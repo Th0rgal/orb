@@ -90,6 +90,51 @@ pub fn account_error_cooldown(consecutive: u32) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Fold a 128-bit `Uuid` into a non-zero `u32` identifier for the Lean 4 `orb_provider_pool_step`
+/// and `orb_route_argmin_step` kernels (`0` is reserved for "none / invalid").
+pub fn account_u32_id(id: Uuid) -> u32 {
+    let b = id.as_bytes();
+    let w0 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    let w1 = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+    let w2 = u32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+    let w3 = u32::from_le_bytes([b[12], b[13], b[14], b[15]]);
+    let folded = w0 ^ w1.rotate_left(7) ^ w2.rotate_left(13) ^ w3.rotate_left(23);
+    if folded == 0 || folded == u32::MAX {
+        1
+    } else {
+        folded
+    }
+}
+
+/// Serializable snapshot of the live Lean 4 proxy routing shadow runner (`RefinementSimulation`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyShadowSnapshot {
+    pub subsystem: &'static str,
+    pub total_steps: u64,
+    pub total_divergences: u64,
+    pub recent_divergences: usize,
+}
+
+static PROXY_SHADOW_RING: std::sync::LazyLock<
+    std::sync::Mutex<crate::orb_spec::shadow::ShadowDivergenceRing<256>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(crate::orb_spec::shadow::ShadowDivergenceRing::<256>::new())
+});
+
+/// Snapshot the live proxy shadow-mode counters (`total_steps`, `total_divergences`) for
+/// `/api/model-routing/shadow` and structured telemetry.
+pub fn proxy_shadow_snapshot() -> ProxyShadowSnapshot {
+    let ring = PROXY_SHADOW_RING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ProxyShadowSnapshot {
+        subsystem: "proxy_provider_pool",
+        total_steps: ring.total_events,
+        total_divergences: ring.unexpected_divergences,
+        recent_divergences: ring.entries().len(),
+    }
+}
+
 /// Verified Lean 4 account pool & failover gate (`orb_provider_pool_step`):
 /// enforces bound-account matching (preventing the Antigravity wrong-account bug),
 /// rejected-account cooldown/quota reset isolation, bounded failover attempts,
@@ -98,6 +143,59 @@ pub fn verify_account_dispatch_candidate(
     input: crate::orb_spec::ProviderPoolStepInput,
 ) -> crate::orb_spec::ProviderPoolStepVerdict {
     crate::orb_spec::provider_pool_step(input)
+}
+
+/// Run `verify_account_dispatch_candidate` in lockstep with the host decision via
+/// `RefinementSimulation::observe_step` and record the comparison in `PROXY_SHADOW_RING`.
+pub fn observe_account_candidate_shadow(
+    input: crate::orb_spec::ProviderPoolStepInput,
+    host_admits: bool,
+) -> crate::orb_spec::ProviderPoolStepVerdict {
+    let verdict = verify_account_dispatch_candidate(input);
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        bool,
+        bool,
+        crate::orb_spec::ProviderPoolStepInput,
+        u32,
+        u32,
+    > {
+        subsystem: "proxy_provider_pool",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = verify_account_dispatch_candidate(*ev);
+            let effs = if v.emit_dispatch_effect {
+                vec![v.dispatched_account_id]
+            } else {
+                Vec::new()
+            };
+            (v.first_byte_locked_next, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits {
+        vec![input.candidate_account_id]
+    } else {
+        Vec::new()
+    };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: input.now_epoch.saturating_mul(1000),
+        fresh_nonce: input.attempts as u64,
+        idempotency_key: input.candidate_account_id as u64,
+        boot_id_matches: true,
+        schema_id: 1,
+    };
+    if let Ok(mut ring) = PROXY_SHADOW_RING.lock() {
+        let _ = sim.observe_step(
+            &input.first_byte_sent,
+            &verdict.first_byte_locked_next,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
 }
 
 /// Verified Lean 4 `ArgminRouteFold` candidate selector (`orb_route_argmin_step` + `orb_provider_pool_step`).
@@ -119,6 +217,60 @@ pub fn select_argmin_account_candidate(
         now_epoch,
         candidates,
     )
+}
+
+/// Run `select_argmin_account_candidate` in shadow lockstep with the host's top account pick
+/// via `RefinementSimulation::observe_step` into `PROXY_SHADOW_RING`.
+pub fn observe_argmin_selection_shadow(
+    bound_account_id: Option<u32>,
+    now_epoch: u64,
+    candidates: &[crate::orb_spec::RouteCandidate],
+    host_selected_id: Option<u32>,
+) -> Option<u32> {
+    let lean_selected = select_argmin_account_candidate(
+        bound_account_id,
+        false,
+        false,
+        0,
+        (candidates.len() as u32).max(1),
+        now_epoch,
+        candidates,
+    );
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        Option<u32>,
+        Option<u32>,
+        u64,
+        u32,
+        u32,
+    > {
+        subsystem: "proxy_argmin_route_fold",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |s, _ev, _ctx| {
+            let effs = s.iter().copied().collect();
+            (*s, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects: Vec<u32> = host_selected_id.into_iter().collect();
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: now_epoch.saturating_mul(1000),
+        fresh_nonce: 0,
+        idempotency_key: host_selected_id.unwrap_or(0) as u64,
+        boot_id_matches: true,
+        schema_id: 1,
+    };
+    if let Ok(mut ring) = PROXY_SHADOW_RING.lock() {
+        let _ = sim.observe_step(
+            &lean_selected,
+            &host_selected_id,
+            &now_epoch,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    lean_selected
 }
 
 /// Label stored with a persisted out-of-credit cooldown, so a restart still
@@ -2139,17 +2291,64 @@ impl ModelChainStore {
                     store_accounts = ai_providers.get_all_by_type(provider_type).await;
                 }
             }
+            let now_epoch = (now_ms.max(0) as u64) / 1000;
             // Among the accounts of a provider, the one with the most quota
             // left goes first. Cached usage only: no usage data, no change.
             // An order the user set (distinct priorities) wins over quota.
             let store_accounts = store_accounts
                 .chunk_by(|a, b| a.priority == b.priority)
                 .flat_map(|tier| {
-                    crate::account_limits::prefer_most_remaining_quota(tier.to_vec(), |account| {
-                        health_tracker.remaining_quota(account.id)
-                    })
+                    let known_candidates: Vec<crate::orb_spec::RouteCandidate> = tier
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, account)| {
+                            let step = (health_tracker.remaining_quota(account.id)? / 10.0)
+                                .floor()
+                                .clamp(0.0, 10.0) as u64;
+                            Some(crate::orb_spec::RouteCandidate {
+                                account_id: account_u32_id(account.id),
+                                score: (10u64.saturating_sub(step)) * 1000 + (idx as u64),
+                                is_rejected: false,
+                                reset_epoch: 0,
+                            })
+                        })
+                        .collect();
+                    let ordered = crate::account_limits::prefer_most_remaining_quota(
+                        tier.to_vec(),
+                        |account| health_tracker.remaining_quota(account.id),
+                    );
+                    if known_candidates.len() >= 2 {
+                        let host_best = ordered
+                            .iter()
+                            .find(|a| health_tracker.remaining_quota(a.id).is_some())
+                            .map(|a| account_u32_id(a.id));
+                        let _ = observe_argmin_selection_shadow(
+                            None,
+                            now_epoch,
+                            &known_candidates,
+                            host_best,
+                        );
+                    }
+                    ordered
                 })
                 .collect::<Vec<_>>();
+            let bound_custom_account_id: Option<u32> =
+                if matches!(provider_type, crate::ai_providers::ProviderType::Custom)
+                    && entry.provider_id != "custom"
+                {
+                    Some(
+                        store_accounts
+                            .iter()
+                            .find(|a| {
+                                crate::api::providers::sanitize_custom_provider_id(&a.name)
+                                    == entry.provider_id
+                            })
+                            .map(|a| account_u32_id(a.id))
+                            .unwrap_or(u32::MAX),
+                    )
+                } else {
+                    None
+                };
             // The proxy selects from its own pool. If that pool contains a direct
             // key, its synthetic identity must not bypass the key's cooldown.
             let duplicate_google_proxy_key = provider_type
@@ -2175,12 +2374,45 @@ impl ModelChainStore {
             let mut store_contributed_google_oauth = false;
 
             for account in &store_accounts {
-                if !health_tracker.is_healthy(account.id).await {
+                let is_healthy = health_tracker.is_healthy(account.id).await;
+                let antigravity_unverified =
+                    provider_type == crate::ai_providers::ProviderType::Antigravity
+                        && account
+                            .cli_proxy_auth_file
+                            .as_deref()
+                            .is_some_and(crate::api::antigravity_accounts::needs_verification);
+                let pool_cooling = health_tracker.pool_is_cooling(
+                    &entry.provider_id,
+                    account.id,
+                    &entry.model_id,
+                );
+                let cand_u32 = account_u32_id(account.id);
+                let is_rejected = !is_healthy || antigravity_unverified || pool_cooling;
+                let host_admits_pool =
+                    !is_rejected && bound_custom_account_id.is_none_or(|b| b == cand_u32);
+                let pool_verdict = observe_account_candidate_shadow(
+                    crate::orb_spec::ProviderPoolStepInput {
+                        bound_account_id: bound_custom_account_id,
+                        candidate_account_id: cand_u32,
+                        is_rejected,
+                        first_byte_sent: false,
+                        is_failover_attempt: false,
+                        attempts: 0,
+                        max_attempts: (store_accounts.len() as u32).max(1),
+                        now_epoch,
+                        reset_epoch: if is_rejected { now_epoch + 60 } else { 0 },
+                    },
+                    host_admits_pool,
+                );
+                if !is_healthy {
                     tracing::debug!(
                         account_id = %account.id,
                         provider = %entry.provider_id,
                         "Skipping account in cooldown"
                     );
+                    continue;
+                }
+                if !pool_verdict.emit_dispatch_effect {
                     continue;
                 }
                 if !account.has_credentials() {
@@ -4653,12 +4885,16 @@ mod tests {
         );
 
         // An order the user set wins over remaining quota.
+        let before_shadow = proxy_shadow_snapshot();
         store.reorder(&[c, a, b]).await.unwrap();
         tracker.record_remaining_quota(c, 10.0);
         assert_eq!(
             resolved_anthropic_accounts(&store, &tracker).await,
             vec![c, a]
         );
+        let after_shadow = proxy_shadow_snapshot();
+        assert!(after_shadow.total_steps > before_shadow.total_steps);
+        assert_eq!(after_shadow.total_divergences, 0);
     }
 
     #[tokio::test]

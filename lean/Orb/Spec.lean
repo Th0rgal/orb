@@ -1694,26 +1694,30 @@ def providerPoolMetaGate : MetaGateSpec ProviderPoolCheck
     unfold providerPoolStep at h
     rw [pack32_lo] at h
     unfold ProviderPoolCheck.Admissible
-    cases hfb : (p.firstByteSent == 1 && p.isFailoverAttempt == 1) <;>
-      cases hfa : (p.isFailoverAttempt == 1 && !(decide (1 ≤ p.maxAttempts) && decide (p.attempts < p.maxAttempts))) <;>
-      cases hba : (p.hasBoundAccount == 1 && !(p.candidateAccountId == p.boundAccountId)) <;>
-      cases hrj : (p.isRejected == 1 && decide (p.nowEpoch < p.resetEpoch)) <;>
-      cases hc0 : (p.candidateAccountId == 0) <;>
-      cases hfs : (p.firstByteSent == 1) <;>
+    cases hfs : (p.firstByteSent == 1) <;>
+      cases hif : (p.isFailoverAttempt == 1) <;>
+      cases hm1 : decide (1 ≤ p.maxAttempts) <;>
+      cases hma : decide (p.attempts < p.maxAttempts) <;>
       cases hb1 : (p.hasBoundAccount == 1) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      cases hcb : (p.candidateAccountId == p.boundAccountId) <;>
+      cases hr1 : (p.isRejected == 1) <;>
+      cases hnr : decide (p.nowEpoch < p.resetEpoch) <;>
+      cases hc0 : (p.candidateAccountId == 0) <;>
+      (simp only [hfs, hif, hm1, hma, hb1, hcb, hr1, hnr, hc0] at h ⊢; revert h; decide)
   complete p h := by
     unfold ProviderPoolCheck.Admissible at h
     unfold providerPoolStep
     rw [pack32_lo]
-    cases hfb : (p.firstByteSent == 1 && p.isFailoverAttempt == 1) <;>
-      cases hfa : (p.isFailoverAttempt == 1 && !(decide (1 ≤ p.maxAttempts) && decide (p.attempts < p.maxAttempts))) <;>
-      cases hba : (p.hasBoundAccount == 1 && !(p.candidateAccountId == p.boundAccountId)) <;>
-      cases hrj : (p.isRejected == 1 && decide (p.nowEpoch < p.resetEpoch)) <;>
-      cases hc0 : (p.candidateAccountId == 0) <;>
-      cases hfs : (p.firstByteSent == 1) <;>
+    cases hfs : (p.firstByteSent == 1) <;>
+      cases hif : (p.isFailoverAttempt == 1) <;>
+      cases hm1 : decide (1 ≤ p.maxAttempts) <;>
+      cases hma : decide (p.attempts < p.maxAttempts) <;>
       cases hb1 : (p.hasBoundAccount == 1) <;>
-      (simp_all; try decide)
+      cases hcb : (p.candidateAccountId == p.boundAccountId) <;>
+      cases hr1 : (p.isRejected == 1) <;>
+      cases hnr : decide (p.nowEpoch < p.resetEpoch) <;>
+      cases hc0 : (p.candidateAccountId == 0) <;>
+      (simp only [hfs, hif, hm1, hma, hb1, hcb, hr1, hnr, hc0] at h ⊢; revert h; decide)
   posWitness := ⟨1, 42, 42, 0, 0, 0, 0, 3, 1000, 500⟩
   negWitness := ⟨1, 42, 99, 0, 0, 0, 0, 3, 1000, 500⟩
   nonVacuous := rfl
@@ -1730,37 +1734,60 @@ theorem antigravity_dispatch_matches_bound_account
     (providerPoolStep 1 boundId candId isRej fb isFail att maxAtt now rst >>> 32) = 0 := by
   unfold providerPoolStep
   rw [pack32_lo, pack32_hi]
-  cases hfb : (fb == 1 && isFail == 1) <;>
-    cases hfa : (isFail == 1 && !(decide (1 ≤ maxAtt) && decide (att < maxAtt))) <;>
-    cases hfs : (fb == 1) <;>
+  cases hfs : (fb == 1) <;>
+    cases hif : (isFail == 1) <;>
+    cases hm1 : decide (1 ≤ maxAtt) <;>
+    cases hma : decide (att < maxAtt) <;>
     (simp_all; try decide)
 
 /-- Corollary 56 (`ClockDiscipline`, `ConservedResource` & `StickyFence` — `orb_provider_pool_step`):
     1. `rejected_account_never_routed_before_reset`: `isRejected == 1` with `nowEpoch < resetEpoch` emits zero dispatch.
-    2. `failover_terminates`: `isFailoverAttempt == 1` at `attempts == maxAttempts` returns `4 (ExhaustedFailover)`.
-    3. `first_byte_locks_provider`: once `firstByteSent == 1`, any failover returns `3 (AbortLockedStream)` with lock bit `65536`. -/
+    2. `pre_first_byte_dispatch_preserves_unlocked_state`: when `firstByteSent == 0`, `next_first_byte` bit (`65536`) is `0`, preserving pre-first-byte failover.
+    3. `failover_terminates`: `isFailoverAttempt == 1` at `attempts == maxAttempts` returns `4 (ExhaustedFailover)`.
+    4. `first_byte_locks_provider`: once `firstByteSent == 1`, any failover returns `3 (AbortLockedStream)` with lock bit `65536`. -/
 theorem rejected_account_failover_and_first_byte_lock
-    (hasBnd : UInt8) (bndId candId : UInt32) (fb isFail : UInt8) (att maxAtt : UInt32)
-    (now rst : UInt64) (h_before_reset : (now < rst) = true) :
+    (hasBnd : UInt8) (bndId candId : UInt32) (isRej fb isFail : UInt8) (att maxAtt : UInt32)
+    (now rst : UInt64) (h_before_reset : decide (now < rst) = true) :
     ((providerPoolStep hasBnd bndId candId 1 fb isFail att maxAtt now rst &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((providerPoolStep hasBnd bndId candId isRej 0 isFail att maxAtt now rst &&& 0xFFFFFFFF) &&& 65536) = 0 ∧
     providerPoolStep hasBnd bndId candId 0 0 1 maxAtt maxAtt now rst = 4 ∧
     providerPoolStep hasBnd bndId candId 0 1 1 att maxAtt now rst = 65539 := by
-  refine ⟨?_, ?_, rfl⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · unfold providerPoolStep
     rw [pack32_lo]
-    cases hfb : (fb == 1 && isFail == 1) <;>
-      cases hfa : (isFail == 1 && !(decide (1 ≤ maxAtt) && decide (att < maxAtt))) <;>
-      cases hba : (hasBnd == 1 && !(candId == bndId)) <;>
-      cases hfs : (fb == 1) <;>
+    cases hfs : (fb == 1) <;>
+      cases hif : (isFail == 1) <;>
+      cases hm1 : decide (1 ≤ maxAtt) <;>
+      cases hma : decide (att < maxAtt) <;>
+      cases hb1 : (hasBnd == 1) <;>
+      cases hcb : (candId == bndId) <;>
+      cases hc0 : (candId == 0) <;>
+      (simp_all; try decide)
+  · unfold providerPoolStep
+    rw [pack32_lo]
+    cases hif : (isFail == 1) <;>
+      cases hm1 : decide (1 ≤ maxAtt) <;>
+      cases hma : decide (att < maxAtt) <;>
+      cases hb1 : (hasBnd == 1) <;>
+      cases hcb : (candId == bndId) <;>
+      cases hr1 : (isRej == 1) <;>
+      cases hnr : decide (now < rst) <;>
+      cases hc0 : (candId == 0) <;>
       (simp_all; try decide)
   · unfold providerPoolStep
     have hirr : ¬ (maxAtt < maxAtt) := UInt32.lt_irrefl maxAtt
     simp [hirr]
-    decide
+  · unfold providerPoolStep
+    simp
+
+/-- Pure state-machine event enricher for `orb_provider_pool_step`:
+    `firstByteLocked` is sticky — once set in state `s` or observed in `e.firstByteSent`, it stays `1`. -/
+def effectiveFirstByte (firstByteLocked : UInt8) (e : ProviderPoolCheck) : ProviderPoolCheck :=
+  { e with firstByteSent := if firstByteLocked == 1 || e.firstByteSent == 1 then 1 else 0 }
 
 /-- Pure state-machine transition wrapper for `orb_provider_pool_step` (`State × Event → State × List UInt32`). -/
-def providerPoolMachineStep (firstByteSent : UInt8) (e : ProviderPoolCheck) : UInt8 × List UInt32 :=
-  let e' : ProviderPoolCheck := { e with firstByteSent := firstByteSent }
+def providerPoolMachineStep (firstByteLocked : UInt8) (e : ProviderPoolCheck) : UInt8 × List UInt32 :=
+  let e' := effectiveFirstByte firstByteLocked e
   let w := providerPoolStep e'.hasBoundAccount e'.boundAccountId e'.candidateAccountId
     e'.isRejected e'.firstByteSent e'.isFailoverAttempt e'.attempts e'.maxAttempts e'.nowEpoch e'.resetEpoch
   (if ((w &&& 0xFFFFFFFF) &&& 65536) != 0 then 1 else 0,
@@ -1772,28 +1799,30 @@ def providerPoolMetaStepSpec : MetaStepSpec UInt8 ProviderPoolCheck UInt32 where
   safety := {
     step := providerPoolMachineStep
     authorized := fun s e eff =>
-      eff == e.candidateAccountId &&
-      ({ e with firstByteSent := s } : ProviderPoolCheck).Admissible
+      eff == e.candidateAccountId && (effectiveFirstByte s e).Admissible
     sound := fun s e eff h_in => by
       dsimp [providerPoolMachineStep] at h_in
       split at h_in
       · next h_emit =>
         simp only [List.mem_singleton] at h_in
         subst h_in
-        have h_adm := providerPoolMetaGate.sound { e with firstByteSent := s } h_emit
+        have h_adm := providerPoolMetaGate.sound (effectiveFirstByte s e) h_emit
         simp [h_adm]
       · contradiction
   }
   liveness := {
     init := 0
     step := providerPoolMachineStep
-    progressRequired := fun s e => ({ e with firstByteSent := s } : ProviderPoolCheck).Admissible
+    progressRequired := fun s e => (effectiveFirstByte s e).Admissible
     expectedEffect := fun e eff => eff == e.candidateAccountId
     live := fun s e h_req => by
-      have h_gate := providerPoolMetaGate.complete { e with firstByteSent := s } h_req
+      have h_gate := providerPoolMetaGate.complete (effectiveFirstByte s e) h_req
       dsimp [providerPoolMachineStep]
       simp [h_gate]
-    traceEvents := []
+    traceEvents := [
+      ⟨0, 0, 10, 0, 0, 0, 0, 3, 1000, 500⟩,
+      ⟨0, 0, 20, 0, 0, 1, 1, 3, 1000, 500⟩
+    ]
     posEvent := ⟨1, 42, 42, 0, 0, 0, 0, 3, 1000, 500⟩
     negEvent := ⟨1, 42, 99, 0, 0, 0, 0, 3, 1000, 500⟩
     reachable_live := by decide
@@ -1854,9 +1883,9 @@ theorem route_argmin_selects_strictly_better_eligible (bestId candId : UInt32) (
   refine ⟨?_, ?_, by decide, by decide⟩
   · unfold routeArgminStep
     rw [pack32_lo]
-    decide
+    simp; decide
   · unfold routeArgminStep
     rw [pack32_hi]
-    rfl
+    simp
 
 end Orb.Spec

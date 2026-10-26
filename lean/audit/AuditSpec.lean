@@ -107,13 +107,13 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
     for a in axs do
       unless allowedAxioms.contains a do
         errors := errors.push s!"{n}: depends on {a}"
-  let mut theorems := 0
+  let mut theorems : Nat := 0
   for n in spec do
     let some (.thmInfo t) := env.find? n | continue
     theorems := theorems + 1
     if let some reason := checkTheoremVacuity t.type then
       errors := errors.push s!"{n}: {reason}"
-  let mut exports := 0
+  let mut exports : Nat := 0
   for n in kernel do
     let some sym := getExportNameFor? env n | continue
     exports := exports + 1
@@ -123,7 +123,7 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
       | none => false
     unless used do
       errors := errors.push s!"{n} (export {sym}): not referenced by any Orb.Spec declaration"
-  let mut metaStepSpecs := 0
+  let mut metaStepSpecs : Nat := 0
   for n in spec do
     let some ci := env.find? n | continue
     if ci.type.isAppOf ``Orb.Spec.MetaStepSpec then
