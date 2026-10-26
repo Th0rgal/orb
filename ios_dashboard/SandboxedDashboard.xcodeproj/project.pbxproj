@@ -72,6 +72,7 @@
 		8147A53D4E600CE8A6AC44BE /* OrbTranscriptModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494EC92D8A8E2F4C4A780560 /* OrbTranscriptModel.swift */; };
 		85152A48162502B82E5358A5 /* OrbDebugInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = D361F38D66FC44DB9F7A4874 /* OrbDebugInfo.swift */; };
 		8556FB4215210A7F0B278081 /* OrbConversation+Composer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82AA118A5010F08109573E09 /* OrbConversation+Composer.swift */; };
+		856C8AAD4F8E9E49062C7174 /* OrbApprovalEnrollment.swift in Sources */ = {isa = PBXBuildFile; fileRef = BABEF954356DAFF6B508CC02 /* OrbApprovalEnrollment.swift */; };
 		86C9D56D2E0A4F576734B3F1 /* OrbCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 717FFF091D1EDB3F27D08712 /* OrbCore.swift */; };
 		89EDBE4F4CAD403AA092C7A3 /* OrbAgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 985657C4A8D7B5A23C05B9EC /* OrbAgentPicker.swift */; };
 		922EF6DD2004AF9515649B3D /* MathAssets in Resources */ = {isa = PBXBuildFile; fileRef = 1698950E343FC7A6715F842A /* MathAssets */; };
@@ -239,6 +240,7 @@
 		B99CEDD78722A67576461842 /* OrbPrivilegeAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbPrivilegeAccessTests.swift; sourceTree = "<group>"; };
 		BA4DE96B58D59E4D20C580BB /* OrbTurnStatusUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTurnStatusUITests.swift; sourceTree = "<group>"; };
 		BA6CA5F698C6D1559550F7FF /* OrbProjects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbProjects.swift; sourceTree = "<group>"; };
+		BABEF954356DAFF6B508CC02 /* OrbApprovalEnrollment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbApprovalEnrollment.swift; sourceTree = "<group>"; };
 		BB4BFC16F121E10DCFD755BC /* OrbLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbLog.swift; sourceTree = "<group>"; };
 		BC1EA34EDE4E3ABF51473613 /* OrbMissionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbMissionSettings.swift; sourceTree = "<group>"; };
 		BFA9AF87C230C7A8BAFB1E26 /* OrbConversation+Menu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "OrbConversation+Menu.swift"; sourceTree = "<group>"; };
@@ -333,6 +335,7 @@
 			children = (
 				555F14279E1F8E312FB9231C /* OrbAdminSettings.swift */,
 				985657C4A8D7B5A23C05B9EC /* OrbAgentPicker.swift */,
+				BABEF954356DAFF6B508CC02 /* OrbApprovalEnrollment.swift */,
 				C623C7A6712001F7E32CA623 /* OrbAttachments.swift */,
 				D3B499BE2EC4EB4545CB79EC /* OrbBitwardenSettings.swift */,
 				70D8E88BB09A731DE6517295 /* OrbClient.swift */,
@@ -642,6 +645,7 @@
 				FF9AD27CB2EDBA4E942F09D4 /* FidoSignRequest.swift in Sources */,
 				2FB3063E55707CF751D817F9 /* OrbAdminSettings.swift in Sources */,
 				89EDBE4F4CAD403AA092C7A3 /* OrbAgentPicker.swift in Sources */,
+				856C8AAD4F8E9E49062C7174 /* OrbApprovalEnrollment.swift in Sources */,
 				226AFC0BA710210493AF4569 /* OrbAttachments.swift in Sources */,
 				3C7BD46FB1BA888A750CA564 /* OrbBitwardenSettings.swift in Sources */,
 				93F4F963F2ABFF0E01D8D978 /* OrbClient.swift in Sources */,
