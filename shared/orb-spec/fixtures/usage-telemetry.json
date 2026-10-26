@@ -1,0 +1,232 @@
+{
+  "description": "Opt-in Orb usage telemetry (docs/USAGE_TELEMETRY.md). Core embeds this file as its allowlist; desktop, iOS and Android test their event builders against it. Fields not listed here are dropped; a value that fails its type is dropped. Clients may only send client_schemas; Core emits orb.turn.v1 and orb.prompt.v1 itself.",
+  "version": 1,
+  "quick_close_ms": 2000,
+  "clients": [
+    "desktop",
+    "ios",
+    "android",
+    "core"
+  ],
+  "client_schemas": [
+    "orb.approval.v1",
+    "orb.page.v1",
+    "orb.action.v1"
+  ],
+  "schemas": {
+    "orb.approval.v1": {
+      "kind": [
+        "tool",
+        "command_class",
+        "grant",
+        "payment"
+      ],
+      "decision": [
+        "approved",
+        "denied",
+        "expired",
+        "dismissed"
+      ],
+      "method": [
+        "face_id",
+        "touch_id",
+        "passcode",
+        "desktop_click",
+        "none"
+      ],
+      "wait_ms": "uint",
+      "tool_name": "ident",
+      "command_class": "ident"
+    },
+    "orb.page.v1": {
+      "screen": "ident",
+      "surface": [
+        "screen",
+        "sheet",
+        "pane"
+      ],
+      "dwell_ms": "uint",
+      "entry_point": "ident"
+    },
+    "orb.action.v1": {
+      "action": [
+        "sidebar_move",
+        "btw",
+        "fork",
+        "queue",
+        "file_viewer_open",
+        "inbox_open",
+        "inbox_archive",
+        "inbox_snooze",
+        "inbox_done",
+        "message_edit",
+        "message_resend"
+      ],
+      "count": "uint",
+      "surface": "ident"
+    },
+    "orb.turn.v1": {
+      "model": "ident",
+      "harness": "ident",
+      "session_id": "ident",
+      "input_tokens": "uint",
+      "output_tokens": "uint",
+      "cache_read_tokens": "uint",
+      "cost_cents": "uint",
+      "latency_ms": "uint",
+      "interrupted": "bool",
+      "resent": "bool"
+    },
+    "orb.prompt.v1": {
+      "session_id": "ident",
+      "prompt_digest": "ident",
+      "chars": "uint"
+    }
+  },
+  "common": {
+    "schema": "schema",
+    "event_id": "ident",
+    "ts": "ident",
+    "client": "client",
+    "app_version": "ident"
+  },
+  "ident_pattern": "^[A-Za-z0-9_.:/+@-]{1,120}$",
+  "sanitize": [
+    {
+      "name": "approval keeps allowed fields and drops the payload",
+      "in": {
+        "schema": "orb.approval.v1",
+        "event_id": "evt-approval-0001",
+        "client": "ios",
+        "kind": "tool",
+        "decision": "approved",
+        "method": "face_id",
+        "wait_ms": 4200,
+        "tool_name": "Bash",
+        "payload": "rm -rf / --no-preserve-root",
+        "secret": "tl_live_abcdefghijklmnop"
+      },
+      "out": {
+        "schema": "orb.approval.v1",
+        "event_id": "evt-approval-0001",
+        "client": "ios",
+        "kind": "tool",
+        "decision": "approved",
+        "method": "face_id",
+        "wait_ms": 4200,
+        "tool_name": "Bash"
+      }
+    },
+    {
+      "name": "page derives quick_close from dwell",
+      "in": {
+        "schema": "orb.page.v1",
+        "event_id": "evt-page-0001",
+        "client": "desktop",
+        "screen": "settings.telemetry",
+        "surface": "sheet",
+        "dwell_ms": 1500,
+        "entry_point": "command_palette"
+      },
+      "out": {
+        "schema": "orb.page.v1",
+        "event_id": "evt-page-0001",
+        "client": "desktop",
+        "screen": "settings.telemetry",
+        "surface": "sheet",
+        "dwell_ms": 1500,
+        "entry_point": "command_palette",
+        "quick_close": true
+      }
+    },
+    {
+      "name": "invalid enum and free text values are dropped",
+      "in": {
+        "schema": "orb.action.v1",
+        "event_id": "evt-action-0001",
+        "client": "android",
+        "action": "fork",
+        "count": 2,
+        "surface": "has spaces so it is not an ident"
+      },
+      "out": {
+        "schema": "orb.action.v1",
+        "event_id": "evt-action-0001",
+        "client": "android",
+        "action": "fork",
+        "count": 2
+      }
+    }
+  ],
+  "rejected": [
+    {
+      "reason": "unknown schema",
+      "in": {
+        "schema": "turbo-lean.run.v1",
+        "client": "desktop"
+      }
+    },
+    {
+      "reason": "core-only schema from a client",
+      "in": {
+        "schema": "orb.prompt.v1",
+        "client": "ios",
+        "chars": 3
+      }
+    },
+    {
+      "reason": "unknown client",
+      "in": {
+        "schema": "orb.action.v1",
+        "client": "web",
+        "action": "fork"
+      }
+    }
+  ],
+  "scrub": [
+    {
+      "in": "use sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv to call",
+      "out": "use [REDACTED] to call"
+    },
+    {
+      "in": "token tl_live_0123456789abcdef please",
+      "out": "token [REDACTED] please"
+    },
+    {
+      "in": "push with ghp_abcdefghijklmnopqrstuvwxyz0123",
+      "out": "push with [REDACTED]"
+    },
+    {
+      "in": "AWS AKIAIOSFODNN7EXAMPLE key",
+      "out": "AWS [REDACTED] key"
+    },
+    {
+      "in": "curl -H 'Authorization: Bearer abc.def-ghi_jklmnopqrstu'",
+      "out": "curl -H 'Authorization: Bearer [REDACTED]'"
+    },
+    {
+      "in": "export OPENAI_API_KEY=supersecretvalue123",
+      "out": "export OPENAI_API_KEY=[REDACTED]"
+    },
+    {
+      "in": "password: hunter2hunter2",
+      "out": "password: [REDACTED]"
+    },
+    {
+      "in": "clone https://bob:p4ssw0rd@github.com/x/y",
+      "out": "clone https://[REDACTED]@github.com/x/y"
+    },
+    {
+      "in": "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----",
+      "out": "[REDACTED]"
+    },
+    {
+      "in": "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+      "out": "jwt [REDACTED]"
+    },
+    {
+      "in": "fix the token refresh bug in auth.rs",
+      "out": "fix the token refresh bug in auth.rs"
+    }
+  ]
+}

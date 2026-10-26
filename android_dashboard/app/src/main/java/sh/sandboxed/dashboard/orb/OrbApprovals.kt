@@ -175,13 +175,21 @@ object OrbApprovalKey {
         method: String,
         path: String,
         body: Map<String, Any?>?,
-        summary: String
+        summary: String,
+        /** Usage telemetry for this decision: wait and method are measured here, never the payload. */
+        telemetry: UsageTelemetry.Approval? = null
     ): Any? {
         val text = body?.let { OrbJSON.stringify(it) } ?: ""
+        fun record(decision: UsageTelemetry.Decision, method: UsageTelemetry.Method, waitMs: Long) {
+            telemetry?.let { UsageTelemetry.trackApproval(it.kind, decision, method, waitMs, it.toolName, it.commandClass) }
+        }
         val context = activity ?: return core.request(path, method, rawBody = body?.let { text })
+            .also { record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.None, 0) }
         val device = deviceId(context, core.baseURLFlow.value)
         val headers = mutableMapOf<String, String>()
-        if (device != null && publicKey() != null) {
+        if (device == null || publicKey() == null) {
+            record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.None, 0)
+        } else {
             val challenge = dictOf(
                 core.request(
                     "/api/approvals/challenge",
@@ -191,7 +199,17 @@ object OrbApprovalKey {
             )
             val id = OrbJSON.str(challenge, "challenge_id") ?: error("No challenge")
             val payload = OrbJSON.str(challenge, "payload") ?: error("No challenge payload")
-            headers["X-Paloma-Approval"] = "$id.$device.${sign(context, payload, summary)}"
+            // Wait = biometric prompt shown -> decision. Strong biometric only, so face and
+            // fingerprint cannot be told apart: reported as touch_id (see UsageTelemetry).
+            val shown = System.currentTimeMillis()
+            val signed = try {
+                sign(context, payload, summary)
+            } catch (e: Cancelled) {
+                record(UsageTelemetry.Decision.Dismissed, UsageTelemetry.Method.TouchId, System.currentTimeMillis() - shown)
+                throw e
+            }
+            record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.TouchId, System.currentTimeMillis() - shown)
+            headers["X-Paloma-Approval"] = "$id.$device.$signed"
         }
         return core.request(path, method, headers = headers, rawBody = body?.let { text })
     }
@@ -347,7 +365,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                         core, activity, "POST",
                                         "/api/bitwarden/requests/${core.encodeComponent(id)}/approve",
                                         if (scopeName == null) emptyMap() else mapOf("scope" to scopeName),
-                                        "$label: ${describe(r)} for $who"
+                                        "$label: ${describe(r)} for $who",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
                                     )
                                 }
                             }) { Text(label) }
@@ -363,7 +382,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     OrbApprovalKey.signedRequest(
                                         core, activity, "POST",
                                         "/api/bitwarden/requests/${core.encodeComponent(id)}/reject",
-                                        null, "Decline: ${describe(r)}"
+                                        null, "Decline: ${describe(r)}",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
                                     )
                                 }
                             }) { Text("Decline", color = Color(0xFFFF6B6B)) }
@@ -441,7 +461,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                         core, activity, "POST",
                                         "/api/privilege-access/${core.encodeComponent(id)}/approve",
                                         OrbPrivilegeAccess.approveBody(r),
-                                        "Grant $what to $who"
+                                        "Grant $what to $who",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
                                     )
                                 }
                             }) { Text("Allow") }
@@ -450,7 +471,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     OrbApprovalKey.signedRequest(
                                         core, activity, "POST",
                                         "/api/privilege-access/${core.encodeComponent(id)}/deny",
-                                        null, "Decline: $who asks for $what"
+                                        null, "Decline: $who asks for $what",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
                                     )
                                 }
                             }) { Text("Deny", color = Color(0xFFFF6B6B)) }
@@ -524,7 +546,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                         core, activity, "POST",
                                         "/api/mission-access/${core.encodeComponent(id)}/approve",
                                         mapOf("ttl_hours" to hours),
-                                        "Let $who read $target for $hours h"
+                                        "Let $who read $target for $hours h",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
                                     )
                                 }
                             }) { Text("Allow read") }
@@ -533,7 +556,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     OrbApprovalKey.signedRequest(
                                         core, activity, "POST",
                                         "/api/mission-access/${core.encodeComponent(id)}/deny",
-                                        null, "Decline: $who wants to read $target"
+                                        null, "Decline: $who wants to read $target",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
                                     )
                                 }
                             }) { Text("Deny", color = Color(0xFFFF6B6B)) }

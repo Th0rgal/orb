@@ -146,7 +146,7 @@ struct OrbSecretRequestsSheet: View {
                     Section { Text("No pending requests.").foregroundStyle(.secondary) }
                 } else {
                     Section("Pending") {
-                        ForEach(monitor.pending, id: \.selfID) { requestRow($0) }
+                        ForEach(monitor.pending, id: \.selfID) { r in requestRow(r).onAppear { OrbUsageTelemetry.shared.approvalShown(r["id"].text) } }
                     }
                 }
             }
@@ -230,6 +230,7 @@ struct OrbSecretRequestsSheet: View {
                 }
                 error = ""
                 OrbHaptics.success()
+                OrbUsageTelemetry.recordGrant(id, approve: scope != nil, enrolled: false)
             } catch {
                 self.error = error.localizedDescription
             }
@@ -422,7 +423,7 @@ struct OrbMissionAccessList: View {
             }
             Section("Pending") {
                 if monitor.pending.isEmpty { Text("No pending requests.").foregroundStyle(.secondary) }
-                ForEach(monitor.pending, id: \.selfID) { pendingRow($0) }
+                ForEach(monitor.pending, id: \.selfID) { r in pendingRow(r).onAppear { OrbUsageTelemetry.shared.approvalShown(r["id"].text) } }
             }
             Section("Active grants") {
                 if monitor.grants.isEmpty { Text("No active grants.").foregroundStyle(.secondary) }
@@ -520,6 +521,7 @@ struct OrbMissionAccessList: View {
                                                         summary: reason)
                 error = ""
                 OrbHaptics.success()
+                OrbUsageTelemetry.recordGrant(id, approve: approve, enrolled: enrolled)
             } catch {
                 self.error = error.localizedDescription
             }

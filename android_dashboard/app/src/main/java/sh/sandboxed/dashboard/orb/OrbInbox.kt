@@ -1657,6 +1657,7 @@ fun OrbInboxView(
     }
 
     fun dismissWithUndo(item: OrbInboxItem) {
+        UsageTelemetry.trackAction(UsageTelemetry.Action.InboxDone, "inbox")
         markItemAndChildrenRead(item)
         OrbInboxModel.dismiss(item)
         lastDismissedItem = item
@@ -2121,6 +2122,7 @@ fun OrbInboxView(
                                     peekTurns = peekTurnsByItem[item.id] ?: emptyList(),
                                     isLoadingPeek = loadingPeekId == item.id,
                                     onSelectMission = {
+                                        UsageTelemetry.trackAction(UsageTelemetry.Action.InboxOpen, "inbox")
                                         markItemAndChildrenRead(item)
                                         onSelectMission(item.mission, item.project)
                                     },
@@ -2191,6 +2193,7 @@ fun OrbInboxView(
                                     peekTurns = peekTurnsByItem[item.id] ?: emptyList(),
                                     isLoadingPeek = loadingPeekId == item.id,
                                     onSelectMission = {
+                                        UsageTelemetry.trackAction(UsageTelemetry.Action.InboxOpen, "inbox")
                                         markItemAndChildrenRead(item)
                                         onSelectMission(item.mission, item.project)
                                     },

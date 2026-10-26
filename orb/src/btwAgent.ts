@@ -28,6 +28,7 @@ import type {SideAttachment,SideEvent,SideExchange} from './sideQuestionClient';
 import {transferFile} from './uploads';
 import {createSignal} from 'solid-js';
 import type {LocalActivity} from './localAgents';
+import {usageTelemetry} from './usageTelemetry';
 const [remoteActivities,setRemoteActivities]=createSignal<Record<string,LocalActivity[]>>({});
 export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean};
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
@@ -231,6 +232,7 @@ function pause(ms:number,signal:AbortSignal){return new Promise<void>(resolve=>{
  * `clientMessageId` names this turn: every resend of it, automatic or from
  * Retry, carries the same id so Core accepts the message at most once. */
 export async function askBtwAgent(parent:string,question:string,context:string,history:SideExchange[],signal:AbortSignal,receive:(e:SideEvent)=>void,attachments:SideAttachment[]=[],launchSignal:AbortSignal=signal,clientMessageId:string=crypto.randomUUID(),allowCleanRetry=true){
+ if(allowCleanRetry)usageTelemetry.action('btw','side_question');
  const version=connectionVersion();
  const key=storageKey(parent);if(locks.has(key))throw new Error('A side question is already starting.');
  let unlock!:()=>void;locks.set(key,new Promise<void>(r=>{unlock=r;}));

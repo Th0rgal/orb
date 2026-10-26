@@ -23,6 +23,7 @@ import { CloudAgentPage } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
 import {startLocalQueueWorker} from "./localMessageQueue";
 import {BtwSettings} from "./btwSettings";
+import { screenName, startUsageTelemetry, usageTelemetry } from "./usageTelemetry";
 import {type PlanProgressData} from "./PlanProgress";
 import { startLocalOrigin, localAgentForLaunch } from "./localAgents";
 import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, recordFleet, recordMissions } from "./machineLoad";
@@ -102,6 +103,7 @@ import {
 const UsageSettings = lazy(() => import("./UsageSettings").then(module => ({ default: module.UsageSettings })));
 const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
 const SkillsSettings = lazy(() => import("./SkillsSettings").then(module => ({ default: module.SkillsSettings })));
+const UsageTelemetrySettings = lazy(() => import("./UsageTelemetrySettings").then(module => ({ default: module.UsageTelemetrySettings })));
 const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module => ({ default: module.BitwardenSettings })));
 import { InboxPage } from "./Inbox";
 import { requestInboxDigest } from "./inboxDigest";
@@ -133,6 +135,12 @@ export default function App() {
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => { writeString("orb.selectedConversation", selected() ?? ""); });
+  onMount(() => onCleanup(startUsageTelemetry()));
+  // One page view per selected page; the previous page is the entry point.
+  createEffect(on(() => screenName(selected()), (screen, previous) => {
+    const close = usageTelemetry.page(screen, "screen", previous ?? "launch");
+    onCleanup(close);
+  }));
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
   const [sbWidth, setSbWidth] = createSignal(220);
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
@@ -1311,7 +1319,7 @@ export default function App() {
                 missions={inboxMissions()}
                 projects={liveProjects()}
                 loading={missionsLoading()}
-                onOpenMission={(id) => open(`m:${id}`)}
+                onOpenMission={(id) => { usageTelemetry.action("inbox_open", "inbox"); open(`m:${id}`); }}
                 onOpenSettings={openSettings}
                 onOpenInboxSettings={() => open("inbox-settings")}
                 onNewAgent={() => open(null)}
@@ -1340,6 +1348,7 @@ export default function App() {
             <SettingsShell page={selected()!} onOpen={open}>
               <Switch>
                 <Match when={selected() === "settings"}><Settings onOpenPage={open} /></Match>
+                <Match when={selected() === "usage-telemetry"}><UsageTelemetrySettings /></Match>
                 <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
                   <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
                 </Match>

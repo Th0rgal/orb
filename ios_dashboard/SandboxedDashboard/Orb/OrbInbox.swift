@@ -2755,6 +2755,7 @@ struct OrbInboxView: View {
                 method: "POST",
                 body: .object(["status": .string("acknowledged")])
             )
+            OrbUsageTelemetry.shared.trackAction(.inboxDone, surface: "inbox")
             OrbReadCache.invalidate("project:\(item.projectSlug)")
         } catch {
             withAnimation(.snappy(duration: 0.2)) {
@@ -2786,6 +2787,7 @@ struct OrbInboxView: View {
                     body: .object(["status": .string("acknowledged")])
                 )
             }
+            OrbUsageTelemetry.shared.trackAction(.inboxDone, surface: "inbox", count: items.count)
         } catch {
             self.error = error.localizedDescription
         }

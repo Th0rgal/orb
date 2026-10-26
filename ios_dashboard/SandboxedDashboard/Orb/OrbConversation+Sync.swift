@@ -209,6 +209,7 @@ extension OrbConversation {
                 text = ""
             }
             deferredSends.append((clientID, content))
+            OrbUsageTelemetry.shared.trackAction(.queue, surface: "composer")
             Task { await drainDeferredSends() }
             return true
         }
@@ -248,6 +249,7 @@ extension OrbConversation {
         guard !busy, !cloudBlocked else { return false }
         if let id, !isCloud, let question = Self.btwQuestion(text) {
             sideQuestion = OrbSideQuestionRequest(parent: id, question: question)
+            OrbUsageTelemetry.shared.trackAction(.btw, surface: "composer")
             text = ""
             return true
         }
@@ -276,6 +278,7 @@ extension OrbConversation {
             let pending: OrbPending
             if let saved = OrbDisk.read(pendingKey, as: OrbPending.self) {
                 pending = saved
+                OrbUsageTelemetry.shared.trackAction(.messageResend, surface: "composer")
                 optimisticPrompt = saved.body["content"].text.isEmpty ? saved.body["prompt"].text : saved.body["content"].text
                 rebuildHistory()
             } else {
@@ -287,6 +290,7 @@ extension OrbConversation {
                 // Optimistic UI: show the user bubble immediately and clear composer text while sending.
                 withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
                     if queueing {
+                        OrbUsageTelemetry.shared.trackAction(.queue, surface: "composer")
                         followUps = followUps.enqueue(clientID, prompt, lastSequence: events.last?.sequence)
                         text = ""
                     } else {
@@ -419,6 +423,7 @@ extension OrbConversation {
         do {
             _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))/project", method: "POST", body: .object(["project": .string(destinationProject), "tags": .array(tags)]))
             moving = false
+            OrbUsageTelemetry.shared.trackAction(.sidebarMove, surface: "conversation")
             OrbReadCache.invalidate("project:\(project)")
             OrbReadCache.invalidate("project:\(project):all")
             OrbReadCache.invalidate("project:\(destinationProject)")
@@ -469,6 +474,7 @@ extension OrbConversation {
         switch OrbSendFlow.editOutcome(status: status) {
         case .edited:
             followUps = followUps.editConfirmed(queueID, content)
+            OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "queue")
         case .unsupported:
             followUps = followUps.editReverted(queueID).hide(queueID)
             _ = try? await api.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")

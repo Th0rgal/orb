@@ -685,6 +685,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Disk-usage watcher: logs + Paloma-webhook alerts on Warn/Critical
     // crossings, recovery notice on the way back down.
     super::disk_watch::spawn(Arc::clone(&state));
+    super::usage_telemetry::spawn(Arc::clone(&state));
 
     // Zombie-scope reaper: stops leftover sandboxed-exec-*.scope units whose
     // mission no longer needs a live harness (see scope_reaper docs).
@@ -1531,6 +1532,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/secrets", secrets_api::routes())
         // Bitwarden Secrets Manager (`bws`) integration endpoints
         .nest("/api/bitwarden", super::bitwarden::routes())
+        // Opt-in usage telemetry forwarded to the owner's telemetry hub
+        .nest("/api/usage-telemetry", super::usage_telemetry::routes())
         // Device-signed approvals (Secure Enclave / Android Keystore keys)
         .nest("/api/approvals", super::approvals::routes())
         .nest("/api/mission-access", super::mission_access::routes())

@@ -20,7 +20,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     }
     var subtitle: String {
         switch self {
-        case .account: "Your server connection, connected accounts and how Orb looks."
+        case .account: "Your server connection, connected accounts, how Orb looks and usage telemetry."
         case .models: "Fallback order, provider health, usage over time and API keys."
         case .agents: "What agents know and can do, the Assistant, and the agents on this computer."
         case .security: "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets."
@@ -39,7 +39,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     /// Page ids and labels; ids shared with desktop keep desktop's label.
     var pages: [(id: String, label: String)] {
         switch self {
-        case .account: [("settings", "Account"), ("dictation", "Dictation"), ("debug", "Advanced")]
+        case .account: [("settings", "Account"), ("usage-telemetry", "Usage telemetry"), ("dictation", "Dictation"), ("debug", "Advanced")]
         case .models: [("routing", "Fallback Chains"), ("providers", "Providers"), ("usage-settings", "Usage"), ("routing-keys", "API Keys")]
         case .agents: [("skills-settings", "Skills"), ("hermes-settings", "Assistant"), ("btw-settings", "Quick questions (/btw)"), ("machines", "Machines")]
         case .security: [("security-settings", "Access"), ("mission-access", "Mission access"), ("bitwarden-settings", "Secrets vault")]
@@ -88,6 +88,7 @@ struct OrbSettingsHome: View {
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
             .task { await loadAttention() }
         }
+        .orbTrackPage("settings", surface: .sheet)
         .id(OrbCore.shared.connectionGeneration)
         .presentationDetents([.large]).presentationDragIndicator(.visible)
     }
@@ -96,7 +97,7 @@ struct OrbSettingsHome: View {
         List {
             Section {
                 ForEach(section.pages, id: \.id) { p in
-                    NavigationLink { destination(p.id) } label: { Text(p.label) }
+                    NavigationLink { destination(p.id).orbTrackPage("settings.\(p.id)", surface: .pane, entryPoint: "settings.\(section.rawValue)") } label: { Text(p.label) }
                         .accessibilityIdentifier(p.id == "settings" ? "settings.backend" : "settings.\(p.id)")
                 }
             } header: { Text(section.subtitle).textCase(nil) }
@@ -108,6 +109,7 @@ struct OrbSettingsHome: View {
     @ViewBuilder private func destination(_ id: String) -> some View {
         switch id {
         case "settings": SetupSheet(onComplete: onBackendChanged, allowsDismissal: true, embedded: true)
+        case "usage-telemetry": OrbUsageTelemetrySettings()
         case "dictation": OrbDictationSettingsView()
         case "debug": OrbDebugInfoView()
         case "routing": OrbRoutingSettings()

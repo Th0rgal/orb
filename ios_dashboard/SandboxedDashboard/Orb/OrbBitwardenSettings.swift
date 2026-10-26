@@ -575,6 +575,7 @@ struct OrbBitwardenSettings: View {
             } else {
                 _ = try await OrbApprovalKey.signedCall("/api/bitwarden/requests/\(id)/reject", method: "POST", summary: "Decline: \(describe(r))")
             }
+            OrbUsageTelemetry.recordGrant(id, approve: scope != nil, enrolled: true)
         } catch {
             self.error = error.localizedDescription
         }

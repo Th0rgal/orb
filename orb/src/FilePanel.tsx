@@ -18,6 +18,7 @@ import {
   For,
   type JSX,
 } from "solid-js";
+import { usageTelemetry } from "./usageTelemetry";
 import {
   createFileClient,
   fileScopeKey,
@@ -119,6 +120,11 @@ export function FilePanelProvider(p: {
     [active, setActive] = createSignal<string>(),
     [expanded, setExpanded] = createSignal<string[]>([]);
   // All file entry points (including links and Cmd+P) select the Files pane.
+  createEffect(on(opened, isOpen => {
+    if (!isOpen) return;
+    usageTelemetry.action("file_viewer_open", "files");
+    onCleanup(usageTelemetry.page("files", "pane"));
+  }));
   const setOpened = (value: boolean | ((previous: boolean) => boolean)) => {
     setSideVisible(false);
     return setFilesOpened(value);
