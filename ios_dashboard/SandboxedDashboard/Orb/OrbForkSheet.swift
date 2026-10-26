@@ -165,6 +165,7 @@ struct OrbForkSheet: View {
             if backend == "codex" { body["service_tier"] = .string(speed) }
             let forked = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(mission["id"].text))/fork", method: "POST", body: .object(body))
             OrbHaptics.success()
+            OrbUsageTelemetry.shared.trackAction(.fork, surface: "fork_sheet")
             dismiss()
             onForked(forked)
         } catch let e as OrbHTTPError where [404, 405].contains(e.status) {

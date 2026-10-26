@@ -1073,7 +1073,7 @@ pub(super) async fn control_actor_loop(
                                 }
                             }
                         };
-                        for (run, backend_id, active_tool_calls, idle_secs) in leases {
+                        for (run, _backend_id, active_tool_calls, idle_secs) in leases {
                             let mut live_registered_tools = 0usize;
                             let mut has_registered_user_wait = false;
                             let has_durable_remote_job = remote_jobs_by_mission.contains(&run.mission_id);
@@ -6626,6 +6626,13 @@ pub(super) async fn control_actor_loop(
                                     runner.touch();
                                 }
                             }
+
+                            let harness = match mission_id {
+                                Some(mid) if running_mission_id == Some(mid) => running_backend_id.as_deref(),
+                                Some(mid) => parallel_runners.get(&mid).map(|runner| runner.backend_id.as_str()),
+                                None => None,
+                            };
+                            crate::api::usage_telemetry::global().observe(&event, harness);
 
                             // --- Activity tracking & subtask detection ---
                             match &event {

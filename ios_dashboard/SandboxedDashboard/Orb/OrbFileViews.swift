@@ -227,6 +227,7 @@ struct OrbFileViewer: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("file.viewer")
+        .onAppear { OrbUsageTelemetry.shared.trackAction(.fileViewerOpen, surface: "file_viewer") }
         .task(id: attempt) { await load() }
     }
 

@@ -497,6 +497,41 @@ async fn describe(
                 )
             }
         }
+        (&Method::PUT, ["", "api", "usage-telemetry", "config"]) => {
+            let req: super::usage_telemetry::ConfigRequest = typed(body)?;
+            let mut changes = Vec::new();
+            if let Some(on) = req.enabled {
+                changes.push(format!(
+                    "{} usage telemetry",
+                    if on { "turn ON" } else { "turn off" }
+                ));
+            }
+            if let Some(on) = req.prompts_enabled {
+                changes.push(format!(
+                    "{} sending prompts",
+                    if on { "turn ON" } else { "turn off" }
+                ));
+            }
+            if let Some(url) = req.hub_url.as_deref() {
+                let shown = reqwest::Url::parse(url.trim())
+                    .map(|u| u.origin().ascii_serialization())
+                    .unwrap_or_else(|_| "an invalid URL".into());
+                changes.push(format!("send to {}", quoted(&shown)));
+            }
+            if let Some(ns) = req.namespace.as_deref() {
+                changes.push(format!("namespace {}", quoted(ns.trim())));
+            }
+            match req.token.as_deref().map(str::trim) {
+                Some("") => changes.push("remove the hub token".to_string()),
+                Some(_) => changes.push("replace the hub token".to_string()),
+                None => {}
+            }
+            if changes.is_empty() {
+                "Save usage telemetry settings".to_string()
+            } else {
+                format!("Usage telemetry: {}", changes.join(", "))
+            }
+        }
         (&Method::PUT, ["", "api", "bitwarden", "config"]) => {
             let req: UpdateBitwardenConfigRequest = typed(body)?;
             let mut changes = Vec::new();
@@ -640,6 +675,8 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
         (&Method::POST, ["", "api", "privilege-access", _, "approve" | "deny"]) => true,
         (&Method::PUT, ["", "api", "bitwarden", "default-access", _]) => true,
         (&Method::PUT, ["", "api", "bitwarden", "config"]) => true,
+        // The hub URL and token decide where usage data (and prompts) go.
+        (&Method::PUT, ["", "api", "usage-telemetry", "config"]) => true,
         (&Method::GET, ["", "api", "bitwarden", "secrets", _, "reveal"]) => true,
         (&Method::POST, ["", "api", "bitwarden", "projects", _, "secrets"]) => true,
         (&Method::PUT | &Method::DELETE, ["", "api", "bitwarden", "secrets", _]) => true,

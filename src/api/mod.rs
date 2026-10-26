@@ -111,6 +111,7 @@ pub(crate) mod uploads;
 pub(crate) mod usage_attribution;
 pub mod usage_optimize;
 pub(crate) mod usage_summary;
+pub mod usage_telemetry;
 pub mod validation;
 pub mod voice;
 pub mod webhook_markers;

@@ -9841,6 +9841,7 @@ async fn transferred_claude_starts_with_context_then_resumes_same_session() {
     fixture.set_state("succeeded");
 }
 
+#[tokio::test]
 async fn core_child_keeps_its_own_directory_and_inherits_the_workspace() {
     let harness = Harness::new().await;
     let host = crate::workspace::DEFAULT_WORKSPACE_ID;

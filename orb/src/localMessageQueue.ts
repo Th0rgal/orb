@@ -10,6 +10,7 @@ import {sideQuestionKey} from './sideQuestionStorage';
 import {normalizeEffort} from './effort';
 import {providerLimit} from './usageLimit';
 import {recoverLocalLaunch,recordLocalFailure,restoreLocalBindings,localBinding,pollLocal,reconcileLocalRun,startLocal,followLocal,stopLocal,type StartLocal,type PollLocal} from './localAgents';
+import {usageTelemetry} from './usageTelemetry';
 
 export type QueuedLocalMessage={id:ReturnType<typeof crypto.randomUUID>;mission:string;text:string;request:StartLocal;state:'queued'|'dispatching'|'accepted'|'error';error?:string;interrupted?:boolean;autoResumed?:boolean;resumes?:number;lastSyncedText?:string;cut?:'restart'|'connection'|'background';retryAfter?:number;waiting?:boolean;delegated?:boolean;scheduled?:boolean;receipt?:ClientRunReceipt;claimedAt?:number;userSynced?:boolean;result?:PollLocal;resultStatus?:'interrupted'|'failed'|'awaiting_user';resultId?:ReturnType<typeof crypto.randomUUID>;heldAt?:number};
 const [entries,publishEntries]=createSignal<QueuedLocalMessage[]>([]);
@@ -211,6 +212,7 @@ export async function takeQueuedMessage(id:string){
  return text;
 }
 export async function retryQueuedMessage(id:string){
+ usageTelemetry.action('message_resend','queue');
  const key=storageKey(),row=(await read(key)).find(row=>row.id===id);
  if(!row)return;
  if(row.state==='accepted'&&row.interrupted){

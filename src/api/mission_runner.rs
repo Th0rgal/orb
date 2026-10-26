@@ -10109,7 +10109,7 @@ impl From<&MissionRunner> for RunningMissionInfo {
             seconds_since_activity,
             tool_call_in_flight,
             health: running_health(runner.state, seconds_since_activity, tool_call_in_flight),
-            expected_deliverables: runner.deliverables.deliverables.len(),
+            expected_deliverables: 0,
             current_activity: runner.current_activity.clone(),
             subtask_total: runner.subtasks.len(),
             subtask_completed: runner.subtasks.iter().filter(|s| s.completed).count(),

@@ -421,16 +421,19 @@ struct OrbHome: View {
                     projects: projects,
                     actionableCount: $inboxCount,
                     onOpenMission: { row in
+                        OrbUsageTelemetry.shared.trackAction(.inboxOpen, surface: "inbox")
                         linkedProject = row.raw["project"].text
                         linkedFolder = row.folder
                         linkedMission = row.id
                     }
                 )
+                .orbTrackPage("inbox")
                 .onAppear { OrbOnScreen.inboxVisible = true }
                 .onDisappear { OrbOnScreen.inboxVisible = false }
             } else {
                 projectsScrollView
                     .searchable(text: $search, prompt: "Search projects")
+                    .orbTrackPage("projects")
             }
         }
         .background(OrbStyle.background)
@@ -445,9 +448,9 @@ struct OrbHome: View {
         }
         .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
         .safeAreaInset(edge: .top, spacing: 0) { secretBanner }
-        .sheet(isPresented: $approvalsSheet) { OrbApprovalQueueSheet() }
-        .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet() }
-        .sheet(isPresented: $enrollSheet) { OrbApprovalEnrollmentSheet() }
+        .sheet(isPresented: $approvalsSheet) { OrbApprovalQueueSheet().orbTrackPage("approval_queue", surface: .sheet) }
+        .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet().orbTrackPage("privilege_access", surface: .sheet) }
+        .sheet(isPresented: $enrollSheet) { OrbApprovalEnrollmentSheet().orbTrackPage("approval_enrollment", surface: .sheet) }
         .onChange(of: approvalEnrollment.sheetRequested) { _, open in
             if open { approvalEnrollment.sheetRequested = false; enrollSheet = true }
         }

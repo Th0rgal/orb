@@ -8,8 +8,8 @@ export type SettingsTab = { id: string; label: string };
 export type SettingsSection = { id: SettingsSectionId; label: string; subtitle: string; tabs: SettingsTab[] };
 
 export const SETTINGS_SECTIONS: SettingsSection[] = [
-  { id: "account", label: "Account", subtitle: "Your server connection, connected accounts and how Orb looks.",
-    tabs: [{ id: "settings", label: "Account" }] },
+  { id: "account", label: "Account", subtitle: "Your server connection, connected accounts, how Orb looks and usage telemetry.",
+    tabs: [{ id: "settings", label: "Account" }, { id: "usage-telemetry", label: "Usage telemetry" }] },
   { id: "models", label: "Models", subtitle: "Fallback order, provider health, usage over time and API keys.",
     tabs: [{ id: "routing", label: "Fallback Chains" }, { id: "routing-providers", label: "Providers" }, { id: "usage-settings", label: "Usage" }, { id: "routing-keys", label: "API Keys" }] },
   { id: "agents", label: "Agents", subtitle: "What agents know and can do, the Assistant, and the agents on this computer.",

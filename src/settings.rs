@@ -111,6 +111,27 @@ pub struct BitwardenSettings {
     pub default_access: std::collections::BTreeMap<String, Vec<String>>,
 }
 
+/// Opt-in Orb usage telemetry forwarded to a telemetry hub
+/// (`Th0rgal/telemetry-hub`). Off unless `enabled` is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrbTelemetrySettings {
+    /// Forward `orb.*` UI, approval and turn events. Default: off.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Also forward scrubbed prompt text (`orb.prompt.v1`). Separate opt-in.
+    #[serde(default)]
+    pub prompts_enabled: bool,
+    /// Hub base URL (default `https://telemetry.thomas.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_url: Option<String>,
+    /// Owner namespace on the hub. Never `community`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// AES-256-GCM encrypted `tl_live_` hub token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_token: Option<String>,
+}
+
 /// Global application settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Settings {
@@ -167,6 +188,9 @@ pub struct Settings {
     /// Bitwarden Secrets Manager (`bws`) integration settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitwarden: Option<BitwardenSettings>,
+    /// Opt-in usage telemetry (off by default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orb_telemetry: Option<OrbTelemetrySettings>,
 }
 
 /// In-memory store for global settings with disk persistence.
@@ -245,6 +269,7 @@ impl SettingsStore {
             metadata_model: None,
             harness_versions: None,
             bitwarden: None,
+            orb_telemetry: None,
         }
     }
 
@@ -262,6 +287,27 @@ impl SettingsStore {
     pub async fn set_bitwarden(&self, bitwarden: BitwardenSettings) -> Result<(), std::io::Error> {
         let mut settings = self.settings.write().await;
         settings.bitwarden = Some(bitwarden);
+        drop(settings);
+        self.save_to_disk().await
+    }
+
+    /// Current usage telemetry settings (disabled when unset).
+    pub async fn get_orb_telemetry(&self) -> OrbTelemetrySettings {
+        self.settings
+            .read()
+            .await
+            .orb_telemetry
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// Update the usage telemetry settings and persist to disk.
+    pub async fn set_orb_telemetry(
+        &self,
+        telemetry: OrbTelemetrySettings,
+    ) -> Result<(), std::io::Error> {
+        let mut settings = self.settings.write().await;
+        settings.orb_telemetry = Some(telemetry);
         drop(settings);
         self.save_to_disk().await
     }

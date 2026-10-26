@@ -275,6 +275,17 @@ fun OrbAppRoot(
     }
 
     val currentScreen = backStack.value.lastOrNull() ?: OrbNavScreen.Home
+    // One page event per main screen (and Home tab); the settings sheet tracks its own pages.
+    TrackPage(
+        screen = when (currentScreen) {
+            is OrbNavScreen.Home -> if (topTab == OrbTopTab.Inbox) "inbox" else "home"
+            is OrbNavScreen.Project -> "project"
+            is OrbNavScreen.Conversation -> "conversation"
+            is OrbNavScreen.Documents -> "documents"
+            is OrbNavScreen.DocumentViewer -> "document_viewer"
+        },
+        surface = UsageTelemetry.Surface.Screen
+    )
     OrbSafeDrawingRoot(modifier = modifier) {
         when (currentScreen) {
             is OrbNavScreen.Home -> {
@@ -2675,6 +2686,7 @@ object OrbMoveClipboard {
             method = "POST",
             body = mapOf("project" to slug, "tags" to tags)
         )
+        UsageTelemetry.trackAction(UsageTelemetry.Action.SidebarMove, "sidebar")
         clear()
     }
 }

@@ -1274,7 +1274,7 @@ pub async fn download(
             return Err(denied());
         }
         let axum::Extension(user) = user.ok_or_else(denied)?;
-        super::control::get_mission(
+        let _ = super::control::get_mission(
             State(state.clone()),
             axum::Extension(user),
             axum::extract::Path(mission),

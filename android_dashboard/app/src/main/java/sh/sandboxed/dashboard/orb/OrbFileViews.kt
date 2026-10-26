@@ -301,6 +301,8 @@ private fun OrbSheetHeader(title: String, onBack: (() -> Unit)?, file: File?, on
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrbFileViewerSheet(core: OrbCore, ref: OrbFileRef, scope: OrbFileScope, onDismiss: () -> Unit) {
+    TrackPage("file_viewer", UsageTelemetry.Surface.Sheet, entryPoint = "transcript")
+    androidx.compose.runtime.LaunchedEffect(Unit) { UsageTelemetry.trackAction(UsageTelemetry.Action.FileViewerOpen, "transcript") }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var file by remember(ref) { mutableStateOf<File?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = OrbStyle.background, contentColor = Color.White) {

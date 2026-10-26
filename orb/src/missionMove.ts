@@ -2,6 +2,7 @@ import { api, getApiUrl, getMission, connectionVersion } from './api';
 import { copyText } from './clipboard';
 import { missionMoveKey, moveOptimistically, previewMove, withMovedMissions } from './moves';
 import { missionParent } from './missionTree';
+import { usageTelemetry } from './usageTelemetry';
 const prefix = 'orb:cut-mission:';
 export async function cutMission(id: string): Promise<string> {
   const text = prefix + JSON.stringify({ id, backend: getApiUrl(), nonce: crypto.randomUUID() });
@@ -73,6 +74,7 @@ export function planMissionMoves(ids: readonly string[], project: string, folder
  * old place on its own. Resolves with the ids that failed.
  */
 export async function moveMissions(plan: MovePlan, project: string): Promise<{ id: string; error: unknown }[]> {
+  if (plan.length) usageTelemetry.action('sidebar_move', 'sidebar', plan.length);
   for (const step of plan) previewMove(missionMoveKey(step.id), { kind: 'mission', fromProject: step.from, toProject: project, path: step.folder });
   const results = await Promise.allSettled(plan.map(step => moveMission(step.id, project, step.folder, step.from)));
   return results.flatMap((r, i) => r.status === 'rejected' ? [{ id: plan[i].id, error: r.reason }] : []);
