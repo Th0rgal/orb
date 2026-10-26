@@ -35,6 +35,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/health/:account_id/clear", post(clear_cooldown))
         // Observability
         .route("/events", get(list_fallback_events))
+        .route("/shadow", get(get_proxy_shadow_metrics))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -532,6 +533,11 @@ async fn list_fallback_events(
     State(state): State<Arc<super::routes::AppState>>,
 ) -> Json<Vec<crate::provider_health::FallbackEvent>> {
     Json(state.health_tracker.get_recent_events(200).await)
+}
+
+/// GET /api/model-routing/shadow - Live Lean 4 proxy routing shadow metrics (`RefinementSimulation`).
+async fn get_proxy_shadow_metrics() -> Json<crate::provider_health::ProxyShadowSnapshot> {
+    Json(crate::provider_health::proxy_shadow_snapshot())
 }
 
 #[cfg(test)]

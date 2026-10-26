@@ -591,14 +591,63 @@ mod tests {
             Some(202)
         );
 
-        // 4. First-byte lock (`StickyFence`): failover after first byte sent is aborted (`AbortLockedStream`)
-        let locked = provider_pool_step(ProviderPoolStepInput {
+        // 4. Sequential state-carrying regression:
+        //    initial dispatch (first_byte_sent=false) -> next_first_byte == false ->
+        //    pre-byte failure -> allowed retry using next state ->
+        //    first byte observed -> rejected retry (`AbortLockedStream`).
+        let initial_dispatch = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id: None,
+            candidate_account_id: 101,
+            is_rejected: false,
+            first_byte_sent: false,
+            is_failover_attempt: false,
+            attempts: 0,
+            max_attempts: 3,
+            now_epoch: 1_000,
+            reset_epoch: 0,
+        });
+        assert_eq!(initial_dispatch.action, ProviderPoolAction::DispatchPoolCandidate);
+        assert!(initial_dispatch.emit_dispatch_effect);
+        assert!(!initial_dispatch.first_byte_locked_next);
+
+        let pre_byte_retry = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id: None,
+            candidate_account_id: 303,
+            is_rejected: false,
+            first_byte_sent: initial_dispatch.first_byte_locked_next,
+            is_failover_attempt: true,
+            attempts: 1,
+            max_attempts: 3,
+            now_epoch: 1_000,
+            reset_epoch: 0,
+        });
+        assert_eq!(pre_byte_retry.action, ProviderPoolAction::DispatchPoolCandidate);
+        assert!(pre_byte_retry.emit_dispatch_effect);
+        assert!(!pre_byte_retry.first_byte_locked_next);
+        assert_eq!(pre_byte_retry.dispatched_account_id, 303);
+
+        // First byte observed on candidate 303 sets sticky lock
+        let first_byte_observed = provider_pool_step(ProviderPoolStepInput {
             bound_account_id: None,
             candidate_account_id: 303,
             is_rejected: false,
             first_byte_sent: true,
+            is_failover_attempt: false,
+            attempts: 1,
+            max_attempts: 3,
+            now_epoch: 1_000,
+            reset_epoch: 0,
+        });
+        assert!(first_byte_observed.first_byte_locked_next);
+
+        // Subsequent failover attempt using `first_byte_observed.first_byte_locked_next` is aborted
+        let locked = provider_pool_step(ProviderPoolStepInput {
+            bound_account_id: None,
+            candidate_account_id: 101,
+            is_rejected: false,
+            first_byte_sent: first_byte_observed.first_byte_locked_next,
             is_failover_attempt: true,
-            attempts: 0,
+            attempts: 2,
             max_attempts: 3,
             now_epoch: 1_000,
             reset_epoch: 0,

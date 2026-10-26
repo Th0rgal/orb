@@ -1250,7 +1250,7 @@ def effectAdmissible
   - Else if `isRejected == 1 && nowEpoch < resetEpoch`,
     returns `action = 0 (RejectCandidate)` (never routes to a rejected account before `resetEpoch`).
   - Else if `candidateAccountId == 0`, returns `action = 0 (RejectCandidate)`.
-  - Otherwise admits dispatch (`bit 8 = 256`, `bit 16 = 65536 = firstByteLockedNext`,
+  - Otherwise admits dispatch (`bit 8 = 256`, `bit 16 = lockBit` preserving `firstByteSent`,
     `bits 32..63 = candidateAccountId`), with `action = 1 (DispatchBoundAccount)` when
     `hasBoundAccount == 1` and `action = 2 (DispatchPoolCandidate)` when `hasBoundAccount == 0`.
 -/
@@ -1262,14 +1262,19 @@ def providerPoolStep
     (nowEpoch resetEpoch : UInt64) : UInt64 :=
   let lockBit : UInt32 := if firstByteSent == 1 then 65536 else 0
   let lo32 : UInt32 :=
-    if firstByteSent == 1 && isFailoverAttempt == 1 then (3 : UInt32) ||| lockBit
-    else if isFailoverAttempt == 1 && !(1 ≤ maxAttempts && attempts < maxAttempts) then (4 : UInt32) ||| lockBit
+    if firstByteSent == 1 && isFailoverAttempt == 1 then 3 + lockBit
+    else if isFailoverAttempt == 1 && !(1 ≤ maxAttempts && attempts < maxAttempts) then 4 + lockBit
     else if hasBoundAccount == 1 && !(candidateAccountId == boundAccountId) then lockBit
     else if isRejected == 1 && nowEpoch < resetEpoch then lockBit
     else if candidateAccountId == 0 then lockBit
-    else (if hasBoundAccount == 1 then (1 : UInt32) else 2) ||| 256 ||| 65536
+    else (if hasBoundAccount == 1 then 1 else 2) + 256 + lockBit
   let hi32 : UInt32 :=
-    if (lo32 &&& 256) != 0 then candidateAccountId else 0
+    if firstByteSent == 1 && isFailoverAttempt == 1 then 0
+    else if isFailoverAttempt == 1 && !(1 ≤ maxAttempts && attempts < maxAttempts) then 0
+    else if hasBoundAccount == 1 && !(candidateAccountId == boundAccountId) then 0
+    else if isRejected == 1 && nowEpoch < resetEpoch then 0
+    else if candidateAccountId == 0 then 0
+    else candidateAccountId
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
 
 /--
