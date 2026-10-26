@@ -1606,7 +1606,10 @@ impl MeshManifest {
         ];
 
         let mut rules = Vec::new();
-        for worker in ["ashur", "babylon", "nippur", "old-agent", "watchtower"] {
+        // 1. Orb Remote Compute Nodes (`sandboxed-node` `:3088`): only compute workers + dgx-spark.
+        // (`polymath`, `thomas-md`, `maven-repo`, and `watchtower` are RESERVED/SHARED_PROTECTED
+        // non-compute hosts and do not run `sandboxed-node` `:3088`.)
+        for worker in ["ashur", "babylon", "nippur", "old-agent"] {
             rules.push(CapabilityRule {
                 src_peer: "agent-core".into(),
                 dst_peer: worker.into(),
@@ -1620,8 +1623,49 @@ impl MeshManifest {
                 dst_peer: "agent-core".into(),
                 proto: MeshProto::Tcp,
                 port_min: 3000,
-                port_max: 3000,
-                description: format!("Worker telemetry & LLM proxy {worker} -> agent-core:3000"),
+                port_max: 3002,
+                description: format!(
+                    "Worker telemetry, LLM proxy & bunker status {worker} -> agent-core:3000-3002"
+                ),
+            });
+            rules.push(CapabilityRule {
+                src_peer: worker.into(),
+                dst_peer: "dgx-spark".into(),
+                proto: MeshProto::Tcp,
+                port_min: 8888,
+                port_max: 8890,
+                description: format!(
+                    "Worker mission Hindsight & spark-memory access {worker} -> dgx-spark:8888-8890"
+                ),
+            });
+        }
+        rules.push(CapabilityRule {
+            src_peer: "agent-core".into(),
+            dst_peer: "dgx-spark".into(),
+            proto: MeshProto::Tcp,
+            port_min: 3088,
+            port_max: 3089,
+            description: "Orb control-plane dispatch & admin agent-core -> dgx-spark:3088-3089"
+                .into(),
+        });
+        // 2. Full-Fleet Orb Security Enrollment (`lean-mesh`, Canary tripwires, Bunker status, Sovereign heartbeat):
+        for peer_to_core in [
+            "dgx-spark",
+            "thomas-md",
+            "polymath",
+            "maven-repo",
+            "watchtower",
+            "macbook-air",
+        ] {
+            rules.push(CapabilityRule {
+                src_peer: peer_to_core.into(),
+                dst_peer: "agent-core".into(),
+                proto: MeshProto::Tcp,
+                port_min: 3000,
+                port_max: 3002,
+                description: format!(
+                    "Fleet security, heartbeat & bunker status {peer_to_core} -> agent-core:3000-3002"
+                ),
             });
         }
         rules.push(CapabilityRule {
@@ -1641,7 +1685,21 @@ impl MeshManifest {
             port_max: 8890,
             description: "Orb control-plane -> dgx-spark Hindsight memory & remarkablesync".into(),
         });
+        // 3. Control-Plane JIT Privileged Broker SSH (`agent-core -> <peer>:22`) & Operator Breakglass SSH (`macbook-air -> <peer>:22`):
         for peer in &peers {
+            if peer.name != "agent-core" {
+                rules.push(CapabilityRule {
+                    src_peer: "agent-core".into(),
+                    dst_peer: peer.name.clone(),
+                    proto: MeshProto::Tcp,
+                    port_min: 22,
+                    port_max: 22,
+                    description: format!(
+                        "Orb JIT privilege broker & sentinel SSH agent-core -> {}:22",
+                        peer.name
+                    ),
+                });
+            }
             if peer.name != "macbook-air" {
                 rules.push(CapabilityRule {
                     src_peer: "macbook-air".into(),
