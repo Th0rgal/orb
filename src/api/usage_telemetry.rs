@@ -198,7 +198,7 @@ fn scrub_patterns() -> &'static [(Regex, &'static str)] {
             (r"\bAIza[0-9A-Za-z_-]{35}", "[REDACTED]"),
             (r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]{16,}=*", "${1}[REDACTED]"),
             (
-                r"(?i)\b([A-Z0-9_]*(?:secret|token|password|passwd|api_?key|private_?key)[A-Z0-9_]*)(\s*[:=]\s*)([^\s'\x22]{6,})",
+                r"(?i)\b([A-Z0-9_-]*(?:secret|token|password|passwd|api_?key|private_?key)[A-Z0-9_-]*)(['\x22]?\s*[:=]\s*['\x22]?)([^\s'\x22,}]{4,})",
                 "${1}${2}[REDACTED]",
             ),
             (r"://[^/\s:@]+:[^/\s@]+@", "://[REDACTED]@"),

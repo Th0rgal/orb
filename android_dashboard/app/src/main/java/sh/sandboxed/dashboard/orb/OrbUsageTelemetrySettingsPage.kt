@@ -33,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -49,6 +50,7 @@ import kotlinx.coroutines.launch
 fun OrbUsageTelemetrySettingsPage(core: OrbCore, onBack: () -> Unit) {
     val status by UsageTelemetry.status.collectAsState()
     val scope = rememberCoroutineScope()
+    val activity = LocalContext.current.fragmentActivity()
     var namespace by remember { mutableStateOf("") }
     var hubUrl by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
@@ -63,7 +65,7 @@ fun OrbUsageTelemetrySettingsPage(core: OrbCore, onBack: () -> Unit) {
     fun save(patch: Map<String, Any?>) {
         busy = true
         scope.launch {
-            runCatching { OrbJSON.dict(core.request("/api/usage-telemetry/config", "PUT", body = patch)) ?: emptyMap() }
+            runCatching { OrbJSON.dict(OrbApprovalKey.signedRequest(core, activity, "PUT", "/api/usage-telemetry/config", patch, "change usage telemetry")) ?: emptyMap() }
                 .onSuccess { UsageTelemetry.applyStatus(it); error = null }
                 .onFailure { error = it.message ?: "Couldn’t save telemetry settings." }
             busy = false

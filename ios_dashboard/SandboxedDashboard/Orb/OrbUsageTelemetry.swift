@@ -318,7 +318,7 @@ struct OrbUsageTelemetrySettings: View {
         Task {
             saving = true; defer { saving = false }
             do {
-                let next = OrbTelemetryStatus(try await client.call("/api/usage-telemetry/config", method: "PUT", body: .object(body)))
+                let next = OrbTelemetryStatus(try await OrbApprovalKey.signedCall("/api/usage-telemetry/config", method: "PUT", body: .object(body), summary: "change usage telemetry"))
                 telemetry.apply(next)
                 sync(next)
                 token = ""

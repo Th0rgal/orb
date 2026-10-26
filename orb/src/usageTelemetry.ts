@@ -6,6 +6,7 @@
  * iOS (`OrbUsageTelemetry.swift`) and Android (`UsageTelemetry.kt`) use the
  * same names. */
 import { api } from "./api";
+import { signedApi } from "./deviceApproval";
 
 export type UsageTelemetryStatus = {
   enabled: boolean;
@@ -115,7 +116,7 @@ export const usageTelemetry = createUsageTelemetry({
 export const getUsageTelemetryStatus = () => api<UsageTelemetryStatus>("/api/usage-telemetry");
 
 export async function updateUsageTelemetryConfig(config: UsageTelemetryConfig): Promise<UsageTelemetryStatus> {
-  const status = await api<UsageTelemetryStatus>("/api/usage-telemetry/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(config) });
+  const status = await signedApi<UsageTelemetryStatus>("PUT", "/api/usage-telemetry/config", config, "change usage telemetry");
   usageTelemetry.setActive(status.active);
   return status;
 }

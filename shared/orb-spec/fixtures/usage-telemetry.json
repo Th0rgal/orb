@@ -225,6 +225,18 @@
       "out": "jwt [REDACTED]"
     },
     {
+      "in": "config {\"api_key\": \"abcd1234efgh\"}",
+      "out": "config {\"api_key\": \"[REDACTED]\"}"
+    },
+    {
+      "in": "password = 'hunter2x'",
+      "out": "password = '[REDACTED]'"
+    },
+    {
+      "in": "client_secret:\"s3cr3tv4lue\"",
+      "out": "client_secret:\"[REDACTED]\""
+    },
+    {
       "in": "fix the token refresh bug in auth.rs",
       "out": "fix the token refresh bug in auth.rs"
     }
