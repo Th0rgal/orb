@@ -138,7 +138,7 @@ export async function signedApi<T>(method: string, path: string, body: unknown, 
     return await api<T>(path, { method, headers, ...(body === undefined ? {} : { body: text }) });
   } catch (e) {
     if (e instanceof ApiError && e.status === 403 && e.detail.includes("device_approval_required")) {
-      throw new Error("Core requires an enrolled device for this. Enroll this Mac in Settings → Secrets → Approval devices.");
+      throw new Error("Core requires an enrolled device for this. Enroll this Mac in Settings → Security → Approval devices.");
     }
     throw e;
   }

@@ -1,0 +1,18 @@
+{
+  "description": "Settings navigation shared by Orb desktop (orb/src/settingsNav.ts), iOS (OrbSettingsNav.swift) and Android (SettingsNav.kt): five sections in this order, each with a one-line subtitle and its tabs. Tab ids are page ids; legacy maps ids that lost their own page. A section shows an attention dot: security when Fleet Bunker Mode is active or this device can approve but is not enrolled; models when a provider quota is exhausted.",
+  "sections": [
+    { "id": "account", "label": "Account", "subtitle": "Your server connection, connected accounts and how Orb looks.", "tabs": [{ "id": "settings", "label": "Account" }] },
+    { "id": "models", "label": "Models", "subtitle": "Which models agents use, in what order, and how much quota is left.", "tabs": [{ "id": "routing", "label": "Routing" }, { "id": "usage-settings", "label": "Details" }] },
+    { "id": "agents", "label": "Agents", "subtitle": "What agents know and can do, the Assistant, and the agents on this computer.", "tabs": [{ "id": "skills-settings", "label": "Skills" }, { "id": "hermes-settings", "label": "Assistant" }, { "id": "btw-settings", "label": "Quick questions (/btw)" }, { "id": "local-agents", "label": "Local agents" }] },
+    { "id": "security", "label": "Security", "subtitle": "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets.", "tabs": [{ "id": "security-settings", "label": "Access" }, { "id": "bitwarden-settings", "label": "Secrets vault" }] },
+    { "id": "notifications", "label": "Notifications", "subtitle": "What reaches your Inbox and when Orb tells you.", "tabs": [{ "id": "inbox-settings", "label": "Notifications" }] }
+  ],
+  "legacy": { "execution": "local-agents" },
+  "attention": [
+    { "name": "calm", "state": { "bunkerActive": false, "deviceEnrolled": true, "quotaExhausted": false }, "expected": [] },
+    { "name": "bunker", "state": { "bunkerActive": true, "deviceEnrolled": true, "quotaExhausted": false }, "expected": ["security"] },
+    { "name": "unenrolled", "state": { "bunkerActive": false, "deviceEnrolled": false, "quotaExhausted": false }, "expected": ["security"] },
+    { "name": "quota", "state": { "bunkerActive": false, "deviceEnrolled": true, "quotaExhausted": true }, "expected": ["models"] },
+    { "name": "all", "state": { "bunkerActive": true, "deviceEnrolled": false, "quotaExhausted": true }, "expected": ["security", "models"] }
+  ]
+}
