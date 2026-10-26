@@ -9,6 +9,7 @@ import {
   queueSummary,
   type ApprovalItem,
 } from "./approvalQueue";
+import { listBitwardenProjects } from "./bitwardenApi";
 import { ApprovalCancelled } from "./deviceApproval";
 import { CloseIcon } from "./icons";
 import { FingerprintIcon } from "./approvalIcons";
@@ -33,6 +34,11 @@ const [changedAt, setChangedAt] = createSignal(0);
 const SETTLE_MS = 1500;
 let lastKeys = "";
 let openReview = () => {};
+/** Bitwarden project names, loaded once a secret request names a project. */
+const [projectNames, setProjectNames] = createSignal<Record<string, string> | null>(null);
+let projectsLoading = false;
+const projectName = (id: string) => projectNames()?.[id] || id.slice(0, 8);
+const detail = (i: ApprovalItem) => itemDetail(i, projectName);
 
 const key = (i: Pick<ApprovalItem, "kind" | "id">) => `${i.kind}:${i.id}`;
 const visible = () => pending().filter((i) => !hidden().has(key(i)));
@@ -46,6 +52,12 @@ const hide = (items: ApprovalItem[], on: boolean) =>
 export function syncApprovalQueue(items: ApprovalItem[], review: () => void) {
   openReview = review;
   setPending(items);
+  if (!projectsLoading && items.some((i) => i.kind === "secret" && i.request.project_id)) {
+    projectsLoading = true;
+    listBitwardenProjects()
+      .then((ps) => setProjectNames(Object.fromEntries(ps.map((p) => [p.id, p.name]))))
+      .catch(() => { projectsLoading = false; });
+  }
   const live = new Set(items.map(key));
   setHidden((prev) => new Set([...prev].filter((k) => live.has(k))));
   // A changed item (new digest) counts as a change too.
@@ -93,7 +105,7 @@ function ApprovalQueueCard() {
           <Show when={one()}>{(i) => <span class="toast-sub" title={i().requester_mission_id}>asked by {itemRequester(i())}</span>}</Show>
         </span>
         <Show when={one()?.reason}><span class="toast-message">{one()!.reason}</span></Show>
-        <Show when={one() && itemDetail(one()!)}><span class="access-scope">{itemDetail(one()!)}</span></Show>
+        <Show when={one() && detail(one()!)}><span class="access-scope">{detail(one()!)}</span></Show>
       </div>
       <button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss" onClick={close}><CloseIcon size={13} /></button>
     </div>
@@ -102,7 +114,7 @@ function ApprovalQueueCard() {
         <For each={list()}>{(i) =>
           <div class="secret-row" classList={{ "approval-critical": i.risk === "critical" }} data-testid="approval-queue-row">
             <div class="toast-body">
-              <strong class="secret-row-key">{itemTitle(i)}</strong>
+              <strong class="secret-row-key">{itemTitle(i)}<Show when={detail(i)}><span class="approval-row-detail"> · {detail(i)}</span></Show></strong>
               <span class="secret-row-reason" title={i.reason}>{itemRequester(i)}{i.reason ? `: ${i.reason}` : ""}</span>
             </div>
             <button type="button" class="toast-btn" onClick={() => act([i], false)}>Deny</button>

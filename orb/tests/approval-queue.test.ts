@@ -3,7 +3,7 @@ vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0}));
 vi.mock('../src/deviceApproval',()=>({signedApi:vi.fn(),ApprovalCancelled:class extends Error{}}));
 import {signedApi} from '../src/deviceApproval';
 import fixture from '../../shared/orb-spec/fixtures/approvals.json';
-import {approveItems,batchApprovable,denyItem,itemDetail,itemRequester,itemTitle,queueSummary,type ApprovalItem} from '../src/approvalQueue';
+import {approveItems,batchApprovable,denyItem,itemDetail,itemRequester,itemTitle,queueSummary,signingReason,type ApprovalItem} from '../src/approvalQueue';
 const item=(c:any,n=0):ApprovalItem=>({id:`i${n}`,reason:'',created_at:'',digest:`d${n}`,...c.item});
 afterEach(()=>vi.mocked(signedApi).mockReset());
 describe('approval queue',()=>{
@@ -30,6 +30,11 @@ describe('approval queue',()=>{
   await approveItems([root]);
   expect((vi.mocked(signedApi).mock.calls[1][2] as any).confirm_critical).toBe(true);
   expect(vi.mocked(signedApi).mock.calls[1][3]).toBe('Root on its own node for Mission 9a8b7c6d');
+ });
+ it('the device prompt names every item, critical first',()=>{
+  const items=[0,9,2].map(k=>item(fixture.labels[k],k));
+  expect(signingReason(items)).toBe('approve 3 requests (1 critical · 1 elevated · 1 routine): Move OLD_TOKEN; Service deploy on agent-core; Read OPENAI_API_KEY');
+  expect(itemDetail(items[1],(id)=>({'3b1f9c2a-0000-4000-8000-00000000000a':'prod','8d2e4f6a-0000-4000-8000-00000000000b':'archive'} as any)[id])).toBe('From prod to archive');
  });
  it('denies through each kind\'s own route',async()=>{
   vi.mocked(signedApi).mockResolvedValue({});

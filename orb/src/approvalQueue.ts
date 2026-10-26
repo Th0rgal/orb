@@ -46,9 +46,22 @@ export function itemTitle(i: Pick<ApprovalItem, "kind" | "tier" | "request">): s
   return r.all_projects ? `${verb} every secret project` : `${verb} a whole secret project`;
 }
 
-/** The fine print under a single request: what it unlocks and for how long. */
-export function itemDetail(i: Pick<ApprovalItem, "kind" | "request">): string {
+/** Short project id until the Secrets page has loaded names. */
+const shortProject = (id: string) => id.slice(0, 8);
+
+/**
+ * The fine print: what it unlocks and for how long, and for secrets the
+ * project a write lands in, a delete removes from, or a move goes between.
+ */
+export function itemDetail(i: Pick<ApprovalItem, "kind" | "tier" | "request">, projectName: (id: string) => string = shortProject): string {
   const r = i.request;
+  if (i.kind === "secret") {
+    const from = str(r.project_id) ? projectName(str(r.project_id)) : "";
+    if (i.tier === "move") return `From ${from || "unknown project"} to ${str(r.target_project_id) ? projectName(str(r.target_project_id)) : "unknown project"}`;
+    if (i.tier === "delete") return `From ${from || "unknown project"}`;
+    if (i.tier === "write") return from ? `Into ${from}` : "";
+    return "";
+  }
   if (i.kind === "privilege") {
     const p = { scope: str(r.scope) as PrivilegeScope, allowed_unit: str(r.allowed_unit) || null, session_scoped: r.session_scoped === true, ttl_minutes: Number(r.ttl_minutes) || 0 };
     return `Allows ${scopeUnlocks(p)} · ${lifetimeLabel(p)}`;
@@ -75,6 +88,13 @@ export function queueSummary(items: ApprovalItem[]) {
   };
 }
 
+/** What the device prompt says: every item, critical first (Core's own text is what gets signed). */
+export function signingReason(items: ApprovalItem[]): string {
+  if (items.length === 1) return `${itemTitle(items[0])} for ${itemRequester(items[0])}`;
+  const sorted = [...items].sort((a, b) => RISK_ORDER.indexOf(a.risk) - RISK_ORDER.indexOf(b.risk));
+  return `approve ${items.length} requests (${queueSummary(items).risks}): ${sorted.map(itemTitle).join("; ")}`;
+}
+
 /** What "Approve all" covers: critical items only when the approver ticked them. */
 export const batchApprovable = (items: ApprovalItem[], includeCritical: boolean) =>
   items.filter((i) => includeCritical || i.risk !== "critical");
@@ -99,7 +119,7 @@ export async function approveItems(items: ApprovalItem[]) {
     "POST",
     "/api/approvals/approve-all",
     { items: items.map((i) => ({ kind: i.kind, id: i.id, digest: i.digest })), confirm_critical: s.critical > 0 },
-    items.length === 1 ? `${itemTitle(items[0])} for ${itemRequester(items[0])}` : `approve ${items.length} requests (${s.risks})`,
+    signingReason(items),
   );
   answered(items);
   return out;

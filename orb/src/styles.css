@@ -4117,3 +4117,4 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-requests + .approval-batch { padding: 6px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .secret-row.approval-critical .secret-row-key, .toast-title strong.approval-critical { color: var(--danger); }
 .approval-critical-confirm { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--danger); }
+.approval-row-detail { font: 11px var(--sans, inherit); color: var(--fg-3); font-weight: 400; }

@@ -1,5 +1,5 @@
 {
-  "description": "Shared approval model (src/api/approval_queue.rs, Lean orb_verify_approval). `gate`: the one admission rule every approval kind and every batch goes through; a batch is admitted only when every item is. `risk`: how each kind's tier maps to a risk; critical items need explicit confirmation and are left out of \"Approve all\" unless ticked. Clients (desktop approvalQueue.ts, iOS OrbApprovalQueue.swift, Android OrbApprovalQueue.kt) use the same names. `labels`: the row title, requester and fine print (`detail`) every client shows for an item. `summaries` (indexes into `labels`): the \"Approve all\" line, risks most severe first, missions sorted, and how many items the button covers while critical ones are not ticked.",
+  "description": "Shared approval model (src/api/approval_queue.rs, Lean orb_verify_approval). `gate`: the one admission rule every approval kind and every batch goes through; a batch is admitted only when every item is. `risk`: how each kind's tier maps to a risk; critical items need explicit confirmation and are left out of \"Approve all\" unless ticked. Clients (desktop approvalQueue.ts, iOS OrbApprovalQueue.swift, Android OrbApprovalQueue.kt) use the same names. `labels`: the row title, requester and fine print (`detail`; secret project ids shown as their first 8 characters until names load) every client shows for an item. `summaries` (indexes into `labels`): the \"Approve all\" line, risks most severe first, missions sorted, and how many items the button covers while critical ones are not ticked.",
   "gate": [
     {
       "name": "signed, owned, pending, unchanged, elevated",
@@ -234,12 +234,13 @@
         "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
         "request": {
           "kind": "write",
-          "key": "DEPLOY_TOKEN"
+          "key": "DEPLOY_TOKEN",
+          "project_id": "3b1f9c2a-0000-4000-8000-00000000000a"
         }
       },
       "title": "Store DEPLOY_TOKEN",
       "requester": "Ship usage fix",
-      "detail": ""
+      "detail": "Into 3b1f9c2a"
     },
     {
       "item": {
@@ -251,12 +252,13 @@
         "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
         "request": {
           "kind": "delete",
-          "key": "OLD_TOKEN"
+          "key": "OLD_TOKEN",
+          "project_id": "3b1f9c2a-0000-4000-8000-00000000000a"
         }
       },
       "title": "Delete OLD_TOKEN",
       "requester": "Ship usage fix",
-      "detail": ""
+      "detail": "From 3b1f9c2a"
     },
     {
       "item": {
@@ -327,6 +329,25 @@
       "title": "Read Mission 5e6f7a8b",
       "requester": "Fleet health",
       "detail": "Read only \u00b7 24 h \u00b7 no messages, cancel or resume"
+    },
+    {
+      "item": {
+        "kind": "secret",
+        "tier": "move",
+        "target": "OLD_TOKEN",
+        "risk": "critical",
+        "requester_title": "Ship usage fix",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "kind": "move",
+          "key": "OLD_TOKEN",
+          "project_id": "3b1f9c2a-0000-4000-8000-00000000000a",
+          "target_project_id": "8d2e4f6a-0000-4000-8000-00000000000b"
+        }
+      },
+      "title": "Move OLD_TOKEN",
+      "requester": "Ship usage fix",
+      "detail": "From 3b1f9c2a to 8d2e4f6a"
     }
   ],
   "summaries": [
