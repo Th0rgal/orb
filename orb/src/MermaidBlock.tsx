@@ -92,7 +92,7 @@ export function MermaidBlock(p: { text: string; complete: boolean }) {
       }>
         <Show when={svg()} fallback={<div class="mermaid-skeleton" aria-label="Rendering diagram" role="status"><span /><span /><span /></div>}>
           {(r) => (
-            <div class="mermaid-canvas" tabIndex={0} aria-label="Diagram" onDblClick={() => setExpanded(true)}>
+            <div class="mermaid-canvas" role="button" tabIndex={0} aria-label="Open diagram full screen" onClick={() => { if (!window.getSelection()?.toString()) setExpanded(true); }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(true); } }}>
               <img class="mermaid-svg" alt="Diagram" draggable={false} src={svgDataUrl(r().svg)} width={Math.round(r().width)} height={Math.round(r().height)} style={fitStyle(r().width, r().height)} />
             </div>
           )}
