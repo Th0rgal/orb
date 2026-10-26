@@ -56,22 +56,18 @@ class OrbPrivilegeAccessTest {
         }
     }
 
-    @Test fun approveAllBodyListsEachRequestAndConfirmsRootOnlyWhenIncluded() {
-        val deploy = mapOf("id" to "p1", "requester_mission_id" to "m1", "target_host" to "agent-core", "scope" to "service_deploy",
-            "allowed_unit" to null, "ttl_minutes" to 240.0, "session_scoped" to true, "reason" to "x")
-        val root = mapOf("id" to "p2", "requester_mission_id" to "m2", "target_host" to "self", "scope" to "root_exec",
-            "allowed_unit" to "", "ttl_minutes" to 60.0, "session_scoped" to false)
+    @Test fun approveAllSignsEachRequestByCoreDigestAndConfirmsRootOnlyWhenIncluded() {
+        val deploy = mapOf("id" to "p1", "scope" to "service_deploy", "target_host" to "agent-core", "digest" to "d1", "reason" to "x")
+        val root = mapOf("id" to "p2", "scope" to "root_exec", "target_host" to "self", "digest" to "d2")
         val body = OrbPrivilegeAccess.batchBody(listOf(deploy, root))
-        assertEquals(true, body["confirm_root"])
+        assertEquals(true, body["confirm_critical"])
         assertEquals(
             listOf(
-                mapOf("id" to "p1", "requester_mission_id" to "m1", "target_host" to "agent-core", "scope" to "service_deploy",
-                    "allowed_unit" to null, "ttl_minutes" to 240, "session_scoped" to true),
-                mapOf("id" to "p2", "requester_mission_id" to "m2", "target_host" to "self", "scope" to "root_exec",
-                    "allowed_unit" to null, "ttl_minutes" to 60, "session_scoped" to false),
+                mapOf("kind" to "privilege", "id" to "p1", "digest" to "d1"),
+                mapOf("kind" to "privilege", "id" to "p2", "digest" to "d2"),
             ),
             body["items"]
         )
-        assertEquals(false, OrbPrivilegeAccess.batchBody(listOf(deploy))["confirm_root"])
+        assertEquals(false, OrbPrivilegeAccess.batchBody(listOf(deploy))["confirm_critical"])
     }
 }

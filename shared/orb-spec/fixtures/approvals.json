@@ -1,0 +1,171 @@
+{
+  "description": "Shared approval model (src/api/approval_queue.rs, Lean orb_verify_approval). `gate`: the one admission rule every approval kind and every batch goes through; a batch is admitted only when every item is. `risk`: how each kind's tier maps to a risk; critical items need explicit confirmation and are left out of \"Approve all\" unless ticked. Clients (desktop approvalQueue.ts, iOS OrbApprovalQueue.swift, Android OrbApprovalQueue.kt) use the same names.",
+  "gate": [
+    {
+      "name": "signed, owned, pending, unchanged, elevated",
+      "input": {
+        "signed": 1,
+        "owned": 1,
+        "pending": 1,
+        "unexpired": 1,
+        "unchanged": 1,
+        "risk": 1,
+        "confirmed": 0
+      },
+      "admitted": 1
+    },
+    {
+      "name": "routine",
+      "input": {
+        "signed": 1,
+        "owned": 1,
+        "pending": 1,
+        "unexpired": 1,
+        "unchanged": 1,
+        "risk": 0,
+        "confirmed": 0
+      },
+      "admitted": 1
+    },
+    {
+      "name": "unsigned",
+      "input": {
+        "signed": 0,
+        "owned": 1,
+        "pending": 1,
+        "unexpired": 1,
+        "unchanged": 1,
+        "risk": 1,
+        "confirmed": 0
+      },
+      "admitted": 0
+    },
+    {
+      "name": "another user's request",
+      "input": {
+        "signed": 1,
+        "owned": 0,
+        "pending": 1,
+        "unexpired": 1,
+        "unchanged": 1,
+        "risk": 1,
+        "confirmed": 0
+      },
+      "admitted": 0
+    },
+    {
+      "name": "already decided",
+      "input": {
+        "signed": 1,
+        "owned": 1,
+        "pending": 0,
+        "unexpired": 1,
+        "unchanged": 1,
+        "risk": 1,
+        "confirmed": 0
+      },
+      "admitted": 0
+    },
+    {
+      "name": "expired",
+      "input": {
+        "signed": 1,
+        "owned": 1,
+        "pending": 1,
+        "unexpired": 0,
+        "unchanged": 1,
+        "risk": 1,
+        "confirmed": 0
+      },
+      "admitted": 0
+    },
+    {
+      "name": "changed after it was shown",
+      "input": {
+        "signed": 1,
+        "owned": 1,
+        "pending": 1,
+        "unexpired": 1,
+        "unchanged": 0,
+        "risk": 1,
+        "confirmed": 0
+      },
+      "admitted": 0
+    },
+    {
+      "name": "critical without confirmation",
+      "input": {
+        "signed": 1,
+        "owned": 1,
+        "pending": 1,
+        "unexpired": 1,
+        "unchanged": 1,
+        "risk": 2,
+        "confirmed": 0
+      },
+      "admitted": 0
+    },
+    {
+      "name": "critical confirmed",
+      "input": {
+        "signed": 1,
+        "owned": 1,
+        "pending": 1,
+        "unexpired": 1,
+        "unchanged": 1,
+        "risk": 2,
+        "confirmed": 1
+      },
+      "admitted": 1
+    }
+  ],
+  "risk": [
+    {
+      "kind": "privilege",
+      "tier": "ops_read",
+      "risk": "routine"
+    },
+    {
+      "kind": "privilege",
+      "tier": "service_deploy",
+      "risk": "elevated"
+    },
+    {
+      "kind": "privilege",
+      "tier": "root_exec",
+      "risk": "critical"
+    },
+    {
+      "kind": "secret",
+      "tier": "read",
+      "all_projects": false,
+      "risk": "routine"
+    },
+    {
+      "kind": "secret",
+      "tier": "read",
+      "all_projects": true,
+      "risk": "elevated"
+    },
+    {
+      "kind": "secret",
+      "tier": "write",
+      "risk": "elevated"
+    },
+    {
+      "kind": "secret",
+      "tier": "delete",
+      "risk": "critical"
+    },
+    {
+      "kind": "secret",
+      "tier": "move",
+      "risk": "critical"
+    },
+    {
+      "kind": "mission_access",
+      "tier": "read_mission",
+      "risk": "elevated"
+    }
+  ]
+}

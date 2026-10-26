@@ -32,6 +32,9 @@ internal func orb_verify_bundle_budget(_ isComplete: UInt8, _ decodedBytes: UInt
 @_silgen_name("orb_verify_token_rotation")
 internal func orb_verify_token_rotation(_ presentedNonEmpty: UInt8, _ matchCurrent: UInt8, _ prevNonEmpty: UInt8, _ matchPrev: UInt8, _ scopeAndExpiryOk: UInt8) -> UInt8
 
+@_silgen_name("orb_verify_approval")
+internal func orb_verify_approval(_ signed: UInt8, _ owned: UInt8, _ pending: UInt8, _ unexpired: UInt8, _ unchanged: UInt8, _ risk: UInt8, _ confirmed: UInt8) -> UInt8
+
 @_silgen_name("orb_verify_log_window")
 internal func orb_verify_log_window(_ offset: UInt64, _ reqLen: UInt64, _ maxChunk: UInt64, _ hardCap: UInt64, _ fileSize: UInt64, _ actualLen: UInt64) -> UInt8
 

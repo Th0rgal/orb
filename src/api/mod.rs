@@ -20,6 +20,7 @@ pub(crate) mod antigravity_accounts;
 pub(crate) mod antigravity_native;
 pub(crate) mod antigravity_usage;
 pub mod approval_flow;
+pub mod approval_queue;
 pub mod approvals;
 pub mod ask;
 pub(crate) mod auth;

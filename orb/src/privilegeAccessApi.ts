@@ -27,6 +27,8 @@ export interface PrivilegeRequest {
   decided_at?: string | null;
   expires_at?: string | null;
   revoked_at?: string | null;
+  /** Core's approval digest while pending: what "Approve all" signs (see /api/approvals/approve-all). */
+  digest?: string;
 }
 
 export interface PrivilegeAudit {
@@ -143,20 +145,12 @@ export const batchApprovable = <T extends Pick<PrivilegeRequest, "scope">>(rs: T
 /** One signature for exactly these requests, as shown; Core refuses the whole batch if any changed. */
 export const approveAllPrivilegeAccess = (rs: PrivilegeRequest[]) => {
   const s = batchSummary(rs);
-  return signedApi<PrivilegeRequest[]>(
+  return signedApi<unknown>(
     "POST",
-    "/api/privilege-access/approve-all",
+    "/api/approvals/approve-all",
     {
-      items: rs.map((r) => ({
-        id: r.id,
-        requester_mission_id: r.requester_mission_id,
-        target_host: r.target_host,
-        scope: r.scope,
-        allowed_unit: r.allowed_unit ?? null,
-        ttl_minutes: r.ttl_minutes,
-        session_scoped: r.session_scoped,
-      })),
-      confirm_root: s.root > 0,
+      items: rs.map((r) => ({ kind: "privilege", id: r.id, digest: r.digest ?? "" })),
+      confirm_critical: s.root > 0,
     },
     `grant ${rs.length} privileged requests (${s.tiers}) on ${s.hosts}`,
   ).then((out) => {

@@ -54,21 +54,15 @@ final class OrbPrivilegeAccessTests: XCTestCase {
         }
     }
 
-    func testApproveAllBodyListsEachRequestAndConfirmsRootOnlyWhenIncluded() throws {
-        let deploy = try json(["id": "p1", "requester_mission_id": "m1", "target_host": "agent-core", "scope": "service_deploy",
-                               "allowed_unit": NSNull(), "ttl_minutes": 240, "session_scoped": true, "reason": "x"])
-        let root = try json(["id": "p2", "requester_mission_id": "m2", "target_host": "self", "scope": "root_exec",
-                             "allowed_unit": "", "ttl_minutes": 60, "session_scoped": false])
+    func testApproveAllSignsEachRequestByCoreDigestAndConfirmsRootOnlyWhenIncluded() throws {
+        let deploy = try json(["id": "p1", "scope": "service_deploy", "target_host": "agent-core", "digest": "d1", "reason": "x"])
+        let root = try json(["id": "p2", "scope": "root_exec", "target_host": "self", "digest": "d2"])
         let body = OrbPrivilegeAccessMonitor.batchBody([deploy, root])
-        XCTAssertEqual(body["confirm_root"], .bool(true))
-        let items = body["items"].items
-        XCTAssertEqual(items.map { $0["id"].text }, ["p1", "p2"])
-        XCTAssertEqual(items[0]["target_host"].text, "agent-core")
-        XCTAssertEqual(items[1]["scope"].text, "root_exec")
-        XCTAssertEqual(items[1]["requester_mission_id"].text, "m2")
-        XCTAssertEqual(items[1]["allowed_unit"], .null)
-        XCTAssertEqual(items[1]["session_scoped"], .bool(false))
-        if case .object(let o) = items[0] { XCTAssertEqual(o.count, 7, "only the fields Core checks") } else { XCTFail("item is not an object") }
-        XCTAssertEqual(OrbPrivilegeAccessMonitor.batchBody([deploy])["confirm_root"], .bool(false))
+        XCTAssertEqual(body["confirm_critical"], .bool(true))
+        XCTAssertEqual(body["items"], .array([
+            .object(["kind": .string("privilege"), "id": .string("p1"), "digest": .string("d1")]),
+            .object(["kind": .string("privilege"), "id": .string("p2"), "digest": .string("d2")]),
+        ]))
+        XCTAssertEqual(OrbPrivilegeAccessMonitor.batchBody([deploy])["confirm_critical"], .bool(false))
     }
 }

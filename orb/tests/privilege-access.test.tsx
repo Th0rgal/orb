@@ -34,19 +34,16 @@ describe('privilege access',()=>{
    expect(batchApprovable(rs,true).length).toBe(rs.length);
   }
  });
- it('signs one challenge that lists every request with its host, tier and mission',async()=>{
+ it('signs one challenge over each request\'s Core digest',async()=>{
   vi.mocked(signedApi).mockResolvedValue([]);
-  const rs=[req(),req({id:'p2',scope:'root_exec',target_host:'self',requester_mission_id:'m2',ttl_minutes:60,session_scoped:false,allowed_unit:null})];
+  const rs=[req({digest:'d1'}),req({id:'p2',scope:'root_exec',target_host:'self',requester_mission_id:'m2',digest:'d2'})];
   await approveAllPrivilegeAccess(rs);
   const [method,path,body,summary]=vi.mocked(signedApi).mock.calls[0];
-  expect([method,path]).toEqual(['POST','/api/privilege-access/approve-all']);
-  expect(body).toEqual({confirm_root:true,items:[
-   {id:'p1',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000001',target_host:'agent-core',scope:'service_deploy',allowed_unit:null,ttl_minutes:240,session_scoped:true},
-   {id:'p2',requester_mission_id:'m2',target_host:'self',scope:'root_exec',allowed_unit:null,ttl_minutes:60,session_scoped:false},
-  ]});
+  expect([method,path]).toEqual(['POST','/api/approvals/approve-all']);
+  expect(body).toEqual({confirm_critical:true,items:[{kind:'privilege',id:'p1',digest:'d1'},{kind:'privilege',id:'p2',digest:'d2'}]});
   expect(summary).toContain('1 Root · 1 Service deploy');
   await approveAllPrivilegeAccess([req()]);
-  expect((vi.mocked(signedApi).mock.calls[1][2] as any).confirm_root).toBe(false);
+  expect((vi.mocked(signedApi).mock.calls[1][2] as any).confirm_critical).toBe(false);
  });
  it('approves all non-root pending requests from settings, root only when ticked',async()=>{
   vi.mocked(signedApi).mockResolvedValue([]);

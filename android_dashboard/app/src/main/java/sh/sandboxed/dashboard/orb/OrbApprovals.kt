@@ -422,7 +422,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                             act {
                                 val s = OrbPrivilegeAccess.batchSummary(ready)
                                 OrbApprovalKey.signedRequest(
-                                    core, activity, "POST", "/api/privilege-access/approve-all",
+                                    core, activity, "POST", "/api/approvals/approve-all",
                                     OrbPrivilegeAccess.batchBody(ready),
                                     "Grant ${ready.size} privileged requests (${s.tiers}) on ${s.hosts}"
                                 )

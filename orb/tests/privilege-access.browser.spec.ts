@@ -53,10 +53,10 @@ test('approve all: summary per tier, root left out until ticked, one signed batc
  await card.screenshot({path:`${shots}/desktop-privilege-approve-all.png`});
  await sum.getByRole('checkbox').check();
  await card.locator('.secret-bar').getByRole('button',{name:'Approve all'}).click();
- await expect.poll(()=>sent(page)).toContain('POST /api/privilege-access/approve-all');
+ await expect.poll(()=>sent(page)).toContain('POST /api/approvals/approve-all');
  const body=JSON.parse(await page.evaluate(()=>(window as any).calls.find((c:any)=>c.url.includes('/approve-all')).body));
- expect(body.confirm_root).toBe(true);
- expect(body.items.map((i:any)=>[i.id,i.scope,i.target_host])).toEqual([['p1','service_deploy','agent-core'],['p2','root_exec','self'],['p4','ops_read','ashur']]);
+ expect(body.confirm_critical).toBe(true);
+ expect(body.items).toEqual([{kind:'privilege',id:'p1',digest:'d-p1'},{kind:'privilege',id:'p2',digest:'d-p2'},{kind:'privilege',id:'p4',digest:'d-p4'}]);
  await expect(card).toHaveCount(0);
 });
 test('approval card is centred on the conversation composer and as wide',async({page})=>{

@@ -78,21 +78,14 @@ final class OrbPrivilegeAccessMonitor {
     static func batchApprovable(_ rs: [OrbJSON], includeRoot: Bool) -> [OrbJSON] {
         rs.filter { includeRoot || $0["scope"].text != "root_exec" }
     }
-    /// The signed body: every request as shown. Core refuses the whole batch if one changed.
+    /// The signed body for `/api/approvals/approve-all`: each request by Core's
+    /// digest of what it grants. Core refuses the whole batch if one changed.
     static func batchBody(_ rs: [OrbJSON]) -> OrbJSON {
         .object([
             "items": .array(rs.map { r in
-                .object([
-                    "id": r["id"],
-                    "requester_mission_id": r["requester_mission_id"],
-                    "target_host": r["target_host"],
-                    "scope": r["scope"],
-                    "allowed_unit": r["allowed_unit"].text.isEmpty ? .null : r["allowed_unit"],
-                    "ttl_minutes": r["ttl_minutes"],
-                    "session_scoped": .bool(r["session_scoped"].flag),
-                ])
+                .object(["kind": .string("privilege"), "id": r["id"], "digest": .string(r["digest"].text)])
             }),
-            "confirm_root": .bool(batchSummary(rs).root > 0),
+            "confirm_critical": .bool(batchSummary(rs).root > 0),
         ])
     }
 
@@ -246,7 +239,7 @@ struct OrbPrivilegeAccessList: View {
             acting = "all"
             defer { acting = nil }
             do {
-                _ = try await OrbApprovalKey.signedCall("/api/privilege-access/approve-all", method: "POST",
+                _ = try await OrbApprovalKey.signedCall("/api/approvals/approve-all", method: "POST",
                                                         body: OrbPrivilegeAccessMonitor.batchBody(rs), summary: reason)
                 error = ""
                 includeRoot = false

@@ -67,19 +67,9 @@ object OrbPrivilegeAccess {
     fun batchApprovable(rs: List<Map<String, Any?>>, includeRoot: Boolean): List<Map<String, Any?>> =
         rs.filter { includeRoot || it["scope"] != "root_exec" }
 
-    /** The signed body: every request as shown. Core refuses the whole batch if one changed. */
+    /** The signed body for `/api/approvals/approve-all`: each request by Core's digest of what it grants. Core refuses the whole batch if one changed. */
     fun batchBody(rs: List<Map<String, Any?>>): Map<String, Any?> = mapOf(
-        "items" to rs.map { r ->
-            mapOf(
-                "id" to r["id"],
-                "requester_mission_id" to r["requester_mission_id"],
-                "target_host" to r["target_host"],
-                "scope" to r["scope"],
-                "allowed_unit" to (r["allowed_unit"] as? String)?.takeIf { it.isNotEmpty() },
-                "ttl_minutes" to (r["ttl_minutes"] as? Number)?.toInt(),
-                "session_scoped" to (r["session_scoped"] == true),
-            )
-        },
-        "confirm_root" to (batchSummary(rs).root > 0),
+        "items" to rs.map { r -> mapOf("kind" to "privilege", "id" to r["id"], "digest" to ((r["digest"] as? String) ?: "")) },
+        "confirm_critical" to (batchSummary(rs).root > 0),
     )
 }

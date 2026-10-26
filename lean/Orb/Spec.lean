@@ -560,6 +560,49 @@ theorem token_rotation_rejects_invalid (r : TokenRotationCheck)
       r.prevNonEmpty r.matchPrev r.scopeAndExpiryOk == 1) = false :=
   tokenRotationMetaGate.rejects_unsafe r (by simp [h_bad])
 
+structure ApprovalCheck where
+  signed    : UInt8
+  owned     : UInt8
+  pending   : UInt8
+  unexpired : UInt8
+  unchanged : UInt8
+  risk      : UInt8
+  confirmed : UInt8
+  deriving Repr, DecidableEq
+
+/-- The one admission rule every approval kind shares ("signed, owned, pending, unexpired,
+    unchanged, and critical only when confirmed"). -/
+def approvalSafe (a : ApprovalCheck) : Prop :=
+  (a.signed == 1 && a.owned == 1 && a.pending == 1 && a.unexpired == 1 && a.unchanged == 1 &&
+    (a.risk < 2 || a.confirmed == 1)) = true
+
+def approvalMetaGate : MetaGateSpec ApprovalCheck approvalSafe where
+  gate a := verifyApproval a.signed a.owned a.pending a.unexpired a.unchanged a.risk a.confirmed == 1
+  sound _ h := by unfold approvalSafe; unfold verifyApproval at h; repeat (first | split at h | simp_all)
+  complete _ h := by unfold approvalSafe at h; unfold verifyApproval; repeat (first | split | simp_all)
+  posWitness := ⟨1, 1, 1, 1, 1, 0, 0⟩
+  negWitness := ⟨1, 1, 1, 1, 1, 2, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary (`ScopedAuthority` — `orb_verify_approval`): a request that changed after the
+    approver saw it (tampered list, or one added after the challenge) is never admitted. -/
+theorem approval_rejects_changed (a : ApprovalCheck) (h : a.unchanged ≠ 1) :
+    approvalMetaGate.gate a = false :=
+  approvalMetaGate.rejects_unsafe a (by unfold approvalSafe; simp [h])
+
+/-- Corollary (`ClockDiscipline` — `orb_verify_approval`): expired or already-decided requests
+    are never admitted, whatever else holds. -/
+theorem approval_rejects_stale (a : ApprovalCheck) (h : a.pending ≠ 1 ∨ a.unexpired ≠ 1) :
+    approvalMetaGate.gate a = false :=
+  approvalMetaGate.rejects_unsafe a (by unfold approvalSafe; rcases h with h | h <;> simp [h])
+
+/-- Corollary (`ScopedAuthority` — `orb_verify_approval`): critical requests (root, secret
+    delete or move) are never admitted without explicit confirmation, even when signed. -/
+theorem approval_critical_needs_confirmation (a : ApprovalCheck) (hr : a.risk = 2) (hc : a.confirmed ≠ 1) :
+    approvalMetaGate.gate a = false :=
+  approvalMetaGate.rejects_unsafe a (by unfold approvalSafe; simp [hr, hc])
+
 structure LogWindowCheck where
   offset    : UInt64
   reqLen    : UInt64

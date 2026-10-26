@@ -5,8 +5,8 @@ import {PrivilegeAccessPanel} from '../src/PrivilegeAccessPanel';
 const now=Date.now();
 const iso=(ms:number)=>new Date(now+ms).toISOString();
 const base={session_scoped:true,ttl_minutes:240,created_at:iso(-60_000),allowed_unit:null};
-const deploy={...base,id:'p1',state:'pending',scope:'service_deploy',target_host:'agent-core',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000001',requester_title:'Ship usage fix',reason:'Deploy and verify the usage-limit fix on production.'};
-const root={...base,id:'p2',state:'pending',scope:'root_exec',target_host:'self',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000002',requester_title:'Disk cleanup',reason:'Prune old docker images.'};
+const deploy={...base,digest:'d-p1',id:'p1',state:'pending',scope:'service_deploy',target_host:'agent-core',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000001',requester_title:'Ship usage fix',reason:'Deploy and verify the usage-limit fix on production.'};
+const root={...base,digest:'d-p2',id:'p2',state:'pending',scope:'root_exec',target_host:'self',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000002',requester_title:'Disk cleanup',reason:'Prune old docker images.'};
 const grant={...base,id:'g1',state:'approved',scope:'ops_read',target_host:'ashur',requester_mission_id:'7c1d2e3f-0000-4000-8000-000000000003',requester_title:'Fleet health',reason:'Read RAID status',decided_at:iso(-600_000),expires_at:iso(3*3_600_000)};
 const w=window as any;
 w.opened=false;
@@ -16,7 +16,7 @@ const realFetch=window.fetch;
 window.fetch=(async(input:any,init?:any)=>{const url=String(input);if(url.includes('/api/')){w.calls.push({url,method:init?.method,body:init?.body});return new Response(JSON.stringify({...deploy,state:'approved'}),{status:200,headers:{'Content-Type':'application/json'}});}return realFetch(input,init);}) as any;
 w.showOne=()=>syncPrivilegeAccessNotices([deploy] as any,()=>{w.opened=true;});
 w.showMany=()=>syncPrivilegeAccessNotices([deploy,root] as any,()=>{w.opened=true;});
-w.showBatch=()=>syncPrivilegeAccessNotices([deploy,root,{...deploy,id:'p4',scope:'ops_read',target_host:'ashur',requester_title:'Fleet health',reason:'Read RAID status'}] as any,()=>{w.opened=true;});
+w.showBatch=()=>syncPrivilegeAccessNotices([deploy,root,{...deploy,id:'p4',digest:'d-p4',scope:'ops_read',target_host:'ashur',requester_title:'Fleet health',reason:'Read RAID status'}] as any,()=>{w.opened=true;});
 // A conversation column offset by a sidebar, plus a side-panel composer lower on screen.
 w.addDock=()=>{
  const dock=document.createElement('div');dock.className='dock';dock.style.cssText='position:fixed;left:300px;right:40px;bottom:0;margin:0;padding:10px 34px 16px';
