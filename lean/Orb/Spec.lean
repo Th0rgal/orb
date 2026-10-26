@@ -2133,17 +2133,25 @@ def forkHomeMetaGate : MetaGateSpec ForkHomeCheck
   tight      := rfl
 
 /-- Corollary 61 (`ScopedAuthority` — `orb_fork_home_step`):
-    1. `fork_preserves_job_home`: under ALL inputs (even `requestedOverrideHome == 1`), `overrideHomeBit` (`65536`)
-       is `0` (fixing the `#1302`/`9178bd08` fork `HOME` sign-out bug).
+    1. `fork_preserves_job_home`: under ALL inputs (even `requestedOverrideHome == 1` or rejected sources),
+       `overrideHomeBit` (`65536`) is `0` and `jobHomePreservedBit` (`131072`) is `131072`
+       (fixing the `#1302`/`9178bd08` fork `HOME` sign-out bug).
     2. Missing (`sourceExists == 0`) or symlinked (`sourceIsSymlink == 1`) fork workspaces fail closed with exit code `78`.
     3. A valid sibling fork (`1, 1, 0, 1, 1, 0`) sets `admitBit = 256`, `useSourceCwdBit = 512`, and `jobHomePreservedBit = 131072`. -/
 theorem fork_preserves_job_home_and_source_cwd
     (isFork srcEx sym sameWs sameNd xfer reqHome : UInt8) :
     ((forkHomeStep isFork srcEx sym sameWs sameNd xfer reqHome &&& 0xFFFFFFFF) &&& 65536) = 0 ∧
+    ((forkHomeStep isFork srcEx sym sameWs sameNd xfer reqHome &&& 0xFFFFFFFF) &&& 131072) = 131072 ∧
     (forkHomeStep 1 0 sym sameWs sameNd xfer reqHome >>> 32) = 78 ∧
     (forkHomeStep 1 srcEx 1 sameWs sameNd xfer reqHome >>> 32) = 78 ∧
     forkHomeStep 1 1 0 1 1 0 reqHome = 131842 := by
-  refine ⟨?_, ?_, ?_, by unfold forkHomeStep; simp⟩
+  refine ⟨?_, ?_, ?_, ?_, by unfold forkHomeStep; simp⟩
+  · unfold forkHomeStep
+    rw [pack32_lo]
+    cases hf : (isFork == 0) <;>
+      cases hv : (srcEx == 1 && sym == 0 && sameWs == 1 && sameNd == 1) <;>
+      cases hx : (xfer == 1) <;>
+      (simp_all; try decide)
   · unfold forkHomeStep
     rw [pack32_lo]
     cases hf : (isFork == 0) <;>

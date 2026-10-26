@@ -1375,7 +1375,7 @@ def forkHomeStep
     sourceExists == 1 && sourceIsSymlink == 0 && sameWorkspace == 1 && sameNode == 1
   let lo32 : UInt32 :=
     if isForkOrSide == 0 then 131329
-    else if !validForkSource then 0
+    else if !validForkSource then 131072
     else if hasCommittedTransfer == 1 then 131843
     else 131842
   let hi32 : UInt32 :=

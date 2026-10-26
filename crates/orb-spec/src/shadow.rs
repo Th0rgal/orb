@@ -922,6 +922,7 @@ mod tests {
         assert_eq!(symlink_fork.action, ForkHomeAction::RejectForkWorkspace);
         assert!(!symlink_fork.admit_launch);
         assert!(!symlink_fork.override_home);
+        assert!(symlink_fork.job_home_preserved);
         assert_eq!(symlink_fork.exit_code, 78);
     }
 }

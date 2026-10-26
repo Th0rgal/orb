@@ -2,6 +2,69 @@
 
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn evaluate_mission_control_gate(
+    working_dir: &std::path::Path,
+    mission_store: &dyn MissionStore,
+    mission: &Mission,
+    expected_lease_owner: &str,
+    resume_session_id: Option<&str>,
+    events: &[crate::api::mission_store::StoredEvent],
+    fallback_prompt: Option<&str>,
+    host_admits: bool,
+) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
+    let is_archived = matches!(
+        mission.status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    );
+    let active_run = mission_store.get_active_mission_run(mission.id).await?;
+    let has_lease = active_run
+        .as_ref()
+        .is_some_and(|run| run.owner_actor_id == expected_lease_owner);
+    let active_track_writers = match &active_run {
+        Some(run)
+            if !run.owner_actor_id.is_empty() && run.owner_actor_id != expected_lease_owner =>
+        {
+            1
+        }
+        _ => 0,
+    };
+    let msg_already_delivered = fork::side_launch_receipt(working_dir, mission.id)
+        .ok()
+        .flatten()
+        .is_some_and(|receipt| receipt.accepted);
+    let is_resume = resume_session_id.is_some();
+    let session_created = mission
+        .session_id
+        .as_deref()
+        .is_some_and(|sid| !sid.trim().is_empty());
+    let lineage_verified = match (resume_session_id, mission.session_id.as_deref()) {
+        (Some(req_sid), Some(stored_sid)) => req_sid == stored_sid,
+        (None, _) => session_created,
+        (Some(_), None) => false,
+    };
+    let rollout_exists = events.iter().any(|event| {
+        event.event_type == "assistant_message"
+            && !event.content.trim().is_empty()
+            && event.metadata["success"] != serde_json::json!(false)
+    });
+    let has_fallback_prompt = fallback_prompt.is_some_and(|p| !p.trim().is_empty());
+    Ok(fork::observe_mission_control_shadow(
+        crate::orb_spec::MissionControlStepInput {
+            is_archived,
+            active_track_writers,
+            has_lease,
+            msg_already_delivered,
+            is_resume,
+            session_created,
+            lineage_verified,
+            rollout_exists,
+            has_fallback_prompt,
+        },
+        host_admits,
+    ))
+}
+
 pub(super) async fn submit_leased_remote_job(
     state: &Arc<AppState>,
     control: &ControlState,
@@ -66,7 +129,7 @@ pub(super) async fn submit_leased_remote_job(
 
     if let RemoteHarnessPlan::Codex {
         prompt,
-        resume_session_id: Some(_),
+        resume_session_id: Some(ref resume_sid),
         fallback_prompt,
         ..
     } = &mut resolved_plan
@@ -86,65 +149,39 @@ pub(super) async fn submit_leased_remote_job(
         *fallback_prompt =
             fork::recovery_prompt(mission.id, mission.title.as_deref(), &events, prompt)
                 .or_else(|| Some(prompt.clone()));
-        let codex_resume_verdict = fork::observe_mission_control_shadow(
-            crate::orb_spec::MissionControlStepInput {
-                is_archived: false,
-                active_track_writers: 0,
-                has_lease: true,
-                msg_already_delivered: false,
-                is_resume: true,
-                session_created: true,
-                lineage_verified: true,
-                // When the node rollout is missing, fallback_prompt seeds a fresh thread (`c96df4f9`):
-                rollout_exists: false,
-                has_fallback_prompt: fallback_prompt.is_some(),
-            },
-            fallback_prompt.is_some(),
-        );
-        if !codex_resume_verdict.emit_dispatch_effect
-            || !codex_resume_verdict.seed_fallback_session
+        let expected_owner = remote_job_lease_owner(job_id);
+        let active_run = control
+            .mission_store
+            .get_active_mission_run(mission.id)
+            .await?;
+        let host_admits_codex = !matches!(
+            mission.status,
+            MissionStatus::Acknowledged | MissionStatus::Completed
+        )
+            && active_run
+                .as_ref()
+                .is_some_and(|run| run.owner_actor_id == expected_owner)
+            && !fork::side_launch_receipt(&state.config.working_dir, mission.id)
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.accepted)
+            && fallback_prompt.as_deref().is_some_and(|p| !p.trim().is_empty());
+        let codex_resume_verdict = evaluate_mission_control_gate(
+            &state.config.working_dir,
+            control.mission_store.as_ref(),
+            mission,
+            &expected_owner,
+            Some(resume_sid.as_str()),
+            &events,
+            fallback_prompt.as_deref(),
+            host_admits_codex,
+        )
+        .await?;
+        if host_admits_codex
+            && (!codex_resume_verdict.emit_dispatch_effect || codex_resume_verdict.archived_next)
         {
-            return Err("Codex resume fallback rejected by mission control kernel gate".into());
+            return Err("Codex resume rejected by mission control kernel gate".into());
         }
-    }
-    let is_resume_plan = matches!(
-        &resolved_plan,
-        RemoteHarnessPlan::Codex {
-            resume_session_id: Some(_),
-            ..
-        } | RemoteHarnessPlan::ClaudeCode {
-            resume_session_id: Some(_),
-            ..
-        } | RemoteHarnessPlan::Grok {
-            resume_session_id: Some(_),
-            ..
-        } | RemoteHarnessPlan::Antigravity {
-            resume_session_id: Some(_),
-            ..
-        } | RemoteHarnessPlan::Vibe {
-            resume_session_id: Some(_),
-            ..
-        } | RemoteHarnessPlan::OpenCode {
-            resume_session_id: Some(_),
-            ..
-        }
-    );
-    let dispatch_gate = fork::observe_mission_control_shadow(
-        crate::orb_spec::MissionControlStepInput {
-            is_archived: false,
-            active_track_writers: 0,
-            has_lease: true,
-            msg_already_delivered: false,
-            is_resume: is_resume_plan,
-            session_created: is_resume_plan,
-            lineage_verified: is_resume_plan,
-            rollout_exists: is_resume_plan,
-            has_fallback_prompt: true,
-        },
-        true,
-    );
-    if !dispatch_gate.emit_dispatch_effect || dispatch_gate.archived_next {
-        return Err("Remote job dispatch rejected by mission control kernel gate".into());
     }
     let plan = &resolved_plan;
     let mut workspace_prefix =
@@ -157,7 +194,13 @@ pub(super) async fn submit_leased_remote_job(
             }
             format!("cd -- {} || exit 78; ", shell_single_quote(directory))
         } else {
-            fork::workspace_prefix(control, mission, &node.id, &state.config.working_dir).await?
+            fork::workspace_prefix(
+                &control.mission_store,
+                mission,
+                &node.id,
+                &state.config.working_dir,
+            )
+            .await?
         };
     // Run in the final execution cwd, before any harness command. A failed
     // preparation exits the job clearly rather than starting without skills.
@@ -996,24 +1039,6 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
         .await
     {
         Ok(Some(placement)) if wait.limit == usage_limit_wait::FRESH_SESSION_FALLBACK => {
-            let fallback_verdict = fork::observe_mission_control_shadow(
-                crate::orb_spec::MissionControlStepInput {
-                    is_archived: false,
-                    active_track_writers: 0,
-                    has_lease: true,
-                    msg_already_delivered: false,
-                    is_resume: true,
-                    session_created: true,
-                    lineage_verified: true,
-                    rollout_exists: false,
-                    has_fallback_prompt: true,
-                },
-                true,
-            );
-            debug_assert_eq!(
-                fallback_verdict.action,
-                crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
-            );
             match replace_remote_mission_with_fresh_session(
                 state,
                 &control,
