@@ -38,14 +38,18 @@ test("settings has five sections with subtitles, tabs and attention dots", async
 
   await rows.filter({ hasText: "Models" }).click();
   await expect(title(page)).toHaveText("Models");
-  await expect(page.locator(".quota-strip-row").filter({ hasText: "Claude (work)" })).toBeVisible();
-  await expect(page.locator(".quota-strip-chip.exhausted")).toHaveCount(1);
-  const tab = page.getByRole("tab", { name: "Routing" });
+  // Quotas live in Providers only; Models has no strip and no usage tab.
+  await expect(page.locator(".quota-strip")).toHaveCount(0);
+  await expect(page.getByRole("tablist")).toHaveCount(0);
+
+  // Agents tabs move with the arrow keys and keep focus.
+  await rows.filter({ hasText: "Agents" }).click();
+  const tab = page.getByRole("tab", { name: "Skills" });
   await expect(tab).toHaveAttribute("aria-selected", "true");
   await tab.focus();
   await page.keyboard.press("ArrowRight");
-  await expect(page.getByRole("tab", { name: "Details" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("tab", { name: "Details" })).toBeFocused();
+  await expect(page.getByRole("tab", { name: "Assistant" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Assistant" })).toBeFocused();
 
   await rows.filter({ hasText: "Security" }).click();
   await expect(title(page)).toHaveText("Security");
@@ -54,20 +58,20 @@ test("settings has five sections with subtitles, tabs and attention dots", async
 });
 
 for (const [id, section, tab] of [
-  ["routing", "Models", "Routing"],
-  ["usage-settings", "Models", "Details"],
+  ["routing", "Models", null],
+  ["usage-settings", "Models", null],
   ["hermes-settings", "Agents", "Assistant"],
   ["btw-settings", "Agents", "Quick questions (/btw)"],
   ["skills-settings", "Agents", "Skills"],
   ["execution", "Agents", "Local agents"],
   ["bitwarden-settings", "Security", "Secrets vault"],
-] as const) {
-  test(`old page id ${id} opens ${section} → ${tab}`, async ({ page }) => {
+] as [string, string, string | null][]) {
+  test(`old page id ${id} opens ${section}${tab ? ` → ${tab}` : ""}`, async ({ page }) => {
     await setup(page);
     await page.evaluate((target) => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: target })), id);
     await expect(title(page)).toHaveText(section);
     await expect(page.locator(`[data-settings-section][aria-current="page"] .row-label`)).toHaveText(section);
-    await expect(page.getByRole("tab", { name: tab, exact: true })).toHaveAttribute("aria-selected", "true");
+    if (tab) await expect(page.getByRole("tab", { name: tab, exact: true })).toHaveAttribute("aria-selected", "true");
   });
 }
 
@@ -75,4 +79,12 @@ test("a saved old page id reopens in its new section", async ({ page }) => {
   await setup(page, "execution");
   await expect(title(page)).toHaveText("Agents");
   await expect(page.getByRole("tab", { name: "Local agents" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("Providers links to usage details, which opens inside Models", async ({ page }) => {
+  await setup(page);
+  await page.getByRole("button", { name: "Providers", exact: true }).click();
+  await page.getByRole("button", { name: "Usage details", exact: true }).click();
+  await expect(title(page)).toHaveText("Models");
+  await expect(page.locator('[data-settings-section="models"]')).toHaveAttribute("aria-current", "page");
 });

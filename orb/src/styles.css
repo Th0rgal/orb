@@ -4125,20 +4125,11 @@ select.orb-select-native:disabled { cursor: default; }
 .settings-tab:hover { color: var(--fg); }
 .settings-tab.active { color: var(--fg); border-bottom-color: var(--fg); }
 .settings-tab:focus-visible { outline: 2px solid var(--focus, var(--purple)); outline-offset: -2px; border-radius: var(--radius-xs); }
-.quota-strip { margin: 0 8px 20px; display: flex; flex-direction: column; gap: 6px; min-height: 22px; }
-.quota-strip-row { display: flex; align-items: center; gap: 12px; min-height: 22px; font-size: 12px; color: var(--fg-2); flex-wrap: wrap; }
-.quota-strip-empty { color: var(--fg-3); }
-.quota-strip-skel { width: 60%; height: 10px; }
-.quota-strip-name { width: 140px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
-.quota-strip-chip { display: inline-flex; align-items: center; gap: 6px; }
-.quota-strip-chip .p-bar { width: 56px; flex: none; display: inline-block; }
-.quota-strip-chip .p-bar-fill { display: block; }
-.quota-strip-chip.warning .p-bar-fill { background: var(--warning); }
-.quota-strip-chip.exhausted .p-bar-fill { background: var(--danger); }
-.quota-strip-chip.exhausted .quota-strip-label { color: var(--danger); }
 .settings-advanced { margin-top: 26px; }
 .settings-advanced > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; margin: 0 8px; font-size: 13px; font-weight: 500; color: var(--fg-2); }
 .settings-advanced > summary::-webkit-details-marker { display: none; }
 .settings-advanced[open] > summary svg { transform: rotate(180deg); }
 .row-dot { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); flex: none; }
 .row-badge + .row-dot { margin-left: 6px; }
+.link-btn { border: 0; background: none; padding: 0; font: inherit; color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.link-btn:hover { color: var(--fg); }

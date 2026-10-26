@@ -1,6 +1,5 @@
-import { For, Show, createResource, createSignal, type JSX } from "solid-js";
-import { connectionVersion, getAllProviderUsage, isConnected, listProviders } from "./api";
-import { usageChips } from "./providerUsage";
+import { For, Show, createSignal, type JSX } from "solid-js";
+import { isConnected } from "./api";
 import { settingsPageId, settingsSectionFor } from "./settingsNav";
 import { ErrorToast } from "./toast";
 import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
@@ -29,7 +28,6 @@ export function SettingsShell(p: { page: string; onOpen: (id: string) => void; c
       <div class="s-inner">
         <h2>{section().label}</h2>
         <p class="s-lead settings-subtitle">{section().subtitle}</p>
-        <Show when={section().id === "models"}><QuotaStrip /></Show>
         <Show when={section().tabs.length > 1}>
           <div class="settings-tabs" role="tablist" aria-label={section().label} onKeyDown={onKey}>
             <For each={section().tabs}>{(t, i) =>
@@ -43,34 +41,6 @@ export function SettingsShell(p: { page: string; onOpen: (id: string) => void; c
         </div>
       </div>
     </div>
-  );
-}
-
-/** Per-provider quota bars above the Models tabs; Details has the history. */
-function QuotaStrip() {
-  const [rows] = createResource(() => (isConnected() ? connectionVersion() + 1 : 0), async (v) => {
-    if (!v) return [];
-    const [providers, usage] = await Promise.all([listProviders(), getAllProviderUsage()]);
-    return providers.map(a => ({ name: a.name, chips: usage[a.id] ? usageChips(usage[a.id]) : [] })).filter(r => r.chips.length);
-  });
-  return (
-    <section class="quota-strip" aria-label="Quotas" aria-busy={rows.loading}>
-      <Show when={!rows.loading} fallback={<div class="quota-strip-row"><span class="spend-skel quota-strip-skel" /></div>}>
-        <Show when={rows()?.length} fallback={<div class="quota-strip-row quota-strip-empty">{rows.error ? "Couldn’t load quotas." : "No provider reports a quota."}</div>}>
-          <For each={rows()}>{r =>
-            <div class="quota-strip-row">
-              <span class="quota-strip-name" title={r.name}>{r.name}</span>
-              <For each={r.chips}>{c =>
-                <span class={`quota-strip-chip ${c.level}`} title={c.detail ?? `${c.label}: ${Math.round(c.used * 100)}% used`}>
-                  <span class="quota-strip-label">{c.label === "7d" ? "Weekly" : c.label}</span>
-                  <span class="p-bar"><span class="p-bar-fill" style={{ width: `${Math.min(100, Math.round(c.used * 100))}%` }} /></span>
-                </span>
-              }</For>
-            </div>
-          }</For>
-        </Show>
-      </Show>
-    </section>
   );
 }
 
