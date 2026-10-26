@@ -198,7 +198,7 @@ fn scrub_patterns() -> &'static [(Regex, &'static str)] {
             (r"\bAIza[0-9A-Za-z_-]{35}", "[REDACTED]"),
             (r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]{16,}=*", "${1}[REDACTED]"),
             (
-                r"(?i)\b([A-Z0-9_-]*(?:secret|token|password|passwd|api_?key|private_?key)[A-Z0-9_-]*)(['\x22]?\s*[:=]\s*['\x22]?)([^\s'\x22,}]{4,})",
+                r"(?i)\b([A-Z0-9_-]*(?:secret|token|password|passwd|api_?key|private_?key)[A-Z0-9_-]*)(['\x22]?\s*[:=]\s*['\x22]?)([^\s'\x22]{4,})",
                 "${1}${2}[REDACTED]",
             ),
             (r"://[^/\s:@]+:[^/\s@]+@", "://[REDACTED]@"),
@@ -547,6 +547,9 @@ fn hub_url_allowed(url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
     };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
     match parsed.scheme() {
         "https" => parsed.host().is_some(),
         "http" => matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
@@ -793,6 +796,7 @@ mod tests {
         assert!(hub_url_allowed("http://127.0.0.1:18895"));
         assert!(!hub_url_allowed("http://169.254.169.254"));
         assert!(!hub_url_allowed("file:///etc/passwd"));
+        assert!(!hub_url_allowed("https://telemetry.thomas.md@evil.example"));
     }
 
     #[test]

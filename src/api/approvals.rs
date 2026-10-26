@@ -505,7 +505,10 @@ async fn describe(
                 ));
             }
             if let Some(url) = req.hub_url.as_deref() {
-                changes.push(format!("send to {}", quoted(url.trim())));
+                let shown = reqwest::Url::parse(url.trim())
+                    .map(|u| u.origin().ascii_serialization())
+                    .unwrap_or_else(|_| "an invalid URL".into());
+                changes.push(format!("send to {}", quoted(&shown)));
             }
             if let Some(ns) = req.namespace.as_deref() {
                 changes.push(format!("namespace {}", quoted(ns.trim())));
