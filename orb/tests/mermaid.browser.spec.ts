@@ -80,6 +80,18 @@ test("wide diagrams fit the block and expand supports zoom", async ({ page }) =>
   await expect(dialog).toHaveCount(0);
 });
 
+test("a single click on the diagram opens the zoom view", async ({ page }) => {
+  await page.goto("/tests/mermaid.html?only=wide");
+  const block = page.locator(".mermaid-block");
+  await expect(block).toHaveAttribute("data-state", "ready");
+  await block.locator(".mermaid-canvas").click();
+  const dialog = page.getByRole("dialog", { name: "Diagram", exact: true });
+  await expect(dialog.locator(".mermaid-zoom")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await block.locator(".mermaid-canvas").press("Enter");
+  await expect(dialog.locator(".mermaid-zoom")).toBeVisible();
+});
+
 for (const theme of ["dark", "light"] as const) {
   test(`every diagram type renders in the ${theme} theme`, async ({ page }) => {
     await page.goto(`/tests/mermaid.html?theme=${theme}`);

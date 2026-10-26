@@ -904,6 +904,76 @@ unsafe extern "C" {
         has_committed_transfer: u8,
         requested_override_home: u8,
     ) -> u64;
+    fn orb_privd_command_step(
+        lease_valid: u8,
+        grant_scope: u8,
+        command_class: u8,
+        unit_matches_allowed: u8,
+        has_shell_metachar_or_flag_bypass: u8,
+        has_path_traversal_or_symlink: u8,
+        has_unsafe_env_var: u8,
+        require_force_cmd: u8,
+    ) -> u64;
+    fn orb_ssh_identity_step(
+        is_worker_or_container_target: u8,
+        bundle_has_control_plane_key: u8,
+        parent_dir_is_symlink: u8,
+        pub_key_is_ed25519_without_private: u8,
+        proxy_jump_valid: u8,
+        codex_cyber_program_valid: u8,
+        codex_goal_budget_exhausted: u8,
+    ) -> u64;
+    fn orb_agent_event_normalize_step(
+        harness_kind: u8,
+        raw_event_kind: u8,
+        is_completed: u8,
+        has_non_empty_text: u8,
+        session_matches_exp: u32,
+        is_duplicate_turn_tool: u32,
+        payload_bytes: u32,
+        max_payload_bytes: u32,
+    ) -> u64;
+    fn orb_transcript_reduce_step(
+        last_applied_seq: u64,
+        incoming_seq: u64,
+        thinking_open: u8,
+        normalized_action: u8,
+        is_replay_from_log: u8,
+    ) -> u64;
+    fn orb_cursor_page_step(
+        since_seq: u64,
+        before_seq: u64,
+        item_seq: u64,
+        has_since_cursor: u32,
+        has_before_cursor: u32,
+        is_partial_response: u32,
+        existing_count: u32,
+    ) -> u64;
+    fn orb_sidebar_merge_step(
+        existing_id_ord: u32,
+        incoming_id_ord: u32,
+        existing_updated_at_ms: u64,
+        incoming_updated_at_ms: u64,
+        incoming_superseded_or_archived: u8,
+        is_partial_page: u8,
+    ) -> u64;
+    fn orb_scroll_epoch_step(
+        layout_epoch: u32,
+        last_corrected_epoch: u32,
+        corrections_in_epoch: u8,
+        is_pinned_to_bottom: u8,
+        user_is_dragging: u8,
+        target_scroll_top_px: u32,
+        current_scroll_top_px: u32,
+    ) -> u64;
+    fn orb_client_parity_step(
+        client_target: u8,
+        wire_schema_id: u32,
+        transcript_seq: u32,
+        markdown_blocks_count: u32,
+        send_queue_depth: u32,
+        scroll_corrected_in_epoch: u8,
+    ) -> u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2668,6 +2738,1268 @@ pub fn fork_home_step(input: ForkHomeStepInput) -> ForkHomeStepVerdict {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrivdGrantScope {
+    OpsRead = 0,
+    ServiceDeploy = 1,
+    RootExec = 2,
+}
+
+impl From<u8> for PrivdGrantScope {
+    #[inline]
+    fn from(raw: u8) -> Self {
+        match raw {
+            0 => Self::OpsRead,
+            1 => Self::ServiceDeploy,
+            _ => Self::RootExec,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrivdCommandClass {
+    UnknownOrForbidden = 0,
+    OpsReadSafe = 1,
+    ServiceDeployUnit = 2,
+    ServiceDeployReload = 3,
+    RootExecCommand = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrivdCommandAction {
+    Reject = 0,
+    AdmitOpsRead = 1,
+    AdmitServiceDeploy = 2,
+    AdmitRootExec = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivdCommandStepInput {
+    pub lease_valid: bool,
+    pub grant_scope: PrivdGrantScope,
+    pub command_class: PrivdCommandClass,
+    pub unit_matches_allowed: bool,
+    pub has_shell_metachar_or_flag_bypass: bool,
+    pub has_path_traversal_or_symlink: bool,
+    pub has_unsafe_env_var: bool,
+    pub require_force_cmd: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivdCommandStepVerdict {
+    pub action: PrivdCommandAction,
+    pub allow_exec: bool,
+    pub scrub_env: bool,
+    pub audit_required: bool,
+    pub exit_code: u32,
+    pub exit_code_on_reject: u32,
+}
+
+pub type PrivdCommandVerdict = PrivdCommandStepVerdict;
+
+#[inline]
+pub fn privd_command_step(input: PrivdCommandStepInput) -> PrivdCommandStepVerdict {
+    let raw = unsafe {
+        orb_privd_command_step(
+            u8::from(input.lease_valid),
+            input.grant_scope as u8,
+            input.command_class as u8,
+            u8::from(input.unit_matches_allowed),
+            u8::from(input.has_shell_metachar_or_flag_bypass),
+            u8::from(input.has_path_traversal_or_symlink),
+            u8::from(input.has_unsafe_env_var),
+            u8::from(input.require_force_cmd),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => PrivdCommandAction::AdmitOpsRead,
+        2 => PrivdCommandAction::AdmitServiceDeploy,
+        3 => PrivdCommandAction::AdmitRootExec,
+        _ => PrivdCommandAction::Reject,
+    };
+    let exit_code = (raw >> 32) as u32;
+    PrivdCommandStepVerdict {
+        action,
+        allow_exec: ((raw >> 8) & 1) != 0,
+        scrub_env: ((raw >> 9) & 1) != 0,
+        audit_required: ((raw >> 10) & 1) != 0,
+        exit_code,
+        exit_code_on_reject: exit_code,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SshIdentityAction {
+    Reject = 0,
+    AdmitCodingOnlyIdentity = 1,
+    AdmitFleetIdentity = 2,
+}
+
+impl SshIdentityAction {
+    #[allow(non_upper_case_globals)]
+    pub const RejectSshOrCodexConfig: Self = Self::Reject;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SshIdentityStepInput {
+    pub is_worker_or_container_target: bool,
+    pub bundle_has_control_plane_key: bool,
+    pub parent_dir_is_symlink: bool,
+    pub pub_key_is_ed25519_without_private: bool,
+    pub proxy_jump_valid: bool,
+    pub codex_cyber_program_valid: bool,
+    pub codex_goal_budget_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SshIdentityStepVerdict {
+    pub action: SshIdentityAction,
+    pub admit: bool,
+    pub strip_control_plane_secrets: bool,
+    pub no_secret_leak: bool,
+    pub exit_code: u32,
+    pub exit_code_on_reject: u32,
+}
+
+pub type SshIdentityVerdict = SshIdentityStepVerdict;
+
+#[inline]
+pub fn ssh_identity_step(input: SshIdentityStepInput) -> SshIdentityStepVerdict {
+    let raw = unsafe {
+        orb_ssh_identity_step(
+            u8::from(input.is_worker_or_container_target),
+            u8::from(input.bundle_has_control_plane_key),
+            u8::from(input.parent_dir_is_symlink),
+            u8::from(input.pub_key_is_ed25519_without_private),
+            u8::from(input.proxy_jump_valid),
+            u8::from(input.codex_cyber_program_valid),
+            u8::from(input.codex_goal_budget_exhausted),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => SshIdentityAction::AdmitCodingOnlyIdentity,
+        2 => SshIdentityAction::AdmitFleetIdentity,
+        _ => SshIdentityAction::Reject,
+    };
+    let exit_code = (raw >> 32) as u32;
+    SshIdentityStepVerdict {
+        action,
+        admit: ((raw >> 8) & 1) != 0,
+        strip_control_plane_secrets: ((raw >> 9) & 1) != 0,
+        no_secret_leak: ((raw >> 10) & 1) != 0,
+        exit_code,
+        exit_code_on_reject: exit_code,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AgentHarnessKind {
+    Codex = 0,
+    ClaudeCode = 1,
+    Antigravity = 2,
+    OpenCode = 3,
+    Grok = 4,
+    Vibe = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RawAgentEventKind {
+    DiagnosticLine = 0,
+    SessionIdUpdate = 1,
+    ThinkingUpdate = 2,
+    AssistantText = 3,
+    ToolCall = 4,
+    GoalProgress = 5,
+    TurnCompleted = 6,
+    ErrorOrAuth = 7,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AgentEventNormalizeAction {
+    RejectOverBudget = 0,
+    SkipDuplicateOrEmpty = 1,
+    EmitDiagnostic = 2,
+    EmitSessionId = 3,
+    EmitThinking = 4,
+    EmitAssistantText = 5,
+    EmitToolCompleted = 6,
+    EmitToolRunning = 7,
+    EmitGoalProgress = 8,
+    EmitTurnCompleted = 9,
+    EmitErrorOrAuth = 10,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentEventNormalizeStepInput {
+    pub harness_kind: AgentHarnessKind,
+    pub raw_event_kind: RawAgentEventKind,
+    pub is_completed: bool,
+    pub has_non_empty_text: bool,
+    pub session_matches_expected: bool,
+    pub is_duplicate_turn_or_tool: bool,
+    pub payload_bytes: u32,
+    pub max_payload_bytes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentEventNormalizeStepVerdict {
+    pub action: AgentEventNormalizeAction,
+    pub emit_event: bool,
+    pub thinking_open_next: bool,
+    pub close_thinking: bool,
+    pub total_transducer: bool,
+    pub bounded_bytes: u32,
+}
+
+#[inline]
+pub fn agent_event_normalize_step(
+    input: AgentEventNormalizeStepInput,
+) -> AgentEventNormalizeStepVerdict {
+    let raw = unsafe {
+        orb_agent_event_normalize_step(
+            input.harness_kind as u8,
+            input.raw_event_kind as u8,
+            u8::from(input.is_completed),
+            u8::from(input.has_non_empty_text),
+            u32::from(input.session_matches_expected),
+            u32::from(input.is_duplicate_turn_or_tool),
+            input.payload_bytes,
+            input.max_payload_bytes,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => AgentEventNormalizeAction::SkipDuplicateOrEmpty,
+        2 => AgentEventNormalizeAction::EmitDiagnostic,
+        3 => AgentEventNormalizeAction::EmitSessionId,
+        4 => AgentEventNormalizeAction::EmitThinking,
+        5 => AgentEventNormalizeAction::EmitAssistantText,
+        6 => AgentEventNormalizeAction::EmitToolCompleted,
+        7 => AgentEventNormalizeAction::EmitToolRunning,
+        8 => AgentEventNormalizeAction::EmitGoalProgress,
+        9 => AgentEventNormalizeAction::EmitTurnCompleted,
+        10 => AgentEventNormalizeAction::EmitErrorOrAuth,
+        _ => AgentEventNormalizeAction::RejectOverBudget,
+    };
+    AgentEventNormalizeStepVerdict {
+        action,
+        emit_event: ((raw >> 8) & 1) != 0,
+        thinking_open_next: ((raw >> 9) & 1) != 0,
+        close_thinking: ((raw >> 10) & 1) != 0,
+        total_transducer: ((raw >> 11) & 1) != 0,
+        bounded_bytes: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TranscriptReduceAction {
+    DedupeOrSkip = 0,
+    AppendOrUpdateThinking = 1,
+    AppendTranscriptEntry = 2,
+    UpdateMetadata = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptReduceStepInput {
+    pub last_applied_seq: u64,
+    pub incoming_seq: u64,
+    pub thinking_open: bool,
+    pub normalized_action: AgentEventNormalizeAction,
+    pub is_replay_from_log: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptReduceStepVerdict {
+    pub action: TranscriptReduceAction,
+    pub emit_entry: bool,
+    pub thinking_open_next: bool,
+    pub closed_previous_thinking: bool,
+    pub next_applied_seq_lo32: u32,
+}
+
+#[inline]
+pub fn transcript_reduce_step(input: TranscriptReduceStepInput) -> TranscriptReduceStepVerdict {
+    let raw = unsafe {
+        orb_transcript_reduce_step(
+            input.last_applied_seq,
+            input.incoming_seq,
+            u8::from(input.thinking_open),
+            input.normalized_action as u8,
+            u8::from(input.is_replay_from_log),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => TranscriptReduceAction::AppendOrUpdateThinking,
+        2 => TranscriptReduceAction::AppendTranscriptEntry,
+        3 => TranscriptReduceAction::UpdateMetadata,
+        _ => TranscriptReduceAction::DedupeOrSkip,
+    };
+    TranscriptReduceStepVerdict {
+        action,
+        emit_entry: ((raw >> 8) & 1) != 0,
+        thinking_open_next: ((raw >> 9) & 1) != 0,
+        closed_previous_thinking: ((raw >> 10) & 1) != 0,
+        next_applied_seq_lo32: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CursorPageAction {
+    RejectInvalidWindow = 0,
+    IncludeItem = 1,
+    ExcludeOutOfWindow = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPageStepInput {
+    pub since_seq: Option<u64>,
+    pub before_seq: Option<u64>,
+    pub item_seq: u64,
+    pub is_partial_response: bool,
+    pub existing_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPageStepVerdict {
+    pub action: CursorPageAction,
+    pub include_item: bool,
+    pub preserve_existing: bool,
+    pub partial_safe: bool,
+    pub next_count: u32,
+}
+
+#[inline]
+pub fn cursor_page_step(input: CursorPageStepInput) -> CursorPageStepVerdict {
+    let raw = unsafe {
+        orb_cursor_page_step(
+            input.since_seq.unwrap_or(0),
+            input.before_seq.unwrap_or(0),
+            input.item_seq,
+            u32::from(input.since_seq.is_some()),
+            u32::from(input.before_seq.is_some()),
+            u32::from(input.is_partial_response),
+            input.existing_count,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => CursorPageAction::IncludeItem,
+        2 => CursorPageAction::ExcludeOutOfWindow,
+        _ => CursorPageAction::RejectInvalidWindow,
+    };
+    CursorPageStepVerdict {
+        action,
+        include_item: ((raw >> 8) & 1) != 0,
+        preserve_existing: ((raw >> 9) & 1) != 0,
+        partial_safe: ((raw >> 10) & 1) != 0,
+        next_count: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SidebarMergeAction {
+    SkipArchivedOrSuperseded = 0,
+    UpdateExistingInPlace = 1,
+    RetainExistingNewer = 2,
+    InsertNewUnique = 3,
+    RemoveSuperseded = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarMergeStepInput {
+    pub existing_id_ord: u32,
+    pub incoming_id_ord: u32,
+    pub existing_updated_at_ms: u64,
+    pub incoming_updated_at_ms: u64,
+    pub incoming_superseded_or_archived: bool,
+    pub is_partial_page: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidebarMergeStepVerdict {
+    pub action: SidebarMergeAction,
+    pub retain_or_upsert: bool,
+    pub insert_new: bool,
+    pub unique_sidebar: bool,
+    pub preserve_unmentioned: bool,
+    pub net_new_rows: u32,
+}
+
+#[inline]
+pub fn sidebar_merge_step(input: SidebarMergeStepInput) -> SidebarMergeStepVerdict {
+    let raw = unsafe {
+        orb_sidebar_merge_step(
+            input.existing_id_ord,
+            input.incoming_id_ord,
+            input.existing_updated_at_ms,
+            input.incoming_updated_at_ms,
+            u8::from(input.incoming_superseded_or_archived),
+            u8::from(input.is_partial_page),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => SidebarMergeAction::UpdateExistingInPlace,
+        2 => SidebarMergeAction::RetainExistingNewer,
+        3 => SidebarMergeAction::InsertNewUnique,
+        4 => SidebarMergeAction::RemoveSuperseded,
+        _ => SidebarMergeAction::SkipArchivedOrSuperseded,
+    };
+    SidebarMergeStepVerdict {
+        action,
+        retain_or_upsert: ((raw >> 8) & 1) != 0,
+        insert_new: ((raw >> 9) & 1) != 0,
+        unique_sidebar: ((raw >> 10) & 1) != 0,
+        preserve_unmentioned: ((raw >> 11) & 1) != 0,
+        net_new_rows: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScrollEpochAction {
+    KeepCurrentScroll = 0,
+    ApplyEpochCorrection = 1,
+    SuppressDuplicateEpochCorrection = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollEpochStepInput {
+    pub layout_epoch: u32,
+    pub last_corrected_epoch: u32,
+    pub corrections_in_epoch: u8,
+    pub is_pinned_to_bottom: bool,
+    pub user_is_dragging: bool,
+    pub target_scroll_top_px: u32,
+    pub current_scroll_top_px: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollEpochStepVerdict {
+    pub action: ScrollEpochAction,
+    pub apply_scroll: bool,
+    pub epoch_fence_set: bool,
+    pub effective_scroll_top_px: u32,
+}
+
+#[inline]
+pub fn scroll_epoch_step(input: ScrollEpochStepInput) -> ScrollEpochStepVerdict {
+    let raw = unsafe {
+        orb_scroll_epoch_step(
+            input.layout_epoch,
+            input.last_corrected_epoch,
+            input.corrections_in_epoch,
+            u8::from(input.is_pinned_to_bottom),
+            u8::from(input.user_is_dragging),
+            input.target_scroll_top_px,
+            input.current_scroll_top_px,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => ScrollEpochAction::ApplyEpochCorrection,
+        2 => ScrollEpochAction::SuppressDuplicateEpochCorrection,
+        _ => ScrollEpochAction::KeepCurrentScroll,
+    };
+    ScrollEpochStepVerdict {
+        action,
+        apply_scroll: ((raw >> 8) & 1) != 0,
+        epoch_fence_set: ((raw >> 10) & 1) != 0,
+        effective_scroll_top_px: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ClientProjectionTarget {
+    Core = 0,
+    Ios = 1,
+    Android = 2,
+    DesktopWasm32 = 3,
+}
+
+#[inline]
+pub fn client_parity_step(
+    target: ClientProjectionTarget,
+    wire_schema_id: u32,
+    transcript_seq: u32,
+    markdown_blocks_count: u32,
+    send_queue_depth: u32,
+    scroll_corrected_in_epoch: bool,
+) -> u64 {
+    unsafe {
+        orb_client_parity_step(
+            target as u8,
+            wire_schema_id,
+            transcript_seq,
+            markdown_blocks_count,
+            send_queue_depth,
+            u8::from(scroll_corrected_in_epoch),
+        )
+    }
+}
+
+/// Snapshot of a subsystem's bounded shadow divergence counter (`ShadowDivergenceRing<256>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowSnapshot {
+    pub subsystem: &'static str,
+    pub total_events: u64,
+    pub total_divergences: u64,
+    pub recent_divergences: usize,
+}
+
+/// Thread-safe bounded shadow counter backed by [`shadow::ShadowDivergenceRing<256>`] and
+/// [`shadow::RefinementSimulation::observe_step`].
+pub struct ShadowCounter {
+    ring: std::sync::Mutex<shadow::ShadowDivergenceRing<256>>,
+}
+
+impl Default for ShadowCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ShadowCounter {
+    pub fn new() -> Self {
+        Self {
+            ring: std::sync::Mutex::new(shadow::ShadowDivergenceRing::<256>::new()),
+        }
+    }
+
+    pub fn snapshot(&self, subsystem: &'static str) -> ShadowSnapshot {
+        let ring = self
+            .ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ShadowSnapshot {
+            subsystem,
+            total_events: ring.total_events,
+            total_divergences: ring.unexpected_divergences,
+            recent_divergences: ring.entries().len(),
+        }
+    }
+}
+
+/// Observe `privd_command_step` (`orb_privd_command_step`) against the host admission decision.
+pub fn observe_privd_command_shadow(
+    input: PrivdCommandStepInput,
+    host_allow_exec: bool,
+    counter: &ShadowCounter,
+) -> PrivdCommandStepVerdict {
+    let verdict = privd_command_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, PrivdCommandStepInput, u8, u8> {
+        subsystem: "orb_privd_command_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = privd_command_step(*ev);
+            let effs = if v.allow_exec {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.allow_exec, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_allow_exec {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.grant_scope as u8),
+        idempotency_key: u64::from(input.command_class as u8),
+        boot_id_matches: true,
+        schema_id: 5,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.lease_valid,
+            &host_allow_exec,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `ssh_identity_step` (`orb_ssh_identity_step`) against the host admission decision.
+pub fn observe_ssh_identity_shadow(
+    input: SshIdentityStepInput,
+    host_admits: bool,
+    counter: &ShadowCounter,
+) -> SshIdentityStepVerdict {
+    let verdict = ssh_identity_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, SshIdentityStepInput, u8, u8> {
+        subsystem: "orb_ssh_identity_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = ssh_identity_step(*ev);
+            let effs = if v.admit {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.admit, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.is_worker_or_container_target),
+        idempotency_key: u64::from(input.bundle_has_control_plane_key),
+        boot_id_matches: true,
+        schema_id: 5,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_worker_or_container_target,
+            &host_admits,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `agent_event_normalize_step` (`orb_agent_event_normalize_step`) against the host transducer.
+pub fn observe_agent_event_normalize_shadow(
+    input: AgentEventNormalizeStepInput,
+    host_emits: bool,
+    counter: &ShadowCounter,
+) -> AgentEventNormalizeStepVerdict {
+    let verdict = agent_event_normalize_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, AgentEventNormalizeStepInput, u8, u8> {
+        subsystem: "orb_agent_event_normalize_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = agent_event_normalize_step(*ev);
+            let effs = if v.emit_event {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.emit_event, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_emits {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.harness_kind as u8),
+        idempotency_key: u64::from(input.raw_event_kind as u8),
+        boot_id_matches: true,
+        schema_id: 3,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_completed,
+            &host_emits,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `transcript_reduce_step` (`orb_transcript_reduce_step`) against the host reducer.
+pub fn observe_transcript_reduce_shadow(
+    input: TranscriptReduceStepInput,
+    host_emits: bool,
+    counter: &ShadowCounter,
+) -> TranscriptReduceStepVerdict {
+    let verdict = transcript_reduce_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, TranscriptReduceStepInput, u8, u8> {
+        subsystem: "orb_transcript_reduce_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = transcript_reduce_step(*ev);
+            let effs = if v.emit_entry {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.emit_entry, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_emits {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: input.last_applied_seq,
+        idempotency_key: input.incoming_seq,
+        boot_id_matches: true,
+        schema_id: 3,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.thinking_open,
+            &host_emits,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `cursor_page_step` (`orb_cursor_page_step`) against the host pagination filter.
+pub fn observe_cursor_page_shadow(
+    input: CursorPageStepInput,
+    host_includes: bool,
+    counter: &ShadowCounter,
+) -> CursorPageStepVerdict {
+    let verdict = cursor_page_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, CursorPageStepInput, u8, u8> {
+        subsystem: "orb_cursor_page_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = cursor_page_step(*ev);
+            let effs = if v.include_item {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.include_item, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_includes {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: input.item_seq,
+        idempotency_key: u64::from(input.existing_count),
+        boot_id_matches: true,
+        schema_id: 4,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_partial_response,
+            &host_includes,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `sidebar_merge_step` (`orb_sidebar_merge_step`) against the host sidebar reconciliation.
+pub fn observe_sidebar_merge_shadow(
+    input: SidebarMergeStepInput,
+    host_retains_or_upserts: bool,
+    counter: &ShadowCounter,
+) -> SidebarMergeStepVerdict {
+    let verdict = sidebar_merge_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, SidebarMergeStepInput, u8, u8> {
+        subsystem: "orb_sidebar_merge_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = sidebar_merge_step(*ev);
+            let effs = if v.retain_or_upsert {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.retain_or_upsert, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_retains_or_upserts {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: input.incoming_updated_at_ms,
+        fresh_nonce: u64::from(input.existing_id_ord),
+        idempotency_key: u64::from(input.incoming_id_ord),
+        boot_id_matches: true,
+        schema_id: 4,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_partial_page,
+            &host_retains_or_upserts,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+/// Observe `scroll_epoch_step` (`orb_scroll_epoch_step`) against the host scroll correction policy.
+pub fn observe_scroll_epoch_shadow(
+    input: ScrollEpochStepInput,
+    host_applies_correction: bool,
+    counter: &ShadowCounter,
+) -> ScrollEpochStepVerdict {
+    let verdict = scroll_epoch_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, ScrollEpochStepInput, u8, u8> {
+        subsystem: "orb_scroll_epoch_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = scroll_epoch_step(*ev);
+            let effs = if v.apply_scroll {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.apply_scroll, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_applies_correction {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.layout_epoch),
+        idempotency_key: u64::from(input.last_corrected_epoch),
+        boot_id_matches: true,
+        schema_id: 6,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_pinned_to_bottom,
+            &host_applies_correction,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientParityStepInput {
+    pub client_target: ClientProjectionTarget,
+    pub wire_schema_id: u32,
+    pub transcript_seq: u32,
+    pub markdown_blocks_count: u32,
+    pub send_queue_depth: u32,
+    pub scroll_corrected_in_epoch: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientParityStepVerdict {
+    pub raw: u64,
+    pub parity_admitted: bool,
+    pub digest32: u32,
+}
+
+/// Observe `client_parity_step` (`orb_client_parity_step`) against the host cross-client parity check.
+pub fn observe_client_parity_shadow(
+    input: ClientParityStepInput,
+    host_admits_parity: bool,
+    counter: &ShadowCounter,
+) -> ClientParityStepVerdict {
+    let raw = client_parity_step(
+        input.client_target,
+        input.wire_schema_id,
+        input.transcript_seq,
+        input.markdown_blocks_count,
+        input.send_queue_depth,
+        input.scroll_corrected_in_epoch,
+    );
+    let verdict = ClientParityStepVerdict {
+        raw,
+        parity_admitted: ((raw >> 8) & 1) != 0,
+        digest32: (raw >> 32) as u32,
+    };
+    let sim = shadow::RefinementSimulation::<bool, bool, ClientParityStepInput, u8, u8> {
+        subsystem: "orb_client_parity_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let r = client_parity_step(
+                ev.client_target,
+                ev.wire_schema_id,
+                ev.transcript_seq,
+                ev.markdown_blocks_count,
+                ev.send_queue_depth,
+                ev.scroll_corrected_in_epoch,
+            );
+            let admitted = ((r >> 8) & 1) != 0;
+            let effs = if admitted {
+                vec![(r & 0xFF) as u8]
+            } else {
+                vec![0u8]
+            };
+            (admitted, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits_parity {
+        vec![(raw & 0xFF) as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.transcript_seq),
+        idempotency_key: u64::from(input.wire_schema_id),
+        boot_id_matches: true,
+        schema_id: 6,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &true,
+            &host_admits_parity,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Wave 10: Fleet Security — Canary Blast-Radius Isolation, Process Whitelist,
+//          High-Signal Attacker Bait, Enforcer Convergence & Biometric/Mesh Gates
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Classification of a canary tripwire sensor (`Orb.Kernel.canaryTripwireStep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CanaryClass {
+    /// Ambient filesystem or socket decoy (`.env.production.canary`, `.vault-recovery.age`, `mongo_27017`).
+    AmbientDecoy = 0,
+    /// High-signal attacker-only bait (e.g., fake Bitcoin WIF / BIP-39 wallet seed `btc_wallet_canary`
+    /// or `ssh_exfil_canary`) that legitimate agents never touch; a hit even from an agent process
+    /// implies process or inference compromise and escalates to fleet `HardLockdown`.
+    HighSignalBait = 1,
+}
+
+/// Classification of the process that triggered a canary (`Orb.Kernel.canaryTripwireStep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ActorTrust {
+    /// Known agent/mission process performing a routine file/directory walk (`rg`, `fd`, `find`, `ls`, `git`).
+    WhitelistedAgentWalk = 0,
+    /// Mission job process directly reading or probing an ambient decoy.
+    MissionProcess = 1,
+    /// Non-agent, unknown, root, or external process.
+    UntrustedOrSystem = 2,
+}
+
+/// Blast-radius action returned by [`canary_tripwire_step`] (`Orb.Kernel.canaryTripwireStep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CanaryTripwireAction {
+    /// Whitelisted agent walk or synthetic `--dry-run`: do not quarantine node or lock down fleet.
+    IgnoreWhitelisted = 0,
+    /// Single mission process reading an ambient decoy: quarantine ONLY the reporting node;
+    /// keep global fleet `bunker_state` unchanged (`Normal`).
+    QuarantineNodeOnly = 1,
+    /// High-signal attacker bait (even from our own agent process) or untrusted system process:
+    /// quarantine node AND escalate global fleet `bunker_state` to `HardLockdown (2)`.
+    EscalateFleetLockdown = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanaryTripwireStepInput {
+    pub canary_class: CanaryClass,
+    pub actor_trust: ActorTrust,
+    pub is_dry_run: bool,
+    pub current_fleet_bunker: BunkerState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanaryTripwireStepVerdict {
+    pub action: CanaryTripwireAction,
+    pub quarantine_reporting_node: bool,
+    pub escalate_fleet_lockdown: bool,
+    pub alert_operator: bool,
+    pub next_fleet_bunker: BunkerState,
+    pub raw: u64,
+}
+
+/// Pure implementation of `Orb.Kernel.canaryTripwireStep` verified by
+/// `canary_whitelisted_ambient_no_bunker`, `canary_mission_ambient_node_only`, and
+/// `canary_high_signal_bait_always_locks_down` in `lean/Orb/Spec.lean`.
+#[inline]
+pub fn canary_tripwire_step(input: CanaryTripwireStepInput) -> CanaryTripwireStepVerdict {
+    let clamped_bunker = (input.current_fleet_bunker as u8).min(2);
+    let is_high_signal = (input.canary_class as u8) >= 1;
+    let action_code: u8 = if input.is_dry_run {
+        0
+    } else if is_high_signal {
+        2
+    } else if input.actor_trust == ActorTrust::WhitelistedAgentWalk {
+        0
+    } else if input.actor_trust == ActorTrust::MissionProcess {
+        1
+    } else {
+        2
+    };
+    let next_bunker_code: u8 = if action_code == 2 { 2 } else { clamped_bunker };
+    let quarantine_bit: u32 = if action_code >= 1 { 256 } else { 0 };
+    let lockdown_bit: u32 = if action_code == 2 { 512 } else { 0 };
+    let alert_bit: u32 = if action_code >= 1 || input.is_dry_run {
+        1024
+    } else {
+        0
+    };
+    let lo32 = u32::from(action_code) | quarantine_bit | lockdown_bit | alert_bit;
+    let hi32 = u32::from(next_bunker_code);
+    let raw = u64::from(lo32) | (u64::from(hi32) << 32);
+    let action = match action_code {
+        1 => CanaryTripwireAction::QuarantineNodeOnly,
+        2 => CanaryTripwireAction::EscalateFleetLockdown,
+        _ => CanaryTripwireAction::IgnoreWhitelisted,
+    };
+    let next_fleet_bunker = match next_bunker_code {
+        0 => BunkerState::Normal,
+        1 => BunkerState::SoftQuarantine,
+        _ => BunkerState::HardLockdown,
+    };
+    CanaryTripwireStepVerdict {
+        action,
+        quarantine_reporting_node: (lo32 & 256) != 0,
+        escalate_fleet_lockdown: (lo32 & 512) != 0,
+        alert_operator: (lo32 & 1024) != 0,
+        next_fleet_bunker,
+        raw,
+    }
+}
+
+/// Classifies a `canary_kind` identifier into [`CanaryClass::AmbientDecoy`] vs
+/// [`CanaryClass::HighSignalBait`].
+pub fn classify_canary_class(canary_kind: &str) -> CanaryClass {
+    let k = canary_kind.trim().to_ascii_lowercase();
+    if k.contains("btc")
+        || k.contains("bitcoin")
+        || k.contains("wallet")
+        || k.contains("mnemonic")
+        || k.contains("seed")
+        || k.contains("ssh_exfil")
+        || k.contains("high_signal")
+        || k.contains("attacker_bait")
+    {
+        CanaryClass::HighSignalBait
+    } else {
+        CanaryClass::AmbientDecoy
+    }
+}
+
+/// Whitelisted agent file-search / directory-traversal binaries that may walk workspace trees
+/// during normal coding missions without intending to exfiltrate ambient decoys.
+pub const WHITELISTED_AGENT_WALK_BINARIES: &[&str] = &[
+    "rg", "ripgrep", "grep", "egrep", "fgrep", "find", "fd", "fdfind", "ls", "stat", "file", "du",
+    "tree", "git",
+];
+
+/// Classifies the process that tripped a canary into [`ActorTrust`]:
+/// - Checks whether `uid` (`999` / `sandboxed-node`), `cgroup`, or `cmdline` belongs to a
+///   managed Paloma agent/mission execution context (`sandboxed-node`, `opencode`, `antigravity`,
+///   `claude`, `codex`).
+/// - If it is an agent/mission process AND the executable is a passive search/traversal tool in
+///   [`WHITELISTED_AGENT_WALK_BINARIES`], returns [`ActorTrust::WhitelistedAgentWalk`].
+/// - If it is an agent/mission process running any other command (e.g. `cat`, `curl`, `python3`),
+///   returns [`ActorTrust::MissionProcess`] (quarantines ONLY that node on ambient decoys, or
+///   locks down the whole fleet on [`CanaryClass::HighSignalBait`]).
+/// - Otherwise returns [`ActorTrust::UntrustedOrSystem`].
+pub fn classify_actor_trust(
+    uid: Option<u32>,
+    cgroup: Option<&str>,
+    cmdline: Option<&str>,
+) -> ActorTrust {
+    let cg = cgroup.unwrap_or("").to_ascii_lowercase();
+    let cmd = cmdline.unwrap_or("").trim();
+    let cmd_lower = cmd.to_ascii_lowercase();
+
+    let is_agent_context = uid == Some(999)
+        || cg.contains("sandboxed-node")
+        || cg.contains("sandboxed_node")
+        || cg.contains("opencode")
+        || cg.contains("antigravity")
+        || cmd_lower.contains("/var/lib/sandboxed-node/")
+        || cmd_lower.contains("fast_9024_scanner");
+
+    if !is_agent_context {
+        return ActorTrust::UntrustedOrSystem;
+    }
+
+    let first_token = cmd.split_whitespace().next().unwrap_or("");
+    let exe_name = first_token
+        .rsplit('/')
+        .next()
+        .unwrap_or(first_token)
+        .to_ascii_lowercase();
+
+    if WHITELISTED_AGENT_WALK_BINARIES.contains(&exe_name.as_str()) {
+        ActorTrust::WhitelistedAgentWalk
+    } else {
+        ActorTrust::MissionProcess
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BunkerEnforcerAction {
+    ReleaseQuarantine = 0,
+    ApplyOrKeepQuarantine = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BunkerEnforcerStepInput {
+    pub status_reachable: bool,
+    pub fleet_bunker: u8,
+    pub node_quarantined_by_core: bool,
+    pub has_local_trip_marker: bool,
+    pub local_trip_epoch: u64,
+    pub last_unbunker_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BunkerEnforcerStepVerdict {
+    pub action: BunkerEnforcerAction,
+    pub apply_or_keep_quarantine: bool,
+    pub clear_local_marker: bool,
+    pub raw: u32,
+}
+
+/// Pure implementation of `Orb.Kernel.bunkerEnforcerStep` verified by
+/// `bunker_enforcer_converges_on_unbunker` in `lean/Orb/Spec.lean`.
+#[inline]
+pub fn bunker_enforcer_step(input: BunkerEnforcerStepInput) -> BunkerEnforcerStepVerdict {
+    let fleet_lockdown = input.fleet_bunker >= 2;
+    let marker_cleared =
+        !input.has_local_trip_marker || input.last_unbunker_epoch >= input.local_trip_epoch;
+    let raw: u32 = if !input.status_reachable {
+        if input.has_local_trip_marker {
+            257
+        } else {
+            0
+        }
+    } else if fleet_lockdown || input.node_quarantined_by_core || !marker_cleared {
+        257
+    } else if input.has_local_trip_marker {
+        512
+    } else {
+        0
+    };
+    let apply_or_keep = (raw & 256) != 0;
+    BunkerEnforcerStepVerdict {
+        action: if apply_or_keep {
+            BunkerEnforcerAction::ApplyOrKeepQuarantine
+        } else {
+            BunkerEnforcerAction::ReleaseQuarantine
+        },
+        apply_or_keep_quarantine: apply_or_keep,
+        clear_local_marker: (raw & 512) != 0,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BiometricGateVerdict {
+    pub admitted: bool,
+    pub surface_error: bool,
+    pub raw: u32,
+}
+
+/// Pure implementation of `Orb.Kernel.biometricGateStep` verified by
+/// `biometric_gate_never_fails_open` in `lean/Orb/Spec.lean`.
+#[inline]
+pub fn biometric_gate_step(
+    surface_requires_bio: bool,
+    hardware_enrolled: bool,
+    eval_succeeded: bool,
+    passcode_fallback_succeeded: bool,
+) -> BiometricGateVerdict {
+    let raw: u32 = if !surface_requires_bio
+        || (hardware_enrolled && eval_succeeded)
+        || (!hardware_enrolled && passcode_fallback_succeeded)
+    {
+        257
+    } else {
+        512
+    };
+    BiometricGateVerdict {
+        admitted: (raw & 256) != 0,
+        surface_error: (raw & 512) != 0,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshServiceRouteVerdict {
+    pub admitted: bool,
+    pub rejected_retired_tailnet: bool,
+    pub raw: u32,
+}
+
+/// Pure implementation of `Orb.Kernel.meshServiceRouteStep` verified by
+/// `mesh_service_route_rejects_retired_tailnet` in `lean/Orb/Spec.lean`.
+#[inline]
+pub fn mesh_service_route_step(
+    endpoint_in_mesh_overlay: bool,
+    endpoint_in_retired_tailnet: bool,
+    has_mesh_auth_or_bearer: bool,
+    is_loopback: bool,
+) -> MeshServiceRouteVerdict {
+    let raw: u32 = if endpoint_in_retired_tailnet {
+        512
+    } else if is_loopback || endpoint_in_mesh_overlay || has_mesh_auth_or_bearer {
+        257
+    } else {
+        512
+    };
+    MeshServiceRouteVerdict {
+        admitted: (raw & 256) != 0,
+        rejected_retired_tailnet: endpoint_in_retired_tailnet,
+        raw,
+    }
+}
+
 #[cfg(test)]
 mod privilege_bunker_deploy_tests {
     use super::*;
@@ -3413,5 +4745,202 @@ mod tests {
         assert_eq!(lean_sys_cabi::select_isa(775, 927, 4, 4), 0);
         assert!(lean_sys_cabi::verify_isa_selection(927, 927, 4, 4));
         assert!(!lean_sys_cabi::verify_isa_selection(775, 927, 4, 4));
+    }
+
+    #[test]
+    fn phase6_scroll_epoch_and_client_parity_zero_divergences() {
+        let scroll_counter = ShadowCounter::new();
+        let parity_counter = ShadowCounter::new();
+
+        // 1. First scroll correction in layout epoch 12 is admitted
+        let first = observe_scroll_epoch_shadow(
+            ScrollEpochStepInput {
+                layout_epoch: 12,
+                last_corrected_epoch: 11,
+                corrections_in_epoch: 0,
+                is_pinned_to_bottom: true,
+                user_is_dragging: false,
+                target_scroll_top_px: 3817,
+                current_scroll_top_px: 3600,
+            },
+            true,
+            &scroll_counter,
+        );
+        assert_eq!(first.action, ScrollEpochAction::ApplyEpochCorrection);
+        assert!(first.apply_scroll);
+        assert!(first.epoch_fence_set);
+        assert_eq!(first.effective_scroll_top_px, 3817);
+
+        // 2. Duplicate correction in the same layout epoch 12 is suppressed (`scroll_single_correction_per_epoch`)
+        let second = observe_scroll_epoch_shadow(
+            ScrollEpochStepInput {
+                layout_epoch: 12,
+                last_corrected_epoch: 12,
+                corrections_in_epoch: 1,
+                is_pinned_to_bottom: true,
+                user_is_dragging: false,
+                target_scroll_top_px: 3817,
+                current_scroll_top_px: 3700,
+            },
+            false,
+            &scroll_counter,
+        );
+        assert_eq!(
+            second.action,
+            ScrollEpochAction::SuppressDuplicateEpochCorrection
+        );
+        assert!(!second.apply_scroll);
+        assert!(second.epoch_fence_set);
+        assert_eq!(second.effective_scroll_top_px, 3700);
+
+        // 3. Cross-client parity across Core (0), iOS (1), Android (2), and Desktop wasm32 (3)
+        let targets = [
+            ClientProjectionTarget::Core,
+            ClientProjectionTarget::Ios,
+            ClientProjectionTarget::Android,
+            ClientProjectionTarget::DesktopWasm32,
+        ];
+        let mut ref_digest = None;
+        for target in targets {
+            let v = observe_client_parity_shadow(
+                ClientParityStepInput {
+                    client_target: target,
+                    wire_schema_id: 1,
+                    transcript_seq: 42,
+                    markdown_blocks_count: 7,
+                    send_queue_depth: 1,
+                    scroll_corrected_in_epoch: true,
+                },
+                true,
+                &parity_counter,
+            );
+            assert!(v.parity_admitted);
+            if let Some(d) = ref_digest {
+                assert_eq!(
+                    v.digest32, d,
+                    "all 4 client targets must produce identical parity digest"
+                );
+            } else {
+                ref_digest = Some(v.digest32);
+            }
+        }
+
+        let scroll_snap = scroll_counter.snapshot("orb_scroll_epoch_step");
+        let parity_snap = parity_counter.snapshot("orb_client_parity_step");
+        assert_eq!(scroll_snap.total_events, 2);
+        assert_eq!(scroll_snap.total_divergences, 0);
+        assert_eq!(parity_snap.total_events, 4);
+        assert_eq!(parity_snap.total_divergences, 0);
+    }
+
+    #[test]
+    fn wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gates() {
+        // 1. Whitelisted agent walk (`rg --hidden` by sandboxed-node) on an ambient decoy
+        //    is ignored: no node quarantine, no fleet bunker escalation (`canary_whitelisted_ambient_no_bunker`).
+        let actor = classify_actor_trust(
+            Some(999),
+            Some("/system.slice/sandboxed-node.service"),
+            Some("rg --hidden --no-ignore CANT_MATCH ."),
+        );
+        assert_eq!(actor, ActorTrust::WhitelistedAgentWalk);
+        let class = classify_canary_class("env_honeytoken");
+        assert_eq!(class, CanaryClass::AmbientDecoy);
+
+        let v_walk = canary_tripwire_step(CanaryTripwireStepInput {
+            canary_class: class,
+            actor_trust: actor,
+            is_dry_run: false,
+            current_fleet_bunker: BunkerState::Normal,
+        });
+        assert_eq!(v_walk.action, CanaryTripwireAction::IgnoreWhitelisted);
+        assert!(!v_walk.quarantine_reporting_node);
+        assert!(!v_walk.escalate_fleet_lockdown);
+        assert!(!v_walk.alert_operator);
+        assert_eq!(v_walk.next_fleet_bunker, BunkerState::Normal);
+
+        // 2. Single mission process reading `.env.production.canary` (`cat`) quarantines ONLY that node
+        //    and leaves global fleet bunker at `Normal` (`canary_mission_ambient_node_only`).
+        let actor_cat = classify_actor_trust(
+            Some(999),
+            Some("/system.slice/sandboxed-node.service"),
+            Some("cat /opt/paloma-canary/.env.production.canary"),
+        );
+        assert_eq!(actor_cat, ActorTrust::MissionProcess);
+        let v_mission = canary_tripwire_step(CanaryTripwireStepInput {
+            canary_class: CanaryClass::AmbientDecoy,
+            actor_trust: actor_cat,
+            is_dry_run: false,
+            current_fleet_bunker: BunkerState::Normal,
+        });
+        assert_eq!(v_mission.action, CanaryTripwireAction::QuarantineNodeOnly);
+        assert!(v_mission.quarantine_reporting_node);
+        assert!(!v_mission.escalate_fleet_lockdown);
+        assert!(v_mission.alert_operator);
+        assert_eq!(v_mission.next_fleet_bunker, BunkerState::Normal);
+
+        // 3. High-signal attacker bait (`btc_wallet_canary` / fake Bitcoin private key) ALWAYS escalates
+        //    to fleet `HardLockdown (2)` EVEN when accessed by a whitelisted agent process
+        //    (`canary_high_signal_bait_always_locks_down`).
+        let btc_class = classify_canary_class("btc_wallet_canary");
+        assert_eq!(btc_class, CanaryClass::HighSignalBait);
+        for trust in [
+            ActorTrust::WhitelistedAgentWalk,
+            ActorTrust::MissionProcess,
+            ActorTrust::UntrustedOrSystem,
+        ] {
+            let v_btc = canary_tripwire_step(CanaryTripwireStepInput {
+                canary_class: btc_class,
+                actor_trust: trust,
+                is_dry_run: false,
+                current_fleet_bunker: BunkerState::Normal,
+            });
+            assert_eq!(v_btc.action, CanaryTripwireAction::EscalateFleetLockdown);
+            assert!(v_btc.quarantine_reporting_node);
+            assert!(v_btc.escalate_fleet_lockdown);
+            assert!(v_btc.alert_operator);
+            assert_eq!(v_btc.next_fleet_bunker, BunkerState::HardLockdown);
+        }
+
+        // 4. Worker node bunker enforcer converges to `ReleaseQuarantine` and clears local marker
+        //    once `last_unbunker_epoch >= local_trip_epoch` and `fleet_bunker == Normal`
+        //    (`bunker_enforcer_converges_on_unbunker`).
+        let enf_keep = bunker_enforcer_step(BunkerEnforcerStepInput {
+            status_reachable: true,
+            fleet_bunker: 0,
+            node_quarantined_by_core: false,
+            has_local_trip_marker: true,
+            local_trip_epoch: 200,
+            last_unbunker_epoch: 150,
+        });
+        assert_eq!(enf_keep.action, BunkerEnforcerAction::ApplyOrKeepQuarantine);
+        assert!(enf_keep.apply_or_keep_quarantine);
+
+        let enf_release = bunker_enforcer_step(BunkerEnforcerStepInput {
+            status_reachable: true,
+            fleet_bunker: 0,
+            node_quarantined_by_core: false,
+            has_local_trip_marker: true,
+            local_trip_epoch: 200,
+            last_unbunker_epoch: 205,
+        });
+        assert_eq!(enf_release.action, BunkerEnforcerAction::ReleaseQuarantine);
+        assert!(!enf_release.apply_or_keep_quarantine);
+        assert!(enf_release.clear_local_marker);
+
+        // 5. Biometric gate never fails open (`biometric_gate_never_fails_open`).
+        let bio_fail = biometric_gate_step(true, true, false, false);
+        assert!(!bio_fail.admitted);
+        assert!(bio_fail.surface_error);
+        let bio_ok = biometric_gate_step(true, true, true, false);
+        assert!(bio_ok.admitted);
+        assert!(!bio_ok.surface_error);
+
+        // 6. Mesh service route rejects retired Tailscale CGNAT (`mesh_service_route_rejects_retired_tailnet`).
+        let route_retired = mesh_service_route_step(true, true, true, false);
+        assert!(!route_retired.admitted);
+        assert!(route_retired.rejected_retired_tailnet);
+        let route_mesh = mesh_service_route_step(true, false, false, false);
+        assert!(route_mesh.admitted);
+        assert!(!route_mesh.rejected_retired_tailnet);
     }
 }

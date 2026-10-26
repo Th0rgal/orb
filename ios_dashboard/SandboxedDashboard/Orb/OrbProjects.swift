@@ -461,7 +461,11 @@ struct OrbHome: View {
         VStack(spacing: 0) {
             OrbSecretRequestBanner(count: secretRequests.pending.count) { secretSheet = true }
             OrbMissionAccessBanner(count: accessRequests.pending.count) { accessSheet = true }
-            OrbPrivilegeAccessBanner(count: privilegeRequests.pending.count) { privilegeSheet = true }
+            OrbPrivilegeAccessBanner(
+                count: privilegeRequests.pending.count,
+                bunkered: privilegeRequests.bunkered,
+                bunkerState: privilegeRequests.bunkerState
+            ) { privilegeSheet = true }
         }
     }
 
@@ -1779,7 +1783,10 @@ struct OrbProjectPage: View {
         let nextMissions = value["missions"].items.map { OrbRow($0) }.filter(\.mobile)
         if missions != nextMissions { missions = nextMissions }
         if case .object(let entries) = value["manifest"]["entries"] {
-            let nextFolders = entries.filter { $0.value["directory"].flag }.map(\.key).sorted()
+            let nextFolders = entries
+                .filter { $0.value["directory"].flag && $0.key != "attachments" && !$0.key.hasPrefix("attachments/") }
+                .map(\.key)
+                .sorted()
             if folders != nextFolders { folders = nextFolders }
         }
     }

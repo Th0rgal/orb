@@ -52,6 +52,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -736,50 +738,9 @@ fun OrbProvidersSettingsPage(
                                                     fontSize = 12.sp
                                                 )
                                             } else {
-                                                windows.forEach { (wLabel, ratio) ->
-                                                    val pctInt = (ratio * 100.0).roundToInt()
-                                                    val level = OrbQuotaLevel.of(ratio)
-                                                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                                                        Row(
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Text(
-                                                                text = wLabel,
-                                                                color = Color.White,
-                                                                fontSize = 13.sp,
-                                                                maxLines = 1,
-                                                                overflow = TextOverflow.Ellipsis,
-                                                                modifier = Modifier.weight(1f)
-                                                            )
-                                                            Text(
-                                                                text = "$pctInt% used",
-                                                                color = level.color(OrbStyle.textSecondary),
-                                                                fontWeight = if (level == OrbQuotaLevel.Normal) null else FontWeight.SemiBold,
-                                                                fontSize = 13.sp,
-                                                                maxLines = 1,
-                                                                softWrap = false
-                                                            )
-                                                        }
-                                                        Box(
-                                                            modifier = Modifier
-                                                                .fillMaxWidth()
-                                                                .height(4.dp)
-                                                                .clip(CircleShape)
-                                                                .background(OrbStyle.card)
-                                                        ) {
-                                                            Box(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth(ratio.toFloat().coerceIn(0f, 1f))
-                                                                    .height(4.dp)
-                                                                    .clip(CircleShape)
-                                                                    .background(
-                                                                        level.color(OrbStyle.inboxBlue)
-                                                                    )
-                                                            )
-                                                        }
-                                                    }
+                                                // One row per pool with every window the API returns (desktop: provider-usage-row).
+                                                quotaPools(windows).forEach { (pool, poolWindows) ->
+                                                    OrbQuotaPoolRow(pool, poolWindows)
                                                 }
                                             }
 
@@ -1299,4 +1260,52 @@ fun OrbProvidersSettingsPage(
 object OrbProviderLoginFlow {
     /** Subscription types offered by iOS `OrbProvidersSettingsView.subscriptionTypes`. */
     val subscriptionTypes = setOf("anthropic", "openai", "google", "xai", "kimi")
+}
+
+/** Windows grouped by pool in API order; "Gemini · 5h" → ("Gemini", "5h"). */
+internal fun quotaPools(windows: List<Pair<String, Double>>): List<Pair<String, List<Pair<String, Double>>>> {
+    val out = linkedMapOf<String, MutableList<Pair<String, Double>>>()
+    for ((label, used) in windows) {
+        val pool = quotaPool(label)
+        val short = if (pool.isEmpty()) label else label.substring(pool.length + 3)
+        out.getOrPut(pool) { mutableListOf() }.add(short to used)
+    }
+    return out.map { it.key to it.value.toList() }
+}
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun OrbQuotaPoolRow(pool: String, windows: List<Pair<String, Double>>) {
+    androidx.compose.foundation.layout.FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        itemVerticalAlignment = Alignment.CenterVertically
+    ) {
+        if (pool.isNotEmpty()) {
+            Text(text = pool, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        }
+        windows.forEach { (label, ratio) ->
+            val pct = (ratio * 100.0).roundToInt()
+            val level = OrbQuotaLevel.of(ratio)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "$label $pct% used" }
+            ) {
+                Text(text = if (label == "7d") "Weekly" else label, color = OrbStyle.textSecondary, fontSize = 12.sp, maxLines = 1)
+                Box(modifier = Modifier.width(44.dp).height(4.dp).clip(CircleShape).background(OrbStyle.card)) {
+                    Box(modifier = Modifier.fillMaxWidth(ratio.toFloat().coerceIn(0f, 1f)).height(4.dp).clip(CircleShape).background(level.color(OrbStyle.inboxBlue)))
+                }
+                Text(
+                    text = "$pct%",
+                    color = level.color(OrbStyle.textSecondary),
+                    fontWeight = if (level == OrbQuotaLevel.Normal) null else FontWeight.SemiBold,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    softWrap = false
+                )
+            }
+        }
+    }
 }

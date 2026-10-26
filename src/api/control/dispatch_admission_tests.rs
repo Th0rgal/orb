@@ -13363,6 +13363,11 @@ async fn retired_chatgpt_ui_backend_is_rejected_with_the_opencode_alternative() 
 /// wait, and the mission must still start once the slot frees.
 #[tokio::test]
 async fn pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs() {
+    if isolated_track_http_test(
+        "pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs",
+    ) {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let h = Harness::with_capacity(
         FixtureDir {
@@ -13409,7 +13414,7 @@ async fn pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs()
         .state
         .http_client
         .post(format!("{}/missions", h.url))
-        .json(&json!({"title":"queued behind the slot", "backend":"codex", "prompt":"Say ACK"}))
+        .json(&json!({"title":"queued behind the slot", "backend":"codex", "prompt":"Say ACK", "estimated_disk_gib": 1}))
         .send()
         .await
         .unwrap();

@@ -22,6 +22,9 @@ final class OrbTranscriptModel {
     private(set) var turnTimings: [String: OrbTurnTiming] = [:]
     /// `metadata.shared_files` of assistant messages, for file chips (size, download url).
     private(set) var sharedFiles: [OrbSharedFile] = []
+    /// Cross-client projection parity digest and admission flag from `OrbKernel.clientParityStep`.
+    private(set) var parityDigest: UInt32 = 0
+    private(set) var parityAdmitted: Bool = true
 
     /// Work fold, changed files and open questions from `events`.
     func rebuildDerived(working: Bool) {
@@ -52,6 +55,17 @@ final class OrbTranscriptModel {
             if let timing = byAnswer[row.2.trimmingCharacters(in: .whitespacesAndNewlines)] { timings[row.0] = timing }
         }
         if timings != turnTimings { turnTimings = timings }
+        let lastSeq = events.last?.sequence ?? Int64(history.count)
+        let parity = OrbKernel.clientParityStep(
+            clientTarget: 1,
+            wireSchemaId: 1,
+            transcriptSeq: UInt32(clamping: max(0, lastSeq)),
+            markdownBlocksCount: UInt32(clamping: history.count),
+            sendQueueDepth: optimisticPrompt == nil ? 0 : 1,
+            scrollCorrectedInEpoch: grew > 0 ? 1 : 0
+        )
+        parityAdmitted = parity.parityAdmitted
+        parityDigest = parity.digest32
         return grew
     }
 

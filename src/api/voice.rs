@@ -104,7 +104,7 @@ pub async fn transcribe(
             .expect("voice HTTP client")
     });
     let endpoint = std::env::var("SANDBOXED_VOICE_TRANSCRIPTION_URL")
-        .unwrap_or_else(|_| "http://100.77.4.93:8000/v1/audio/transcriptions".into());
+        .unwrap_or_else(|_| "http://10.88.0.2:8000/v1/audio/transcriptions".into());
     forward(
         client,
         &endpoint,

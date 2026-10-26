@@ -388,12 +388,28 @@ impl SqliteMissionStore {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| e.to_string())?;
                 let page_len = page.len();
-                for mission in page {
-                    // The tag prefilter can over-select; this is the authority.
-                    if filter.matches(&mission) {
-                        matched.push(mission);
-                        if matched.len() >= want {
-                            break;
+                if filter.attention_only {
+                    let mut candidates = Vec::new();
+                    for mission in page {
+                        let mut non_attn = filter.clone();
+                        non_attn.attention_only = false;
+                        if non_attn.matches(&mission) {
+                            candidates.push(mission);
+                        }
+                    }
+                    matched = crate::api::mission_store::reconcile_sidebar_missions_page(
+                        &matched,
+                        &candidates,
+                        true,
+                    );
+                } else {
+                    for mission in page {
+                        // The tag prefilter can over-select; this is the authority.
+                        if filter.matches(&mission) {
+                            matched.push(mission);
+                            if matched.len() >= want {
+                                break;
+                            }
                         }
                     }
                 }

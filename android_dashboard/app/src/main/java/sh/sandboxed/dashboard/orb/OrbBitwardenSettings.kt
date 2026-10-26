@@ -25,11 +25,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -140,7 +142,14 @@ private fun authenticateOwner(context: Context, onResult: (Boolean, String?) -> 
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                onResult(false, errString.toString())
+                if (errorCode == BiometricPrompt.ERROR_USER_CANCELED ||
+                    errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON ||
+                    errorCode == BiometricPrompt.ERROR_CANCELED
+                ) {
+                    onResult(false, null)
+                } else {
+                    onResult(false, errString.toString())
+                }
             }
         }
     )
@@ -175,9 +184,11 @@ fun OrbBitwardenSettingsPage(
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
     val pendingCount by core.pendingSecretRequests.collectAsState()
     val revealed = remember { mutableStateMapOf<String, String>() }
+    var copiedSecretId by remember { mutableStateOf<String?>(null) }
     var filter by remember { mutableStateOf("") }
     var tokenDraft by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var showAccountSettings by remember { mutableStateOf(false) }
 
     var editorTarget by remember { mutableStateOf<OrbRow?>(null) }
     var editorOpen by remember { mutableStateOf(false) }
@@ -195,7 +206,7 @@ fun OrbBitwardenSettingsPage(
         authError = null
         authenticateOwner(context) { ok, message ->
             unlocked = ok
-            if (!ok) authError = message ?: "Authentication failed"
+            if (!ok) authError = message
         }
     }
 
@@ -261,10 +272,11 @@ fun OrbBitwardenSettingsPage(
         if (!unlocked) return@LaunchedEffect
         loadAll()
     }
-    LaunchedEffect(notice) {
-        if (notice != null) {
+    LaunchedEffect(notice, copiedSecretId) {
+        if (notice != null || copiedSecretId != null) {
             delay(1800)
             notice = null
+            copiedSecretId = null
         }
     }
 
@@ -319,7 +331,7 @@ fun OrbBitwardenSettingsPage(
                 (it.str("note") ?: "").lowercase().contains(needle)
         }
 
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.weight(1f)) {
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.weight(1f)) {
             if (pendingCount > 0) {
                 item(key = "access") {
                     // Approvals are device-signed on the Secrets page (OrbApprovals); this vault page has no approval path.
@@ -329,120 +341,7 @@ fun OrbBitwardenSettingsPage(
                             color = Color.White,
                             fontSize = 13.sp
                         )
-                        OrbBwPill("Open Secrets", primary = true) { onOpenRequests() }
-                    }
-                }
-            }
-
-            item(key = "account") {
-                OrbBwSection("MACHINE ACCOUNT") {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(if (configured) OrbStyle.success else OrbStyle.warning)
-                        )
-                        Text(
-                            text = if (configured) {
-                                "Connected" + (OrbJSON.str(status, "token_hint")?.let { " · …$it" } ?: "")
-                            } else if (OrbJSON.bool(status, "bws_installed") == false) {
-                                "bws CLI is not installed on the backend"
-                            } else {
-                                "Not connected"
-                            },
-                            color = Color.White,
-                            fontSize = 14.sp
-                        )
-                    }
-                    OrbBwField("Machine account access token", tokenDraft, secret = true) { tokenDraft = it }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OrbBwPill(if (configured) "Replace token" else "Connect", primary = true, enabled = tokenDraft.isNotBlank()) {
-                            act {
-                                status = OrbJSON.dict(
-                                    core.request("${OrbBitwardenApi.BASE}/config", method = "PUT", body = mapOf("access_token" to tokenDraft.trim()))
-                                ) ?: status
-                                tokenDraft = ""
-                                loadAll()
-                            }
-                        }
-                        if (configured) {
-                            OrbBwPill("Clear token", destructive = true) {
-                                act {
-                                    status = OrbJSON.dict(
-                                        core.request("${OrbBitwardenApi.BASE}/config", method = "PUT", body = mapOf("access_token" to ""))
-                                    ) ?: status
-                                    projects = emptyList()
-                                    secrets = emptyList()
-                                }
-                            }
-                        }
-                    }
-                    if (configured) {
-                        val defaultId = OrbJSON.str(status, "default_project_id")
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Default project", color = OrbStyle.textMuted, fontSize = 11.sp)
-                                Text(projectName(defaultId) ?: defaultId ?: "None", color = Color.White, fontSize = 13.sp)
-                            }
-                            Box {
-                                OrbBwPill("Change") { showDefaultProjectPicker = true }
-                                androidx.compose.material3.DropdownMenu(
-                                    expanded = showDefaultProjectPicker,
-                                    onDismissRequest = { showDefaultProjectPicker = false },
-                                    containerColor = OrbStyle.elevated
-                                ) {
-                                    projects.forEach { p ->
-                                        androidx.compose.material3.DropdownMenuItem(
-                                            text = { Text(p.str("name") ?: p.id, color = Color.White) },
-                                            onClick = {
-                                                showDefaultProjectPicker = false
-                                                act {
-                                                    status = OrbJSON.dict(
-                                                        core.request("${OrbBitwardenApi.BASE}/config", method = "PUT", body = mapOf("default_project_id" to p.id))
-                                                    ) ?: status
-                                                }
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (configured && palomaProjects.isNotEmpty()) {
-                item(key = "default_access") {
-                    OrbBwSection("READ WITHOUT ASKING") {
-                        Text(
-                            "Missions in these projects may read the chosen Bitwarden projects without a request.",
-                            color = OrbStyle.textMuted,
-                            fontSize = 12.sp
-                        )
-                        val access = OrbJSON.dict(status["default_access"]) ?: emptyMap()
-                        palomaProjects.forEach { p ->
-                            val slug = p.str("slug", "id") ?: p.id
-                            val ids = OrbJSON.strList(access, slug)
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .orbPressClickable { accessSlug = slug }
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(p.str("name", "title") ?: slug, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                                Text(
-                                    if (ids.isEmpty()) "Ask" else ids.joinToString(", ") { projectName(it) ?: it.take(8) },
-                                    color = OrbStyle.textMuted,
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
-                                )
-                            }
-                        }
+                        OrbBwPill("Open Approvals", primary = true) { onOpenRequests() }
                     }
                 }
             }
@@ -482,18 +381,52 @@ fun OrbBitwardenSettingsPage(
                 }
                 items(visibleSecrets, key = { "s-${it.id}" }) { secret ->
                     val value = revealed[secret.id]
+                    val isCopied = copiedSecretId == secret.id
+                    var menuOpen by remember(secret.id) { mutableStateOf(false) }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
                             .background(OrbStyle.surface)
                             .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
-                            .padding(12.dp),
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text(secret.str("key") ?: "", color = Color.White, fontSize = 14.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            OrbBwIcon(if (value != null) Icons.Default.VisibilityOff else Icons.Default.Visibility, "Reveal") {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    secret.str("key") ?: "",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                secret.str("note")?.takeIf { it.isNotBlank() }?.let {
+                                    Text(it, color = OrbStyle.textMuted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            OrbBwIcon(
+                                if (isCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                                "Copy",
+                                tint = if (isCopied) OrbStyle.success else OrbStyle.textSecondary
+                            ) {
+                                act {
+                                    val v = revealed[secret.id] ?: OrbJSON.rawStr(
+                                        core.fetchDict("${OrbBitwardenApi.BASE}/secrets/${core.encodeComponent(secret.id)}/reveal"),
+                                        "value"
+                                    ) ?: ""
+                                    OrbStyle.copyToClipboard(context, v)
+                                    copiedSecretId = secret.id
+                                    notice = "Copied ${secret.str("key") ?: "secret"}"
+                                }
+                            }
+                            OrbBwIcon(
+                                if (value != null) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                if (value != null) "Hide" else "Reveal",
+                                tint = if (value != null) Color.White else OrbStyle.textSecondary
+                            ) {
                                 if (value != null) {
                                     revealed.remove(secret.id)
                                 } else {
@@ -503,31 +436,197 @@ fun OrbBitwardenSettingsPage(
                                     }
                                 }
                             }
-                            OrbBwIcon(Icons.Default.ContentCopy, "Copy") {
-                                act {
-                                    val v = revealed[secret.id] ?: OrbJSON.rawStr(
-                                        core.fetchDict("${OrbBitwardenApi.BASE}/secrets/${core.encodeComponent(secret.id)}/reveal"),
-                                        "value"
-                                    ) ?: ""
-                                    OrbStyle.copyToClipboard(context, v)
-                                    notice = "Copied"
+                            Box {
+                                OrbBwIcon(Icons.Default.MoreHoriz, "Actions") { menuOpen = true }
+                                androidx.compose.material3.DropdownMenu(
+                                    expanded = menuOpen,
+                                    onDismissRequest = { menuOpen = false },
+                                    containerColor = OrbStyle.elevated
+                                ) {
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text("Copy Value", color = Color.White) },
+                                        onClick = {
+                                            menuOpen = false
+                                            act {
+                                                val v = revealed[secret.id] ?: OrbJSON.rawStr(
+                                                    core.fetchDict("${OrbBitwardenApi.BASE}/secrets/${core.encodeComponent(secret.id)}/reveal"),
+                                                    "value"
+                                                ) ?: ""
+                                                OrbStyle.copyToClipboard(context, v)
+                                                copiedSecretId = secret.id
+                                                notice = "Copied ${secret.str("key") ?: "secret"}"
+                                            }
+                                        }
+                                    )
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text("Copy Key Name", color = Color.White) },
+                                        onClick = {
+                                            menuOpen = false
+                                            OrbStyle.copyToClipboard(context, secret.str("key") ?: "")
+                                            notice = "Copied key name"
+                                        }
+                                    )
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text("Edit", color = Color.White) },
+                                        onClick = {
+                                            menuOpen = false
+                                            act {
+                                                val d = core.fetchDict("${OrbBitwardenApi.BASE}/secrets/${core.encodeComponent(secret.id)}/reveal")
+                                                editorTarget = secret
+                                                editorKey = secret.str("key") ?: ""
+                                                editorValue = OrbJSON.rawStr(d, "value") ?: ""
+                                                editorNote = OrbJSON.rawStr(d, "note") ?: secret.str("note") ?: ""
+                                                editorOpen = true
+                                            }
+                                        }
+                                    )
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text("Delete", color = OrbStyle.error) },
+                                        onClick = {
+                                            menuOpen = false
+                                            deleteTarget = secret
+                                        }
+                                    )
                                 }
                             }
-                            OrbBwIcon(Icons.Default.Edit, "Edit") {
-                                act {
-                                    val d = core.fetchDict("${OrbBitwardenApi.BASE}/secrets/${core.encodeComponent(secret.id)}/reveal")
-                                    editorTarget = secret
-                                    editorKey = secret.str("key") ?: ""
-                                    editorValue = OrbJSON.rawStr(d, "value") ?: ""
-                                    editorNote = OrbJSON.rawStr(d, "note") ?: secret.str("note") ?: ""
-                                    editorOpen = true
-                                }
-                            }
-                            OrbBwIcon(Icons.Default.Delete, "Delete", tint = OrbStyle.error) { deleteTarget = secret }
                         }
-                        secret.str("note")?.let { Text(it, color = OrbStyle.textMuted, fontSize = 12.sp) }
                         value?.let {
-                            Text(it, color = OrbStyle.textSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(OrbStyle.card)
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                            ) {
+                                Text(it, color = OrbStyle.textSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            }
+                        }
+                    }
+                }
+            }
+
+            item(key = "account") {
+                OrbBwSection("MACHINE ACCOUNT") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .orbPressClickable { if (configured) showAccountSettings = !showAccountSettings },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (configured) OrbStyle.success else OrbStyle.warning)
+                        )
+                        Text(
+                            text = if (configured) {
+                                "Connected" + (OrbJSON.str(status, "token_hint")?.let { " · …$it" } ?: "")
+                            } else if (OrbJSON.bool(status, "bws_installed") == false) {
+                                "bws CLI is not installed on the backend"
+                            } else {
+                                "Not connected"
+                            },
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (configured) {
+                            OrbBwPill(if (showAccountSettings) "Hide" else "Configure") {
+                                showAccountSettings = !showAccountSettings
+                            }
+                        }
+                    }
+                    if (!configured || showAccountSettings) {
+                        OrbBwField("Machine account access token", tokenDraft, secret = true) { tokenDraft = it }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OrbBwPill(if (configured) "Replace token" else "Connect", primary = true, enabled = tokenDraft.isNotBlank()) {
+                                act {
+                                    status = OrbJSON.dict(
+                                        core.request("${OrbBitwardenApi.BASE}/config", method = "PUT", body = mapOf("access_token" to tokenDraft.trim()))
+                                    ) ?: status
+                                    tokenDraft = ""
+                                    loadAll()
+                                }
+                            }
+                            if (configured) {
+                                OrbBwPill("Clear token", destructive = true) {
+                                    act {
+                                        status = OrbJSON.dict(
+                                            core.request("${OrbBitwardenApi.BASE}/config", method = "PUT", body = mapOf("access_token" to ""))
+                                        ) ?: status
+                                        projects = emptyList()
+                                        secrets = emptyList()
+                                    }
+                                }
+                            }
+                        }
+                        if (configured) {
+                            val defaultId = OrbJSON.str(status, "default_project_id")
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Default project", color = OrbStyle.textMuted, fontSize = 11.sp)
+                                    Text(projectName(defaultId) ?: defaultId ?: "None", color = Color.White, fontSize = 13.sp)
+                                }
+                                Box {
+                                    OrbBwPill("Change") { showDefaultProjectPicker = true }
+                                    androidx.compose.material3.DropdownMenu(
+                                        expanded = showDefaultProjectPicker,
+                                        onDismissRequest = { showDefaultProjectPicker = false },
+                                        containerColor = OrbStyle.elevated
+                                    ) {
+                                        projects.forEach { p ->
+                                            androidx.compose.material3.DropdownMenuItem(
+                                                text = { Text(p.str("name") ?: p.id, color = Color.White) },
+                                                onClick = {
+                                                    showDefaultProjectPicker = false
+                                                    act {
+                                                        status = OrbJSON.dict(
+                                                            core.request("${OrbBitwardenApi.BASE}/config", method = "PUT", body = mapOf("default_project_id" to p.id))
+                                                        ) ?: status
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (configured && showAccountSettings && palomaProjects.isNotEmpty()) {
+                item(key = "default_access") {
+                    OrbBwSection("READ WITHOUT ASKING") {
+                        Text(
+                            "Missions in these projects may read the chosen Bitwarden projects without a request.",
+                            color = OrbStyle.textMuted,
+                            fontSize = 12.sp
+                        )
+                        val access = OrbJSON.dict(status["default_access"]) ?: emptyMap()
+                        palomaProjects.forEach { p ->
+                            val slug = p.str("slug", "id") ?: p.id
+                            val ids = OrbJSON.strList(access, slug)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .orbPressClickable { accessSlug = slug }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(p.str("name", "title") ?: slug, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                Text(
+                                    if (ids.isEmpty()) "Ask" else ids.joinToString(", ") { projectName(it) ?: it.take(8) },
+                                    color = OrbStyle.textMuted,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                )
+                            }
                         }
                     }
                 }

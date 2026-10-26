@@ -8,11 +8,23 @@ use super::*;
 pub async fn post_message(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
-    Json(req): Json<ControlMessageRequest>,
+    Json(mut req): Json<ControlMessageRequest>,
 ) -> Result<Json<ControlMessageResponse>, (StatusCode, String)> {
     let content = req.content.trim().to_string();
     if content.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "content is required".to_string()));
+    }
+    // Strip any `/api/uploads` receipt paths that older mobile builds duplicated
+    // into `req.attachments` alongside `[Uploaded: <path>]` in `content`.
+    if let Some(attachments) = req.attachments.as_mut() {
+        attachments.retain(|item| {
+            !(item.kind == crate::api::mission_payload::AttachmentKind::File
+                && item
+                    .path
+                    .as_deref()
+                    .map(|p| p.starts_with('/') && content.contains(&format!("[Uploaded: {p}]")))
+                    .unwrap_or(false))
+        });
     }
     crate::api::mission_payload::validate_user_content(&content)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
@@ -134,6 +146,12 @@ pub async fn post_message(
                 } else {
                     content
                 };
+            let content = crate::api::uploads::forward_core_uploads_in_prompt(
+                &state,
+                &placement.node_id,
+                &content,
+            )
+            .await?;
             remote_queue::enqueue(
                 &state,
                 &control,

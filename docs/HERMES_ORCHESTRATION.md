@@ -321,7 +321,7 @@ Compliance at the time of writing:
 | skill-body guard | ✓ | ✓ warns with the skill name | n/a |
 | webhook forwarder | ✓ marker divergence is the evidence | ✓ reconcile log | ✓ durable markers |
 
-For agents, the mirror rule lives in `controllers-policy`: a `terminal_reason`
+For agents, the mirror rule lives in the `orb-control` skill (controllers policy): a `terminal_reason`
 without evidence is missing data to report — never an invitation to guess.
 
 ## Known limitations

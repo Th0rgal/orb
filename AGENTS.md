@@ -119,6 +119,12 @@ scripts/check-capability-matrix.sh
 
 CI enforces formatting (`cargo fmt --check`); run it before pushing.
 
+Never push to `master` directly: open a PR and merge only when every check is
+green (pending counts as not green). Things CI checks that are easy to miss:
+the iOS project must be regenerated with the pinned xcodegen (2.46.0); Lean
+must pass `turbo-lean --json audit-spec` with no horizontal-packing warnings;
+Android unit tests load the JNI kernel once per JVM, so tests fork per class.
+
 For mobile changes, also run the iOS unit tests (`xcodebuild test` on the
 `SandboxedDashboard` scheme with a simulator) and `./gradlew :app:testDebugUnitTest
 :app:assembleDebug` in `android_dashboard/`. Boot simulators or emulators only
@@ -134,6 +140,11 @@ missions.
 
 ## Local build resource budget
 
+- Concurrent builds of different worktrees must not share one
+  `CARGO_TARGET_DIR`: they invalidate each other's `sandboxed_sh` crate and
+  queue on the Cargo lock indefinitely. Use a per-worktree target dir, or wait.
+- When waiting for other builds, check `pgrep -lx "cargo|rustc|xcodebuild"`;
+  `pgrep -f` with the pattern inside your own command line matches itself.
 - On Thomas's Mac, prefer dev/debug builds for routine development and
   validation. Use release builds only when the task requires a release artifact
   or measuring optimized runtime behaviour; explain that need before starting.
