@@ -1260,7 +1260,9 @@ def streamCommitMetaGate : MetaGateSpec StreamCommitCheck
       let nextTick : UInt8 := if s.lineTick == 1 then (if s.tick == 1 then 0 else 1) else (if s.tick == 1 then 1 else 0)
       let nextFence := streamNextFenceKind s.openKind s.openCount s.markerKind s.markerCount
       (s.lineBlank == 1 && nextTick == 0 && nextFence == 0) = true) where
-  gate s := ((streamCommitStep s.tick s.openKind s.openCount s.lineBlank s.lineTick s.markerKind s.markerCount s.pos s.commit &&& 0xFFFFFFFF) &&& 65536) != 0
+  gate s :=
+    ((streamCommitStep s.tick s.openKind s.openCount s.lineBlank s.lineTick
+        s.markerKind s.markerCount s.pos s.commit &&& 0xFFFFFFFF) &&& 65536) != 0
   sound s h := by
     unfold streamCommitStep at h
     rw [pack32_lo] at h
@@ -1271,7 +1273,11 @@ def streamCommitMetaGate : MetaGateSpec StreamCommitCheck
       cases hnf : (nf == 0) <;>
       cases hnf1 : (nf == 1) <;>
       cases hnf2 : (nf == 2) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide)
   complete s h := by
     unfold streamCommitStep
     rw [pack32_lo]
@@ -1306,7 +1312,9 @@ structure MissionAttentionCheck where
   deriving Repr, DecidableEq
 
 def missionAttentionMetaGate : MetaGateSpec MissionAttentionCheck
-    (fun m => (missionStateClassify m.stateId == 0 || missionStateClassify m.stateId == 1 || missionStateClassify m.stateId == 2) = true) where
+    (fun m => (missionStateClassify m.stateId == 0 ||
+      missionStateClassify m.stateId == 1 ||
+      missionStateClassify m.stateId == 2) = true) where
   gate m := (missionFlags m.stateId &&& 4) != 0
   sound m h := by
     revert h
@@ -1373,7 +1381,12 @@ def connectionIssueMetaGate : MetaGateSpec ConnectionIssueCheck
       cases hd1 : (c.isUsingDefault == 1) <;>
       cases ha : (c.isPrivateAddr == 1) <;>
       cases hr : (c.defaultReachable == 1) <;>
-      (simp_all; try (exfalso; revert h; decide); try decide)
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide
+       try decide)
   complete c h := by
     unfold connectionIssueClassify
     cases hu : (c.isUnreachable != 1) <;>
@@ -1484,7 +1497,11 @@ def machineActionMetaGate : MetaGateSpec MachineActionCheck
       by_cases h2 : m.stateKind ≤ 2 <;>
       cases hb : (m.isBusy == 0) <;>
       cases hm : (m.isMuted == 0) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide)
   complete m h := by
     unfold machineActionAdmitted
     split <;> (simp_all; try decide)
