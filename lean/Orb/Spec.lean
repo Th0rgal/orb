@@ -1759,7 +1759,8 @@ theorem antigravity_dispatch_matches_bound_account
 
 /-- Corollary 56 (`ClockDiscipline`, `ConservedResource` & `StickyFence` — `orb_provider_pool_step`):
     1. `rejected_account_never_routed_before_reset`: `isRejected == 1` with `nowEpoch < resetEpoch` emits zero dispatch.
-    2. `pre_first_byte_dispatch_preserves_unlocked_state`: when `firstByteSent == 0`, `next_first_byte` bit (`65536`) is `0`, preserving pre-first-byte failover.
+    2. `pre_first_byte_dispatch_preserves_unlocked_state`: when `firstByteSent == 0`,
+       the `next_first_byte` bit (`65536`) is `0`, preserving pre-first-byte failover.
     3. `failover_terminates`: `isFailoverAttempt == 1` at `attempts == maxAttempts` returns `4 (ExhaustedFailover)`.
     4. `first_byte_locks_provider`: once `firstByteSent == 1`, any failover returns `3 (AbortLockedStream)` with lock bit `65536`. -/
 theorem rejected_account_failover_and_first_byte_lock
@@ -1878,7 +1879,11 @@ def routeArgminMetaGate : MetaGateSpec RouteArgminCheck
     rw [pack32_lo] at h
     cases hc : (r.candAdmissible == 1 && (r.hasBest == 0 || decide (r.candScore < r.bestScore))) <;>
       cases hb : (r.hasBest == 1) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all
+       try
+         exfalso
+         revert h
+         decide)
   complete r h := by
     unfold routeArgminStep
     rw [pack32_lo]
