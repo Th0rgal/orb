@@ -188,6 +188,17 @@ fn has_quota(health: Option<&Health>, now: i64) -> bool {
     })
 }
 
+/// How many pools are spent or refused: with no login usable for every
+/// model, the one that still serves some pools beats one that serves none.
+fn spent_pools(health: Option<&Health>, now: i64) -> u64 {
+    let Some(h) = health else { return 0 };
+    if h.refused_until.is_some_and(|at| at > now) {
+        return 2;
+    }
+    u64::from(pool_spent(h.gemini_remaining, h.gemini_reset, now))
+        + u64::from(pool_spent(h.claude_remaining, h.claude_reset, now))
+}
+
 /// When a spent login is expected back (its latest blocking reset).
 fn usable_again(health: Option<&Health>, now: i64) -> i64 {
     let Some(h) = health else { return now };
@@ -206,7 +217,7 @@ fn usable_again(health: Option<&Health>, now: i64) -> i64 {
 
 /// The login that should serve native runs: highest priority among eligible
 /// accounts with quota left in every pool; failing that, the eligible one
-/// that comes back first; never an account Google refuses to serve.
+/// with the fewest spent pools, then the one that comes back first; never an account Google refuses to serve.
 pub(crate) fn choose<'a>(
     candidates: &'a [Candidate],
     health: &HashMap<String, Health>,
@@ -227,9 +238,7 @@ pub(crate) fn choose<'a>(
             .then_with(|| a.file.cmp(&b.file))
     });
     let now_epoch = now.max(0) as u64;
-    let any_has_quota = eligible
-        .iter()
-        .any(|c| has_quota(health.get(&c.file), now));
+    let any_has_quota = eligible.iter().any(|c| has_quota(health.get(&c.file), now));
     let route_candidates: Vec<crate::orb_spec::RouteCandidate> = eligible
         .iter()
         .enumerate()
@@ -250,9 +259,12 @@ pub(crate) fn choose<'a>(
             } else {
                 crate::orb_spec::RouteCandidate {
                     account_id: (rank + 1) as u32,
-                    score: reset_at
-                        .saturating_mul(1000)
-                        .saturating_add(rank as u64),
+                    score: (spent_pools(health.get(&c.file), now) << 56).saturating_add(
+                        reset_at
+                            .min(1 << 45)
+                            .saturating_mul(1000)
+                            .saturating_add(rank as u64),
+                    ),
                     is_rejected: false,
                     reset_epoch: 0,
                 }
@@ -264,10 +276,10 @@ pub(crate) fn choose<'a>(
         .copied()
         .find(|c| has_quota(health.get(&c.file), now))
         .or_else(|| {
-            eligible
-                .iter()
-                .copied()
-                .min_by_key(|c| usable_again(health.get(&c.file), now))
+            eligible.iter().copied().min_by_key(|c| {
+                let h = health.get(&c.file);
+                (spent_pools(h, now), usable_again(h, now))
+            })
         });
     let host_id = host_choice.and_then(|chosen| {
         eligible
@@ -890,6 +902,23 @@ mod tests {
             crate::account_limits::parse_limit_reset(raw, now, crate::account_limits::Zone::UTC)
                 .unwrap();
         assert_eq!((reset - now).num_minutes(), 129 * 60 + 43);
+    }
+
+    #[test]
+    fn with_no_fully_usable_login_the_one_still_serving_a_pool_wins() {
+        // Screenshot 2026-10-26: 1st login spent on both pools, 2nd spent on
+        // Gemini only. Claude must keep flowing through the 2nd.
+        let c = [cand("first", 20), cand("second", 10)];
+        let mut both = h(Eligibility::Eligible, Some(0.0), Some(500));
+        both.claude_remaining = Some(0.0);
+        both.claude_reset = Some(400);
+        let mut gemini_only = h(Eligibility::Eligible, Some(0.0), Some(900));
+        gemini_only.claude_remaining = Some(1.0);
+        let m = HashMap::from([("first".into(), both), ("second".into(), gemini_only)]);
+        let before = crate::provider_health::proxy_shadow_snapshot();
+        assert_eq!(choose(&c, &m, 100).unwrap().file, "second");
+        let after = crate::provider_health::proxy_shadow_snapshot();
+        assert_eq!(after.total_divergences, before.total_divergences);
     }
 
     #[test]
