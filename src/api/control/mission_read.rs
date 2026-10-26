@@ -581,6 +581,11 @@ pub async fn get_mission_digest(
         .map(|run| mission_execution_projection(run, mission.status));
 
     let goal = mission_goal_digest(&mission);
+    let queue_wait = super::dispatch_capacity::queue_wait_for(
+        &mission,
+        control.dispatch_capacity.read().await.as_ref(),
+        chrono::Utc::now(),
+    );
     Ok(Json(serde_json::json!({
         "id": mission.id,
         "title": mission.title,
@@ -606,6 +611,7 @@ pub async fn get_mission_digest(
         "updated_at": mission.updated_at,
         "acknowledged_at": (mission.status == MissionStatus::Acknowledged).then_some(mission.updated_at.clone()),
         "execution": execution,
+        "queue_wait": queue_wait,
         "mission_mode": goal["mission_mode"],
         "goal_mode": goal["goal_mode"],
         "goal_objective": goal["goal_objective"],

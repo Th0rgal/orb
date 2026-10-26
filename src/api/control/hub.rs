@@ -224,6 +224,9 @@ pub struct ControlState {
     pub(crate) assignment_owners: Arc<RwLock<HashSet<Uuid>>>,
     /// Max parallel missions allowed
     pub max_parallel: usize,
+    /// Slot usage from the last scheduler pass. Read paths use it to say a
+    /// pending mission is waiting for a slot rather than stuck.
+    pub(crate) dispatch_capacity: Arc<RwLock<Option<super::dispatch_capacity::DispatchCapacity>>>,
     /// Mission persistence (SQLite-backed)
     pub mission_store: Arc<dyn MissionStore>,
     /// Cache for semantic mission search results keyed by normalized query hash
