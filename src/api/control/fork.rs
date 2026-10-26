@@ -638,9 +638,11 @@ pub(super) fn recovery_prompt(
 }
 
 /// Node jobs start in work_root/<mission UUID>, which is also their HOME. A
-/// fork (or /btw side agent) uses the existing sibling workspace and its HOME,
-/// so it sees the toolchains and caches the source installed there
-/// (`~/.cargo`, `~/.elan`), while its job/session identity remains newly allocated.
+/// fork (or /btw side agent) works in the existing sibling workspace but keeps
+/// its own HOME: the node prepares the job's harness sign-in and conversation
+/// state there (e.g. `.gemini/antigravity-cli` linked to the node login), and
+/// pointing HOME at the source folder left the harness signed out with no
+/// history. Its job/session identity remains newly allocated.
 pub(super) async fn workspace_prefix(
     control: &ControlState,
     mission: &Mission,
@@ -677,13 +679,13 @@ pub(super) async fn workspace_prefix(
             .destination_root
             .ok_or("Transferred workspace missing")?;
         let root = shell_single_quote(&root);
-        return Ok(format!("cd -- {root} || exit 78; export HOME={root}; "));
+        return Ok(format!("cd -- {root} || exit 78; "));
     }
     Ok(workspace_command(source_id))
 }
 
 fn workspace_command(source_id: Uuid) -> String {
-    format!("fork_root=$(pwd -P); fork_root=${{fork_root%/*}}; fork_dir=\"$fork_root/{source_id}\"; [ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || {{ echo 'Fork workspace unavailable' >&2; exit 78; }}; cd -- \"$fork_dir\" || exit 78; export HOME=\"$PWD\"; ")
+    format!("fork_root=$(pwd -P); fork_root=${{fork_root%/*}}; fork_dir=\"$fork_root/{source_id}\"; [ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || {{ echo 'Fork workspace unavailable' >&2; exit 78; }}; cd -- \"$fork_dir\" || exit 78; ")
 }
 
 #[cfg(test)]
@@ -881,6 +883,7 @@ mod tests {
                     workspace_command(source_id)
                 ))
                 .current_dir(&target)
+                .env("HOME", &target)
                 .output()
                 .unwrap()
         };
@@ -892,12 +895,12 @@ mod tests {
         let mut lines = stdout.lines();
         let source = source.canonicalize().unwrap();
         assert_eq!(lines.next().unwrap(), source.to_str().unwrap());
-        // The side agent shares the source's HOME (its toolchains), not its own empty job dir.
+        // HOME stays the job's own: the node put its harness sign-in there.
         assert_eq!(
             std::path::Path::new(lines.next().unwrap())
                 .canonicalize()
                 .unwrap(),
-            source
+            target.canonicalize().unwrap()
         );
         #[cfg(unix)]
         {
