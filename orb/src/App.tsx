@@ -494,14 +494,15 @@ export default function App() {
       context: previewContext()?.id === id ? previewContext()?.pct : null };
   });
 
-  const onSettings = () => selected() === "settings" || selected() === "execution" || selected() === "routing" || selected() === "inbox-settings" || selected() === "btw-settings" || selected() === "hermes-settings" || selected() === "skills-settings" || selected() === "bitwarden-settings" || selected() === "usage-settings";
+  const SETTINGS_PAGES = new Set(["settings", "execution", "routing", "inbox-settings", "btw-settings", "hermes-settings", "skills-settings", "bitwarden-settings", "usage-settings"]);
+  const onSettings = () => SETTINGS_PAGES.has(selected() ?? "");
   const openSettings = () => {
     open("settings");
   };
   const leaveSettings = () => {
     const h = history();
     for (let i = hIdx() - 1; i >= 0; i--) {
-      if (h[i] !== "settings" && h[i] !== "routing" && h[i] !== "inbox-settings" && h[i] !== "btw-settings" && h[i] !== "hermes-settings" && h[i] !== "skills-settings" && h[i] !== "bitwarden-settings" && h[i] !== "usage-settings") {
+      if (!SETTINGS_PAGES.has(h[i] ?? "")) {
         if (selected() === "routing" && !confirmLeaveRouting(() => { if (open(h[i], false)) setHIdx(i); })) return;
         if (open(h[i], false)) setHIdx(i);
         return;

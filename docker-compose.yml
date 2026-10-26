@@ -8,7 +8,7 @@ services:
       - sandboxed-data:/root/.sandboxed-sh
       - claude-auth:/root/.claude
       # Uncomment to mount SSH keys for private git repos (Library):
-      - ~/.ssh:/root/.ssh:ro
+      # - ~/.ssh:/root/.ssh:ro
     env_file:
       - path: .env
         required: false
