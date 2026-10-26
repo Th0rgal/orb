@@ -1350,10 +1350,17 @@ mod tests {
         );
         assert!(!v_dedupe.emit_dispatch_effect);
 
-        // 6. Archived mission (`MissionStatus::Acknowledged` and `MissionStatus::Completed`) -> RejectArchived
-        for archived_status in [MissionStatus::Acknowledged, MissionStatus::Completed] {
+        // 6. Archived mission (`MissionStatus::Acknowledged` and `SUPERSEDED_TAG`) -> RejectArchived
+        for is_superseded_tag in [false, true] {
             let mut archived_mission = mission.clone();
-            archived_mission.status = archived_status;
+            if is_superseded_tag {
+                archived_mission
+                    .project
+                    .tags
+                    .push(crate::api::mission_store::SUPERSEDED_TAG.to_string());
+            } else {
+                archived_mission.status = MissionStatus::Acknowledged;
+            }
             let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
                 dir.path(),
                 store.as_ref(),
