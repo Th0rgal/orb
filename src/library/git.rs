@@ -510,12 +510,9 @@ pub async fn commit(path: &Path, message: &str, author: Option<&GitAuthor>) -> R
     }
 
     // Build commit command with optional author
-    // Sign with the shared identity only Core's own commits; an author named
-    // by the API caller is committed unsigned.
-    let mut cmd = match author {
-        Some(_) => git(),
-        None => trusted_git_at(path),
-    };
+    // Commits are never signed: the identity only authenticates fetch and
+    // push to the configured remote.
+    let mut cmd = git();
     cmd.current_dir(path);
     cmd.args(["commit", "-m", message]);
 
