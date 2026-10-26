@@ -24,6 +24,7 @@ struct SandboxedDashboardApp: App {
         // Caches/missions files); Orb keeps its own account-scoped store.
         OrbLegacyCleanup.purgeLegacyMissionCacheIfNeeded()
         OrbMemory.observeWarnings()
+        OrbUsageTelemetry.shared.start()
     }
 
     @Environment(\.scenePhase) private var scenePhase

@@ -811,6 +811,7 @@ fun OrbConversationPage(
                         if (question.isEmpty()) throw OrbError("Type a question after /btw.")
                         val child = OrbSideAgent.launch(core, id, question, latestTurns)
                         sideAgentSession = OrbSideAgentSession(child.id, question)
+                        UsageTelemetry.trackAction(UsageTelemetry.Action.Btw, "composer")
                     }
                     OrbMissionCommand.Fork -> {
                         val body = mutableMapOf<String, Any?>(
@@ -824,6 +825,7 @@ fun OrbConversationPage(
                         core.refreshMissionsQuietly()
                         currentMission = OrbRow(created)
                         commandBanner = "Forked into a new conversation"
+                        UsageTelemetry.trackAction(UsageTelemetry.Action.Fork, "composer")
                     }
                     OrbMissionCommand.Clone -> {
                         val body = mutableMapOf<String, Any?>(
@@ -857,6 +859,7 @@ fun OrbConversationPage(
     fun queueFollowUp(id: String, content: String) {
         val clientId = UUID.randomUUID().toString()
         followUps = followUps.enqueue(clientId, content)
+        UsageTelemetry.trackAction(UsageTelemetry.Action.Queue, "composer")
         scope.launch {
             try {
                 val receipt = OrbJSON.dict(
@@ -902,7 +905,10 @@ fun OrbConversationPage(
                 -1
             }
             when (OrbSendFlow.editOutcome(status.takeIf { it >= 0 })) {
-                OrbEditOutcome.Edited -> followUps = followUps.editConfirmed(queueId, content)
+                OrbEditOutcome.Edited -> {
+                    followUps = followUps.editConfirmed(queueId, content)
+                    UsageTelemetry.trackAction(UsageTelemetry.Action.MessageEdit, "followup_queue")
+                }
                 OrbEditOutcome.Unsupported -> {
                     // Older Core: replace (remove, then queue the new text at the end).
                     followUps = followUps.editReverted(queueId).hide(queueId)

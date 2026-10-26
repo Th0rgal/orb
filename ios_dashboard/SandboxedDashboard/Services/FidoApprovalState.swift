@@ -43,6 +43,7 @@ final class FidoApprovalState {
         guard let request = FidoSignRequest.parse(data) else { return }
         // The same request can arrive on several open streams (global monitor + conversation).
         guard !pendingRequests.contains(where: { $0.id == request.id }), !inFlightRequestIds.contains(request.id) else { return }
+        OrbUsageTelemetry.shared.approvalShown(request.id)
         clearExpiredRules()
 
         if matchingRule(for: request) != nil {
@@ -69,6 +70,7 @@ final class FidoApprovalState {
         guard !inFlightRequestIds.contains(requestId) else { return }
         lastError = nil
         if let message = await OrbBiometric.authenticate(reason: "Approve the SSH signing request") {
+            Self.recordApproval(requestId, .dismissed, method: .deviceOwner, consume: false)
             if !message.isEmpty {
                 lastError = message
                 OrbHaptics.error()
@@ -88,6 +90,7 @@ final class FidoApprovalState {
         defer { inFlightRequestIds.remove(requestId) }
         do {
             try await api.fidoRespond(requestId: requestId, approved: true)
+            Self.recordApproval(requestId, .approved, method: .deviceOwner)
             OrbHaptics.success()
         } catch {
             // Usually the 60 s server timeout already expired the request.
@@ -102,10 +105,18 @@ final class FidoApprovalState {
         defer { inFlightRequestIds.remove(requestId) }
         do {
             try await api.fidoRespond(requestId: requestId, approved: false)
+            Self.recordApproval(requestId, .denied, method: .none)
         } catch {
             lastError = error.localizedDescription
         }
         pendingRequests.removeAll { $0.id == requestId }
+    }
+
+    /// Usage telemetry: an SSH signing decision (never the request itself).
+    private static func recordApproval(_ id: String, _ decision: OrbTelemetryDecision, method: OrbTelemetryMethod, consume: Bool = true) {
+        let t = OrbUsageTelemetry.shared
+        let wait = consume ? t.approvalWait(id) : nil
+        t.trackApproval(kind: .tool, decision: decision, method: method, waitMs: wait, toolName: "ssh_sign")
     }
 
     // MARK: - Auto-Approval Rules

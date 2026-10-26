@@ -167,11 +167,14 @@ object OrbFido {
     private const val AUTHENTICATORS =
         BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
 
-    /** Biometric (fingerprint / face) with device-credential fallback. False if cancelled or unavailable. */
-    suspend fun authenticate(activity: FragmentActivity, req: OrbFidoRequest): Boolean {
+    /**
+     * Biometric (fingerprint / face) with device-credential fallback. Null if cancelled or
+     * unavailable, otherwise the telemetry method (biometric -> touch_id, PIN/pattern -> passcode).
+     */
+    suspend fun authenticate(activity: FragmentActivity, req: OrbFidoRequest): UsageTelemetry.Method? {
         if (BiometricManager.from(activity).canAuthenticate(AUTHENTICATORS) != BiometricManager.BIOMETRIC_SUCCESS) {
             OrbLog.w(OrbLog.Category.Auth, "FIDO approval: no biometric or device credential enrolled")
-            return false
+            return null
         }
         return suspendCancellableCoroutine { cont ->
             val prompt = BiometricPrompt(
@@ -179,11 +182,14 @@ object OrbFido {
                 ContextCompat.getMainExecutor(activity),
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                        if (cont.isActive) cont.resume(true)
+                        if (cont.isActive) cont.resume(
+                            if (result.authenticationType == BiometricPrompt.AUTHENTICATION_RESULT_TYPE_DEVICE_CREDENTIAL) UsageTelemetry.Method.Passcode
+                            else UsageTelemetry.Method.TouchId
+                        )
                     }
 
                     override fun onAuthenticationError(code: Int, message: CharSequence) {
-                        if (cont.isActive) cont.resume(false)
+                        if (cont.isActive) cont.resume(null)
                     }
                 }
             )
@@ -205,6 +211,10 @@ fun OrbFidoApprovalDialog(core: OrbCore) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     remember(context) { OrbFidoSettings.init(context); true }
+    val shownAt = remember(req.requestId) { System.currentTimeMillis() }
+    fun record(decision: UsageTelemetry.Decision, method: UsageTelemetry.Method) = UsageTelemetry.trackApproval(
+        UsageTelemetry.ApprovalKind.Tool, decision, method, System.currentTimeMillis() - shownAt, toolName = "ssh_sign"
+    )
     // Opt-in trust window (default off): same key + host, shortly after a biometric approval.
     if (OrbFidoSettings.trust.isTrusted(req)) {
         LaunchedEffect(req.requestId) {
@@ -230,7 +240,9 @@ fun OrbFidoApprovalDialog(core: OrbCore) {
             TextButton(onClick = {
                 scope.launch {
                     val activity = context.fragmentActivity()
-                    if (activity != null && OrbFido.authenticate(activity, req)) {
+                    val method = activity?.let { OrbFido.authenticate(it, req) }
+                    if (method != null) {
+                        record(UsageTelemetry.Decision.Approved, method)
                         OrbFidoSettings.trust.recordBiometricApproval(req)
                         OrbFido.respond(core, req.requestId, approved = true)
                     }
@@ -240,6 +252,7 @@ fun OrbFidoApprovalDialog(core: OrbCore) {
         },
         dismissButton = {
             TextButton(onClick = {
+                record(UsageTelemetry.Decision.Denied, UsageTelemetry.Method.None)
                 scope.launch { OrbFido.respond(core, req.requestId, approved = false) }
             }) { Text("Deny", color = OrbStyle.error) }
         }

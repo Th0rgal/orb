@@ -15,6 +15,7 @@ import sh.sandboxed.dashboard.orb.OrbGitHubSignIn
 import sh.sandboxed.dashboard.orb.OrbLog
 import sh.sandboxed.dashboard.orb.OrbMaterialTheme
 import sh.sandboxed.dashboard.orb.OrbNotifications
+import sh.sandboxed.dashboard.orb.UsageTelemetry
 
 // FragmentActivity: BiometricPrompt (device approvals, FIDO signing) needs one.
 class MainActivity : FragmentActivity() {
@@ -26,6 +27,7 @@ class MainActivity : FragmentActivity() {
         if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
+        UsageTelemetry.install(orbCore, BuildConfig.VERSION_NAME)
         handleIncomingIntent(intent, orbCore)
         // Debug-only: render the first-run screen over an existing session so
         // device inset checks can screenshot it without clearing app data.
@@ -35,6 +37,16 @@ class MainActivity : FragmentActivity() {
                 OrbAppRoot(core = orbCore, debugShowSetup = debugShowSetup)
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        UsageTelemetry.onForeground()
+    }
+
+    override fun onStop() {
+        UsageTelemetry.onBackground()
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {

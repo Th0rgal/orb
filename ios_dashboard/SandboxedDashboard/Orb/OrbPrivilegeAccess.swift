@@ -217,7 +217,7 @@ struct OrbPrivilegeAccessList: View {
             } header: { Text("Fleet posture & lean-mesh") }
             Section {
                 if monitor.pending.isEmpty { Text("No pending requests.").foregroundStyle(.secondary) }
-                ForEach(monitor.pending, id: \.selfID) { pendingRow($0) }
+                ForEach(monitor.pending, id: \.selfID) { r in pendingRow(r).onAppear { OrbUsageTelemetry.shared.approvalShown(r["id"].text) } }
             } header: { Text("Pending") } footer: {
                 Text("A grant lasts at most the mission session. Core checks and logs every command, and you can revoke it at any time.")
             }
@@ -322,6 +322,7 @@ struct OrbPrivilegeAccessList: View {
                 _ = try await OrbApprovalKey.signedCall(path, method: "POST", body: body, summary: reason)
                 error = ""
                 OrbHaptics.success()
+                OrbUsageTelemetry.recordGrant(id, approve: approve, enrolled: enrolled)
             } catch {
                 if let msg = OrbBiometric.friendlyError(error) {
                     self.error = msg

@@ -419,16 +419,19 @@ struct OrbHome: View {
                     projects: projects,
                     actionableCount: $inboxCount,
                     onOpenMission: { row in
+                        OrbUsageTelemetry.shared.trackAction(.inboxOpen, surface: "inbox")
                         linkedProject = row.raw["project"].text
                         linkedFolder = row.folder
                         linkedMission = row.id
                     }
                 )
+                .orbTrackPage("inbox")
                 .onAppear { OrbOnScreen.inboxVisible = true }
                 .onDisappear { OrbOnScreen.inboxVisible = false }
             } else {
                 projectsScrollView
                     .searchable(text: $search, prompt: "Search projects")
+                    .orbTrackPage("projects")
             }
         }
         .background(OrbStyle.background)
@@ -443,9 +446,9 @@ struct OrbHome: View {
         }
         .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
         .safeAreaInset(edge: .top, spacing: 0) { secretBanner }
-        .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet() }
-        .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet() }
-        .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet() }
+        .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet().orbTrackPage("secret_requests", surface: .sheet) }
+        .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet().orbTrackPage("mission_access", surface: .sheet) }
+        .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet().orbTrackPage("privilege_access", surface: .sheet) }
         .onChange(of: accessRequests.openRequested, initial: true) { _, open in
             if open { accessRequests.openRequested = false; accessSheet = true }
         }

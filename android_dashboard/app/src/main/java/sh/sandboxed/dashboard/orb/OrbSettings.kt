@@ -95,6 +95,7 @@ enum class OrbSettingsRoute {
     Dictation,
     SideQuestions,
     Usage,
+    UsageTelemetry,
     DebugInfo
 }
 
@@ -141,6 +142,15 @@ fun OrbSettingsSheet(
         contentColor = Color.White,
         dragHandle = null
     ) {
+        TrackPage("settings", UsageTelemetry.Surface.Sheet)
+        TrackPage(
+            "settings." + when (route) {
+                OrbSettingsRoute.Root -> "root"
+                OrbSettingsRoute.Section -> "section." + (section?.id ?: "none")
+                else -> OrbSettingsSection.of(route)?.pages?.firstOrNull { it.third == route }?.first ?: route.name.lowercase()
+            },
+            UsageTelemetry.Surface.Pane
+        )
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -287,6 +297,9 @@ fun OrbSettingsSheet(
                 OrbSettingsRoute.Usage -> {
                     OrbUsageSettingsPage(core = core, onBack = back)
                 }
+                OrbSettingsRoute.UsageTelemetry -> {
+                    OrbUsageTelemetrySettingsPage(core = core, onBack = back)
+                }
                 OrbSettingsRoute.DebugInfo -> {
                     OrbDebugInfoPage(core = core, onBack = back)
                 }
@@ -328,6 +341,7 @@ private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: In
     OrbSettingsRoute.SideQuestions -> "${serviceName(OrbBtwSettings.harness)} · ${OrbBtwSettings.model}"
     OrbSettingsRoute.DebugInfo -> "Logs, version, endpoint, recent errors"
     OrbSettingsRoute.Usage -> "Spend over time and top missions"
+    OrbSettingsRoute.UsageTelemetry -> if (UsageTelemetry.status.value["enabled"] == true) "On" else "Off"
     else -> ""
 }
 

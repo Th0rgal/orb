@@ -683,6 +683,7 @@ struct OrbBitwardenSettings: View {
             } else {
                 _ = try await OrbApprovalKey.signedCall("/api/bitwarden/requests/\(id)/reject", method: "POST", summary: "Decline: \(describe(r))")
             }
+            OrbUsageTelemetry.recordGrant(id, approve: scope != nil, enrolled: true)
             OrbHaptics.success()
         } catch {
             if let msg = OrbBiometric.friendlyError(error) {

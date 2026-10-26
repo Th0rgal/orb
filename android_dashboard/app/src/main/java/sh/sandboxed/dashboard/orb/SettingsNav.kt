@@ -8,7 +8,7 @@ package sh.sandboxed.dashboard.orb
  * they belong to.
  */
 enum class OrbSettingsSection(val id: String, val label: String, val subtitle: String) {
-    Account("account", "Account", "Your server connection, connected accounts and how Orb looks."),
+    Account("account", "Account", "Your server connection, connected accounts, how Orb looks and usage telemetry."),
     Models("models", "Models", "Fallback order, provider health, usage over time and API keys."),
     Agents("agents", "Agents", "What agents know and can do, the Assistant, and the agents on this computer."),
     Security("security", "Security", "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets."),
@@ -19,6 +19,7 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
         get() = when (this) {
             Account -> listOf(
                 Triple("settings", "Account", OrbSettingsRoute.Backend),
+                Triple("usage-telemetry", "Usage telemetry", OrbSettingsRoute.UsageTelemetry),
                 Triple("dictation", "Dictation", OrbSettingsRoute.Dictation),
                 Triple("debug", "Advanced", OrbSettingsRoute.DebugInfo),
             )

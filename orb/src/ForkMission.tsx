@@ -8,6 +8,7 @@ import { For, Show, createEffect, createSignal, on, onMount } from "solid-js";
 import { archiveMission, cancelMission, forkMission, getMission, shortModelLabel, type HarnessChoice, type Mission } from "./api";
 import { effortLabel, supportedEfforts } from "./effort";
 import { Menu } from "./Menu";
+import { usageTelemetry } from "./usageTelemetry";
 
 export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; destination: string; anchor?: HTMLElement; onOpen?: () => void; onClose: () => void; onFork: (mission: Mission) => void }) {
   const [backend, setBackend] = createSignal(p.mission.backend ?? p.choices[0]?.backend.id ?? "");
@@ -30,7 +31,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
   const fork = async (effort = "") => {
     if (busy() || !backend() || unavailable(backend()) || !choices().some(choice => choice.value === model())) return;
     setBusy(true); setError("");
-    try { if(backend()==="codex")await requireSpeedSupport(model(),speed(),undefined,!!localBinding(p.mission.id)); const next = await forkMission(p.mission.id, { backend: backend(), model_override: model(), model_effort: effort, service_tier:backend()==="codex"?speed():undefined, idempotency_key: key }); p.onFork(next); void retireTransferredSource(p.mission.id); }
+    try { if(backend()==="codex")await requireSpeedSupport(model(),speed(),undefined,!!localBinding(p.mission.id)); const next = await forkMission(p.mission.id, { backend: backend(), model_override: model(), model_effort: effort, service_tier:backend()==="codex"?speed():undefined, idempotency_key: key }); p.onFork(next); usageTelemetry.action("fork", "mission"); void retireTransferredSource(p.mission.id); }
     catch (e) {setError(e instanceof Error ? e.message : String(e));}
     finally {setBusy(false);}
   };
