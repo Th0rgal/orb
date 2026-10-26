@@ -800,7 +800,18 @@ impl SqliteMissionStore {
                     .map_err(|e| e.to_string())?;
                 let mut result = Vec::new();
                 for row in rows {
-                    result.push(row.map_err(|e| e.to_string())?);
+                    let ev = row.map_err(|e| e.to_string())?;
+                    let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
+                        Some(since_seq.max(0) as u64),
+                        None,
+                        ev.sequence.max(0) as u64,
+                        true,
+                        result.len() as u32,
+                        ev.sequence > since_seq,
+                    );
+                    if verdict.include_item {
+                        result.push(ev);
+                    }
                 }
                 result
             } else {
@@ -810,7 +821,18 @@ impl SqliteMissionStore {
                     .map_err(|e| e.to_string())?;
                 let mut result = Vec::new();
                 for row in rows {
-                    result.push(row.map_err(|e| e.to_string())?);
+                    let ev = row.map_err(|e| e.to_string())?;
+                    let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
+                        Some(since_seq.max(0) as u64),
+                        None,
+                        ev.sequence.max(0) as u64,
+                        true,
+                        result.len() as u32,
+                        ev.sequence > since_seq,
+                    );
+                    if verdict.include_item {
+                        result.push(ev);
+                    }
                 }
                 result
             };
@@ -893,7 +915,18 @@ impl SqliteMissionStore {
                     .map_err(|e| e.to_string())?;
                 let mut result = Vec::new();
                 for row in rows {
-                    result.push(row.map_err(|e| e.to_string())?);
+                    let ev = row.map_err(|e| e.to_string())?;
+                    let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
+                        None,
+                        Some(before_seq.max(0) as u64),
+                        ev.sequence.max(0) as u64,
+                        true,
+                        result.len() as u32,
+                        ev.sequence < before_seq,
+                    );
+                    if verdict.include_item {
+                        result.push(ev);
+                    }
                 }
                 result
             } else {
@@ -903,7 +936,18 @@ impl SqliteMissionStore {
                     .map_err(|e| e.to_string())?;
                 let mut result = Vec::new();
                 for row in rows {
-                    result.push(row.map_err(|e| e.to_string())?);
+                    let ev = row.map_err(|e| e.to_string())?;
+                    let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
+                        None,
+                        Some(before_seq.max(0) as u64),
+                        ev.sequence.max(0) as u64,
+                        true,
+                        result.len() as u32,
+                        ev.sequence < before_seq,
+                    );
+                    if verdict.include_item {
+                        result.push(ev);
+                    }
                 }
                 result
             };
