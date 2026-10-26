@@ -2,83 +2,71 @@ import { expect, test } from "@playwright/test";
 
 test.use({ browserName: "webkit", viewport: { width: 1120, height: 960 } });
 
-test("skills settings displays harness matrix, resolves drift with one click, and previews skills in dark and light mode", async ({
-  page,
-}) => {
+test("skills pane: one repo line, one badge per row, attention filter, automatic sync, editor controls", async ({ page }) => {
   await page.goto("/tests/skills-settings.html");
 
-  const compatSection = page.getByRole("region", { name: "Harness compatibility" });
-  await expect(compatSection).toBeVisible();
+  const catalog = page.getByRole("region", { name: "Library skills" });
+  await expect(catalog).toContainText("Th0rgal/sandboxed-library");
+  await expect(catalog).toContainText("synced 2m ago");
+  await expect(page.getByRole("button", { name: /Sync all harnesses/ })).toHaveCount(0);
 
-  const agyRow = compatSection.locator('details[data-harness="antigravity"]');
-  await expect(agyRow).toContainText("Out of sync · 2/37");
+  // One badge per row, only when unusual; its actions live in the row's menu.
+  const policy = catalog.locator('[data-skill="controllers-policy"]');
+  await expect(policy.locator(".skills-badge")).toHaveText(["Edited on this Mac"]);
+  await expect(policy.getByRole("button", { name: /Keep|Discard/ })).toHaveCount(0);
+  await policy.getByRole("button", { name: "Actions for controllers-policy" }).click();
+  await expect(page.getByRole("menuitem", { name: "Keep this Mac’s version" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Discard this Mac’s edit" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: /Delete/ })).toBeVisible();
+  await page.keyboard.press("Escape");
+  const legacy = catalog.locator('[data-skill="spark-lean-offload"]');
+  await expect(legacy.locator(".skills-badge")).toHaveText(["Only in an old folder"]);
+  await legacy.click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Import to the Library" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(catalog.locator(".skills-origin-tag, .skills-aud")).toHaveCount(0);
 
-  // Expand Antigravity row to inspect missing skills
-  await agyRow.locator("summary").click();
-  await expect(agyRow).toContainText("Missing 5 canonical skills in ~/.agents/skills");
-  await expect(agyRow.locator(".skills-mini-chip").first()).toBeVisible();
+  // One "Needs attention" filter.
+  const attention = catalog.getByRole("button", { name: /Needs attention/ });
+  await attention.click();
+  await expect(catalog.locator(".skills-item[data-skill]").filter({ hasNot: page.locator(".skills-badge") })).toHaveCount(0);
+  await attention.click();
+  await expect(catalog).toContainText("aristotle-lean");
+  await page.screenshot({ path: "test-results/skills-settings-dark.png" });
 
-  // Unified catalog: badges for audience, scope, sources and problems.
-  const catalogSection = page.getByRole("region", { name: "Global and Library skills catalog" });
-  const policyItem = catalogSection.locator('[data-skill="controllers-policy"]');
-  await expect(policyItem).toContainText("common");
-  await expect(policyItem).toContainText("Divergent");
-  await expect(catalogSection.locator('[data-skill="spark-lean-offload"]')).toContainText("Only in legacy folder");
-
-  // Delivery preview with project selection and reasons.
+  // Drift is fixed without a button once the Library is loaded.
+  await page.locator("details.skills-advanced > summary").click();
+  const agyRow = page.getByRole("region", { name: "Harness compatibility" }).locator('details[data-harness="antigravity"]');
+  await expect(agyRow).toContainText("Synced · 37 skills");
   const delivery = page.getByRole("region", { name: "Skill delivery preview" });
   await delivery.getByLabel("Preview project").selectOption("erdos-647");
   await expect(delivery).toContainText("Resolved delivery (4)");
-  await expect(delivery).toContainText("Missing from the Library: lean-blueprint");
-  await delivery.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: "test-results/skills-delivery-dark.png" });
 
-  // Detail panel: editor, audience controls, copies with diff.
-  await policyItem.getByRole("button").first().click();
+  // One panel: the skill's files as a tree, the open file on the right.
+  await policy.locator(".skills-item-head").click();
   const dialog = page.getByRole("dialog");
-  // Divergent skills open on their copies; the editor is one tab away.
-  await dialog.getByRole("tab", { name: "SKILL.md" }).click();
-  await expect(dialog.locator(".skills-editor")).toContainText("STATE_SIGNATURE");
-  await expect(dialog.getByRole("button", { name: /Common/ })).toBeVisible();
+  await expect(dialog.getByRole("tree", { name: "controllers-policy files" })).toBeVisible();
+  await expect(dialog.locator(".skills-version, .skills-diff")).toHaveCount(0);
+  await expect(dialog.locator(".skills-oldcopy")).toContainText("Old copy in");
+  // Opens on the rendered markdown; Edit shows the source.
+  await expect(dialog.locator(".skills-md-view")).toContainText("STATE_SIGNATURE");
+  await expect(dialog.getByRole("button", { name: "Edit" })).toBeVisible();
+  await expect(dialog.getByRole("group", { name: "Who uses it" }).getByRole("checkbox")).toHaveCount(3);
+  await expect(dialog.getByRole("radio", { name: "Always" })).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByRole("button", { name: "History" })).toBeVisible();
+  // Nothing touches the panel edges.
+  const box = (await dialog.boundingBox())!, body = (await dialog.locator(".skills-panel").boundingBox())!;
+  expect(body.x - box.x).toBeGreaterThanOrEqual(16);
+  expect(box.x + box.width - (body.x + body.width)).toBeGreaterThanOrEqual(16);
+  // Delete confirms inside the panel, never as a dialog on top.
+  await dialog.getByRole("button", { name: "Delete…" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await expect(dialog.getByRole("alertdialog", { name: "Delete controllers-policy?" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
   await page.waitForTimeout(250);
   await page.screenshot({ path: "test-results/skills-detail-dark.png" });
-  await dialog.getByRole("tab", { name: /Copies/ }).click();
-  await dialog.getByRole("button", { name: "Compare" }).click();
-  await expect(dialog.locator(".skills-diff")).toBeVisible();
-  await page.screenshot({ path: "test-results/skills-detail-diff-dark.png" });
   await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
-  await expect(dialog).toHaveCount(0);
 
-  // Verify project skills appear as project-sourced rows.
-  await expect(catalogSection).toContainText("aristotle-lean");
-
-  await page.evaluate(() => {
-    document.querySelector(".s-body")?.scrollTo(0, 0);
-  });
-  await page.screenshot({ path: "test-results/skills-settings-dark.png" });
-
-  await page.evaluate(() => {
-    const el = document.querySelector(".s-body");
-    if (el) el.scrollTo(0, el.scrollHeight);
-  });
-  await page.screenshot({ path: "test-results/skills-settings-dark-bottom.png" });
-
-  await page.evaluate(() => {
-    document.querySelector(".s-body")?.scrollTo(0, 0);
-  });
-
-  // Click Sync all harnesses and verify drift is resolved
-  const syncBtn = page.getByRole("button", { name: /Sync all harnesses \(2 out of date\)/ });
-  await syncBtn.click();
-  await expect(page.getByRole("status")).toContainText(
-    "Synchronized 37 skills across all 6 local harness directories",
-  );
-  await expect(agyRow).toContainText("Synced · 37 skills");
-
-  // Switch to light mode and capture screenshot
-  await page.evaluate(() => {
-    document.documentElement.dataset.theme = "light";
-    document.querySelector(".s-body")?.scrollTo(0, 0);
-  });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "light"; document.querySelector(".s-body")?.scrollTo(0, 0); });
   await page.screenshot({ path: "test-results/skills-settings-light.png" });
 });

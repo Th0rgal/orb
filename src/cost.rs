@@ -211,6 +211,12 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         aliases: &["gpt-6.1-sol", "gpt-6-1-sol", "gpt-6.1"],
         pricing: pricing(5_000, 30_000, Some(6_250), Some(500)),
     },
+    // GPT-6.1 Terra (Codex catalog 2026-10-26): GPT-5.6 Terra rates likewise.
+    PricingEntry {
+        canonical: "gpt-6.1-terra",
+        aliases: &["gpt-6.1-terra", "gpt-6-1-terra"],
+        pricing: pricing(2_500, 15_000, Some(3_125), Some(250)),
+    },
     PricingEntry {
         canonical: "gpt-6-sol",
         aliases: &["gpt-6-sol"],

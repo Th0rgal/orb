@@ -13,7 +13,7 @@ it("checks every machine with the one sign-in and lists where it runs", async ()
     return [["agy-demo", "Gemini 4 Argon"]];
   });
   const ui = render(() => <AntigravityProvider />);
-  await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Available on Core, ashur"));
+  await waitFor(() => expect(ui.getByRole("status").getAttribute("title")).toContain("Available on Core, ashur"));
   expect(ui.getByText("nippur unavailable")).toBeTruthy();
   expect(ui.queryByLabelText("Antigravity machine")).toBeNull();
   expect(discovery.mock.calls.map(c => c[0]).sort()).toEqual(["ashur", "core", "nippur"]);
@@ -31,7 +31,7 @@ it("retries a single machine without rechecking the others", async () => {
   await waitFor(() => expect(ui.getByText("nippur unavailable")).toBeTruthy());
   discovery.mockResolvedValueOnce([["agy-demo", "Gemini 4 Argon"]]);
   fireEvent.click(ui.getByRole("button", { name: "Retry" }));
-  await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Available on Core, nippur"));
+  await waitFor(() => expect(ui.getByRole("status").getAttribute("title")).toContain("Available on Core, nippur"));
   expect(discovery.mock.calls.filter(c => c[0] === "core")).toHaveLength(1);
 });
 
@@ -41,7 +41,7 @@ it("keeps Core when the machine inventory fails and reloads on refresh", async (
   const ui = render(() => <AntigravityProvider />);
   await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Available on Core"));
   window.dispatchEvent(new Event("orb:providers-refresh"));
-  await waitFor(() => expect(ui.getByRole("status").textContent).toBe("Available on Core, new-node"));
+  await waitFor(() => expect(ui.getByRole("status").getAttribute("title")).toContain("Available on Core, new-node"));
 });
 
 it("ignores late answers from a previous connection", async () => {

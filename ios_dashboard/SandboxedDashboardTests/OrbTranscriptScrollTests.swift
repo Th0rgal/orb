@@ -49,6 +49,44 @@ final class OrbTranscriptScrollTests: XCTestCase {
         XCTAssertFalse(scroller.showsJumpToLatest)
     }
 
+    @MainActor func testSingleScrollCorrectionPerLayoutEpochAndClientParity() {
+        let scroller = OrbTranscriptScroller()
+        scroller.update(metrics(offset: 3600))
+        let epoch1 = scroller.layoutEpoch
+        XCTAssertEqual(scroller.correctionsInEpoch, 1, "first layout pass in epoch applies one scroll correction")
+        XCTAssertEqual(scroller.lastCorrectedEpoch, epoch1)
+
+        // Second pass in the same layoutEpoch must be suppressed (`scroll_single_correction_per_epoch`)
+        let secondInSameEpoch = scroller.evaluateEpochScrollCorrection(targetTop: 3817, currentTop: 3700)
+        XCTAssertFalse(secondInSameEpoch, "duplicate scroll correction in the same layout epoch is suppressed")
+        XCTAssertEqual(scroller.correctionsInEpoch, 1)
+
+        // Advancing to a new layout epoch (content height grows) admits exactly one new correction
+        scroller.update(metrics(offset: 3600, content: 4800))
+        XCTAssertEqual(scroller.layoutEpoch, epoch1 + 1)
+        XCTAssertEqual(scroller.correctionsInEpoch, 1)
+        XCTAssertEqual(scroller.lastCorrectedEpoch, epoch1 + 1)
+
+        // Verify cross-client parity digest across Core (0), iOS (1), Android (2), and Desktop wasm32 (3)
+        let coreParity = OrbKernel.clientParityStep(
+            clientTarget: 0, wireSchemaId: 1, transcriptSeq: 42, markdownBlocksCount: 7, sendQueueDepth: 1, scrollCorrectedInEpoch: 1
+        )
+        let iosParity = OrbKernel.clientParityStep(
+            clientTarget: 1, wireSchemaId: 1, transcriptSeq: 42, markdownBlocksCount: 7, sendQueueDepth: 1, scrollCorrectedInEpoch: 1
+        )
+        let androidParity = OrbKernel.clientParityStep(
+            clientTarget: 2, wireSchemaId: 1, transcriptSeq: 42, markdownBlocksCount: 7, sendQueueDepth: 1, scrollCorrectedInEpoch: 1
+        )
+        let wasmParity = OrbKernel.clientParityStep(
+            clientTarget: 3, wireSchemaId: 1, transcriptSeq: 42, markdownBlocksCount: 7, sendQueueDepth: 1, scrollCorrectedInEpoch: 1
+        )
+        XCTAssertTrue(iosParity.parityAdmitted)
+        XCTAssertTrue(iosParity.singleScrollCorrectionOk)
+        XCTAssertEqual(coreParity.digest32, iosParity.digest32)
+        XCTAssertEqual(iosParity.digest32, androidParity.digest32)
+        XCTAssertEqual(androidParity.digest32, wasmParity.digest32)
+    }
+
     func testInlinePreviewNeverEndsInsideATableOrFence() {
         let table = (1...200).map { "| row \($0) | value \($0) | more |" }.joined(separator: "\n")
         let source = "# Title\n\nIntro paragraph.\n\n| A | B | C |\n| --- | --- | --- |\n" + table

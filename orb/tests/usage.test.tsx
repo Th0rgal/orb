@@ -53,6 +53,12 @@ export function summary(window = "24h"): UsageSummary {
   };
 }
 
+/** The page opens on top missions; these cases read the per-model breakdown. */
+async function showByModel() {
+  fireEvent.change(await screen.findByLabelText("Group by"), { target: { value: "model" } });
+  await screen.findByText("gemini-4-argon");
+}
+
 describe("usage helpers", () => {
   it("builds queries with only set filters", () => {
     expect(usageQuery("5h", { provider: "google", backend: "" })).toBe("/api/ai/usage/summary?window=5h&provider=google");
@@ -99,7 +105,7 @@ describe("Usage page", () => {
 
   it("shows totals, router attribution and unknown costs, and filters by key", async () => {
     render(() => <UsageSettings />);
-    await screen.findByText("gemini-4-argon");
+    await showByModel();
     expect(screen.getByText("$6.10+")).toBeTruthy();
     expect(screen.getByText("96%")).toBeTruthy();
     expect(within(screen.getByRole("table", { name: "Usage by model" })).getByText("Unknown")).toBeTruthy();
@@ -121,7 +127,7 @@ describe("Usage page", () => {
 
   it("breaks usage down by caller kind, filters by caller and toggles day/hour", async () => {
     render(() => <UsageSettings />);
-    await screen.findByText("gemini-4-argon");
+    await showByModel();
     const groupBy = screen.getByLabelText("Group by") as HTMLSelectElement;
     groupBy.value = "caller_kind";
     fireEvent.change(groupBy);
@@ -130,10 +136,10 @@ describe("Usage page", () => {
     await waitFor(() => expect(requests).toContain("/api/ai/usage/summary?window=24h&caller_kind=subagent"));
     await waitFor(() => expect((screen.getByLabelText("Caller") as HTMLSelectElement).value).toBe("subagent"));
 
-    const chart = () => screen.getByRole("figure");
-    expect(chart().getAttribute("aria-label")).toBe("tokens per hour");
+    const chart = () => screen.getAllByRole("figure")[0];
+    expect(chart().getAttribute("aria-label")).toBe("cost per hour by provider");
     fireEvent.click(screen.getByRole("radio", { name: "Day" }));
-    await waitFor(() => expect(chart().getAttribute("aria-label")).toBe("tokens per day"));
+    await waitFor(() => expect(chart().getAttribute("aria-label")).toBe("cost per day by provider"));
     const window = screen.getByLabelText("Time window") as HTMLSelectElement;
     window.value = "30d";
     fireEvent.change(window);
@@ -168,7 +174,7 @@ describe("Usage page", () => {
       return new Response("not found", { status: 404 });
     }));
     render(() => <UsageSettings />);
-    await screen.findByText("gemini-4-argon");
+    await showByModel();
     await waitFor(() => expect(screen.getByRole("region", { name: "Reliability" }).textContent).toContain("unavailable"));
   });
 });

@@ -659,14 +659,40 @@ pub fn always_signed(method: &Method, path: &str) -> bool {
     )
 }
 
+/// Decodes RFC 3986 unreserved percent-encodings (`-`, `_`, `~`) produced by
+/// `CharacterSet.alphanumerics` on older iOS builds while keeping all other
+/// percent sequences intact so `path.contains('%')` still blocks encoded
+/// separators or traversal bytes.
+pub(crate) fn normalize_unreserved_percent_encoding(path: &str) -> String {
+    if !path.contains('%') {
+        return path.to_string();
+    }
+    path.replace("%2D", "-")
+        .replace("%2d", "-")
+        .replace("%5F", "_")
+        .replace("%5f", "_")
+        .replace("%7E", "~")
+        .replace("%7e", "~")
+}
+
 /// Middleware: runs after authentication; only acts on protected operations.
 pub async fn require_device_approval(
     State(state): State<Arc<AppState>>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let raw_path = req.uri().path().to_string();
+    let path = normalize_unreserved_percent_encoding(&raw_path);
+    if path != raw_path {
+        let pq = match req.uri().query() {
+            Some(q) if !q.is_empty() => format!("{path}?{q}"),
+            _ => path.clone(),
+        };
+        if let Ok(new_uri) = pq.parse::<axum::http::Uri>() {
+            *req.uri_mut() = new_uri;
+        }
+    }
     let guarded_prefix = path.starts_with("/api/bitwarden")
         || path.starts_with("/api/approvals")
         || path.starts_with("/api/mission-access")
@@ -768,7 +794,7 @@ async fn challenge(
     let method = req.method.trim().to_ascii_uppercase();
     let method_parsed = Method::from_bytes(method.as_bytes())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Bad method".into()))?;
-    let path = req.path.split('?').next().unwrap_or("").to_string();
+    let path = normalize_unreserved_percent_encoding(req.path.split('?').next().unwrap_or(""));
     // Enrollment by an existing device signs the enroll request itself.
     let enroll =
         method_parsed == Method::POST && path.trim_end_matches('/') == "/api/approvals/devices";
@@ -828,7 +854,7 @@ async fn enroll_device(
         .get(HEADER)
         .and_then(|h| h.to_str().ok())
         .map(str::to_string);
-    let path = req.uri().path().to_string();
+    let path = normalize_unreserved_percent_encoding(req.uri().path());
     let bytes = to_bytes(req.into_body(), MAX_BODY)
         .await
         .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "Body too large".to_string()))?;
@@ -842,10 +868,30 @@ async fn enroll_device(
             "platform must be macos, ios or android".into(),
         ));
     }
+    let trimmed_pubkey = body.public_key.trim().to_string();
+    {
+        let data = store.data.lock().await;
+        if let Some(existing) = data
+            .devices
+            .iter()
+            .find(|d| d.revoked_at.is_none() && d.public_key == trimmed_pubkey)
+            .cloned()
+        {
+            return Ok(Json(existing));
+        }
+    }
+    let has_active_platform_device = store
+        .data
+        .lock()
+        .await
+        .devices
+        .iter()
+        .any(|d| d.revoked_at.is_none() && d.platform == platform);
+    let mode = store.mode().await;
     let authorized = match (&header, &body.enrollment_code) {
         (Some(h), _) => store.verify(h, "POST", &path, &bytes).await.is_ok(),
-        (None, Some(code)) => store.take_enrollment_code(code).await,
-        _ => false,
+        (None, Some(code)) if !code.trim().is_empty() => store.take_enrollment_code(code).await,
+        _ => mode == Mode::Warn && !has_active_platform_device,
     };
     if !authorized {
         return Err((
@@ -857,18 +903,19 @@ async fn enroll_device(
         id: Uuid::new_v4(),
         name: body.name.trim().chars().take(80).collect(),
         platform,
-        public_key: body.public_key.trim().to_string(),
+        public_key: trimmed_pubkey,
         created_at: Utc::now(),
         last_used_at: None,
         revoked_at: None,
     };
     let mut data = store.data.lock().await;
-    if data
+    if let Some(existing) = data
         .devices
         .iter()
-        .any(|d| d.revoked_at.is_none() && d.public_key == device.public_key)
+        .find(|d| d.revoked_at.is_none() && d.public_key == device.public_key)
+        .cloned()
     {
-        return Err((StatusCode::CONFLICT, "This key is already enrolled".into()));
+        return Ok(Json(existing));
     }
     data.devices.push(device.clone());
     if let Err(e) = store.save(&data).await {
@@ -1053,5 +1100,19 @@ mod tests {
         let q = quoted("evil\nAllow: read\u{202e}x\"y");
         assert!(!q.contains('\n') && !q.contains('\u{202e}'));
         assert_eq!(quoted(&"a".repeat(200)).len(), 62);
+    }
+
+    #[test]
+    fn normalize_unreserved_percent_encoding_decodes_uuid_hyphens_only() {
+        assert_eq!(
+            normalize_unreserved_percent_encoding(
+                "/api/privilege-access/1722a8ac%2D49c5%2D4193%2D9317%2D7498a0dceffd/approve"
+            ),
+            "/api/privilege-access/1722a8ac-49c5-4193-9317-7498a0dceffd/approve"
+        );
+        assert!(
+            normalize_unreserved_percent_encoding("/api/privilege-access/%2e%2e/approve")
+                .contains('%')
+        );
     }
 }

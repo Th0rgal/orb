@@ -1,9 +1,10 @@
 import { HARNESS_IDS } from "./harnesses";
 import { swallow } from "./log";
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { Select } from "./Select";
 import { ConfirmDialog, Field, NameDialog } from "./Dialog";
+import { PopupMenu, type MenuEntry } from "./Menu";
 import {
   connectionVersion,
   getRemoteNodes,
@@ -29,10 +30,11 @@ import {
   type SyncSkillPayload,
 } from "./localAgents";
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
-import { newSkillTemplate, normalizeSkillName, parseSkillMeta } from "./skillModel";
-import { buildSkillRows, filterSkillRows, type ProblemFilter, type ProjectContextSkill, type SkillRow } from "./skillRows";
-import { deleteLibrarySkill, fetchLibrarySkill, getProjectSkills, putLibrarySkill, putProjectSkills, putSkillFile, readSkillFile } from "./skillsApi";
-import { SkillBadges, SkillDetail } from "./SkillDetail";
+import { effectiveAudience, newSkillTemplate, normalizeSkillName, parseSkillMeta, setSandboxedMeta } from "./skillModel";
+import { SKILL_BADGE_LABEL, buildSkillRows, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
+import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, getLibraryStatus, getProjectSkills, putLibrarySkill, putProjectSkills, putSkillFile, readSkillFile, repoLabel, syncLibrary, type LibraryStatus } from "./skillsApi";
+import { orbRelativeTimeString } from "./orbKernel";
+import { SkillDetail, dropsSandboxedMetadata } from "./SkillDetail";
 import { SkillDeliveryPreview } from "./SkillDelivery";
 
 export interface HarnessCatalogRow {
@@ -124,6 +126,8 @@ let cachedSkillNames: string[] = [
 ];
 
 /** Reactive list of known skill names for autocomplete in ControllerSettings. */
+let cachedReport: LocalSkillsReport | null = null;
+
 export function knownSkillNames(): string[] {
   return cachedSkillNames;
 }
@@ -137,21 +141,21 @@ export function rememberKnownSkillNames(names: Iterable<string>) {
   cachedSkillNames = [...merged].sort();
 }
 
-const PROBLEM_FILTERS: Array<[ProblemFilter, string]> = [
-  ["all", "All"],
-  ["problems", "Problems"],
-  ["drift", "Drift"],
-  ["divergent", "Divergent"],
-  ["legacy", "Only legacy"],
-  ["lint", "Lint"],
-];
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** Plain words instead of a raw 500 dump; the detail stays in the message for support. */
+function deleteMessage(name: string, e: unknown): string {
+  const raw = errorText(e).replace(/^\d{3}\s+/, "");
+  if (/gpg|sign/i.test(raw)) return `Core couldn’t sign the Library commit, so ${name} is still there. (${raw.slice(0, 120)})`;
+  if (/push|rejected|denied/i.test(raw)) return `Core couldn’t push the Library, so the delete isn’t saved yet. (${raw.slice(0, 120)})`;
+  return `Couldn’t delete ${name}: ${raw}`;
+}
 
 export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [machine, setMachine] = createSignal<string>("local");
   const [remoteNodes, setRemoteNodes] = createSignal<RemoteNodeView[]>([]);
-  const [localReport, setLocalReport] = createSignal<LocalSkillsReport | null>(null);
+  // Per-harness reads are cached for the session; reopening shows them at once and refreshes behind.
+  const [localReport, setLocalReport] = createSignal<LocalSkillsReport | null>(cachedReport);
   const [librarySkills, setLibrarySkills] = createSignal<LibrarySkillSummary[]>([]);
   const [libraryFull, setLibraryFull] = createSignal<Record<string, LibrarySkill>>({});
   const [libraryLoaded, setLibraryLoaded] = createSignal(false);
@@ -160,17 +164,23 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [projectSkills, setProjectSkills] = createSignal<ProjectContextSkill[]>([]);
   // Library skills each project lists (PUT /api/projects/:slug/skills), keyed by project slug.
   const [projectSelections, setProjectSelections] = createSignal<Record<string, string[]>>({});
-  const [whereFilter, setWhereFilter] = createSignal("all");
   const [loading, setLoading] = createSignal(false);
   const [syncing, setSyncing] = createSignal(false);
   const [syncNotice, setSyncNotice] = createSignal<string | null>(null);
   const [syncError, setSyncError] = createSignal<string | null>(null);
   const [search, setSearch] = createSignal("");
-  const [audienceFilter] = createSignal("all");
-  const [scopeFilter] = createSignal("all");
-  const [problemFilter, setProblemFilter] = createSignal<ProblemFilter>("all");
+  const [attentionOnly, setAttentionOnly] = createSignal(false);
+  const [advancedOpen, setAdvancedOpen] = createSignal(false);
+  // Rows being deleted are hidden at once and come back if the delete fails.
+  const [deleting, setDeleting] = createSignal<ReadonlySet<string>>(new Set());
+  const [rowMenu, setRowMenu] = createSignal<{ row: SkillRow; x: number; y: number } | null>(null);
+  const [openView, setOpenView] = createSignal<"edit" | "history">("edit");
+  const [confirmRowDelete, setConfirmRowDelete] = createSignal<string | null>(null);
+  const [rowDeleteBusy, setRowDeleteBusy] = createSignal(false);
+  const [rowDeleteError, setRowDeleteError] = createSignal<string | null>(null);
+  const [repo, setRepo] = createSignal<LibraryStatus | null>(null);
+  const [pulling, setPulling] = createSignal(false);
   const [openSkill, setOpenSkill] = createSignal<string | null>(null);
-  const [confirmPrune, setConfirmPrune] = createSignal<string[] | null>(null);
   const [creating, setCreating] = createSignal(false);
   const [newName, setNewName] = createSignal("");
   const [newDesc, setNewDesc] = createSignal("");
@@ -197,21 +207,28 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   };
 
   /** Fetch every Library skill body; the Library is the canonical source for local sync. */
-  const loadLibrary = async () => {
+  // Rows render from the Library index at once; bodies (needed for drift and
+  // divergence) arrive in the background and land in one update.
+  const loadLibrary = async (): Promise<{ bodies: Promise<void> }> => {
     const items = await listLibrarySkills();
-    const fetched = await Promise.all(items.map((s) => fetchLibrarySkill(s.name).catch(() => null)));
-    const map: Record<string, LibrarySkill> = {};
-    for (const skill of fetched) if (skill) map[skill.name] = skill;
     setLibrarySkills(items);
-    setLibraryFull(map);
-    setLibraryLoaded(true);
     setLibraryError(null);
     rememberKnownSkillNames(items.map((s) => s.name));
+    const bodies = (async () => {
+      const fetched = await Promise.all(items.map((s) => fetchLibrarySkill(s.name).catch(() => null)));
+      const map: Record<string, LibrarySkill> = {};
+      for (const skill of fetched) if (skill) map[skill.name] = skill;
+      setLibraryFull(map);
+      setLibraryLoaded(true);
+    })();
+    // Wrapped: an async function returning a bare promise would wait for it.
+    return { bodies };
   };
 
   const refreshReport = async () => {
     const rep = await localSkillsStatus(libraryPayloads());
     if (rep) {
+      cachedReport = rep;
       setLocalReport(rep);
       rememberKnownSkillNames(rep.skills.map((s) => s.name));
     }
@@ -223,10 +240,14 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     try {
       const side: Promise<unknown>[] = [refreshLocalAgents(force).catch(() => []), refreshSoftware(force).catch(swallow("skills.refreshSoftware"))];
       if (isConnected()) {
-        await loadLibrary().catch((e) => {
+        const { bodies } = await loadLibrary().catch((e) => {
           setLibraryLoaded(false);
           setLibraryError(errorText(e));
+          return { bodies: Promise.resolve() };
         });
+        void getLibraryStatus().then(setRepo).catch(() => setRepo(null));
+        // Drift needs the bodies; it fills the badges in when ready.
+        side.push(bodies.then(() => refreshReport()).catch((e) => setSyncError(errorText(e))));
         side.push(getRemoteNodes().then((res) => setRemoteNodes(res.nodes ?? [])).catch(swallow("skills.remoteNodes")));
         side.push(loadProjectSkills());
       } else {
@@ -236,7 +257,8 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         setProjects([]);
         setProjectSkills([]);
       }
-      side.push(refreshReport().catch((e) => setSyncError(errorText(e))));
+      if (!isConnected()) side.push(refreshReport().catch((e) => setSyncError(errorText(e))));
+      setLoading(false);
       await Promise.all(side);
     } finally {
       setLoading(false);
@@ -277,16 +299,13 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   };
 
   onMount(() => {
-    void loadAll(false);
     const onRefresh = () => void loadAll(true);
     window.addEventListener("orb:refresh", onRefresh);
     onCleanup(() => window.removeEventListener("orb:refresh", onRefresh));
   });
 
-  createEffect(() => {
-    connectionVersion();
-    if (isConnected()) void loadAll(false);
-  });
+  // The one load on open (and on reconnect); online it also reads the Library.
+  createEffect(on(connectionVersion, () => void loadAll(false)));
 
   const machineOptions = createMemo(() => {
     const opts = [{ id: "local", label: "This Mac (Local Harnesses)" }];
@@ -432,16 +451,12 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     }),
   );
   const membership = (name: string) => Object.entries(projectSelections()).filter(([, names]) => names.includes(name)).map(([slug]) => slug).sort();
-  const matchesWhere = (row: SkillRow) => {
-    const w = whereFilter();
-    if (w === "all") return true;
-    if (w === "local") return row.audience.includes("local");
-    if (w === "common") return row.scope === "global";
-    return w.startsWith("project:") && membership(row.name).includes(w.slice(8));
-  };
-  const filteredRows = createMemo(() =>
-    filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: problemFilter(), harnessTotal: harnessTotal() }).filter(matchesWhere),
-  );
+  const searched = createMemo(() => {
+    const q = search().trim().toLowerCase();
+    return q ? rows().filter((row) => row.name.toLowerCase().includes(q) || row.description.toLowerCase().includes(q)) : rows();
+  });
+  const attentionCount = createMemo(() => searched().filter(needsAttention).length);
+  const filteredRows = createMemo(() => (attentionOnly() ? searched().filter(needsAttention) : searched()).filter((row) => !deleting().has(row.name)));
   const saveProjects = async (name: string, next: string[]) => {
     const current = projectSelections();
     const changed = projects().filter((proj) => (current[proj.slug] ?? []).includes(name) !== next.includes(proj.slug));
@@ -453,9 +468,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     }
     setProjectSelections(updated);
   };
-  // Pills count skills under the other active filters, so "Drift 4" matches the list it opens.
-  const problemCounts = createMemo(() => Object.fromEntries(PROBLEM_FILTERS.map(([id]) => [id,
-    filterSkillRows(rows(), { query: search(), audience: audienceFilter(), scope: scopeFilter(), problem: id, harnessTotal: harnessTotal() }).filter(matchesWhere).length])) as Record<ProblemFilter, number>);
   const openRow = createMemo(() => rows().find((r) => r.name === openSkill() && !r.name.startsWith("project:")) ?? null);
 
   /** Sync local harnesses from the Library snapshot. Pruning removes Orb-managed leftovers only. */
@@ -475,11 +487,8 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: prune && libraryLoaded() });
       setLocalReport(result.report);
       rememberKnownSkillNames(result.report.skills.map((s) => s.name));
-      const n = result.report.harnesses.length;
-      const parts = [`${result.harnesses_updated} updated`];
-      if (result.pruned?.length) parts.push(`${result.pruned.length} removed`);
-      if (result.skipped_unmanaged.length) parts.push(`${result.skipped_unmanaged.length} user-owned preserved`);
-      setSyncNotice(`${label ? `${label} ` : ""}Synchronized ${result.synced_skills} skills across all ${n} local harness directories (${parts.join(", ")}).`);
+      cachedReport = result.report;
+      if (label) setSyncNotice(label);
     } catch (e) {
       setSyncError(errorText(e));
     } finally {
@@ -487,12 +496,36 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     }
   };
 
-  const handleSyncAll = () => {
-    if (syncing()) return;
-    const rep = localReport();
-    const stale = rep?.library_known ? [...new Set(rep.harnesses.flatMap((h) => h.stale_managed ?? []))] : [];
-    if (stale.length && libraryLoaded()) setConfirmPrune(stale);
-    else void syncNow(libraryLoaded());
+  /** Pull from the repo, then bring every harness up to date. */
+  const pull = async () => {
+    if (pulling()) return;
+    setPulling(true);
+    setSyncError(null);
+    try {
+      await syncLibrary();
+      await loadAll(true);
+      await syncNow(false);
+    } catch (e) {
+      setSyncError(`Couldn’t pull the Library: ${errorText(e)}`);
+    } finally {
+      setPulling(false);
+    }
+  };
+
+  // Out-of-date harnesses are brought in line automatically once drift is known.
+  let autoSynced = false;
+  createEffect(() => {
+    if (!autoSynced && libraryLoaded() && driftCount() > 0 && !syncing()) { autoSynced = true; void syncNow(false); }
+  });
+
+  /** Keep this Mac's edit: it becomes the Library version. */
+  const keepLocal = async (row: SkillRow) => {
+    const local = row.sources.find((src) => src.id !== "library" && src.content);
+    if (!local?.content) throw new Error("This copy has no readable SKILL.md.");
+    // A local copy without metadata.sandboxed must not silently drop who uses the skill.
+    const lib = libraryFull()[row.name]?.content;
+    const content = dropsSandboxedMetadata(lib, local.content) ? setSandboxedMeta(local.content, effectiveAudience(parseSkillMeta(lib!)), parseSkillMeta(lib!).scope ?? null, row.name) : local.content;
+    await saveSkill(row.name, content);
   };
 
   const refetchSkill = async (name: string) => {
@@ -501,10 +534,13 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     if (!librarySkills().some((s) => s.name === name)) setLibrarySkills(await listLibrarySkills());
   };
 
-  const saveSkill = async (name: string, content: string) => {
+  /** Save to the Library and land it in the repo (commit + push), then sync harnesses. */
+  const saveSkill = async (name: string, content: string, message = `skill: update ${name}`) => {
     await putLibrarySkill(name, content);
+    await commitAndPush(message);
+    void getLibraryStatus().then(setRepo).catch(() => {});
     await refetchSkill(name);
-    await syncNow(false, `Saved "${name}".`);
+    await syncNow(false);
   };
 
   const importSkill = async (name: string, src: SkillSourceRef, rels: string[]) => {
@@ -513,23 +549,69 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     const files = await readLegacySkillFiles(src.id, name, rels);
     await putLibrarySkill(name, src.content);
     for (const f of files) await putSkillFile(name, f.rel, f.content);
+    await commitAndPush(`skill: import ${name}`);
     setLibrarySkills(await listLibrarySkills());
     await refetchSkill(name);
-    await syncNow(false, `Imported "${name}" from ${src.label}.`);
+    await syncNow(false, `Imported "${name}" from ${src.label} and saved it to the repo.`);
   };
 
+  /** Delete from the Library and the repo. The row hides at once and returns on failure.
+   * Retry-safe: a skill already gone from the Library (an earlier try that failed at commit)
+   * only needs the commit and push. */
   const removeSkill = async (name: string) => {
-    await deleteLibrarySkill(name);
+    setDeleting((prev) => new Set([...prev, name]));
+    try {
+      await deleteLibrarySkill(name).catch((e) => { if (!/not found|404/i.test(errorText(e))) throw e; });
+      await commitAndPush(`skill: delete ${name}`);
+    } catch (e) {
+      setDeleting((prev) => { const next = new Set(prev); next.delete(name); return next; });
+      throw new Error(deleteMessage(name, e));
+    }
     setLibrarySkills((list) => list.filter((s) => s.name !== name));
     setLibraryFull((prev) => {
       const next = { ...prev };
       delete next[name];
       return next;
     });
-    await syncNow(true, `Deleted "${name}".`);
+    setDeleting((prev) => { const next = new Set(prev); next.delete(name); return next; });
+    void syncNow(true);
+  };
+
+  const confirmDeleteRow = async () => {
+    const name = confirmRowDelete();
+    if (!name || rowDeleteBusy()) return;
+    setRowDeleteBusy(true);
+    setRowDeleteError(null);
+    try { await removeSkill(name); setConfirmRowDelete(null); }
+    catch (e) { setRowDeleteError(errorText(e)); }
+    finally { setRowDeleteBusy(false); }
+  };
+
+  const menuFor = (row: SkillRow): MenuEntry[] => {
+    const badge = skillBadge(row);
+    const local = row.sources.find((x) => x.id !== "library" && x.content);
+    const act = (fn: () => Promise<void>) => () => { setSyncError(null); void fn().catch((e) => setSyncError(errorText(e))); };
+    return [
+      { kind: "item", label: "Edit", icon: Ic.PencilIcon, onClick: () => { setOpenView("edit"); openRowDetail(row); } },
+      ...(row.inLibrary ? [{ kind: "item" as const, label: "History", icon: Ic.ReopenIcon, onClick: () => { setOpenView("history"); openRowDetail(row); } }] : []),
+      ...(badge === "edited" && isConnected() ? [
+        { kind: "sep" as const },
+        { kind: "item" as const, label: "Keep this Mac’s version", onClick: act(() => keepLocal(row)) },
+        { kind: "item" as const, label: "Discard this Mac’s edit", onClick: act(() => syncNow(false)) },
+      ] : []),
+      ...(badge === "old-folder" && local && isConnected() ? [
+        { kind: "sep" as const },
+        { kind: "item" as const, label: "Import to the Library", onClick: act(() => importSkill(row.name, local, local.files?.map((f) => f.rel) ?? [])) },
+      ] : []),
+      ...(row.inLibrary && isConnected() ? [
+        { kind: "sep" as const },
+        { kind: "item" as const, label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => { setRowDeleteError(null); setConfirmRowDelete(row.name); } },
+      ] : []),
+    ];
   };
 
   const filesChanged = async (name: string) => {
+    await commitAndPush(`skill: update ${name} files`);
     await refetchSkill(name);
     await syncNow(false);
   };
@@ -548,13 +630,14 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     setCreateError(null);
     try {
       await putLibrarySkill(name, newSkillTemplate(name, newDesc()));
+      await commitAndPush(`skill: create ${name}`);
       setLibrarySkills(await listLibrarySkills());
       await refetchSkill(name);
       setCreating(false);
       setNewName("");
       setNewDesc("");
       setOpenSkill(name);
-      void syncNow(false, `Created "${name}".`);
+      void syncNow(false);
     } catch (e) {
       setCreateError(errorText(e));
     } finally {
@@ -575,24 +658,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   return (
     <div class="s-body settings-body">
       <div class="s-inner skills-settings-page">
-        <div class="skills-head">
-          <div>
-            <h2>Skills</h2>
-            <p class="s-lead">
-              The Library is the single source of skills. Orb installs Library skills meant for <code>local</code> use into every local harness
-              and flags copies that only live in legacy folders.
-            </p>
-          </div>
-          <div class="skills-head-actions">
-            <button type="button" class="s-btn sm" disabled={loading() || syncing()} onClick={() => void loadAll(true)} title="Re-scan local and remote skill directories">
-              {loading() ? "Scanning…" : "Refresh"}
-            </button>
-            <button type="button" class="s-btn sm primary" disabled={syncing()} onClick={handleSyncAll}>
-              {syncing() ? "Syncing…" : driftCount() > 0 ? `Sync all harnesses (${driftCount()} out of date)` : "Sync all harnesses"}
-            </button>
-          </div>
-        </div>
-
         <Show when={syncNotice()}>
           {(msg) => (
             <div class="skills-banner ok" role="status">
@@ -616,55 +681,60 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
           )}
         </Show>
 
-        <section class="s-sec" aria-label="Global and Library skills catalog">
-          <div class="skills-sec-head">
-            <h3>Skills ({filteredRows().length})</h3>
-            <div class="skills-catalog-controls">
-              <input type="search" aria-label="Filter skills" class="s-input skills-search" placeholder="Search skills…" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} />
-              <Show when={isConnected()}>
-                <button type="button" class="s-btn sm" onClick={() => { setCreating(true); setCreateError(null); }}>New skill</button>
-              </Show>
-            </div>
+        <section class="s-sec" aria-label="Library skills">
+          <div class="skills-toolbar">
+            <Show when={isConnected()} fallback={<span class="skills-repo dim">Connect to Core to load the Library.</span>}>
+              <span class="skills-repo" title={repo()?.remote ?? ""}>
+                {repoLabel(repo()?.remote)}
+                <span class="dim"> · {pulling() ? "pulling…" : repo()?.last_synced_at ? (() => { const t = orbRelativeTimeString(Date.now() / 1000 - repo()!.last_synced_at!); return t === "now" ? "synced just now" : `synced ${t} ago`; })() : repo() && !repo()!.clean ? `${repo()!.modified_files.length} unsaved changes` : "not synced yet"}</span>
+              </span>
+              <button type="button" class="icon-btn settings-refresh" classList={{ spinning: pulling() || syncing() }} aria-label="Pull from the repo" title="Pull from the repo and update every agent" disabled={pulling()} onClick={() => void pull()}>
+                <Ic.RefreshIcon size={14} />
+              </button>
+            </Show>
+            <input type="search" aria-label="Filter skills" class="s-input skills-search" placeholder="Search skills…" value={search()} onInput={(e) => setSearch(e.currentTarget.value)} />
+            <Show when={isConnected()}>
+              <button type="button" class="s-btn sm" onClick={() => { setCreating(true); setCreateError(null); }}>+ New</button>
+            </Show>
           </div>
-          <div class="skills-filter-bar">
-            <Select aria-label="Filter by place" class="s-input" value={whereFilter()} onChange={(e) => setWhereFilter(e.currentTarget.value)}>
-              <option value="all">Everywhere</option>
-              <option value="local">Local</option>
-              <option value="common">Common</option>
-              <For each={projects()}>{(proj) => <option value={`project:${proj.slug}`}>{proj.title || proj.slug}</option>}</For>
-            </Select>
-            <div class="skills-filter-pills" role="tablist" aria-label="Filter skills by problem">
-              <For each={PROBLEM_FILTERS}>{([id, label]) => (
-                <button type="button" role="tab" aria-selected={problemFilter() === id} class={`skills-filter-pill ${problemFilter() === id ? "on" : ""}`} onClick={() => setProblemFilter(id)}>
-                  {label}<Show when={!loading() || rows().length}> <span class="dim">{problemCounts()[id]}</span></Show>
-                </button>
-              )}</For>
+          <Show when={attentionCount() > 0 || attentionOnly()}>
+            <div class="skills-filter-pills">
+              <button type="button" aria-pressed={attentionOnly()} class={`skills-filter-pill ${attentionOnly() ? "on" : ""}`} onClick={() => setAttentionOnly(!attentionOnly())}>
+                Needs attention <span class="dim">{attentionCount()}</span>
+              </button>
             </div>
-          </div>
+          </Show>
 
-          <Show when={libraryError()}>{(err) => <p class="skills-sub-note">Core Library unavailable: {err()}. Local status only; syncing will not remove anything.</p>}</Show>
-          <Show when={!isConnected()}><p class="skills-sub-note">Connect to Core to load the Library, the canonical skill source.</p></Show>
+          <Show when={libraryError()}>{(err) => <p class="skills-sub-note">Core Library unavailable: {err()}. Showing this Mac only.</p>}</Show>
 
           <div class="s-card skills-catalog-card">
-            <For each={filteredRows()} fallback={<div class="s-row"><div class="s-row-text"><div class="s-row-desc">{loading() || (isConnected() && !libraryLoaded() && !libraryError()) ? "Loading skills…" : "No skills match the current filter."}</div></div></div>}>
-              {(row) => (
-                <div class="skills-item" data-skill={row.name}>
-                  <button type="button" class="skills-item-head" onClick={() => openRowDetail(row)}>
-                    <div class="skills-item-body">
-                      <div class="skills-item-top">
-                        <code class="skills-item-name">{row.name}</code>
-                        <SkillBadges row={row} harnessTotal={harnessTotal()} projects={membership(row.name)} />
-                        <Show when={row.lint.length}><span class="skills-lint-count" title={row.lint.map((l) => l.message).join("\n")}>{row.lint.length} warning{row.lint.length === 1 ? "" : "s"}</span></Show>
-                      </div>
-                      <div class="skills-item-desc">{row.description || "No description."}</div>
+            <Show when={!(loading() && !rows().length)} fallback={<For each={[0, 1, 2, 3, 4, 5]}>{() => <div class="skills-item skeleton" aria-hidden="true"><div class="skills-item-head"><span class="spend-skel skills-skel-name" /><span class="spend-skel skills-skel-desc" /></div></div>}</For>}>
+              <For each={filteredRows()} fallback={<div class="s-row"><div class="s-row-text"><div class="s-row-desc">{attentionOnly() ? "Nothing needs attention." : "No skills match."}</div></div></div>}>
+                {(row) => {
+                  const badge = () => skillBadge(row);
+                  return (
+                    <div class="skills-item" data-skill={row.name} onContextMenu={(e) => { e.preventDefault(); setRowMenu({ row, x: e.clientX, y: e.clientY }); }}>
+                      <button type="button" class="skills-item-head" onClick={() => { setOpenView("edit"); openRowDetail(row); }}>
+                        <Ic.FileIcon size={14} />
+                        <span class="skills-item-name">{row.name}</span>
+                        <span class="skills-item-desc">{row.description || "No description."}</span>
+                        <Show when={badge()}>{(b) => <span class={`skills-badge ${b()}`}>{SKILL_BADGE_LABEL[b()]}</span>}</Show>
+                        <Show when={!badge() && row.lint.length}><span class="skills-badge lint" title={row.lint.map((l) => l.message).join("\n")}>Needs a fix</span></Show>
+                      </button>
+                      <button type="button" class="icon-btn skills-item-more" aria-label={`Actions for ${row.name}`} aria-haspopup="menu" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setRowMenu({ row, x: r.right - 200, y: r.bottom + 4 }); }}>
+                        <span aria-hidden="true">···</span>
+                      </button>
                     </div>
-                  </button>
-                </div>
-              )}
-            </For>
+                  );
+                }}
+              </For>
+            </Show>
           </div>
         </section>
 
+        <details class="settings-advanced skills-advanced" onToggle={(e) => { if (e.currentTarget.open) setAdvancedOpen(true); }}>
+          <summary>Harnesses, delivery and preflight <Ic.ChevronDown size={14} /></summary>
+          <Show when={advancedOpen()}>
         <Show when={isConnected()}>
           <SkillDeliveryPreview projects={projects()} librarySkills={librarySkills().map((s) => s.name)} />
         </Show>
@@ -810,12 +880,21 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
             </For>
           </div>
         </section>
+          </Show>
+        </details>
       </div>
 
+      <Show when={rowMenu()}>{(m) => <PopupMenu x={m().x} y={m().y} items={menuFor(m().row)} onClose={() => setRowMenu(null)} />}</Show>
+      <Show when={confirmRowDelete()}>{(name) =>
+        <ConfirmDialog title={`Delete ${name()}?`} description="It leaves the Library and every agent on this Mac." destructive
+          action={rowDeleteError() ? "Retry" : "Delete"} busy={rowDeleteBusy()} error={rowDeleteError()}
+          onClose={() => setConfirmRowDelete(null)} onConfirm={() => void confirmDeleteRow()} />
+      }</Show>
       <Show when={openRow()}>
         {(row) => (
           <SkillDetail
             row={row()}
+            initialView={openView()}
             library={libraryFull()[row().name]}
             connected={isConnected()}
             harnessTotal={harnessTotal()}
@@ -828,18 +907,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
             projectMembership={membership(row().name)}
             onSaveProjects={saveProjects}
             onOpenProjectFile={(slug, path) => p.onOpenPage?.(`pf:${slug}:${path}`)}
-          />
-        )}
-      </Show>
-      <Show when={confirmPrune()}>
-        {(stale) => (
-          <ConfirmDialog
-            title="Remove skills that left the Library?"
-            description={`Sync will remove ${stale().length} Orb-managed skill${stale().length === 1 ? "" : "s"} no longer in the Library (or not meant for local use): ${stale().slice(0, 8).join(", ")}${stale().length > 8 ? ` +${stale().length - 8} more` : ""}. Import any you want to keep first. Your own unmanaged skills are never touched.`}
-            action="Sync and remove"
-            destructive
-            onClose={() => setConfirmPrune(null)}
-            onConfirm={() => { setConfirmPrune(null); void syncNow(true); }}
           />
         )}
       </Show>

@@ -180,7 +180,8 @@ impl OrbWireFrame {
             return Err(OrbWireStatus::TruncatedOrOutOfBounds);
         }
 
-        let payload = &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
+        let payload =
+            &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
         let records_slice = &payload[..arena_off];
         let arena_slice = &payload[arena_off..arena_off + arena_len];
 
@@ -606,7 +607,10 @@ mod tests {
             now_epoch: 1_000,
             reset_epoch: 0,
         });
-        assert_eq!(initial_dispatch.action, ProviderPoolAction::DispatchPoolCandidate);
+        assert_eq!(
+            initial_dispatch.action,
+            ProviderPoolAction::DispatchPoolCandidate
+        );
         assert!(initial_dispatch.emit_dispatch_effect);
         assert!(!initial_dispatch.first_byte_locked_next);
 
@@ -621,7 +625,10 @@ mod tests {
             now_epoch: 1_000,
             reset_epoch: 0,
         });
-        assert_eq!(pre_byte_retry.action, ProviderPoolAction::DispatchPoolCandidate);
+        assert_eq!(
+            pre_byte_retry.action,
+            ProviderPoolAction::DispatchPoolCandidate
+        );
         assert!(pre_byte_retry.emit_dispatch_effect);
         assert!(!pre_byte_retry.first_byte_locked_next);
         assert_eq!(pre_byte_retry.dispatched_account_id, 303);
@@ -719,7 +726,7 @@ mod tests {
                 (next, vec![s.bound_account])
             },
             classify_known_legacy_bug: |s, _e, rust_effs, lean_effs| {
-                if rust_effs != lean_effs && lean_effs == &[s.bound_account] {
+                if rust_effs != lean_effs && lean_effs == [s.bound_account] {
                     Some("antigravity_wrong_account")
                 } else {
                     None
@@ -922,6 +929,279 @@ mod tests {
         assert_eq!(symlink_fork.action, ForkHomeAction::RejectForkWorkspace);
         assert!(!symlink_fork.admit_launch);
         assert!(!symlink_fork.override_home);
+        assert!(symlink_fork.job_home_preserved);
         assert_eq!(symlink_fork.exit_code, 78);
+    }
+
+    #[test]
+    fn phase5_privd_command_and_ssh_identity_confinement_replays() {
+        use crate::{
+            privd_command_step, ssh_identity_step, PrivdCommandAction, PrivdCommandClass,
+            PrivdCommandStepInput, PrivdGrantScope, SshIdentityAction, SshIdentityStepInput,
+        };
+
+        // 1. Valid service_deploy systemctl unit command
+        let ok_deploy = privd_command_step(PrivdCommandStepInput {
+            lease_valid: true,
+            grant_scope: PrivdGrantScope::ServiceDeploy,
+            command_class: PrivdCommandClass::ServiceDeployUnit,
+            unit_matches_allowed: true,
+            has_shell_metachar_or_flag_bypass: false,
+            has_path_traversal_or_symlink: false,
+            has_unsafe_env_var: false,
+            require_force_cmd: false,
+        });
+        assert_eq!(ok_deploy.action, PrivdCommandAction::AdmitServiceDeploy);
+        assert!(ok_deploy.allow_exec);
+        assert!(ok_deploy.scrub_env);
+        assert!(ok_deploy.audit_required);
+        assert_eq!(ok_deploy.exit_code, 0);
+
+        // 2. Attack vectors: shell metacharacters, path traversal/symlinks, unsafe env vars, privilege escalation
+        for attack in [
+            PrivdCommandStepInput {
+                has_shell_metachar_or_flag_bypass: true,
+                ..ok_deploy_input()
+            },
+            PrivdCommandStepInput {
+                has_path_traversal_or_symlink: true,
+                ..ok_deploy_input()
+            },
+            PrivdCommandStepInput {
+                has_unsafe_env_var: true,
+                ..ok_deploy_input()
+            },
+            PrivdCommandStepInput {
+                grant_scope: PrivdGrantScope::OpsRead,
+                command_class: PrivdCommandClass::ServiceDeployUnit,
+                ..ok_deploy_input()
+            },
+            PrivdCommandStepInput {
+                grant_scope: PrivdGrantScope::ServiceDeploy,
+                command_class: PrivdCommandClass::RootExecCommand,
+                ..ok_deploy_input()
+            },
+        ] {
+            let v = privd_command_step(attack);
+            assert_eq!(v.action, PrivdCommandAction::Reject);
+            assert!(!v.allow_exec);
+            assert!(v.scrub_env);
+            assert!(v.audit_required);
+            assert_eq!(v.exit_code, 126);
+        }
+
+        // 3. SSH identity non-leakage on worker/container targets & Codex driver gates
+        let worker_ok = ssh_identity_step(SshIdentityStepInput {
+            is_worker_or_container_target: true,
+            bundle_has_control_plane_key: false,
+            parent_dir_is_symlink: false,
+            pub_key_is_ed25519_without_private: true,
+            proxy_jump_valid: true,
+            codex_cyber_program_valid: true,
+            codex_goal_budget_exhausted: false,
+        });
+        assert_eq!(worker_ok.action, SshIdentityAction::AdmitCodingOnlyIdentity);
+        assert!(worker_ok.admit);
+        assert!(worker_ok.strip_control_plane_secrets);
+        assert!(worker_ok.no_secret_leak);
+        assert_eq!(worker_ok.exit_code, 0);
+
+        let leaked_key = ssh_identity_step(SshIdentityStepInput {
+            bundle_has_control_plane_key: true,
+            ..SshIdentityStepInput {
+                is_worker_or_container_target: true,
+                bundle_has_control_plane_key: true,
+                parent_dir_is_symlink: false,
+                pub_key_is_ed25519_without_private: true,
+                proxy_jump_valid: true,
+                codex_cyber_program_valid: true,
+                codex_goal_budget_exhausted: false,
+            }
+        });
+        assert_eq!(leaked_key.action, SshIdentityAction::Reject);
+        assert!(!leaked_key.admit);
+        assert!(leaked_key.strip_control_plane_secrets);
+        assert!(leaked_key.no_secret_leak);
+        assert_eq!(leaked_key.exit_code, 78);
+    }
+
+    fn ok_deploy_input() -> crate::PrivdCommandStepInput {
+        crate::PrivdCommandStepInput {
+            lease_valid: true,
+            grant_scope: crate::PrivdGrantScope::ServiceDeploy,
+            command_class: crate::PrivdCommandClass::ServiceDeployUnit,
+            unit_matches_allowed: true,
+            has_shell_metachar_or_flag_bypass: false,
+            has_path_traversal_or_symlink: false,
+            has_unsafe_env_var: false,
+            require_force_cmd: false,
+        }
+    }
+
+    #[test]
+    fn phase3_agent_event_normalizer_and_transcript_reducer_replays() {
+        use crate::{
+            agent_event_normalize_step, transcript_reduce_step, AgentEventNormalizeAction,
+            AgentEventNormalizeStepInput, AgentHarnessKind, RawAgentEventKind,
+            TranscriptReduceAction, TranscriptReduceStepInput,
+        };
+
+        let think = agent_event_normalize_step(AgentEventNormalizeStepInput {
+            harness_kind: AgentHarnessKind::Grok,
+            raw_event_kind: RawAgentEventKind::ThinkingUpdate,
+            is_completed: false,
+            has_non_empty_text: true,
+            session_matches_expected: true,
+            is_duplicate_turn_or_tool: false,
+            payload_bytes: 120,
+            max_payload_bytes: 4096,
+        });
+        assert_eq!(think.action, AgentEventNormalizeAction::EmitThinking);
+        assert!(think.emit_event);
+        assert!(think.thinking_open_next);
+        assert!(think.total_transducer);
+
+        let text = agent_event_normalize_step(AgentEventNormalizeStepInput {
+            harness_kind: AgentHarnessKind::Grok,
+            raw_event_kind: RawAgentEventKind::AssistantText,
+            is_completed: true,
+            has_non_empty_text: true,
+            session_matches_expected: true,
+            is_duplicate_turn_or_tool: false,
+            payload_bytes: 256,
+            max_payload_bytes: 4096,
+        });
+        assert_eq!(text.action, AgentEventNormalizeAction::EmitAssistantText);
+        assert!(text.emit_event);
+        assert!(text.close_thinking);
+
+        // Replay from log vs live stream equivalence
+        let live_r1 = transcript_reduce_step(TranscriptReduceStepInput {
+            last_applied_seq: 1,
+            incoming_seq: 2,
+            thinking_open: true,
+            normalized_action: text.action,
+            is_replay_from_log: false,
+        });
+        let replay_r1 = transcript_reduce_step(TranscriptReduceStepInput {
+            is_replay_from_log: true,
+            ..TranscriptReduceStepInput {
+                last_applied_seq: 1,
+                incoming_seq: 2,
+                thinking_open: true,
+                normalized_action: text.action,
+                is_replay_from_log: true,
+            }
+        });
+        assert_eq!(live_r1, replay_r1);
+        assert_eq!(
+            live_r1.action,
+            TranscriptReduceAction::AppendTranscriptEntry
+        );
+        assert!(live_r1.emit_entry);
+        assert!(live_r1.closed_previous_thinking);
+        assert!(!live_r1.thinking_open_next);
+    }
+
+    #[test]
+    fn phase4_cursor_pagination_and_sidebar_merge_replays() {
+        use crate::{
+            cursor_page_step, sidebar_merge_step, CursorPageAction, CursorPageStepInput,
+            SidebarMergeAction, SidebarMergeStepInput,
+        };
+
+        // Exclusive cursor bounds: item_seq == since_seq or item_seq == before_seq excluded
+        let at_since = cursor_page_step(CursorPageStepInput {
+            since_seq: Some(10),
+            before_seq: Some(20),
+            item_seq: 10,
+            is_partial_response: true,
+            existing_count: 5,
+        });
+        assert_eq!(at_since.action, CursorPageAction::ExcludeOutOfWindow);
+        assert!(!at_since.include_item);
+        assert!(at_since.preserve_existing);
+        assert_eq!(at_since.next_count, 5);
+
+        let inside = cursor_page_step(CursorPageStepInput {
+            since_seq: Some(10),
+            before_seq: Some(20),
+            item_seq: 15,
+            is_partial_response: true,
+            existing_count: 5,
+        });
+        assert_eq!(inside.action, CursorPageAction::IncludeItem);
+        assert!(inside.include_item);
+        assert!(inside.preserve_existing);
+        assert_eq!(inside.next_count, 6);
+
+        // Sidebar merge deduplication: same non-zero ordinal updates in place (`insert_new == false`, `net_new_rows == 0`)
+        let dup_sidebar = sidebar_merge_step(SidebarMergeStepInput {
+            existing_id_ord: 77,
+            incoming_id_ord: 77,
+            existing_updated_at_ms: 1_000,
+            incoming_updated_at_ms: 2_000,
+            incoming_superseded_or_archived: false,
+            is_partial_page: true,
+        });
+        assert_eq!(
+            dup_sidebar.action,
+            SidebarMergeAction::UpdateExistingInPlace
+        );
+        assert!(dup_sidebar.retain_or_upsert);
+        assert!(!dup_sidebar.insert_new);
+        assert!(dup_sidebar.unique_sidebar);
+        assert!(dup_sidebar.preserve_unmentioned);
+        assert_eq!(dup_sidebar.net_new_rows, 0);
+    }
+
+    #[test]
+    fn phase6_scroll_epoch_and_client_parity_replays() {
+        use crate::{
+            client_parity_step, scroll_epoch_step, ClientProjectionTarget, ScrollEpochAction,
+            ScrollEpochStepInput,
+        };
+
+        // First correction in epoch 5 is applied
+        let first = scroll_epoch_step(ScrollEpochStepInput {
+            layout_epoch: 5,
+            last_corrected_epoch: 4,
+            corrections_in_epoch: 0,
+            is_pinned_to_bottom: true,
+            user_is_dragging: false,
+            target_scroll_top_px: 1200,
+            current_scroll_top_px: 900,
+        });
+        assert_eq!(first.action, ScrollEpochAction::ApplyEpochCorrection);
+        assert!(first.apply_scroll);
+        assert!(first.epoch_fence_set);
+        assert_eq!(first.effective_scroll_top_px, 1200);
+
+        // Second correction in the same epoch 5 is suppressed (`build 1393` ping-pong prevention)
+        let second = scroll_epoch_step(ScrollEpochStepInput {
+            layout_epoch: 5,
+            last_corrected_epoch: 5,
+            corrections_in_epoch: 1,
+            is_pinned_to_bottom: true,
+            user_is_dragging: false,
+            target_scroll_top_px: 1240,
+            current_scroll_top_px: 1200,
+        });
+        assert_eq!(
+            second.action,
+            ScrollEpochAction::SuppressDuplicateEpochCorrection
+        );
+        assert!(!second.apply_scroll);
+        assert!(second.epoch_fence_set);
+        assert_eq!(second.effective_scroll_top_px, 1200);
+
+        // Bitwise parity across Core, iOS, Android, and Desktop wasm32
+        let w_core = client_parity_step(ClientProjectionTarget::Core, 1, 42, 12, 3, true);
+        let w_ios = client_parity_step(ClientProjectionTarget::Ios, 1, 42, 12, 3, true);
+        let w_and = client_parity_step(ClientProjectionTarget::Android, 1, 42, 12, 3, true);
+        let w_wasm = client_parity_step(ClientProjectionTarget::DesktopWasm32, 1, 42, 12, 3, true);
+        assert_eq!(w_core, w_ios);
+        assert_eq!(w_ios, w_and);
+        assert_eq!(w_and, w_wasm);
     }
 }

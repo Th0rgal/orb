@@ -55,6 +55,19 @@ struct FidoApprovalOverlay: View {
 
                             // Quick auto-approve chip
                             let isInFlight = fidoState.inFlightRequestIds.contains(request.id)
+                            if let lastError = fidoState.lastError, !lastError.isEmpty {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(Theme.warning)
+                                    Text(lastError)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.textPrimary)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Theme.warning.opacity(0.14), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
                             Button {
                                 fidoState.addAutoApprovalRule(
                                     type: .allSSH,
@@ -109,7 +122,7 @@ struct FidoApprovalOverlay: View {
                                                 .controlSize(.small)
                                                 .tint(.white)
                                         } else {
-                                            Image(systemName: "checkmark")
+                                            Image(systemName: OrbBiometric.symbolName)
                                         }
                                         Text("Approve")
                                     }

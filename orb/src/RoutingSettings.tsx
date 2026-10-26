@@ -8,6 +8,7 @@ import {
   Index,
   Show,
   createEffect,
+  on,
   createMemo,
   createSignal,
   onCleanup,
@@ -15,7 +16,6 @@ import {
 } from "solid-js";
 import {
   connectionVersion,
-  getApiUrl,
   isConnected,
   listProviders,
   type AIProvider,
@@ -42,19 +42,17 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const time = (value: string | null) =>
   value ? new Date(value).toLocaleString() : "—";
 
-export function RoutingSettings(p: { onOpenClient: () => void }) {
-  const serverUrl = createMemo(() => {
-    connectionVersion();
-    return getApiUrl();
-  });
-  const [tab, setTab] = createSignal<"chains" | "health" | "events" | "keys">("chains");
+export type RoutingTab = "chains" | "health" | "keys";
+
+/** `tab` comes from the settings page (Models → Fallback Chains, Providers, API Keys). */
+export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab }) {
+  const [tab, setTab] = createSignal<RoutingTab>(p.tab ?? "chains");
   const [catalogLoading, setCatalogLoading] = createSignal(false);
   const [copiedId, setCopiedId] = createSignal("");
   let copyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(copyFeedbackTimer));
   const [chains, setChains] = createSignal<R.ModelChain[]>([]);
   const [health, setHealth] = createSignal<R.AccountHealthSnapshot[]>([]);
-  const [events, setEvents] = createSignal<R.FallbackEvent[]>([]);
   const [catalog, setCatalog] = createSignal<R.RoutingCatalog>({
     providers: [],
   });
@@ -76,12 +74,9 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     resolved?: R.ResolvedEntry[];
     test?: R.ChainTestResult;
   }>();
-  const [chainFilter, setChainFilter] = createSignal("");
-  const [providerFilter, setProviderFilter] = createSignal("");
   const [expandedHealth, setExpandedHealth] = createSignal<Set<string>>(
     new Set(),
   );
-  const [reasonFilter, setReasonFilter] = createSignal("");
   let generation = 0;
   let fetching = false;
   let queuedFullRefresh = false;
@@ -135,7 +130,6 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
         ...(full ? [read("Accounts", listProviders, setAccounts)] : []),
 
       ] : []),
-      ...(tab() === "events" ? [read("Recent Fallback Events", R.listEvents, setEvents)] : []),
     ]);
     if (epoch === generation) {
       setUpdated(new Date().toISOString());
@@ -154,11 +148,12 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     const connected = isConnected();
     generation++;
     fetching = false;
+    // A superseded request never reaches its own setLoading(false).
+    setLoading(false);
     queuedFullRefresh = false;
     queuedForceRefresh = false;
     setChains([]);
     setHealth([]);
-    setEvents([]);
     setAccounts([]);
     setCatalog({ providers: [] });
     setLeaveRequest(null);
@@ -170,15 +165,12 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     setExpanded(null);
     setDirty(false);
     setResult(undefined);
-    setChainFilter("");
-    setProviderFilter("");
-    setReasonFilter("");
     setBusy(false);
     setActionError("");
     setCatalogLoading(false);
     if (connected) untrack(() => void refresh(true));
   });
-  const stopPoll = pollWhileVisible(() => (tab() === "health" || tab() === "events") ? refresh() : undefined, 10000, "routing.refresh");
+  const stopPoll = pollWhileVisible(() => tab() === "health" ? refresh() : undefined, 10000, "routing.refresh");
   const beforeUnload = (e: BeforeUnloadEvent) => {
     if (dirty()) {
       e.preventDefault();
@@ -193,12 +185,13 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
     setDirty(false);
     setLeaveRequest(null);
   });
-  function selectTab(next: "chains" | "health" | "events" | "keys") {
+  function selectTab(next: RoutingTab) {
     if (!confirmLeaveRouting(() => selectTab(next))) return;
     setEditing(null);
     setTab(next);
     if (next !== "keys") void refresh(true);
   }
+  createEffect(on(() => p.tab, next => { if (next && next !== tab()) selectTab(next); }, { defer: true }));
   const [discovery, setDiscovery] = createSignal<R.ModelDiscovery>();
   async function loadCatalog(force = false) {
     const epoch = generation;
@@ -312,27 +305,6 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
       if (epoch === generation) setResult(value);
     });
   }
-  const eventProviders = createMemo(() =>
-    [
-      ...new Set(
-        events().flatMap((e) =>
-          [e.from_provider, e.to_provider].filter((s): s is string => !!s),
-        ),
-      ),
-    ].sort(),
-  );
-  const filteredEvents = createMemo(() =>
-    events()
-      .filter(
-        (e) =>
-          (!chainFilter() || e.chain_id === chainFilter()) &&
-          (!providerFilter() ||
-            e.from_provider === providerFilter() ||
-            e.to_provider === providerFilter()) &&
-          (!reasonFilter() || e.reason === reasonFilter()),
-      )
-      .sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
-  );
   const ChainTools = (props: { chain: R.ModelChain }) => {
     return <div class="routing-actions routing-diagnostics">
       <button type="button" class="s-btn" disabled={busy() || dirty()} title="Test the saved chain with a small inference request" onClick={() => void inspect(props.chain.id, true)}>Test chain</button>
@@ -574,25 +546,24 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
           <h2>Models &amp; Routing</h2>
           <Show when={tab() !== "keys"}>
           <button
-            class="s-btn"
+            class="icon-btn settings-refresh"
+            classList={{ spinning: loading() }}
+            aria-label={loading() ? "Refreshing" : "Refresh"}
+            title="Refresh"
             disabled={loading() || !isConnected()}
             onClick={() => void refresh(true, true)}
           >
-            {loading() ? "Refreshing…" : "Refresh"}
+            <Ic.RefreshIcon size={14} />
           </button>
           </Show>
         </div>
-        <p class="s-lead">
-          Choose the order models are tried when a provider is unavailable.
-          <span class="routing-server" title="Applies to this server’s proxy. Direct local providers keep their own configuration.">{serverUrl()}</span>
-        </p>
         <Show
           when={isConnected()}
           fallback={
             <>
               <p class="s-lead">Connect to a backend to configure routing.</p>
               <button class="s-btn" onClick={p.onOpenClient}>
-                Open Client settings
+                Open Account settings
               </button>
             </>
           }
@@ -600,7 +571,6 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
           <nav class="routing-tabs" aria-label="Routing sections">
             <button aria-current={tab() === "chains" ? "page" : undefined} onClick={() => selectTab("chains")}>Fallback Chains</button>
             <button aria-current={tab() === "health" ? "page" : undefined} onClick={() => selectTab("health")}>Provider Health</button>
-            <button aria-current={tab() === "events" ? "page" : undefined} onClick={() => selectTab("events")}>Recent Fallback Events</button>
             <button aria-current={tab() === "keys" ? "page" : undefined} onClick={() => selectTab("keys")}>Proxy API Keys</button>
           </nav>
           <Show when={tab() === "keys"}><ProxyApiKeys /></Show>
@@ -772,121 +742,6 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
                       </Show>
                     </div>
                   </details>
-                )}
-              </For>
-            </Show>
-          </section>
-          </Show>
-          <Show when={tab() === "events"}>
-          <section class="s-sec" id="routing-events">
-            <h3>Recent Fallback Events</h3>
-            <p class="routing-muted">
-              Up to 200 recent events retained by the backend. This is not a
-              permanent log.
-            </p>
-            <div class="routing-filters">
-              <label>
-                Chain
-                <Select
-                  aria-label="Chain"
-                  value={chainFilter()}
-                  onChange={(e) => setChainFilter(e.currentTarget.value)}
-                >
-                  <option value="">All chains</option>
-                  <For
-                    each={[
-                      ...new Set([
-                        ...chains().map((c) => c.id),
-                        ...events().map((e) => e.chain_id),
-                      ]),
-                    ]}
-                  >
-                    {(id) => <option value={id}>{id}</option>}
-                  </For>
-                </Select>
-              </label>
-              <label>
-                Provider
-                <Select
-                  aria-label="Provider"
-                  value={providerFilter()}
-                  onChange={(e) => setProviderFilter(e.currentTarget.value)}
-                >
-                  <option value="">All providers</option>
-                  <For each={eventProviders()}>
-                    {(id) => <option>{id}</option>}
-                  </For>
-                </Select>
-              </label>
-              <label>
-                Reason
-                <Select
-                  aria-label="Reason"
-                  value={reasonFilter()}
-                  onChange={(e) => setReasonFilter(e.currentTarget.value)}
-                >
-                  <option value="">All reasons</option>
-                  <For each={[...new Set(events().map((e) => e.reason))]}>
-                    {(reason) => (
-                      <option value={reason}>
-                        {reason.replaceAll("_", " ")}
-                      </option>
-                    )}
-                  </For>
-                </Select>
-              </label>
-            </div>
-            <Show
-              when={filteredEvents().length}
-              fallback={
-                <p class="routing-muted">
-                  {events().length
-                    ? "No events match these filters."
-                    : "No fallback events recorded."}
-                </p>
-              }
-            >
-              <For each={filteredEvents()}>
-                {(event) => (
-                  <div class="routing-event">
-                    <div class="routing-heading">
-                      <time>{time(event.timestamp)}</time>
-                      <button
-                        class="s-btn"
-                        disabled={
-                          !chains().some((c) => c.id === event.chain_id)
-                        }
-                        onClick={() => {
-                          const chain = chains().find(
-                            (c) => c.id === event.chain_id,
-                          );
-                          if (chain) {
-                            edit(chain);
-                            document
-                              .getElementById("routing-chains")
-                              ?.scrollIntoView({ behavior: "smooth" });
-                          }
-                        }}
-                      >
-                        {event.chain_id}
-                      </button>
-                    </div>
-                    <p>
-                      {event.from_provider} / {event.from_model} ·{" "}
-                      {accountName(event.from_account_id)} →{" "}
-                      {event.to_provider || "Chain exhausted"}
-                    </p>
-                    <p class="routing-muted">
-                      {event.reason.replaceAll("_", " ")} · attempt{" "}
-                      {event.attempt_number}/{event.chain_length}
-                      {event.latency_ms != null
-                        ? ` · ${event.latency_ms} ms`
-                        : ""}
-                      {event.cooldown_secs != null
-                        ? ` · ${event.cooldown_secs}s cooldown`
-                        : ""}
-                    </p>
-                  </div>
                 )}
               </For>
             </Show>

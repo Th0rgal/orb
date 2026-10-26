@@ -18,6 +18,15 @@ function keyUsage(u: UsageGroup | undefined) {
   return `${KEY_USAGE_WINDOW}: ${u.requests.toLocaleString()} ${u.requests === 1 ? "request" : "requests"} · ${formatTokens(totalTokens(u))} tokens · ${formatCost(u)}`;
 }
 
+const LIST_TIMEOUT_MS = 15_000;
+/** A request that never settles must not leave "Refreshing…" up forever. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("The backend did not answer in time.")), ms);
+    promise.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
+  });
+}
+
 export function ProxyApiKeys() {
   const [keys, setKeys] = createSignal<Keys.ProxyApiKeySummary[]>([]);
   const [loading, setLoading] = createSignal(false);
@@ -47,16 +56,13 @@ export function ProxyApiKeys() {
     const request = ++listRequest;
     setLoading(true);
     setListError("");
+    // Totals are informative: they load after the list and never hold it up.
+    void getUsageSummary(KEY_USAGE_WINDOW, { source: "router" }).then(summary => {
+      if (epoch === generation && request === listRequest) setUsage(new Map((summary.by_api_key ?? []).filter(g => g.key).map(g => [g.key!, g])));
+    }).catch(() => {});
     try {
-      const [result, summary] = await Promise.all([
-        Keys.listProxyApiKeys(),
-        // Totals are informative; a usage failure must not hide the key list.
-        getUsageSummary(KEY_USAGE_WINDOW, { source: "router" }).catch(() => null),
-      ]);
-      if (epoch === generation && request === listRequest) {
-        setKeys(result);
-        setUsage(new Map((summary?.by_api_key ?? []).filter(g => g.key).map(g => [g.key!, g])));
-      }
+      const result = await withTimeout(Keys.listProxyApiKeys(), LIST_TIMEOUT_MS);
+      if (epoch === generation && request === listRequest) setKeys(result);
     } catch (e) {
       if (epoch === generation && request === listRequest) setListError(message(e));
     } finally {
@@ -234,7 +240,7 @@ export function ProxyApiKeys() {
       </div>
     </Show>
     <ErrorToast error={error()} onDismiss={() => setError("")} />
-    <Show when={listError()}><ErrorNotice error={`Could not load proxy API keys: ${listError()}`} /></Show>
+    <Show when={listError()}><ErrorNotice error={`Could not load proxy API keys: ${listError()}`}><button class="s-btn" onClick={() => void refresh()}>Retry</button></ErrorNotice></Show>
     <Show when={!loading() && !listError() && !keys().length}><p class="routing-muted">No API keys yet. Create one to connect external tools.</p></Show>
     <div class="s-card proxy-key-list" aria-busy={loading()}>
       <For each={keys()}>{key => <div class="proxy-key-row">

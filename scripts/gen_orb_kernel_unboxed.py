@@ -54,9 +54,9 @@ BIN = {
 # Emitted unconditionally (unused macros are harmless), in this order.
 MACROS = [
     ("uint8", ["dec_eq", "dec_lt", "dec_le", "to_uint32", "to_uint64"]),
-    ("uint32", ["dec_eq", "dec_lt", "dec_le", "add", "sub", "mul", "lor", "land", "shift_left", "shift_right", "to_uint64"]),
+    ("uint32", ["dec_eq", "dec_lt", "dec_le", "add", "sub", "mul", "lor", "land", "xor", "shift_left", "shift_right", "to_uint64"]),
     ("uint64", ["dec_eq", "dec_lt", "dec_le", "add", "sub", "mul", "div", "mod", "lor", "land", "xor",
-                "shift_left", "shift_right"]),
+                "shift_left", "shift_right", "to_uint32"]),
 ]
 SUPPORTED = {(w, o) for w, ops in MACROS for o in ops}
 
@@ -69,7 +69,7 @@ def macro(width, op):
 
 def orb_c(out_dir):
     turbo_bin = os.environ.get("TURBO_LEAN_BIN") or shutil.which("turbo-lean")
-    if turbo_bin:
+    if turbo_bin and pathlib.Path(turbo_bin).is_file():
         subprocess.run([turbo_bin, "build", "--project-dir", str(ROOT / "lean"), "Orb.Kernel"],
                        cwd=ROOT, check=True)
         ir_c = ROOT / "lean/.lake/build/ir/Orb/Kernel.c"
@@ -89,7 +89,7 @@ def orb_c(out_dir):
     subprocess.run([
         "lean", "-DwarningAsError=true", "-DautoImplicit=false",
         f"--setup={setup_file}", str(ROOT / "lean/Orb/Kernel.lean"), "-c", str(c),
-    ], check=True)
+    ], cwd=ROOT / "lean", check=True)
     return c
 
 

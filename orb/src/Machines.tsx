@@ -30,7 +30,7 @@ export const MACHINES: Machine[] = [
   { id: "babylon", name: "babylon", host: "54.36.175.109", user: "ubuntu", port: 22, note: "db1.starknet.id · Lean" },
   { id: "nippur", name: "nippur", host: "37.187.92.183", user: "ubuntu", port: 22, note: "db2.starknet.id · Lean/Verity" },
   { id: "old-agent", name: "old-agent", host: "95.216.112.253", user: "root", port: 22, note: "Compute leaf · sandboxed-node" },
-  { id: "dgx-spark", name: "dgx-spark", host: "100.77.4.93", user: "th0rgal", port: 22, note: "spark-de79 · Tailscale · GPU" },
+  { id: "dgx-spark", name: "dgx-spark", host: "10.88.0.2", user: "th0rgal", port: 22, note: "spark-de79 · lean-mesh · GPU" },
 ];
 
 function target(m: Machine) {

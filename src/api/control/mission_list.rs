@@ -554,7 +554,11 @@ pub async fn list_missions(
             .await
             .map_err(internal_error)?;
         populate_workspace_names(&state, &mut page).await;
-        page
+        if filter.attention_only {
+            crate::api::mission_store::reconcile_sidebar_missions_page(&[], &page, false)
+        } else {
+            page
+        }
     } else {
         const PAGE: usize = 200;
         // Bounds how many STORE-FILTERED candidates we resolve workspace names
@@ -576,6 +580,7 @@ pub async fn list_missions(
                 .map_err(internal_error)?;
             let page_len = page.len();
             populate_workspace_names(&state, &mut page).await;
+            let mut page_matches = Vec::new();
             for m in page {
                 let keep = match (workspace_raw, workspace_lower.as_deref()) {
                     (Some(raw), Some(lower)) => {
@@ -587,6 +592,17 @@ pub async fn list_missions(
                     _ => true,
                 };
                 if keep {
+                    page_matches.push(m);
+                }
+            }
+            if filter.attention_only {
+                matched = crate::api::mission_store::reconcile_sidebar_missions_page(
+                    &matched,
+                    &page_matches,
+                    true,
+                );
+            } else {
+                for m in page_matches {
                     matched.push(m);
                     if matched.len() >= want {
                         break;

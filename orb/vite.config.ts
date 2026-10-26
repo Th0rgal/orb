@@ -36,6 +36,25 @@ export default defineConfig({
   },
   plugins: [solid(), palomaPub()],
   clearScreen: false,
+  // Code highlighting is loaded lazily, so the dev server would discover Prism
+  // only once a transcript shows code and then reload the page mid-test.
+  // Pre-bundle it up front (dev only; builds are unaffected).
+  optimizeDeps: { include: [
+    "prismjs",
+    "prismjs/components/prism-python",
+    "prismjs/components/prism-typescript",
+    "prismjs/components/prism-rust",
+    "prismjs/components/prism-bash",
+    "prismjs/components/prism-json",
+    "prismjs/components/prism-yaml",
+    "prismjs/components/prism-sql",
+    "prismjs/components/prism-go",
+    "prismjs/components/prism-c",
+    "prismjs/components/prism-cpp",
+    "prismjs/components/prism-solidity",
+    "prismjs/components/prism-toml",
+    "prismjs/components/prism-diff",
+  ] },
   // Polling also detects edits made by agent processes without macOS file events.
   server: { port: 1430, strictPort: true, watch: { usePolling: true, interval: 500, ignored: ["**/src-tauri/**", "**/target/**", "**/dist/**"] } },
   build: { target: "safari15" },

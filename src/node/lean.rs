@@ -1791,7 +1791,14 @@ pub fn spawn_cache_gc(work_root: PathBuf) {
     tokio::spawn(async move {
         loop {
             let root = work_root.clone();
-            let result = tokio::task::spawn_blocking(move || gc_once(&root)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                crate::uploads::prune_expired_uploads(
+                    &root.join("uploads"),
+                    std::time::Duration::from_secs(crate::uploads::BATCH_OPEN_SECS),
+                );
+                gc_once(&root)
+            })
+            .await;
             if let Err(err) = result {
                 tracing::warn!("node cache GC task panicked: {err}");
             }

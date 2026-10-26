@@ -342,6 +342,16 @@ incident: 5 deploys + 2 rollbacks in 90 minutes).
 The orchestrator MCP exposes a `deploy_sandboxed_sh` tool that hits an
 internal `/api/system/deploy` endpoint with safety rails.
 
+**Production gate (since #1309):** a production deploy requires an active
+session-scoped `service_deploy` grant. A mission calls
+`request_privileged_access(target_host="agent-core", scope="service_deploy",
+session_scoped=true, reason=...)`, Thomas approves it once with Touch ID in Orb,
+and the grant covers that session's deploy/verify loop. Calls without a mission
+id (operator scripts, curl) get `403`. To deploy from outside a mission, start a
+short mission that requests the grant and deploys. Before a `force=true`
+deploy, record the active/pending mission ids and resume the interrupted ones
+afterwards; check with `get_mission_health`, not the status alone.
+
 **Targeting rule:** `deploy_sandboxed_sh` deploys the backend API it is sent
 to. If `target_environment` is omitted, the tool uses the API that launched the
 mission. A prod mission therefore deploys prod by default; a dev mission deploys

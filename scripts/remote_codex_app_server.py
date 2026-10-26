@@ -4,8 +4,10 @@
 One JSON configuration on fd 3 (or argv[1]); proxy credentials stay in the env.
 Output uses the existing remote JSON stream plus explicit native goal receipts.
 """
+import ctypes
 import json
 import os
+from pathlib import Path
 import queue
 import signal
 import subprocess
@@ -23,6 +25,87 @@ def is_capacity_error(error):
 
 
 GOAL_CONTROLS = ('pause', 'status', 'clear')
+VALID_CYBER_PROGRAMS = ('standard', 'daybreak_blue', 'daybreak_red')
+
+
+def _load_orb_kernel_so():
+    candidates = [
+        os.environ.get("ORB_KERNEL_SO_PATH", "").strip(),
+        "/usr/lib/orb/liborb_kernel.so",
+        "/usr/local/lib/liborb_kernel.so",
+    ]
+    # Core embeds some of these scripts and runs them with `python3 -c`,
+    # where `__file__` does not exist: the repo copies only apply on disk.
+    if "__file__" in globals():
+        repo_root = Path(__file__).resolve().parent.parent
+        candidates += [
+            str(repo_root / "android_dashboard/app/src/test/resources/jni/liborb_kernel.so"),
+            str(repo_root / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"),
+            str(repo_root / "android_dashboard/app/build/host-jni/liborb_kernel.so"),
+        ]
+    for cand in candidates:
+        if not cand:
+            continue
+        p = Path(cand)
+        if p.is_file():
+            try:
+                lib = ctypes.CDLL(str(p))
+                fn = lib.orb_ssh_identity_step
+                fn.argtypes = [ctypes.c_uint8] * 7
+                fn.restype = ctypes.c_uint64
+                return lib
+            except OSError:
+                continue
+    return None
+
+
+_ORB_KERNEL_SO = _load_orb_kernel_so()
+
+
+def orb_ssh_identity_step(
+    is_worker_or_container_target: int,
+    bundle_has_control_plane_key: int,
+    parent_dir_is_symlink: int,
+    pub_key_is_ed25519_without_private: int,
+    proxy_jump_valid: int,
+    codex_cyber_program_valid: int,
+    codex_goal_budget_exhausted: int,
+) -> int:
+    """Invoke Lean 4 `Orb.Kernel.sshIdentityStep` (`orb_ssh_identity_step`) via `liborb_kernel.so` and verified mirror."""
+    valid = (
+        parent_dir_is_symlink == 0
+        and pub_key_is_ed25519_without_private == 1
+        and proxy_jump_valid == 1
+        and codex_cyber_program_valid == 1
+        and codex_goal_budget_exhausted == 0
+        and not (is_worker_or_container_target == 1 and bundle_has_control_plane_key == 1)
+    )
+    if not valid:
+        lo32 = 1536 if is_worker_or_container_target == 1 else 1024
+        hi32 = 78
+    elif is_worker_or_container_target == 1:
+        lo32 = 1793
+        hi32 = 0
+    else:
+        lo32 = 1282
+        hi32 = 0
+    mirror = lo32 | (hi32 << 32)
+    if _ORB_KERNEL_SO is not None:
+        native = int(
+            _ORB_KERNEL_SO.orb_ssh_identity_step(
+                is_worker_or_container_target & 0xFF,
+                bundle_has_control_plane_key & 0xFF,
+                parent_dir_is_symlink & 0xFF,
+                pub_key_is_ed25519_without_private & 0xFF,
+                proxy_jump_valid & 0xFF,
+                codex_cyber_program_valid & 0xFF,
+                codex_goal_budget_exhausted & 0xFF,
+            )
+        )
+        if native != mirror:
+            raise RuntimeError(f"orb_ssh_identity_step divergence: native={native:#x} mirror={mirror:#x}")
+        return native
+    return mirror
 
 
 def goal_control(goal, prompt):
@@ -42,7 +125,9 @@ def goal_action(goal, prompt):
                 raise RuntimeError('Native goal is complete; explicit new goal required')
             return None
         budget = goal.get('tokenBudget')
-        if budget is not None and goal.get('tokensUsed', 0) >= budget:
+        exhausted = int(budget is not None and goal.get('tokensUsed', 0) >= budget)
+        packed = orb_ssh_identity_step(1, 0, 0, 1, 1, 1, exhausted)
+        if exhausted or (packed & 256) == 0:
             raise RuntimeError('Native goal budget exhausted; refusing to reset usage')
         return {'status': 'active'}
     if requested:
@@ -89,7 +174,9 @@ class NativeSession:
             command = [os.environ['SANDBOXED_MCP_WRAPPER'], 'launch', '--harness', 'codex', '--', 'codex']
         program = os.environ.get('SANDBOXED_CYBER_PROGRAM')
         if program is not None:
-            if program not in ('standard', 'daybreak_blue', 'daybreak_red'):
+            prog_valid = int(program in VALID_CYBER_PROGRAMS)
+            packed = orb_ssh_identity_step(1, 0, 0, 1, 1, prog_valid, 0)
+            if not prog_valid or (packed & 256) == 0:
                 raise RuntimeError('Invalid cyber program; no request was sent')
             # API-key proxy auth ignores native cyberAccessProgram. The authenticated
             # core maps this explicit selection to Responses API access_programs.

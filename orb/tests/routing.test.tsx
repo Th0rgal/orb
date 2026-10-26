@@ -215,8 +215,6 @@ describe("Routing settings", () => {
     await screen.findByText("First account");
     expect(screen.getByText("First account")).toBeTruthy();
     expect(screen.getByText("Second account")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Recent Fallback Events", exact: true }));
-    await screen.findByText(/→ Chain exhausted/);
     fireEvent.click(screen.getByRole("button", { name: "Fallback Chains", exact: true }));
     fireEvent.click(screen.getByRole("button", { name: /Test chain/ }));
     expect(writes).toHaveLength(0);
@@ -279,14 +277,8 @@ describe("Routing settings", () => {
     expect(leave).toHaveBeenCalledTimes(1);
     expect(confirmLeaveRouting()).toBe(true);
   });
-  it("filters fallback events and clears one account cooldown", async () => {
+  it("clears one account cooldown", async () => {
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "Recent Fallback Events", exact: true }));
-    await screen.findByText(/→ Chain exhausted/);
-    fireEvent.change(screen.getByLabelText("Chain"), {
-      target: { value: "test/chain" },
-    });
-    expect(screen.getByText(/→ Chain exhausted/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Provider Health", exact: true }));
     await screen.findByText("First account");
     fireEvent.click(
@@ -303,12 +295,8 @@ describe("Routing settings", () => {
       ).toBe(true),
     );
   });
-  it("updates the server identity when reconnecting", async () => {
+  it("keeps infra details out of the page (the server URL lives in Account)", async () => {
     await mount();
-    setConnection("https://other-routing.test", "new-test");
-    await waitFor(() =>
-      expect(screen.getByText(/https:\/\/other-routing.test/)).toBeTruthy(),
-    );
     expect(screen.queryByText(/https:\/\/routing.test/)).toBeNull();
   });
   it("clears server data and drafts on disconnect", async () => {

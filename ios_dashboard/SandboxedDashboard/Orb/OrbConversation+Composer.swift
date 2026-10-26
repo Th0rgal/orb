@@ -490,7 +490,7 @@ extension OrbConversation {
                 }
             }
         } leading: {
-            if !effectiveProjectSlug.isEmpty && !isCloud {
+            if !effectiveProjectSlug.isEmpty && supportsAttachments {
                 OrbAttachments(
                     files: $attachments,
                     error: $error,

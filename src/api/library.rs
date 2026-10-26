@@ -109,14 +109,32 @@ async fn sync_skill_to_workspaces(
     }
 }
 
+fn same_remote(a: &str, b: &str) -> bool {
+    let norm = |r: &str| {
+        r.trim()
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_ascii_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
 async fn ensure_library(
     state: &super::routes::AppState,
     headers: &HeaderMap,
 ) -> Result<Arc<LibraryStore>, (StatusCode, String)> {
-    // Check HTTP header override first, then fall back to settings store
-    let remote = match extract_library_remote(headers) {
-        Some(r) => Some(r),
-        None => state.settings.get_library_remote().await,
+    // The configured remote is the only Library: Core's git identity pushes
+    // to it, so a different remote named per request is refused.
+    let configured = state.settings.get_library_remote().await;
+    let remote = match (extract_library_remote(headers), configured) {
+        (Some(r), Some(c)) if !same_remote(&r, &c) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "This Core serves only its configured Library remote".to_string(),
+            ))
+        }
+        (Some(r), None) => Some(r),
+        (_, configured) => configured,
     };
     let remote = remote.ok_or_else(|| {
         (
@@ -176,6 +194,8 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/skill/:name", get(get_skill))
         .route("/skill/:name", put(save_skill))
         .route("/skill/:name", delete(delete_skill))
+        .route("/skill/:name/history", get(get_skill_history))
+        .route("/skill/:name/history/:rev", get(get_skill_at))
         .route("/skill/:name/files/*path", get(get_skill_reference))
         .route("/skill/:name/files/*path", put(save_skill_reference))
         .route("/skill/:name/files/*path", delete(delete_skill_reference))
@@ -663,6 +683,33 @@ async fn get_skill(
         .get_skill(&name)
         .await
         .map(Json)
+        .map_err(not_found_or_internal)
+}
+
+/// GET /api/library/skill/:name/history - Commits that changed the skill.
+async fn get_skill_history(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::library::types::LibraryHistoryEntry>>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .skill_history(&name)
+        .await
+        .map(Json)
+        .map_err(not_found_or_internal)
+}
+
+/// GET /api/library/skill/:name/history/:rev - SKILL.md at that commit.
+async fn get_skill_at(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path((name, rev)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<String, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .skill_at(&name, &rev)
+        .await
         .map_err(not_found_or_internal)
 }
 

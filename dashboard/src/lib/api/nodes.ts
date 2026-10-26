@@ -57,3 +57,52 @@ export async function setNodeCordon(
     `Failed to ${action} node`
   );
 }
+
+export interface MeshStatusView {
+  epoch: number;
+  bunker_state: number;
+  last_heartbeat_at: number;
+  formal_verified: boolean;
+}
+
+export interface BunkerIncidentView {
+  id: string;
+  at: string;
+  source: string;
+  peer_name?: string | null;
+  canary_kind?: string | null;
+  previous_bunker_state: number;
+  new_bunker_state: number;
+  epoch: number;
+  dry_run: boolean;
+  reason: string;
+  alert_delivered: boolean;
+}
+
+export interface PrivilegeSummaryView {
+  bunker_state: number;
+  bunker_incidents?: BunkerIncidentView[];
+}
+
+export function bunkerStateLabel(state: number): string {
+  switch (state) {
+    case 0:
+      return "Normal";
+    case 1:
+      return "Soft Quarantine";
+    case 2:
+      return "Hard Lockdown";
+    case 3:
+      return "Sovereign Dead-Man Tripped";
+    default:
+      return `Locked (${state})`;
+  }
+}
+
+export async function getMeshStatus(): Promise<MeshStatusView> {
+  return apiGet("/api/mesh/status", "Failed to fetch lean-mesh status");
+}
+
+export async function getPrivilegeSummary(): Promise<PrivilegeSummaryView> {
+  return apiGet("/api/privilege-access", "Failed to fetch privilege access");
+}
