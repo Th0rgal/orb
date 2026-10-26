@@ -280,7 +280,7 @@ test("composer effort: shown after harness and model for Codex, and sent on crea
   expect(posts[0].backend).toBe("codex");
   expect(posts[0].model_override).toBe("gpt-6-astra");
   expect(posts[0].model_effort).toBe("high");
-  expect(posts[0].cyber_access).toBe("standard");
+  expect(posts[0].cyber_access).toBe("automatic"); // the default since #1323
 });
 
 test("composer effort: absent for a harness the core ignores effort for, and reset on switch", async ({ page }) => {
