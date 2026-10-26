@@ -324,6 +324,18 @@ impl LibraryStore {
         Ok(skills)
     }
 
+    /// Commits that changed a skill's SKILL.md, newest first.
+    pub async fn skill_history(&self, name: &str) -> Result<Vec<types::LibraryHistoryEntry>> {
+        Self::validate_name(name)?;
+        git::log_path(&self.path, &format!("{SKILL_DIR}/{name}/SKILL.md"), 30).await
+    }
+
+    /// A skill's SKILL.md at an earlier commit (restore saves it as a new version).
+    pub async fn skill_at(&self, name: &str, rev: &str) -> Result<String> {
+        Self::validate_name(name)?;
+        git::show_at(&self.path, rev, &format!("{SKILL_DIR}/{name}/SKILL.md")).await
+    }
+
     /// Get a skill by name with full content.
     /// Encrypted values in <encrypted v="N">...</encrypted> tags are decrypted
     /// to <encrypted>...</encrypted> format for display/editing.

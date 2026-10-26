@@ -1,24 +1,23 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal } from "solid-js";
 import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
 import { MdSource, MdView } from "./Markdown";
 import type { LibrarySkill } from "./api";
 import type { SkillSourceRef } from "./localAgents";
+import { getSkillAt, getSkillHistory, UnsupportedEndpoint } from "./skillsApi";
+import { SKILL_BADGE_LABEL, skillBadge } from "./skillRows";
+import { orbRelativeTimeString } from "./orbKernel";
 import {
   compactDiff,
   effectiveAudience,
   lineDiff,
   lintSkill,
   parseSkillMeta,
-  placesOf,
-  placesToMeta,
   setSandboxedMeta,
-  type SkillPlaces,
 } from "./skillModel";
-import { SkillPlacesPicker, type PlaceProject } from "./SkillPlaces";
 import { deleteSkillFile, putSkillFile, readSkillFile, referencePaths } from "./skillsApi";
 import type { SkillRow } from "./skillRows";
 
-type Tab = "skill" | "files" | "versions";
+type Tab = "skill" | "files" | "versions" | "history";
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const formatSize = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
@@ -49,8 +48,8 @@ export interface SkillDetailProps {
   connected: boolean;
   harnessTotal: number;
   onClose: () => void;
-  /** Persist SKILL.md in the Library, then sync local harnesses. */
-  onSave: (name: string, content: string) => Promise<void>;
+  /** Persist SKILL.md in the Library, commit and push it, then sync local harnesses. */
+  onSave: (name: string, content: string, message?: string) => Promise<void>;
   /** Import a legacy/divergent copy (SKILL.md + reference files) into the Library. */
   onImport: (name: string, source: SkillSourceRef, rels: string[]) => Promise<void>;
   onDelete: (name: string) => Promise<void>;
@@ -58,7 +57,7 @@ export interface SkillDetailProps {
   onFilesChanged: (name: string) => Promise<void>;
   onOpenProjectFile?: (slug: string, path: string) => void;
   /** Projects that can receive Library skills, and those that currently list this one. */
-  projects?: PlaceProject[];
+  projects?: { slug: string; title?: string }[];
   projectMembership?: string[];
   /** Persist this skill's project memberships (only called when they changed). */
   onSaveProjects?: (name: string, projects: string[]) => Promise<void>;
@@ -69,7 +68,8 @@ export function SkillDetail(p: SkillDetailProps) {
   const editable = () => p.connected && !!p.library;
   const [draft, setDraft] = createSignal(original());
   const [tab, setTab] = createSignal<Tab>(p.row.divergent || p.row.legacyOnly ? "versions" : "skill");
-  const [preview, setPreview] = createSignal(!editable());
+  // Opens on the rendered skill; Edit switches to the source.
+  const [preview, setPreview] = createSignal(true);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
@@ -83,13 +83,20 @@ export function SkillDetail(p: SkillDetailProps) {
   const lint = createMemo(() => lintSkill(p.row.name, draft()));
   const [projectDraft, setProjectDraft] = createSignal<string[]>([...(p.projectMembership ?? [])].sort());
   const projectsDirty = () => projectDraft().join(",") !== [...(p.projectMembership ?? [])].sort().join(",");
-  const places = createMemo<SkillPlaces>(() => placesOf(audience(), meta().scope, projectDraft()));
-  const setPlaces = (next: SkillPlaces) => {
-    const projects = next.common ? [] : next.projects;
-    const m = placesToMeta({ ...next, projects }, audience().includes("coordinator") && meta().scope !== "global");
-    setProjectDraft(projects);
-    setDraft(setSandboxedMeta(draft(), m.audience, m.scope, p.row.name));
+  // Two plain controls write the same frontmatter the agents read.
+  const toggleAudience = (who: string, on: boolean) => {
+    const next = on ? [...new Set([...audience(), who])] : audience().filter((a) => a !== who);
+    setDraft(setSandboxedMeta(draft(), next, meta().scope ?? null, p.row.name));
   };
+  const setLoad = (always: boolean) => setDraft(setSandboxedMeta(draft(), audience(), always ? "global" : null, p.row.name));
+  const toggleProject = (slug: string, on: boolean) => setProjectDraft((list) => (on ? [...new Set([...list, slug])] : list.filter((x) => x !== slug)).sort());
+  const [saved, setSaved] = createSignal(false);
+  const save = () => void run(async () => {
+    setSaved(false);
+    if (draft() !== original()) await p.onSave(p.row.name, draft());
+    if (projectsDirty()) await p.onSaveProjects?.(p.row.name, projectDraft());
+    setSaved(true);
+  });
 
   const run = async (fn: () => Promise<void>) => {
     if (busy()) return;
@@ -147,15 +154,14 @@ export function SkillDetail(p: SkillDetailProps) {
           </Show>
           <DialogButton disabled={busy()} onClick={close}>{dirty() ? "Cancel" : "Close"}</DialogButton>
           <Show when={editable()}>
-            <DialogButton variant="primary" disabled={busy() || !dirty()} onClick={() => void run(async () => { if (draft() !== original()) await p.onSave(p.row.name, draft()); if (projectsDirty()) await p.onSaveProjects?.(p.row.name, projectDraft()); })}>
-              {busy() ? "Saving…" : "Save & sync"}
+            <Show when={saved() && !dirty()}><span class="skills-saved" role="status">Saved to repo</span></Show>
+            <DialogButton variant="primary" disabled={busy() || !dirty()} onClick={save}>
+              {busy() ? "Saving…" : "Save"}
             </DialogButton>
           </Show>
         </>}>
-        <div class="skills-detail-badges">
-          <SkillBadges row={p.row} harnessTotal={p.harnessTotal} projects={projectDraft()} />
-        </div>
-        <Show when={error()}>{(e) => <p class="inline-error" role="alert">{e()}</p>}</Show>
+        <Show when={skillBadge(p.row)}>{(b) => <div class="skills-detail-badges"><span class={`skills-badge ${b()}`}>{SKILL_BADGE_LABEL[b()]}</span></div>}</Show>
+        <Show when={error()}>{(e) => <p class="inline-error" role="alert">{e()} <Show when={dirty()}><button type="button" class="s-btn sm" onClick={save}>Retry</button></Show></p>}</Show>
         <Show when={lint().length}>
           <ul class="skills-lint" aria-label="Lint warnings">
             <For each={lint()}>{(l) => <li data-lint={l.id}>{l.message}</li>}</For>
@@ -167,6 +173,9 @@ export function SkillDetail(p: SkillDetailProps) {
           <Show when={p.library}>
             <button type="button" role="tab" aria-selected={tab() === "files"} class={`skills-filter-pill ${tab() === "files" ? "on" : ""}`} onClick={() => setTab("files")}>Reference files ({files().length})</button>
           </Show>
+          <Show when={p.library}>
+            <button type="button" role="tab" aria-selected={tab() === "history"} class={`skills-filter-pill ${tab() === "history" ? "on" : ""}`} onClick={() => setTab("history")}>History</button>
+          </Show>
           <Show when={versions().length}>
             <button type="button" role="tab" aria-selected={tab() === "versions"} class={`skills-filter-pill ${tab() === "versions" ? "on" : ""}`} onClick={() => setTab("versions")}>
               Copies ({versions().length}){p.row.divergent ? " · divergent" : ""}
@@ -177,8 +186,28 @@ export function SkillDetail(p: SkillDetailProps) {
         <Show when={tab() === "skill"}>
           <Show when={editable()}>
             <div class="skills-meta-controls">
-              <SkillPlacesPicker value={places()} projects={p.projects ?? []} disabled={busy()} onChange={setPlaces} />
-              <button type="button" class="s-btn sm quiet skills-preview-toggle" onClick={() => setPreview(!preview())}>{preview() ? "Edit" : "Preview"}</button>
+              <div class="skills-meta-row" role="group" aria-label="Who uses it">
+                <span class="skills-meta-label">Who uses it</span>
+                <For each={[["mission", "Missions"], ["coordinator", "Assistant"], ["local", "This Mac"]] as const}>{([id, label]) =>
+                  <label class="skills-check"><input type="checkbox" checked={audience().includes(id)} disabled={busy()} onChange={(e) => toggleAudience(id, e.currentTarget.checked)} />{label}</label>
+                }</For>
+              </div>
+              <div class="skills-meta-row" role="radiogroup" aria-label="Load">
+                <span class="skills-meta-label">Load</span>
+                <div class="skills-seg">
+                  <button type="button" role="radio" aria-checked={meta().scope !== "global"} class={meta().scope !== "global" ? "on" : ""} disabled={busy()} onClick={() => setLoad(false)}>On demand</button>
+                  <button type="button" role="radio" aria-checked={meta().scope === "global"} class={meta().scope === "global" ? "on" : ""} disabled={busy()} onClick={() => setLoad(true)}>Always</button>
+                </div>
+              </div>
+              <Show when={(p.projects ?? []).length && meta().scope !== "global"}>
+                <div class="skills-meta-row" role="group" aria-label="Projects">
+                  <span class="skills-meta-label">Projects</span>
+                  <For each={p.projects ?? []}>{(proj) =>
+                    <label class="skills-check"><input type="checkbox" checked={projectDraft().includes(proj.slug)} disabled={busy()} onChange={(e) => toggleProject(proj.slug, e.currentTarget.checked)} />{proj.title || proj.slug}</label>
+                  }</For>
+                </div>
+              </Show>
+              <button type="button" class="s-btn sm quiet skills-preview-toggle" aria-pressed={!preview()} onClick={() => setPreview(!preview())}>{preview() ? "Edit" : "Done editing"}</button>
             </div>
           </Show>
           <Show when={!p.library && p.row.projectFile}>
@@ -193,7 +222,7 @@ export function SkillDetail(p: SkillDetailProps) {
             <p class="skills-sub-note">Not in the Library. Import a copy from the Copies tab to manage it here.</p>
           </Show>
           <div class="skills-editor">
-            <Show when={!preview() && editable()} fallback={<div class="skills-md-view"><MdView text={draft() || "_No SKILL.md content available._"} /></div>}>
+            <Show when={!preview() && editable()} fallback={<div class="skills-md-view"><MdView text={draft().replace(/^---\n[\s\S]*?\n---\n?/, "").trim() || "_No SKILL.md content available._"} /></div>}>
               <MdSource text={draft()} onInput={setDraft} readOnly={busy()} />
             </Show>
           </div>
@@ -222,6 +251,10 @@ export function SkillDetail(p: SkillDetailProps) {
               </div>
             )}</Show>
           </div>
+        </Show>
+
+        <Show when={tab() === "history"}>
+          <SkillHistory name={p.row.name} current={original()} busy={busy()} onRestore={(rev, content) => void run(async () => { await p.onSave(p.row.name, content, `skill: restore ${p.row.name} to ${rev.slice(0, 7)}`); setDraft(content); setSaved(true); })} />
         </Show>
 
         <Show when={tab() === "versions"}>
@@ -306,24 +339,37 @@ export function SkillDetail(p: SkillDetailProps) {
   );
 }
 
-export function SkillBadges(p: { row: SkillRow; harnessTotal: number; projects?: string[] }) {
-  const r = () => p.row;
+/** Git versions of SKILL.md from the Library repo; Restore saves an old one as a new commit. */
+function SkillHistory(p: { name: string; current: string; busy: boolean; onRestore: (rev: string, content: string) => void }) {
+  const [versions] = createResource(() => p.name, (name) => getSkillHistory(name).catch((e) => (e instanceof UnsupportedEndpoint ? null : Promise.reject(e))));
+  const [open, setOpen] = createSignal<{ rev: string; content: string } | null>(null);
+  const view = async (rev: string) => setOpen(open()?.rev === rev ? null : { rev, content: await getSkillAt(p.name, rev) });
   return (
-    <>
-      <Show when={r().audience.includes("local")}><span class="skills-aud aud-local">local</span></Show>
-      <Show when={r().scope === "global"}><span class="skills-aud aud-global">common</span></Show>
-      <For each={p.projects ?? []}>{(slug) => <span class="skills-aud aud-project">{slug}</span>}</For>
-      <For each={r().sourceKinds}>{(k) => <span class="skills-origin-tag">{k}</span>}</For>
-      <Show when={r().desired}>
-        <span class={`skills-badge ${r().harnessCount >= p.harnessTotal && !r().staleCount ? "synced" : "drift"}`}>
-          {r().staleCount ? `Drift · ${r().harnessCount}/${p.harnessTotal}` : `Synced ${r().harnessCount}/${p.harnessTotal}`}
-        </span>
+    <div class="skills-versions" aria-label="History">
+      <Show when={!versions.loading} fallback={<For each={[0, 1, 2]}>{() => <div class="skills-version skeleton"><span class="spend-skel skills-skel-desc" /></div>}</For>}>
+        <Show when={!versions.error} fallback={<p class="inline-error">Couldn’t load the history: {String(versions.error?.message ?? versions.error)}</p>}>
+          <Show when={versions()} fallback={<p class="skills-sub-note">This Core is too old to show skill history.</p>}>{(list) =>
+            <For each={list()} fallback={<p class="skills-sub-note">No saved versions yet.</p>}>{(v, i) =>
+              <div class="skills-version">
+                <div class="skills-version-head">
+                  <div class="skills-version-title">
+                    <strong>{v.subject}</strong>
+                    <span class="skills-sub-note">{v.author} · {(() => { const t = orbRelativeTimeString(Date.now() / 1000 - v.timestamp); return t === "now" ? "just now" : `${t} ago`; })()} · {v.rev.slice(0, 7)}</span>
+                  </div>
+                  <div class="skills-version-actions">
+                    <button type="button" class="s-btn sm" onClick={() => void view(v.rev)}>{open()?.rev === v.rev ? "Hide" : "Compare"}</button>
+                    <Show when={i() > 0}>
+                      <button type="button" class="s-btn sm" disabled={p.busy} onClick={() => void getSkillAt(p.name, v.rev).then((content) => p.onRestore(v.rev, content))}>Restore</button>
+                    </Show>
+                  </div>
+                </div>
+                <Show when={open()?.rev === v.rev ? open() : null}>{(o) => <DiffView before={o().content} after={p.current} beforeLabel={o().rev.slice(0, 7)} afterLabel="Current" />}</Show>
+              </div>
+            }</For>
+          }</Show>
+        </Show>
       </Show>
-      
-      <Show when={r().legacyOnly}><span class="skills-badge drift">Only in legacy folder</span></Show>
-      <Show when={r().divergent}><span class="skills-badge drift">Divergent</span></Show>
-      <Show when={r().lines}><span class="skills-sub-note">{r().lines} lines</span></Show>
-    </>
+    </div>
   );
 }
 
