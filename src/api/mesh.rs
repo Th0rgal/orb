@@ -12,11 +12,15 @@
 //!   (`leanmesh_endpoint_roam_step`) followed by per-peer RFC 6479 64-packet anti-replay
 //!   windows (`leanmesh_replay_window_step`) and automatic manifest re-signing.
 //! - Synchronizes Orb's Bunker Mode with the persistent 4-state Mesh Bunker & 180s
-//!   Sovereign Dead-Man's Switch (`leanmesh_bunker_isolate_step`), and renders
-//!   deterministic WireGuard (`wg-leanmesh0.conf`) and `nftables` (`table inet lean_mesh`)
-//!   configurations.
+//!   Sovereign Dead-Man's Switch (`leanmesh_bunker_isolate_step`), verifying Ed25519
+//!   heartbeat signatures, anti-replay sequence numbers, and server-side biometric
+//!   `PrivilegeBroker` unbunker grants BEFORE updating `last_heartbeat_at`.
+//! - Renders deterministic WireGuard (`wg-leanmesh0.conf`) and `nftables`
+//!   (`table inet lean_mesh`) configurations only when the manifest passes
+//!   `verify_formal(0, 0, now)`.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -31,14 +35,13 @@ use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use lean_mesh::{
     check_endpoint_roam, select_relay_path, step_bunker_isolate, verify_frame_bounds,
-    verify_jit_lease, BunkerState as MeshBunkerState, BunkerTransition, MeshManifest, MeshProto,
-    RelayPathKind, ReplayWindow64, RouteDecision, LEAN_MESH_DEFAULT_WG_PORT,
-    LEAN_MESH_FRAME_MAGIC, LEAN_MESH_INTERFACE_NAME, LEAN_MESH_PROTOCOL_VERSION,
-    LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    verify_heartbeat_signature, verify_jit_lease, BunkerState as MeshBunkerState,
+    BunkerTransition, MeshManifest, MeshProto, NodeClass, RelayPathKind, ReplayWindow64,
+    RouteDecision, LEAN_MESH_DEFAULT_WG_PORT, LEAN_MESH_FRAME_MAGIC, LEAN_MESH_INTERFACE_NAME,
+    LEAN_MESH_PROTOCOL_VERSION, LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -61,23 +64,47 @@ fn default_bunker_normal() -> MeshBunkerState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedMeshState {
     pub coordinator_seed_hex: String,
+    pub pinned_coordinator_pubkey_hex: String,
     pub manifest: MeshManifest,
     pub peer_roam: BTreeMap<String, PeerRoamState>,
+    #[serde(default)]
+    pub heartbeat_replay: BTreeMap<String, ReplayWindow64>,
     pub last_heartbeat_at: u64,
     pub is_sovereign_node: bool,
     #[serde(default = "default_bunker_normal")]
     pub bunker_state: MeshBunkerState,
     pub active_relay_sessions: u32,
     pub max_relay_sessions: u32,
+    #[serde(skip)]
+    pub corrupted_state: bool,
 }
 
 impl PersistedMeshState {
-    fn signing_key(&self) -> SigningKey {
-        let bytes = hex::decode(&self.coordinator_seed_hex)
-            .ok()
-            .and_then(|v| <[u8; 32]>::try_from(v).ok())
-            .unwrap_or([0x42; 32]);
-        SigningKey::from_bytes(&bytes)
+    /// Decodes the coordinator Ed25519 signing key and verifies it matches the pinned
+    /// coordinator public key. Fails closed (`Err`) on any corruption — never falls back
+    /// to a hardcoded or predictable key.
+    pub fn signing_key(&self) -> Result<SigningKey, String> {
+        if self.corrupted_state {
+            return Err("mesh store is in fail-closed corrupted state".into());
+        }
+        let raw = hex::decode(self.coordinator_seed_hex.trim())
+            .map_err(|_| "corrupted coordinator_seed_hex in PersistedMeshState".to_string())?;
+        let bytes: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| "coordinator_seed_hex must decode to exactly 32 bytes".to_string())?;
+        if bytes == [0u8; 32] {
+            return Err("all-zero coordinator seed rejected".into());
+        }
+        let sk = SigningKey::from_bytes(&bytes);
+        let derived_pub = hex::encode(sk.verifying_key().to_bytes());
+        if derived_pub != self.pinned_coordinator_pubkey_hex
+            || derived_pub != self.manifest.coordinator_pubkey_hex
+        {
+            return Err(
+                "coordinator signing key does not match pinned_coordinator_pubkey_hex".into(),
+            );
+        }
+        Ok(sk)
     }
 }
 
@@ -92,11 +119,29 @@ fn unix_now() -> u64 {
     Utc::now().timestamp().max(1) as u64
 }
 
-fn derive_default_seed(working_dir: &std::path::Path) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(b"orb-lean-mesh-coordinator-seed-v1:");
-    h.update(working_dir.to_string_lossy().as_bytes());
-    h.finalize().into()
+fn generate_csprng_seed() -> Result<[u8; 32], String> {
+    let mut f = std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("failed to open /dev/urandom: {e}"))?;
+    let mut seed = [0u8; 32];
+    f.read_exact(&mut seed)
+        .map_err(|e| format!("failed to read 32 bytes from /dev/urandom: {e}"))?;
+    if seed == [0u8; 32] {
+        return Err("CSPRNG returned all-zero seed".into());
+    }
+    Ok(seed)
+}
+
+fn write_initial_private_sync(path: &std::path::Path, state: &PersistedMeshState) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 impl MeshStore {
@@ -106,24 +151,95 @@ impl MeshStore {
         let path = dir.join("lean_mesh_state.json");
         let now = unix_now();
 
-        let state = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<PersistedMeshState>(&raw).ok())
-            .unwrap_or_else(|| {
-                let seed = derive_default_seed(&working_dir);
-                let sk = SigningKey::from_bytes(&seed);
+        let state = match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<PersistedMeshState>(&raw) {
+                Ok(loaded)
+                    if loaded.signing_key().is_ok() && loaded.manifest.verify_ed25519() =>
+                {
+                    loaded
+                }
+                _ => {
+                    // Existing state file on disk is corrupted or tampered: fail closed in
+                    // `HardLockdown` with `corrupted_state = true` rather than overwriting
+                    // with a new or predictable key.
+                    let fallback_seed = generate_csprng_seed().unwrap_or([0x99; 32]);
+                    let sk = SigningKey::from_bytes(&fallback_seed);
+                    let manifest = MeshManifest::paloma_fleet_default(now, &sk);
+                    PersistedMeshState {
+                        coordinator_seed_hex: String::new(),
+                        pinned_coordinator_pubkey_hex: manifest.coordinator_pubkey_hex.clone(),
+                        manifest,
+                        peer_roam: BTreeMap::new(),
+                        heartbeat_replay: BTreeMap::new(),
+                        last_heartbeat_at: now,
+                        is_sovereign_node: true,
+                        bunker_state: MeshBunkerState::HardLockdown,
+                        active_relay_sessions: 0,
+                        max_relay_sessions: 128,
+                        corrupted_state: true,
+                    }
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match generate_csprng_seed() {
+                    Ok(seed) => {
+                        let sk = SigningKey::from_bytes(&seed);
+                        let manifest = MeshManifest::paloma_fleet_default(now, &sk);
+                        let pubkey_hex = manifest.coordinator_pubkey_hex.clone();
+                        let fresh = PersistedMeshState {
+                            coordinator_seed_hex: hex::encode(seed),
+                            pinned_coordinator_pubkey_hex: pubkey_hex,
+                            manifest,
+                            peer_roam: BTreeMap::new(),
+                            heartbeat_replay: BTreeMap::new(),
+                            last_heartbeat_at: now,
+                            is_sovereign_node: true,
+                            bunker_state: MeshBunkerState::Normal,
+                            active_relay_sessions: 0,
+                            max_relay_sessions: 128,
+                            corrupted_state: false,
+                        };
+                        let _ = write_initial_private_sync(&path, &fresh);
+                        fresh
+                    }
+                    Err(_) => {
+                        let sk = SigningKey::from_bytes(&[0x99; 32]);
+                        let manifest = MeshManifest::paloma_fleet_default(now, &sk);
+                        PersistedMeshState {
+                            coordinator_seed_hex: String::new(),
+                            pinned_coordinator_pubkey_hex: manifest.coordinator_pubkey_hex.clone(),
+                            manifest,
+                            peer_roam: BTreeMap::new(),
+                            heartbeat_replay: BTreeMap::new(),
+                            last_heartbeat_at: now,
+                            is_sovereign_node: true,
+                            bunker_state: MeshBunkerState::HardLockdown,
+                            active_relay_sessions: 0,
+                            max_relay_sessions: 128,
+                            corrupted_state: true,
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                let fallback_seed = generate_csprng_seed().unwrap_or([0x99; 32]);
+                let sk = SigningKey::from_bytes(&fallback_seed);
                 let manifest = MeshManifest::paloma_fleet_default(now, &sk);
                 PersistedMeshState {
-                    coordinator_seed_hex: hex::encode(seed),
+                    coordinator_seed_hex: String::new(),
+                    pinned_coordinator_pubkey_hex: manifest.coordinator_pubkey_hex.clone(),
                     manifest,
                     peer_roam: BTreeMap::new(),
+                    heartbeat_replay: BTreeMap::new(),
                     last_heartbeat_at: now,
-                    is_sovereign_node: false,
-                    bunker_state: MeshBunkerState::Normal,
+                    is_sovereign_node: true,
+                    bunker_state: MeshBunkerState::HardLockdown,
                     active_relay_sessions: 0,
                     max_relay_sessions: 128,
+                    corrupted_state: true,
                 }
-            });
+            }
+        };
 
         Arc::new(Self {
             path,
@@ -131,13 +247,11 @@ impl MeshStore {
         })
     }
 
-    async fn save(&self, state: &PersistedMeshState) {
-        if let Ok(json) = serde_json::to_string_pretty(state) {
-            let tmp = self.path.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.path);
-            }
+    async fn save(&self, state: &PersistedMeshState) -> Result<(), String> {
+        if state.corrupted_state {
+            return Err("refusing to overwrite corrupted mesh state file".into());
         }
+        super::approval_flow::persist_private(&self.path, state).await
     }
 }
 
@@ -162,18 +276,127 @@ async fn effective_mesh_bunker(
 ) -> BunkerTransition {
     let orb_bunker = super::privilege_broker::store(app_state).bunker_state().await;
     let base = mesh_state.bunker_state.max(map_orb_bunker_to_mesh(orb_bunker));
+    let hb_fresh = mesh_state.last_heartbeat_at <= now_epoch
+        && now_epoch.saturating_sub(mesh_state.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
     step_bunker_isolate(
         base,
         mesh_state.is_sovereign_node,
-        orb_bunker == OrbBunkerState::HardLockdown,
+        mesh_state.corrupted_state || orb_bunker == OrbBunkerState::HardLockdown,
         orb_bunker == OrbBunkerState::SoftQuarantine,
         0,
         false,
-        true,
+        hb_fresh,
         now_epoch,
         mesh_state.last_heartbeat_at,
         LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
     )
+}
+
+/// Pure server-side heartbeat verification & bunker state transition step.
+///
+/// Enforces:
+/// 1. `is_sovereign_node` is derived strictly from the pinned manifest (`NodeClass::SovereignVault`),
+///    never from a client boolean.
+/// 2. `canary_tripped` and `auth_failure_burst` are derived strictly from server-side `orb_bunker`.
+/// 3. Ed25519 signature over `("lean-mesh-heartbeat-v1", peer_name, heartbeat_seq, timestamp)`,
+///    timestamp freshness, and `ReplayWindow64` anti-replay are verified **before** updating
+///    `last_heartbeat_at`.
+/// 4. If heartbeat verification fails, `last_heartbeat_at` is NOT updated and `step_bunker_isolate`
+///    is evaluated with `heartbeat_valid = false` against the previously persisted `last_heartbeat_at`,
+///    so a forged, stale, or replayed heartbeat cannot delay or clear `SovereignDeadManTripped`.
+pub fn process_heartbeat_step(
+    state: &mut PersistedMeshState,
+    req: &HeartbeatRequest,
+    orb_bunker: OrbBunkerState,
+    biometric_unbunker_verified: bool,
+    now_epoch: u64,
+) -> Result<BunkerTransition, (StatusCode, String, Option<BunkerTransition>)> {
+    if state.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mesh store is in fail-closed corrupted state".into(),
+            None,
+        ));
+    }
+
+    let peer = state.manifest.find_peer(&req.peer_name).map_err(|e| {
+        (StatusCode::NOT_FOUND, e.to_string(), None)
+    })?;
+    let peer_active = !peer.revoked && now_epoch < peer.expires_at;
+    let is_sovereign_peer = peer.node_class == NodeClass::SovereignVault;
+    let effective_sovereign = state.is_sovereign_node || is_sovereign_peer;
+
+    let canary_tripped = orb_bunker == OrbBunkerState::HardLockdown;
+    let auth_failure_burst = orb_bunker == OrbBunkerState::SoftQuarantine;
+    let base = state.bunker_state.max(map_orb_bunker_to_mesh(orb_bunker));
+
+    let sig_ok = peer_active
+        && verify_heartbeat_signature(
+            &state.pinned_coordinator_pubkey_hex,
+            &req.peer_name,
+            req.heartbeat_seq,
+            req.timestamp,
+            &req.signature_hex,
+        );
+    let ts_fresh = req.timestamp <= now_epoch.saturating_add(30)
+        && now_epoch.saturating_sub(req.timestamp) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+
+    let replay_ok = if sig_ok && ts_fresh {
+        state
+            .heartbeat_replay
+            .entry(req.peer_name.clone())
+            .or_default()
+            .check_and_advance(req.heartbeat_seq)
+    } else {
+        false
+    };
+
+    let heartbeat_valid = sig_ok && ts_fresh && replay_ok;
+    if !heartbeat_valid {
+        // Evaluate `step_bunker_isolate` against the OLD `state.last_heartbeat_at` with
+        // `heartbeat_valid = false` and `biometric_unbunker = false`.
+        let transition = step_bunker_isolate(
+            base,
+            effective_sovereign,
+            canary_tripped,
+            auth_failure_burst,
+            0,
+            false,
+            false,
+            now_epoch,
+            state.last_heartbeat_at,
+            LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+        );
+        if transition.next_state > state.bunker_state {
+            state.bunker_state = transition.next_state;
+        }
+        let reason = if !sig_ok {
+            "invalid Ed25519 heartbeat signature or inactive peer"
+        } else if !ts_fresh {
+            "stale or future heartbeat timestamp"
+        } else {
+            "replayed heartbeat_seq rejected by ReplayWindow64"
+        };
+        return Err((StatusCode::UNAUTHORIZED, reason.into(), Some(transition)));
+    }
+
+    // Only update `last_heartbeat_at` after cryptographic + freshness + anti-replay checks succeed.
+    state.last_heartbeat_at = req.timestamp.min(now_epoch);
+    state.is_sovereign_node = effective_sovereign;
+    let transition = step_bunker_isolate(
+        base,
+        effective_sovereign,
+        canary_tripped,
+        auth_failure_burst,
+        0,
+        biometric_unbunker_verified,
+        true,
+        now_epoch,
+        state.last_heartbeat_at,
+        LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    );
+    state.bunker_state = transition.next_state;
+    Ok(transition)
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,14 +446,12 @@ pub struct EndpointRoamRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct HeartbeatRequest {
+    pub peer_name: String,
+    pub heartbeat_seq: u64,
+    pub timestamp: u64,
+    pub signature_hex: String,
     #[serde(default)]
-    pub is_sovereign_node: Option<bool>,
-    #[serde(default)]
-    pub canary_tripped: bool,
-    #[serde(default)]
-    pub auth_failure_burst: bool,
-    #[serde(default)]
-    pub biometric_unbunker: bool,
+    pub unbunker_grant_id: Option<Uuid>,
 }
 
 async fn get_mesh_status(
@@ -259,13 +480,14 @@ async fn get_mesh_status(
         "panic_seq": guard.manifest.panic_seq,
         "issued_at": guard.manifest.issued_at,
         "expires_at": guard.manifest.expires_at,
-        "coordinator_pubkey_hex": guard.manifest.coordinator_pubkey_hex,
+        "coordinator_pubkey_hex": guard.pinned_coordinator_pubkey_hex,
         "peers_count": guard.manifest.peers.len(),
         "rules_count": guard.manifest.rules.len(),
         "bunker": bunker,
         "persisted_bunker_state": guard.bunker_state,
         "last_heartbeat_at": guard.last_heartbeat_at,
         "sovereign_deadman_timeout_secs": LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+        "corrupted_state": guard.corrupted_state,
         "cabi_self_test_ok": frame_gate_ok,
     }))
 }
@@ -288,12 +510,19 @@ async fn post_mesh_manifest(
     let now = unix_now();
     let mut guard = store.inner.lock().await;
 
-    if candidate.coordinator_pubkey_hex != guard.manifest.coordinator_pubkey_hex {
+    if guard.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "mesh store is in fail-closed corrupted state" })),
+        ));
+    }
+
+    if candidate.coordinator_pubkey_hex != guard.pinned_coordinator_pubkey_hex {
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({
                 "error": "coordinator_pubkey_hex mismatch against pinned mesh coordinator key",
-                "expected_coordinator_pubkey_hex": guard.manifest.coordinator_pubkey_hex,
+                "expected_coordinator_pubkey_hex": guard.pinned_coordinator_pubkey_hex,
             })),
         ));
     }
@@ -312,7 +541,12 @@ async fn post_mesh_manifest(
         })?;
 
     guard.manifest = candidate;
-    store.save(&guard).await;
+    store.save(&guard).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+    })?;
 
     Ok(Json(json!({
         "admitted": ratchet.admitted,
@@ -334,7 +568,7 @@ async fn post_evaluate_route(
     let bunker = effective_mesh_bunker(&app_state, &guard, now).await;
     if bunker.next_state > guard.bunker_state {
         guard.bunker_state = bunker.next_state;
-        store.save(&guard).await;
+        let _ = store.save(&guard).await;
     }
 
     let src = guard.manifest.find_peer(&req.src_peer).map_err(|e| {
@@ -452,6 +686,20 @@ async fn post_endpoint_roam(
     let store = store(&app_state);
     let now = unix_now();
     let mut guard = store.inner.lock().await;
+    if guard.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "mesh store is in fail-closed corrupted state" })),
+        ));
+    }
+
+    let sk = guard.signing_key().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+    })?;
+
     let bunker = effective_mesh_bunker(&app_state, &guard, now).await;
     if bunker.next_state > guard.bunker_state {
         guard.bunker_state = bunker.next_state;
@@ -520,9 +768,13 @@ async fn post_endpoint_roam(
     guard.manifest.epoch = guard.manifest.epoch.saturating_add(1);
     guard.manifest.issued_at = now;
     guard.manifest.expires_at = now.saturating_add(guard.manifest.max_ttl_secs);
-    let sk = guard.signing_key();
     guard.manifest.sign(&sk);
-    store.save(&guard).await;
+    store.save(&guard).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+    })?;
 
     Ok(Json(json!({
         "admitted": true,
@@ -548,7 +800,7 @@ async fn render_wg_handler(
         .render_wireguard_config(&node, "<NODE_WG_PRIVATE_KEY>", bunker.next_state, now)
         .map_err(|e| {
             (
-                StatusCode::NOT_FOUND,
+                StatusCode::BAD_REQUEST,
                 Json(json!({ "error": e.to_string() })),
             )
         })
@@ -569,7 +821,7 @@ async fn render_nft_handler(
         .render_nftables_policy(&node, bunker.next_state, now)
         .map_err(|e| {
             (
-                StatusCode::NOT_FOUND,
+                StatusCode::BAD_REQUEST,
                 Json(json!({ "error": e.to_string() })),
             )
         })
@@ -577,36 +829,83 @@ async fn render_nft_handler(
 
 async fn post_heartbeat(
     State(app_state): State<Arc<AppState>>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     Json(req): Json<HeartbeatRequest>,
-) -> Json<Value> {
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let store = store(&app_state);
     let now = unix_now();
-    let mut guard = store.inner.lock().await;
-    if let Some(sov) = req.is_sovereign_node {
-        guard.is_sovereign_node = sov;
-    }
-    guard.last_heartbeat_at = now;
     let orb_bunker = super::privilege_broker::store(&app_state).bunker_state().await;
-    let base = guard.bunker_state.max(map_orb_bunker_to_mesh(orb_bunker));
-    let transition = step_bunker_isolate(
-        base,
-        guard.is_sovereign_node,
-        req.canary_tripped || orb_bunker == OrbBunkerState::HardLockdown,
-        req.auth_failure_burst || orb_bunker == OrbBunkerState::SoftQuarantine,
-        0,
-        req.biometric_unbunker,
-        true,
+
+    // Verify optional `unbunker_grant_id` server-side via `PrivilegeBroker` (`RootExec` scope).
+    let biometric_unbunker_verified = if let Some(grant_id) = req.unbunker_grant_id {
+        let Some(grant) = super::privilege_broker::store(&app_state)
+            .get(&user.id, grant_id)
+            .await
+        else {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "unknown or unauthorized unbunker_grant_id",
+                })),
+            ));
+        };
+        let valid_unbunker = grant.state == ApprovalState::Approved
+            && grant.owner == user.id
+            && grant.scope == super::privilege_broker::PrivilegeScope::RootExec
+            && grant.revoked_at.is_none()
+            && (grant.target_host == req.peer_name || grant.target_host == "all")
+            && grant.live_grant(Utc::now(), orb_bunker);
+        if !valid_unbunker {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "unbunker_grant_id is not an active biometric RootExec grant for this peer",
+                })),
+            ));
+        }
+        true
+    } else {
+        false
+    };
+
+    let mut guard = store.inner.lock().await;
+    match process_heartbeat_step(
+        &mut guard,
+        &req,
+        orb_bunker,
+        biometric_unbunker_verified,
         now,
-        guard.last_heartbeat_at,
-        LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
-    );
-    guard.bunker_state = transition.next_state;
-    store.save(&guard).await;
-    Json(json!({
-        "last_heartbeat_at": guard.last_heartbeat_at,
-        "bunker": transition,
-    }))
+    ) {
+        Ok(transition) => {
+            store.save(&guard).await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e })),
+                )
+            })?;
+            Ok(Json(json!({
+                "admitted": true,
+                "peer": req.peer_name,
+                "heartbeat_seq": req.heartbeat_seq,
+                "last_heartbeat_at": guard.last_heartbeat_at,
+                "bunker": transition,
+            })))
+        }
+        Err((status, reason, maybe_transition)) => {
+            if maybe_transition.is_some() && !guard.corrupted_state {
+                let _ = store.save(&guard).await;
+            }
+            Err((
+                status,
+                Json(json!({
+                    "admitted": false,
+                    "error": reason,
+                    "last_heartbeat_at": guard.last_heartbeat_at,
+                    "bunker": maybe_transition,
+                })),
+            ))
+        }
+    }
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -623,6 +922,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lean_mesh::sign_heartbeat;
 
     #[test]
     fn mesh_store_initializes_and_enforces_sovereign_isolation() {
@@ -631,6 +931,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         rt.block_on(async {
             let guard = ms.inner.lock().await;
+            assert!(!guard.corrupted_state);
+            assert!(guard.signing_key().is_ok());
             let now = guard.manifest.issued_at + 5;
             assert!(guard.manifest.verify_formal(0, 0, now).is_ok());
 
@@ -726,13 +1028,140 @@ mod tests {
             guard.manifest.epoch = initial_epoch + 1;
             guard.manifest.issued_at = now;
             guard.manifest.expires_at = now + guard.manifest.max_ttl_secs;
-            let sk = guard.signing_key();
+            let sk = guard.signing_key().expect("valid coordinator signing key");
             guard.manifest.sign(&sk);
             assert!(guard.manifest.verify_ed25519());
             assert!(guard
                 .manifest
                 .verify_formal(initial_epoch, 0, now + 1)
                 .is_ok());
+        });
+    }
+
+    #[test]
+    fn heartbeat_verifies_ed25519_before_updating_last_heartbeat_and_trips_deadman_on_forgery() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ms = MeshStore::open(tmp.path().to_path_buf());
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async {
+            let mut guard = ms.inner.lock().await;
+            let sk = guard.signing_key().expect("valid signing key");
+            let t0 = guard.manifest.issued_at;
+            guard.last_heartbeat_at = t0;
+
+            // 1. Valid signed heartbeat at `t0 + 10` advances `last_heartbeat_at` and keeps Normal state.
+            let sig1 = sign_heartbeat(&sk, "dgx-spark", 1, t0 + 10);
+            let req1 = HeartbeatRequest {
+                peer_name: "dgx-spark".into(),
+                heartbeat_seq: 1,
+                timestamp: t0 + 10,
+                signature_hex: sig1.clone(),
+                unbunker_grant_id: None,
+            };
+            let tr1 = process_heartbeat_step(
+                &mut guard,
+                &req1,
+                OrbBunkerState::Normal,
+                false,
+                t0 + 10,
+            )
+            .expect("valid signed heartbeat must succeed");
+            assert_eq!(tr1.next_state, MeshBunkerState::Normal);
+            assert_eq!(guard.last_heartbeat_at, t0 + 10);
+
+            // 2. Replaying the same heartbeat (`heartbeat_seq = 1`) is rejected by `ReplayWindow64`
+            // and does NOT advance `last_heartbeat_at`.
+            let replay_err = process_heartbeat_step(
+                &mut guard,
+                &req1,
+                OrbBunkerState::Normal,
+                false,
+                t0 + 15,
+            )
+            .unwrap_err();
+            assert_eq!(replay_err.0, StatusCode::UNAUTHORIZED);
+            assert_eq!(guard.last_heartbeat_at, t0 + 10);
+
+            // 3. Forged heartbeat after 200s (`> 180s` dead-man timeout) does NOT overwrite
+            // `last_heartbeat_at` and trips `SovereignDeadManTripped` (State 3)!
+            let forged_req = HeartbeatRequest {
+                peer_name: "dgx-spark".into(),
+                heartbeat_seq: 2,
+                timestamp: t0 + 215,
+                signature_hex: "00".repeat(64),
+                unbunker_grant_id: None,
+            };
+            let forged_err = process_heartbeat_step(
+                &mut guard,
+                &forged_req,
+                OrbBunkerState::Normal,
+                false,
+                t0 + 215,
+            )
+            .unwrap_err();
+            assert_eq!(forged_err.0, StatusCode::UNAUTHORIZED);
+            assert_eq!(guard.last_heartbeat_at, t0 + 10);
+            assert_eq!(
+                guard.bunker_state,
+                MeshBunkerState::SovereignDeadManTripped
+            );
+
+            // 4. Even a valid heartbeat WITHOUT a verified server-side biometric unbunker grant
+            // cannot exit `SovereignDeadManTripped` (sticky fence).
+            let sig2 = sign_heartbeat(&sk, "dgx-spark", 2, t0 + 220);
+            let req2 = HeartbeatRequest {
+                peer_name: "dgx-spark".into(),
+                heartbeat_seq: 2,
+                timestamp: t0 + 220,
+                signature_hex: sig2,
+                unbunker_grant_id: None,
+            };
+            let tr2 = process_heartbeat_step(
+                &mut guard,
+                &req2,
+                OrbBunkerState::Normal,
+                false,
+                t0 + 220,
+            )
+            .expect("valid heartbeat accepted");
+            assert_eq!(tr2.next_state, MeshBunkerState::SovereignDeadManTripped);
+
+            // 5. Valid heartbeat WITH verified server-side biometric `RootExec` grant unbunkers back to Normal.
+            let sig3 = sign_heartbeat(&sk, "dgx-spark", 3, t0 + 225);
+            let req3 = HeartbeatRequest {
+                peer_name: "dgx-spark".into(),
+                heartbeat_seq: 3,
+                timestamp: t0 + 225,
+                signature_hex: sig3,
+                unbunker_grant_id: None,
+            };
+            let tr3 = process_heartbeat_step(
+                &mut guard,
+                &req3,
+                OrbBunkerState::Normal,
+                true,
+                t0 + 225,
+            )
+            .expect("biometric unbunker with valid heartbeat must succeed");
+            assert_eq!(tr3.next_state, MeshBunkerState::Normal);
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+        });
+    }
+
+    #[test]
+    fn corrupted_mesh_state_fails_closed_into_hard_lockdown_without_fallback_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join(".sandboxed-sh");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lean_mesh_state.json"), "{ invalid json").unwrap();
+
+        let ms = MeshStore::open(tmp.path().to_path_buf());
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async {
+            let guard = ms.inner.lock().await;
+            assert!(guard.corrupted_state);
+            assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
+            assert!(guard.signing_key().is_err());
         });
     }
 }

@@ -65,6 +65,10 @@ enum Commands {
         #[arg(long, default_value = "paloma-fleet-manifest.json")]
         out: PathBuf,
         #[arg(long)]
+        seed_hex: Option<String>,
+        #[arg(long)]
+        seed_out: Option<PathBuf>,
+        #[arg(long)]
         now: Option<u64>,
     },
     /// Cryptographically and formally verify a signed mesh manifest via `LeanMesh.Kernel`
@@ -148,20 +152,62 @@ fn unix_now() -> u64 {
         .unwrap_or(1_760_000_000)
 }
 
+fn generate_csprng_seed() -> Result<[u8; 32]> {
+    use std::io::Read;
+    let mut f = fs::File::open("/dev/urandom")
+        .context("failed to open /dev/urandom for CSPRNG coordinator key generation")?;
+    let mut seed = [0u8; 32];
+    f.read_exact(&mut seed)
+        .context("failed to read 32 CSPRNG bytes from /dev/urandom")?;
+    if seed == [0u8; 32] {
+        bail!("CSPRNG returned all-zero seed");
+    }
+    Ok(seed)
+}
+
+fn write_private_file(path: &PathBuf, contents: &str) -> Result<()> {
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to set 0600 permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::InitFleet { out, now } => {
+        Commands::InitFleet {
+            out,
+            seed_hex,
+            seed_out,
+            now,
+        } => {
             let now_epoch = now.unwrap_or_else(unix_now);
-            let sk = SigningKey::from_bytes(&[0x42; 32]);
+            let seed: [u8; 32] = match seed_hex {
+                Some(hex_str) => {
+                    let bytes =
+                        hex::decode(hex_str.trim()).context("invalid --seed-hex encoding")?;
+                    bytes
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("--seed-hex must decode to exactly 32 bytes"))?
+                }
+                None => generate_csprng_seed()?,
+            };
+            if let Some(seed_path) = &seed_out {
+                write_private_file(seed_path, &format!("{}\n", hex::encode(seed)))?;
+            }
+            let sk = SigningKey::from_bytes(&seed);
             let manifest = MeshManifest::paloma_fleet_default(now_epoch, &sk);
             let json = serde_json::to_string_pretty(&manifest)?;
-            fs::write(&out, &json)
-                .with_context(|| format!("failed to write {}", out.display()))?;
+            write_private_file(&out, &json)?;
             println!(
-                "Generated signed Paloma fleet manifest at {} (epoch={}, peers={}, rules={})",
+                "Generated signed Paloma fleet manifest at {} (epoch={}, coordinator_pubkey={}, peers={}, rules={})",
                 out.display(),
                 manifest.epoch,
+                manifest.coordinator_pubkey_hex,
                 manifest.peers.len(),
                 manifest.rules.len()
             );

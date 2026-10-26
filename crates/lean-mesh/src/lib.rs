@@ -966,6 +966,7 @@ impl MeshManifest {
     }
 
     /// Renders a deterministic kernel WireGuard configuration (`wg-leanmesh0.conf`) for `node_name`.
+    /// Fails closed if the manifest fails `verify_formal(0, 0, now_epoch)`.
     pub fn render_wireguard_config(
         &self,
         node_name: &str,
@@ -973,6 +974,7 @@ impl MeshManifest {
         bunker_state: BunkerState,
         now_epoch: u64,
     ) -> Result<String, MeshError> {
+        self.verify_formal(0, 0, now_epoch)?;
         let self_peer = self.find_peer(node_name)?;
         let bunker_prune_mode: u8 = match bunker_state {
             BunkerState::Normal | BunkerState::SoftQuarantine => 0,
@@ -1041,12 +1043,14 @@ impl MeshManifest {
     }
 
     /// Renders a deterministic `nftables` capability enforcement policy for `node_name`.
+    /// Fails closed if the manifest fails `verify_formal(0, 0, now_epoch)`.
     pub fn render_nftables_policy(
         &self,
         node_name: &str,
         bunker_state: BunkerState,
         now_epoch: u64,
     ) -> Result<String, MeshError> {
+        self.verify_formal(0, 0, now_epoch)?;
         let self_peer = self.find_peer(node_name)?;
         let peer_by_name: BTreeMap<&str, &MeshPeer> =
             self.peers.iter().map(|p| (p.name.as_str(), p)).collect();
@@ -1372,6 +1376,58 @@ impl MeshManifest {
     }
 }
 
+/// Canonical domain-separated SHA-256 digest for authenticated mesh heartbeats.
+pub fn canonical_heartbeat_bytes(peer_name: &str, heartbeat_seq: u64, timestamp: u64) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lean-mesh-heartbeat-v1:");
+    hasher.update(peer_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(heartbeat_seq.to_be_bytes());
+    hasher.update(b":");
+    hasher.update(timestamp.to_be_bytes());
+    hasher.finalize().to_vec()
+}
+
+/// Signs a canonical mesh heartbeat `(peer_name, heartbeat_seq, timestamp)` with `signing_key`.
+pub fn sign_heartbeat(
+    signing_key: &SigningKey,
+    peer_name: &str,
+    heartbeat_seq: u64,
+    timestamp: u64,
+) -> String {
+    let digest = canonical_heartbeat_bytes(peer_name, heartbeat_seq, timestamp);
+    let sig: Signature = signing_key.sign(&digest);
+    hex::encode(sig.to_bytes())
+}
+
+/// Verifies an Ed25519 signature over a canonical mesh heartbeat `(peer_name, heartbeat_seq, timestamp)`.
+pub fn verify_heartbeat_signature(
+    pubkey_hex: &str,
+    peer_name: &str,
+    heartbeat_seq: u64,
+    timestamp: u64,
+    signature_hex: &str,
+) -> bool {
+    let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let Ok(pk_arr): Result<[u8; 32], _> = pk_bytes.try_into() else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(sig_arr): Result<[u8; 64], _> = sig_bytes.try_into() else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    let digest = canonical_heartbeat_bytes(peer_name, heartbeat_seq, timestamp);
+    verifying_key.verify(&digest, &signature).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1605,5 +1661,110 @@ mod tests {
         manifest.epoch += 1;
         manifest.sign(&sk);
         assert!(manifest.verify_formal(1, 0, now + 10).is_err());
+    }
+
+    #[test]
+    fn render_refuses_invalid_manifest_and_nftables_matches_eval_route() {
+        let sk = test_signing_key();
+        let now = 1_760_000_000;
+        let manifest = MeshManifest::paloma_fleet_default(now, &sk);
+
+        // 1. Forged signature or expired manifest is rejected by both `render_wireguard_config`
+        // and `render_nftables_policy` (no "render-anyway").
+        let mut forged = manifest.clone();
+        forged.signature_hex = "00".repeat(64);
+        assert!(forged
+            .render_wireguard_config("ashur", "<KEY>", BunkerState::Normal, now + 10)
+            .is_err());
+        assert!(forged
+            .render_nftables_policy("ashur", BunkerState::Normal, now + 10)
+            .is_err());
+        assert!(manifest
+            .render_wireguard_config(
+                "ashur",
+                "<KEY>",
+                BunkerState::Normal,
+                manifest.expires_at + 1
+            )
+            .is_err());
+        assert!(manifest
+            .render_nftables_policy("ashur", BunkerState::Normal, manifest.expires_at + 1)
+            .is_err());
+
+        // 2. Bijective coherence between `render_nftables_policy` and `evaluate_route`
+        // across every destination node and every source peer on key ports `[22, 3000, 3088, 8888]`.
+        for dst in &manifest.peers {
+            let nft = manifest
+                .render_nftables_policy(&dst.name, BunkerState::Normal, now + 10)
+                .unwrap();
+            for src in &manifest.peers {
+                if src.id == dst.id {
+                    continue;
+                }
+                for port in [22u32, 3000, 3088, 8888] {
+                    let decision = manifest
+                        .evaluate_route(
+                            &src.name,
+                            &dst.name,
+                            MeshProto::Tcp,
+                            port,
+                            false,
+                            0,
+                            BunkerState::Normal,
+                            now + 10,
+                        )
+                        .unwrap();
+                    let prefix = format!(
+                        "ip saddr {} ip daddr {} tcp dport ",
+                        src.overlay_ip, dst.overlay_ip
+                    );
+                    let emitted_in_nft = nft.lines().any(|line| {
+                        let trimmed = line.trim();
+                        if !trimmed.starts_with(&prefix) || !trimmed.contains(" accept") {
+                            return false;
+                        }
+                        let rest = &trimmed[prefix.len()..];
+                        let port_tok = rest.split_whitespace().next().unwrap_or("");
+                        if let Some((lo, hi)) = port_tok.split_once('-') {
+                            let lo_u = lo.parse::<u32>().unwrap_or(0);
+                            let hi_u = hi.parse::<u32>().unwrap_or(0);
+                            lo_u <= port && port <= hi_u
+                        } else {
+                            port_tok.parse::<u32>().ok() == Some(port)
+                        }
+                    });
+                    assert_eq!(
+                        decision.allowed, emitted_in_nft,
+                        "mismatch between evaluate_route and render_nftables_policy for {} -> {}:{}",
+                        src.name, dst.name, port
+                    );
+                }
+            }
+        }
+
+        // 3. Authenticated heartbeat signature verification succeeds only for matching parameters.
+        let pub_hex = hex::encode(sk.verifying_key().to_bytes());
+        let sig_hex = sign_heartbeat(&sk, "dgx-spark", 1, now + 5);
+        assert!(verify_heartbeat_signature(
+            &pub_hex,
+            "dgx-spark",
+            1,
+            now + 5,
+            &sig_hex
+        ));
+        assert!(!verify_heartbeat_signature(
+            &pub_hex,
+            "dgx-spark",
+            2,
+            now + 5,
+            &sig_hex
+        ));
+        assert!(!verify_heartbeat_signature(
+            &pub_hex,
+            "ashur",
+            1,
+            now + 5,
+            &sig_hex
+        ));
     }
 }
