@@ -397,6 +397,8 @@ struct OrbHome: View {
     @State private var accessRequests = OrbMissionAccessMonitor.shared
     @State private var accessSheet = false
     @State private var privilegeRequests = OrbPrivilegeAccessMonitor.shared
+    @State private var approvalEnrollment = OrbApprovalEnrollmentMonitor.shared
+    @State private var enrollSheet = false
     @State private var privilegeSheet = false
     @State private var deepLinks = OrbDeepLinks.shared
     @State private var homeReady = false
@@ -446,6 +448,11 @@ struct OrbHome: View {
         .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet() }
         .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet() }
         .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet() }
+        .sheet(isPresented: $enrollSheet) { OrbApprovalEnrollmentSheet() }
+        .onChange(of: approvalEnrollment.sheetRequested) { _, open in
+            if open { approvalEnrollment.sheetRequested = false; enrollSheet = true }
+        }
+        .task(id: scenePhase) { if scenePhase == .active { await approvalEnrollment.refresh() } }
         .onChange(of: accessRequests.openRequested, initial: true) { _, open in
             if open { accessRequests.openRequested = false; accessSheet = true }
         }
@@ -461,11 +468,9 @@ struct OrbHome: View {
         VStack(spacing: 0) {
             OrbSecretRequestBanner(count: secretRequests.pending.count) { secretSheet = true }
             OrbMissionAccessBanner(count: accessRequests.pending.count) { accessSheet = true }
-            OrbPrivilegeAccessBanner(
-                count: privilegeRequests.pending.count,
-                bunkered: privilegeRequests.bunkered,
-                bunkerState: privilegeRequests.bunkerState
-            ) { privilegeSheet = true }
+            OrbBunkerModeCard { privilegeSheet = true }
+            OrbPrivilegeAccessBanner(count: privilegeRequests.pending.count) { privilegeSheet = true }
+            OrbApprovalEnrollmentBanner()
         }
     }
 

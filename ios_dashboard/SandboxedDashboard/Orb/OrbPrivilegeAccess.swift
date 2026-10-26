@@ -24,6 +24,22 @@ final class OrbPrivilegeAccessMonitor {
     private var endpoint = ""
     private var announced: Set<String> = []
     private var announcedBunkerLevel = 0
+    /// The Bunker Mode card stays hidden at this level once dismissed; a new level shows it again.
+    private(set) var bunkerDismissedForLevel = 0
+
+    var showsBunkerCard: Bool { Self.showsBunkerCard(state: bunkerState, dismissedLevel: bunkerDismissedForLevel) }
+    var latestIncidentReason: String? { Self.latestIncidentReason(incidents) }
+
+    nonisolated static func showsBunkerCard(state: Int, dismissedLevel: Int) -> Bool {
+        state > 0 && dismissedLevel != state
+    }
+
+    /// Core lists incidents newest first; canary dry runs do not change the posture.
+    nonisolated static func latestIncidentReason(_ incidents: [OrbJSON]) -> String? {
+        incidents.first { !$0["dry_run"].flag && !$0["reason"].text.isEmpty }?["reason"].text
+    }
+
+    func dismissBunkerCard() { bunkerDismissedForLevel = bunkerState }
 
     var pending: [OrbJSON] { requests.filter { $0["state"].text == "pending" } }
     var grants: [OrbJSON] { requests.filter { Self.isLive($0) } }
@@ -86,8 +102,32 @@ final class OrbPrivilegeAccessMonitor {
         meshStatus = await Log.attempt(.network, "mesh status", { try await OrbCore.shared.call("/api/mesh/status") })
         let meshBunker = Int(meshStatus?["bunker_state"].doubleValue ?? 0)
         bunkerState = max(snapBunker, meshBunker)
+        if bunkerState <= 0 { bunkerDismissedForLevel = 0 }
         announce()
         return true
+    }
+
+    /// Enter (level 2) or exit Fleet Bunker Mode, signed by this phone's approval key.
+    /// Same endpoints and bodies as desktop `privilegeAccessApi.ts`.
+    func setBunker(lock: Bool) async throws {
+        let reason = lock ? "enter Hard Bunker Lockdown across the fleet" : "exit Fleet Bunker Mode"
+        let enrolled = await OrbApprovalKey.ensureEnrolled()
+        if !enrolled, let message = await OrbBiometric.authenticate(reason: reason) {
+            if message.isEmpty { throw CancellationError() }
+            throw OrbHTTPError(status: 0, detail: message)
+        }
+        let path = lock ? "/api/privilege-access/bunker" : "/api/privilege-access/unbunker"
+        let body: OrbJSON? = lock
+            ? .object([
+                "level": .number(2),
+                "reason": .string("Operator manual Fleet Bunker lockdown from Orb iOS"),
+                "canary_tripped": .bool(true),
+                "auth_failure_burst": .bool(false)
+            ])
+            : nil
+        _ = try await OrbApprovalKey.signedCall(path, method: "POST", body: body, summary: reason)
+        OrbHaptics.success()
+        await refresh()
     }
 
     func poll() async {
@@ -123,20 +163,14 @@ final class OrbPrivilegeAccessMonitor {
 
 struct OrbPrivilegeAccessBanner: View {
     let count: Int
-    var bunkered: Bool = false
-    var bunkerState: Int = 0
     let open: () -> Void
     var body: some View {
-        if bunkered || count > 0 {
+        if count > 0 {
             Button(action: open) {
                 HStack(spacing: 10) {
-                    Image(systemName: bunkered ? "lock.shield.fill" : "lock.trianglebadge.exclamationmark")
+                    Image(systemName: "lock.trianglebadge.exclamationmark")
                         .foregroundStyle(OrbStyle.warning)
-                    Text(
-                        bunkered
-                            ? "Bunker Mode: \(OrbPrivilegeAccessMonitor.bunkerLabel(bunkerState))"
-                            : (count == 1 ? "A mission asks for privileged access" : "\(count) missions ask for privileged access")
-                    )
+                    Text(count == 1 ? "A mission asks for privileged access" : "\(count) missions ask for privileged access")
                         .font(.footnote.weight(.semibold))
                     Spacer()
                     if count > 0 {
@@ -343,33 +377,91 @@ struct OrbPrivilegeAccessList: View {
 
     private func toggleBunker(lock: Bool) {
         Task {
-            let reason = lock
-                ? "enter Hard Bunker Lockdown across the fleet"
-                : "exit Fleet Bunker Mode"
-            let enrolled = await OrbApprovalKey.ensureEnrolled()
-            if !enrolled, let message = await OrbBiometric.authenticate(reason: reason) {
-                if !message.isEmpty { error = message }
-                return
-            }
             acting = lock ? "bunker" : "unbunker"
             defer { acting = nil }
             do {
-                let path = lock ? "/api/privilege-access/bunker" : "/api/privilege-access/unbunker"
-                let body: OrbJSON? = lock
-                    ? .object([
-                        "level": .number(2),
-                        "reason": .string("Operator manual Fleet Bunker lockdown from Orb iOS"),
-                        "canary_tripped": .bool(true),
-                        "auth_failure_burst": .bool(false)
-                    ])
-                    : nil
-                _ = try await OrbApprovalKey.signedCall(path, method: "POST", body: body, summary: reason)
+                try await monitor.setBunker(lock: lock)
                 error = ""
-                OrbHaptics.success()
+            } catch is CancellationError {
             } catch {
                 self.error = error.localizedDescription
             }
-            await monitor.refresh()
+        }
+    }
+}
+
+/// Home card while the fleet is in Bunker Mode, like desktop `BunkerModeCard`:
+/// the level, the latest incident, Review and a Face ID-signed exit.
+struct OrbBunkerModeCard: View {
+    @State private var monitor = OrbPrivilegeAccessMonitor.shared
+    @State private var exiting = false
+    @State private var error = ""
+    let review: () -> Void
+
+    var body: some View {
+        if monitor.showsBunkerCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Image(systemName: "lock.shield.fill").foregroundStyle(OrbStyle.error)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Fleet Bunker Mode: \(OrbPrivilegeAccessMonitor.bunkerLabel(monitor.bunkerState))")
+                            .font(.footnote.weight(.semibold))
+                        Text("New privileged requests are locked and active root/deploy grants are revoked.")
+                            .font(.caption).foregroundStyle(OrbStyle.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let reason = monitor.latestIncidentReason {
+                            Text(reason).font(.caption).italic().lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("home.bunker.reason")
+                        }
+                        if !error.isEmpty {
+                            Text(error).font(.caption).foregroundStyle(OrbStyle.error)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Button { monitor.dismissBunkerCard() } label: {
+                        Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(OrbStyle.textSecondary)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss")
+                }
+                HStack {
+                    Button("Review", action: review)
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("home.bunker.review")
+                    Spacer()
+                    Button { exit() } label: {
+                        Label("Exit Bunker Mode", systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                            .foregroundStyle(.black)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(OrbStyle.success)
+                    .disabled(exiting)
+                    .accessibilityIdentifier("home.bunker.exit")
+                }
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
+            .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.error.opacity(0.5)))
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .accessibilityIdentifier("home.bunker")
+        }
+    }
+
+    private func exit() {
+        Task {
+            exiting = true
+            defer { exiting = false }
+            do {
+                try await monitor.setBunker(lock: false)
+                error = ""
+            } catch is CancellationError {
+            } catch {
+                self.error = error.localizedDescription
+            }
         }
     }
 }
