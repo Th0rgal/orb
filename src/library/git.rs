@@ -30,10 +30,26 @@ fn get_ssh_command() -> Option<String> {
 }
 
 /// Apply SSH configuration to a git command if needed.
-/// The development identity's git config: GitHub credentials and commit
-/// signing for Core's own Library commits. The service user's global config
-/// may name the signing key without the identity's gpg wrapper or a valid
-/// credential, which froze the prod Library on 2026-10-18.
+/// Core's configured Library remote, set once at startup. Only this remote
+/// gets the development identity; a remote named per request never does.
+static TRUSTED_REMOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_trusted_remote(remote: &str) {
+    let _ = TRUSTED_REMOTE.set(normalize_remote(remote));
+}
+
+fn normalize_remote(remote: &str) -> String {
+    remote
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_ascii_lowercase()
+}
+
+/// The development identity's git config (GitHub credential and signing).
+/// The service user's own config named the signing key without its gpg
+/// wrapper and held an expired GitHub token, which froze the prod Library
+/// on 2026-10-18.
 fn identity_gitconfig() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("SANDBOXED_DEVELOPMENT_IDENTITY")
         .map(std::path::PathBuf::from)
@@ -43,19 +59,45 @@ fn identity_gitconfig() -> Option<std::path::PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// A git command for the Library: the development identity when present,
-/// otherwise the host config without commit signing.
+/// A local git command: never signs, never uses the shared identity.
 fn git() -> Command {
     let mut cmd = Command::new("git");
-    match identity_gitconfig() {
-        Some(config) => {
-            cmd.env("GIT_CONFIG_GLOBAL", config);
-        }
-        None => {
-            cmd.args(["-c", "commit.gpgsign=false"]);
-        }
-    }
+    cmd.args(["-c", "commit.gpgsign=false"]);
     cmd
+}
+
+fn origin_of(path: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .current_dir(path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// A network or commit command: the development identity only when `remote`
+/// is the configured Library remote, otherwise the plain [`git`].
+fn trusted_git(remote: Option<&str>) -> Command {
+    let trusted = remote
+        .map(normalize_remote)
+        .zip(TRUSTED_REMOTE.get())
+        .is_some_and(|(remote, trusted)| remote == *trusted);
+    match identity_gitconfig().filter(|_| trusted) {
+        Some(config) => {
+            let mut cmd = Command::new("git");
+            cmd.env("GIT_CONFIG_GLOBAL", config);
+            cmd
+        }
+        None => git(),
+    }
+}
+
+/// [`trusted_git`] for the repository at `path`, judged by its origin.
+fn trusted_git_at(path: &Path) -> Command {
+    trusted_git(origin_of(path).as_deref())
 }
 
 fn apply_ssh_config(cmd: &mut Command) {
@@ -78,7 +120,7 @@ pub async fn clone_if_needed(path: &Path, remote: &str) -> Result<bool> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let mut cmd = git();
+    let mut cmd = trusted_git(Some(remote));
     cmd.args(["clone", remote, &path.to_string_lossy()]);
     apply_ssh_config(&mut cmd);
     let output = cmd.output().await.context("Failed to execute git clone")?;
@@ -137,7 +179,7 @@ pub async fn ensure_remote(path: &Path, remote: &str) -> Result<()> {
 
     // Fetch from the new remote
     tracing::info!("Fetching from new remote");
-    let mut cmd = git();
+    let mut cmd = trusted_git_at(path);
     cmd.current_dir(path).args(["fetch", "origin"]);
     apply_ssh_config(&mut cmd);
     let output = cmd.output().await.context("Failed to execute git fetch")?;
@@ -340,7 +382,7 @@ impl std::error::Error for PullError {}
 pub async fn pull(path: &Path) -> Result<(), PullError> {
     tracing::info!(path = %path.display(), "Pulling library changes");
 
-    let mut cmd = git();
+    let mut cmd = trusted_git_at(path);
     cmd.current_dir(path).args(["pull", "--ff-only"]);
     apply_ssh_config(&mut cmd);
     let output = cmd
@@ -383,7 +425,7 @@ pub async fn force_pull(path: &Path) -> Result<()> {
     tracing::info!(path = %path.display(), "Force pulling library (resetting to remote)");
 
     // First, fetch the latest from remote
-    let mut cmd = git();
+    let mut cmd = trusted_git_at(path);
     cmd.current_dir(path).args(["fetch", "origin"]);
     apply_ssh_config(&mut cmd);
     let output = cmd.output().await.context("Failed to execute git fetch")?;
@@ -420,7 +462,7 @@ pub async fn force_pull(path: &Path) -> Result<()> {
 pub async fn force_push(path: &Path) -> Result<()> {
     tracing::info!(path = %path.display(), "Force pushing library changes");
 
-    let mut cmd = git();
+    let mut cmd = trusted_git_at(path);
     cmd.current_dir(path).args(["push", "--force-with-lease"]);
     apply_ssh_config(&mut cmd);
     let output = cmd
@@ -468,7 +510,12 @@ pub async fn commit(path: &Path, message: &str, author: Option<&GitAuthor>) -> R
     }
 
     // Build commit command with optional author
-    let mut cmd = git();
+    // Sign with the shared identity only Core's own commits; an author named
+    // by the API caller is committed unsigned.
+    let mut cmd = match author {
+        Some(_) => git(),
+        None => trusted_git_at(path),
+    };
     cmd.current_dir(path);
     cmd.args(["commit", "-m", message]);
 
@@ -495,7 +542,7 @@ pub async fn commit(path: &Path, message: &str, author: Option<&GitAuthor>) -> R
 pub async fn push(path: &Path) -> Result<()> {
     tracing::info!(path = %path.display(), "Pushing library changes");
 
-    let mut cmd = git();
+    let mut cmd = trusted_git_at(path);
     cmd.current_dir(path).args(["push"]);
     apply_ssh_config(&mut cmd);
     let output = cmd.output().await.context("Failed to execute git push")?;
@@ -517,7 +564,7 @@ pub async fn clone(path: &Path, remote: &str) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let mut cmd = git();
+    let mut cmd = trusted_git(Some(remote));
     cmd.args(["clone", "--depth", "1", remote, &path.to_string_lossy()]);
     apply_ssh_config(&mut cmd);
     let output = cmd.output().await.context("Failed to execute git clone")?;
@@ -593,7 +640,7 @@ pub async fn sparse_clone(path: &Path, remote: &str, subpath: &str) -> Result<()
     tokio::fs::write(&sparse_checkout_path, format!("{}\n", subpath)).await?;
 
     // Fetch and checkout
-    let mut cmd = git();
+    let mut cmd = trusted_git_at(path);
     cmd.current_dir(path)
         .args(["fetch", "--depth", "1", "origin"]);
     apply_ssh_config(&mut cmd);
