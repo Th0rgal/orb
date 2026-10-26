@@ -57,7 +57,10 @@ fn main() {
             .arg(out_lean.join("LeanMesh/Kernel.olean"))
             .status()
             .expect("Failed to execute `lean` on LeanMesh/Kernel.lean");
-        assert!(status_k.success(), "LeanMesh/Kernel.lean verification failed");
+        assert!(
+            status_k.success(),
+            "LeanMesh/Kernel.lean verification failed"
+        );
 
         let status_s = Command::new("lean")
             .current_dir(&lean_dir)
@@ -138,7 +141,9 @@ fn main() {
     for req in REQUIRED_EXPORTS {
         let found = def_str.lines().any(|line| {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            parts.len() >= 2 && (parts[0] == *req || parts[0] == format!("_{req}")) && parts[1] == "T"
+            parts.len() >= 2
+                && (parts[0] == *req || parts[0] == format!("_{req}"))
+                && parts[1] == "T"
         });
         assert!(
             found,
