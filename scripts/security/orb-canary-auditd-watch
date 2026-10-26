@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Paloma / Orb Canary Auditd Watcher (Wave 10)
+# Enforces `Orb.Kernel.canaryTripwireStep` (`lean/Orb/Kernel.lean`):
+# 1. Ambient decoys (`env_honeytoken`, `vault_canary`, `mongo_27017`):
+#    - Whitelisted agent file-search / directory-walk processes (`rg`, `ripgrep`, `grep`,
+#      `find`, `fd`, `fdfind`, `ls`, `stat`, `file`, `du`, `tree`, `git`) running inside a
+#      managed Paloma agent cgroup (`sandboxed-node`, `opencode`, `antigravity`, `claude`, `codex`)
+#      are logged as `WHITELISTED_AGENT_WALK` and ignored (no node quarantine, no fleet bunker).
+#    - Other mission processes (`actor_trust = MissionProcess`) trigger node-local quarantine
+#      and report to Core (`QuarantineNodeOnly` — quarantines ONLY this node, not the whole fleet).
+# 2. High-signal attacker bait (`btc_wallet_canary` / `btc-treasury-wallet.dat`, `ssh_exfil_canary`):
+#    - Bypasses the process whitelist (`canary_high_signal_bait_always_locks_down`): even if
+#      accessed by our own agent process (indicating stolen device or MITM'd inference), immediately
+#      quarantines the node and escalates the fleet to `HardLockdown (2)`.
+set -euo pipefail
+
+STATE_FILE="/var/lib/lean-mesh/canary-audit-cursor"
+TRIPWIRE="/usr/local/sbin/orb-canary-tripwire"
+mkdir -p /var/lib/lean-mesh
+chmod 700 /var/lib/lean-mesh
+
+LAST_TS="$(cat "$STATE_FILE" 2>/dev/null || echo 0)"
+
+is_whitelisted_agent_walk() {
+  local uid="$1" cgroup="$2" cmdline="$3"
+  local cg_lower="${cgroup,,}"
+  local cmd_lower="${cmdline,,}"
+
+  # Must originate from a managed Paloma agent/mission execution context
+  if [[ "$uid" != "999" ]] && \
+     [[ "$cg_lower" != *"sandboxed-node"* ]] && \
+     [[ "$cg_lower" != *"sandboxed_node"* ]] && \
+     [[ "$cg_lower" != *"opencode"* ]] && \
+     [[ "$cg_lower" != *"antigravity"* ]] && \
+     [[ "$cmd_lower" != *"/var/lib/sandboxed-node/"* ]] && \
+     [[ "$cmd_lower" != *"fast_9024_scanner"* ]]; then
+    return 1
+  fi
+
+  local first_tok="${cmdline%% *}"
+  local exe_name="${first_tok##*/}"
+  exe_name="${exe_name,,}"
+
+  case "$exe_name" in
+    rg|ripgrep|grep|egrep|fgrep|find|fd|fdfind|ls|stat|file|du|tree|git)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_high_signal_bait() {
+  local kind="$1"
+  case "$kind" in
+    btc_wallet_canary|ssh_exfil_canary|*btc*|*bitcoin*|*wallet*|*high_signal*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+while true; do
+  for KEY_PAIR in \
+    "paloma_canary_env:env_honeytoken" \
+    "paloma_canary_vault:vault_canary" \
+    "paloma_canary_btc:btc_wallet_canary" \
+    "paloma_canary_ssh:ssh_exfil_canary"; do
+    KEY="${KEY_PAIR%%:*}"
+    KIND="${KEY_PAIR##*:}"
+    LINE="$(ausearch -k "$KEY" -i 2>/dev/null | grep -E 'type=SYSCALL' | tail -n 1 || true)"
+    if [[ -n "$LINE" ]]; then
+      EVENT_ID="$(echo "$LINE" | grep -oE 'audit\([^)]+\)' | head -n 1 || true)"
+      if [[ -n "$EVENT_ID" && "$EVENT_ID" != "$LAST_TS" ]]; then
+        PID="$(echo "$LINE" | grep -oE ' pid=[0-9]+' | head -n 1 | cut -d= -f2 || echo 0)"
+        UID_VAL="$(echo "$LINE" | grep -oE ' uid=[^ ]+' | head -n 1 | cut -d= -f2 || echo 0)"
+        COMM="$(echo "$LINE" | grep -oE ' comm=[^ ]+' | head -n 1 | cut -d= -f2 || echo unknown)"
+        EXE="$(echo "$LINE" | grep -oE ' exe=[^ ]+' | head -n 1 | cut -d= -f2 || echo unknown)"
+
+        # Convert non-numeric UID (from `ausearch -i`) to numeric UID if needed
+        if ! [[ "$UID_VAL" =~ ^[0-9]+$ ]]; then
+          UID_NUM="$(id -u "$UID_VAL" 2>/dev/null || echo 999)"
+        else
+          UID_NUM="$UID_VAL"
+        fi
+
+        CGROUP="$(tr '\0' ';' < "/proc/$PID/cgroup" 2>/dev/null | head -c 200 || echo auditd)"
+        CMDLINE="$(tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null | head -c 240 || echo "$COMM ($EXE)")"
+        if [[ -z "${CMDLINE// /}" ]]; then
+          CMDLINE="$COMM ($EXE)"
+        fi
+
+        echo "$EVENT_ID" > "$STATE_FILE"
+        LAST_TS="$EVENT_ID"
+
+        if ! is_high_signal_bait "$KIND" && is_whitelisted_agent_walk "$UID_NUM" "$CGROUP" "$CMDLINE"; then
+          logger -t orb-canary-auditd-watch "WHITELISTED_AGENT_WALK ignored: kind=$KIND event=$EVENT_ID pid=$PID uid=$UID_NUM comm=$COMM"
+          continue
+        fi
+
+        "$TRIPWIRE" "$KIND" "auditd key=$KEY event=$EVENT_ID comm=$COMM exe=$EXE" "$PID" "$UID_NUM" "$CGROUP" "$CMDLINE" || true
+      fi
+    fi
+  done
+  sleep 2
+done
