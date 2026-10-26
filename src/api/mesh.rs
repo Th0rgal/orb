@@ -752,8 +752,116 @@ pub async fn sync_orb_bunker_transition(
     Ok((prev, transition, guard.manifest.epoch))
 }
 
-/// Verifies a signed `CanaryTripwireRequest` against `MeshStore` without mutating
-/// in-memory replay or bunker state until `commit_canary_tripwire_state` persists it.
+/// Validates all cryptographic, peer-status, freshness, and canonical-digest invariants
+/// for a `CanaryTripwireRequest` without mutating `canary_replay` or `bunker_state`,
+/// returning `(previous_mesh_bunker, simulated_transition, manifest_epoch, peer_sign_pubkey_hex, already_in_replay_window)`.
+pub async fn preview_canary_tripwire(
+    app_state: &AppState,
+    req: &CanaryTripwireRequest,
+) -> Result<(MeshBunkerState, BunkerTransition, u64, String, bool), (StatusCode, String)> {
+    let store = store(app_state);
+    let now = unix_now();
+    let guard = store.inner.lock().await;
+    if guard.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mesh store is in fail-closed corrupted state".into(),
+        ));
+    }
+    let peer_name = req.peer_name.trim();
+    let canary_kind = req.canary_kind.trim();
+    let reason = req.reason.trim();
+    if peer_name.is_empty() || canary_kind.is_empty() || reason.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "peer_name, canary_kind, and reason must be non-empty".into(),
+        ));
+    }
+    let peer = guard
+        .manifest
+        .find_peer(peer_name)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    if peer.revoked || now >= peer.expires_at {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "reporting peer is revoked or expired in manifest".into(),
+        ));
+    }
+    let peer_pubkey_hex = peer.sign_pubkey_hex.clone();
+
+    let expected_evidence_sha256 = canonical_canary_evidence_sha256_hex(
+        &req.reason,
+        req.pid,
+        req.uid,
+        req.cgroup.as_deref(),
+        req.cmdline.as_deref(),
+    );
+    if !expected_evidence_sha256.eq_ignore_ascii_case(req.detail_sha256_hex.trim()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "detail_sha256_hex does not match canonical forensic evidence digest".into(),
+        ));
+    }
+
+    let ts_fresh = req.timestamp <= now.saturating_add(30)
+        && now.saturating_sub(req.timestamp) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    if !ts_fresh {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "stale or future canary tripwire timestamp".into(),
+        ));
+    }
+
+    let sig_ok = verify_canary_trip_signature(
+        &peer_pubkey_hex,
+        peer_name,
+        canary_kind,
+        req.event_seq,
+        req.timestamp,
+        req.dry_run,
+        &expected_evidence_sha256,
+        req.signature_hex.trim(),
+    );
+    if !sig_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid Ed25519 canary tripwire signature".into(),
+        ));
+    }
+
+    let mut test_window = guard
+        .canary_replay
+        .get(peer_name)
+        .cloned()
+        .unwrap_or_default();
+    let already_replayed = !test_window.check_and_advance(req.event_seq);
+
+    let previous = guard.bunker_state;
+    let hb_fresh = guard.last_heartbeat_at <= now
+        && now.saturating_sub(guard.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    let transition = step_bunker_isolate(
+        previous,
+        guard.is_sovereign_node,
+        true,
+        false,
+        2,
+        false,
+        hb_fresh,
+        now,
+        guard.last_heartbeat_at,
+        LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    );
+    Ok((
+        previous,
+        transition,
+        guard.manifest.epoch,
+        peer_pubkey_hex,
+        already_replayed,
+    ))
+}
+
+/// Verifies a signed `CanaryTripwireRequest` against `MeshStore` and durably persists
+/// the advanced replay window and (when `dry_run == false`) the escalated `MeshBunkerState`.
 pub async fn verify_and_apply_canary_tripwire(
     app_state: &AppState,
     req: &CanaryTripwireRequest,

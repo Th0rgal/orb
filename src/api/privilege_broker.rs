@@ -232,6 +232,12 @@ pub struct BunkerIncidentEntry {
     #[serde(default)]
     pub event_seq: Option<u64>,
     #[serde(default)]
+    pub event_timestamp: Option<u64>,
+    #[serde(default)]
+    pub peer_pubkey_hex: Option<String>,
+    #[serde(default)]
+    pub signature_hex: Option<String>,
+    #[serde(default)]
     pub epoch: u64,
     #[serde(alias = "previous_state")]
     pub previous_bunker_state: u8,
@@ -955,24 +961,146 @@ impl PrivilegeBroker {
         Ok(id)
     }
 
-    pub async fn find_incident_by_canary_event(
+    pub async fn match_canary_incident(
         &self,
-        peer_name: &str,
-        canary_kind: &str,
-        event_seq: u64,
-        detail_sha256_hex: &str,
-    ) -> Option<BunkerIncidentEntry> {
+        req: &super::mesh::CanaryTripwireRequest,
+        peer_pubkey_hex: &str,
+    ) -> Result<Option<BunkerIncidentEntry>, String> {
+        let peer_name = req.peer_name.trim();
+        let canary_kind = req.canary_kind.trim();
         let data = self.data.lock().await;
-        data.bunker_incidents
-            .iter()
-            .rev()
-            .find(|i| {
-                i.peer_name.as_deref() == Some(peer_name)
-                    && i.canary_kind.as_deref() == Some(canary_kind)
-                    && i.event_seq == Some(event_seq)
-                    && i.detail_sha256_hex.eq_ignore_ascii_case(detail_sha256_hex)
-            })
-            .cloned()
+        let Some(existing) = data.bunker_incidents.iter().rev().find(|i| {
+            i.peer_name.as_deref() == Some(peer_name)
+                && i.event_seq == Some(req.event_seq)
+        }) else {
+            return Ok(None);
+        };
+        let exact_match = existing.canary_kind.as_deref() == Some(canary_kind)
+            && existing.dry_run == req.dry_run
+            && existing.event_timestamp == Some(req.timestamp)
+            && existing
+                .detail_sha256_hex
+                .eq_ignore_ascii_case(req.detail_sha256_hex.trim())
+            && existing
+                .peer_pubkey_hex
+                .as_deref()
+                .map(|k| k.eq_ignore_ascii_case(peer_pubkey_hex.trim()))
+                .unwrap_or(false)
+            && existing
+                .signature_hex
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case(req.signature_hex.trim()))
+                .unwrap_or(false);
+        if exact_match {
+            Ok(Some(existing.clone()))
+        } else {
+            Err("conflicting canary payload for already-recorded (peer_name, event_seq)".into())
+        }
+    }
+
+    /// Atomically transitions `PrivilegeBroker` Bunker state (revoking active JIT grants
+    /// when `!req.dry_run`) and records the `BunkerIncidentEntry` in a single `commit`
+    /// BEFORE `MeshStore.canary_replay` is advanced on disk.
+    pub async fn escalate_and_record_canary_incident(
+        &self,
+        req: &super::mesh::CanaryTripwireRequest,
+        prev_mesh_u8: u8,
+        next_mesh_u8: u8,
+        epoch: u64,
+        peer_pubkey_hex: &str,
+    ) -> Result<(BunkerStepResponse, BunkerIncidentEntry), String> {
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        let prev_bunker = data.current_bunker();
+        let prev_bunker_u8 = prev_bunker as u8;
+        let mut revoked_ids = Vec::new();
+        let orb_step = if req.dry_run {
+            BunkerStepResponse {
+                previous_state: prev_bunker_u8,
+                bunker_state: prev_bunker_u8,
+                revoke_all_jit_grants: false,
+                isolate_node_mesh: false,
+                revoked_grants_count: 0,
+            }
+        } else {
+            let verdict = bunker_step(prev_bunker, true, false, 2, false);
+            data.bunker_state = verdict.next_state as u8;
+            let detail = Some(format!(
+                "canary_tripwire:{}:{}:{}",
+                req.peer_name.trim(),
+                req.canary_kind.trim(),
+                req.reason.trim()
+            ));
+            if verdict.revoke_all_jit_grants {
+                for r in data.requests.iter_mut() {
+                    if r.state == ApprovalState::Approved || r.state.is_pending() {
+                        r.state = ApprovalState::Revoked;
+                        r.revoked_at = Some(now);
+                        r.lease_token_sha256 = None;
+                        revoked_ids.push(r.clone());
+                    }
+                }
+                for r in &revoked_ids {
+                    data.log(r, "bunker_revoked", detail.clone(), now);
+                }
+            }
+            BunkerStepResponse {
+                previous_state: prev_bunker_u8,
+                bunker_state: verdict.next_state as u8,
+                revoke_all_jit_grants: verdict.revoke_all_jit_grants,
+                isolate_node_mesh: verdict.isolate_node_mesh,
+                revoked_grants_count: revoked_ids.len(),
+            }
+        };
+
+        let incident = BunkerIncidentEntry {
+            id: Uuid::new_v4(),
+            at: now,
+            source: "canary_tripwire".into(),
+            peer_name: Some(req.peer_name.trim().to_string()),
+            canary_kind: Some(req.canary_kind.trim().to_string()),
+            event_seq: Some(req.event_seq),
+            event_timestamp: Some(req.timestamp),
+            peer_pubkey_hex: Some(peer_pubkey_hex.trim().to_string()),
+            signature_hex: Some(req.signature_hex.trim().to_string()),
+            epoch,
+            previous_bunker_state: orb_step.previous_state.max(prev_mesh_u8),
+            new_bunker_state: if req.dry_run {
+                orb_step.bunker_state.max(prev_mesh_u8)
+            } else {
+                orb_step.bunker_state.max(next_mesh_u8)
+            },
+            dry_run: req.dry_run,
+            reason: req.reason.trim().to_string(),
+            pid: req.pid,
+            uid: req.uid,
+            cgroup: req.cgroup.clone(),
+            cmdline: req.cmdline.clone(),
+            detail_sha256_hex: req.detail_sha256_hex.trim().to_string(),
+            alert_delivered: false,
+            alert_channels: Vec::new(),
+            alert_error: None,
+        };
+        let snapshot_before_commit = serde_json::to_value(&*data).ok();
+        data.log_bunker_incident(incident.clone());
+        if let Err(e) = self.commit(&data).await {
+            if let Some(prev_val) = snapshot_before_commit {
+                if let Ok(restored) = serde_json::from_value::<Persisted>(prev_val) {
+                    *data = restored;
+                }
+            }
+            data.bunker_state = prev_bunker_u8;
+            return Err(e);
+        }
+        drop(data);
+        if !revoked_ids.is_empty() {
+            let mut tokens = self.live_tokens.lock().await;
+            for r in &revoked_ids {
+                tokens.remove(&r.id);
+            }
+        }
+        self.changed.notify_waiters();
+        Ok((orb_step, incident))
     }
 
     pub async fn update_incident_alert_status(
@@ -1651,6 +1779,9 @@ pub async fn record_and_alert_mesh_transition(
         peer_name: Some(peer_name.to_string()),
         canary_kind: Some("mesh_heartbeat".into()),
         event_seq: None,
+        event_timestamp: None,
+        peer_pubkey_hex: None,
+        signature_hex: None,
         epoch,
         previous_bunker_state: previous_state,
         new_bunker_state: next_state,
@@ -1675,105 +1806,89 @@ async fn canary_tripwire(
 ) -> Result<Json<Value>, ApiError> {
     let broker = store(&state);
 
-    // Verify signature, freshness, and advance/persist MeshStore state atomically.
-    // If an identical event_seq was already recorded earlier (e.g., worker retrying
-    // after a transient network or alert error), allow idempotent alert redelivery.
-    let (prev_mesh, mesh_transition, epoch) =
-        match super::mesh::verify_and_apply_canary_tripwire(&state, &req).await {
-            Ok(res) => res,
-            Err((StatusCode::UNAUTHORIZED, ref msg))
-                if msg.contains("ReplayWindow64") =>
-            {
-                if let Some(existing) = broker
-                    .find_incident_by_canary_event(
-                        req.peer_name.trim(),
-                        req.canary_kind.trim(),
-                        req.event_seq,
-                        req.detail_sha256_hex.trim(),
+    // 1. Validate peer, timestamp, digest, and Ed25519 signature WITHOUT consuming
+    //    `MeshStore.canary_replay` yet.
+    let (prev_mesh, mesh_transition, epoch, peer_pubkey_hex, already_replayed) =
+        super::mesh::preview_canary_tripwire(&state, &req).await?;
+
+    // 2. Check if `(peer_name, event_seq)` was already recorded in `PrivilegeBroker`:
+    //    - Reject any conflicting payload (`dry_run`, `timestamp`, `detail_sha256_hex`,
+    //      `peer_pubkey_hex`, `signature_hex` mismatch) with `409 Conflict`.
+    //    - If an identical authenticated payload was already persisted in `PrivilegeBroker`
+    //      (e.g., crash after `PrivilegeBroker` commit and before `MeshStore` or alert delivery),
+    //      reconcile `MeshStore` and alert delivery idempotently.
+    match broker.match_canary_incident(&req, &peer_pubkey_hex).await {
+        Err(conflict) => return Err((StatusCode::CONFLICT, conflict)),
+        Ok(Some(existing)) => {
+            if !already_replayed {
+                super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
+            }
+            if !existing.dry_run && (broker.bunker_state().await as u8) < 2 {
+                broker
+                    .step_bunker(
+                        true,
+                        false,
+                        2,
+                        false,
+                        Some(format!(
+                            "canary_tripwire_reconcile:{}:{}:{}",
+                            req.peer_name, req.canary_kind, req.reason
+                        )),
                     )
                     .await
-                {
-                    let (delivered, channels, err) = if existing.alert_delivered {
-                        (
-                            existing.alert_delivered,
-                            existing.alert_channels.clone(),
-                            existing.alert_error.clone(),
-                        )
-                    } else {
-                        dispatch_bunker_alert(&state, &existing).await
-                    };
-                    return Ok(Json(json!({
-                        "admitted": true,
-                        "idempotent_retry": true,
-                        "incident_id": existing.id,
-                        "dry_run": existing.dry_run,
-                        "peer_name": req.peer_name,
-                        "canary_kind": req.canary_kind,
-                        "event_seq": req.event_seq,
-                        "alert_delivered": delivered,
-                        "alert_channels": channels,
-                        "alert_error": err,
-                    })));
-                }
-                return Err((StatusCode::UNAUTHORIZED, msg.clone()));
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
             }
-            Err(e) => return Err(e),
-        };
-
-    let orb_step = if req.dry_run {
-        let cur = broker.bunker_state().await as u8;
-        BunkerStepResponse {
-            previous_state: cur,
-            bunker_state: cur,
-            revoke_all_jit_grants: false,
-            isolate_node_mesh: false,
-            revoked_grants_count: 0,
+            let (delivered, channels, err) = if existing.alert_delivered {
+                (
+                    existing.alert_delivered,
+                    existing.alert_channels.clone(),
+                    existing.alert_error.clone(),
+                )
+            } else {
+                dispatch_bunker_alert(&state, &existing).await
+            };
+            return Ok(Json(json!({
+                "admitted": true,
+                "idempotent_retry": true,
+                "incident_id": existing.id,
+                "dry_run": existing.dry_run,
+                "peer_name": req.peer_name,
+                "canary_kind": req.canary_kind,
+                "event_seq": req.event_seq,
+                "epoch": existing.epoch,
+                "alert_delivered": delivered,
+                "alert_channels": channels,
+                "alert_error": err,
+            })));
         }
-    } else {
-        broker
-            .step_bunker(
-                true,
-                false,
-                2,
-                false,
-                Some(format!(
-                    "canary_tripwire:{}:{}:{}",
-                    req.peer_name, req.canary_kind, req.reason
-                )),
-            )
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-    };
+        Ok(None) => {
+            if already_replayed {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "replayed or zero event_seq rejected by ReplayWindow64".into(),
+                ));
+            }
+        }
+    }
 
-    let incident = BunkerIncidentEntry {
-        id: Uuid::new_v4(),
-        at: Utc::now(),
-        source: "canary_tripwire".into(),
-        peer_name: Some(req.peer_name.clone()),
-        canary_kind: Some(req.canary_kind.clone()),
-        event_seq: Some(req.event_seq),
-        epoch,
-        previous_bunker_state: orb_step.previous_state.max(prev_mesh as u8),
-        new_bunker_state: if req.dry_run {
-            orb_step.bunker_state.max(prev_mesh as u8)
-        } else {
-            orb_step.bunker_state.max(mesh_transition.next_state as u8)
-        },
-        dry_run: req.dry_run,
-        reason: req.reason.clone(),
-        pid: req.pid,
-        uid: req.uid,
-        cgroup: req.cgroup.clone(),
-        cmdline: req.cmdline.clone(),
-        detail_sha256_hex: req.detail_sha256_hex.clone(),
-        alert_delivered: false,
-        alert_channels: Vec::new(),
-        alert_error: None,
-    };
-    broker
-        .record_bunker_incident(incident.clone())
+    // 3. Durably escalate `PrivilegeBroker` and record the `BunkerIncidentEntry` FIRST
+    //    in a single atomic commit before consuming `MeshStore.canary_replay`.
+    let (orb_step, incident) = broker
+        .escalate_and_record_canary_incident(
+            &req,
+            prev_mesh as u8,
+            mesh_transition.next_state as u8,
+            epoch,
+            &peer_pubkey_hex,
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // 4. Advance `MeshStore.canary_replay` and persist `MeshStore` bunker state.
+    let (_, mesh_transition, epoch) =
+        super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
+
+    // 5. Dispatch redacted out-of-band alert and update incident delivery status.
     let (alert_delivered, alert_channels, alert_error) =
         dispatch_bunker_alert(&state, &incident).await;
 
@@ -1830,6 +1945,9 @@ async fn trigger_bunker(
         peer_name: Some("agent-core".into()),
         canary_kind: Some(format!("manual_level_{manual}")),
         event_seq: None,
+        event_timestamp: None,
+        peer_pubkey_hex: None,
+        signature_hex: None,
         epoch,
         previous_bunker_state: resp.previous_state,
         new_bunker_state: resp.bunker_state,
@@ -1880,6 +1998,9 @@ async fn unbunker(
         peer_name: Some("agent-core".into()),
         canary_kind: Some("biometric_unbunker".into()),
         event_seq: None,
+        event_timestamp: None,
+        peer_pubkey_hex: None,
+        signature_hex: None,
         epoch,
         previous_bunker_state: resp.previous_state,
         new_bunker_state: resp.bunker_state,
@@ -2170,6 +2291,9 @@ mod tests {
             peer_name: Some("nippur".into()),
             canary_kind: Some("mongo_27017".into()),
             event_seq: Some(42),
+            event_timestamp: Some(1_700_000_000),
+            peer_pubkey_hex: Some("11".repeat(32)),
+            signature_hex: Some("22".repeat(64)),
             epoch: 9,
             previous_bunker_state: 0,
             new_bunker_state: 2,
@@ -2185,11 +2309,33 @@ mod tests {
             alert_error: None,
         };
         broker.record_bunker_incident(entry.clone()).await.unwrap();
+        let mut req_payload = crate::api::mesh::CanaryTripwireRequest {
+            peer_name: "nippur".into(),
+            canary_kind: "mongo_27017".into(),
+            event_seq: 42,
+            timestamp: 1_700_000_000,
+            dry_run: false,
+            detail_sha256_hex: "ABCD".repeat(16),
+            signature_hex: "22".repeat(64),
+            reason: None,
+            pid: None,
+            uid: None,
+            cgroup: None,
+            cmdline: None,
+        };
         let found = broker
-            .find_incident_by_canary_event("nippur", "mongo_27017", 42, &"ABCD".repeat(16))
+            .match_canary_incident(&req_payload, &"11".repeat(32))
             .await
+            .expect("no collision")
             .expect("incident must be found case-insensitively by digest");
         assert_eq!(found.id, entry.id);
+
+        // A conflicting retry (e.g. dry_run=true on the same (peer_name, event_seq)) is rejected.
+        req_payload.dry_run = true;
+        assert!(broker
+            .match_canary_incident(&req_payload, &"11".repeat(32))
+            .await
+            .is_err());
 
         let snap = broker.snapshot("thomas").await;
         let inc_json = &snap["bunker_incidents"][0];
