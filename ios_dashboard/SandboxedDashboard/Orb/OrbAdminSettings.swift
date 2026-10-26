@@ -24,7 +24,7 @@ struct OrbRoutingSettings: View {
             eventsSection
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
-        .navigationTitle("Models & Routing").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Routing").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button { editing = OrbChainDraft() } label: { Image(systemName: "plus") }.accessibilityLabel("New chain") } }
         .refreshable { await load() }
         .task { await load() }
@@ -494,7 +494,7 @@ struct OrbHermesSettings: View {
             }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
-        .navigationTitle("Hermes").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Assistant").navigationBarTitleDisplayMode(.inline)
         .task { await load() }
     }
 

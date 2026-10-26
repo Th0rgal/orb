@@ -26,6 +26,23 @@ final class OrbSettingsTests: XCTestCase {
             }
         }
     }
+    /// Same five sections, names, subtitles and tab labels as desktop (`settings-nav.json`).
+    func testSettingsNavMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/settings-nav.json")
+        let sections = try XCTUnwrap(spec["sections"] as? [[String: Any]])
+        XCTAssertEqual(sections.map { $0["id"] as? String }, OrbSettingsSection.allCases.map(\.rawValue))
+        for (json, section) in zip(sections, OrbSettingsSection.allCases) {
+            XCTAssertEqual(json["label"] as? String, section.label)
+            XCTAssertEqual(json["subtitle"] as? String, section.subtitle)
+            let tabs = Dictionary(uniqueKeysWithValues: try XCTUnwrap(json["tabs"] as? [[String: String]]).map { ($0["id"]!, $0["label"]!) })
+            for page in section.pages where tabs[page.id] != nil { XCTAssertEqual(page.label, tabs[page.id], page.id) }
+        }
+        for c in try XCTUnwrap(spec["attention"] as? [[String: Any]]) {
+            let s = try XCTUnwrap(c["state"] as? [String: Bool])
+            let got = OrbSettingsSection.attention(bunkerActive: s["bunkerActive"]!, deviceEnrolled: s["deviceEnrolled"]!, quotaExhausted: s["quotaExhausted"]!)
+            XCTAssertEqual(Set(got.map(\.rawValue)), Set(c["expected"] as? [String] ?? []), c["name"] as? String ?? "?")
+        }
+    }
     func testQuotaExhaustedLabelMatchesSharedSpec() throws {
         let spec = try OrbSpec.json("fixtures/quota-exhausted.json")
         let cases = try XCTUnwrap(spec["cases"] as? [[String: Any]])

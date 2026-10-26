@@ -15,6 +15,7 @@
 		0693D4053A9B20410B6E92A5 /* OrbMissionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B18EE0CF61F06F5599C3DAC /* OrbMissionState.swift */; };
 		07985F241B3185EF35CA3281 /* OrbSideQuestion.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0FC617748B4C068829D9F3D /* OrbSideQuestion.swift */; };
 		07E4DA4A4886502016F1ED67 /* OrbFleetActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9331F1134F0091DB717302CC /* OrbFleetActivity.swift */; };
+		0A93BF11BE7E1C88B6C338EB /* OrbSettingsNav.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E895CD9DD02AEAF7B85742E /* OrbSettingsNav.swift */; };
 		0D00520E1A6F2454E3B18A7F /* AnyCodable.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4CA8C69928B3838868EE34A /* AnyCodable.swift */; };
 		10EE88187305C6ECFA6DD140 /* OrbLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4BFC16F121E10DCFD755BC /* OrbLog.swift */; };
 		13626B5B8FB1869DC1214443 /* OrbLegacyCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 424CC90454DE36077DB56858 /* OrbLegacyCleanup.swift */; };
@@ -210,6 +211,7 @@
 		728F8E4967094E618F0B595B /* OrbFleetActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbFleetActivityController.swift; sourceTree = "<group>"; };
 		750C4C8090EAD0168794EEE4 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		778CFF752239E44DB252DB96 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		7E895CD9DD02AEAF7B85742E /* OrbSettingsNav.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSettingsNav.swift; sourceTree = "<group>"; };
 		7EFD4EB6514ED6508583BEA3 /* OrbKernelGenerated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbKernelGenerated.swift; sourceTree = "<group>"; };
 		7FF9EF2372E04C65A688DF58 /* OrbForkSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbForkSheet.swift; sourceTree = "<group>"; };
 		8080D5ADF84794AFE484FE17 /* SandboxedDashboardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SandboxedDashboardApp.swift; sourceTree = "<group>"; };
@@ -377,6 +379,7 @@
 				884A33B3C040821BDB103A97 /* OrbSecretRequests.swift */,
 				067CABDD48BEA5928AE8027E /* OrbSendFlow.swift */,
 				ED0E5526A2A0CE4FDFC33968 /* OrbSettings.swift */,
+				7E895CD9DD02AEAF7B85742E /* OrbSettingsNav.swift */,
 				A0FC617748B4C068829D9F3D /* OrbSideQuestion.swift */,
 				D3598BD269ADECE8BF197A56 /* OrbStreamText.swift */,
 				A3CD1D35D37ACC8A7FC2EB5F /* OrbSvg.swift */,
@@ -687,6 +690,7 @@
 				5C0006CACB18652C8A332338 /* OrbSecretRequests.swift in Sources */,
 				F27A47BB880A0287FE3BBB17 /* OrbSendFlow.swift in Sources */,
 				7D0338496466B0EF19ADC62F /* OrbSettings.swift in Sources */,
+				0A93BF11BE7E1C88B6C338EB /* OrbSettingsNav.swift in Sources */,
 				07985F241B3185EF35CA3281 /* OrbSideQuestion.swift in Sources */,
 				2D770ECB854FC41FEDED9AB3 /* OrbStreamText.swift in Sources */,
 				9AAFF8C53C135534547DC392 /* OrbSvg.swift in Sources */,
@@ -814,7 +818,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102601;
+				CURRENT_PROJECT_VERSION = 2026102602;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -834,7 +838,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.13.1;
+				MARKETING_VERSION = 1.14.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -965,7 +969,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102601;
+				CURRENT_PROJECT_VERSION = 2026102602;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_PREVIEWS = YES;
@@ -979,7 +983,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.13.1;
+				MARKETING_VERSION = 1.14.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
