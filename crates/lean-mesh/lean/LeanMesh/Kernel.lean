@@ -103,8 +103,12 @@ def ratchetEpochStep
     (jitBiometricGrant bunkerState : UInt8) (nowEpoch jitExpiresAt : UInt64) : Bool :=
   let touches3088 := dstPort == 3088 || (rulePortMin ≤ 3088 && 3088 ≤ rulePortMax)
   let jitActive := jitBiometricGrant == 1 && bunkerState == 0 && nowEpoch < jitExpiresAt
+  let vaultServicePort := 8888 ≤ rulePortMin && rulePortMax ≤ 8890 && 8888 ≤ dstPort && dstPort ≤ 8890
   (touches3088 && srcClass != 4 && srcClass != 6) ||
-  (dstClass == 5 && (srcClass ≤ 1 || srcClass == 3 || (srcClass == 2 && !jitActive))) ||
+  (dstClass == 5 &&
+    (srcClass ≤ 1 || srcClass == 3 || srcClass == 5 ||
+     (srcClass == 2 && !jitActive) ||
+     (srcClass == 4 && !vaultServicePort))) ||
   (dstClass == 3 && srcClass ≤ 1 && !jitActive)
 
 @[inline] def bunkerAllowsRoute

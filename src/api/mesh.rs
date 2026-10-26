@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     routing::{get, post},
     Extension, Json, Router,
@@ -35,10 +35,11 @@ use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use lean_mesh::{
     check_endpoint_roam, select_relay_path, step_bunker_isolate, verify_frame_bounds,
-    verify_heartbeat_signature, verify_jit_lease, BunkerState as MeshBunkerState,
-    BunkerTransition, MeshManifest, MeshProto, NodeClass, RelayPathKind, ReplayWindow64,
-    RouteDecision, LEAN_MESH_DEFAULT_WG_PORT, LEAN_MESH_FRAME_MAGIC, LEAN_MESH_INTERFACE_NAME,
-    LEAN_MESH_PROTOCOL_VERSION, LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    verify_heartbeat_signature, verify_jit_lease, verify_roam_signature,
+    BunkerState as MeshBunkerState, BunkerTransition, MeshManifest, MeshProto, NodeClass,
+    RelayPathKind, ReplayWindow64, RouteDecision, LEAN_MESH_DEFAULT_WG_PORT,
+    LEAN_MESH_FRAME_MAGIC, LEAN_MESH_INTERFACE_NAME, LEAN_MESH_PROTOCOL_VERSION,
+    LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -439,9 +440,18 @@ pub struct EndpointRoamRequest {
     pub candidate_ip: String,
     pub candidate_port: u16,
     pub pkt_seq: u64,
-    pub aead_auth_ok: bool,
+    pub timestamp: u64,
+    pub signature_hex: String,
     #[serde(default)]
     pub allow_private_roam: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RenderNodeAuthQuery {
+    pub seq: Option<u64>,
+    pub timestamp: Option<u64>,
+    pub signature_hex: Option<String>,
+    pub grant_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -585,20 +595,21 @@ async fn post_evaluate_route(
     })?;
 
     // Verify JIT lease via server-side `PrivilegeBroker` + `leanmesh_jit_lease_step`.
+    // Rejects wildcard `target_host == "all"` grants and requires an explicit `decided_at` approval timestamp.
     let (jit_admitted, jit_expires_at) = if let Some(grant_id) = req.jit_grant_id {
         if let Some(grant) = super::privilege_broker::store(&app_state)
             .get(&user.id, grant_id)
             .await
         {
             let bio_ok = grant.state == ApprovalState::Approved
-                && (grant.target_host == req.dst_peer || grant.target_host == "all");
+                && grant.decided_at.is_some()
+                && grant.target_host == req.dst_peer;
             let same_owner = grant.owner == user.id;
             let revoked = grant.revoked_at.is_some() || grant.state == ApprovalState::Revoked;
             let issued_at = grant
                 .decided_at
-                .unwrap_or(grant.created_at)
-                .timestamp()
-                .max(0) as u64;
+                .map(|t| t.timestamp().max(0) as u64)
+                .unwrap_or(0);
             let expires_at = grant
                 .expires_at
                 .map(|t| t.timestamp().max(0) as u64)
@@ -671,18 +682,116 @@ async fn post_evaluate_route(
     }))
 }
 
+/// Pure server-side endpoint roam verification, anti-replay, and manifest re-signing step.
+///
+/// Computes `aead_auth_ok` server-side from `verify_roam_signature` (Ed25519 signature +
+/// `leanmesh_frame_bounds_step` + timestamp freshness), evaluates `leanmesh_endpoint_roam_step`
+/// BEFORE mutating the RFC 6479 64-packet `ReplayWindow64`, and ratchets + re-signs the manifest.
+pub fn process_endpoint_roam_step(
+    state: &mut PersistedMeshState,
+    req: &EndpointRoamRequest,
+    effective_bunker: MeshBunkerState,
+    now_epoch: u64,
+) -> Result<String, (StatusCode, String)> {
+    if state.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mesh store is in fail-closed corrupted state".into(),
+        ));
+    }
+
+    let ip: Ipv4Addr = req.candidate_ip.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid candidate IPv4 address".into(),
+        )
+    })?;
+
+    let sk = state
+        .signing_key()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let peer_idx = state
+        .manifest
+        .peers
+        .iter()
+        .position(|p| p.name == req.peer_name)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("unknown peer `{}`", req.peer_name),
+            )
+        })?;
+    let peer = &state.manifest.peers[peer_idx];
+    let peer_active = !peer.revoked && now_epoch < peer.expires_at;
+    let pinned_static = peer.pinned_static;
+
+    let ts_fresh = req.timestamp <= now_epoch.saturating_add(30)
+        && now_epoch.saturating_sub(req.timestamp) <= 120;
+    let aead_auth_ok = peer_active
+        && ts_fresh
+        && verify_roam_signature(
+            &state.pinned_coordinator_pubkey_hex,
+            &req.peer_name,
+            ip,
+            req.candidate_port,
+            req.pkt_seq,
+            req.timestamp,
+            &req.signature_hex,
+        );
+
+    let roam_state = state
+        .peer_roam
+        .entry(req.peer_name.clone())
+        .or_default();
+
+    // 1. Verify server-derived `aead_auth_ok`, static pinning, bogon/overlay IP classification,
+    //    bunker state, and roam rate-limit BEFORE mutating the anti-replay window!
+    let roam_ok = check_endpoint_roam(
+        aead_auth_ok,
+        pinned_static,
+        ip,
+        req.allow_private_roam,
+        effective_bunker,
+        req.candidate_port,
+        roam_state.last_roam_seq,
+        req.pkt_seq,
+        roam_state.last_roam_epoch,
+        now_epoch,
+        2,
+    );
+
+    if !roam_ok {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "rejected_by_leanmesh_endpoint_roam_step".into(),
+        ));
+    }
+
+    // 2. Advance RFC 6479 64-packet anti-replay window only after `leanmesh_endpoint_roam_step` succeeds.
+    if !roam_state.replay_window.check_and_advance(req.pkt_seq) {
+        return Err((
+            StatusCode::CONFLICT,
+            "rejected_by_leanmesh_replay_window_step".into(),
+        ));
+    }
+
+    roam_state.last_roam_seq = req.pkt_seq;
+    roam_state.last_roam_epoch = now_epoch;
+    let new_ep = format!("{}:{}", ip, req.candidate_port);
+    state.manifest.peers[peer_idx].endpoint = Some(new_ep.clone());
+    state.manifest.epoch = state.manifest.epoch.saturating_add(1);
+    state.manifest.issued_at = now_epoch;
+    state.manifest.expires_at = now_epoch.saturating_add(state.manifest.max_ttl_secs);
+    state.manifest.sign(&sk);
+    Ok(new_ep)
+}
+
 async fn post_endpoint_roam(
     State(app_state): State<Arc<AppState>>,
     Extension(_user): Extension<AuthUser>,
     Json(req): Json<EndpointRoamRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let ip: Ipv4Addr = req.candidate_ip.parse().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "invalid candidate IPv4 address" })),
-        )
-    })?;
-
     let store = store(&app_state);
     let now = unix_now();
     let mut guard = store.inner.lock().await;
@@ -693,82 +802,24 @@ async fn post_endpoint_roam(
         ));
     }
 
-    let sk = guard.signing_key().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
-        )
-    })?;
-
     let bunker = effective_mesh_bunker(&app_state, &guard, now).await;
     if bunker.next_state > guard.bunker_state {
         guard.bunker_state = bunker.next_state;
+        let _ = store.save(&guard).await;
     }
 
-    let peer_idx = guard
-        .manifest
-        .peers
-        .iter()
-        .position(|p| p.name == req.peer_name)
-        .ok_or_else(|| {
+    let new_ep = process_endpoint_roam_step(&mut guard, &req, bunker.next_state, now).map_err(
+        |(status, reason)| {
             (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": format!("unknown peer `{}`", req.peer_name) })),
+                status,
+                Json(json!({
+                    "admitted": false,
+                    "reason": reason,
+                })),
             )
-        })?;
-    let pinned_static = guard.manifest.peers[peer_idx].pinned_static;
+        },
+    )?;
 
-    let roam_state = guard
-        .peer_roam
-        .entry(req.peer_name.clone())
-        .or_default();
-
-    // 1. Verify AEAD authentication, static pinning, bogon/overlay IP classification,
-    //    bunker state, and roam rate-limit BEFORE mutating the anti-replay window!
-    let roam_ok = check_endpoint_roam(
-        req.aead_auth_ok,
-        pinned_static,
-        ip,
-        req.allow_private_roam,
-        bunker.next_state,
-        req.candidate_port,
-        roam_state.last_roam_seq,
-        req.pkt_seq,
-        roam_state.last_roam_epoch,
-        now,
-        2,
-    );
-
-    if !roam_ok {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "admitted": false,
-                "reason": "rejected_by_leanmesh_endpoint_roam_step",
-            })),
-        ));
-    }
-
-    // 2. Advance RFC 6479 64-packet anti-replay window only after `leanmesh_endpoint_roam_step` succeeds.
-    if !roam_state.replay_window.check_and_advance(req.pkt_seq) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(json!({
-                "admitted": false,
-                "reason": "rejected_by_leanmesh_replay_window_step",
-                "last_max_seq": roam_state.replay_window.last_max_seq,
-            })),
-        ));
-    }
-
-    roam_state.last_roam_seq = req.pkt_seq;
-    roam_state.last_roam_epoch = now;
-    let new_ep = format!("{}:{}", ip, req.candidate_port);
-    guard.manifest.peers[peer_idx].endpoint = Some(new_ep.clone());
-    guard.manifest.epoch = guard.manifest.epoch.saturating_add(1);
-    guard.manifest.issued_at = now;
-    guard.manifest.expires_at = now.saturating_add(guard.manifest.max_ttl_secs);
-    guard.manifest.sign(&sk);
     store.save(&guard).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -785,14 +836,61 @@ async fn post_endpoint_roam(
     })))
 }
 
+async fn authorize_node_render(
+    app_state: &AppState,
+    user: &AuthUser,
+    mesh_state: &PersistedMeshState,
+    node: &str,
+    auth: &RenderNodeAuthQuery,
+    now_epoch: u64,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if let (Some(seq), Some(ts), Some(sig)) = (auth.seq, auth.timestamp, auth.signature_hex.as_deref()) {
+        let ts_fresh = ts <= now_epoch.saturating_add(30) && now_epoch.saturating_sub(ts) <= 120;
+        if ts_fresh
+            && verify_heartbeat_signature(
+                &mesh_state.pinned_coordinator_pubkey_hex,
+                node,
+                seq,
+                ts,
+                sig,
+            )
+        {
+            return Ok(());
+        }
+    }
+    if let Some(grant_id) = auth.grant_id {
+        let orb_bunker = super::privilege_broker::store(app_state).bunker_state().await;
+        if let Some(grant) = super::privilege_broker::store(app_state)
+            .get(&user.id, grant_id)
+            .await
+        {
+            if grant.state == ApprovalState::Approved
+                && grant.owner == user.id
+                && grant.target_host == node
+                && grant.live_grant(Utc::now(), orb_bunker)
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "node configuration rendering requires a valid Ed25519 node signature or active PrivilegeBroker grant for the target node",
+        })),
+    ))
+}
+
 async fn render_wg_handler(
     State(app_state): State<Arc<AppState>>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     AxumPath(node): AxumPath<String>,
+    Query(auth): Query<RenderNodeAuthQuery>,
 ) -> Result<String, (StatusCode, Json<Value>)> {
     let store = store(&app_state);
     let now = unix_now();
     let guard = store.inner.lock().await;
+    authorize_node_render(&app_state, &user, &guard, &node, &auth, now).await?;
     let bunker = effective_mesh_bunker(&app_state, &guard, now).await;
 
     guard
@@ -808,12 +906,14 @@ async fn render_wg_handler(
 
 async fn render_nft_handler(
     State(app_state): State<Arc<AppState>>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(user): Extension<AuthUser>,
     AxumPath(node): AxumPath<String>,
+    Query(auth): Query<RenderNodeAuthQuery>,
 ) -> Result<String, (StatusCode, Json<Value>)> {
     let store = store(&app_state);
     let now = unix_now();
     let guard = store.inner.lock().await;
+    authorize_node_render(&app_state, &user, &guard, &node, &auth, now).await?;
     let bunker = effective_mesh_bunker(&app_state, &guard, now).await;
 
     guard
@@ -850,10 +950,11 @@ async fn post_heartbeat(
             ));
         };
         let valid_unbunker = grant.state == ApprovalState::Approved
+            && grant.decided_at.is_some()
             && grant.owner == user.id
             && grant.scope == super::privilege_broker::PrivilegeScope::RootExec
             && grant.revoked_at.is_none()
-            && (grant.target_host == req.peer_name || grant.target_host == "all")
+            && grant.target_host == req.peer_name
             && grant.live_grant(Utc::now(), orb_bunker);
         if !valid_unbunker {
             return Err((
@@ -973,68 +1074,96 @@ mod tests {
 
     #[test]
     fn endpoint_roam_rejects_unauthenticated_before_replay_window_and_resigns_manifest() {
+        use lean_mesh::sign_roam;
         let tmp = tempfile::tempdir().expect("tempdir");
         let ms = MeshStore::open(tmp.path().to_path_buf());
         let rt = tokio::runtime::Runtime::new().expect("rt");
         rt.block_on(async {
             let mut guard = ms.inner.lock().await;
+            let sk = guard.signing_key().expect("valid coordinator signing key");
             let now = guard.manifest.issued_at + 10;
             let initial_epoch = guard.manifest.epoch;
 
-            // 1. Unauthenticated roam attempt for `macbook-air` (non-pinned) with pkt_seq = 77
-            // is rejected by `check_endpoint_roam` BEFORE touching `replay_window`.
-            let roam_unauth = check_endpoint_roam(
-                false,
-                false,
-                Ipv4Addr::new(95, 216, 173, 237),
-                false,
+            // 1. Forged roam signature for `macbook-air` (non-pinned) with pkt_seq = 77
+            // is rejected by `process_endpoint_roam_step` BEFORE touching `replay_window`.
+            let forged_roam = EndpointRoamRequest {
+                peer_name: "macbook-air".into(),
+                candidate_ip: "95.216.173.237".into(),
+                candidate_port: 51888,
+                pkt_seq: 77,
+                timestamp: now,
+                signature_hex: "00".repeat(64),
+                allow_private_roam: false,
+            };
+            let err_unauth = process_endpoint_roam_step(
+                &mut guard,
+                &forged_roam,
                 MeshBunkerState::Normal,
-                51888,
-                0,
-                77,
-                0,
                 now,
-                2,
-            );
-            assert!(!roam_unauth);
+            )
+            .unwrap_err();
+            assert_eq!(err_unauth.0, StatusCode::FORBIDDEN);
 
-            // 2. Legitimate authenticated packet with the same pkt_seq = 77 succeeds and advances window.
-            let roam_auth = check_endpoint_roam(
-                true,
-                false,
+            // 2. Legitimate Ed25519-signed roam frame with the same `pkt_seq = 77` succeeds,
+            // advances the replay window, and re-signs + ratchets the manifest epoch.
+            let valid_sig = sign_roam(
+                &sk,
+                "macbook-air",
                 Ipv4Addr::new(95, 216, 173, 237),
-                false,
-                MeshBunkerState::Normal,
                 51888,
-                0,
                 77,
-                0,
                 now,
-                2,
             );
-            assert!(roam_auth);
-            let rs = guard.peer_roam.entry("macbook-air".into()).or_default();
-            assert!(rs.replay_window.check_and_advance(77));
-            assert!(!rs.replay_window.check_and_advance(77));
-
-            // 3. Updating endpoint and re-signing preserves Ed25519 signature and ratchets epoch.
-            let peer_idx = guard
-                .manifest
-                .peers
-                .iter()
-                .position(|p| p.name == "macbook-air")
-                .unwrap();
-            guard.manifest.peers[peer_idx].endpoint = Some("95.216.173.237:51888".into());
-            guard.manifest.epoch = initial_epoch + 1;
-            guard.manifest.issued_at = now;
-            guard.manifest.expires_at = now + guard.manifest.max_ttl_secs;
-            let sk = guard.signing_key().expect("valid coordinator signing key");
-            guard.manifest.sign(&sk);
+            let valid_roam = EndpointRoamRequest {
+                peer_name: "macbook-air".into(),
+                candidate_ip: "95.216.173.237".into(),
+                candidate_port: 51888,
+                pkt_seq: 77,
+                timestamp: now,
+                signature_hex: valid_sig,
+                allow_private_roam: false,
+            };
+            let new_ep = process_endpoint_roam_step(
+                &mut guard,
+                &valid_roam,
+                MeshBunkerState::Normal,
+                now,
+            )
+            .expect("signed roam frame must succeed");
+            assert_eq!(new_ep, "95.216.173.237:51888");
+            assert_eq!(guard.manifest.epoch, initial_epoch + 1);
             assert!(guard.manifest.verify_ed25519());
             assert!(guard
                 .manifest
                 .verify_formal(initial_epoch, 0, now + 1)
                 .is_ok());
+
+            // 3. Replaying the same signed roam frame (`pkt_seq = 77`) is rejected by `ReplayWindow64`.
+            let replay_sig = sign_roam(
+                &sk,
+                "macbook-air",
+                Ipv4Addr::new(95, 216, 173, 238),
+                51888,
+                77,
+                now + 5,
+            );
+            let replay_roam = EndpointRoamRequest {
+                peer_name: "macbook-air".into(),
+                candidate_ip: "95.216.173.238".into(),
+                candidate_port: 51888,
+                pkt_seq: 77,
+                timestamp: now + 5,
+                signature_hex: replay_sig,
+                allow_private_roam: false,
+            };
+            let err_replay = process_endpoint_roam_step(
+                &mut guard,
+                &replay_roam,
+                MeshBunkerState::Normal,
+                now + 5,
+            )
+            .unwrap_err();
+            assert_eq!(err_replay.0, StatusCode::FORBIDDEN);
         });
     }
 

@@ -1149,6 +1149,165 @@ impl MeshManifest {
         Ok(out)
     }
 
+    /// Reconciles live kernel WireGuard state (`wg show <iface> dump` output) against this
+    /// formally verified `MeshManifest` using `leanmesh_reconcile_wg_step`.
+    ///
+    /// Evaluates every manifest peer (`peerPresentInKernel`, `pubkeyMatches`, `allowedIpMatches`,
+    /// `endpointChanged`) as well as any unknown peer currently present in the kernel (`peerRevoked = 1`),
+    /// returning the deterministic reconciliation plan (`AddPeer`, `UpdateEndpoint`, `ReplacePeer`,
+    /// `RemovePeer`, `NoopInSync`, `NoopAbsent`).
+    pub fn reconcile_wireguard_dump(
+        &self,
+        node_name: &str,
+        wg_dump: &str,
+        bunker_state: BunkerState,
+        now_epoch: u64,
+    ) -> Result<Vec<PeerReconcilePlan>, MeshError> {
+        self.verify_formal(0, 0, now_epoch)?;
+        let self_peer = self.find_peer(node_name)?;
+        let bunker_prune_mode: u8 = match bunker_state {
+            BunkerState::Normal | BunkerState::SoftQuarantine => 0,
+            BunkerState::HardLockdown => 1,
+            BunkerState::SovereignDeadManTripped => 2,
+        };
+
+        // Parse `wg show <iface> dump` peer lines:
+        // `<public-key>\t<preshared-key>\t<endpoint>\t<allowed-ips>\t<latest-handshake>\t<rx>\t<tx>\t<persistent-keepalive>`
+        let mut kernel_peers: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
+        for raw_line in wg_dump.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() >= 8 {
+                let pubkey = cols[0].trim().to_string();
+                let ep = match cols[2].trim() {
+                    "(none)" | "" => None,
+                    other => Some(other.to_string()),
+                };
+                let allowed_ips = cols[3].trim().to_string();
+                kernel_peers.insert(pubkey, (ep, allowed_ips));
+            }
+        }
+
+        let mut plans = Vec::new();
+        let mut manifest_pubkeys = BTreeMap::new();
+
+        for peer in &self.peers {
+            if peer.id == self_peer.id {
+                continue;
+            }
+            manifest_pubkeys.insert(peer.wg_pubkey.as_str(), peer);
+            let expected_allowed_ip = format!("{}/{}", peer.overlay_ip, peer.prefix_len);
+            let (present, pubkey_matches, allowed_ip_matches, endpoint_changed) =
+                match kernel_peers.get(&peer.wg_pubkey) {
+                    Some((kern_ep, kern_allowed)) => {
+                        let ip_ok = kern_allowed == &expected_allowed_ip;
+                        let ep_changed = kern_ep != &peer.endpoint;
+                        (1u8, 1u8, u8::from(ip_ok), u8::from(ep_changed))
+                    }
+                    None => (0u8, 1u8, 1u8, 0u8),
+                };
+
+            let action = ReconcileAction::from_u8(unsafe {
+                cabi::leanmesh_reconcile_wg_step(
+                    1,
+                    present,
+                    u8::from(peer.revoked),
+                    pubkey_matches,
+                    allowed_ip_matches,
+                    endpoint_changed,
+                    bunker_prune_mode,
+                    u8::from(peer.node_class.is_admin()),
+                    now_epoch,
+                    peer.expires_at,
+                )
+            });
+
+            let wg_set_args = match action {
+                ReconcileAction::AddPeer | ReconcileAction::ReplacePeerKeyOrIp => {
+                    let mut args = vec![
+                        "set".into(),
+                        LEAN_MESH_INTERFACE_NAME.into(),
+                        "peer".into(),
+                        peer.wg_pubkey.clone(),
+                        "allowed-ips".into(),
+                        expected_allowed_ip,
+                        "persistent-keepalive".into(),
+                        "25".into(),
+                    ];
+                    if let Some(ep) = &peer.endpoint {
+                        args.push("endpoint".into());
+                        args.push(ep.clone());
+                    }
+                    Some(args)
+                }
+                ReconcileAction::UpdateEndpointOnly => peer.endpoint.as_ref().map(|ep| {
+                    vec![
+                        "set".into(),
+                        LEAN_MESH_INTERFACE_NAME.into(),
+                        "peer".into(),
+                        peer.wg_pubkey.clone(),
+                        "endpoint".into(),
+                        ep.clone(),
+                    ]
+                }),
+                ReconcileAction::RemovePeer => Some(vec![
+                    "set".into(),
+                    LEAN_MESH_INTERFACE_NAME.into(),
+                    "peer".into(),
+                    peer.wg_pubkey.clone(),
+                    "remove".into(),
+                ]),
+                ReconcileAction::AbortInvalidManifest
+                | ReconcileAction::NoopSkipInactive
+                | ReconcileAction::NoopInSync => None,
+            };
+
+            plans.push(PeerReconcilePlan {
+                peer_name: peer.name.clone(),
+                wg_pubkey: peer.wg_pubkey.clone(),
+                action,
+                wg_set_args,
+            });
+        }
+
+        // Any unknown peer present in the kernel that is NOT in the verified manifest is pruned (`peerRevoked = 1`).
+        for kern_pubkey in kernel_peers.keys() {
+            if !manifest_pubkeys.contains_key(kern_pubkey.as_str()) {
+                let action = ReconcileAction::from_u8(unsafe {
+                    cabi::leanmesh_reconcile_wg_step(
+                        1,
+                        1,
+                        1,
+                        0,
+                        0,
+                        0,
+                        bunker_prune_mode,
+                        0,
+                        now_epoch,
+                        0,
+                    )
+                });
+                plans.push(PeerReconcilePlan {
+                    peer_name: "<unlisted-kernel-peer>".into(),
+                    wg_pubkey: kern_pubkey.clone(),
+                    action,
+                    wg_set_args: Some(vec![
+                        "set".into(),
+                        LEAN_MESH_INTERFACE_NAME.into(),
+                        "peer".into(),
+                        kern_pubkey.clone(),
+                        "remove".into(),
+                    ]),
+                });
+            }
+        }
+
+        Ok(plans)
+    }
+
     /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`.
     pub fn paloma_fleet_default(now_epoch: u64, signing_key: &SigningKey) -> Self {
         let expires_at = now_epoch + 86_400;
@@ -1376,6 +1535,15 @@ impl MeshManifest {
     }
 }
 
+/// Deterministic per-peer WireGuard reconciliation action produced by `reconcile_wireguard_dump`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerReconcilePlan {
+    pub peer_name: String,
+    pub wg_pubkey: String,
+    pub action: ReconcileAction,
+    pub wg_set_args: Option<Vec<String>>,
+}
+
 /// Canonical domain-separated SHA-256 digest for authenticated mesh heartbeats.
 pub fn canonical_heartbeat_bytes(peer_name: &str, heartbeat_seq: u64, timestamp: u64) -> Vec<u8> {
     let mut hasher = Sha256::new();
@@ -1426,6 +1594,82 @@ pub fn verify_heartbeat_signature(
     let signature = Signature::from_bytes(&sig_arr);
     let digest = canonical_heartbeat_bytes(peer_name, heartbeat_seq, timestamp);
     verifying_key.verify(&digest, &signature).is_ok()
+}
+
+/// Canonical domain-separated SHA-256 digest for authenticated endpoint roam control frames.
+pub fn canonical_roam_bytes(
+    peer_name: &str,
+    candidate_ip: Ipv4Addr,
+    candidate_port: u16,
+    pkt_seq: u64,
+    timestamp: u64,
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lean-mesh-roam-v1:");
+    hasher.update(peer_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(candidate_ip.octets());
+    hasher.update(b":");
+    hasher.update(candidate_port.to_be_bytes());
+    hasher.update(b":");
+    hasher.update(pkt_seq.to_be_bytes());
+    hasher.update(b":");
+    hasher.update(timestamp.to_be_bytes());
+    hasher.finalize().to_vec()
+}
+
+/// Signs a canonical endpoint roam frame `(peer_name, candidate_ip, candidate_port, pkt_seq, timestamp)`.
+pub fn sign_roam(
+    signing_key: &SigningKey,
+    peer_name: &str,
+    candidate_ip: Ipv4Addr,
+    candidate_port: u16,
+    pkt_seq: u64,
+    timestamp: u64,
+) -> String {
+    let digest = canonical_roam_bytes(peer_name, candidate_ip, candidate_port, pkt_seq, timestamp);
+    let sig: Signature = signing_key.sign(&digest);
+    hex::encode(sig.to_bytes())
+}
+
+/// Verifies an Ed25519 signature + `leanmesh_frame_bounds_step` wire bounds over an endpoint roam frame.
+pub fn verify_roam_signature(
+    pubkey_hex: &str,
+    peer_name: &str,
+    candidate_ip: Ipv4Addr,
+    candidate_port: u16,
+    pkt_seq: u64,
+    timestamp: u64,
+    signature_hex: &str,
+) -> bool {
+    let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let Ok(pk_arr): Result<[u8; 32], _> = pk_bytes.try_into() else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(sig_arr): Result<[u8; 64], _> = sig_bytes.try_into() else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    let digest = canonical_roam_bytes(peer_name, candidate_ip, candidate_port, pkt_seq, timestamp);
+    let tag_ok = verifying_key.verify(&digest, &signature).is_ok();
+    verify_frame_bounds(
+        LEAN_MESH_FRAME_MAGIC,
+        LEAN_MESH_PROTOCOL_VERSION,
+        2,
+        tag_ok,
+        64,
+        (peer_name.len() as u64) + 32,
+        4096,
+        4096,
+    )
 }
 
 #[cfg(test)]
@@ -1766,5 +2010,57 @@ mod tests {
             now + 5,
             &sig_hex
         ));
+
+        // 4. Authenticated roam frame signature + bounds check.
+        let roam_sig = sign_roam(
+            &sk,
+            "macbook-air",
+            Ipv4Addr::new(95, 216, 173, 237),
+            51888,
+            10,
+            now + 5,
+        );
+        assert!(verify_roam_signature(
+            &pub_hex,
+            "macbook-air",
+            Ipv4Addr::new(95, 216, 173, 237),
+            51888,
+            10,
+            now + 5,
+            &roam_sig
+        ));
+        assert!(!verify_roam_signature(
+            &pub_hex,
+            "macbook-air",
+            Ipv4Addr::new(95, 216, 173, 238),
+            51888,
+            10,
+            now + 5,
+            &roam_sig
+        ));
+
+        // 5. `reconcile_wireguard_dump` computes `NoopInSync`, `UpdateEndpoint`, `AddPeer`, and `RemovePeer`.
+        let agent_core_peer = manifest.find_peer("agent-core").unwrap();
+        let babylon_peer = manifest.find_peer("babylon").unwrap();
+        let wg_dump = format!(
+            "{}\t(none)\t95.216.173.237:51888\t10.88.0.1/32\t1760000000\t100\t200\t25\n\
+             {}\t(none)\t1.2.3.4:51888\t10.88.0.12/32\t1760000000\t100\t200\t25\n\
+             roguepubkey00000000000000000000000000000000=\t(none)\t9.9.9.9:51888\t10.88.0.99/32\t0\t0\t0\t25\n",
+            agent_core_peer.wg_pubkey, babylon_peer.wg_pubkey
+        );
+        let plans = manifest
+            .reconcile_wireguard_dump("ashur", &wg_dump, BunkerState::Normal, now + 10)
+            .unwrap();
+        let ac_plan = plans.iter().find(|p| p.peer_name == "agent-core").unwrap();
+        assert_eq!(ac_plan.action, ReconcileAction::NoopInSync);
+        let bab_plan = plans.iter().find(|p| p.peer_name == "babylon").unwrap();
+        assert_eq!(bab_plan.action, ReconcileAction::UpdateEndpointOnly);
+        let nip_plan = plans.iter().find(|p| p.peer_name == "nippur").unwrap();
+        assert_eq!(nip_plan.action, ReconcileAction::AddPeer);
+        let rogue_plan = plans
+            .iter()
+            .find(|p| p.peer_name == "<unlisted-kernel-peer>")
+            .unwrap();
+        assert_eq!(rogue_plan.action, ReconcileAction::RemovePeer);
     }
 }

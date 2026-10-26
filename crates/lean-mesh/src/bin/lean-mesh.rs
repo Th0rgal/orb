@@ -122,6 +122,19 @@ enum Commands {
         #[arg(long)]
         now: Option<u64>,
     },
+    /// Reconcile live `wg show <iface> dump` state against a signed manifest via `leanmesh_reconcile_wg_step`
+    ReconcileWg {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        wg_dump: PathBuf,
+        #[arg(long, value_enum, default_value_t = BunkerArg::Normal)]
+        bunker: BunkerArg,
+        #[arg(long)]
+        now: Option<u64>,
+    },
     /// Evaluate a 4-state Bunker & Sovereign Dead-Man's Switch transition
     BunkerStep {
         #[arg(long, value_enum, default_value_t = BunkerArg::Normal)]
@@ -284,6 +297,20 @@ fn main() -> Result<()> {
             m.verify_formal(0, 0, now_epoch)?;
             let nft = m.render_nftables_policy(&node, bunker.into(), now_epoch)?;
             print!("{nft}");
+        }
+        Commands::ReconcileWg {
+            manifest,
+            node,
+            wg_dump,
+            bunker,
+            now,
+        } => {
+            let raw = fs::read_to_string(&manifest)?;
+            let m: MeshManifest = serde_json::from_str(&raw)?;
+            let dump_raw = fs::read_to_string(&wg_dump)?;
+            let now_epoch = now.unwrap_or_else(unix_now);
+            let plans = m.reconcile_wireguard_dump(&node, &dump_raw, bunker.into(), now_epoch)?;
+            println!("{}", serde_json::to_string_pretty(&plans)?);
         }
         Commands::BunkerStep {
             current,

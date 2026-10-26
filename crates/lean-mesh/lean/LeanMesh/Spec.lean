@@ -139,7 +139,7 @@ structure SlidingWindowAntiReplay where
 
 /--
   8. `SovereignNonInterference`: Untrusted allocation classes (`MissionSandbox = 0`, `RetiredFree = 1`,
-  `ReservedProd = 3`) can never obtain a route or JIT lease to `SovereignVault` (`5`, `dgx-spark`),
+  `ReservedProd = 3`, `SovereignVault = 5`) can never obtain a route or JIT lease to `SovereignVault` (`5`, `dgx-spark`),
   and leaf worker nodes never accept `:3088` control-plane traffic laterally from non-control-plane peers.
 -/
 structure SovereignNonInterference (RouteReq JitReq : Type) where
@@ -147,8 +147,10 @@ structure SovereignNonInterference (RouteReq JitReq : Type) where
   evalJit                 : JitReq → UInt32
   isUntrustedToVaultRoute : RouteReq → Bool
   isUntrustedToVaultJit   : JitReq → Bool
+  isLateral3088Route      : RouteReq → Bool
   route_blocks_untrusted_vault : ∀ r, isUntrustedToVaultRoute r = true → (evalRoute r &&& 1) = 0
   jit_blocks_untrusted_vault   : ∀ j, isUntrustedToVaultJit j = true → (evalJit j &&& 1) = 0
+  route_blocks_lateral_3088    : ∀ r, isLateral3088Route r = true → (evalRoute r &&& 1) = 0
 
 /-! ## Layer II: Independent Declarative `MetaGateSpec` Instances & Corollaries for All 12 C-ABI Exports -/
 
@@ -278,7 +280,8 @@ def evalRouteMetaGate : MetaGateSpec EvalRouteCheck
   tight      := rfl
 
 /-- Corollary 2a (`SovereignNonInterference` — `leanmesh_eval_route_step`): `MissionSandbox` (`0`),
-    `RetiredFree` (`1`), and `ReservedProd` (`3`) can NEVER route to `SovereignVault` (`5`, `dgx-spark`),
+    `RetiredFree` (`1`), `ReservedProd` (`3`), and `SovereignVault` (`5`) can NEVER route to `SovereignVault` (`5`, `dgx-spark`),
+    `SharedProtected` (`4`, `agent-core`) can ONLY route to `SovereignVault` (`5`) on `8888..=8890`,
     and `FreeCompute` (`2`) cannot route to `SovereignVault` (`5`) during `SoftQuarantine` (`bunkerState == 1`)
     even with `jitBiometricGrant == 1`. -/
 theorem eval_route_blocks_untrusted_and_quarantined_jit_to_sovereign_vault
@@ -288,6 +291,9 @@ theorem eval_route_blocks_untrusted_and_quarantined_jit_to_sovereign_vault
     (evalRouteStep srcId dstId 0 5 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
     (evalRouteStep srcId dstId 1 5 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
     (evalRouteStep srcId dstId 3 5 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    (evalRouteStep srcId dstId 5 5 srcRev dstRev matched proto dstPort pMin pMax jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    (evalRouteStep srcId dstId 4 5 srcRev dstRev matched proto 22 22 22 jit bunker now srcExp dstExp jitExp &&& 1) = 0 ∧
+    evalRouteStep 1 2 4 5 0 0 1 6 8888 8888 8890 0 0 1000 2000 2000 0 = 1 ∧
     (evalRouteStep srcId dstId 2 5 srcRev dstRev matched proto dstPort pMin pMax 1 1 now srcExp dstExp jitExp &&& 1) = 0 := by
   unfold evalRouteStep sovereignOrLateralViolation
   repeat (first | constructor | split | decide | simp_all)
@@ -512,12 +518,20 @@ structure RelaySelectCheck where
   maxDirectStaleSecs  : UInt64
   deriving Repr, DecidableEq
 
-/-- Independent declarative specification for `relaySelectStep` admitting a control-plane relay (`== 3`). -/
+/-- Independent declarative specification for `relaySelectStep` admitting a control-plane relay (`== 3`),
+    stated purely in terms of `RelaySelectCheck` fields without calling any kernel helper. -/
 def relaySelectControlPlaneSpec (c : RelaySelectCheck) : Bool :=
-  let fresh := directPathFresh c.nowEpoch c.directHandshakeAt c.maxDirectStaleSecs
   !(c.routeAllowed != 1 || c.srcId == 0 || c.dstId == 0 || c.srcId == c.dstId) &&
-  !(c.lanReachable == 1 && fresh) &&
-  !(c.wanReachable == 1 && fresh) &&
+  !(c.lanReachable == 1 &&
+    (c.directHandshakeAt > 0 &&
+     0 < c.maxDirectStaleSecs && c.maxDirectStaleSecs ≤ 86400 &&
+     c.directHandshakeAt ≤ c.nowEpoch &&
+     c.nowEpoch - c.directHandshakeAt ≤ c.maxDirectStaleSecs)) &&
+  !(c.wanReachable == 1 &&
+    (c.directHandshakeAt > 0 &&
+     0 < c.maxDirectStaleSecs && c.maxDirectStaleSecs ≤ 86400 &&
+     c.directHandshakeAt ≤ c.nowEpoch &&
+     c.nowEpoch - c.directHandshakeAt ≤ c.maxDirectStaleSecs)) &&
   (c.relayHealthy == 1 && c.relayId != 0 && c.relayId != c.srcId && c.relayId != c.dstId &&
    c.activeRelaySessions < c.maxRelaySessions)
 
@@ -527,6 +541,18 @@ theorem relay_select_eq_three_iff (c : RelaySelectCheck) :
       c.nowEpoch c.directHandshakeAt c.maxDirectStaleSecs == 3) =
     relaySelectControlPlaneSpec c := by
   unfold relaySelectStep relaySelectControlPlaneSpec
+  change (let fresh := directPathFresh c.nowEpoch c.directHandshakeAt c.maxDirectStaleSecs
+    (if (c.routeAllowed != 1 || c.srcId == 0 || c.dstId == 0 || c.srcId == c.dstId) = true then 0
+     else if (c.lanReachable == 1 && fresh) = true then 2
+     else if (c.wanReachable == 1 && fresh) = true then 1
+     else if (c.relayHealthy == 1 && c.relayId != 0 && c.relayId != c.srcId && c.relayId != c.dstId &&
+              decide (c.activeRelaySessions < c.maxRelaySessions)) = true then 3
+     else 0) == 3) =
+    (!(c.routeAllowed != 1 || c.srcId == 0 || c.dstId == 0 || c.srcId == c.dstId) &&
+     !(c.lanReachable == 1 && directPathFresh c.nowEpoch c.directHandshakeAt c.maxDirectStaleSecs) &&
+     !(c.wanReachable == 1 && directPathFresh c.nowEpoch c.directHandshakeAt c.maxDirectStaleSecs) &&
+     (c.relayHealthy == 1 && c.relayId != 0 && c.relayId != c.srcId && c.relayId != c.dstId &&
+      decide (c.activeRelaySessions < c.maxRelaySessions)))
   dsimp only
   by_cases h1 : (c.routeAllowed != 1 || c.srcId == 0 || c.dstId == 0 || c.srcId == c.dstId) = true
   · simp [h1]
@@ -585,15 +611,18 @@ structure BunkerIsolateCheck where
   deadManTimeoutSecs : UInt64
   deriving Repr, DecidableEq
 
-/-- Independent declarative specification for when `bunkerIsolateStep` returns Normal (`0`). -/
+/-- Independent declarative specification for when `bunkerIsolateStep` returns Normal (`0`),
+    stated purely in terms of `BunkerIsolateCheck` fields without calling any kernel helper. -/
 def bunkerIsolateNormalSpec (b : BunkerIsolateCheck) : Bool :=
-  let clamped : UInt8 := clampBunkerState b.currentState
-  let retained : UInt8 := if b.biometricUnbunker == 1 then 0 else clamped
-  let deadMan := b.manualTrigger == 3 ||
-                 sovereignDeadManExpired b.isSovereignNode b.heartbeatValid
-                   b.nowEpoch b.lastHeartbeatAt b.deadManTimeoutSecs
-  let floor := bunkerTriggerFloor deadMan b.canaryTripped b.authFailureBurst b.manualTrigger
-  floor == 0 && retained == 0
+  !(b.manualTrigger == 3 ||
+    (b.isSovereignNode == 1 &&
+     (b.heartbeatValid != 1 ||
+      b.deadManTimeoutSecs == 0 ||
+      b.nowEpoch < b.lastHeartbeatAt ||
+      b.nowEpoch - b.lastHeartbeatAt ≥ b.deadManTimeoutSecs))) &&
+  !(b.canaryTripped == 1 || b.manualTrigger == 2) &&
+  !(b.authFailureBurst == 1 || b.manualTrigger == 1) &&
+  (b.biometricUnbunker == 1 || b.currentState == 0)
 
 def isValidBunkerLevel (x : UInt8) : Prop := x = 0 ∨ x = 1 ∨ x = 2 ∨ x = 3
 def isStickyBunkerLevel (x : UInt8) : Prop := x = 1 ∨ x = 2 ∨ x = 3
@@ -650,6 +679,27 @@ theorem bunker_low_eq_next_state (s sov c a m u hb : UInt8) (now lastHb timeout 
   dsimp only
   exact bunker_pack_extract_low _ sov hj
 
+theorem bunker_floor_eq_zero_iff (d : Bool) (c a m : UInt8) :
+    (bunkerTriggerFloor d c a m == 0) =
+    (!d && !(c == 1 || m == 2) && !(a == 1 || m == 1)) := by
+  unfold bunkerTriggerFloor
+  cases d <;> by_cases h1 : (c == 1 || m == 2) = true <;> by_cases h2 : (a == 1 || m == 1) = true <;>
+    simp [h1, h2]
+
+theorem bunker_retained_eq_zero_iff (s u : UInt8) :
+    ((if u == 1 then 0 else clampBunkerState s) == 0) =
+    (u == 1 || s == 0) := by
+  unfold clampBunkerState
+  by_cases hu : (u == 1) = true
+  · simp [hu]
+  · by_cases hs0 : (s == 0) = true
+    · simp [hu, hs0]
+    · by_cases hs1 : (s == 1) = true
+      · simp [hu, hs0, hs1]
+      · by_cases hs2 : (s == 2) = true
+        · simp [hu, hs0, hs1, hs2]
+        · simp [hu, hs0, hs1, hs2]
+
 theorem bunker_isolate_eq_zero_iff (b : BunkerIsolateCheck) :
     (bunkerIsolateStep b.currentState b.isSovereignNode b.canaryTripped
       b.authFailureBurst b.manualTrigger b.biometricUnbunker b.heartbeatValid
@@ -665,7 +715,9 @@ theorem bunker_isolate_eq_zero_iff (b : BunkerIsolateCheck) :
   unfold bunkerIsolateStep bunkerNextState bunkerIsolateNormalSpec
   dsimp only
   rw [bunker_pack_eq_zero_iff _ b.isSovereignNode hj]
-  exact bunker_join_eq_zero_iff _ _ hf hr
+  rw [bunker_join_eq_zero_iff _ _ hf hr]
+  rw [bunker_floor_eq_zero_iff, bunker_retained_eq_zero_iff]
+  rfl
 
 def bunkerIsolateMetaGate : MetaGateSpec BunkerIsolateCheck
     (fun b => bunkerIsolateNormalSpec b = true) where
@@ -808,10 +860,14 @@ structure ReconcileWgCheck where
   peerExpiresAt       : UInt64
   deriving Repr, DecidableEq
 
-/-- Independent declarative specification for when `reconcileWgStep` reaches the idempotent `NoopInSync` (`6`) fixed point. -/
+/-- Independent declarative specification for when `reconcileWgStep` reaches the idempotent `NoopInSync` (`6`) fixed point,
+    stated purely in terms of `ReconcileWgCheck` fields without calling any kernel helper. -/
 def reconcileWgNoopSyncedSpec (r : ReconcileWgCheck) : Bool :=
   r.manifestValid == 1 &&
-  !peerShouldBeInactive r.peerRevoked r.bunkerPruneNonAdmin r.peerIsAdmin r.nowEpoch r.peerExpiresAt &&
+  !(r.peerRevoked == 1 ||
+    r.nowEpoch ≥ r.peerExpiresAt ||
+    r.bunkerPruneNonAdmin ≥ 2 ||
+    (r.bunkerPruneNonAdmin == 1 && r.peerIsAdmin != 1)) &&
   r.peerPresentInKernel != 0 &&
   !(r.pubkeyMatches != 1 || r.allowedIpMatches != 1) &&
   r.endpointChanged != 1
@@ -823,10 +879,20 @@ def reconcileWgMetaGate : MetaGateSpec ReconcileWgCheck
       r.pubkeyMatches r.allowedIpMatches r.endpointChanged r.bunkerPruneNonAdmin
       r.peerIsAdmin r.nowEpoch r.peerExpiresAt == 6
   sound r h := by
-    unfold reconcileWgStep reconcileWgNoopSyncedSpec at *
+    unfold reconcileWgStep at h
+    change (r.manifestValid == 1 &&
+      !peerShouldBeInactive r.peerRevoked r.bunkerPruneNonAdmin r.peerIsAdmin r.nowEpoch r.peerExpiresAt &&
+      r.peerPresentInKernel != 0 &&
+      !(r.pubkeyMatches != 1 || r.allowedIpMatches != 1) &&
+      r.endpointChanged != 1) = true
     repeat (first | split at h | simp_all)
   complete r h := by
-    unfold reconcileWgStep reconcileWgNoopSyncedSpec at *
+    change (r.manifestValid == 1 &&
+      !peerShouldBeInactive r.peerRevoked r.bunkerPruneNonAdmin r.peerIsAdmin r.nowEpoch r.peerExpiresAt &&
+      r.peerPresentInKernel != 0 &&
+      !(r.pubkeyMatches != 1 || r.allowedIpMatches != 1) &&
+      r.endpointChanged != 1) = true at h
+    unfold reconcileWgStep
     repeat (first | split at h | split | simp_all)
   posWitness := ⟨1, 1, 0, 1, 1, 0, 0, 0, 1000, 2000⟩
   negWitness := ⟨1, 1, 0, 1, 1, 0, 2, 1, 1000, 2000⟩
@@ -863,12 +929,14 @@ structure JitLeaseCheck where
   maxJitTtlSecs     : UInt64
   deriving Repr, DecidableEq
 
-/-- Independent declarative specification for `jitLeaseStep` admitting a cross-tier JIT lease. -/
+/-- Independent declarative specification for `jitLeaseStep` admitting a cross-tier JIT lease,
+    stated purely in terms of `JitLeaseCheck` fields without calling any kernel helper. -/
 def jitLeaseDeclarativeSpec (j : JitLeaseCheck) : Bool :=
   !(j.missionActive == 0 || j.grantRevoked == 1 || j.bunkerState != 0 || j.grantExpiresAt ≤ j.nowEpoch) &&
   (j.biometricSigValid == 1 &&
    j.operatorSameOwner == 1 &&
-   jitClassPairAllowed j.srcClass j.dstClass &&
+   ((j.srcClass == 2 && j.dstClass == 5) ||
+    ((j.srcClass == 0 || j.srcClass == 1) && j.dstClass == 3)) &&
    0 < j.maxJitTtlSecs && j.maxJitTtlSecs ≤ 14400 &&
    j.grantIssuedAt ≤ j.nowEpoch &&
    j.grantIssuedAt < j.grantExpiresAt &&
@@ -881,14 +949,14 @@ def jitLeaseMetaGate : MetaGateSpec JitLeaseCheck
       j.grantRevoked j.bunkerState j.srcClass j.dstClass
       j.nowEpoch j.grantIssuedAt j.grantExpiresAt j.maxJitTtlSecs &&& 1) == 1
   sound j h := by
-    unfold jitLeaseStep jitLeaseDeclarativeSpec at *
+    unfold jitLeaseStep jitClassPairAllowed jitLeaseDeclarativeSpec at *
     split at h
     · contradiction
     · split at h
       · simp_all
       · contradiction
   complete j h := by
-    unfold jitLeaseStep jitLeaseDeclarativeSpec at *
+    unfold jitLeaseStep jitClassPairAllowed jitLeaseDeclarativeSpec at *
     repeat split
     all_goals (first | decide | simp_all)
   posWitness := ⟨1, 1, 1, 0, 0, 2, 5, 1000, 990, 1800, 900⟩
@@ -993,7 +1061,10 @@ def palomaClockDiscipline : ClockDiscipline RatchetEpochCheck where
 /-- 3. Concrete `ScopedAuthority` instance over `jitLeaseStep`. -/
 def palomaScopedAuthority : ScopedAuthority JitLeaseCheck where
   admit j       := jitLeaseMetaGate.gate j
-  withinScope j := jitClassPairAllowed j.srcClass j.dstClass && j.bunkerState == 0
+  withinScope j :=
+    ((j.srcClass == 2 && j.dstClass == 5) ||
+     ((j.srcClass == 0 || j.srcClass == 1) && j.dstClass == 3)) &&
+    j.bunkerState == 0
   admit_implies_within_scope j h := by
     have h_spec := jitLeaseMetaGate.sound j h
     unfold jitLeaseDeclarativeSpec at h_spec
@@ -1056,13 +1127,19 @@ def palomaSovereignNonInterference : SovereignNonInterference EvalRouteCheck Jit
     jitLeaseStep j.biometricSigValid j.operatorSameOwner j.missionActive
       j.grantRevoked j.bunkerState j.srcClass j.dstClass
       j.nowEpoch j.grantIssuedAt j.grantExpiresAt j.maxJitTtlSecs
-  isUntrustedToVaultRoute r := r.dstClass == 5 && (r.srcClass ≤ 1 || r.srcClass == 3)
-  isUntrustedToVaultJit j   := j.dstClass == 5 && (j.srcClass ≤ 1 || j.srcClass == 3)
+  isUntrustedToVaultRoute r := r.dstClass == 5 && (r.srcClass ≤ 1 || r.srcClass == 3 || r.srcClass == 5)
+  isUntrustedToVaultJit j   := j.dstClass == 5 && (j.srcClass ≤ 1 || j.srcClass == 3 || j.srcClass == 5)
+  isLateral3088Route r      :=
+    (r.dstPort == 3088 || (r.rulePortMin ≤ 3088 && 3088 ≤ r.rulePortMax)) &&
+    r.srcClass != 4 && r.srcClass != 6
   route_blocks_untrusted_vault r h := by
     unfold evalRouteStep sovereignOrLateralViolation
     repeat (first | split at h | split | decide | simp_all)
   jit_blocks_untrusted_vault j h := by
     unfold jitLeaseStep jitClassPairAllowed
+    repeat (first | split at h | split | decide | simp_all)
+  route_blocks_lateral_3088 r h := by
+    unfold evalRouteStep sovereignOrLateralViolation
     repeat (first | split at h | split | decide | simp_all)
 
 /-- Cross-Gate Coherence Theorem (`bunkerState != 0` across `evalRouteStep` and `jitLeaseStep`):
