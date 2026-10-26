@@ -1820,15 +1820,14 @@ pub async fn handle_tool(
                     .map(|s| s.to_string())
                     .collect()
             } else if let Some(cmd_str) = args.get("command").and_then(Value::as_str) {
-                cmd_str
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect()
+                cmd_str.split_whitespace().map(|s| s.to_string()).collect()
             } else {
                 Vec::new()
             };
             if argv.is_empty() {
-                return Err("argv (non-empty array of command tokens) or command is required".into());
+                return Err(
+                    "argv (non-empty array of command tokens) or command is required".into(),
+                );
             }
             let command_str = argv.join(" ");
 
@@ -1919,7 +1918,9 @@ pub async fn handle_tool(
 
             let output = output_res
                 .map_err(|_| format!("Privileged command on `{target_host}` timed out after 120s"))?
-                .map_err(|e| format!("Failed to spawn privileged command on `{target_host}`: {e}"))?;
+                .map_err(|e| {
+                    format!("Failed to spawn privileged command on `{target_host}`: {e}")
+                })?;
 
             let exit_code = output.status.code().unwrap_or(-1);
             let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -2593,13 +2594,14 @@ async fn canary_tripwire(
     let (_, mesh_transition, epoch) =
         super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
 
-    let quarantine_scope = if orb_step.revoke_all_jit_grants || (mesh_transition.next_state as u8) >= 2 {
-        "fleet_lockdown"
-    } else if orb_step.isolate_node_mesh {
-        "node_only"
-    } else {
-        "whitelisted_ignored"
-    };
+    let quarantine_scope =
+        if orb_step.revoke_all_jit_grants || (mesh_transition.next_state as u8) >= 2 {
+            "fleet_lockdown"
+        } else if orb_step.isolate_node_mesh {
+            "node_only"
+        } else {
+            "whitelisted_ignored"
+        };
 
     // 5. Dispatch redacted out-of-band alert and update incident delivery status
     //    (skip alert for whitelisted routine agent file walks unless `dry_run == true`).
