@@ -54,8 +54,8 @@ validation notes below describe the former implementation, not a supported harne
    and atomically replaces only Hermes's owned MCP server. On readiness
    failure it restores the prior configuration and credential. No secret is
    printed or passed as a command-line value.
-4. Install the matching `project-manager`, `controllers-policy` and
-   `sandboxed-sh-missions` runtime skills, then restart `hermes-assistant`.
+4. Install the matching `project-manager` and `orb-control` (missions,
+   projects, controllers policy) runtime skills, then restart `hermes-assistant`.
    Verify the running child uses `sandboxed-mcp` and can read capabilities
    and an action receipt. Repeat separately with suffixed dev binaries.
 5. Roll out the node companion and packaged Orb. Once no process or active

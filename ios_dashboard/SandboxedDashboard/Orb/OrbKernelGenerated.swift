@@ -720,7 +720,7 @@ enum OrbKernel {
         let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
         let action = Int(lo32 & 0xFF)
         let applyCorrection = ((lo32 >> 8) & 1) != 0
-        let nextCorrections = UInt8((lo32 >> 16) & 0xFF)
+        let nextCorrections = UInt8((lo32 >> 10) & 1)
         let nextEpoch = applyCorrection ? layoutEpoch : lastCorrectedEpoch
         return (action, applyCorrection, nextCorrections, nextEpoch, Int(hi32))
     }

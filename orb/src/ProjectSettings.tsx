@@ -267,7 +267,7 @@ export function ProjectSettings(p: { slug: string; onOpenPage: (id: string) => v
                   <div class="s-row-title">Allowed by default</div>
                   <div class="s-row-desc">
                     Missions in this project read secrets from the checked Bitwarden projects without asking.
-                    Anything else waits for your approval in Settings → Secrets.
+                    Anything else waits for your approval in Settings → Security.
                   </div>
                 </div>
                 <div class="s-row-ctrl">

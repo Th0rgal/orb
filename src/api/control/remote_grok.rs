@@ -595,9 +595,7 @@ impl GrokStream {
         let (session_matches_expected, candidate_session_to_bind) =
             match (current_expected, line_session) {
                 (Some(exp), Some(got)) => (exp == got, None),
-                (None, Some(_))
-                    if self.antigravity.is_some() && event_str == "thought_update" =>
-                {
+                (None, Some(_)) if self.antigravity.is_some() && event_str == "thought_update" => {
                     (false, None)
                 }
                 (None, Some(got)) => (true, Some(got.to_string())),
@@ -640,10 +638,8 @@ impl GrokStream {
                     | crate::orb_spec::RawAgentEventKind::SessionIdUpdate
                     | crate::orb_spec::RawAgentEventKind::ErrorOrAuth
             );
-        let host_emits = payload_bytes <= MAX_LINE_BYTES
-            && sess_ok
-            && !is_duplicate_turn_or_tool
-            && text_ok;
+        let host_emits =
+            payload_bytes <= MAX_LINE_BYTES && sess_ok && !is_duplicate_turn_or_tool && text_ok;
 
         let norm = evaluate_agent_event_normalize_gate(
             harness_kind,
@@ -714,24 +710,14 @@ impl GrokStream {
     }
 
     pub(crate) fn feed(&mut self, chunk: &str) -> Vec<StreamUpdate> {
-        const MAX_BUFFER_BYTES: usize = 1024 * 1024 + 4096;
+        const MAX_BUFFER_BYTES: usize = 1024 * 1024;
         let mut updates = Vec::new();
         for part in chunk.split_inclusive('\n') {
             let complete = part.ends_with('\n');
             if !self.dropping_line && self.partial.len() + part.len() <= MAX_BUFFER_BYTES {
                 self.partial.push_str(part);
             } else {
-                self.partial.clear();
-                self.dropping_line = true;
-            }
-            if complete {
                 if !self.dropping_line {
-                    let line = std::mem::take(&mut self.partial);
-                    let trimmed = line.trim_end_matches('\n');
-                    if self.admit_and_reduce_raw_line(trimmed) {
-                        self.feed_line(trimmed, &mut updates);
-                    }
-                } else {
                     let _ = evaluate_agent_event_normalize_gate(
                         self.active_harness_kind(),
                         crate::orb_spec::RawAgentEventKind::DiagnosticLine,
@@ -743,6 +729,17 @@ impl GrokStream {
                         1024 * 1024,
                         false,
                     );
+                }
+                self.partial.clear();
+                self.dropping_line = true;
+            }
+            if complete {
+                if !self.dropping_line {
+                    let line = std::mem::take(&mut self.partial);
+                    let trimmed = line.trim_end_matches('\n');
+                    if self.admit_and_reduce_raw_line(trimmed) {
+                        self.feed_line(trimmed, &mut updates);
+                    }
                 }
                 self.dropping_line = false;
             }
@@ -5298,19 +5295,21 @@ mod tests {
         assert_eq!(u1, vec![StreamUpdate::ThinkingSnapshot("analyzing".into())]);
         assert!(grok_stream.reducer_thinking_open);
 
-        let u2 = grok_stream.feed(
-            "{\"type\":\"tool_call\",\"data\":{\"toolCallId\":\"c1\",\"name\":\"bash\"}}\n",
-        );
-        assert!(matches!(&u2[0], StreamUpdate::Tool { completed: false, .. }));
+        let u2 = grok_stream
+            .feed("{\"type\":\"tool_call\",\"data\":{\"toolCallId\":\"c1\",\"name\":\"bash\"}}\n");
+        assert!(matches!(
+            &u2[0],
+            StreamUpdate::Tool {
+                completed: false,
+                ..
+            }
+        ));
         assert!(!grok_stream.reducer_thinking_open);
 
         let u3 = grok_stream.feed("{\"type\":\"text\",\"data\":\"done\"}\n{\"type\":\"end\",\"stopReason\":\"end_turn\"}\n");
         assert_eq!(
             u3,
-            vec![
-                StreamUpdate::TextSnapshot("done".into()),
-                StreamUpdate::End
-            ]
+            vec![StreamUpdate::TextSnapshot("done".into()), StreamUpdate::End]
         );
         assert!(!grok_stream.reducer_thinking_open);
         assert!(grok_stream.last_reduced_seq >= 4);
@@ -5465,24 +5464,15 @@ mod tests {
             assert!(complete.close_thinking);
 
             // Live vs replay equivalence (`ReplayEquivalence`)
-            let live_red = evaluate_transcript_reduce_gate(
-                10,
-                11,
-                true,
-                complete.action,
-                false,
-                true,
-            );
-            let replay_red = evaluate_transcript_reduce_gate(
-                10,
-                11,
-                true,
-                complete.action,
-                true,
-                true,
-            );
+            let live_red =
+                evaluate_transcript_reduce_gate(10, 11, true, complete.action, false, true);
+            let replay_red =
+                evaluate_transcript_reduce_gate(10, 11, true, complete.action, true, true);
             assert_eq!(live_red, replay_red);
-            assert_eq!(live_red.action, TranscriptReduceAction::AppendTranscriptEntry);
+            assert_eq!(
+                live_red.action,
+                TranscriptReduceAction::AppendTranscriptEntry
+            );
             assert!(live_red.closed_previous_thinking);
             assert!(!live_red.thinking_open_next);
 
@@ -5497,24 +5487,16 @@ mod tests {
             assert_eq!(meta_red.action, TranscriptReduceAction::UpdateMetadata);
 
             // Stale / duplicate sequence (`incoming_seq <= last_applied_seq`) is deduplicated
-            let stale_red = evaluate_transcript_reduce_gate(
-                12,
-                12,
-                false,
-                complete.action,
-                true,
-                false,
-            );
+            let stale_red =
+                evaluate_transcript_reduce_gate(12, 12, false, complete.action, true, false);
             assert_eq!(stale_red.action, TranscriptReduceAction::DedupeOrSkip);
             assert!(!stale_red.emit_entry);
         }
 
         let norm_snap =
             agent_event_normalize_shadow_counter().snapshot("orb_agent_event_normalize_step");
-        let red_snap =
-            transcript_reduce_shadow_counter().snapshot("orb_transcript_reduce_step");
-        let parity_snap =
-            client_parity_shadow_counter().snapshot("orb_client_parity_step");
+        let red_snap = transcript_reduce_shadow_counter().snapshot("orb_transcript_reduce_step");
+        let parity_snap = client_parity_shadow_counter().snapshot("orb_client_parity_step");
         assert!(norm_snap.total_events >= 20);
         assert_eq!(norm_snap.total_divergences, 0);
         assert!(red_snap.total_events >= 20);
