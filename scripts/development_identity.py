@@ -49,7 +49,13 @@ def run(argv, *, data=None, env=None, cwd=None, timeout=60):
 
 def write(path, value, mode=0o600):
     path = Path(path)
+    if path.parent.exists() and path.parent.is_symlink():
+        raise ValueError("symlinked parent directory rejected")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.parent.is_symlink():
+        raise ValueError("symlinked parent directory rejected")
+    with contextlib.suppress(PermissionError):
+        path.parent.chmod(0o700)
     tmp = path.with_name(path.name + ".new-" + uuid.uuid4().hex)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
@@ -111,6 +117,8 @@ def validate_bundle(bundle):
             priv_k, pub_k = host["identity_key"], host["public_key"]
             if priv_k not in host_keys or pub_k not in host_keys:
                 raise ValueError("SSH host key missing from host_keys")
+            if "PRIVATE KEY" not in host_keys[priv_k]:
+                raise ValueError("expected a private key in host_keys")
             if "PRIVATE KEY" in host_keys[pub_k] or not host_keys[pub_k].startswith("ssh-ed25519 "):
                 raise ValueError("expected an Ed25519 host public key")
             referenced_host_keys.update((priv_k, pub_k))
@@ -122,7 +130,12 @@ def validate_bundle(bundle):
 
 
 def coding_only_bundle(bundle):
-    """Strip fleet SSH keys for worker nodes and containers that only need GitHub + GPG."""
+    """Strip fleet/infrastructure SSH keys for worker nodes and containers.
+
+    Retains BASE_FIELDS (GITHUB_TOKEN, GITHUB_SSH_PRIVATE_KEY/PUBLIC_KEY scoped
+    solely to `Host github.com`, and GIT_SIGNING_PRIVATE_KEY) while removing
+    PALOMA_SSH_PRIVATE_KEY/PUBLIC_KEY, host_keys, and ssh_hosts.
+    """
     return {
         "secrets": {k: bundle["secrets"][k] for k in BASE_FIELDS},
         "known_hosts": bundle["known_hosts"],
@@ -434,7 +447,7 @@ def prepare_generation(root, bundle):
             "created_at": int(time.time()),
             "library_revision": bundle["library_revision"],
             "signing_fingerprint": FINGERPRINT,
-            "coding_only": not has_paloma,
+            "coding_only": not has_paloma and not host_key_files,
             "host_key_files": host_key_files,
         })
         return stage
@@ -463,8 +476,26 @@ def publish_launchers(root):
     write(root / "launch", "#!/bin/sh\nexec " + shlex.join([sys.executable, str(Path(__file__).resolve()), "run", "--root", str(root.resolve()), "--"]) + ' "$@"\n', 0o700)
 
 
+def verify_ssh_keypair(priv_pem, pub_line, expected_fp=None):
+    with tempfile.TemporaryDirectory(prefix="identity-ssh-check-") as d:
+        key_path = Path(d) / "id_ed25519"
+        write(key_path, priv_pem.rstrip() + "\n", 0o600)
+        derived = run(["ssh-keygen", "-y", "-P", "", "-f", str(key_path)])
+        if derived.split()[:2] != pub_line.split()[:2]:
+            raise RuntimeError("SSH private/public key mismatch")
+        if expected_fp is not None:
+            pub_path = Path(d) / "id_ed25519.pub"
+            write(pub_path, derived, 0o600)
+            fp = run(["ssh-keygen", "-lf", str(pub_path)])
+            if expected_fp not in fp:
+                raise RuntimeError("unexpected SSH fingerprint")
+
+
 def install(root, bundle, network=True):
     validate_bundle(bundle)
+    root = Path(root)
+    if root.exists() and root.is_symlink():
+        raise ValueError("symlinked root directory rejected")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.chmod(0o700)
     with open(root / ".lock", "a") as lock:
@@ -523,18 +554,30 @@ def export_bundle(config):
     if p.returncode:
         raise RuntimeError("Bitwarden read failed; keeping current credentials")
     values = {x["key"]: x["value"] for x in json.loads(p.stdout)}
-    selected = {k: values[k] for k in FIELDS}
-    host_keys = {}
-    for host in config["ssh_hosts"]:
-        if "identity_key" in host:
-            host_keys[host["identity_key"]] = values[host["identity_key"]]
-            host_keys[host["public_key"]] = values[host["public_key"]]
+    try:
+        selected = {k: values[k] for k in FIELDS}
+        host_keys = {}
+        for host in config["ssh_hosts"]:
+            if "identity_key" in host:
+                host_keys[host["identity_key"]] = values[host["identity_key"]]
+                host_keys[host["public_key"]] = values[host["public_key"]]
+    except KeyError as e:
+        raise RuntimeError("Bitwarden read failed; keeping current credentials") from e
     bundle = {"secrets": selected, "known_hosts": Path(config["known_hosts"]).read_text(),
               "ssh_hosts": config["ssh_hosts"], "library_revision": config["library_revision"],
               "skill": pinned_skill(config)}
     if host_keys:
         bundle["host_keys"] = host_keys
     validate_bundle(bundle)
+    verify_ssh_keypair(selected["GITHUB_SSH_PRIVATE_KEY"], selected["GITHUB_SSH_PUBLIC_KEY"], SSH_FINGERPRINT)
+    verify_ssh_keypair(selected["PALOMA_SSH_PRIVATE_KEY"], selected["PALOMA_SSH_PUBLIC_KEY"], ADMIN_FINGERPRINT)
+    for host in config["ssh_hosts"]:
+        if "identity_key" in host:
+            verify_ssh_keypair(
+                host_keys[host["identity_key"]],
+                host_keys[host["public_key"]],
+                host.get("fingerprint"),
+            )
     validate_signing_payload(selected["GIT_SIGNING_PRIVATE_KEY"])
     github_login(selected["GITHUB_TOKEN"])
     return bundle
@@ -644,7 +687,25 @@ def stage_containers(config, bundle):
     return reports
 
 
+def validate_targets(config):
+    targets = config.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("targets list required")
+    allowed = {"name", "root", "user", "ssh", "coding_only", "ssh_identity"}
+    for t in targets:
+        if not isinstance(t, dict) or not {"name", "root"} <= set(t) <= allowed:
+            raise ValueError("invalid target fields")
+        if "coding_only" in t and not isinstance(t["coding_only"], bool):
+            raise ValueError("target coding_only must be boolean")
+        for k in ("name", "root", "user", "ssh", "ssh_identity"):
+            if k in t and (not isinstance(t[k], str) or not t[k].strip()):
+                raise ValueError("invalid target string value")
+    if "containers_coding_only" in config and not isinstance(config["containers_coding_only"], bool):
+        raise ValueError("containers_coding_only must be boolean")
+
+
 def sync(config, apply):
+    validate_targets(config)
     bundle = export_bundle(config)
     if not apply:
         return {"source": "Bitwarden", "login": "Th0rgal", "targets": [t["name"] for t in config["targets"]]}

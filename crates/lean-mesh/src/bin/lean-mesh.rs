@@ -108,10 +108,26 @@ enum Commands {
         manifest: PathBuf,
         #[arg(long)]
         node: String,
+        #[arg(long)]
+        private_key_file: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = BunkerArg::Normal)]
         bunker: BunkerArg,
         #[arg(long)]
         now: Option<u64>,
+    },
+    /// Re-sign a MeshManifest JSON file with the coordinator Ed25519 signing seed (64-hex bytes)
+    SignManifest {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        signing_key_file: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate a CSPRNG Ed25519 node signing seed (`0600`) and print its `sign_pubkey_hex`
+    NodeKeygen {
+        #[arg(long)]
+        out_seed: PathBuf,
     },
     /// Render deterministic `nftables` capability firewall policy (`table inet lean_mesh`) for a node
     RenderNft {
@@ -279,6 +295,7 @@ fn main() -> Result<()> {
         Commands::RenderWg {
             manifest,
             node,
+            private_key_file,
             bunker,
             now,
         } => {
@@ -286,13 +303,53 @@ fn main() -> Result<()> {
             let m: MeshManifest = serde_json::from_str(&raw)?;
             let now_epoch = now.unwrap_or_else(unix_now);
             m.verify_formal(0, 0, now_epoch)?;
+            let priv_key = match private_key_file {
+                Some(p) => fs::read_to_string(&p)
+                    .with_context(|| format!("failed to read {}", p.display()))?
+                    .trim()
+                    .to_string(),
+                None => "<NODE_WG_PRIVATE_KEY>".to_string(),
+            };
             let cfg = m.render_wireguard_config(
                 &node,
-                "<NODE_WG_PRIVATE_KEY>",
+                &priv_key,
                 bunker.into(),
                 now_epoch,
             )?;
             print!("{cfg}");
+        }
+        Commands::SignManifest {
+            manifest,
+            signing_key_file,
+            output,
+        } => {
+            let raw = fs::read_to_string(&manifest)?;
+            let mut m: MeshManifest = serde_json::from_str(&raw)?;
+            let key_hex = fs::read_to_string(&signing_key_file)
+                .with_context(|| format!("failed to read {}", signing_key_file.display()))?;
+            let seed_bytes = hex::decode(key_hex.trim()).context("invalid hex in signing_key_file")?;
+            let seed: [u8; 32] = seed_bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("signing_key_file must contain 32-byte hex seed"))?;
+            let sk = SigningKey::from_bytes(&seed);
+            m.sign(&sk);
+            let now_epoch = unix_now();
+            m.verify_formal(0, 0, now_epoch)?;
+            let out_path = output.unwrap_or(manifest);
+            let json = serde_json::to_string_pretty(&m)?;
+            write_private_file(&out_path, &json)?;
+            println!(
+                "Signed and verified manifest at {} (epoch={}, coordinator_pubkey={})",
+                out_path.display(),
+                m.epoch,
+                m.coordinator_pubkey_hex
+            );
+        }
+        Commands::NodeKeygen { out_seed } => {
+            let seed = generate_csprng_seed()?;
+            write_private_file(&out_seed, &format!("{}\n", hex::encode(seed)))?;
+            let sk = SigningKey::from_bytes(&seed);
+            println!("{}", hex::encode(sk.verifying_key().to_bytes()));
         }
         Commands::RenderNft {
             manifest,

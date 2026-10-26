@@ -287,7 +287,7 @@ class IdentityTests(unittest.TestCase):
             "public_key": "PALOMA_SSH_KEY_ASHUR_PUBLIC_KEY",
         }]
         b["host_keys"] = {
-            "PALOMA_SSH_KEY_ASHUR": "fixture-priv",
+            "PALOMA_SSH_KEY_ASHUR": "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----",
             "PALOMA_SSH_KEY_ASHUR_PUBLIC_KEY": "ssh-ed25519 Zml4dHVyZQ==",
         }
         identity.validate_bundle(b)
@@ -311,11 +311,29 @@ class IdentityTests(unittest.TestCase):
             "public_key": "PALOMA_SSH_KEY_ASHUR_PUBLIC_KEY",
         }]
         b2["host_keys"] = {
-            "PALOMA_SSH_KEY_ASHUR": "fixture-priv",
+            "PALOMA_SSH_KEY_ASHUR": "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----",
             "PALOMA_SSH_KEY_ASHUR_PUBLIC_KEY": "-----BEGIN OPENSSH PRIVATE KEY-----",
         }
         with self.assertRaises(ValueError):
             identity.validate_bundle(b2)
+        b3 = self.bundle()
+        b3["ssh_hosts"] = b2["ssh_hosts"]
+        b3["host_keys"] = {
+            "PALOMA_SSH_KEY_ASHUR": "not-a-private-key",
+            "PALOMA_SSH_KEY_ASHUR_PUBLIC_KEY": "ssh-ed25519 Zml4dHVyZQ==",
+        }
+        with self.assertRaises(ValueError):
+            identity.validate_bundle(b3)
+
+    def test_validate_targets_rejects_typo_and_missing_bws_key_raises_runtime_error(self):
+        with self.assertRaises(ValueError):
+            identity.validate_targets({"targets": [{"name": "node", "root": "/p", "coding-only": True}]})
+        with self.assertRaises(ValueError):
+            identity.validate_targets({"targets": [{"name": "node", "root": "/p", "coding_only": "yes"}]})
+        identity.validate_targets({"targets": [{"name": "node", "root": "/p", "coding_only": True}]})
+        with patch.object(identity.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "[]", "")):
+            with self.assertRaises(RuntimeError):
+                identity.export_bundle({"bitwarden_command": ["bws"], "ssh_hosts": []})
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Lean-Mesh (`wg-leanmesh0`)
 
-`lean-mesh` ([`Th0rgal/lean-mesh`](https://github.com/Th0rgal/lean-mesh), integrated in `crates/lean-mesh` and `src/api/mesh.rs`) is Paloma's zero-trust WireGuard + `nftables` overlay network (`10.88.0.0/16` on `wg-leanmesh0`). It replaces Tailscale (`tailscaled` / Headscale) with a tiny, self-sovereign Rust + Lean 4 verified mesh that operates in two modes simultaneously:
+`lean-mesh` ([`Th0rgal/lean-mesh`](https://github.com/Th0rgal/lean-mesh), integrated in `crates/lean-mesh` and `src/api/mesh.rs`) is Paloma's zero-trust WireGuard + `nftables` overlay network (`10.88.0.0/16` on `wg-leanmesh0`, default UDP port `51888`). It replaces Tailscale (`tailscaled` / Headscale) with a tiny, self-sovereign Rust + Lean 4 verified mesh that operates in two modes simultaneously:
 
 - **Mode A (Orb-Integrated)**: `agent-core` (`10.88.0.1`) serves `/api/mesh/*`, enforces `LeanMesh.Kernel` C-ABI transitions, and worker nodes (`sandboxed-node`) + `dgx-spark` route all node dispatch (`:3088`), Hindsight memory (`:8888-:8890`), telemetry (`:3000`), and Biometric JIT SSH grants over `wg-leanmesh0`.
 - **Mode B (Standalone CLI without Orb)**: Any machine that does **not** run Orb or `sandboxed-node` (`thomas-md`, `polymath`, `maven-repo`, `watchtower`, workstations, or any new VPS/NAS) runs only the standalone `/usr/local/bin/lean-mesh` binary (`Th0rgal/lean-mesh`) + kernel `wireguard-tools` + `nftables`.
@@ -12,31 +12,33 @@
 Every manifest update, peer roaming frame, route evaluation, WireGuard/nftables render, and `dgx-spark` heartbeat passes through two layers:
 
 1. **Cryptographic Envelope Verification (Ed25519 + Domain Separation)**:
-   - `LEAN_MESH_MANIFEST_V1`: Signed by the authority Ed25519 key (`authority_pubkey_hex`).
-   - `LEAN_MESH_ROAM_V1`: Signed by the **peer's own pinned Ed25519 signing key** (`MeshPeer.sign_pubkey_hex`), preventing any compromised peer from hijacking another peer's endpoint (`PeerIdentityHijackFree`).
-   - `LEAN_MESH_HEARTBEAT_V1`: Signed by `dgx-spark`'s pinned Ed25519 signing key (`node_id = 2`).
-   - `LEAN_MESH_RENDER_V1`: Signed by the requesting node's pinned Ed25519 signing key (`GET /api/mesh/render-wg/:node` and `GET /api/mesh/render-nft/:node`).
+   - `lean-mesh-manifest-v1:`: Signed by the coordinator Ed25519 key (`MeshManifest.coordinator_pubkey_hex`).
+   - `lean-mesh-roam-v1:`: Signed by the **peer's own pinned Ed25519 signing key** (`MeshPeer.sign_pubkey_hex`), preventing any compromised peer from hijacking another peer's endpoint (`roam_rejects_unauthenticated`).
+   - `lean-mesh-heartbeat-v1:`: Signed by `dgx-spark`'s pinned Ed25519 signing key (`id = "dgx-spark"`).
+   - `lean-mesh-render-v1:`: Signed by the requesting node's pinned Ed25519 signing key (`GET /api/mesh/render-wg/:node` and `GET /api/mesh/render-nft/:node`).
 2. **Lean 4 Machine-Checked Decision Kernel (`LeanMesh.Kernel` / `LeanMesh.Spec`)**:
-   - Compiled to a zero-runtime-reflection C-ABI library (`0 import Lean`, `0 sorryAx`, `0` custom axioms, **278 machine-checked theorems**).
-   - Enforces strict epoch monotonicity (`step_manifest_epoch`), mesh subnet containment (`10.88.0.0/16`, `validMeshIp`), capability matrix isolation (workers cannot SSH laterally or initiate reverse connections to `agent-core`), Biometric JIT SSH route opening (`jit_grant_id != 0` with `grant_expires_at > now_epoch`), and the **180-second `dgx-spark` Dead-Man's Switch** (`step_bunker_isolate`).
+   - Compiled to a zero-runtime-reflection C-ABI library (`0 import Lean`, `0 sorryAx`, `0` custom axioms, **278 machine-checked theorems** across 12 C-ABI exports).
+   - Enforces strict epoch monotonicity (`leanmesh_ratchet_epoch_step`), mesh subnet containment (`10.88.0.0/16`, `overlayHostIpValid`), capability matrix isolation (`leanmesh_eval_route_step`: workers cannot SSH laterally or initiate reverse connections to `agent-core`), Biometric JIT SSH route opening (`jitBiometricGrant == 1 && bunkerState == 0 && nowEpoch < jitExpiresAt`), and the **180-second `dgx-spark` Dead-Man's Switch** (`leanmesh_bunker_isolate_step`).
 
 ---
 
-## 2. Fleet Overlay Address Map (`10.88.0.0/16`)
+## 2. Fleet Overlay Address Map (`10.88.0.0/16`, UDP `51888`)
 
-| Node Name | Node ID | Role | Mesh IP (`wg-leanmesh0`) | Public / Endpoint |
-| :--- | :---: | :--- | :--- | :--- |
-| `agent-core` | `1` | ControlPlane (`orb` / `sandboxed-sh`) | `10.88.0.1/32` | `65.109.98.246:51880` |
-| `dgx-spark` | `2` | SovereignBrain (Hindsight, Arbiter, Node) | `10.88.0.2/32` | Dynamic (hub-relayed via `agent-core`) |
-| `ashur` | `11` | Worker (`sandboxed-node` `:3088`) | `10.88.0.11/32` | `188.40.69.160:51880` |
-| `babylon` | `12` | Worker (`sandboxed-node` `:3088`) | `10.88.0.12/32` | `54.36.175.109:51880` |
-| `nippur` | `13` | Worker (`sandboxed-node` `:3088`) | `10.88.0.13/32` | `37.187.92.183:51880` |
-| `old-agent` | `14` | Worker (`sandboxed-node` `:3088`) | `10.88.0.14/32` | `95.216.112.253:51880` |
-| `thomas-md` | `20` | Production (Standalone — no Orb) | `10.88.0.20/32` | `95.216.244.60:51880` |
-| `polymath` | `21` | Production (Standalone — no Orb) | `10.88.0.21/32` | `5.135.152.216:51880` |
-| `maven-repo` | `30` | ArtifactEdge (Standalone — no Orb) | `10.88.0.30/32` | `141.94.78.32:51880` |
-| `watchtower` | `31` | MediaExit (Standalone — no Orb) | `10.88.0.31/32` | `147.135.137.133:51880` |
-| `macbook-air` | `100` | Operator (`Touch ID` P-256 authority) | `10.88.0.100/32` | Dynamic roaming |
+| Node ID (`id`) | Node Class (`node_class`) | Mesh IP (`overlay_ip/prefix_len`) | Default Endpoint (`:51888`) | Mode |
+| :--- | :--- | :--- | :--- | :--- |
+| `agent-core` | `ControlPlane` | `10.88.0.1/32` | `65.109.98.246:51888` | Mode A (Orb Control Plane) |
+| `dgx-spark` | `SovereignVault` | `10.88.0.2/32` | Dynamic (hub-relayed via `agent-core`) | Mode A (Sovereign Brain & Node) |
+| `thomas-md` | `ReservedProd` | `10.88.0.3/32` | `95.216.244.60:51888` | Mode B (Standalone — no Orb) |
+| `polymath` | `ReservedProd` | `10.88.0.4/32` | `5.135.152.216:51888` | Mode B (Standalone — no Orb) |
+| `maven-repo` | `ReservedProd` | `10.88.0.5/32` | `141.94.78.32:51888` | Mode B (Standalone — no Orb) |
+| `ashur` | `ComputeWorker` | `10.88.0.11/32` | `188.40.69.160:51888` | Mode A (`sandboxed-node` `:3088`) |
+| `babylon` | `ComputeWorker` | `10.88.0.12/32` | `54.36.175.109:51888` | Mode A (`sandboxed-node` `:3088`) |
+| `nippur` | `ComputeWorker` | `10.88.0.13/32` | `37.187.92.183:51888` | Mode A (`sandboxed-node` `:3088`) |
+| `old-agent` | `ComputeWorker` | `10.88.0.14/32` | `95.216.112.253:51888` | Mode A (`sandboxed-node` `:3088`) |
+| `watchtower` | `MediaGateway` | `10.88.0.15/32` | `147.135.137.133:51888` | Mode B (Standalone — no Orb) |
+| `macbook-air` | `OperatorAdmin` | `10.88.0.100/32` | Dynamic roaming | Operator (`Touch ID` authority) |
+
+*(Retiring hosts `utu-deposit-signer` `10.88.0.21/32` and `api-federation` `10.88.0.22/32` are classified as `RetiredReadOnly`.)*
 
 ---
 
@@ -46,11 +48,11 @@ On `agent-core`, Orb exposes the mesh control plane under `/api/mesh`:
 
 | Endpoint | Method | Purpose |
 | :--- | :---: | :--- |
-| `/api/mesh/status` | `GET` | Returns manifest epoch, peer count, bunker isolation state, and `dgx-spark` dead-man status |
-| `/api/mesh/manifest` | `GET` / `POST` | Fetch or atomically advance the signed `MeshManifest` (`step_manifest_epoch`) |
-| `/api/mesh/evaluate-route` | `POST` | Evaluate `(src, dst, proto, port, jit_grant)` against `LeanMesh.Kernel` |
-| `/api/mesh/roam` | `POST` | Submit a peer-signed `SignedRoamUpdate` (`step_peer_roam`) |
-| `/api/mesh/heartbeat` | `POST` | Submit a `dgx-spark`-signed `SignedHeartbeat` (`step_bunker_isolate`) |
+| `/api/mesh/status` | `GET` | Returns manifest epoch, peer count, `bunker_state`, and `dgx-spark` dead-man status |
+| `/api/mesh/manifest` | `GET` / `POST` | Fetch or atomically advance the signed `MeshManifest` (`leanmesh_ratchet_epoch_step`) |
+| `/api/mesh/evaluate-route` | `POST` | Evaluate `(src, dst, proto, port, jit_biometric)` against `leanmesh_eval_route_step` |
+| `/api/mesh/roam` | `POST` | Submit a peer-signed `RoamRequest` (`leanmesh_endpoint_roam_ok`) |
+| `/api/mesh/heartbeat` | `POST` | Submit a `dgx-spark`-signed `HeartbeatRequest` (`leanmesh_bunker_isolate_step`) |
 | `/api/mesh/render-wg/:node` | `GET` | Render `wg-leanmesh0.conf` (requires `X-LeanMesh-*` node signature headers) |
 | `/api/mesh/render-nft/:node` | `GET` | Render `table inet lean_mesh` (`nftables`) (requires `X-LeanMesh-*` node signature headers) |
 
@@ -77,43 +79,41 @@ install -d -m 0700 /etc/lean-mesh
 ```bash
 umask 077
 wg genkey | tee /etc/lean-mesh/wg.key | wg pubkey > /etc/lean-mesh/wg.pub
-openssl rand -hex 32 > /etc/lean-mesh/node_sign.key
+lean-mesh node-keygen --out-seed /etc/lean-mesh/node_sign.key > /etc/lean-mesh/node_sign.pub
 ```
 
 ### Step 3: Register the Peer in the Signed `MeshManifest`
-Add the peer entry (`node_id`, `name`, `role`, `wg_pubkey_hex`, `sign_pubkey_hex`, `mesh_ip: "10.88.0.<id>"`, `endpoint`, `listen_port: 51880`) and any explicit `capabilities` rules to `manifest.json`, then sign it with the authority key:
+Add the `MeshPeer` entry (`id`, `node_class`, `wg_pubkey` base64 from `wg.pub`, `sign_pubkey_hex` 64-hex from `node_sign.pub`, `overlay_ip: "10.88.0.<id>"`, `prefix_len: 32`, `endpoint: "<public_ip>:51888"`, `persistent_keepalive: 25`, `roam_generation: 1`, `key_epoch: 1`, `is_hub: false`) and any explicit `rules` to `manifest.json`, bump `epoch`, and sign it with the coordinator signing seed:
 ```bash
 lean-mesh sign-manifest \
   --manifest /etc/lean-mesh/manifest.json \
-  --signing-key-file /etc/lean-mesh/authority.key \
+  --signing-key-file /etc/lean-mesh/coordinator.seed \
   --output /etc/lean-mesh/manifest.json
 ```
 *(If `agent-core` is managing the manifest, POST the signed manifest to `POST /api/mesh/manifest`.)*
 
-### Step 4: Render & Reconcile WireGuard + `nftables` Locally
+### Step 4: Render & Apply WireGuard + `nftables` Locally
 On the standalone host, `lean-mesh` verifies the Ed25519 signature and all `LeanMesh.Kernel` invariants locally before emitting config:
 ```bash
-lean-mesh verify-manifest --manifest /etc/lean-mesh/manifest.json
+lean-mesh verify-manifest /etc/lean-mesh/manifest.json
 lean-mesh render-wg \
   --manifest /etc/lean-mesh/manifest.json \
-  --node <host-name> \
+  --node <node-id> \
   --private-key-file /etc/lean-mesh/wg.key > /etc/wireguard/wg-leanmesh0.conf
 chmod 600 /etc/wireguard/wg-leanmesh0.conf
 systemctl enable --now wg-quick@wg-leanmesh0
 
 lean-mesh render-nft \
   --manifest /etc/lean-mesh/manifest.json \
-  --node <host-name> | nft -f -
+  --node <node-id> | nft -f -
 ```
 
-### Step 5: Zero-Downtime Live Reconciliation (`reconcile-wg`)
-When the manifest updates (new peer or roamed endpoint), run `reconcile-wg` to compute exact `wg set` commands without bouncing the interface:
+### Step 5: Live WireGuard Dump Reconciliation (`reconcile-wg`)
+To inspect the formal reconciliation plan (`Keep`, `AddOrUpdate`, `RemoveStale`) between `wg show wg-leanmesh0 dump` and the verified manifest:
 ```bash
 wg show wg-leanmesh0 dump > /run/wg-leanmesh0.dump
 lean-mesh reconcile-wg \
   --manifest /etc/lean-mesh/manifest.json \
-  --node <host-name> \
-  --interface wg-leanmesh0 \
-  --dump-file /run/wg-leanmesh0.dump | sh -e
-lean-mesh render-nft --manifest /etc/lean-mesh/manifest.json --node <host-name> | nft -f -
+  --node <node-id> \
+  --wg-dump /run/wg-leanmesh0.dump
 ```
