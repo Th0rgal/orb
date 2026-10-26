@@ -838,7 +838,7 @@ object OrbKernel {
         return ScrollEpochVerdict(
             action = lo32 and 0xFF,
             applyCorrection = ((lo32 ushr 8) and 1) != 0,
-            nextCorrectionsInEpoch = (lo32 ushr 16) and 0xFF,
+            nextCorrectionsInEpoch = (lo32 ushr 10) and 1,
             resolvedScrollTopPx = hi32
         )
     }

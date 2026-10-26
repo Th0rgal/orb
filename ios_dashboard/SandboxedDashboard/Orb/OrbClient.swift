@@ -689,7 +689,7 @@ final class OrbCore {
         return try await decode(OrbJSON.self, from: data, label: "POST /api/voice/transcribe")["text"].text
     }
 
-    private static let unreservedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+    nonisolated private static let unreservedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
 
     nonisolated static func escape(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: unreservedCharacters) ?? "" }
 

@@ -109,16 +109,15 @@ fn read_only_option_allowed(prog: &str, arg: &str) -> bool {
         return prog == "journalctl"
             || arg.starts_with("/dev/")
             || (!arg.is_empty()
-                && arg
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ',' | '=' | '-')));
+                && arg.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ',' | '=' | '-')
+                }));
     }
     let flag = arg.split('=').next().unwrap_or(arg);
     match prog {
         "journalctl" => matches!(
             flag,
-            "-u"
-                | "--unit"
+            "-u" | "--unit"
                 | "-n"
                 | "--lines"
                 | "--since"
@@ -160,8 +159,7 @@ fn read_only_option_allowed(prog: &str, arg: &str) -> bool {
         ),
         "smartctl" => matches!(
             flag,
-            "-a"
-                | "--all"
+            "-a" | "--all"
                 | "-x"
                 | "--xall"
                 | "-i"
@@ -183,6 +181,7 @@ fn read_only_option_allowed(prog: &str, arg: &str) -> bool {
 /// `EnvironmentConfinement`, `NoPrivilegeEscalation`, `AuditCompleteness`) over
 /// live runtime command / argv / cwd / environment inputs and record the decision
 /// in `privd_command_shadow_counter()`.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_privd_command_confinement(
     lease_valid: bool,
     grant_scope: PrivilegeScope,
@@ -229,12 +228,43 @@ pub fn evaluate_privd_command_confinement(
             .unwrap_or(false)
     });
     let argv_traversal = tokens.iter().any(|tok| {
-        *tok == ".."
-            || tok.starts_with("../")
-            || tok.ends_with("/..")
-            || tok.contains("/../")
+        *tok == ".." || tok.starts_with("../") || tok.ends_with("/..") || tok.contains("/../")
     });
-    let has_path_traversal_or_symlink = cwd_traversal_or_symlink || argv_traversal;
+    const TRUSTED_EXEC_DIRS: &[&str] = &["/bin", "/usr/bin", "/sbin", "/usr/sbin"];
+    let raw_exe = tokens.first().copied().unwrap_or("");
+    let exe_path_trusted = if raw_exe.is_empty() {
+        false
+    } else if !raw_exe.contains('/') && !raw_exe.contains('\\') {
+        raw_exe != "." && raw_exe != ".."
+    } else if raw_exe.contains('\\')
+        || raw_exe.starts_with("./")
+        || raw_exe.starts_with("../")
+        || raw_exe.contains("/./")
+        || raw_exe.contains("/../")
+    {
+        false
+    } else {
+        let exe_path = std::path::Path::new(raw_exe);
+        let parent_ok = exe_path
+            .parent()
+            .and_then(|p| p.to_str())
+            .is_some_and(|dir| TRUSTED_EXEC_DIRS.contains(&dir));
+        let symlink_bad = std::fs::symlink_metadata(exe_path).ok().is_some_and(|m| {
+            m.file_type().is_symlink()
+                && std::fs::canonicalize(exe_path)
+                    .ok()
+                    .and_then(|canon| {
+                        canon
+                            .parent()
+                            .and_then(|p| p.to_str())
+                            .map(|d| !TRUSTED_EXEC_DIRS.contains(&d))
+                    })
+                    .unwrap_or(true)
+        });
+        parent_ok && !symlink_bad
+    };
+    let has_path_traversal_or_symlink =
+        cwd_traversal_or_symlink || argv_traversal || (!raw_exe.is_empty() && !exe_path_trusted);
 
     let token_has_metachar = tokens.is_empty()
         || command.contains('\0')
@@ -261,8 +291,7 @@ pub fn evaluate_privd_command_confinement(
     let is_service_deploy_reload = (prog == "systemctl"
         && tokens.get(1..) == Some(&["daemon-reload"]))
         || (prog == "nginx"
-            && (tokens.get(1..) == Some(&["-t"])
-                || tokens.get(1..) == Some(&["-s", "reload"])));
+            && (tokens.get(1..) == Some(&["-t"]) || tokens.get(1..) == Some(&["-s", "reload"])));
 
     let is_service_deploy_unit = prog == "systemctl"
         && tokens.len() >= 3
@@ -292,7 +321,10 @@ pub fn evaluate_privd_command_confinement(
             "nft" => tokens.get(1..) == Some(&["list", "ruleset"]),
             "mdadm" => {
                 tokens.get(1).is_some_and(|a| {
-                    matches!(*a, "--detail" | "-D" | "--examine" | "-E" | "--query" | "-Q")
+                    matches!(
+                        *a,
+                        "--detail" | "-D" | "--examine" | "-E" | "--query" | "-Q"
+                    )
                 }) && tokens[1..]
                     .iter()
                     .all(|a| read_only_option_allowed("mdadm", a))
@@ -1290,12 +1322,8 @@ impl PrivilegeBroker {
             .filter(|c| c.owner == owner)
             .take(500)
             .collect();
-        let bunker_incidents: Vec<&BunkerIncidentEntry> = data
-            .bunker_incidents
-            .iter()
-            .rev()
-            .take(100)
-            .collect();
+        let bunker_incidents: Vec<&BunkerIncidentEntry> =
+            data.bunker_incidents.iter().rev().take(100).collect();
         json!({
             "bunker_state": bunker as u8,
             "requests": requests,
@@ -1327,8 +1355,7 @@ impl PrivilegeBroker {
         let canary_kind = req.canary_kind.trim();
         let data = self.data.lock().await;
         let Some(existing) = data.bunker_incidents.iter().rev().find(|i| {
-            i.peer_name.as_deref() == Some(peer_name)
-                && i.event_seq == Some(req.event_seq)
+            i.peer_name.as_deref() == Some(peer_name) && i.event_seq == Some(req.event_seq)
         }) else {
             return Ok(None);
         };
@@ -1996,7 +2023,11 @@ fn redact_forensic_cmdline(cmdline: Option<&str>) -> String {
     if arg_count > 0 {
         format!(
             "{} (+{} redacted args)",
-            if safe_exe.is_empty() { "proc" } else { &safe_exe },
+            if safe_exe.is_empty() {
+                "proc"
+            } else {
+                &safe_exe
+            },
             arg_count
         )
     } else if safe_exe.is_empty() {
@@ -2009,7 +2040,10 @@ fn redact_forensic_cmdline(cmdline: Option<&str>) -> String {
 fn sanitize_alert_error(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len().min(240));
     for token in raw.split_whitespace() {
-        let word = if token.contains("api.telegram.org/bot") || token.contains("http://") || token.contains("https://") {
+        let word = if token.contains("api.telegram.org/bot")
+            || token.contains("http://")
+            || token.contains("https://")
+        {
             "<redacted-url>"
         } else {
             token
@@ -2038,7 +2072,11 @@ pub async fn dispatch_bunker_alert(
     let mut channels = Vec::new();
     let mut errors = Vec::new();
 
-    let dry_tag = if incident.dry_run { " [DRY-RUN TEST]" } else { "" };
+    let dry_tag = if incident.dry_run {
+        " [DRY-RUN TEST]"
+    } else {
+        ""
+    };
     let host = incident.peer_name.as_deref().unwrap_or("agent-core");
     let kind = incident.canary_kind.as_deref().unwrap_or(&incident.source);
     let redacted_cmd = redact_forensic_cmdline(incident.cmdline.as_deref());
@@ -2075,8 +2113,14 @@ pub async fn dispatch_bunker_alert(
     if let Some(token) = resolve_bunker_telegram_bot_token() {
         let base_url = format!("https://api.telegram.org/bot{token}");
         let chat_id = resolve_bunker_telegram_chat_id();
-        match super::telegram::send_telegram_text(&state.http_client, &base_url, chat_id, &text, None)
-            .await
+        match super::telegram::send_telegram_text(
+            &state.http_client,
+            &base_url,
+            chat_id,
+            &text,
+            None,
+        )
+        .await
         {
             Ok(_) => channels.push(format!("telegram:{chat_id}")),
             Err(e) => errors.push(format!("telegram: {}", sanitize_alert_error(&e))),
@@ -2114,7 +2158,12 @@ pub async fn dispatch_bunker_alert(
         Some(errors.join("; "))
     };
     store(state)
-        .update_incident_alert_status(incident.id, delivered, channels.clone(), err_summary.clone())
+        .update_incident_alert_status(
+            incident.id,
+            delivered,
+            channels.clone(),
+            err_summary.clone(),
+        )
         .await;
     (delivered, channels, err_summary)
 }
@@ -2630,13 +2679,17 @@ mod tests {
     #[tokio::test]
     async fn bunker_incident_serialization_and_forensic_redaction() {
         assert_eq!(
-            redact_forensic_cmdline(Some("/usr/bin/curl -H Authorization:Bearer_secret https://x")),
+            redact_forensic_cmdline(Some(
+                "/usr/bin/curl -H Authorization:Bearer_secret https://x"
+            )),
             "curl (+3 redacted args)"
         );
         assert_eq!(redact_forensic_cmdline(Some("/usr/bin/nc")), "nc");
         assert_eq!(redact_forensic_cmdline(None), "-");
         assert_eq!(
-            sanitize_alert_error("POST https://api.telegram.org/bot12345:SECRET/sendMessage failed"),
+            sanitize_alert_error(
+                "POST https://api.telegram.org/bot12345:SECRET/sendMessage failed"
+            ),
             "POST <redacted-url> failed"
         );
 
@@ -2723,7 +2776,10 @@ mod tests {
             })
             .await
             .unwrap();
-        broker.approve("thomas", ro_req.id, None, None).await.unwrap();
+        broker
+            .approve("thomas", ro_req.id, None, None)
+            .await
+            .unwrap();
         let ro_token = broker.lease_token_for(ro_req.id).await.unwrap();
 
         let deploy_req = broker
