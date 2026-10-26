@@ -1340,7 +1340,9 @@ export default function App() {
             <SettingsShell page={selected()!} onOpen={open}>
               <Switch>
                 <Match when={selected() === "settings"}><Settings onOpenPage={open} /></Match>
-                <Match when={selected() === "routing"}><RoutingSettings onOpenClient={() => open("settings")} /></Match>
+                <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
+                  <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
+                </Match>
                 <Match when={selected() === "usage-settings"}><UsageSettings /></Match>
                 <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
                 <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
