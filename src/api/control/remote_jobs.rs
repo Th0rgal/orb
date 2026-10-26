@@ -101,8 +101,7 @@ pub(super) async fn submit_leased_remote_job(
             },
             fallback_prompt.is_some(),
         );
-        if !codex_resume_verdict.emit_dispatch_effect
-            || !codex_resume_verdict.seed_fallback_session
+        if !codex_resume_verdict.emit_dispatch_effect || !codex_resume_verdict.seed_fallback_session
         {
             return Err("Codex resume fallback rejected by mission control kernel gate".into());
         }

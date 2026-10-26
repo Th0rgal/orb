@@ -105,11 +105,7 @@ pub(super) fn observe_fork_home_shadow(
         },
         classify_known_legacy_bug: |_, _, _, _| None,
     };
-    let host_effects = if host_admits {
-        vec![0u32]
-    } else {
-        vec![78u32]
-    };
+    let host_effects = if host_admits { vec![0u32] } else { vec![78u32] };
     let ctx = crate::orb_spec::shadow::EventContext {
         now_ms: 0,
         fresh_nonce: 0,
@@ -118,14 +114,7 @@ pub(super) fn observe_fork_home_shadow(
         schema_id: 1,
     };
     if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
-        let _ = sim.observe_step(
-            &false,
-            &false,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
+        let _ = sim.observe_step(&false, &false, &input, &host_effects, ctx, &mut ring);
     }
     verdict
 }
@@ -901,7 +890,12 @@ fn workspace_command(source_id: Uuid) -> String {
         },
         true,
     );
-    debug_assert!(verdict.admit_launch && verdict.use_source_cwd && !verdict.override_home && verdict.job_home_preserved);
+    debug_assert!(
+        verdict.admit_launch
+            && verdict.use_source_cwd
+            && !verdict.override_home
+            && verdict.job_home_preserved
+    );
     format!("fork_root=$(pwd -P); fork_root=${{fork_root%/*}}; fork_dir=\"$fork_root/{source_id}\"; [ -d \"$fork_dir\" ] && [ ! -L \"$fork_dir\" ] || {{ echo 'Fork workspace unavailable' >&2; exit 78; }}; cd -- \"$fork_dir\" || exit 78; ")
 }
 
