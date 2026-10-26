@@ -62,11 +62,8 @@ pub mod cabi {
 
         pub fn leanmesh_replay_window_step(last_max_seq: u64, bitmap: u64, pkt_seq: u64) -> u8;
 
-        pub fn leanmesh_replay_window_next_max(
-            last_max_seq: u64,
-            bitmap: u64,
-            pkt_seq: u64,
-        ) -> u64;
+        pub fn leanmesh_replay_window_next_max(last_max_seq: u64, bitmap: u64, pkt_seq: u64)
+            -> u64;
 
         pub fn leanmesh_replay_window_next_bitmap(
             last_max_seq: u64,
@@ -282,11 +279,7 @@ impl IpClass {
             || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
             || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
             || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19));
-        if ip.is_unspecified()
-            || octets[0] == 0
-            || is_overlay_subnet
-            || is_rfc5737_or_benchmark
-        {
+        if ip.is_unspecified() || octets[0] == 0 || is_overlay_subnet || is_rfc5737_or_benchmark {
             Self::InvalidOrUnspecified
         } else if ip.is_loopback() || ip.is_link_local() {
             Self::LoopbackOrLinkLocal
@@ -876,7 +869,10 @@ impl MeshManifest {
                     p_a.name
                 )));
             }
-            if p_a.sign_pubkey_hex.eq_ignore_ascii_case(&self.coordinator_pubkey_hex) {
+            if p_a
+                .sign_pubkey_hex
+                .eq_ignore_ascii_case(&self.coordinator_pubkey_hex)
+            {
                 return Err(MeshError::InvalidPeerMetadata(format!(
                     "peer `{}` sign_pubkey_hex must be distinct from coordinator_pubkey_hex",
                     p_a.name
@@ -917,7 +913,9 @@ impl MeshManifest {
                 let p_b = &self.peers[j];
                 if p_a.name == p_b.name
                     || p_a.wg_pubkey == p_b.wg_pubkey
-                    || p_a.sign_pubkey_hex.eq_ignore_ascii_case(&p_b.sign_pubkey_hex)
+                    || p_a
+                        .sign_pubkey_hex
+                        .eq_ignore_ascii_case(&p_b.sign_pubkey_hex)
                 {
                     return Err(MeshError::InvalidPeerMetadata(format!(
                         "duplicate peer name, WireGuard public key, or Ed25519 sign_pubkey_hex between `{}` and `{}`",
@@ -972,7 +970,10 @@ impl MeshManifest {
             r.src_peer == src_name
                 && r.dst_peer == dst_name
                 && r.proto == proto
-                && ((proto == MeshProto::Icmp && dst_port == 0 && r.port_min == 0 && r.port_max == 0)
+                && ((proto == MeshProto::Icmp
+                    && dst_port == 0
+                    && r.port_min == 0
+                    && r.port_max == 0)
                     || (r.port_min <= dst_port && dst_port <= r.port_max))
         });
 
@@ -1070,7 +1071,10 @@ impl MeshManifest {
             ));
             out.push_str("[Peer]\n");
             out.push_str(&format!("PublicKey = {}\n", peer.wg_pubkey));
-            out.push_str(&format!("AllowedIPs = {}/{}\n", peer.overlay_ip, peer.prefix_len));
+            out.push_str(&format!(
+                "AllowedIPs = {}/{}\n",
+                peer.overlay_ip, peer.prefix_len
+            ));
             if let Some(ep) = &peer.endpoint {
                 out.push_str(&format!("Endpoint = {ep}\n"));
             }
@@ -1120,7 +1124,9 @@ impl MeshManifest {
         out.push_str("    ct state established,related accept\n");
 
         if bunker_state == BunkerState::SovereignDeadManTripped {
-            out.push_str("    # Sovereign Dead-Man Switch tripped: drop all wg-leanmesh0 traffic\n");
+            out.push_str(
+                "    # Sovereign Dead-Man Switch tripped: drop all wg-leanmesh0 traffic\n",
+            );
             out.push_str("    counter drop\n");
             out.push_str("  }\n}\n");
             return Ok(out);
@@ -1634,7 +1640,10 @@ impl MeshManifest {
                     proto: MeshProto::Tcp,
                     port_min: 22,
                     port_max: 22,
-                    description: format!("Operator break-glass SSH macbook-air -> {}:22", peer.name),
+                    description: format!(
+                        "Operator break-glass SSH macbook-air -> {}:22",
+                        peer.name
+                    ),
                 });
             }
         }
@@ -1659,7 +1668,10 @@ impl MeshManifest {
 
     /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`
     /// with fresh CSPRNG per-peer Ed25519 identities. Fails closed (`Err`) on any CSPRNG failure.
-    pub fn paloma_fleet_default(now_epoch: u64, signing_key: &SigningKey) -> Result<Self, MeshError> {
+    pub fn paloma_fleet_default(
+        now_epoch: u64,
+        signing_key: &SigningKey,
+    ) -> Result<Self, MeshError> {
         Ok(Self::paloma_fleet_with_csprng_peers(now_epoch, signing_key)?.0)
     }
 }
@@ -1891,9 +1903,13 @@ mod tests {
 
         // Failure injection on per-peer CSPRNG: short/empty RNG or all-zero RNG fails closed (`Err`) without panicking.
         let mut short_rng = std::io::Cursor::new(vec![0x11u8; 16]);
-        assert!(MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut short_rng).is_err());
+        assert!(
+            MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut short_rng).is_err()
+        );
         let mut zero_rng = std::io::Cursor::new(vec![0u8; 32 * 13]);
-        assert!(MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut zero_rng).is_err());
+        assert!(
+            MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut zero_rng).is_err()
+        );
 
         let ratchet = manifest
             .verify_formal(0, 0, now + 10)
@@ -2106,7 +2122,9 @@ mod tests {
             .render_nftables_policy("ashur", BunkerState::HardLockdown, now + 10)
             .unwrap();
         assert!(!nft_lockdown.contains("tcp dport 3088 accept"));
-        assert!(nft_lockdown.contains("ip saddr 10.88.0.100 ip daddr 10.88.0.11 tcp dport 22 accept"));
+        assert!(
+            nft_lockdown.contains("ip saddr 10.88.0.100 ip daddr 10.88.0.11 tcp dport 22 accept")
+        );
 
         // 2. Single-peer manifest with invalid /16 prefix or network IP 10.88.0.0 is rejected by unary `leanmesh_overlay_ip_step`.
         manifest.peers.truncate(1);
@@ -2203,7 +2221,10 @@ mod tests {
         let det_seed: [u8; 32] = det_h.finalize().into();
         let det_sk = SigningKey::from_bytes(&det_seed);
         let det_pub_hex = hex::encode(det_sk.verifying_key().to_bytes());
-        assert!(is_name_derived_peer_signing_pubkey("dgx-spark", &det_pub_hex));
+        assert!(is_name_derived_peer_signing_pubkey(
+            "dgx-spark",
+            &det_pub_hex
+        ));
         let mut bad_det_manifest = manifest.clone();
         bad_det_manifest.peers[1].sign_pubkey_hex = det_pub_hex;
         bad_det_manifest.epoch += 1;
@@ -2321,10 +2342,7 @@ mod tests {
         assert_eq!(rogue_plan.action, ReconcileAction::RemovePeer);
 
         // 6. Source-wide audit: production `lib.rs` and `bin/lean-mesh.rs` contain zero deterministic seed fallbacks.
-        let lib_src = include_str!("lib.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
+        let lib_src = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
         let bin_src = include_str!("bin/lean-mesh.rs");
         for forbidden in ["[0x42", "[0x99", "unwrap_or([", "derive_default_seed"] {
             assert!(

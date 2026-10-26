@@ -76,6 +76,11 @@ android {
             // Tests read the cross-platform tables in shared/orb-spec straight from the repo.
             it.systemProperty("orb.spec.dir", rootProject.file("../shared/orb-spec").absolutePath)
             it.systemProperty("java.library.path", rootProject.file("app/src/test/resources/jni").absolutePath)
+            // A JVM loads liborb_kernel into one classloader only: a plain JUnit test
+            // (OrbKernelTest) loading it first left Robolectric tests (OrbStreamCostTest,
+            // own sandbox classloader) with "liborb_kernel JNI not loaded", depending on
+            // test order. One JVM per test class keeps each load in its own classloader.
+            it.forkEvery = 1
         }
     }
     lint {
