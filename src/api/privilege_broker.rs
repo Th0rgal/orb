@@ -231,8 +231,12 @@ pub struct BunkerIncidentEntry {
     pub canary_kind: Option<String>,
     #[serde(default)]
     pub event_seq: Option<u64>,
-    pub previous_state: u8,
-    pub next_state: u8,
+    #[serde(default)]
+    pub epoch: u64,
+    #[serde(alias = "previous_state")]
+    pub previous_bunker_state: u8,
+    #[serde(alias = "next_state")]
+    pub new_bunker_state: u8,
     #[serde(default)]
     pub dry_run: bool,
     pub reason: String,
@@ -938,14 +942,37 @@ impl PrivilegeBroker {
         })
     }
 
-    pub async fn record_bunker_incident(&self, entry: BunkerIncidentEntry) -> Uuid {
+    pub async fn record_bunker_incident(&self, entry: BunkerIncidentEntry) -> Result<Uuid, String> {
         let id = entry.id;
         let mut data = self.data.lock().await;
         data.log_bunker_incident(entry);
-        self.save(&data).await;
+        if let Err(e) = self.commit(&data).await {
+            data.bunker_incidents.pop();
+            return Err(e);
+        }
         drop(data);
         self.changed.notify_waiters();
-        id
+        Ok(id)
+    }
+
+    pub async fn find_incident_by_canary_event(
+        &self,
+        peer_name: &str,
+        canary_kind: &str,
+        event_seq: u64,
+        detail_sha256_hex: &str,
+    ) -> Option<BunkerIncidentEntry> {
+        let data = self.data.lock().await;
+        data.bunker_incidents
+            .iter()
+            .rev()
+            .find(|i| {
+                i.peer_name.as_deref() == Some(peer_name)
+                    && i.canary_kind.as_deref() == Some(canary_kind)
+                    && i.event_seq == Some(event_seq)
+                    && i.detail_sha256_hex.eq_ignore_ascii_case(detail_sha256_hex)
+            })
+            .cloned()
     }
 
     pub async fn update_incident_alert_status(
@@ -1335,7 +1362,13 @@ async fn list(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
 ) -> Json<Value> {
-    Json(store(&state).snapshot(&user.id).await)
+    let mut snap = store(&state).snapshot(&user.id).await;
+    let (mesh_bunker, _) = super::mesh::current_effective_bunker_and_epoch(&state).await;
+    if let Some(obj) = snap.as_object_mut() {
+        let cur = obj.get("bunker_state").and_then(Value::as_u64).unwrap_or(0) as u8;
+        obj.insert("bunker_state".into(), json!(cur.max(mesh_bunker)));
+    }
+    Json(snap)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1462,9 +1495,57 @@ fn resolve_bunker_telegram_chat_id() -> i64 {
         .unwrap_or(1_139_694_048)
 }
 
+fn redact_forensic_cmdline(cmdline: Option<&str>) -> String {
+    let Some(raw) = cmdline.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "-".into();
+    };
+    let mut parts = raw.split_whitespace();
+    let first = parts.next().unwrap_or("-");
+    let exe = first.rsplit('/').next().unwrap_or(first);
+    let safe_exe: String = exe
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(48)
+        .collect();
+    let arg_count = parts.count();
+    if arg_count > 0 {
+        format!(
+            "{} (+{} redacted args)",
+            if safe_exe.is_empty() { "proc" } else { &safe_exe },
+            arg_count
+        )
+    } else if safe_exe.is_empty() {
+        "proc".into()
+    } else {
+        safe_exe
+    }
+}
+
+fn sanitize_alert_error(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(240));
+    for token in raw.split_whitespace() {
+        let word = if token.contains("api.telegram.org/bot") || token.contains("http://") || token.contains("https://") {
+            "<redacted-url>"
+        } else {
+            token
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+        if out.len() >= 200 {
+            break;
+        }
+    }
+    out
+}
+
 /// Dispatches an out-of-band Bunker / Canary alert via Telegram (`send_telegram_text`)
 /// and optional webhook (`ORB_BUNKER_ALERT_WEBHOOK_URL`), returning
 /// `(delivered, channels_succeeded, error_summary)` and updating the incident record.
+///
+/// Redacts raw command-line arguments (`redact_forensic_cmdline`) so secrets or tokens
+/// appearing in process arguments are never exported to external messaging providers.
 pub async fn dispatch_bunker_alert(
     state: &Arc<AppState>,
     incident: &BunkerIncidentEntry,
@@ -1475,17 +1556,21 @@ pub async fn dispatch_bunker_alert(
     let dry_tag = if incident.dry_run { " [DRY-RUN TEST]" } else { "" };
     let host = incident.peer_name.as_deref().unwrap_or("agent-core");
     let kind = incident.canary_kind.as_deref().unwrap_or(&incident.source);
+    let redacted_cmd = redact_forensic_cmdline(incident.cmdline.as_deref());
     let mut text = format!(
         "🚨 **[PALOMA BUNKER ALERT]{dry_tag}**\n\
+         • **Incident ID**: `{}`\n\
          • **Source**: `{}`\n\
-         • **Transition**: `{}` -> `{}`\n\
+         • **Transition**: `{}` -> `{}` (epoch `{}`)\n\
          • **Host / Peer**: `{host}`\n\
          • **Trigger**: `{kind}`\n\
          • **Reason**: {}\n\
          • **Evidence SHA-256**: `{}`",
+        incident.id,
         incident.source,
-        bunker_state_label(incident.previous_state),
-        bunker_state_label(incident.next_state),
+        bunker_state_label(incident.previous_bunker_state),
+        bunker_state_label(incident.new_bunker_state),
+        incident.epoch,
         incident.reason,
         incident.detail_sha256_hex,
     );
@@ -1495,11 +1580,10 @@ pub async fn dispatch_bunker_alert(
         || incident.cmdline.is_some()
     {
         text.push_str(&format!(
-            "\n• **Forensics**: pid=`{:?}` uid=`{:?}` cgroup=`{}` cmd=`{}`",
+            "\n• **Forensics**: pid=`{:?}` uid=`{:?}` cgroup=`{}` proc=`{redacted_cmd}`",
             incident.pid,
             incident.uid,
             incident.cgroup.as_deref().unwrap_or("-"),
-            incident.cmdline.as_deref().unwrap_or("-"),
         ));
     }
 
@@ -1510,7 +1594,7 @@ pub async fn dispatch_bunker_alert(
             .await
         {
             Ok(_) => channels.push(format!("telegram:{chat_id}")),
-            Err(e) => errors.push(format!("telegram: {e}")),
+            Err(e) => errors.push(format!("telegram: {}", sanitize_alert_error(&e))),
         }
     } else {
         errors.push("telegram: no TELEGRAM_BOT_TOKEN configured".into());
@@ -1519,17 +1603,21 @@ pub async fn dispatch_bunker_alert(
     if let Ok(webhook_url) = std::env::var("ORB_BUNKER_ALERT_WEBHOOK_URL") {
         let webhook_url = webhook_url.trim();
         if !webhook_url.is_empty() {
+            let mut safe_incident = incident.clone();
+            if safe_incident.cmdline.is_some() {
+                safe_incident.cmdline = Some(redacted_cmd);
+            }
             match state
                 .http_client
                 .post(webhook_url)
                 .timeout(Duration::from_secs(5))
-                .json(incident)
+                .json(&safe_incident)
                 .send()
                 .await
             {
                 Ok(resp) if resp.status().is_success() => channels.push("webhook".into()),
                 Ok(resp) => errors.push(format!("webhook HTTP {}", resp.status())),
-                Err(e) => errors.push(format!("webhook: {e}")),
+                Err(e) => errors.push(format!("webhook: {}", sanitize_alert_error(&e.to_string()))),
             }
         }
     }
@@ -1555,6 +1643,7 @@ pub async fn record_and_alert_mesh_transition(
     next_state: u8,
     reason: &str,
 ) {
+    let (_, epoch) = super::mesh::current_effective_bunker_and_epoch(state).await;
     let entry = BunkerIncidentEntry {
         id: Uuid::new_v4(),
         at: Utc::now(),
@@ -1562,8 +1651,9 @@ pub async fn record_and_alert_mesh_transition(
         peer_name: Some(peer_name.to_string()),
         canary_kind: Some("mesh_heartbeat".into()),
         event_seq: None,
-        previous_state,
-        next_state,
+        epoch,
+        previous_bunker_state: previous_state,
+        new_bunker_state: next_state,
         dry_run: false,
         reason: reason.to_string(),
         pid: None,
@@ -1575,7 +1665,7 @@ pub async fn record_and_alert_mesh_transition(
         alert_channels: Vec::new(),
         alert_error: None,
     };
-    store(state).record_bunker_incident(entry.clone()).await;
+    let _ = store(state).record_bunker_incident(entry.clone()).await;
     let _ = dispatch_bunker_alert(state, &entry).await;
 }
 
@@ -1583,10 +1673,53 @@ async fn canary_tripwire(
     State(state): State<Arc<AppState>>,
     Json(req): Json<super::mesh::CanaryTripwireRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let (prev_mesh, mesh_transition) =
-        super::mesh::verify_and_apply_canary_tripwire(&state, &req).await?;
-
     let broker = store(&state);
+
+    // Verify signature, freshness, and advance/persist MeshStore state atomically.
+    // If an identical event_seq was already recorded earlier (e.g., worker retrying
+    // after a transient network or alert error), allow idempotent alert redelivery.
+    let (prev_mesh, mesh_transition, epoch) =
+        match super::mesh::verify_and_apply_canary_tripwire(&state, &req).await {
+            Ok(res) => res,
+            Err((StatusCode::UNAUTHORIZED, ref msg))
+                if msg.contains("ReplayWindow64") =>
+            {
+                if let Some(existing) = broker
+                    .find_incident_by_canary_event(
+                        req.peer_name.trim(),
+                        req.canary_kind.trim(),
+                        req.event_seq,
+                        req.detail_sha256_hex.trim(),
+                    )
+                    .await
+                {
+                    let (delivered, channels, err) = if existing.alert_delivered {
+                        (
+                            existing.alert_delivered,
+                            existing.alert_channels.clone(),
+                            existing.alert_error.clone(),
+                        )
+                    } else {
+                        dispatch_bunker_alert(&state, &existing).await
+                    };
+                    return Ok(Json(json!({
+                        "admitted": true,
+                        "idempotent_retry": true,
+                        "incident_id": existing.id,
+                        "dry_run": existing.dry_run,
+                        "peer_name": req.peer_name,
+                        "canary_kind": req.canary_kind,
+                        "event_seq": req.event_seq,
+                        "alert_delivered": delivered,
+                        "alert_channels": channels,
+                        "alert_error": err,
+                    })));
+                }
+                return Err((StatusCode::UNAUTHORIZED, msg.clone()));
+            }
+            Err(e) => return Err(e),
+        };
+
     let orb_step = if req.dry_run {
         let cur = broker.bunker_state().await as u8;
         BunkerStepResponse {
@@ -1619,8 +1752,9 @@ async fn canary_tripwire(
         peer_name: Some(req.peer_name.clone()),
         canary_kind: Some(req.canary_kind.clone()),
         event_seq: Some(req.event_seq),
-        previous_state: orb_step.previous_state.max(prev_mesh as u8),
-        next_state: if req.dry_run {
+        epoch,
+        previous_bunker_state: orb_step.previous_state.max(prev_mesh as u8),
+        new_bunker_state: if req.dry_run {
             orb_step.bunker_state.max(prev_mesh as u8)
         } else {
             orb_step.bunker_state.max(mesh_transition.next_state as u8)
@@ -1636,7 +1770,10 @@ async fn canary_tripwire(
         alert_channels: Vec::new(),
         alert_error: None,
     };
-    broker.record_bunker_incident(incident.clone()).await;
+    broker
+        .record_bunker_incident(incident.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let (alert_delivered, alert_channels, alert_error) =
         dispatch_bunker_alert(&state, &incident).await;
 
@@ -1647,6 +1784,7 @@ async fn canary_tripwire(
         "peer_name": req.peer_name,
         "canary_kind": req.canary_kind,
         "event_seq": req.event_seq,
+        "epoch": epoch,
         "orb_bunker": orb_step,
         "mesh_bunker": mesh_transition,
         "alert_delivered": alert_delivered,
@@ -1664,7 +1802,16 @@ async fn trigger_bunker(
         .reason
         .clone()
         .unwrap_or_else(|| format!("Operator manual Bunker Mode trigger (level {manual})"));
-    let resp = store(&state)
+    let (prev_mesh, mesh_transition, epoch) = super::mesh::sync_orb_bunker_transition(
+        &state,
+        body.canary_tripped,
+        body.auth_failure_burst,
+        manual,
+        false,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut resp = store(&state)
         .step_bunker(
             body.canary_tripped,
             body.auth_failure_burst,
@@ -1674,14 +1821,8 @@ async fn trigger_bunker(
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let _ = super::mesh::sync_orb_bunker_transition(
-        &state,
-        body.canary_tripped,
-        body.auth_failure_burst,
-        manual,
-        false,
-    )
-    .await;
+    resp.previous_state = resp.previous_state.max(prev_mesh as u8);
+    resp.bunker_state = resp.bunker_state.max(mesh_transition.next_state as u8);
     let incident = BunkerIncidentEntry {
         id: Uuid::new_v4(),
         at: Utc::now(),
@@ -1689,8 +1830,9 @@ async fn trigger_bunker(
         peer_name: Some("agent-core".into()),
         canary_kind: Some(format!("manual_level_{manual}")),
         event_seq: None,
-        previous_state: resp.previous_state,
-        next_state: resp.bunker_state,
+        epoch,
+        previous_bunker_state: resp.previous_state,
+        new_bunker_state: resp.bunker_state,
         dry_run: false,
         reason: reason.clone(),
         pid: None,
@@ -1702,7 +1844,10 @@ async fn trigger_bunker(
         alert_channels: Vec::new(),
         alert_error: None,
     };
-    store(&state).record_bunker_incident(incident.clone()).await;
+    store(&state)
+        .record_bunker_incident(incident.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let _ = dispatch_bunker_alert(&state, &incident).await;
     Ok(Json(resp))
 }
@@ -1710,12 +1855,24 @@ async fn trigger_bunker(
 async fn unbunker(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BunkerStepResponse>, ApiError> {
-    let resp = store(&state)
+    let (prev_mesh, mesh_transition, epoch) =
+        super::mesh::sync_orb_bunker_transition(&state, false, false, 0, true)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut resp = store(&state)
         .step_bunker(false, false, 0, true, Some("biometric_unbunker".into()))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let _ = super::mesh::sync_orb_bunker_transition(&state, false, false, 0, true).await;
-    let reason = "Operator biometric unbunker approved; fleet restored to Normal (0)".to_string();
+    resp.previous_state = resp.previous_state.max(prev_mesh as u8);
+    resp.bunker_state = resp.bunker_state.max(mesh_transition.next_state as u8);
+    let reason = if resp.bunker_state == 0 {
+        "Operator biometric unbunker approved; fleet restored to Normal (0)".to_string()
+    } else {
+        format!(
+            "Operator biometric unbunker approved for PrivilegeBroker, but mesh remains in {} pending fresh dgx-spark heartbeat",
+            bunker_state_label(resp.bunker_state)
+        )
+    };
     let incident = BunkerIncidentEntry {
         id: Uuid::new_v4(),
         at: Utc::now(),
@@ -1723,8 +1880,9 @@ async fn unbunker(
         peer_name: Some("agent-core".into()),
         canary_kind: Some("biometric_unbunker".into()),
         event_seq: None,
-        previous_state: resp.previous_state,
-        next_state: resp.bunker_state,
+        epoch,
+        previous_bunker_state: resp.previous_state,
+        new_bunker_state: resp.bunker_state,
         dry_run: false,
         reason: reason.clone(),
         pid: None,
@@ -1736,7 +1894,10 @@ async fn unbunker(
         alert_channels: Vec::new(),
         alert_error: None,
     };
-    store(&state).record_bunker_incident(incident.clone()).await;
+    store(&state)
+        .record_bunker_incident(incident.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let _ = dispatch_bunker_alert(&state, &incident).await;
     Ok(Json(resp))
 }
@@ -1986,5 +2147,54 @@ mod tests {
             broker.get("thomas", req.id).await.unwrap().state,
             ApprovalState::Expired
         );
+    }
+
+    #[tokio::test]
+    async fn bunker_incident_serialization_and_forensic_redaction() {
+        assert_eq!(
+            redact_forensic_cmdline(Some("/usr/bin/curl -H Authorization:Bearer_secret https://x")),
+            "curl (+3 redacted args)"
+        );
+        assert_eq!(redact_forensic_cmdline(Some("/usr/bin/nc")), "nc");
+        assert_eq!(redact_forensic_cmdline(None), "-");
+        assert_eq!(
+            sanitize_alert_error("POST https://api.telegram.org/bot12345:SECRET/sendMessage failed"),
+            "POST <redacted-url> failed"
+        );
+
+        let broker = temp_broker();
+        let entry = BunkerIncidentEntry {
+            id: Uuid::new_v4(),
+            at: Utc::now(),
+            source: "canary_tripwire".into(),
+            peer_name: Some("nippur".into()),
+            canary_kind: Some("mongo_27017".into()),
+            event_seq: Some(42),
+            epoch: 9,
+            previous_bunker_state: 0,
+            new_bunker_state: 2,
+            dry_run: false,
+            reason: "TCP probe to 127.0.0.1:27017".into(),
+            pid: Some(1234),
+            uid: Some(1000),
+            cgroup: Some("/system.slice/sandboxed-node.service".into()),
+            cmdline: Some("python3 -c import_pymongo_secret".into()),
+            detail_sha256_hex: "abcd".repeat(16),
+            alert_delivered: false,
+            alert_channels: vec![],
+            alert_error: None,
+        };
+        broker.record_bunker_incident(entry.clone()).await.unwrap();
+        let found = broker
+            .find_incident_by_canary_event("nippur", "mongo_27017", 42, &"ABCD".repeat(16))
+            .await
+            .expect("incident must be found case-insensitively by digest");
+        assert_eq!(found.id, entry.id);
+
+        let snap = broker.snapshot("thomas").await;
+        let inc_json = &snap["bunker_incidents"][0];
+        assert_eq!(inc_json["previous_bunker_state"].as_u64(), Some(0));
+        assert_eq!(inc_json["new_bunker_state"].as_u64(), Some(2));
+        assert_eq!(inc_json["epoch"].as_u64(), Some(9));
     }
 }

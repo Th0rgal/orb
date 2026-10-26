@@ -1067,8 +1067,11 @@ pub(in crate::api) async fn create_mission_inner(
         if let Some(attachments) = req.attachments.as_mut() {
             attachments.retain(|item| {
                 !(item.kind == crate::api::mission_payload::AttachmentKind::File
-                    && item.path.starts_with('/')
-                    && prompt.contains(&format!("[Uploaded: {}]", item.path)))
+                    && item
+                        .path
+                        .as_deref()
+                        .map(|p| p.starts_with('/') && prompt.contains(&format!("[Uploaded: {p}]")))
+                        .unwrap_or(false))
             });
         }
     }

@@ -19,8 +19,11 @@ pub async fn post_message(
     if let Some(attachments) = req.attachments.as_mut() {
         attachments.retain(|item| {
             !(item.kind == crate::api::mission_payload::AttachmentKind::File
-                && item.path.starts_with('/')
-                && content.contains(&format!("[Uploaded: {}]", item.path)))
+                && item
+                    .path
+                    .as_deref()
+                    .map(|p| p.starts_with('/') && content.contains(&format!("[Uploaded: {p}]")))
+                    .unwrap_or(false))
         });
     }
     crate::api::mission_payload::validate_user_content(&content)

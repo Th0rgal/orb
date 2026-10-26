@@ -709,22 +709,10 @@ pub async fn require_device_approval(
         return next.run(req).await;
     }
     let store = approvals(&state);
-    let configured_mode = store.mode().await;
     let mode = if always_signed(&method, &path) {
-        let has_mobile_device = store
-            .data
-            .lock()
-            .await
-            .devices
-            .iter()
-            .any(|d| d.revoked_at.is_none() && matches!(d.platform.as_str(), "ios" | "android"));
-        if configured_mode != Mode::Enforce && !has_mobile_device {
-            configured_mode
-        } else {
-            Mode::Enforce
-        }
+        Mode::Enforce
     } else {
-        configured_mode
+        store.mode().await
     };
     if mode == Mode::Off {
         return next.run(req).await;
@@ -880,11 +868,30 @@ async fn enroll_device(
             "platform must be macos, ios or android".into(),
         ));
     }
+    let trimmed_pubkey = body.public_key.trim().to_string();
+    {
+        let data = store.data.lock().await;
+        if let Some(existing) = data
+            .devices
+            .iter()
+            .find(|d| d.revoked_at.is_none() && d.public_key == trimmed_pubkey)
+            .cloned()
+        {
+            return Ok(Json(existing));
+        }
+    }
+    let has_active_platform_device = store
+        .data
+        .lock()
+        .await
+        .devices
+        .iter()
+        .any(|d| d.revoked_at.is_none() && d.platform == platform);
     let mode = store.mode().await;
     let authorized = match (&header, &body.enrollment_code) {
         (Some(h), _) => store.verify(h, "POST", &path, &bytes).await.is_ok(),
         (None, Some(code)) if !code.trim().is_empty() => store.take_enrollment_code(code).await,
-        _ => mode != Mode::Enforce,
+        _ => mode == Mode::Warn && !has_active_platform_device,
     };
     if !authorized {
         return Err((
@@ -896,18 +903,19 @@ async fn enroll_device(
         id: Uuid::new_v4(),
         name: body.name.trim().chars().take(80).collect(),
         platform,
-        public_key: body.public_key.trim().to_string(),
+        public_key: trimmed_pubkey,
         created_at: Utc::now(),
         last_used_at: None,
         revoked_at: None,
     };
     let mut data = store.data.lock().await;
-    if data
+    if let Some(existing) = data
         .devices
         .iter()
-        .any(|d| d.revoked_at.is_none() && d.public_key == device.public_key)
+        .find(|d| d.revoked_at.is_none() && d.public_key == device.public_key)
+        .cloned()
     {
-        return Err((StatusCode::CONFLICT, "This key is already enrolled".into()));
+        return Ok(Json(existing));
     }
     data.devices.push(device.clone());
     if let Err(e) = store.save(&data).await {

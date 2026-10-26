@@ -691,29 +691,34 @@ pub fn process_canary_tripwire_step(
     Ok((previous, transition))
 }
 
+/// Returns `(effective_mesh_bunker_u8, manifest_epoch)` for cross-broker snapshots and incidents.
+pub async fn current_effective_bunker_and_epoch(app_state: &AppState) -> (u8, u64) {
+    let store = store(app_state);
+    let now = unix_now();
+    let guard = store.inner.lock().await;
+    let bunker = effective_mesh_bunker(app_state, &guard, now).await;
+    (bunker.next_state as u8, guard.manifest.epoch)
+}
+
 /// Synchronizes `MeshStore.bunker_state` when an operator triggers or clears Bunker Mode
 /// via `PrivilegeBroker` (`POST /api/privilege-access/bunker` or `/unbunker`).
+///
+/// Preserves `last_heartbeat_at` untouched (never fabricates a sovereign heartbeat timestamp).
+/// Commits in-memory state only after durable persistence succeeds.
 pub async fn sync_orb_bunker_transition(
     app_state: &AppState,
     canary_tripped: bool,
     auth_failure_burst: bool,
     manual_trigger: u8,
     biometric_unbunker: bool,
-) -> Option<(MeshBunkerState, BunkerTransition)> {
+) -> Result<(MeshBunkerState, BunkerTransition, u64), String> {
     let store = store(app_state);
     let now = unix_now();
     let mut guard = store.inner.lock().await;
     if guard.corrupted_state {
-        return None;
+        return Err("mesh store is in fail-closed corrupted state".into());
     }
     let prev = guard.bunker_state;
-    if biometric_unbunker {
-        // Refresh `last_heartbeat_at` if within normal grace or reset to `now` on operator
-        // biometric unbunker so the mesh exits sticky state 2/3 cleanly.
-        if now.saturating_sub(guard.last_heartbeat_at) > LEAN_MESH_SOVEREIGN_DEADMAN_SECS {
-            guard.last_heartbeat_at = now;
-        }
-    }
     let hb_fresh = guard.last_heartbeat_at <= now
         && now.saturating_sub(guard.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
     let transition = step_bunker_isolate(
@@ -728,26 +733,31 @@ pub async fn sync_orb_bunker_transition(
         guard.last_heartbeat_at,
         LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
     );
-    guard.bunker_state = transition.next_state;
-    let _ = store.save(&guard).await;
-    Some((prev, transition))
+    let mut candidate = guard.clone();
+    candidate.bunker_state = transition.next_state;
+    store.save(&candidate).await?;
+    *guard = candidate;
+    Ok((prev, transition, guard.manifest.epoch))
 }
 
-/// Verifies a signed `CanaryTripwireRequest` against `MeshStore` and persists the updated
-/// anti-replay window and (when `dry_run == false`) the escalated `MeshBunkerState`.
+/// Verifies a signed `CanaryTripwireRequest` against `MeshStore` without mutating
+/// in-memory replay or bunker state until `commit_canary_tripwire_state` persists it.
 pub async fn verify_and_apply_canary_tripwire(
     app_state: &AppState,
     req: &CanaryTripwireRequest,
-) -> Result<(MeshBunkerState, BunkerTransition), (StatusCode, String)> {
+) -> Result<(MeshBunkerState, BunkerTransition, u64), (StatusCode, String)> {
     let store = store(app_state);
     let now = unix_now();
     let mut guard = store.inner.lock().await;
-    let (prev, transition) = process_canary_tripwire_step(&mut guard, req, now)?;
+    let mut candidate = guard.clone();
+    let (prev, transition) = process_canary_tripwire_step(&mut candidate, req, now)?;
     store
-        .save(&guard)
+        .save(&candidate)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok((prev, transition))
+    let epoch = candidate.manifest.epoch;
+    *guard = candidate;
+    Ok((prev, transition, epoch))
 }
 
 #[derive(Debug, Deserialize)]
@@ -833,6 +843,10 @@ async fn get_mesh_status(
         4096,
     );
 
+    let formal_verified = !guard.corrupted_state
+        && frame_gate_ok
+        && guard.manifest.verify_formal(0, 0, now).is_ok();
+
     Json(json!({
         "interface": LEAN_MESH_INTERFACE_NAME,
         "default_wg_port": LEAN_MESH_DEFAULT_WG_PORT,
@@ -844,6 +858,8 @@ async fn get_mesh_status(
         "peers_count": guard.manifest.peers.len(),
         "rules_count": guard.manifest.rules.len(),
         "bunker": bunker,
+        "bunker_state": bunker.next_state as u8,
+        "formal_verified": formal_verified,
         "persisted_bunker_state": guard.bunker_state,
         "last_heartbeat_at": guard.last_heartbeat_at,
         "sovereign_deadman_timeout_secs": LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
