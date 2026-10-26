@@ -1535,6 +1535,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/approvals", super::approvals::routes())
         .nest("/api/mission-access", super::mission_access::routes())
         .nest("/api/privilege-access", super::privilege_broker::routes())
+        .nest("/api/mesh", super::mesh::routes())
         // Global settings endpoints
         .nest("/api/settings", settings_api::routes())
         // Desktop session management endpoints

@@ -1,0 +1,27 @@
+[package]
+name = "lean-mesh"
+version = "0.1.0"
+edition = "2021"
+description = "Formally verified WireGuard mesh control plane, capability ACL engine, and Bunker isolation client in Lean 4 (0 import Lean, 0 sorryAx) + C99 + Rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Th0rgal/lean-mesh"
+
+[lib]
+name = "lean_mesh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lean-mesh"
+path = "src/bin/lean-mesh.rs"
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+thiserror = "2"

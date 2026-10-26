@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "header": "cabi/lean_mesh_kernel.h",
+  "functions": [
+    {
+      "name": "leanmesh_ratchet_epoch_step",
+      "ret": "uint32_t",
+      "params": [
+        {"name": "sigValid", "type": "uint8_t"},
+        {"name": "isEmergencyPanic", "type": "uint8_t"},
+        {"name": "currentEpoch", "type": "uint64_t"},
+        {"name": "candidateEpoch", "type": "uint64_t"},
+        {"name": "currentPanicSeq", "type": "uint64_t"},
+        {"name": "candidatePanicSeq", "type": "uint64_t"},
+        {"name": "nowEpoch", "type": "uint64_t"},
+        {"name": "issuedAt", "type": "uint64_t"},
+        {"name": "expiresAt", "type": "uint64_t"},
+        {"name": "maxTtlSecs", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_eval_route_step",
+      "ret": "uint32_t",
+      "params": [
+        {"name": "srcId", "type": "uint32_t"},
+        {"name": "dstId", "type": "uint32_t"},
+        {"name": "srcClass", "type": "uint8_t"},
+        {"name": "dstClass", "type": "uint8_t"},
+        {"name": "srcRevoked", "type": "uint8_t"},
+        {"name": "dstRevoked", "type": "uint8_t"},
+        {"name": "ruleMatched", "type": "uint8_t"},
+        {"name": "proto", "type": "uint8_t"},
+        {"name": "dstPort", "type": "uint32_t"},
+        {"name": "rulePortMin", "type": "uint32_t"},
+        {"name": "rulePortMax", "type": "uint32_t"},
+        {"name": "jitBiometricGrant", "type": "uint8_t"},
+        {"name": "bunkerState", "type": "uint8_t"},
+        {"name": "nowEpoch", "type": "uint64_t"},
+        {"name": "srcExpiresAt", "type": "uint64_t"},
+        {"name": "dstExpiresAt", "type": "uint64_t"},
+        {"name": "jitExpiresAt", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_replay_window_step",
+      "ret": "uint8_t",
+      "params": [
+        {"name": "lastMaxSeq", "type": "uint64_t"},
+        {"name": "bitmap", "type": "uint64_t"},
+        {"name": "pktSeq", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_replay_window_next_max",
+      "ret": "uint64_t",
+      "params": [
+        {"name": "lastMaxSeq", "type": "uint64_t"},
+        {"name": "bitmap", "type": "uint64_t"},
+        {"name": "pktSeq", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_replay_window_next_bitmap",
+      "ret": "uint64_t",
+      "params": [
+        {"name": "lastMaxSeq", "type": "uint64_t"},
+        {"name": "bitmap", "type": "uint64_t"},
+        {"name": "pktSeq", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_endpoint_roam_step",
+      "ret": "uint8_t",
+      "params": [
+        {"name": "aeadAuthOk", "type": "uint8_t"},
+        {"name": "peerPinnedStatic", "type": "uint8_t"},
+        {"name": "candidateIpClass", "type": "uint8_t"},
+        {"name": "allowPrivateRoam", "type": "uint8_t"},
+        {"name": "bunkerState", "type": "uint8_t"},
+        {"name": "candidatePort", "type": "uint32_t"},
+        {"name": "lastRoamSeq", "type": "uint64_t"},
+        {"name": "pktSeq", "type": "uint64_t"},
+        {"name": "lastRoamEpoch", "type": "uint64_t"},
+        {"name": "nowEpoch", "type": "uint64_t"},
+        {"name": "minRoamIntervalSecs", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_relay_select_step",
+      "ret": "uint8_t",
+      "params": [
+        {"name": "routeAllowed", "type": "uint8_t"},
+        {"name": "lanReachable", "type": "uint8_t"},
+        {"name": "wanReachable", "type": "uint8_t"},
+        {"name": "relayHealthy", "type": "uint8_t"},
+        {"name": "srcId", "type": "uint32_t"},
+        {"name": "dstId", "type": "uint32_t"},
+        {"name": "relayId", "type": "uint32_t"},
+        {"name": "activeRelaySessions", "type": "uint32_t"},
+        {"name": "maxRelaySessions", "type": "uint32_t"},
+        {"name": "nowEpoch", "type": "uint64_t"},
+        {"name": "directHandshakeAt", "type": "uint64_t"},
+        {"name": "maxDirectStaleSecs", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_bunker_isolate_step",
+      "ret": "uint32_t",
+      "params": [
+        {"name": "currentState", "type": "uint8_t"},
+        {"name": "isSovereignNode", "type": "uint8_t"},
+        {"name": "canaryTripped", "type": "uint8_t"},
+        {"name": "authFailureBurst", "type": "uint8_t"},
+        {"name": "manualTrigger", "type": "uint8_t"},
+        {"name": "biometricUnbunker", "type": "uint8_t"},
+        {"name": "heartbeatValid", "type": "uint8_t"},
+        {"name": "nowEpoch", "type": "uint64_t"},
+        {"name": "lastHeartbeatAt", "type": "uint64_t"},
+        {"name": "deadManTimeoutSecs", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_frame_bounds_step",
+      "ret": "uint8_t",
+      "params": [
+        {"name": "magic", "type": "uint32_t"},
+        {"name": "version", "type": "uint8_t"},
+        {"name": "frameKind", "type": "uint8_t"},
+        {"name": "tagVerified", "type": "uint8_t"},
+        {"name": "headerLen", "type": "uint64_t"},
+        {"name": "payloadLen", "type": "uint64_t"},
+        {"name": "maxFrameBytes", "type": "uint64_t"},
+        {"name": "bufCap", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_overlay_ip_step",
+      "ret": "uint8_t",
+      "params": [
+        {"name": "peerIdA", "type": "uint32_t"},
+        {"name": "peerIdB", "type": "uint32_t"},
+        {"name": "ipA", "type": "uint32_t"},
+        {"name": "ipB", "type": "uint32_t"},
+        {"name": "prefixLenA", "type": "uint8_t"},
+        {"name": "prefixLenB", "type": "uint8_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_reconcile_wg_step",
+      "ret": "uint8_t",
+      "params": [
+        {"name": "manifestValid", "type": "uint8_t"},
+        {"name": "peerPresentInKernel", "type": "uint8_t"},
+        {"name": "peerRevoked", "type": "uint8_t"},
+        {"name": "pubkeyMatches", "type": "uint8_t"},
+        {"name": "allowedIpMatches", "type": "uint8_t"},
+        {"name": "endpointChanged", "type": "uint8_t"},
+        {"name": "bunkerPruneNonAdmin", "type": "uint8_t"},
+        {"name": "peerIsAdmin", "type": "uint8_t"},
+        {"name": "nowEpoch", "type": "uint64_t"},
+        {"name": "peerExpiresAt", "type": "uint64_t"}
+      ]
+    },
+    {
+      "name": "leanmesh_jit_lease_step",
+      "ret": "uint32_t",
+      "params": [
+        {"name": "biometricSigValid", "type": "uint8_t"},
+        {"name": "operatorSameOwner", "type": "uint8_t"},
+        {"name": "missionActive", "type": "uint8_t"},
+        {"name": "grantRevoked", "type": "uint8_t"},
+        {"name": "bunkerState", "type": "uint8_t"},
+        {"name": "srcClass", "type": "uint8_t"},
+        {"name": "dstClass", "type": "uint8_t"},
+        {"name": "nowEpoch", "type": "uint64_t"},
+        {"name": "grantIssuedAt", "type": "uint64_t"},
+        {"name": "grantExpiresAt", "type": "uint64_t"},
+        {"name": "maxJitTtlSecs", "type": "uint64_t"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+/.lake/
+/build/
+*.olean
+*.ilean
+*.c
+*.setup.json
