@@ -1,6 +1,5 @@
 import '../src/styles.css';
 import {render} from 'solid-js/web';
-import {syncPrivilegeAccessNotices} from '../src/privilegeAccessNotices';
 import {PrivilegeAccessPanel} from '../src/PrivilegeAccessPanel';
 const now=Date.now();
 const iso=(ms:number)=>new Date(now+ms).toISOString();
@@ -14,15 +13,4 @@ w.calls=[];
 // Record what the card would send instead of reaching Core.
 const realFetch=window.fetch;
 window.fetch=(async(input:any,init?:any)=>{const url=String(input);if(url.includes('/api/')){w.calls.push({url,method:init?.method,body:init?.body});return new Response(JSON.stringify({...deploy,state:'approved'}),{status:200,headers:{'Content-Type':'application/json'}});}return realFetch(input,init);}) as any;
-w.showOne=()=>syncPrivilegeAccessNotices([deploy] as any,()=>{w.opened=true;});
-w.showMany=()=>syncPrivilegeAccessNotices([deploy,root] as any,()=>{w.opened=true;});
-w.showBatch=()=>syncPrivilegeAccessNotices([deploy,root,{...deploy,id:'p4',digest:'d-p4',scope:'ops_read',target_host:'ashur',requester_title:'Fleet health',reason:'Read RAID status'}] as any,()=>{w.opened=true;});
-// A conversation column offset by a sidebar, plus a side-panel composer lower on screen.
-w.addDock=()=>{
- const dock=document.createElement('div');dock.className='dock';dock.style.cssText='position:fixed;left:300px;right:40px;bottom:0;margin:0;padding:10px 34px 16px';
- dock.innerHTML='<div class="col"><div class="composer" style="height:80px"></div></div>';document.body.appendChild(dock);
- const side=document.createElement('div');side.style.cssText='position:fixed;right:0;bottom:0;width:200px';
- side.innerHTML='<div class="composer" style="height:40px"></div>';document.body.appendChild(side);
-};
-w.showOne();
 render(()=><div style="max-width:760px;padding:16px"><PrivilegeAccessPanel onError={(m)=>{w.error=m;}} initial={{bunker_state:0,requests:[root,grant,{...deploy,id:'p3',state:'denied',decided_at:iso(-120_000)}] as any,audit:[],command_audit:[{id:'c1',at:iso(-30_000),grant_id:'g1',mission_id:grant.requester_mission_id,target_host:'ashur',scope:'ops_read',command:'mdadm --detail /dev/md0',exit_code:0,duration_ms:40}]}} /></div>,document.getElementById('root')!);

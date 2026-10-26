@@ -60,5 +60,17 @@ the same call.
 
 ## Clients
 
-Desktop, iOS and Android label items with the shared fixtures
-(`privilege-access.json`, `approvals.json`) and sign `{kind, id, digest}`.
+One model and one queue component per platform, with the same names:
+`approvalQueue.ts` + `approvalQueueNotices.tsx` (desktop),
+`OrbApprovalQueue.swift` (iOS), `OrbApprovalQueue.kt` (Android). They label
+items from `shared/orb-spec/fixtures/approvals.json` (`labels`, `summaries`),
+poll `GET /api/approvals/queue`, approve through `approve-all` (one item is
+its own confirmation; a batch includes critical items only when ticked) and
+deny through each kind's own route.
+
+Desktop shows every pending approval in one bottom card centred on the
+composer and as wide: one request shows its title, who asks, why and what it
+unlocks; several show a row each, a summary by risk, and "Approve all", which
+waits 1.5 s after the list changes so it never catches a request that just
+appeared. The Secrets / Privileged access / Mission access settings sections
+keep per-request Allow and Deny.

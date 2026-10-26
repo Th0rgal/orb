@@ -27,8 +27,6 @@ export interface PrivilegeRequest {
   decided_at?: string | null;
   expires_at?: string | null;
   revoked_at?: string | null;
-  /** Core's approval digest while pending: what "Approve all" signs (see /api/approvals/approve-all). */
-  digest?: string;
 }
 
 export interface PrivilegeAudit {
@@ -114,47 +112,3 @@ export const revokePrivilegeAccess = (id: string) =>
 export const livePrivilegeGrant = (r: PrivilegeRequest, now = Date.now()) =>
   r.state === "approved" && !r.revoked_at && !!r.expires_at && Date.parse(r.expires_at) > now;
 
-/** Highest tier first, so a root grant leads every batch summary. */
-const TIER_ORDER: PrivilegeScope[] = ["root_exec", "service_deploy", "ops_read"];
-const uniqSorted = (xs: string[]) => [...new Set(xs)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-
-/** What one "Approve all" would grant: count per tier, hosts and missions. */
-export function batchSummary(rs: PrivilegePick[]) {
-  const tiers = TIER_ORDER
-    .map((s) => [s, rs.filter((r) => r.scope === s).length] as const)
-    .filter(([, n]) => n > 0)
-    .map(([s, n]) => `${n} ${scopeLabel(s)}`)
-    .join(" · ");
-  return {
-    tiers,
-    hosts: uniqSorted(rs.map((r) => r.target_host)).map(hostLabel).join(", "),
-    missions: uniqSorted(rs.map(requesterLabel)).join(", "),
-    root: rs.filter((r) => r.scope === "root_exec").length,
-  };
-}
-type PrivilegePick = Pick<PrivilegeRequest, "scope" | "target_host" | "requester_title" | "requester_mission_id">;
-
-/**
- * The requests "Approve all" covers. Root is left out unless the approver
- * ticked it: one fingerprint should never grant root by accident. Core
- * enforces the same rule (`confirm_root`).
- */
-export const batchApprovable = <T extends Pick<PrivilegeRequest, "scope">>(rs: T[], includeRoot: boolean) =>
-  rs.filter((r) => includeRoot || r.scope !== "root_exec");
-
-/** One signature for exactly these requests, as shown; Core refuses the whole batch if any changed. */
-export const approveAllPrivilegeAccess = (rs: PrivilegeRequest[]) => {
-  const s = batchSummary(rs);
-  return signedApi<unknown>(
-    "POST",
-    "/api/approvals/approve-all",
-    {
-      items: rs.map((r) => ({ kind: "privilege", id: r.id, digest: r.digest ?? "" })),
-      confirm_critical: s.root > 0,
-    },
-    `grant ${rs.length} privileged requests (${s.tiers}) on ${s.hosts}`,
-  ).then((out) => {
-    for (const r of rs) window.dispatchEvent(new CustomEvent("orb:privilege-access-answered", { detail: { id: r.id } }));
-    return out;
-  });
-};

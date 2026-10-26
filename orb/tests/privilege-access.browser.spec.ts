@@ -2,27 +2,6 @@ import {test,expect} from '@playwright/test';
 test.use({browserName:'webkit'});
 const shots=process.env.ORB_ACCESS_SHOTS||'test-results';
 const sent=(page:any)=>page.evaluate(()=>(window as any).calls.map((c:any)=>`${c.method} ${new URL(c.url).pathname}`));
-test('privileged access card: scope, host, what it unlocks, session lifetime, Touch ID approve and deny',async({page})=>{
- await page.goto('/tests/privilege-access.html');
- const card=page.getByTestId('privilege-access-card');
- await expect(card.locator('.toast-title strong')).toHaveText('Service deploy on agent-core');
- await expect(card.locator('.toast-sub')).toHaveText('asked by Ship usage fix');
- await expect(card.locator('.access-scope')).toHaveText('Allows restart and deploy services, including production · for this session (max 4 h)');
- await card.screenshot({path:`${shots}/desktop-privilege-card-one.png`});
- await card.locator('.secret-bar').getByRole('button',{name:'Allow'}).click();
- await expect.poll(()=>sent(page)).toContain('POST /api/privilege-access/p1/approve');
- const body=await page.evaluate(()=>(window as any).calls.find((c:any)=>c.url.includes('/approve')).body);
- expect(JSON.parse(body)).toEqual({ttl_minutes:240,session_scoped:true});
- await page.evaluate(()=>(window as any).showMany());
- // The answered request stays hidden while Core catches up; only the other one is left.
- await expect(card.locator('.toast-title strong')).toHaveText('Root on its own node');
- await expect(card.locator('.access-scope')).toContainText('any command as root');
- await page.emulateMedia({colorScheme:'dark'});
- await card.screenshot({path:`${shots}/desktop-privilege-card-dark.png`});
- await page.emulateMedia({colorScheme:'light'});
- await card.locator('.secret-bar').getByRole('button',{name:'Deny'}).click();
- await expect.poll(()=>sent(page)).toContain('POST /api/privilege-access/p2/deny');
-});
 test('settings lists pending requests, live grants with revoke, and the command audit',async({page})=>{
  await page.goto('/tests/privilege-access.html');
  const s=page.getByTestId('privilege-access-settings');
@@ -38,37 +17,4 @@ test('settings lists pending requests, live grants with revoke, and the command 
  await s.screenshot({path:`${shots}/desktop-privilege-settings.png`});
  await g.getByRole('button',{name:'Revoke'}).click();
  await expect.poll(()=>sent(page)).toContain('DELETE /api/privilege-access/g1');
-});
-test('approve all: summary per tier, root left out until ticked, one signed batch',async({page})=>{
- await page.goto('/tests/privilege-access.html');
- await page.evaluate(()=>(window as any).showBatch());
- const card=page.getByTestId('privilege-access-card');
- await expect(card.locator('.toast-title')).toContainText('3 privileged access requests');
- const sum=card.getByTestId('privilege-batch-summary');
- await expect(sum).toContainText('1 Root · 1 Service deploy · 1 Read-only ops · on agent-core, ashur, its own node');
- await expect(sum).toContainText('for Disk cleanup, Fleet health, Ship usage fix');
- await expect(card.locator('.secret-row.privilege-root')).toHaveCount(1);
- const approve=card.locator('.secret-bar').getByRole('button',{name:'Approve 2'});
- await expect(approve).toBeEnabled();
- await card.screenshot({path:`${shots}/desktop-privilege-approve-all.png`});
- await sum.getByRole('checkbox').check();
- await card.locator('.secret-bar').getByRole('button',{name:'Approve all'}).click();
- await expect.poll(()=>sent(page)).toContain('POST /api/approvals/approve-all');
- const body=JSON.parse(await page.evaluate(()=>(window as any).calls.find((c:any)=>c.url.includes('/approve-all')).body));
- expect(body.confirm_critical).toBe(true);
- expect(body.items).toEqual([{kind:'privilege',id:'p1',digest:'d-p1'},{kind:'privilege',id:'p2',digest:'d-p2'},{kind:'privilege',id:'p4',digest:'d-p4'}]);
- await expect(card).toHaveCount(0);
-});
-test('approval card is centred on the conversation composer and as wide',async({page})=>{
- for(const width of [1400,900]){
-  await page.setViewportSize({width,height:900});
-  await page.goto('/tests/privilege-access.html');
-  await page.evaluate(()=>{(window as any).addDock();(window as any).showBatch();});
-  const card=page.getByTestId('privilege-access-card');
-  await expect(card).toBeVisible();
-  await expect.poll(async()=>{
-   const c=await page.locator('.toast').filter({has:card}).boundingBox();const k=await page.locator('.dock .composer').boundingBox();
-   return Math.abs((c!.x+c!.width/2)-(k!.x+k!.width/2))<=1&&Math.abs(c!.width-k!.width)<=1;
-  }).toBe(true);
- }
 });

@@ -2,10 +2,7 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-j
 import { ApprovalCancelled } from "./deviceApproval";
 import * as Ic from "./icons";
 import {
-  approveAllPrivilegeAccess,
   approvePrivilegeAccess,
-  batchApprovable,
-  batchSummary,
   denyPrivilegeAccess,
   emptyPrivilegeSnapshot,
   getPrivilegeAccess,
@@ -18,7 +15,7 @@ import {
   type PrivilegeSnapshot,
 } from "./privilegeAccessApi";
 import { pollWhileVisible } from "./poll";
-import { FingerprintIcon } from "./secretRequestNotices";
+import { FingerprintIcon } from "./approvalIcons";
 import { ago, useNow } from "./time";
 
 const POLL_MS = 5000;
@@ -50,9 +47,6 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
     onCleanup(pollWhileVisible(load, POLL_MS, "privilegeAccess.load"));
   });
   const pending = createMemo(() => snap().requests.filter((r) => r.state === "pending"));
-  const [includeRoot, setIncludeRoot] = createSignal(false);
-  const summary = createMemo(() => batchSummary(pending()));
-  const ready = createMemo(() => batchApprovable(pending(), includeRoot()));
   const grants = createMemo(() => snap().requests.filter((r) => livePrivilegeGrant(r, now())));
   const history = createMemo(() => snap().requests.filter((r) => r.state !== "pending" && !livePrivilegeGrant(r, now())).slice(0, 20));
 
@@ -84,7 +78,7 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
         <div class="bw-requests" role="region" aria-label="Pending privileged access requests">
           <For each={pending()}>
             {(r) => (
-              <div class="secret-row bw-request-row" classList={{ "privilege-root": r.scope === "root_exec" }} data-testid="privilege-access-request">
+              <div class="secret-row bw-request-row" classList={{ "approval-critical": r.scope === "root_exec" }} data-testid="privilege-access-request">
                 <div class="bw-request-body">
                   <div class="bw-request-line">
                     <strong class="secret-row-key">{requestTitle(r)}</strong>
@@ -101,20 +95,6 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
             )}
           </For>
         </div>
-        <Show when={pending().length > 1}>
-          <div class="privilege-batch" data-testid="privilege-batch-summary">
-            <span class="s-row-desc">{summary().tiers} · on {summary().hosts} · for {summary().missions}</span>
-            <Show when={summary().root}>
-              <label class="privilege-root-confirm">
-                <input type="checkbox" checked={includeRoot()} onChange={(e) => setIncludeRoot(e.currentTarget.checked)} />
-                Include {summary().root === 1 ? "the root request" : `${summary().root} root requests`}
-              </label>
-            </Show>
-            <button class="s-btn primary" disabled={!!busy() || !ready().length} onClick={() => void run("all", async () => { await approveAllPrivilegeAccess(ready()); setIncludeRoot(false); })}>
-              <FingerprintIcon size={14} />{ready().length === pending().length ? "Approve all" : `Approve ${ready().length}`}
-            </button>
-          </div>
-        </Show>
       </Show>
       <Show when={grants().length > 0}><h4 class="bw-subhead">Active grants</h4></Show>
       <div class="s-card">

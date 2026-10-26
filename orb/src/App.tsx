@@ -52,12 +52,8 @@ import { cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
 import { loadTranscript, peekReadyTranscript, prefetchTranscript, transcriptVersion } from "./missionCache";
 import { mergeById, pollWhileVisible } from "./poll";
-import { getSecretBroker } from "./bitwardenApi";
-import { syncSecretRequestNotices } from "./secretRequestNotices";
-import { syncMissionAccessNotices } from "./missionAccessNotices";
-import { getMissionAccess } from "./missionAccessApi";
-import { syncPrivilegeAccessNotices } from "./privilegeAccessNotices";
-import { getPrivilegeAccess } from "./privilegeAccessApi";
+import { syncApprovalQueue } from "./approvalQueueNotices";
+import { getApprovalQueue } from "./approvalQueue";
 import { listApprovalDevices, thisDeviceEnrollment } from "./deviceApproval";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
 const ProjectSettings=lazy(()=>import("./ProjectSettings").then(module=>({default:module.ProjectSettings})));
@@ -785,59 +781,34 @@ export default function App() {
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000, "app.fleet");
     // Learn this Mac's approval device id so notifications sign approvals too.
     if (isConnected()) void listApprovalDevices().then((d) => thisDeviceEnrollment(d.devices)).catch(swallow("app.approvalDevices"));
-    const loadSecretRequests = () =>
+    const loadApprovals = () =>
         isConnected()
-          ? getSecretBroker()
-              .then((b) => {
-                const pending = b.requests.filter((r) => r.status === "pending");
-                setSecretRequests(pending.length);
-                syncSecretRequestNotices(pending, () => open("bitwarden-settings"));
+          ? getApprovalQueue()
+              .then(({ items }) => {
+                // One queue for every kind: the card shows them all, the badges count each.
+                setSecretRequests(items.filter((i) => i.kind === "secret").length);
+                setAccessRequests(items.filter((i) => i.kind === "mission_access").length);
+                setPrivilegeRequests(items.filter((i) => i.kind === "privilege").length);
+                syncApprovalQueue(items, () => open("bitwarden-settings"));
               })
-              .catch(swallow("app.secretRequests"))
+              .catch(swallow("app.approvalQueue"))
           : undefined;
-    const stopSecretRequests = pollWhileVisible(loadSecretRequests, 10000, "app.secretRequests");
-    const loadAccessRequests = () =>
-        isConnected()
-          ? getMissionAccess()
-              .then((snap) => {
-                const pending = snap.requests.filter((r) => r.state === "pending");
-                setAccessRequests(pending.length);
-                syncMissionAccessNotices(pending, () => open("bitwarden-settings"));
-              })
-              .catch(swallow("app.accessRequests"))
-          : undefined;
-    const stopAccessRequests = pollWhileVisible(loadAccessRequests, 10000, "app.accessRequests");
-    const onAccessAnswered = () => { setAccessRequests((n) => Math.max(0, n - 1)); void loadAccessRequests(); };
-    const onAccessFocus = () => void loadAccessRequests();
-    window.addEventListener("orb:mission-access-answered", onAccessAnswered);
-    window.addEventListener("focus", onAccessFocus);
-    onCleanup(() => { stopAccessRequests(); window.removeEventListener("orb:mission-access-answered", onAccessAnswered); window.removeEventListener("focus", onAccessFocus); });
-    const loadPrivilegeRequests = () =>
-        isConnected()
-          ? getPrivilegeAccess()
-              .then((snap) => {
-                const pending = snap.requests.filter((r) => r.state === "pending");
-                setPrivilegeRequests(pending.length);
-                syncPrivilegeAccessNotices(pending, () => open("bitwarden-settings"));
-              })
-              .catch(swallow("app.privilegeRequests"))
-          : undefined;
-    const stopPrivilegeRequests = pollWhileVisible(loadPrivilegeRequests, 10000, "app.privilegeRequests");
-    const onPrivilegeAnswered = () => { setPrivilegeRequests((n) => Math.max(0, n - 1)); void loadPrivilegeRequests(); };
-    const onPrivilegeFocus = () => void loadPrivilegeRequests();
-    window.addEventListener("orb:privilege-access-answered", onPrivilegeAnswered);
-    window.addEventListener("focus", onPrivilegeFocus);
-    onCleanup(() => { stopPrivilegeRequests(); window.removeEventListener("orb:privilege-access-answered", onPrivilegeAnswered); window.removeEventListener("focus", onPrivilegeFocus); });
-    // Answering from a notification or the Secrets page updates the badge at once, then confirms.
-    const onSecretAnswered = () => { setSecretRequests((n) => Math.max(0, n - 1)); void loadSecretRequests(); };
-    const onFocus = () => void loadSecretRequests();
-    window.addEventListener("orb:secret-request-answered", onSecretAnswered);
-    window.addEventListener("focus", onFocus);
-    onCleanup(() => { window.removeEventListener("orb:secret-request-answered", onSecretAnswered); window.removeEventListener("focus", onFocus); });
+    const stopApprovals = pollWhileVisible(loadApprovals, 10000, "app.approvalQueue");
+    // Answering anywhere (card, notification, Secrets page) refreshes the queue at once.
+    const answeredEvents = ["orb:secret-request-answered", "orb:mission-access-answered", "orb:privilege-access-answered", "focus"];
+    let reloadQueued = false;
+    const onApprovalsChanged = () => {
+      // A batch answers several requests at once: reload once.
+      if (reloadQueued) return;
+      reloadQueued = true;
+      queueMicrotask(() => { reloadQueued = false; void loadApprovals(); });
+    };
+    for (const e of answeredEvents) window.addEventListener(e, onApprovalsChanged);
+    onCleanup(() => { for (const e of answeredEvents) window.removeEventListener(e, onApprovalsChanged); });
     onCleanup(() => {
       stopMissions();
       stopFleet();
-      stopSecretRequests();
+      stopApprovals();
     });
   });
   onCleanup(() => {

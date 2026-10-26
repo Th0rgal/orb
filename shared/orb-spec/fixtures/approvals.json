@@ -1,5 +1,5 @@
 {
-  "description": "Shared approval model (src/api/approval_queue.rs, Lean orb_verify_approval). `gate`: the one admission rule every approval kind and every batch goes through; a batch is admitted only when every item is. `risk`: how each kind's tier maps to a risk; critical items need explicit confirmation and are left out of \"Approve all\" unless ticked. Clients (desktop approvalQueue.ts, iOS OrbApprovalQueue.swift, Android OrbApprovalQueue.kt) use the same names.",
+  "description": "Shared approval model (src/api/approval_queue.rs, Lean orb_verify_approval). `gate`: the one admission rule every approval kind and every batch goes through; a batch is admitted only when every item is. `risk`: how each kind's tier maps to a risk; critical items need explicit confirmation and are left out of \"Approve all\" unless ticked. Clients (desktop approvalQueue.ts, iOS OrbApprovalQueue.swift, Android OrbApprovalQueue.kt) use the same names. `labels`: the row title, requester and fine print (`detail`) every client shows for an item. `summaries` (indexes into `labels`): the \"Approve all\" line, risks most severe first, missions sorted, and how many items the button covers while critical ones are not ticked.",
   "gate": [
     {
       "name": "signed, owned, pending, unchanged, elevated",
@@ -166,6 +166,189 @@
       "kind": "mission_access",
       "tier": "read_mission",
       "risk": "elevated"
+    }
+  ],
+  "labels": [
+    {
+      "item": {
+        "kind": "privilege",
+        "tier": "service_deploy",
+        "target": "agent-core",
+        "risk": "elevated",
+        "requester_title": "Ship usage fix",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "scope": "service_deploy",
+          "target_host": "agent-core",
+          "session_scoped": true,
+          "ttl_minutes": 240
+        }
+      },
+      "title": "Service deploy on agent-core",
+      "requester": "Ship usage fix",
+      "detail": "Allows restart and deploy services, including production \u00b7 for this session (max 4 h)"
+    },
+    {
+      "item": {
+        "kind": "privilege",
+        "tier": "root_exec",
+        "target": "self",
+        "risk": "critical",
+        "requester_title": null,
+        "requester_mission_id": "9a8b7c6d-0000-4000-8000-000000000002",
+        "request": {
+          "scope": "root_exec",
+          "target_host": "self",
+          "session_scoped": false,
+          "ttl_minutes": 30
+        }
+      },
+      "title": "Root on its own node",
+      "requester": "Mission 9a8b7c6d",
+      "detail": "Allows any command as root \u00b7 for 30 min"
+    },
+    {
+      "item": {
+        "kind": "secret",
+        "tier": "read",
+        "target": "OPENAI_API_KEY",
+        "risk": "routine",
+        "requester_title": "Ship usage fix",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "kind": "read",
+          "key": "OPENAI_API_KEY"
+        }
+      },
+      "title": "Read OPENAI_API_KEY",
+      "requester": "Ship usage fix",
+      "detail": ""
+    },
+    {
+      "item": {
+        "kind": "secret",
+        "tier": "write",
+        "target": "DEPLOY_TOKEN",
+        "risk": "elevated",
+        "requester_title": "Ship usage fix",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "kind": "write",
+          "key": "DEPLOY_TOKEN"
+        }
+      },
+      "title": "Store DEPLOY_TOKEN",
+      "requester": "Ship usage fix",
+      "detail": ""
+    },
+    {
+      "item": {
+        "kind": "secret",
+        "tier": "delete",
+        "target": "OLD_TOKEN",
+        "risk": "critical",
+        "requester_title": "Ship usage fix",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "kind": "delete",
+          "key": "OLD_TOKEN"
+        }
+      },
+      "title": "Delete OLD_TOKEN",
+      "requester": "Ship usage fix",
+      "detail": ""
+    },
+    {
+      "item": {
+        "kind": "secret",
+        "tier": "read",
+        "target": "*",
+        "risk": "elevated",
+        "requester_title": "Ship usage fix",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "kind": "read",
+          "all_projects": true
+        }
+      },
+      "title": "Read every secret project",
+      "requester": "Ship usage fix",
+      "detail": ""
+    },
+    {
+      "item": {
+        "kind": "secret",
+        "tier": "read",
+        "target": "p-1",
+        "risk": "routine",
+        "requester_title": "Ship usage fix",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "kind": "read",
+          "project_id": "p-1"
+        }
+      },
+      "title": "Read a whole secret project",
+      "requester": "Ship usage fix",
+      "detail": ""
+    },
+    {
+      "item": {
+        "kind": "mission_access",
+        "tier": "read_mission",
+        "target": "5e6f7a8b-0000-4000-8000-000000000003",
+        "risk": "elevated",
+        "requester_title": "Fleet health",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "target_title": "Disk cleanup",
+          "target_mission_id": "5e6f7a8b-0000-4000-8000-000000000003",
+          "ttl_hours": 24
+        }
+      },
+      "title": "Read Disk cleanup",
+      "requester": "Fleet health",
+      "detail": "Read only \u00b7 24 h \u00b7 no messages, cancel or resume"
+    },
+    {
+      "item": {
+        "kind": "mission_access",
+        "tier": "read_mission",
+        "target": "5e6f7a8b-0000-4000-8000-000000000003",
+        "risk": "elevated",
+        "requester_title": "Fleet health",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "target_title": null,
+          "target_mission_id": "5e6f7a8b-0000-4000-8000-000000000003",
+          "ttl_hours": 24
+        }
+      },
+      "title": "Read Mission 5e6f7a8b",
+      "requester": "Fleet health",
+      "detail": "Read only \u00b7 24 h \u00b7 no messages, cancel or resume"
+    }
+  ],
+  "summaries": [
+    {
+      "items": [
+        0,
+        1,
+        2,
+        7
+      ],
+      "risks": "1 critical \u00b7 2 elevated \u00b7 1 routine",
+      "missions": "Fleet health, Mission 9a8b7c6d, Ship usage fix",
+      "without_critical": 3
+    },
+    {
+      "items": [
+        2,
+        6
+      ],
+      "risks": "2 routine",
+      "missions": "Ship usage fix",
+      "without_critical": 2
     }
   ]
 }
