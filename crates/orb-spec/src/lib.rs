@@ -3569,6 +3569,137 @@ pub fn observe_sidebar_merge_shadow(
     verdict
 }
 
+/// Observe `scroll_epoch_step` (`orb_scroll_epoch_step`) against the host scroll correction policy.
+pub fn observe_scroll_epoch_shadow(
+    input: ScrollEpochStepInput,
+    host_applies_correction: bool,
+    counter: &ShadowCounter,
+) -> ScrollEpochStepVerdict {
+    let verdict = scroll_epoch_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, ScrollEpochStepInput, u8, u8> {
+        subsystem: "orb_scroll_epoch_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = scroll_epoch_step(*ev);
+            let effs = if v.apply_scroll {
+                vec![v.action as u8]
+            } else {
+                vec![0u8]
+            };
+            (v.apply_scroll, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_applies_correction {
+        vec![verdict.action as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.layout_epoch),
+        idempotency_key: u64::from(input.last_corrected_epoch),
+        boot_id_matches: true,
+        schema_id: 6,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &input.is_pinned_to_bottom,
+            &host_applies_correction,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientParityStepInput {
+    pub client_target: ClientProjectionTarget,
+    pub wire_schema_id: u32,
+    pub transcript_seq: u32,
+    pub markdown_blocks_count: u32,
+    pub send_queue_depth: u32,
+    pub scroll_corrected_in_epoch: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientParityStepVerdict {
+    pub raw: u64,
+    pub parity_admitted: bool,
+    pub digest32: u32,
+}
+
+/// Observe `client_parity_step` (`orb_client_parity_step`) against the host cross-client parity check.
+pub fn observe_client_parity_shadow(
+    input: ClientParityStepInput,
+    host_admits_parity: bool,
+    counter: &ShadowCounter,
+) -> ClientParityStepVerdict {
+    let raw = client_parity_step(
+        input.client_target,
+        input.wire_schema_id,
+        input.transcript_seq,
+        input.markdown_blocks_count,
+        input.send_queue_depth,
+        input.scroll_corrected_in_epoch,
+    );
+    let verdict = ClientParityStepVerdict {
+        raw,
+        parity_admitted: ((raw >> 8) & 1) != 0,
+        digest32: (raw >> 32) as u32,
+    };
+    let sim = shadow::RefinementSimulation::<bool, bool, ClientParityStepInput, u8, u8> {
+        subsystem: "orb_client_parity_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let r = client_parity_step(
+                ev.client_target,
+                ev.wire_schema_id,
+                ev.transcript_seq,
+                ev.markdown_blocks_count,
+                ev.send_queue_depth,
+                ev.scroll_corrected_in_epoch,
+            );
+            let admitted = ((r >> 8) & 1) != 0;
+            let effs = if admitted {
+                vec![(r & 0xFF) as u8]
+            } else {
+                vec![0u8]
+            };
+            (admitted, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let host_effects = if host_admits_parity {
+        vec![(raw & 0xFF) as u8]
+    } else {
+        vec![0u8]
+    };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: u64::from(input.transcript_seq),
+        idempotency_key: u64::from(input.wire_schema_id),
+        boot_id_matches: true,
+        schema_id: 6,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &true,
+            &host_admits_parity,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
 #[cfg(test)]
 mod privilege_bunker_deploy_tests {
     use super::*;
@@ -4314,5 +4445,91 @@ mod tests {
         assert_eq!(lean_sys_cabi::select_isa(775, 927, 4, 4), 0);
         assert!(lean_sys_cabi::verify_isa_selection(927, 927, 4, 4));
         assert!(!lean_sys_cabi::verify_isa_selection(775, 927, 4, 4));
+    }
+
+    #[test]
+    fn phase6_scroll_epoch_and_client_parity_zero_divergences() {
+        let scroll_counter = ShadowCounter::new();
+        let parity_counter = ShadowCounter::new();
+
+        // 1. First scroll correction in layout epoch 12 is admitted
+        let first = observe_scroll_epoch_shadow(
+            ScrollEpochStepInput {
+                layout_epoch: 12,
+                last_corrected_epoch: 11,
+                corrections_in_epoch: 0,
+                is_pinned_to_bottom: true,
+                user_is_dragging: false,
+                target_scroll_top_px: 3817,
+                current_scroll_top_px: 3600,
+            },
+            true,
+            &scroll_counter,
+        );
+        assert_eq!(first.action, ScrollEpochAction::ApplyEpochCorrection);
+        assert!(first.apply_scroll);
+        assert!(first.epoch_fence_set);
+        assert_eq!(first.effective_scroll_top_px, 3817);
+
+        // 2. Duplicate correction in the same layout epoch 12 is suppressed (`scroll_single_correction_per_epoch`)
+        let second = observe_scroll_epoch_shadow(
+            ScrollEpochStepInput {
+                layout_epoch: 12,
+                last_corrected_epoch: 12,
+                corrections_in_epoch: 1,
+                is_pinned_to_bottom: true,
+                user_is_dragging: false,
+                target_scroll_top_px: 3817,
+                current_scroll_top_px: 3700,
+            },
+            false,
+            &scroll_counter,
+        );
+        assert_eq!(
+            second.action,
+            ScrollEpochAction::SuppressDuplicateEpochCorrection
+        );
+        assert!(!second.apply_scroll);
+        assert!(second.epoch_fence_set);
+        assert_eq!(second.effective_scroll_top_px, 3700);
+
+        // 3. Cross-client parity across Core (0), iOS (1), Android (2), and Desktop wasm32 (3)
+        let targets = [
+            ClientProjectionTarget::Core,
+            ClientProjectionTarget::Ios,
+            ClientProjectionTarget::Android,
+            ClientProjectionTarget::DesktopWasm32,
+        ];
+        let mut ref_digest = None;
+        for target in targets {
+            let v = observe_client_parity_shadow(
+                ClientParityStepInput {
+                    client_target: target,
+                    wire_schema_id: 1,
+                    transcript_seq: 42,
+                    markdown_blocks_count: 7,
+                    send_queue_depth: 1,
+                    scroll_corrected_in_epoch: true,
+                },
+                true,
+                &parity_counter,
+            );
+            assert!(v.parity_admitted);
+            if let Some(d) = ref_digest {
+                assert_eq!(
+                    v.digest32, d,
+                    "all 4 client targets must produce identical parity digest"
+                );
+            } else {
+                ref_digest = Some(v.digest32);
+            }
+        }
+
+        let scroll_snap = scroll_counter.snapshot("orb_scroll_epoch_step");
+        let parity_snap = parity_counter.snapshot("orb_client_parity_step");
+        assert_eq!(scroll_snap.total_events, 2);
+        assert_eq!(scroll_snap.total_divergences, 0);
+        assert_eq!(parity_snap.total_events, 4);
+        assert_eq!(parity_snap.total_divergences, 0);
     }
 }

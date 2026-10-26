@@ -697,4 +697,57 @@ enum OrbKernel {
     static func verifyIsaSelection(detectedHwCaps: UInt64, requiredMask: UInt64, selectedVariantId: Int, maxVariantId: Int = 4) -> Bool {
         leansys_verify_isa_selection(detectedHwCaps, requiredMask, satU8(selectedVariantId), satU8(maxVariantId)) != 0
     }
+
+    static func scrollEpochStep(
+        layoutEpoch: UInt32,
+        lastCorrectedEpoch: UInt32,
+        correctionsInEpoch: UInt8,
+        isPinnedToBottom: Bool,
+        userIsDragging: Bool,
+        targetScrollTopPx: Int,
+        currentScrollTopPx: Int
+    ) -> (action: Int, applyCorrection: Bool, nextCorrectionsInEpoch: UInt8, nextCorrectedEpoch: UInt32, resolvedScrollTopPx: Int) {
+        let raw = orb_scroll_epoch_step(
+            layoutEpoch,
+            lastCorrectedEpoch,
+            correctionsInEpoch,
+            b8(isPinnedToBottom),
+            b8(userIsDragging),
+            satU32(targetScrollTopPx),
+            satU32(currentScrollTopPx)
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        let action = Int(lo32 & 0xFF)
+        let applyCorrection = ((lo32 >> 8) & 1) != 0
+        let nextCorrections = UInt8((lo32 >> 16) & 0xFF)
+        let nextEpoch = applyCorrection ? layoutEpoch : lastCorrectedEpoch
+        return (action, applyCorrection, nextCorrections, nextEpoch, Int(hi32))
+    }
+
+    static func clientParityStep(
+        clientTarget: Int,
+        wireSchemaId: UInt32,
+        transcriptSeq: UInt32,
+        markdownBlocksCount: UInt32,
+        sendQueueDepth: UInt32,
+        scrollCorrectedInEpoch: UInt8
+    ) -> (action: Int, parityAdmitted: Bool, singleScrollCorrectionOk: Bool, digest32: UInt32) {
+        let raw = orb_client_parity_step(
+            satU8(clientTarget),
+            wireSchemaId,
+            transcriptSeq,
+            markdownBlocksCount,
+            sendQueueDepth,
+            scrollCorrectedInEpoch
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        return (
+            Int(lo32 & 0xFF),
+            ((lo32 >> 8) & 1) != 0,
+            ((lo32 >> 9) & 1) != 0,
+            hi32
+        )
+    }
 }

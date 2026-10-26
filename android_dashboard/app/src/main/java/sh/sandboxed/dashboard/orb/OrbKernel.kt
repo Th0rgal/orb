@@ -806,4 +806,74 @@ object OrbKernel {
         requireNative()
         return leansysVerifyIsaSelection(detectedHwCaps, requiredMask, selectedVariantId.coerceIn(0, 255), maxVariantId.coerceIn(0, 255)) != 0
     }
+
+    data class ScrollEpochVerdict(
+        val action: Int,
+        val applyCorrection: Boolean,
+        val nextCorrectionsInEpoch: Int,
+        val resolvedScrollTopPx: Int
+    )
+
+    fun scrollEpochStep(
+        layoutEpoch: Int,
+        lastCorrectedEpoch: Int,
+        correctionsInEpoch: Int,
+        isPinnedToBottom: Boolean,
+        userIsDragging: Boolean,
+        targetScrollTopPx: Int,
+        currentScrollTopPx: Int
+    ): ScrollEpochVerdict {
+        requireNative()
+        val raw = orbScrollEpochStep(
+            maxOf(0, layoutEpoch),
+            maxOf(0, lastCorrectedEpoch),
+            correctionsInEpoch.coerceIn(0, 255),
+            bInt(isPinnedToBottom),
+            bInt(userIsDragging),
+            maxOf(0, targetScrollTopPx),
+            maxOf(0, currentScrollTopPx)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
+        return ScrollEpochVerdict(
+            action = lo32 and 0xFF,
+            applyCorrection = ((lo32 ushr 8) and 1) != 0,
+            nextCorrectionsInEpoch = (lo32 ushr 16) and 0xFF,
+            resolvedScrollTopPx = hi32
+        )
+    }
+
+    data class ClientParityVerdict(
+        val action: Int,
+        val parityAdmitted: Boolean,
+        val singleScrollCorrectionOk: Boolean,
+        val digest32: Long
+    )
+
+    fun clientParityStep(
+        clientTarget: Int,
+        wireSchemaId: Int,
+        transcriptSeq: Int,
+        markdownBlocksCount: Int,
+        sendQueueDepth: Int,
+        scrollCorrectedInEpoch: Int
+    ): ClientParityVerdict {
+        requireNative()
+        val raw = orbClientParityStep(
+            clientTarget.coerceIn(0, 255),
+            maxOf(0, wireSchemaId),
+            maxOf(0, transcriptSeq),
+            maxOf(0, markdownBlocksCount),
+            maxOf(0, sendQueueDepth),
+            scrollCorrectedInEpoch.coerceIn(0, 255)
+        )
+        val lo32 = (raw and 0xFFFF_FFFFL).toInt()
+        val hi32 = (raw ushr 32) and 0xFFFF_FFFFL
+        return ClientParityVerdict(
+            action = lo32 and 0xFF,
+            parityAdmitted = ((lo32 ushr 8) and 1) != 0,
+            singleScrollCorrectionOk = ((lo32 ushr 9) and 1) != 0,
+            digest32 = hi32
+        )
+    }
 }
