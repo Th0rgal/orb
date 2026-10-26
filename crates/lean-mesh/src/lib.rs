@@ -882,6 +882,12 @@ impl MeshManifest {
                     p_a.name
                 )));
             }
+            if is_name_derived_peer_signing_pubkey(&p_a.name, &p_a.sign_pubkey_hex) {
+                return Err(MeshError::InvalidPeerMetadata(format!(
+                    "peer `{}` sign_pubkey_hex must be CSPRNG/hardware-provisioned and cannot be deterministically derived from peer name",
+                    p_a.name
+                )));
+            }
 
             let ip_a = p_a.overlay_ipv4_u32()?;
             // Unary validation of `p_a` via `leanmesh_overlay_ip_step` so 1-peer manifests
@@ -1339,8 +1345,62 @@ impl MeshManifest {
         Ok(plans)
     }
 
-    /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`.
-    pub fn paloma_fleet_default(now_epoch: u64, signing_key: &SigningKey) -> Self {
+    /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`,
+    /// returning `(MeshManifest, BTreeMap<peer_name, peer_seed_hex>)` with independent `/dev/urandom`
+    /// CSPRNG Ed25519 signing keys for every node.
+    pub fn paloma_fleet_with_csprng_peers(
+        now_epoch: u64,
+        signing_key: &SigningKey,
+    ) -> Result<(Self, BTreeMap<String, String>), MeshError> {
+        use std::io::Read;
+        let mut urandom = std::fs::File::open("/dev/urandom").map_err(|e| {
+            MeshError::InvalidPeerMetadata(format!("failed to open /dev/urandom: {e}"))
+        })?;
+        let mut peer_seeds_hex = BTreeMap::new();
+        let mut peer_pubkeys_hex = BTreeMap::new();
+        for name in [
+            "agent-core",
+            "dgx-spark",
+            "thomas-md",
+            "polymath",
+            "maven-repo",
+            "ashur",
+            "babylon",
+            "nippur",
+            "old-agent",
+            "watchtower",
+            "api-starknet-id",
+            "sepolia-starknet-id",
+            "macbook-air",
+        ] {
+            let mut seed = [0u8; 32];
+            urandom.read_exact(&mut seed).map_err(|e| {
+                MeshError::InvalidPeerMetadata(format!(
+                    "failed to read 32 CSPRNG bytes for peer `{name}`: {e}"
+                ))
+            })?;
+            if seed == [0u8; 32] {
+                return Err(MeshError::InvalidPeerMetadata(format!(
+                    "CSPRNG returned all-zero seed for peer `{name}`"
+                )));
+            }
+            let peer_sk = SigningKey::from_bytes(&seed);
+            let pub_hex = hex::encode(peer_sk.verifying_key().to_bytes());
+            peer_seeds_hex.insert(name.to_string(), hex::encode(seed));
+            peer_pubkeys_hex.insert(name.to_string(), pub_hex);
+        }
+        let manifest = Self::paloma_fleet_with_peer_pubkeys(now_epoch, signing_key, &peer_pubkeys_hex)?;
+        Ok((manifest, peer_seeds_hex))
+    }
+
+    /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`,
+    /// failing closed unless every Paloma peer has an explicitly provisioned non-deterministic Ed25519
+    /// public key in `peer_sign_pubkeys_hex`.
+    pub fn paloma_fleet_with_peer_pubkeys(
+        now_epoch: u64,
+        signing_key: &SigningKey,
+        peer_sign_pubkeys_hex: &BTreeMap<String, String>,
+    ) -> Result<Self, MeshError> {
         let expires_at = now_epoch + 86_400;
         let det_wg_pub = |label: &str| -> String {
             let mut h = Sha256::new();
@@ -1348,8 +1408,12 @@ impl MeshManifest {
             h.update(label.as_bytes());
             base64::engine::general_purpose::STANDARD.encode(h.finalize())
         };
-        let det_sign_pub = |label: &str| -> String {
-            hex::encode(default_peer_signing_key(label).verifying_key().to_bytes())
+        let req_sign_pub = |label: &str| -> Result<String, MeshError> {
+            peer_sign_pubkeys_hex.get(label).cloned().ok_or_else(|| {
+                MeshError::InvalidPeerMetadata(format!(
+                    "missing provisioned Ed25519 sign_pubkey_hex for peer `{label}`"
+                ))
+            })
         };
 
         let peers = vec![
@@ -1360,7 +1424,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.1".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("agent-core"),
-                sign_pubkey_hex: det_sign_pub("agent-core"),
+                sign_pubkey_hex: req_sign_pub("agent-core")?,
                 endpoint: Some("95.216.173.237:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1373,7 +1437,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.2".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("dgx-spark"),
-                sign_pubkey_hex: det_sign_pub("dgx-spark"),
+                sign_pubkey_hex: req_sign_pub("dgx-spark")?,
                 endpoint: None,
                 pinned_static: false,
                 revoked: false,
@@ -1386,7 +1450,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.3".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("thomas-md"),
-                sign_pubkey_hex: det_sign_pub("thomas-md"),
+                sign_pubkey_hex: req_sign_pub("thomas-md")?,
                 endpoint: Some("46.225.188.198:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1399,7 +1463,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.4".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("polymath"),
-                sign_pubkey_hex: det_sign_pub("polymath"),
+                sign_pubkey_hex: req_sign_pub("polymath")?,
                 endpoint: Some("51.83.45.146:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1412,7 +1476,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.5".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("maven-repo"),
-                sign_pubkey_hex: det_sign_pub("maven-repo"),
+                sign_pubkey_hex: req_sign_pub("maven-repo")?,
                 endpoint: Some("54.36.110.220:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1425,7 +1489,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.11".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("ashur"),
-                sign_pubkey_hex: det_sign_pub("ashur"),
+                sign_pubkey_hex: req_sign_pub("ashur")?,
                 endpoint: Some("65.108.230.229:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1438,7 +1502,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.12".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("babylon"),
-                sign_pubkey_hex: det_sign_pub("babylon"),
+                sign_pubkey_hex: req_sign_pub("babylon")?,
                 endpoint: Some("15.235.226.153:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1451,7 +1515,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.13".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("nippur"),
-                sign_pubkey_hex: det_sign_pub("nippur"),
+                sign_pubkey_hex: req_sign_pub("nippur")?,
                 endpoint: Some("37.187.143.36:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1464,7 +1528,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.14".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("old-agent"),
-                sign_pubkey_hex: det_sign_pub("old-agent"),
+                sign_pubkey_hex: req_sign_pub("old-agent")?,
                 endpoint: Some("46.225.95.157:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1477,7 +1541,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.15".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("watchtower"),
-                sign_pubkey_hex: det_sign_pub("watchtower"),
+                sign_pubkey_hex: req_sign_pub("watchtower")?,
                 endpoint: Some("51.75.66.161:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1490,7 +1554,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.21".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("api-starknet-id"),
-                sign_pubkey_hex: det_sign_pub("api-starknet-id"),
+                sign_pubkey_hex: req_sign_pub("api-starknet-id")?,
                 endpoint: Some("5.39.72.91:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1503,7 +1567,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.22".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("sepolia-starknet-id"),
-                sign_pubkey_hex: det_sign_pub("sepolia-starknet-id"),
+                sign_pubkey_hex: req_sign_pub("sepolia-starknet-id")?,
                 endpoint: Some("5.39.73.3:51888".into()),
                 pinned_static: true,
                 revoked: false,
@@ -1516,7 +1580,7 @@ impl MeshManifest {
                 overlay_ip: "10.88.0.100".into(),
                 prefix_len: 32,
                 wg_pubkey: det_wg_pub("macbook-air"),
-                sign_pubkey_hex: det_sign_pub("macbook-air"),
+                sign_pubkey_hex: req_sign_pub("macbook-air")?,
                 endpoint: None,
                 pinned_static: false,
                 revoked: false,
@@ -1578,7 +1642,16 @@ impl MeshManifest {
             signature_hex: String::new(),
         };
         manifest.sign(signing_key);
-        manifest
+        manifest.verify_formal(0, 0, now_epoch)?;
+        Ok(manifest)
+    }
+
+    /// Generates the canonical Paloma fleet topology manifest (`10.88.0.0/16`) signed by `signing_key`
+    /// with fresh CSPRNG per-peer Ed25519 identities.
+    pub fn paloma_fleet_default(now_epoch: u64, signing_key: &SigningKey) -> Self {
+        Self::paloma_fleet_with_csprng_peers(now_epoch, signing_key)
+            .expect("CSPRNG peer key generation must succeed")
+            .0
     }
 }
 
@@ -1591,14 +1664,26 @@ pub struct PeerReconcilePlan {
     pub wg_set_args: Option<Vec<String>>,
 }
 
-/// Derives the default initial per-peer Ed25519 signing key used in `paloma_fleet_default`
-/// before a node's hardware-generated Ed25519 public key is enrolled in the manifest.
-pub fn default_peer_signing_key(peer_name: &str) -> SigningKey {
-    let mut h = Sha256::new();
-    h.update(b"lean-mesh-peer-ed25519-v1:");
-    h.update(peer_name.as_bytes());
-    let digest: [u8; 32] = h.finalize().into();
-    SigningKey::from_bytes(&digest)
+/// Returns `true` if `sign_pubkey_hex` matches any forbidden deterministic derivation
+/// from `peer_name` (such as `SHA256("lean-mesh-peer-ed25519-v1:" || peer_name)` or
+/// `SHA256(peer_name)`), ensuring `verify_formal` rejects publicly derivable node keys.
+pub fn is_name_derived_peer_signing_pubkey(peer_name: &str, sign_pubkey_hex: &str) -> bool {
+    for prefix in [
+        &b"lean-mesh-peer-ed25519-v1:"[..],
+        &b"lean-mesh-wg-pub:"[..],
+        &b""[..],
+    ] {
+        let mut h = Sha256::new();
+        h.update(prefix);
+        h.update(peer_name.as_bytes());
+        let seed: [u8; 32] = h.finalize().into();
+        let sk = SigningKey::from_bytes(&seed);
+        let derived_hex = hex::encode(sk.verifying_key().to_bytes());
+        if sign_pubkey_hex.eq_ignore_ascii_case(&derived_hex) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Canonical domain-separated SHA-256 digest for authenticated node configuration render requests.
@@ -2096,8 +2181,21 @@ mod tests {
         }
 
         // 3. Authenticated heartbeat signature verification succeeds only for matching parameters
-        // and is domain-separated from `sign_render_auth`.
-        let peer_sk = default_peer_signing_key("dgx-spark");
+        // and is domain-separated from `sign_render_auth`. Also verify that `verify_formal` rejects
+        // any peer whose `sign_pubkey_hex` is deterministically derived from its peer name.
+        let mut det_h = Sha256::new();
+        det_h.update(b"lean-mesh-peer-ed25519-v1:dgx-spark");
+        let det_seed: [u8; 32] = det_h.finalize().into();
+        let det_sk = SigningKey::from_bytes(&det_seed);
+        let det_pub_hex = hex::encode(det_sk.verifying_key().to_bytes());
+        assert!(is_name_derived_peer_signing_pubkey("dgx-spark", &det_pub_hex));
+        let mut bad_det_manifest = manifest.clone();
+        bad_det_manifest.peers[1].sign_pubkey_hex = det_pub_hex;
+        bad_det_manifest.epoch += 1;
+        bad_det_manifest.sign(&sk);
+        assert!(bad_det_manifest.verify_formal(1, 0, now + 10).is_err());
+
+        let peer_sk = SigningKey::from_bytes(&[0x33u8; 32]);
         let pub_hex = hex::encode(peer_sk.verifying_key().to_bytes());
         let sig_hex = sign_heartbeat(&peer_sk, "dgx-spark", 1, now + 5);
         assert!(verify_heartbeat_signature(
@@ -2145,7 +2243,7 @@ mod tests {
         ));
 
         // 4. Authenticated roam frame signature + bounds check.
-        let mac_sk = default_peer_signing_key("macbook-air");
+        let mac_sk = SigningKey::from_bytes(&[0x55u8; 32]);
         let mac_pub_hex = hex::encode(mac_sk.verifying_key().to_bytes());
         let roam_sig = sign_roam(
             &mac_sk,
