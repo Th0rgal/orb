@@ -3209,4 +3209,58 @@ theorem mesh_service_route_rejects_retired_tailnet
     meshServiceRouteStep overlay 1 auth loopback = 512 := by
   rfl
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 11: SOC 2 Type I Compliance Proofs — 3-Key SSH & macOS Remote Login,
+--          Off-Host B2 Audit Log Shipper, and OS Lifecycle / Boundary Scope
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/-- Corollary 76 (`ScopedAuthority` — `soc2SshHostKeyPolicyStep`, SOC 2 CC6.1/CC6.6 3-Key & Key-Only SSH):
+    Any host that retains the shared legacy `paloma` key (`hasSharedLegacyKey = 1`), retains a provisioning
+    `ssh-rsa` key (`hasProvisioningRsaKey = 1`), stores a fleet private key on a worker (`workerHasFleetPrivateKey = 1`),
+    or leaves password / keyboard-interactive authentication enabled (`passwordAuthDisabled = 0` or
+    `kbdInteractiveDisabled = 0`, e.g. unhardened macOS Remote Login) is strictly rejected (`512`),
+    while a hardened 3-key host (`1, 1, 1, 0, 0, 0, 1, 1, 1`) is admitted (`257`). -/
+theorem soc2_ssh_host_key_policy_enforces_three_key_and_no_password
+    (yubi brk uniq leg rsa priv pw kbd rootPw : UInt8) :
+    soc2SshHostKeyPolicyStep yubi brk uniq 1 rsa priv pw kbd rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep yubi brk uniq leg 1 priv pw kbd rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep yubi brk uniq leg rsa 1 pw kbd rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep yubi brk uniq leg rsa priv 0 kbd rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep yubi brk uniq leg rsa priv pw 0 rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep 1 1 1 0 0 0 1 1 1 = 257 := by
+  unfold soc2SshHostKeyPolicyStep
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 77 (`ConservedResource` & `ScopedAuthority` — `soc2AuditShipperStep`, SOC 2 CC7.2/C1.1 Off-Host B2 Audit Sink):
+    Unredacted logs (`secretsRedacted = 0`), missing Object-Lock/append-only mode (`objectLockOrAppendOnly = 0`),
+    unverified SHA-256 digests (`sha256DigestVerified = 0`), empty batches (`batchBytes = 0`), and oversized
+    batches (`batchBytes > maxBatchBytes`) are unconditionally rejected (`512`). -/
+theorem soc2_audit_shipper_requires_redaction_object_lock_and_bounds
+    (b2 lock red sha : UInt8) (bytes maxBytes : UInt64) :
+    soc2AuditShipperStep b2 0 red sha bytes maxBytes = 512 ∧
+    soc2AuditShipperStep b2 lock 0 sha bytes maxBytes = 512 ∧
+    soc2AuditShipperStep b2 lock red 0 bytes maxBytes = 512 ∧
+    soc2AuditShipperStep b2 lock red sha 0 maxBytes = 512 ∧
+    soc2AuditShipperStep 1 1 1 1 4096 65536 = 257 := by
+  unfold soc2AuditShipperStep
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 78 (`ScopedAuthority` — `soc2HostScopeStep`, SOC 2 CC7.1/CC6.8 EOL OS & Mesh Egress Boundary):
+    1. Any in-scope host on an EOL OS (`osSupportedLts = 0`, e.g. Ubuntu 23.04 `watchtower` before upgrade)
+       or missing `chain mesh_output` (`meshOutputEgressFilterActive = 0`) is rejected (`512`).
+    2. Any out-of-scope retiring host (`isOutOfScopeDecommission = 1`) that is enrolled in `lean-mesh`
+       (`enrolledInLeanMesh = 1`) or holds fleet credentials (`holdsFleetCredentials = 1`) is rejected (`512`).
+    3. Both compliant in-scope peers (`0, 1, 1, 1, 1, c -> 257`) and fenced out-of-scope retiring hosts
+       (`1, lts, uu, 0, eg, 0 -> 258`) are admitted. -/
+theorem soc2_host_scope_rejects_eol_os_missing_egress_or_unfenced_legacy
+    (lts uu mesh eg cred : UInt8) :
+    soc2HostScopeStep 0 0 uu mesh eg cred = 512 ∧
+    soc2HostScopeStep 0 lts uu mesh 0 cred = 512 ∧
+    soc2HostScopeStep 1 lts uu 1 eg cred = 512 ∧
+    soc2HostScopeStep 1 lts uu mesh eg 1 = 512 ∧
+    soc2HostScopeStep 0 1 1 1 1 cred = 257 ∧
+    soc2HostScopeStep 1 lts uu 0 eg 0 = 258 := by
+  unfold soc2HostScopeStep
+  repeat (first | constructor | split | decide | simp_all)
+
 end Orb.Spec

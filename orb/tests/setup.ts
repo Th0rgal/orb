@@ -11,3 +11,6 @@ afterEach(() => { cleanup(); clearToasts(); sessionStorage.clear(); localStorage
 
 // jsdom has no layout engine; geometry is exercised in browser tests.
 globalThis.ResizeObserver ??= class {observe(){} unobserve(){} disconnect(){}};
+
+// jsdom has no layout; trees reveal their current row with scrollIntoView.
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {};

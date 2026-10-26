@@ -70,7 +70,7 @@ export function createProjectTree(deps: {
     if (dirErrors[key] && !dirs[key]) return [...work, { id: `error:${key}`, data: { kind: "note", slug, path, label: `Files unavailable: ${dirErrors[key]}` } }];
     if (!dirs[key]) return [...work, { id: `loading:${key}`, data: { kind: "note", slug, path, label: "Loading files…" } }];
     const away = filesMovedAway(slug, path);
-    const entries = dirs[key].filter(e => !away.has(e.name));
+    const entries = dirs[key].filter(e => !away.has(e.name) && !(path === "" && e.name === "attachments"));
     for (const arriving of filesMovedInto(slug, path)) if (!entries.some(e => e.name === arriving.name)) entries.push(arriving);
     // Preserve visibility if a referenced folder listing is stale or its physical directory was removed.
     const paths = [...rootMissions(slug).map(root => missionFolder(root.mission)), ...(crons[slug] ?? []).map(j => j.folder ?? "")];

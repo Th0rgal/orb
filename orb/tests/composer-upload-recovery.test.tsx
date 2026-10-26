@@ -41,7 +41,7 @@ it("sends a restored attachment that is already uploaded without touching the or
   const { getApiUrl } = await import("../src/api");
   vi.mocked(readComposerDraft).mockResolvedValue({
     text: `Explique @"${PATH}"`, images: [],
-    uploads: [{ source: { name: "Questões_PPLA_air_Law_key (1).pdf", localPath: "/Users/t/q.pdf" }, path: PATH, destination: "context:pilot", connection: 0, endpoint: getApiUrl() }],
+    uploads: [{ source: { name: "Questões_PPLA_air_Law_key (1).pdf", localPath: "/Users/t/q.pdf" }, path: PATH, destination: "old-agent", connection: 0, endpoint: getApiUrl() }],
   });
   const send = vi.fn(async () => true);
   render(() => <Composer scope="m:old-agent-2" projectSlug="pilot" uploadTarget="old-agent" placeholder="Reply" busy={false} onSend={send} />);
@@ -57,7 +57,13 @@ it("grants only the confirmed folder files to the desktop and revokes the grant 
   const calls: Array<[string, any]> = [];
   const invoke = vi.fn(async (cmd: string, args: any) => { calls.push([cmd, args]); return cmd === "read_upload_file" ? btoa("x") : cmd === "grant_upload_folder" ? 2 : cmd === "stat_upload_file" ? { size: 1, modified: 0 } : undefined; });
   (window as any).__TAURI__ = { core: { invoke }, event: { listen: vi.fn(async (name, handler) => { handlers.set(name, handler); return () => handlers.delete(name); }) } };
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(String(url).endsWith("/blobs") ? { hash: "h" } : String(url).endsWith("/operations") ? { conflict: false } : []))));
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: any) => {
+    if (String(url).endsWith("/api/uploads")) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ name: body.name, path: `/tmp/orb-uploads/${body.batch_id}/${body.relative_path}`, size: 1, sha256: "h" }));
+    }
+    return new Response("[]");
+  }));
   vi.mocked(readComposerDraft).mockResolvedValue(undefined);
   const view = render(() => <Composer scope="m:grant" projectSlug="pilot" uploadTarget="old-agent" placeholder="Reply" busy={false} onSend={() => true} />);
   const el = view.container.querySelector(".composer") as HTMLElement;
@@ -69,7 +75,7 @@ it("grants only the confirmed folder files to the desktop and revokes the grant 
     { name: "b.pdf", path: "/U/Aulas/sub/b.pdf", relative_path: "Aulas/sub/b.pdf", size: 1 },
   ] } } });
   const input = screen.getByPlaceholderText("Reply") as HTMLTextAreaElement;
-  await waitFor(() => expect(input.value).toMatch(/^@attachments\/[0-9a-f-]+\/Aulas\/ $/));
+  await waitFor(() => expect(input.value).toMatch(/^@\/tmp\/orb-uploads\/[0-9a-f-]+\/Aulas\/ $/));
   const files = calls.filter(([cmd]) => cmd !== "voice_capability");
   const order = files.map(([cmd]) => cmd);
   expect(order[0]).toBe("grant_upload_folder");

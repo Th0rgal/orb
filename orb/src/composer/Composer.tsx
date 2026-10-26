@@ -104,7 +104,7 @@ export function Composer(p: {
   onCleanup(() => { disposed = true; });
   let fileInput!: HTMLInputElement;
   const uploadTarget = () => p.uploadTarget ?? "core";
-  const attachmentTarget = () => ["local", "side"].includes(uploadTarget()) ? uploadTarget() : p.projectSlug ? `context:${p.projectSlug}` : uploadTarget();
+  const attachmentTarget = () => uploadTarget();
   const insertUploadedFile = (file: UploadedFile) => {
     uploaded.push(file); bumpUploads(n => n + 1);
     const current = ta ? (ta.selectionStart ?? text().length) : text().length;
