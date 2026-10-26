@@ -3635,6 +3635,8 @@ select.orb-select-native:disabled { cursor: default; }
 .toast-btn.primary:hover { background: var(--fg); opacity: .88; }
 .toast-glyph { flex: none; align-self: flex-start; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--bg-active); color: var(--fg-2); }
 .toast-sub { color: var(--fg-3); font-weight: 400; }
+/* "Read <target>" stays on one line; the requester ellipsizes instead. */
+.access-target { flex: none; white-space: nowrap; }
 .toast.secret .toast-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .toast.secret .toast-title strong { flex: none; white-space: nowrap; font: 500 12px/1.4 var(--mono); color: var(--fg); }
 .toast.secret .toast-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -3788,7 +3790,7 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-chip-count { font: 10.5px var(--mono); color: var(--fg-3); }
 .bw-group-head { width: 100%; display: flex; align-items: center; gap: 6px; padding: 6px 12px; font: 11px/1.4 var(--mono); color: var(--fg-3); text-transform: uppercase; letter-spacing: 0.03em; border-top: 1px solid var(--stroke-soft); background: color-mix(in srgb, var(--bg-elev) 50%, transparent); }
 .bw-group-head > svg { width: 10px; height: 10px; flex: none; }
-.bw-group-head.project { font: 600 12.5px/1.4 var(--sans, inherit); text-transform: none; letter-spacing: 0; color: var(--fg); padding: 8px 12px; }
+.bw-group-head.project { font: 600 12.5px/1.4 var(--sans); text-transform: none; letter-spacing: 0; color: var(--fg); padding: 8px 12px; }
 .bw-group-count { color: var(--fg-3); }
 .ps-secret-project { cursor: pointer; }
 
