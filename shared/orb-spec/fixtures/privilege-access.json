@@ -1,5 +1,5 @@
 {
-  "description": "How Orb clients label a privileged access request (/api/privilege-access). Desktop (orb/src/privilegeAccessApi.ts), iOS (OrbPrivilegeAccess.swift) and Android (OrbPrivilegeAccess.kt) must produce the same strings. `batches` covers the \"Approve all\" summary: tiers (root first), hosts and missions in sorted order, and how many requests the button covers when root is not confirmed (root is never approved in a batch unless ticked).",
+  "description": "How Orb clients label a privileged access request (/api/privilege-access). Desktop (orb/src/privilegeAccessApi.ts), iOS (OrbPrivilegeAccess.swift) and Android (OrbPrivilegeAccess.kt) must produce the same strings.",
   "cases": [
     {
       "request": {
@@ -60,32 +60,6 @@
       "unlocks": "logs, status and disk checks as root; no changes",
       "lifetime": "for this session (max 1 h)",
       "requester": "Fleet health"
-    }
-  ],
-  "batches": [
-    {
-      "requests": [
-        0,
-        1,
-        2,
-        3
-      ],
-      "tiers": "1 Root · 2 Service deploy · 1 Read-only ops",
-      "hosts": "agent-core, ashur, its own node",
-      "missions": "Disk cleanup, Fleet health, Mission 9a8b7c6d, Ship usage fix",
-      "root": 1,
-      "without_root": 3
-    },
-    {
-      "requests": [
-        3,
-        0
-      ],
-      "tiers": "1 Service deploy · 1 Read-only ops",
-      "hosts": "agent-core, ashur",
-      "missions": "Fleet health, Ship usage fix",
-      "root": 0,
-      "without_root": 2
     }
   ]
 }

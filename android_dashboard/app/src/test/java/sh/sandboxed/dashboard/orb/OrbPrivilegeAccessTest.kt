@@ -36,38 +36,4 @@ class OrbPrivilegeAccessTest {
             OrbPrivilegeAccess.approveBody(mapOf("ttl_minutes" to 240.0, "session_scoped" to true))
         )
     }
-
-    @Test fun approveAllSummaryMatchesSharedFixture() {
-        val spec = OrbSpec.dict("fixtures/privilege-access.json")
-        val cases = OrbJSON.dictList(spec["cases"])
-        val batches = OrbJSON.dictList(spec["batches"])
-        assertTrue(batches.isNotEmpty())
-        for (b in batches) {
-            val rs = (b["requests"] as List<*>).mapIndexed { n, i ->
-                (cases[(i as Number).toInt()]["request"] as Map<String, Any?>) + ("id" to "b$n")
-            }
-            val s = OrbPrivilegeAccess.batchSummary(rs)
-            assertEquals(b["tiers"], s.tiers)
-            assertEquals(b["hosts"], s.hosts)
-            assertEquals(b["missions"], s.missions)
-            assertEquals((b["root"] as Number).toInt(), s.root)
-            assertEquals((b["without_root"] as Number).toInt(), OrbPrivilegeAccess.batchApprovable(rs, false).size)
-            assertEquals(rs.size, OrbPrivilegeAccess.batchApprovable(rs, true).size)
-        }
-    }
-
-    @Test fun approveAllSignsEachRequestByCoreDigestAndConfirmsRootOnlyWhenIncluded() {
-        val deploy = mapOf("id" to "p1", "scope" to "service_deploy", "target_host" to "agent-core", "digest" to "d1", "reason" to "x")
-        val root = mapOf("id" to "p2", "scope" to "root_exec", "target_host" to "self", "digest" to "d2")
-        val body = OrbPrivilegeAccess.batchBody(listOf(deploy, root))
-        assertEquals(true, body["confirm_critical"])
-        assertEquals(
-            listOf(
-                mapOf("kind" to "privilege", "id" to "p1", "digest" to "d1"),
-                mapOf("kind" to "privilege", "id" to "p2", "digest" to "d2"),
-            ),
-            body["items"]
-        )
-        assertEquals(false, OrbPrivilegeAccess.batchBody(listOf(deploy))["confirm_critical"])
-    }
 }
