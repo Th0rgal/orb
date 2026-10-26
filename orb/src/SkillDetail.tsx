@@ -1,5 +1,8 @@
 import { For, Show, createMemo, createResource, createSignal } from "solid-js";
-import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
+import { Dialog, DialogButton } from "./Dialog";
+import { SidebarTree, TreeConnectors } from "./Tree";
+import type { TreeNode } from "./treeModel";
+import * as Ic from "./icons";
 import { MdSource, MdView } from "./Markdown";
 import type { LibrarySkill } from "./api";
 import type { SkillSourceRef } from "./localAgents";
@@ -20,7 +23,6 @@ import type { SkillRow } from "./skillRows";
 type Tab = "skill" | "files" | "versions" | "history";
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const formatSize = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
 
 export function DiffView(p: { before: string; after: string; beforeLabel: string; afterLabel: string }) {
   const lines = createMemo(() => compactDiff(lineDiff(p.before, p.after)));
@@ -47,11 +49,14 @@ export interface SkillDetailProps {
   library?: LibrarySkill;
   connected: boolean;
   harnessTotal: number;
+  /** Open on History instead of the editor. */
+  initialView?: "edit" | "history";
   onClose: () => void;
   /** Persist SKILL.md in the Library, commit and push it, then sync local harnesses. */
   onSave: (name: string, content: string, message?: string) => Promise<void>;
-  /** Import a legacy/divergent copy (SKILL.md + reference files) into the Library. */
+  /** Import an old copy (SKILL.md + its allowlisted reference files) into the Library. */
   onImport: (name: string, source: SkillSourceRef, rels: string[]) => Promise<void>;
+  /** Remove the skill; the caller hides the row at once and restores it on failure. */
   onDelete: (name: string) => Promise<void>;
   /** Reference file changed in the Library; refresh and sync. */
   onFilesChanged: (name: string) => Promise<void>;
@@ -63,20 +68,43 @@ export interface SkillDetailProps {
   onSaveProjects?: (name: string, projects: string[]) => Promise<void>;
 }
 
+/** "…/skills/agent-browser/references/a.md" keeps both ends; the tooltip has the rest. */
+export function middleTruncate(text: string, max = 48): string {
+  if (text.length <= max) return text;
+  const keep = max - 1, head = Math.ceil(keep / 2);
+  return `${text.slice(0, head)}…${text.slice(text.length - (keep - head))}`;
+}
+
+const SKILL_MD = "SKILL.md";
+type FileNode = { name: string; path: string; dir: boolean };
+
+/** SKILL.md first, then folders (references/, scripts/, …) like Files & Folders. */
+function fileTree(paths: string[]): TreeNode<FileNode>[] {
+  const dirs = new Map<string, TreeNode<FileNode>>();
+  const top: TreeNode<FileNode>[] = [{ id: SKILL_MD, data: { name: SKILL_MD, path: SKILL_MD, dir: false } }];
+  for (const rel of [...paths].sort()) {
+    const parts = rel.split("/");
+    if (parts.length === 1) { top.push({ id: rel, data: { name: rel, path: rel, dir: false } }); continue; }
+    const dir = parts[0];
+    let node = dirs.get(dir);
+    if (!node) { node = { id: `${dir}/`, data: { name: dir, path: `${dir}/`, dir: true }, expanded: true, children: [] }; dirs.set(dir, node); top.push(node); }
+    node.children!.push({ id: rel, data: { name: parts.slice(1).join("/"), path: rel, dir: false } });
+  }
+  return top;
+}
+
+/** One panel per skill, like opening a folder: its files on the left, the open file on the right. */
 export function SkillDetail(p: SkillDetailProps) {
   const original = () => p.library?.content ?? p.row.content ?? "";
   const editable = () => p.connected && !!p.library;
   const [draft, setDraft] = createSignal(original());
-  const [tab, setTab] = createSignal<Tab>(p.row.divergent || p.row.legacyOnly ? "versions" : "skill");
   // Opens on the rendered skill; Edit switches to the source.
   const [preview, setPreview] = createSignal(true);
+  const [view, setView] = createSignal<"edit" | "history">(p.initialView ?? "edit");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
-  const [confirmImport, setConfirmImportRaw] = createSignal<SkillSourceRef | null>(null);
-  const [importRels, setImportRels] = createSignal<string[]>([]);
-  // Allowed files start checked; the user can deselect any before the PUT.
-  const setConfirmImport = (src: SkillSourceRef | null) => { setImportRels(src?.files?.map((f) => f.rel) ?? []); setConfirmImportRaw(src); };
+  const [deleteError, setDeleteError] = createSignal<string | null>(null);
   const dirty = () => editable() && (draft() !== original() || projectsDirty());
   const meta = createMemo(() => parseSkillMeta(draft()));
   const audience = createMemo(() => effectiveAudience(meta()));
@@ -91,12 +119,6 @@ export function SkillDetail(p: SkillDetailProps) {
   const setLoad = (always: boolean) => setDraft(setSandboxedMeta(draft(), audience(), always ? "global" : null, p.row.name));
   const toggleProject = (slug: string, on: boolean) => setProjectDraft((list) => (on ? [...new Set([...list, slug])] : list.filter((x) => x !== slug)).sort());
   const [saved, setSaved] = createSignal(false);
-  const save = () => void run(async () => {
-    setSaved(false);
-    if (draft() !== original()) await p.onSave(p.row.name, draft());
-    if (projectsDirty()) await p.onSaveProjects?.(p.row.name, projectDraft());
-    setSaved(true);
-  });
 
   const run = async (fn: () => Promise<void>) => {
     if (busy()) return;
@@ -104,238 +126,184 @@ export function SkillDetail(p: SkillDetailProps) {
     setError(null);
     try { await fn(); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   };
+  const save = () => void run(async () => {
+    setSaved(false);
+    if (draft() !== original()) await p.onSave(p.row.name, draft());
+    if (projectsDirty()) await p.onSaveProjects?.(p.row.name, projectDraft());
+    setSaved(true);
+  });
+  // A failed delete stays in the confirm with Retry; success closes the panel.
+  const remove = async () => {
+    if (busy()) return;
+    setBusy(true);
+    setDeleteError(null);
+    try { await p.onDelete(p.row.name); p.onClose(); }
+    catch (e) { setDeleteError(errorText(e)); }
+    finally { setBusy(false); }
+  };
 
-
-  // ── Reference files ──
+  // ── Files: SKILL.md and its reference files ──
   const [files, setFiles] = createSignal<string[]>(p.library ? referencePaths(p.library) : []);
-  const [openFile, setOpenFile] = createSignal<string | null>(null);
+  const [openFile, setOpenFile] = createSignal(SKILL_MD);
   const [fileText, setFileText] = createSignal("");
   const [fileOriginal, setFileOriginal] = createSignal("");
   const [newFile, setNewFile] = createSignal<string | null>(null);
   const [confirmFileDelete, setConfirmFileDelete] = createSignal<string | null>(null);
-  const loadFile = (rel: string) => run(async () => {
-    const inline = p.library?.files?.find((f) => (f.path || f.name) === rel);
-    const text = inline ? inline.content : await readSkillFile(p.row.name, rel);
-    setOpenFile(rel); setFileText(text); setFileOriginal(text);
-  });
-  const saveFile = () => run(async () => {
+  const tree = createMemo(() => fileTree(files()));
+  const openPath = (rel: string) => {
+    if (rel === SKILL_MD) { setOpenFile(SKILL_MD); setView("edit"); return; }
+    void run(async () => {
+      const inline = p.library?.files?.find((f) => (f.path || f.name) === rel);
+      const text = inline ? inline.content : await readSkillFile(p.row.name, rel);
+      setOpenFile(rel); setFileText(text); setFileOriginal(text); setView("edit");
+    });
+  };
+  const saveFile = () => void run(async () => {
     const rel = openFile();
-    if (!rel) return;
     await putSkillFile(p.row.name, rel, fileText());
     setFileOriginal(fileText());
     await p.onFilesChanged(p.row.name);
   });
-  const createFile = () => run(async () => {
+  const createFile = () => void run(async () => {
     const rel = (newFile() ?? "").trim().replace(/^\/+/, "");
-    if (!rel || rel === "SKILL.md" || rel.split("/").some((s) => !s || s === ".." || s === ".")) throw new Error("Enter a relative path such as references/notes.md.");
+    if (!rel || rel === SKILL_MD || rel.split("/").some((seg) => !seg || seg === ".." || seg === ".")) throw new Error("Enter a relative path such as references/notes.md.");
     await putSkillFile(p.row.name, rel, "");
     setFiles((list) => [...new Set([...list, rel])].sort());
     setNewFile(null);
     setOpenFile(rel); setFileText(""); setFileOriginal("");
     await p.onFilesChanged(p.row.name);
   });
-  const removeFile = (rel: string) => run(async () => {
+  const removeFile = (rel: string) => void run(async () => {
     await deleteSkillFile(p.row.name, rel);
     setFiles((list) => list.filter((f) => f !== rel));
-    if (openFile() === rel) setOpenFile(null);
+    if (openFile() === rel) setOpenFile(SKILL_MD);
     setConfirmFileDelete(null);
     await p.onFilesChanged(p.row.name);
   });
 
-  const versions = () => p.row.sources.filter((s) => s.id !== "library");
-  const libraryHash = () => p.row.sources.find((s) => s.id === "library")?.hash;
+  // An old copy outside the Library gets one quiet line, not a panel of its own.
+  const oldCopy = () => p.row.sources.find((src) => src.id !== "library" && src.legacy && src.content);
+  const isSkill = () => openFile() === SKILL_MD;
 
   return (
-    <>
-      <Dialog size="wide" class="skills-detail" title={p.row.name} description={p.row.description} busy={busy()} dirty={dirty()} onClose={p.onClose}
-        footer={(close) => <>
-          <Show when={editable()}>
-            <DialogButton variant="destructive" class="skills-detail-delete" disabled={busy()} onClick={() => setConfirmDelete(true)}>Delete…</DialogButton>
-          </Show>
-          <DialogButton disabled={busy()} onClick={close}>{dirty() ? "Cancel" : "Close"}</DialogButton>
-          <Show when={editable()}>
-            <Show when={saved() && !dirty()}><span class="skills-saved" role="status">Saved to repo</span></Show>
-            <DialogButton variant="primary" disabled={busy() || !dirty()} onClick={save}>
-              {busy() ? "Saving…" : "Save"}
-            </DialogButton>
-          </Show>
-        </>}>
-        <Show when={skillBadge(p.row)}>{(b) => <div class="skills-detail-badges"><span class={`skills-badge ${b()}`}>{SKILL_BADGE_LABEL[b()]}</span></div>}</Show>
-        <Show when={error()}>{(e) => <p class="inline-error" role="alert">{e()} <Show when={dirty()}><button type="button" class="s-btn sm" onClick={save}>Retry</button></Show></p>}</Show>
-        <Show when={lint().length}>
-          <ul class="skills-lint" aria-label="Lint warnings">
-            <For each={lint()}>{(l) => <li data-lint={l.id}>{l.message}</li>}</For>
-          </ul>
+    <Dialog size="wide" class="skills-detail" title={p.row.name} description={p.row.description} busy={busy()} dirty={dirty()} onClose={p.onClose}
+      footer={(close) => <Show when={confirmDelete()} fallback={<>
+        <Show when={editable()}>
+          <DialogButton variant="destructive" class="skills-detail-delete" disabled={busy()} onClick={() => { setDeleteError(null); setConfirmDelete(true); }}>Delete…</DialogButton>
         </Show>
+        <Show when={saved() && !dirty()}><span class="skills-saved" role="status">Saved to repo</span></Show>
+        <DialogButton disabled={busy()} onClick={close}>{dirty() ? "Cancel" : "Close"}</DialogButton>
+        <Show when={editable()}>
+          <DialogButton variant="primary" disabled={busy() || !dirty()} onClick={save}>{busy() ? "Saving…" : "Save"}</DialogButton>
+        </Show>
+      </>}>
+        {/* Delete confirms inside the panel: no dialog on top of a dialog. */}
+        <div class="skills-confirm" role="alertdialog" aria-label={`Delete ${p.row.name}?`}>
+          <span><strong>Delete {p.row.name}?</strong> It leaves the Library and every agent on this Mac.</span>
+          <Show when={deleteError()}>{(e) => <span class="inline-error" role="alert">{e()}</span>}</Show>
+          <DialogButton disabled={busy()} onClick={() => setConfirmDelete(false)}>Cancel</DialogButton>
+          <DialogButton variant="destructive" disabled={busy()} onClick={() => void remove()}>{busy() ? "Deleting…" : deleteError() ? "Retry" : "Delete"}</DialogButton>
+        </div>
+      </Show>}>
+      <Show when={skillBadge(p.row)}>{(b) => <div class="skills-detail-badges"><span class={`skills-badge ${b()}`}>{SKILL_BADGE_LABEL[b()]}</span></div>}</Show>
+      <Show when={error()}>{(e) => <p class="inline-error" role="alert">{e()} <Show when={dirty()}><button type="button" class="s-btn sm" onClick={save}>Retry</button></Show></p>}</Show>
+      <Show when={oldCopy()}>{(src) =>
+        <p class="skills-oldcopy" title={src().path ?? undefined}>
+          Old copy in {src().label}<Show when={src().path}> · <code>{middleTruncate(src().path!, 40)}</code></Show>
+          <Show when={p.connected}> · <button type="button" class="link-btn" disabled={busy()} onClick={() => void run(async () => { await p.onImport(p.row.name, src(), src().files?.map((f) => f.rel) ?? []); p.onClose(); })}>Import</button></Show>
+        </p>
+      }</Show>
+      <Show when={!p.library && p.row.projectFile}>{(pf) =>
+        <p class="skills-oldcopy">Project context skill · {pf().slug} · <button type="button" class="link-btn" onClick={() => p.onOpenProjectFile?.(pf().slug, pf().path)}>Open in project files</button></p>
+      }</Show>
 
-        <div class="skills-filter-pills skills-detail-tabs" role="tablist" aria-label="Skill sections">
-          <button type="button" role="tab" aria-selected={tab() === "skill"} class={`skills-filter-pill ${tab() === "skill" ? "on" : ""}`} onClick={() => setTab("skill")}>SKILL.md</button>
-          <Show when={p.library}>
-            <button type="button" role="tab" aria-selected={tab() === "files"} class={`skills-filter-pill ${tab() === "files" ? "on" : ""}`} onClick={() => setTab("files")}>Reference files ({files().length})</button>
+      <div class="skills-panel">
+        <nav class="skills-files-tree" aria-label="Skill files">
+          <SidebarTree nodes={tree()} label={`${p.row.name} files`} selected={view() === "history" ? null : openFile()} render={(row) => {
+            const d = row.data;
+            return <>
+              <TreeConnectors row={row} />
+              <button type="button" class={`row ${!d.dir && openFile() === d.path && view() === "edit" ? "active" : ""}`} disabled={d.dir || busy()} title={d.path} onClick={() => openPath(d.path)}>
+                <span class="row-ico"><Show when={d.dir} fallback={<Ic.FileIcon />}><Ic.FolderIcon /></Show></span>
+                <span class="row-label">{d.name}</span>
+              </button>
+              <Show when={!d.dir && d.path !== SKILL_MD && editable()}>
+                <Show when={confirmFileDelete() === d.path} fallback={<button type="button" class="icon-btn skills-file-del" aria-label={`Delete ${d.path}`} disabled={busy()} onClick={() => setConfirmFileDelete(d.path)}><Ic.TrashIcon size={12} /></button>}>
+                  <button type="button" class="s-btn sm danger" disabled={busy()} onClick={() => removeFile(d.path)}>Delete</button>
+                  <button type="button" class="s-btn sm quiet" onClick={() => setConfirmFileDelete(null)}>Keep</button>
+                </Show>
+              </Show>
+            </>;
+          }} />
+          <Show when={editable()}>
+            <Show when={newFile() !== null} fallback={<button type="button" class="s-btn sm quiet skills-file-add" disabled={busy()} onClick={() => setNewFile("references/")}><Ic.PlusIcon size={12} /> New file</button>}>
+              <form class="skills-file-new" onSubmit={(e) => { e.preventDefault(); createFile(); }}>
+                <input class="s-input" aria-label="New file path" value={newFile() ?? ""} autofocus onInput={(e) => setNewFile(e.currentTarget.value)} onBlur={(e) => { if (!e.currentTarget.value.trim() || e.currentTarget.value === "references/") setNewFile(null); }} />
+              </form>
+            </Show>
           </Show>
           <Show when={p.library}>
-            <button type="button" role="tab" aria-selected={tab() === "history"} class={`skills-filter-pill ${tab() === "history" ? "on" : ""}`} onClick={() => setTab("history")}>History</button>
-          </Show>
-          <Show when={versions().length}>
-            <button type="button" role="tab" aria-selected={tab() === "versions"} class={`skills-filter-pill ${tab() === "versions" ? "on" : ""}`} onClick={() => setTab("versions")}>
-              Copies ({versions().length}){p.row.divergent ? " · divergent" : ""}
+            <button type="button" class={`row skills-history-row ${view() === "history" ? "active" : ""}`} onClick={() => setView(view() === "history" ? "edit" : "history")}>
+              <span class="row-ico"><Ic.ReopenIcon /></span><span class="row-label">History</span>
             </button>
           </Show>
-        </div>
+        </nav>
 
-        <Show when={tab() === "skill"}>
-          <Show when={editable()}>
-            <div class="skills-meta-controls">
-              <div class="skills-meta-row" role="group" aria-label="Who uses it">
-                <span class="skills-meta-label">Who uses it</span>
-                <For each={[["mission", "Missions"], ["coordinator", "Assistant"], ["local", "This Mac"]] as const}>{([id, label]) =>
-                  <label class="skills-check"><input type="checkbox" checked={audience().includes(id)} disabled={busy()} onChange={(e) => toggleAudience(id, e.currentTarget.checked)} />{label}</label>
-                }</For>
-              </div>
-              <div class="skills-meta-row" role="radiogroup" aria-label="Load">
-                <span class="skills-meta-label">Load</span>
-                <div class="skills-seg">
-                  <button type="button" role="radio" aria-checked={meta().scope !== "global"} class={meta().scope !== "global" ? "on" : ""} disabled={busy()} onClick={() => setLoad(false)}>On demand</button>
-                  <button type="button" role="radio" aria-checked={meta().scope === "global"} class={meta().scope === "global" ? "on" : ""} disabled={busy()} onClick={() => setLoad(true)}>Always</button>
-                </div>
-              </div>
-              <Show when={(p.projects ?? []).length && meta().scope !== "global"}>
-                <div class="skills-meta-row" role="group" aria-label="Projects">
-                  <span class="skills-meta-label">Projects</span>
-                  <For each={p.projects ?? []}>{(proj) =>
-                    <label class="skills-check"><input type="checkbox" checked={projectDraft().includes(proj.slug)} disabled={busy()} onChange={(e) => toggleProject(proj.slug, e.currentTarget.checked)} />{proj.title || proj.slug}</label>
-                  }</For>
-                </div>
+        <section class="skills-panel-main">
+          <Show when={view() === "edit"} fallback={
+            <SkillHistory name={p.row.name} current={original()} busy={busy()} onRestore={(rev, content) => void run(async () => { await p.onSave(p.row.name, content, `skill: restore ${p.row.name} to ${rev.slice(0, 7)}`); setDraft(content); setSaved(true); setView("edit"); })} />
+          }>
+            <div class="pf-bar skills-file-bar">
+              <span class="pf-path" title={`skill/${p.row.name}/${openFile()}`}>{middleTruncate(`${p.row.name}/${openFile()}`)}</span>
+              <Show when={editable() && isSkill()}>
+                <button type="button" class="s-btn sm quiet" aria-pressed={!preview()} onClick={() => setPreview(!preview())}>{preview() ? "Edit" : "Done"}</button>
               </Show>
-              <button type="button" class="s-btn sm quiet skills-preview-toggle" aria-pressed={!preview()} onClick={() => setPreview(!preview())}>{preview() ? "Edit" : "Done editing"}</button>
+              <Show when={editable() && !isSkill()}>
+                <button type="button" class="s-btn sm" disabled={busy() || fileText() === fileOriginal()} onClick={saveFile}>Save file</button>
+              </Show>
             </div>
-          </Show>
-          <Show when={!p.library && p.row.projectFile}>
-            {(pf) => (
-              <div class="skills-drawer-meta">
-                <span>Project context skill · {pf().slug}</span>
-                <button type="button" class="s-btn sm" onClick={() => p.onOpenProjectFile?.(pf().slug, pf().path)}>Open in project files</button>
-              </div>
-            )}
-          </Show>
-          <Show when={!editable() && !p.row.projectFile && p.connected && !p.row.inLibrary}>
-            <p class="skills-sub-note">Not in the Library. Import a copy from the Copies tab to manage it here.</p>
-          </Show>
-          <div class="skills-editor">
-            <Show when={!preview() && editable()} fallback={<div class="skills-md-view"><MdView text={draft().replace(/^---\n[\s\S]*?\n---\n?/, "").trim() || "_No SKILL.md content available._"} /></div>}>
-              <MdSource text={draft()} onInput={setDraft} readOnly={busy()} />
-            </Show>
-          </div>
-          <Show when={dirty()}>
-            <details class="skills-pending-diff"><summary>Review changes</summary><DiffView before={original()} after={draft()} beforeLabel="Library" afterLabel="Draft" /></details>
-          </Show>
-        </Show>
-
-        <Show when={tab() === "files"}>
-          <div class="skills-files">
-            <div class="skills-files-list" role="list">
-              <For each={files()} fallback={<p class="skills-preview-empty">No reference files.</p>}>{(rel) => (
-                <div class={`skills-file-row ${openFile() === rel ? "on" : ""}`} role="listitem">
-                  <button type="button" class="skills-file-name" disabled={busy()} onClick={() => void loadFile(rel)}>{rel}</button>
-                  <button type="button" class="s-btn sm quiet danger" aria-label={`Delete ${rel}`} disabled={busy() || !editable()} onClick={() => setConfirmFileDelete(rel)}>Delete</button>
-                </div>
-              )}</For>
-              <Show when={editable()}><button type="button" class="s-btn sm" disabled={busy()} onClick={() => setNewFile("references/")}>Add file</button></Show>
-            </div>
-            <Show when={openFile()}>{(rel) => (
-              <div class="skills-file-editor">
-                <div class="skills-drawer-meta"><code>{rel()}</code>
-                  <button type="button" class="s-btn sm primary" disabled={busy() || fileText() === fileOriginal() || !editable()} onClick={() => void saveFile()}>Save file & sync</button>
-                </div>
-                <div class="skills-editor small"><MdSource text={fileText()} onInput={setFileText} readOnly={busy() || !editable()} /></div>
-              </div>
-            )}</Show>
-          </div>
-        </Show>
-
-        <Show when={tab() === "history"}>
-          <SkillHistory name={p.row.name} current={original()} busy={busy()} onRestore={(rev, content) => void run(async () => { await p.onSave(p.row.name, content, `skill: restore ${p.row.name} to ${rev.slice(0, 7)}`); setDraft(content); setSaved(true); })} />
-        </Show>
-
-        <Show when={tab() === "versions"}>
-          <div class="skills-versions">
-            <Show when={p.row.legacyOnly}>
-              <p class="skills-sub-note">Only in a legacy folder: it is no longer synced to local harnesses. Import it to the Library to keep it.</p>
-            </Show>
-            <For each={versions()}>{(src) => {
-              const same = () => !!libraryHash() && src.hash === libraryHash();
-              const [compare, setCompare] = createSignal(false);
-              return (
-                <div class="skills-version" data-source={src.id}>
-                  <div class="skills-version-head">
-                    <div class="skills-version-title">
-                      <span class="skills-origin-tag">{src.legacy ? "legacy" : "canonical"}</span>
-                      <strong>{src.label}</strong>
-                      <span class="skills-sub-note">{src.lines} lines · {src.hash.slice(0, 8)}</span>
-                      <Show when={p.row.inLibrary}><span class={`skills-badge ${same() ? "synced" : "drift"}`}>{same() ? "Same as Library" : "Differs from Library"}</span></Show>
-                    </div>
-                    <div class="skills-version-actions">
-                      <Show when={p.row.inLibrary && !same() && src.content}>
-                        <button type="button" class="s-btn sm" onClick={() => setCompare(!compare())}>{compare() ? "Hide diff" : "Compare"}</button>
-                      </Show>
-                      <Show when={p.connected && src.content && !same()}>
-                        <button type="button" class={`s-btn sm${p.row.inLibrary ? "" : " primary"}`} disabled={busy()} onClick={() => setConfirmImport(src)}>{p.row.inLibrary ? "Use this version" : "Import to Library"}</button>
-                      </Show>
+            <Show when={isSkill()} fallback={<div class="skills-editor"><MdSource text={fileText()} onInput={setFileText} readOnly={busy() || !editable()} /></div>}>
+              <Show when={editable()}>
+                <div class="skills-meta-controls">
+                  <div class="skills-meta-row" role="group" aria-label="Who uses it">
+                    <span class="skills-meta-label">Who uses it</span>
+                    <For each={[["mission", "Missions"], ["coordinator", "Assistant"], ["local", "This Mac"]] as const}>{([id, label]) =>
+                      <label class="skills-check"><input type="checkbox" checked={audience().includes(id)} disabled={busy()} onChange={(e) => toggleAudience(id, e.currentTarget.checked)} />{label}</label>
+                    }</For>
+                  </div>
+                  <div class="skills-meta-row" role="radiogroup" aria-label="Load">
+                    <span class="skills-meta-label">Load</span>
+                    <div class="skills-seg">
+                      <button type="button" role="radio" aria-checked={meta().scope !== "global"} class={meta().scope !== "global" ? "on" : ""} disabled={busy()} onClick={() => setLoad(false)}>On demand</button>
+                      <button type="button" role="radio" aria-checked={meta().scope === "global"} class={meta().scope === "global" ? "on" : ""} disabled={busy()} onClick={() => setLoad(true)}>Always</button>
                     </div>
                   </div>
-                  <Show when={src.path}><code class="skills-version-path">{src.path}</code></Show>
-                  <Show when={compare() && src.content}>
-                    <DiffView before={original()} after={src.content!} beforeLabel="Library" afterLabel={src.label} />
+                  <Show when={(p.projects ?? []).length && meta().scope !== "global"}>
+                    <div class="skills-meta-row" role="group" aria-label="Projects">
+                      <span class="skills-meta-label">Projects</span>
+                      <For each={p.projects ?? []}>{(proj) =>
+                        <label class="skills-check"><input type="checkbox" checked={projectDraft().includes(proj.slug)} disabled={busy()} onChange={(e) => toggleProject(proj.slug, e.currentTarget.checked)} />{proj.title || proj.slug}</label>
+                      }</For>
+                    </div>
                   </Show>
                 </div>
-              );
-            }}</For>
-          </div>
-        </Show>
-      </Dialog>
-
-      <Show when={confirmDelete()}>
-        <ConfirmDialog title={`Delete ${p.row.name}?`} destructive action="Delete skill" busy={busy()} error={error()}
-          description={`Removes the skill from the Library and from all ${p.harnessTotal} local harness folders Orb manages. Unmanaged copies you created are kept.`}
-          onClose={() => setConfirmDelete(false)}
-          onConfirm={() => void run(async () => { await p.onDelete(p.row.name); setConfirmDelete(false); p.onClose(); })} />
-      </Show>
-      <Show when={confirmImport()}>{(src) => (
-        <Dialog size="compact" class="skills-import" title={p.row.inLibrary ? `Replace the Library version of ${p.row.name}?` : `Import ${p.row.name} to the Library?`}
-          description={`Writes SKILL.md and the checked reference files from ${src().label} to the Library, then syncs local harnesses.`}
-          busy={busy()} onClose={() => setConfirmImport(null)}
-          footer={(close) => <>
-            <DialogButton disabled={busy()} onClick={close}>Cancel</DialogButton>
-            <DialogButton variant="primary" disabled={busy()} onClick={() => void run(async () => { await p.onImport(p.row.name, src(), importRels()); setConfirmImport(null); p.onClose(); })}>
-              {busy() ? "Working…" : p.row.inLibrary ? "Use this version" : "Import"}
-            </DialogButton>
-          </>}>
-          <Show when={error()}>{(e) => <p class="inline-error" role="alert">{e()}</p>}</Show>
-          <Show when={p.row.inLibrary && dropsSandboxedMetadata(original(), src().content)}>
-            <p class="inline-error" role="alert">This copy has no <code>metadata.sandboxed</code> block. Replacing the Library version removes its audience and scope, so missions stop receiving it automatically.</p>
+              </Show>
+              <Show when={lint().length}>
+                <ul class="skills-lint" aria-label="Lint warnings"><For each={lint()}>{(l) => <li data-lint={l.id}>{l.message}</li>}</For></ul>
+              </Show>
+              <div class="skills-editor">
+                <Show when={!preview() && editable()} fallback={<div class="skills-md-view"><MdView text={draft().replace(/^---\n[\s\S]*?\n---\n?/, "").trim() || "_No SKILL.md content available._"} /></div>}>
+                  <MdSource text={draft()} onInput={setDraft} readOnly={busy()} />
+                </Show>
+              </div>
+              <Show when={dirty()}>
+                <details class="skills-pending-diff"><summary>Review changes</summary><DiffView before={original()} after={draft()} beforeLabel="Library" afterLabel="Draft" /></details>
+              </Show>
+            </Show>
           </Show>
-          <Show when={src().files?.length} fallback={<p class="skills-sub-note">No importable reference files: only SKILL.md is imported.</p>}>
-            <fieldset class="skills-import-files">
-              <legend>Reference files (text under references/, scripts/, assets/, templates/; secrets and dotfiles are never offered)</legend>
-              <For each={src().files}>{(f) => (
-                <label class="skills-check"><input type="checkbox" checked={importRels().includes(f.rel)} disabled={busy()}
-                  onChange={(e) => setImportRels(e.currentTarget.checked ? [...importRels(), f.rel] : importRels().filter((r) => r !== f.rel))} />
-                  <code>{f.rel}</code><span class="skills-sub-note">{formatSize(f.size)}</span></label>
-              )}</For>
-            </fieldset>
-          </Show>
-        </Dialog>
-      )}</Show>
-      <Show when={confirmFileDelete()}>{(rel) => (
-        <ConfirmDialog title={`Delete ${rel()}?`} destructive action="Delete file" busy={busy()} error={error()}
-          description="Removes the reference file from the Library skill and syncs local harnesses."
-          onClose={() => setConfirmFileDelete(null)} onConfirm={() => void removeFile(rel())} />
-      )}</Show>
-      <Show when={newFile() !== null}>
-        <NameDialog title="Add reference file" label="Path inside the skill" placeholder="references/notes.md" value={newFile() ?? ""} onInput={setNewFile}
-          action="Create" busy={busy()} error={error()} onAction={() => void createFile()} onClose={() => setNewFile(null)} />
-      </Show>
-    </>
+        </section>
+      </div>
+    </Dialog>
   );
 }
 

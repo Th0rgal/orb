@@ -4,6 +4,7 @@ import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMou
 import * as Ic from "./icons";
 import { Select } from "./Select";
 import { ConfirmDialog, Field, NameDialog } from "./Dialog";
+import { PopupMenu, type MenuEntry } from "./Menu";
 import {
   connectionVersion,
   getRemoteNodes,
@@ -29,11 +30,11 @@ import {
   type SyncSkillPayload,
 } from "./localAgents";
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
-import { newSkillTemplate, normalizeSkillName, parseSkillMeta } from "./skillModel";
+import { effectiveAudience, newSkillTemplate, normalizeSkillName, parseSkillMeta, setSandboxedMeta } from "./skillModel";
 import { SKILL_BADGE_LABEL, buildSkillRows, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
 import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, getLibraryStatus, getProjectSkills, putLibrarySkill, putProjectSkills, putSkillFile, readSkillFile, repoLabel, syncLibrary, type LibraryStatus } from "./skillsApi";
 import { orbRelativeTimeString } from "./orbKernel";
-import { SkillDetail } from "./SkillDetail";
+import { SkillDetail, dropsSandboxedMetadata } from "./SkillDetail";
 import { SkillDeliveryPreview } from "./SkillDelivery";
 
 export interface HarnessCatalogRow {
@@ -142,6 +143,13 @@ export function rememberKnownSkillNames(names: Iterable<string>) {
 
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** Plain words instead of a raw 500 dump; the detail stays in the message for support. */
+function deleteMessage(name: string, e: unknown): string {
+  const raw = errorText(e).replace(/^\d{3}\s+/, "");
+  if (/gpg|sign/i.test(raw)) return `Core couldn’t sign the Library commit, so ${name} is still there. (${raw.slice(0, 120)})`;
+  if (/push|rejected|denied/i.test(raw)) return `Core couldn’t push the Library, so the delete isn’t saved yet. (${raw.slice(0, 120)})`;
+  return `Couldn’t delete ${name}: ${raw}`;
+}
 
 export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [machine, setMachine] = createSignal<string>("local");
@@ -163,6 +171,13 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [search, setSearch] = createSignal("");
   const [attentionOnly, setAttentionOnly] = createSignal(false);
   const [advancedOpen, setAdvancedOpen] = createSignal(false);
+  // Rows being deleted are hidden at once and come back if the delete fails.
+  const [deleting, setDeleting] = createSignal<ReadonlySet<string>>(new Set());
+  const [rowMenu, setRowMenu] = createSignal<{ row: SkillRow; x: number; y: number } | null>(null);
+  const [openView, setOpenView] = createSignal<"edit" | "history">("edit");
+  const [confirmRowDelete, setConfirmRowDelete] = createSignal<string | null>(null);
+  const [rowDeleteBusy, setRowDeleteBusy] = createSignal(false);
+  const [rowDeleteError, setRowDeleteError] = createSignal<string | null>(null);
   const [repo, setRepo] = createSignal<LibraryStatus | null>(null);
   const [pulling, setPulling] = createSignal(false);
   const [openSkill, setOpenSkill] = createSignal<string | null>(null);
@@ -441,7 +456,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     return q ? rows().filter((row) => row.name.toLowerCase().includes(q) || row.description.toLowerCase().includes(q)) : rows();
   });
   const attentionCount = createMemo(() => searched().filter(needsAttention).length);
-  const filteredRows = createMemo(() => (attentionOnly() ? searched().filter(needsAttention) : searched()));
+  const filteredRows = createMemo(() => (attentionOnly() ? searched().filter(needsAttention) : searched()).filter((row) => !deleting().has(row.name)));
   const saveProjects = async (name: string, next: string[]) => {
     const current = projectSelections();
     const changed = projects().filter((proj) => (current[proj.slug] ?? []).includes(name) !== next.includes(proj.slug));
@@ -507,7 +522,10 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const keepLocal = async (row: SkillRow) => {
     const local = row.sources.find((src) => src.id !== "library" && src.content);
     if (!local?.content) throw new Error("This copy has no readable SKILL.md.");
-    await saveSkill(row.name, local.content);
+    // A local copy without metadata.sandboxed must not silently drop who uses the skill.
+    const lib = libraryFull()[row.name]?.content;
+    const content = dropsSandboxedMetadata(lib, local.content) ? setSandboxedMeta(local.content, effectiveAudience(parseSkillMeta(lib!)), parseSkillMeta(lib!).scope ?? null, row.name) : local.content;
+    await saveSkill(row.name, content);
   };
 
   const refetchSkill = async (name: string) => {
@@ -537,16 +555,59 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     await syncNow(false, `Imported "${name}" from ${src.label} and saved it to the repo.`);
   };
 
+  /** Delete from the Library and the repo. The row hides at once and returns on failure.
+   * Retry-safe: a skill already gone from the Library (an earlier try that failed at commit)
+   * only needs the commit and push. */
   const removeSkill = async (name: string) => {
-    await deleteLibrarySkill(name);
-    await commitAndPush(`skill: delete ${name}`);
+    setDeleting((prev) => new Set([...prev, name]));
+    try {
+      await deleteLibrarySkill(name).catch((e) => { if (!/not found|404/i.test(errorText(e))) throw e; });
+      await commitAndPush(`skill: delete ${name}`);
+    } catch (e) {
+      setDeleting((prev) => { const next = new Set(prev); next.delete(name); return next; });
+      throw new Error(deleteMessage(name, e));
+    }
     setLibrarySkills((list) => list.filter((s) => s.name !== name));
     setLibraryFull((prev) => {
       const next = { ...prev };
       delete next[name];
       return next;
     });
-    await syncNow(true);
+    setDeleting((prev) => { const next = new Set(prev); next.delete(name); return next; });
+    void syncNow(true);
+  };
+
+  const confirmDeleteRow = async () => {
+    const name = confirmRowDelete();
+    if (!name || rowDeleteBusy()) return;
+    setRowDeleteBusy(true);
+    setRowDeleteError(null);
+    try { await removeSkill(name); setConfirmRowDelete(null); }
+    catch (e) { setRowDeleteError(errorText(e)); }
+    finally { setRowDeleteBusy(false); }
+  };
+
+  const menuFor = (row: SkillRow): MenuEntry[] => {
+    const badge = skillBadge(row);
+    const local = row.sources.find((x) => x.id !== "library" && x.content);
+    const act = (fn: () => Promise<void>) => () => { setSyncError(null); void fn().catch((e) => setSyncError(errorText(e))); };
+    return [
+      { kind: "item", label: "Edit", icon: Ic.PencilIcon, onClick: () => { setOpenView("edit"); openRowDetail(row); } },
+      ...(row.inLibrary ? [{ kind: "item" as const, label: "History", icon: Ic.ReopenIcon, onClick: () => { setOpenView("history"); openRowDetail(row); } }] : []),
+      ...(badge === "edited" && isConnected() ? [
+        { kind: "sep" as const },
+        { kind: "item" as const, label: "Keep this Mac’s version", onClick: act(() => keepLocal(row)) },
+        { kind: "item" as const, label: "Discard this Mac’s edit", onClick: act(() => syncNow(false)) },
+      ] : []),
+      ...(badge === "old-folder" && local && isConnected() ? [
+        { kind: "sep" as const },
+        { kind: "item" as const, label: "Import to the Library", onClick: act(() => importSkill(row.name, local, local.files?.map((f) => f.rel) ?? [])) },
+      ] : []),
+      ...(row.inLibrary && isConnected() ? [
+        { kind: "sep" as const },
+        { kind: "item" as const, label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => { setRowDeleteError(null); setConfirmRowDelete(row.name); } },
+      ] : []),
+    ];
   };
 
   const filesChanged = async (name: string) => {
@@ -651,31 +712,18 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
               <For each={filteredRows()} fallback={<div class="s-row"><div class="s-row-text"><div class="s-row-desc">{attentionOnly() ? "Nothing needs attention." : "No skills match."}</div></div></div>}>
                 {(row) => {
                   const badge = () => skillBadge(row);
-                  const [rowBusy, setRowBusy] = createSignal(false);
-                  const act = async (fn: () => Promise<void>) => { setRowBusy(true); setSyncError(null); try { await fn(); } catch (e) { setSyncError(errorText(e)); } finally { setRowBusy(false); } };
                   return (
-                    <div class="skills-item" data-skill={row.name}>
-                      <button type="button" class="skills-item-head" onClick={() => openRowDetail(row)}>
-                        <div class="skills-item-body">
-                          <div class="skills-item-top">
-                            <code class="skills-item-name">{row.name}</code>
-                            <Show when={badge()}>{(b) => <span class={`skills-badge ${b()}`}>{SKILL_BADGE_LABEL[b()]}</span>}</Show>
-                            <Show when={!badge() && row.lint.length}><span class="skills-badge lint" title={row.lint.map((l) => l.message).join("\n")}>Needs a fix</span></Show>
-                          </div>
-                          <div class="skills-item-desc">{row.description || "No description."}</div>
-                        </div>
+                    <div class="skills-item" data-skill={row.name} onContextMenu={(e) => { e.preventDefault(); setRowMenu({ row, x: e.clientX, y: e.clientY }); }}>
+                      <button type="button" class="skills-item-head" onClick={() => { setOpenView("edit"); openRowDetail(row); }}>
+                        <Ic.FileIcon size={14} />
+                        <span class="skills-item-name">{row.name}</span>
+                        <span class="skills-item-desc">{row.description || "No description."}</span>
+                        <Show when={badge()}>{(b) => <span class={`skills-badge ${b()}`}>{SKILL_BADGE_LABEL[b()]}</span>}</Show>
+                        <Show when={!badge() && row.lint.length}><span class="skills-badge lint" title={row.lint.map((l) => l.message).join("\n")}>Needs a fix</span></Show>
                       </button>
-                      <Show when={badge() === "edited" && isConnected()}>
-                        <div class="skills-item-actions">
-                          <button type="button" class="s-btn sm" disabled={rowBusy()} onClick={() => void act(() => keepLocal(row))} title="Save this Mac's version to the Library">Keep</button>
-                          <button type="button" class="s-btn sm quiet" disabled={rowBusy()} onClick={() => void act(() => syncNow(false))} title="Replace this Mac's copy with the Library version">Discard</button>
-                        </div>
-                      </Show>
-                      <Show when={badge() === "old-folder" && isConnected()}>
-                        <div class="skills-item-actions">
-                          <button type="button" class="s-btn sm" disabled={rowBusy()} onClick={() => void act(async () => { const src = row.sources.find((x) => x.content); if (!src) throw new Error("This copy has no readable SKILL.md."); await importSkill(row.name, src, src.files?.map((f) => f.rel) ?? []); })}>Import</button>
-                        </div>
-                      </Show>
+                      <button type="button" class="icon-btn skills-item-more" aria-label={`Actions for ${row.name}`} aria-haspopup="menu" onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setRowMenu({ row, x: r.right - 200, y: r.bottom + 4 }); }}>
+                        <span aria-hidden="true">···</span>
+                      </button>
                     </div>
                   );
                 }}
@@ -836,10 +884,17 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         </details>
       </div>
 
+      <Show when={rowMenu()}>{(m) => <PopupMenu x={m().x} y={m().y} items={menuFor(m().row)} onClose={() => setRowMenu(null)} />}</Show>
+      <Show when={confirmRowDelete()}>{(name) =>
+        <ConfirmDialog title={`Delete ${name()}?`} description="It leaves the Library and every agent on this Mac." destructive
+          action={rowDeleteError() ? "Retry" : "Delete"} busy={rowDeleteBusy()} error={rowDeleteError()}
+          onClose={() => setConfirmRowDelete(null)} onConfirm={() => void confirmDeleteRow()} />
+      }</Show>
       <Show when={openRow()}>
         {(row) => (
           <SkillDetail
             row={row()}
+            initialView={openView()}
             library={libraryFull()[row().name]}
             connected={isConnected()}
             harnessTotal={harnessTotal()}
