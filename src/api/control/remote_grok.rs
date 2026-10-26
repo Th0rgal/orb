@@ -254,6 +254,75 @@ pub(crate) enum StreamUpdate {
     },
 }
 
+static AGENT_EVENT_NORMALIZE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+static TRANSCRIPT_REDUCE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+pub fn agent_event_normalize_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    AGENT_EVENT_NORMALIZE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+pub fn transcript_reduce_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    TRANSCRIPT_REDUCE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+/// Evaluate `orb_agent_event_normalize_step` (`TotalTransducer`, `NoEventLoss`,
+/// `ThinkingClosedOnComplete`) over live runtime harness events and record the
+/// comparison in `agent_event_normalize_shadow_counter()`.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_agent_event_normalize_gate(
+    harness_kind: crate::orb_spec::AgentHarnessKind,
+    raw_event_kind: crate::orb_spec::RawAgentEventKind,
+    is_completed: bool,
+    has_non_empty_text: bool,
+    session_matches_expected: bool,
+    is_duplicate_turn_or_tool: bool,
+    payload_bytes: u32,
+    max_payload_bytes: u32,
+    host_emits: bool,
+) -> crate::orb_spec::AgentEventNormalizeStepVerdict {
+    crate::orb_spec::observe_agent_event_normalize_shadow(
+        crate::orb_spec::AgentEventNormalizeStepInput {
+            harness_kind,
+            raw_event_kind,
+            is_completed,
+            has_non_empty_text,
+            session_matches_expected,
+            is_duplicate_turn_or_tool,
+            payload_bytes,
+            max_payload_bytes,
+        },
+        host_emits,
+        agent_event_normalize_shadow_counter(),
+    )
+}
+
+/// Evaluate `orb_transcript_reduce_step` (`ReplayEquivalence`, `MonotoneProgress`,
+/// `ThinkingClosedOnComplete`) over live or log-replayed normalized events and record
+/// the comparison in `transcript_reduce_shadow_counter()`.
+pub fn evaluate_transcript_reduce_gate(
+    last_applied_seq: u64,
+    incoming_seq: u64,
+    thinking_open: bool,
+    normalized_action: crate::orb_spec::AgentEventNormalizeAction,
+    is_replay_from_log: bool,
+    host_emits: bool,
+) -> crate::orb_spec::TranscriptReduceStepVerdict {
+    crate::orb_spec::observe_transcript_reduce_shadow(
+        crate::orb_spec::TranscriptReduceStepInput {
+            last_applied_seq,
+            incoming_seq,
+            thinking_open,
+            normalized_action,
+            is_replay_from_log,
+        },
+        host_emits,
+        transcript_reduce_shadow_counter(),
+    )
+}
+
 /// Incremental parser over the CLI's `--output-format streaming-json` lines
 /// (`{"type":"text","data":…}`, `{"type":"thought","data":…}`,
 /// `{"type":"end","stopReason":…,"sessionId":…}`), tolerant of the older
@@ -305,9 +374,131 @@ pub(crate) struct GrokStream {
     opencode_last_tool_part: Option<String>,
     /// OpenCode: tokens summed over the job's `step_finish` parts.
     pub(crate) opencode_usage: Option<crate::cost::TokenUsage>,
+    /// Phase 3: Monotone sequence counter and thinking state for `orb_transcript_reduce_step`.
+    pub(crate) last_reduced_seq: u64,
+    pub(crate) reducer_thinking_open: bool,
 }
 
 impl GrokStream {
+    fn active_harness_kind(&self) -> crate::orb_spec::AgentHarnessKind {
+        if self.antigravity.is_some() {
+            crate::orb_spec::AgentHarnessKind::Antigravity
+        } else if self.vibe.is_some() {
+            crate::orb_spec::AgentHarnessKind::Vibe
+        } else if self.claude {
+            crate::orb_spec::AgentHarnessKind::ClaudeCode
+        } else if self.opencode_usage.is_some()
+            || self.opencode_last_tool_part.is_some()
+            || self.opencode_last_message.is_some()
+        {
+            crate::orb_spec::AgentHarnessKind::OpenCode
+        } else if self.codex_ordinary_turn {
+            crate::orb_spec::AgentHarnessKind::Codex
+        } else {
+            crate::orb_spec::AgentHarnessKind::Grok
+        }
+    }
+
+    fn record_normalized_line_step(
+        &mut self,
+        payload_bytes: u32,
+        prev_updates_len: usize,
+        prev_diag_len: usize,
+        updates: &[StreamUpdate],
+    ) {
+        const MAX_LINE_BYTES: u32 = 1024 * 1024;
+        let harness_kind = self.active_harness_kind();
+        let emitted = &updates[prev_updates_len..];
+        if emitted.is_empty() {
+            if self.diagnostics.len() > prev_diag_len {
+                let norm = evaluate_agent_event_normalize_gate(
+                    harness_kind,
+                    crate::orb_spec::RawAgentEventKind::DiagnosticLine,
+                    true,
+                    true,
+                    true,
+                    false,
+                    payload_bytes,
+                    MAX_LINE_BYTES,
+                    true,
+                );
+                let incoming_seq = self.last_reduced_seq.saturating_add(1);
+                let red = evaluate_transcript_reduce_gate(
+                    self.last_reduced_seq,
+                    incoming_seq,
+                    self.reducer_thinking_open,
+                    norm.action,
+                    false,
+                    true,
+                );
+                self.last_reduced_seq = incoming_seq;
+                self.reducer_thinking_open = red.thinking_open_next;
+            }
+            return;
+        }
+        for upd in emitted {
+            let (raw_kind, is_completed, has_non_empty_text) = match upd {
+                StreamUpdate::SessionId(s) => (
+                    crate::orb_spec::RawAgentEventKind::SessionIdUpdate,
+                    true,
+                    !s.is_empty(),
+                ),
+                StreamUpdate::Thinking | StreamUpdate::ThinkingSnapshot(_) => (
+                    crate::orb_spec::RawAgentEventKind::ThinkingUpdate,
+                    false,
+                    !self.thinking.is_empty(),
+                ),
+                StreamUpdate::Text
+                | StreamUpdate::TextSnapshot(_)
+                | StreamUpdate::NativeText(_) => (
+                    crate::orb_spec::RawAgentEventKind::AssistantText,
+                    true,
+                    true,
+                ),
+                StreamUpdate::Tool { completed, .. } => (
+                    crate::orb_spec::RawAgentEventKind::ToolCall,
+                    *completed,
+                    true,
+                ),
+                StreamUpdate::GoalStatus { .. } | StreamUpdate::GoalIteration(_) => (
+                    crate::orb_spec::RawAgentEventKind::GoalProgress,
+                    false,
+                    true,
+                ),
+                StreamUpdate::End => (
+                    crate::orb_spec::RawAgentEventKind::TurnCompleted,
+                    true,
+                    true,
+                ),
+                StreamUpdate::AuthRequired | StreamUpdate::Error(_) => {
+                    (crate::orb_spec::RawAgentEventKind::ErrorOrAuth, true, true)
+                }
+            };
+            let norm = evaluate_agent_event_normalize_gate(
+                harness_kind,
+                raw_kind,
+                is_completed,
+                has_non_empty_text,
+                true,
+                false,
+                payload_bytes,
+                MAX_LINE_BYTES,
+                true,
+            );
+            let incoming_seq = self.last_reduced_seq.saturating_add(1);
+            let red = evaluate_transcript_reduce_gate(
+                self.last_reduced_seq,
+                incoming_seq,
+                self.reducer_thinking_open,
+                norm.action,
+                false,
+                true,
+            );
+            self.last_reduced_seq = incoming_seq;
+            self.reducer_thinking_open = red.thinking_open_next;
+        }
+    }
+
     pub(crate) fn feed(&mut self, chunk: &str) -> Vec<StreamUpdate> {
         let mut updates = Vec::new();
         for part in chunk.split_inclusive('\n') {
@@ -321,7 +512,16 @@ impl GrokStream {
             if complete {
                 if !self.dropping_line {
                     let line = std::mem::take(&mut self.partial);
-                    self.feed_line(line.trim_end_matches('\n'), &mut updates);
+                    let trimmed = line.trim_end_matches('\n');
+                    let prev_len = updates.len();
+                    let prev_diag = self.diagnostics.len();
+                    self.feed_line(trimmed, &mut updates);
+                    self.record_normalized_line_step(
+                        trimmed.len().min(u32::MAX as usize) as u32,
+                        prev_len,
+                        prev_diag,
+                        &updates,
+                    );
                 }
                 self.dropping_line = false;
             }
@@ -335,7 +535,15 @@ impl GrokStream {
         let mut updates = Vec::new();
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
+            let prev_len = updates.len();
+            let prev_diag = self.diagnostics.len();
             self.feed_line(&line, &mut updates);
+            self.record_normalized_line_step(
+                line.len().min(u32::MAX as usize) as u32,
+                prev_len,
+                prev_diag,
+                &updates,
+            );
         }
         self.snapshot_pending(&mut updates);
         updates
@@ -4855,6 +5063,178 @@ mod tests {
         mission.backend = "claudecode".into();
         let other = local_resume_refusal(&mission, &placement);
         assert!(other.contains("/resume"), "{other}");
+    }
+
+    #[test]
+    fn phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences() {
+        use super::{
+            agent_event_normalize_shadow_counter, evaluate_agent_event_normalize_gate,
+            evaluate_transcript_reduce_gate, transcript_reduce_shadow_counter, GrokStream,
+            StreamUpdate,
+        };
+        use crate::orb_spec::{
+            AgentEventNormalizeAction, AgentHarnessKind, RawAgentEventKind, TranscriptReduceAction,
+        };
+
+        // 1. Live Grok stream: thinking -> tool call -> assistant text -> end
+        let mut grok_stream = GrokStream::default();
+        let u1 = grok_stream.feed("{\"type\":\"thought\",\"data\":\"analyzing\"}\n");
+        assert_eq!(u1, vec![StreamUpdate::ThinkingSnapshot("analyzing".into())]);
+        assert!(grok_stream.reducer_thinking_open);
+
+        let u2 = grok_stream.feed(
+            "{\"type\":\"tool_call\",\"data\":{\"toolCallId\":\"c1\",\"name\":\"bash\"}}\n",
+        );
+        assert!(matches!(&u2[0], StreamUpdate::Tool { completed: false, .. }));
+        assert!(!grok_stream.reducer_thinking_open);
+
+        let u3 = grok_stream.feed("{\"type\":\"text\",\"data\":\"done\"}\n{\"type\":\"end\",\"stopReason\":\"end_turn\"}\n");
+        assert_eq!(
+            u3,
+            vec![
+                StreamUpdate::TextSnapshot("done".into()),
+                StreamUpdate::End
+            ]
+        );
+        assert!(!grok_stream.reducer_thinking_open);
+        assert!(grok_stream.last_reduced_seq >= 4);
+
+        // 2. Live Codex stream: thread.started -> reasoning -> agent_message -> turn.completed
+        let mut codex_stream = GrokStream::default();
+        let cu = codex_stream.feed(
+            "{\"type\":\"execution.mode\",\"mode\":\"turn\"}\n\
+             {\"type\":\"thread.started\",\"thread_id\":\"th_1\"}\n\
+             {\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"plan\"}}\n\
+             {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ok\"}}\n\
+             {\"type\":\"turn.completed\"}\n",
+        );
+        assert_eq!(cu.len(), 4);
+        assert!(!codex_stream.reducer_thinking_open);
+
+        // 3. Live OpenCode stream: reasoning -> tool_use -> text -> step_finish
+        let mut oc_stream = GrokStream::default();
+        let ocu = oc_stream.feed(
+            "{\"sessionID\":\"ses_1\",\"type\":\"reasoning\",\"part\":{\"text\":\"step 1\"}}\n\
+             {\"sessionID\":\"ses_1\",\"type\":\"tool_use\",\"part\":{\"id\":\"prt_1\",\"callID\":\"c0\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{},\"output\":\"ok\"}}}\n\
+             {\"sessionID\":\"ses_1\",\"type\":\"text\",\"part\":{\"id\":\"prt_2\",\"messageID\":\"m1\",\"text\":\"final answer\"}}\n\
+             {\"sessionID\":\"ses_1\",\"type\":\"step_finish\",\"part\":{\"reason\":\"stop\",\"tokens\":{\"input\":10,\"output\":5}}}\n",
+        );
+        assert!(!ocu.is_empty());
+        assert!(!oc_stream.reducer_thinking_open);
+
+        // 4. Verify over-budget rejection (`TotalTransducer`), duplicate/stale sequence deduplication,
+        //    and live-stream vs log-replay equivalence (`ReplayEquivalence`) across all 6 harnesses.
+        for harness in [
+            AgentHarnessKind::Codex,
+            AgentHarnessKind::ClaudeCode,
+            AgentHarnessKind::Antigravity,
+            AgentHarnessKind::OpenCode,
+            AgentHarnessKind::Grok,
+            AgentHarnessKind::Vibe,
+        ] {
+            let over_budget = evaluate_agent_event_normalize_gate(
+                harness,
+                RawAgentEventKind::AssistantText,
+                true,
+                true,
+                true,
+                false,
+                5000,
+                4096,
+                false,
+            );
+            assert_eq!(
+                over_budget.action,
+                AgentEventNormalizeAction::RejectOverBudget
+            );
+            assert!(!over_budget.emit_event);
+            assert!(over_budget.total_transducer);
+            assert_eq!(over_budget.bounded_bytes, 4096);
+
+            let think = evaluate_agent_event_normalize_gate(
+                harness,
+                RawAgentEventKind::ThinkingUpdate,
+                false,
+                true,
+                true,
+                false,
+                64,
+                4096,
+                true,
+            );
+            assert_eq!(think.action, AgentEventNormalizeAction::EmitThinking);
+            assert!(think.thinking_open_next);
+
+            let complete = evaluate_agent_event_normalize_gate(
+                harness,
+                RawAgentEventKind::TurnCompleted,
+                true,
+                true,
+                true,
+                false,
+                32,
+                4096,
+                true,
+            );
+            assert_eq!(
+                complete.action,
+                AgentEventNormalizeAction::EmitTurnCompleted
+            );
+            assert!(complete.close_thinking);
+
+            // Live vs replay equivalence (`ReplayEquivalence`)
+            let live_red = evaluate_transcript_reduce_gate(
+                10,
+                11,
+                true,
+                complete.action,
+                false,
+                true,
+            );
+            let replay_red = evaluate_transcript_reduce_gate(
+                10,
+                11,
+                true,
+                complete.action,
+                true,
+                true,
+            );
+            assert_eq!(live_red, replay_red);
+            assert_eq!(live_red.action, TranscriptReduceAction::AppendTranscriptEntry);
+            assert!(live_red.closed_previous_thinking);
+            assert!(!live_red.thinking_open_next);
+
+            let meta_red = evaluate_transcript_reduce_gate(
+                11,
+                12,
+                false,
+                AgentEventNormalizeAction::EmitDiagnostic,
+                false,
+                true,
+            );
+            assert_eq!(meta_red.action, TranscriptReduceAction::UpdateMetadata);
+
+            // Stale / duplicate sequence (`incoming_seq <= last_applied_seq`) is deduplicated
+            let stale_red = evaluate_transcript_reduce_gate(
+                12,
+                12,
+                false,
+                complete.action,
+                true,
+                false,
+            );
+            assert_eq!(stale_red.action, TranscriptReduceAction::DedupeOrSkip);
+            assert!(!stale_red.emit_entry);
+        }
+
+        let norm_snap =
+            agent_event_normalize_shadow_counter().snapshot("orb_agent_event_normalize_step");
+        let red_snap =
+            transcript_reduce_shadow_counter().snapshot("orb_transcript_reduce_step");
+        assert!(norm_snap.total_events >= 20);
+        assert_eq!(norm_snap.total_divergences, 0);
+        assert!(red_snap.total_events >= 20);
+        assert_eq!(red_snap.total_divergences, 0);
     }
 }
 
