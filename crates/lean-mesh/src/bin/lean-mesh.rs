@@ -7,8 +7,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use lean_mesh::{
     BunkerState, IpClass, LEAN_MESH_FRAME_MAGIC, LEAN_MESH_PROTOCOL_VERSION, MeshManifest,
-    MeshProto, NodeClass, RelayPathKind, ReplayWindow64, check_endpoint_roam, select_relay_path,
-    step_bunker_isolate, verify_frame_bounds, verify_jit_lease,
+    MeshProto, NodeClass, RelayPathKind, ReplayWindow64, canonical_canary_evidence_sha256_hex,
+    check_endpoint_roam, select_relay_path, sign_canary_trip, step_bunker_isolate,
+    verify_frame_bounds, verify_jit_lease,
 };
 
 #[derive(Parser)]
@@ -128,6 +129,31 @@ enum Commands {
     NodeKeygen {
         #[arg(long)]
         out_seed: PathBuf,
+    },
+    /// Sign a canonical canary tripwire JSON payload (`POST /api/bunker/tripwire`) with a node's Ed25519 seed
+    SignCanary {
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        signing_key_file: PathBuf,
+        #[arg(long)]
+        canary_kind: String,
+        #[arg(long)]
+        seq: u64,
+        #[arg(long)]
+        timestamp: Option<u64>,
+        #[arg(long, default_value = "Canary tripwire triggered")]
+        reason: String,
+        #[arg(long)]
+        pid: Option<u32>,
+        #[arg(long)]
+        uid: Option<u32>,
+        #[arg(long)]
+        cgroup: Option<String>,
+        #[arg(long)]
+        cmdline: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
     /// Render deterministic `nftables` capability firewall policy (`table inet lean_mesh`) for a node
     RenderNft {
@@ -350,6 +376,65 @@ fn main() -> Result<()> {
             write_private_file(&out_seed, &format!("{}\n", hex::encode(seed)))?;
             let sk = SigningKey::from_bytes(&seed);
             println!("{}", hex::encode(sk.verifying_key().to_bytes()));
+        }
+        Commands::SignCanary {
+            node,
+            signing_key_file,
+            canary_kind,
+            seq,
+            timestamp,
+            reason,
+            pid,
+            uid,
+            cgroup,
+            cmdline,
+            dry_run,
+        } => {
+            if seq == 0 {
+                bail!("--seq must be > 0 for ReplayWindow64 admission");
+            }
+            let key_hex = fs::read_to_string(&signing_key_file)
+                .with_context(|| format!("failed to read {}", signing_key_file.display()))?;
+            let seed_bytes =
+                hex::decode(key_hex.trim()).context("invalid hex in signing_key_file")?;
+            let seed: [u8; 32] = seed_bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("signing_key_file must contain 32-byte hex seed"))?;
+            let sk = SigningKey::from_bytes(&seed);
+            let ts = timestamp.unwrap_or_else(unix_now);
+            let detail_sha256_hex = canonical_canary_evidence_sha256_hex(
+                &reason,
+                pid,
+                uid,
+                cgroup.as_deref(),
+                cmdline.as_deref(),
+            );
+            let signature_hex = sign_canary_trip(
+                &sk,
+                &node,
+                &canary_kind,
+                seq,
+                ts,
+                dry_run,
+                &detail_sha256_hex,
+            );
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "peer_name": node,
+                    "canary_kind": canary_kind,
+                    "event_seq": seq,
+                    "timestamp": ts,
+                    "dry_run": dry_run,
+                    "reason": reason,
+                    "pid": pid,
+                    "uid": uid,
+                    "cgroup": cgroup,
+                    "cmdline": cmdline,
+                    "detail_sha256_hex": detail_sha256_hex,
+                    "signature_hex": signature_hex,
+                }))?
+            );
         }
         Commands::RenderNft {
             manifest,

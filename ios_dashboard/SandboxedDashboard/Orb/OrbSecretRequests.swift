@@ -209,7 +209,7 @@ struct OrbSecretRequestsSheet: View {
             let id = r["id"].text
             // An enrolled phone signs the approval, which prompts for Face ID /
             // Touch ID itself; otherwise ask for it here.
-            let enrolled = OrbApprovalKey.deviceId != nil && OrbApprovalKey.publicKey != nil
+            let enrolled = await OrbApprovalKey.ensureEnrolled()
             if scope != nil, !enrolled, let message = await OrbBiometric.authenticate(reason: reason) {
                 if !message.isEmpty { error = message }
                 return
@@ -296,14 +296,15 @@ struct OrbProjectSecretAccess: View {
         let id = project.selfID, name = project["name"].text.isEmpty ? id : project["name"].text
         let next = on ? Array(Set(allowed + [id])) : allowed.filter { $0 != id }
         let reason = on ? "Let \(slug) missions read \(name) secrets without asking" : "Stop default access to \(name)"
-        if let message = await OrbBiometric.authenticate(reason: reason) {
+        let enrolled = await OrbApprovalKey.ensureEnrolled()
+        if !enrolled, let message = await OrbBiometric.authenticate(reason: reason) {
             if !message.isEmpty { error = message }
             return
         }
         saving = true
         defer { saving = false }
         do {
-            status = try await client.call("/api/bitwarden/default-access/\(OrbCore.escape(slug))", method: "PUT", body: .object(["project_ids": .array(next.map { .string($0) })]))
+            status = try await OrbApprovalKey.signedCall("/api/bitwarden/default-access/\(OrbCore.escape(slug))", method: "PUT", body: .object(["project_ids": .array(next.map { .string($0) })]), summary: reason)
             error = ""
         } catch is CancellationError {
         } catch { self.error = error.localizedDescription }
@@ -505,7 +506,7 @@ struct OrbMissionAccessList: View {
             // An enrolled device signs the request, which prompts for Face ID /
             // Touch ID itself; otherwise ask for it here (Core still requires a
             // signature to approve).
-            let enrolled = OrbApprovalKey.deviceId != nil && OrbApprovalKey.publicKey != nil
+            let enrolled = await OrbApprovalKey.ensureEnrolled()
             if approve, !enrolled, let message = await OrbBiometric.authenticate(reason: reason) {
                 if !message.isEmpty { error = message }
                 return

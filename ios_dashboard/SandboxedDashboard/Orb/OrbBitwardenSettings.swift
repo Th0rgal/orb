@@ -524,11 +524,13 @@ struct OrbBitwardenSettings: View {
                 }
             }
             if !enrolledHere {
-                TextField("One-time code from the Core host", text: $enrollmentCode)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                if approvalMode == "enforce" {
+                    TextField("One-time code from the Core host", text: $enrollmentCode)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
                 Button("Enroll this iPhone (Face ID)") { Task { await enroll() } }
-                    .disabled(enrollmentCode.trimmingCharacters(in: .whitespaces).count < 8)
+                    .disabled(approvalMode == "enforce" && enrollmentCode.trimmingCharacters(in: .whitespaces).count < 8)
             }
         }
     }
@@ -911,10 +913,57 @@ enum OrbApprovalKey {
         context.localizedCancelTitle = "Cancel"
         // Core writes the summary into the signed payload: show that, not caller text.
         let shown = payload.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? reason
-        _ = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: shown)
+        var authError: NSError?
+        let policy: LAPolicy = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &authError)
+            ? .deviceOwnerAuthenticationWithBiometrics
+            : .deviceOwnerAuthentication
+        _ = try await context.evaluatePolicy(policy, localizedReason: shown)
         let blob = try Data(contentsOf: keyURL)
         let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: context)
         return try key.signature(for: Data(payload.utf8)).derRepresentation.base64EncodedString()
+    }
+
+    /// Ensures this device's Secure Enclave P-256 key is matched or enrolled on Core.
+    @MainActor
+    static func ensureEnrolled(forceRefresh: Bool = false) async -> Bool {
+        if !forceRefresh, let existing = deviceId, !existing.isEmpty, publicKey != nil {
+            return true
+        }
+        guard let d = try? await OrbCore.shared.call("/api/approvals/devices") else {
+            return deviceId != nil && publicKey != nil
+        }
+        let devices = d["devices"].items
+        if let mine = publicKey,
+           let match = devices.first(where: { $0["public_key"].text == mine }) {
+            let id = match["id"].text
+            if !id.isEmpty {
+                deviceId = id
+                return true
+            }
+        }
+        deviceId = nil
+        guard d["mode"].text != "enforce" else { return false }
+        do {
+            let pub = try publicKey ?? create()
+            let enrolled = try await OrbCore.shared.call(
+                "/api/approvals/devices",
+                method: "POST",
+                body: .object([
+                    "name": .string("Orb on \(UIDevice.current.name)"),
+                    "platform": .string("ios"),
+                    "public_key": .string(pub),
+                    "enrollment_code": .string("")
+                ])
+            )
+            let id = enrolled["id"].text
+            if !id.isEmpty {
+                deviceId = id
+                return true
+            }
+        } catch {
+            return false
+        }
+        return false
     }
 
     /// Send a protected request, signed when this phone is enrolled.
@@ -926,21 +975,34 @@ enum OrbApprovalKey {
     @MainActor
     static func signedCall(_ path: String, method: String = "GET", body: OrbJSON? = nil, summary: String) async throws -> OrbJSON {
         let raw = try body.map { try JSONEncoder().encode($0) }
+        _ = await ensureEnrolled()
+        return try await performSignedCall(path, method: method, rawBody: raw, summary: summary, allowReenroll: true)
+    }
+
+    @MainActor
+    private static func performSignedCall(_ path: String, method: String, rawBody: Data?, summary: String, allowReenroll: Bool) async throws -> OrbJSON {
         var headers: [String: String] = [:]
-        if let device = deviceId, publicKey != nil {
+        if let device = deviceId, !device.isEmpty, publicKey != nil {
             let challenge = try await OrbCore.shared.call(
                 "/api/approvals/challenge",
                 method: "POST",
                 body: .object([
                     "method": .string(method),
                     "path": .string(path),
-                    "body": .string(raw.flatMap { String(data: $0, encoding: .utf8) } ?? ""),
+                    "body": .string(rawBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""),
                     "summary": .string(summary)
                 ])
             )
             let signature = try await sign(challenge["payload"].text, reason: summary)
             headers["X-Paloma-Approval"] = "\(challenge["challenge_id"].text).\(device).\(signature)"
         }
-        return try await OrbCore.shared.call(path, method: method, rawBody: raw, headers: headers)
+        do {
+            return try await OrbCore.shared.call(path, method: method, rawBody: rawBody, headers: headers)
+        } catch let err as OrbHTTPError where allowReenroll && err.status == 403 {
+            if await ensureEnrolled(forceRefresh: true) {
+                return try await performSignedCall(path, method: method, rawBody: rawBody, summary: summary, allowReenroll: false)
+            }
+            throw err
+        }
     }
 }

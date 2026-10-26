@@ -36,4 +36,20 @@ class OrbPrivilegeAccessTest {
             OrbPrivilegeAccess.approveBody(mapOf("ttl_minutes" to 240.0, "session_scoped" to true))
         )
     }
+
+    @Test fun bunkerStateLabelsAndBody() {
+        assertEquals("Normal", OrbPrivilegeAccess.bunkerLabel(0))
+        assertEquals("Soft Quarantine", OrbPrivilegeAccess.bunkerLabel(1))
+        assertEquals("Hard Lockdown", OrbPrivilegeAccess.bunkerLabel(2))
+        assertEquals("Sovereign Dead-Man Tripped", OrbPrivilegeAccess.bunkerLabel(3))
+        assertEquals(
+            mapOf(
+                "level" to 2,
+                "reason" to "Canary test",
+                "canary_tripped" to true,
+                "auth_failure_burst" to false
+            ),
+            OrbPrivilegeAccess.bunkerBody(2, "Canary test")
+        )
+    }
 }

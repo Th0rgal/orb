@@ -1622,6 +1622,14 @@ impl MeshManifest {
             src_peer: "agent-core".into(),
             dst_peer: "dgx-spark".into(),
             proto: MeshProto::Tcp,
+            port_min: 8000,
+            port_max: 8000,
+            description: "Orb control-plane -> dgx-spark inference & voice transcription router".into(),
+        });
+        rules.push(CapabilityRule {
+            src_peer: "agent-core".into(),
+            dst_peer: "dgx-spark".into(),
+            proto: MeshProto::Tcp,
             port_min: 8888,
             port_max: 8890,
             description: "Orb control-plane -> dgx-spark Hindsight memory & remarkablesync".into(),
@@ -1796,6 +1804,129 @@ pub fn verify_heartbeat_signature(
     };
     let signature = Signature::from_bytes(&sig_arr);
     let digest = canonical_heartbeat_bytes(peer_name, heartbeat_seq, timestamp);
+    verifying_key.verify(&digest, &signature).is_ok()
+}
+
+/// Computes the canonical SHA-256 hex digest over a canary tripwire's evidence fields.
+pub fn canonical_canary_evidence_sha256_hex(
+    reason: &str,
+    pid: Option<u32>,
+    uid: Option<u32>,
+    cgroup: Option<&str>,
+    cmdline: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lean-mesh-canary-evidence-v1:");
+    hasher.update(reason.as_bytes());
+    hasher.update(b":");
+    hasher.update(pid.unwrap_or(0).to_be_bytes());
+    hasher.update(b":");
+    hasher.update([pid.is_some() as u8]);
+    hasher.update(b":");
+    hasher.update(uid.unwrap_or(0).to_be_bytes());
+    hasher.update(b":");
+    hasher.update([uid.is_some() as u8]);
+    hasher.update(b":");
+    hasher.update(cgroup.unwrap_or("").as_bytes());
+    hasher.update(b":");
+    hasher.update(cmdline.unwrap_or("").as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Canonical domain-separated SHA-256 digest for authenticated canary tripwire alerts.
+/// Binds `(peer_name, canary_kind, event_seq, timestamp, dry_run, detail_sha256_hex)` so
+/// a signature cannot be replayed across peers, downgraded from a real trip to `dry_run`,
+/// or stripped of its forensic evidence hash.
+pub fn canonical_canary_trip_bytes(
+    peer_name: &str,
+    canary_kind: &str,
+    event_seq: u64,
+    timestamp: u64,
+    dry_run: bool,
+    detail_sha256_hex: &str,
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"lean-mesh-canary-v1:");
+    hasher.update(peer_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(canary_kind.as_bytes());
+    hasher.update(b":");
+    hasher.update(event_seq.to_be_bytes());
+    hasher.update(b":");
+    hasher.update(timestamp.to_be_bytes());
+    hasher.update(b":");
+    hasher.update([dry_run as u8]);
+    hasher.update(b":");
+    hasher.update(detail_sha256_hex.as_bytes());
+    hasher.finalize().to_vec()
+}
+
+/// Signs a canonical canary tripwire alert with the reporting node's Ed25519 `signing_key`.
+pub fn sign_canary_trip(
+    signing_key: &SigningKey,
+    peer_name: &str,
+    canary_kind: &str,
+    event_seq: u64,
+    timestamp: u64,
+    dry_run: bool,
+    detail_sha256_hex: &str,
+) -> String {
+    let digest = canonical_canary_trip_bytes(
+        peer_name,
+        canary_kind,
+        event_seq,
+        timestamp,
+        dry_run,
+        detail_sha256_hex,
+    );
+    let sig: Signature = signing_key.sign(&digest);
+    hex::encode(sig.to_bytes())
+}
+
+/// Verifies an Ed25519 signature over a canonical canary tripwire alert against the
+/// reporting node's manifest-pinned `pubkey_hex`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_canary_trip_signature(
+    pubkey_hex: &str,
+    peer_name: &str,
+    canary_kind: &str,
+    event_seq: u64,
+    timestamp: u64,
+    dry_run: bool,
+    detail_sha256_hex: &str,
+    signature_hex: &str,
+) -> bool {
+    if peer_name.trim().is_empty()
+        || canary_kind.trim().is_empty()
+        || detail_sha256_hex.len() != 64
+        || hex::decode(detail_sha256_hex).is_err()
+    {
+        return false;
+    }
+    let Ok(pk_bytes) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let Ok(pk_arr): Result<[u8; 32], _> = pk_bytes.try_into() else {
+        return false;
+    };
+    let Ok(verifying_key) = VerifyingKey::from_bytes(&pk_arr) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(sig_arr): Result<[u8; 64], _> = sig_bytes.try_into() else {
+        return false;
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    let digest = canonical_canary_trip_bytes(
+        peer_name,
+        canary_kind,
+        event_seq,
+        timestamp,
+        dry_run,
+        detail_sha256_hex,
+    );
     verifying_key.verify(&digest, &signature).is_ok()
 }
 
@@ -2255,6 +2386,65 @@ mod tests {
             1,
             now + 5,
             &render_sig_hex
+        ));
+
+        let ev_hash = canonical_canary_evidence_sha256_hex(
+            "CRITICAL: local port 27017 canary triggered on ashur",
+            Some(4242),
+            Some(998),
+            Some("/system.slice/sandboxed-node.service"),
+            Some("nc 127.0.0.1 27017"),
+        );
+        let canary_sig = sign_canary_trip(
+            &peer_sk,
+            "ashur",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            false,
+            &ev_hash,
+        );
+        assert!(verify_canary_trip_signature(
+            &pub_hex,
+            "ashur",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            false,
+            &ev_hash,
+            &canary_sig
+        ));
+        // Downgrading `dry_run` from false -> true must fail signature verification.
+        assert!(!verify_canary_trip_signature(
+            &pub_hex,
+            "ashur",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            true,
+            &ev_hash,
+            &canary_sig
+        ));
+        // Cross-peer replay or modified evidence hash must fail.
+        assert!(!verify_canary_trip_signature(
+            &pub_hex,
+            "babylon",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            false,
+            &ev_hash,
+            &canary_sig
+        ));
+        assert!(!verify_canary_trip_signature(
+            &pub_hex,
+            "ashur",
+            "mongo_socket_27017",
+            7,
+            now + 5,
+            false,
+            &"00".repeat(32),
+            &canary_sig
         ));
 
         // 4. Authenticated roam frame signature + bounds check.
