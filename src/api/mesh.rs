@@ -224,9 +224,56 @@ fn write_and_verify_initial_private_sync(
     verify_persisted_file_on_disk(path, Some(&state.pinned_coordinator_pubkey_hex))
 }
 
+fn verify_peer_keystore_on_disk(
+    keystore_path: &std::path::Path,
+    manifest: &MeshManifest,
+) -> Result<BTreeMap<String, String>, String> {
+    let meta = std::fs::symlink_metadata(keystore_path)
+        .map_err(|e| format!("failed to stat peer keystore: {e}"))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err("peer keystore is a symlink or non-regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if (meta.permissions().mode() & 0o777) != 0o600 {
+            return Err("peer keystore permissions must be 0600".into());
+        }
+    }
+    let raw = std::fs::read_to_string(keystore_path)
+        .map_err(|e| format!("failed to read peer keystore: {e}"))?;
+    let loaded: BTreeMap<String, String> =
+        serde_json::from_str(&raw).map_err(|e| format!("failed to parse peer keystore: {e}"))?;
+    if loaded.len() != manifest.peers.len() {
+        return Err("peer keystore entry count does not match manifest.peers.len()".into());
+    }
+    for peer in &manifest.peers {
+        let seed_hex = loaded
+            .get(&peer.name)
+            .ok_or_else(|| format!("missing peer `{}` in peer keystore", peer.name))?;
+        let seed_raw = hex::decode(seed_hex.trim())
+            .map_err(|_| format!("invalid hex seed for peer `{}` in peer keystore", peer.name))?;
+        let seed_bytes: [u8; 32] = seed_raw
+            .try_into()
+            .map_err(|_| format!("peer `{}` seed in keystore must be 32 bytes", peer.name))?;
+        if seed_bytes == [0u8; 32] {
+            return Err(format!("peer `{}` seed in keystore is all-zero", peer.name));
+        }
+        let derived_pub = hex::encode(SigningKey::from_bytes(&seed_bytes).verifying_key().to_bytes());
+        if derived_pub != peer.sign_pubkey_hex {
+            return Err(format!(
+                "peer `{}` keystore public key mismatch against manifest sign_pubkey_hex",
+                peer.name
+            ));
+        }
+    }
+    Ok(loaded)
+}
+
 fn write_and_verify_peer_keystore_sync(
     keystore_path: &std::path::Path,
     peer_seeds_hex: &BTreeMap<String, String>,
+    manifest: &MeshManifest,
 ) -> Result<(), String> {
     let json = serde_json::to_string_pretty(peer_seeds_hex).map_err(|e| e.to_string())?;
     let tmp = keystore_path.with_extension("json.tmp");
@@ -248,23 +295,8 @@ fn write_and_verify_peer_keystore_sync(
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());
     }
-    let meta = std::fs::symlink_metadata(keystore_path)
-        .map_err(|e| format!("failed to stat peer keystore: {e}"))?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return Err("peer keystore is a symlink or non-regular file".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if (meta.permissions().mode() & 0o777) != 0o600 {
-            return Err("peer keystore permissions must be 0600".into());
-        }
-    }
-    let raw = std::fs::read_to_string(keystore_path)
-        .map_err(|e| format!("failed to re-read peer keystore: {e}"))?;
-    let loaded: BTreeMap<String, String> =
-        serde_json::from_str(&raw).map_err(|e| format!("failed to parse peer keystore: {e}"))?;
-    if loaded != *peer_seeds_hex {
+    let loaded = verify_peer_keystore_on_disk(keystore_path, manifest)?;
+    if &loaded != peer_seeds_hex {
         return Err("re-read peer keystore mismatch after write".into());
     }
     Ok(())
@@ -280,8 +312,16 @@ impl MeshStore {
         let state = match ensure_secure_state_dir(&dir) {
             Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
             Ok(()) => match std::fs::symlink_metadata(&path) {
-                Ok(_) => verify_persisted_file_on_disk(&path, None)
-                    .unwrap_or_else(|_| PersistedMeshState::lockdown_store_without_signing_key(now)),
+                Ok(_) => match verify_persisted_file_on_disk(&path, None) {
+                    Ok(loaded) => {
+                        if verify_peer_keystore_on_disk(&keystore_path, &loaded.manifest).is_ok() {
+                            loaded
+                        } else {
+                            PersistedMeshState::lockdown_store_without_signing_key(now)
+                        }
+                    }
+                    Err(_) => PersistedMeshState::lockdown_store_without_signing_key(now),
+                },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let mut coord_seed = [0u8; 32];
                     let coord_ok = rng.read_exact(&mut coord_seed).is_ok() && coord_seed != [0u8; 32];
@@ -291,8 +331,12 @@ impl MeshStore {
                         let sk = SigningKey::from_bytes(&coord_seed);
                         match MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, rng) {
                             Ok((manifest, peer_seeds_hex)) => {
-                                if write_and_verify_peer_keystore_sync(&keystore_path, &peer_seeds_hex)
-                                    .is_err()
+                                if write_and_verify_peer_keystore_sync(
+                                    &keystore_path,
+                                    &peer_seeds_hex,
+                                    &manifest,
+                                )
+                                .is_err()
                                 {
                                     PersistedMeshState::lockdown_store_without_signing_key(now)
                                 } else {
@@ -1667,5 +1711,74 @@ mod tests {
                 assert_eq!(ks_meta.permissions().mode() & 0o777, 0o600);
             }
         });
+
+        // 3. Reopen peer-keystore integrity checks: missing, malformed, symlinked, wrong-permission,
+        // extra-entry, missing-entry, wrong-seed, and mismatched-public-key keystores all enter HardLockdown!
+        let check_reopen_lockdown = |mutate: &dyn Fn(&std::path::Path, &mut BTreeMap<String, String>)| {
+            let t = tempfile::tempdir().expect("tempdir");
+            let _ = MeshStore::open(t.path().to_path_buf());
+            let ks_path = t.path().join(".sandboxed-sh/lean_mesh_peer_keys.json");
+            let raw = std::fs::read_to_string(&ks_path).unwrap();
+            let mut map: BTreeMap<String, String> = serde_json::from_str(&raw).unwrap();
+            mutate(&ks_path, &mut map);
+            let reopened = MeshStore::open(t.path().to_path_buf());
+            rt.block_on(async {
+                let g = reopened.inner.lock().await;
+                assert!(g.corrupted_state);
+                assert_eq!(g.bunker_state, MeshBunkerState::HardLockdown);
+                assert!(g.signing_key().is_err());
+            });
+        };
+
+        // (a) Missing keystore
+        check_reopen_lockdown(&|ks_path, _| {
+            std::fs::remove_file(ks_path).unwrap();
+        });
+        // (b) Malformed JSON keystore
+        check_reopen_lockdown(&|ks_path, _| {
+            write_private_test_helper(ks_path, "{ malformed json");
+        });
+        // (c) Symlinked keystore
+        #[cfg(unix)]
+        check_reopen_lockdown(&|ks_path, _| {
+            let alt = ks_path.with_extension("alt.json");
+            std::fs::rename(ks_path, &alt).unwrap();
+            std::os::unix::fs::symlink(&alt, ks_path).unwrap();
+        });
+        // (d) Wrong permissions (`0o644` instead of `0o600`)
+        #[cfg(unix)]
+        check_reopen_lockdown(&|ks_path, _| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(ks_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        });
+        // (e) Extra entry in keystore
+        check_reopen_lockdown(&|ks_path, map| {
+            map.insert("rogue-node".into(), "11".repeat(32));
+            write_private_test_helper(ks_path, &serde_json::to_string(map).unwrap());
+        });
+        // (f) Missing entry in keystore
+        check_reopen_lockdown(&|ks_path, map| {
+            map.remove("dgx-spark");
+            write_private_test_helper(ks_path, &serde_json::to_string(map).unwrap());
+        });
+        // (g) Wrong seed length or all-zero seed in keystore
+        check_reopen_lockdown(&|ks_path, map| {
+            map.insert("dgx-spark".into(), "00".repeat(32));
+            write_private_test_helper(ks_path, &serde_json::to_string(map).unwrap());
+        });
+        // (h) Mismatched public key (valid 32-byte seed that does not match `peer.sign_pubkey_hex`)
+        check_reopen_lockdown(&|ks_path, map| {
+            map.insert("dgx-spark".into(), "ff".repeat(32));
+            write_private_test_helper(ks_path, &serde_json::to_string(map).unwrap());
+        });
+    }
+
+    fn write_private_test_helper(path: &std::path::Path, content: &str) {
+        std::fs::write(path, content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 }
