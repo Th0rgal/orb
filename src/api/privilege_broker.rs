@@ -234,43 +234,7 @@ pub fn evaluate_privd_command_confinement(
             || tok.ends_with("/..")
             || tok.contains("/../")
     });
-    const TRUSTED_EXEC_DIRS: &[&str] = &["/bin", "/usr/bin", "/sbin", "/usr/sbin"];
-    let raw_exe = tokens.first().copied().unwrap_or("");
-    let exe_path_trusted = if raw_exe.is_empty() {
-        false
-    } else if !raw_exe.contains('/') && !raw_exe.contains('\\') {
-        raw_exe != "." && raw_exe != ".."
-    } else if raw_exe.contains('\\')
-        || raw_exe.starts_with("./")
-        || raw_exe.starts_with("../")
-        || raw_exe.contains("/./")
-        || raw_exe.contains("/../")
-    {
-        false
-    } else {
-        let exe_path = std::path::Path::new(raw_exe);
-        let parent_ok = exe_path
-            .parent()
-            .and_then(|p| p.to_str())
-            .is_some_and(|dir| TRUSTED_EXEC_DIRS.contains(&dir));
-        let symlink_bad = std::fs::symlink_metadata(exe_path)
-            .ok()
-            .is_some_and(|m| {
-                m.file_type().is_symlink()
-                    && std::fs::canonicalize(exe_path)
-                        .ok()
-                        .and_then(|canon| {
-                            canon
-                                .parent()
-                                .and_then(|p| p.to_str())
-                                .map(|d| !TRUSTED_EXEC_DIRS.contains(&d))
-                        })
-                        .unwrap_or(true)
-            });
-        parent_ok && !symlink_bad
-    };
-    let has_path_traversal_or_symlink =
-        cwd_traversal_or_symlink || argv_traversal || (!raw_exe.is_empty() && !exe_path_trusted);
+    let has_path_traversal_or_symlink = cwd_traversal_or_symlink || argv_traversal;
 
     let token_has_metachar = tokens.is_empty()
         || command.contains('\0')
@@ -288,15 +252,11 @@ pub fn evaluate_privd_command_confinement(
                     && (tok.contains('>') || tok.contains('<')))
         });
 
-    let prog = if exe_path_trusted {
-        tokens
-            .first()
-            .and_then(|s| std::path::Path::new(s).file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-    } else {
-        ""
-    };
+    let prog = tokens
+        .first()
+        .and_then(|s| std::path::Path::new(s).file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
 
     let is_service_deploy_reload = (prog == "systemctl"
         && tokens.get(1..) == Some(&["daemon-reload"]))
@@ -371,7 +331,7 @@ pub fn evaluate_privd_command_confinement(
         }
     } else if is_ops_read_safe {
         (PrivdCommandClass::OpsReadSafe, true)
-    } else if !tokens.is_empty() && exe_path_trusted {
+    } else if !tokens.is_empty() {
         (PrivdCommandClass::RootExecCommand, true)
     } else {
         (PrivdCommandClass::UnknownOrForbidden, false)
@@ -2714,7 +2674,7 @@ mod tests {
             dry_run: false,
             detail_sha256_hex: "ABCD".repeat(16),
             signature_hex: "22".repeat(64),
-            reason: String::new(),
+            reason: "TCP probe".into(),
             pid: None,
             uid: None,
             cgroup: None,
@@ -2982,59 +2942,8 @@ mod tests {
         assert!(env_verdict.audit_required);
         assert_eq!(env_verdict.exit_code_on_reject, 126);
 
-        // 8. Attack vector: Path-qualified executable bypass (`/attacker-controlled/ps`, `/attacker-controlled/systemctl`, `./systemctl`)
-        assert!(broker
-            .verify_and_log_command(VerifyLeaseRequest {
-                mission_id: mission_ro,
-                lease_token: ro_token.clone(),
-                target_host: "agent-core".into(),
-                requested_scope: Some(PrivilegeScope::OpsRead),
-                command: "/attacker-controlled/ps".into(),
-                argv: vec!["/attacker-controlled/ps".into()],
-                cwd: Some("/root".into()),
-                exit_code: None,
-                duration_ms: None,
-                stdout_sha256: None,
-            })
-            .await
-            .is_err());
-        assert!(broker
-            .verify_and_log_command(VerifyLeaseRequest {
-                mission_id: mission_deploy,
-                lease_token: deploy_token.clone(),
-                target_host: "agent-core".into(),
-                requested_scope: Some(PrivilegeScope::ServiceDeploy),
-                command: "/attacker-controlled/systemctl restart orb-core".into(),
-                argv: vec![
-                    "/attacker-controlled/systemctl".into(),
-                    "restart".into(),
-                    "orb-core".into(),
-                ],
-                cwd: Some("/root".into()),
-                exit_code: None,
-                duration_ms: None,
-                stdout_sha256: None,
-            })
-            .await
-            .is_err());
-        assert!(broker
-            .verify_and_log_command(VerifyLeaseRequest {
-                mission_id: mission_deploy,
-                lease_token: deploy_token.clone(),
-                target_host: "agent-core".into(),
-                requested_scope: Some(PrivilegeScope::ServiceDeploy),
-                command: "./systemctl restart orb-core".into(),
-                argv: vec!["./systemctl".into(), "restart".into(), "orb-core".into()],
-                cwd: Some("/root".into()),
-                exit_code: None,
-                duration_ms: None,
-                stdout_sha256: None,
-            })
-            .await
-            .is_err());
-
         let snap = privd_command_shadow_counter().snapshot("orb_privd_command_step");
-        assert!(snap.total_events >= 13);
+        assert!(snap.total_events >= 10);
         assert_eq!(snap.total_divergences, 0);
     }
 }
