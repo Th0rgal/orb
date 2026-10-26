@@ -463,8 +463,12 @@ test('follow-up composer does not alternate layouts while typing wrapped text',a
 
 test("unsupported Cyber route keeps the draft and never submits a remote mission",async({page})=>{
  const state=await setup(page,{cyberRefusal:true,capability:{...typedCapability,harnesses:["grok","codex"]}});
- state.releasePost();state.releaseHistory();await chooseRemote(page);
+ state.releasePost();state.releaseHistory();
+ await chooseRemote(page);
  await page.getByRole("button",{name:"Grok",exact:true}).click();await page.getByRole("option",{name:/^Codex/}).click();
+ // The default is now Automatic; this case is a draft left on Standard (as after a launch)
+ // whose remote route is unsupported. The menu cannot pick Standard here, so set the draft directly.
+ await page.evaluate(async()=>{const m=await import("/src/cyberAccess.tsx");m.setDraftCyber("standard");});
  const input=composerInput(page);await input.fill(objective);await input.press("Enter");
  await expect(page.getByRole("alert")).toContainText("Choose Automatic explicitly");
  await expect(input).toHaveValue(objective);expect(state.posts).toHaveLength(0);
