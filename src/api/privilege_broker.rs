@@ -419,10 +419,11 @@ const COMMAND_AUDIT_LIMIT: usize = 5000;
 const BUNKER_INCIDENT_LIMIT: usize = 500;
 const HISTORY_LIMIT: usize = 500;
 
-pub const TOOL_NAMES: [&str; 3] = [
+pub const TOOL_NAMES: [&str; 4] = [
     "request_privileged_access",
     "list_privileged_access",
     "revoke_privileged_access",
+    "execute_privileged_command",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1682,6 +1683,8 @@ pub fn resolve_fleet_ssh_target(target_host: &str) -> Result<Option<&'static str
         "macbook-air" | "mac" | "thomas-air" => Ok(Some("thomas@10.88.0.100")),
         "rpc-starknet-id" | "rpc.starknet.id" => Ok(Some("root@135.181.75.104")),
         "utu-lfglabs" | "utu.lfglabs.dev" => Ok(Some("root@88.99.67.234")),
+        "agent-starknet-id" | "agent.starknet.id" => Ok(Some("ubuntu@10.88.0.18")),
+        "signer-starknet-id" | "signer.starknet.id" => Ok(Some("ubuntu@141.94.26.62")),
         "api-starknet-id" | "api.starknet.id" => Ok(Some("ubuntu@5.39.72.91")),
         "sepolia-starknet-id" | "sepolia.api.starknet.id" => Ok(Some("ubuntu@5.39.73.3")),
         "api-federation" | "api.federation.lfg.rs" | "utu_backend" => {
@@ -2462,6 +2465,34 @@ pub async fn dispatch_bunker_alert(
         }
     } else {
         errors.push("telegram: no TELEGRAM_BOT_TOKEN configured".into());
+    }
+
+    let signal_url = std::env::var("ORB_BUNKER_SIGNAL_API_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://10.88.0.2:8890/api/signal/send".to_string());
+    let signal_recipient = std::env::var("ORB_BUNKER_SIGNAL_RECIPIENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "+33644632603".to_string());
+    match state
+        .http_client
+        .post(&signal_url)
+        .timeout(Duration::from_secs(5))
+        .json(&json!({
+            "recipient": signal_recipient,
+            "message": text,
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            channels.push(format!("signal:{signal_recipient}"))
+        }
+        Ok(resp) => errors.push(format!("signal HTTP {}", resp.status())),
+        Err(e) => errors.push(format!("signal: {}", sanitize_alert_error(&e.to_string()))),
     }
 
     if let Ok(webhook_url) = std::env::var("ORB_BUNKER_ALERT_WEBHOOK_URL") {

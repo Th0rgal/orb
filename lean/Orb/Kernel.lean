@@ -1719,4 +1719,74 @@ def meshServiceRouteStep
   else if isLoopback == 1 || endpointInMeshOverlay == 1 || hasMeshAuthOrBearer == 1 then 257
   else 512
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 11: SOC 2 Type I Compliance Gates — 3-Key SSH & macOS Remote Login,
+--          Off-Host B2 Audit Log Shipper, and OS Lifecycle / Boundary Scope
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  SOC 2 CC6.1 / CC6.6 3-Key SSH & macOS Remote Login Hardening Stepper (`soc2SshHostKeyPolicyStep`):
+  Verifies that an enrolled fleet node (or `macbook-air` with macOS Remote Login enabled) enforces:
+  - Exactly the 3 authorized public keys (`hasYubikeyAdminKey == 1 && hasBreakglassKey == 1 && hasUniqueHostKey == 1`)
+  - Zero legacy/shared keys or worker private keys (`hasSharedLegacyKey == 0 && hasProvisioningRsaKey == 0 && workerHasFleetPrivateKey == 0`)
+  - Key-only `sshd` configuration (`passwordAuthDisabled == 1 && kbdInteractiveDisabled == 1 && rootPasswordDisabled == 1`).
+  Returns `257` (`admittedBit = 256 | 1`) when compliant, else `512` (`rejectBit = 512`).
+-/
+@[inline]
+def soc2SshHostKeyPolicyStep
+    (hasYubikeyAdminKey hasBreakglassKey hasUniqueHostKey : UInt8)
+    (hasSharedLegacyKey hasProvisioningRsaKey workerHasFleetPrivateKey : UInt8)
+    (passwordAuthDisabled kbdInteractiveDisabled rootPasswordDisabled : UInt8) : UInt32 :=
+  if hasYubikeyAdminKey == 1 && hasBreakglassKey == 1 && hasUniqueHostKey == 1 &&
+     hasSharedLegacyKey == 0 && hasProvisioningRsaKey == 0 && workerHasFleetPrivateKey == 0 &&
+     passwordAuthDisabled == 1 && kbdInteractiveDisabled == 1 && rootPasswordDisabled == 1 then
+    257
+  else
+    512
+
+/--
+  SOC 2 CC7.2 / C1.1 Off-Host Immutable Audit Log Shipper & Redaction Stepper (`soc2AuditShipperStep`):
+  Admits an audit log batch for off-host Backblaze B2 shipping (`257`) iff:
+  - Backblaze B2 credentials and append-only/Object-Lock mode are active (`hasB2Credentials == 1 && objectLockOrAppendOnly == 1`)
+  - Command-line / environment secrets have been scrubbed (`secretsRedacted == 1`)
+  - Per-record SHA-256 digest chain is verified (`sha256DigestVerified == 1`)
+  - Batch payload is non-empty and within budget (`0 < batchBytes && batchBytes ≤ maxBatchBytes`).
+  Otherwise returns `512` (`rejectBit = 512`).
+-/
+@[inline]
+def soc2AuditShipperStep
+    (hasB2Credentials objectLockOrAppendOnly secretsRedacted sha256DigestVerified : UInt8)
+    (batchBytes maxBatchBytes : UInt64) : UInt32 :=
+  if hasB2Credentials == 1 && objectLockOrAppendOnly == 1 &&
+     secretsRedacted == 1 && sha256DigestVerified == 1 &&
+     0 < batchBytes && batchBytes ≤ maxBatchBytes then
+    257
+  else
+    512
+
+/--
+  SOC 2 CC7.1 / CC6.8 OS Lifecycle, Egress Filter & System Boundary Scope Stepper (`soc2HostScopeStep`):
+  - For Out-of-Scope Scheduled Decommission hosts (`isOutOfScopeDecommission == 1`, e.g. expiring legacy Starknet.id VPSs):
+    admits (`258`, `admittedBit = 256 | 2`) iff strictly isolated from `lean-mesh` and fleet credentials
+    (`enrolledInLeanMesh == 0 && holdsFleetCredentials == 0`).
+  - For In-Scope Fleet hosts (`isOutOfScopeDecommission == 0`):
+    admits (`257`, `admittedBit = 256 | 1`) iff running a supported LTS OS (`osSupportedLts == 1`),
+    `unattended-upgrades` or equivalent is active (`unattendedUpgradesActive == 1`), enrolled in `lean-mesh`
+    (`enrolledInLeanMesh == 1`), and `chain mesh_output` egress filtering is active (`meshOutputEgressFilterActive == 1`).
+  - Otherwise returns `512` (`rejectBit = 512`), automatically flagging EOL OS hosts inside `lean-mesh`
+    or nodes missing `chain mesh_output`.
+-/
+@[inline]
+def soc2HostScopeStep
+    (isOutOfScopeDecommission osSupportedLts unattendedUpgradesActive : UInt8)
+    (enrolledInLeanMesh meshOutputEgressFilterActive holdsFleetCredentials : UInt8) : UInt32 :=
+  if isOutOfScopeDecommission == 1 then
+    if enrolledInLeanMesh == 0 && holdsFleetCredentials == 0 then 258 else 512
+  else
+    if osSupportedLts == 1 && unattendedUpgradesActive == 1 &&
+       enrolledInLeanMesh == 1 && meshOutputEgressFilterActive == 1 then
+      257
+    else
+      512
+
 end Orb.Kernel

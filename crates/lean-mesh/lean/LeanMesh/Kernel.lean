@@ -81,8 +81,11 @@ def ratchetEpochStep
     * `bunkerState == 2`: only `srcClass == 6` (`OperatorAdmin`) to exact TCP port `22`
       (`proto == 6 && dstPort == 22 && rulePortMin == 22 && rulePortMax == 22`) is admitted.
     * `bunkerState == 1`: `srcClass ≤ 1` (`MissionSandbox` / `RetiredFree`) is denied, and all JIT grants are disabled (`bunkerState == 0` required for JIT).
-  - Leaf worker daemon port `:3088` isolation (including port-range straddling protection):
+  - Leaf worker daemon port `:3088` and SSH `:22` isolation (including port-range straddling protection):
     * Whenever `dstPort == 3088 || (rulePortMin ≤ 3088 && 3088 ≤ rulePortMax)`, `srcClass` MUST be `4` or `6`.
+    * Whenever `dstPort == 22 || (rulePortMin ≤ 22 && 22 ≤ rulePortMax)`, `srcClass` MUST be `4` (`agent-core` JIT broker) or `6` (`OperatorAdmin` breakglass).
+  - Operator Workstation (`dstClass == 6`, `macbook-air`) Non-Interference:
+    * Only `srcClass == 4` (`agent-core` for Touch ID JIT remote login) or `srcClass == 6` may route to `dstClass == 6`; compute workers (`srcClass ≤ 3` or `5`) are unconditionally blocked.
   - Sovereign Vault (`dstClass == 5`, `dgx-spark`) Non-Interference:
     * `srcClass ≤ 1` and `srcClass == 3` are NEVER admitted to `dstClass == 5`.
     * `srcClass == 2` (`FreeCompute`) is admitted to `dstClass == 5` ONLY with an active unbunkered biometric JIT lease
@@ -102,9 +105,12 @@ def ratchetEpochStep
     (srcClass dstClass : UInt8) (dstPort rulePortMin rulePortMax : UInt32)
     (jitBiometricGrant bunkerState : UInt8) (nowEpoch jitExpiresAt : UInt64) : Bool :=
   let touches3088 := dstPort == 3088 || (rulePortMin ≤ 3088 && 3088 ≤ rulePortMax)
+  let touches22 := dstPort == 22 || (rulePortMin ≤ 22 && 22 ≤ rulePortMax)
   let jitActive := jitBiometricGrant == 1 && bunkerState == 0 && nowEpoch < jitExpiresAt
   let vaultServicePort := 8888 ≤ rulePortMin && rulePortMax ≤ 8890 && 8888 ≤ dstPort && dstPort ≤ 8890
   (touches3088 && srcClass != 4 && srcClass != 6) ||
+  (touches22 && srcClass != 4 && srcClass != 6) ||
+  (dstClass == 6 && srcClass != 4 && srcClass != 6) ||
   (dstClass == 5 &&
     (srcClass ≤ 1 || srcClass == 3 || srcClass == 5 ||
      (srcClass == 2 && !jitActive) ||
