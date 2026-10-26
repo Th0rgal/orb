@@ -417,6 +417,44 @@ pub(crate) fn sync_cli_proxy_priorities(accounts: &[crate::ai_providers::AIProvi
     }
 }
 
+/// Auth file key holding the last Gemini weekly window seen for the login.
+const GEMINI_WEEKLY_KEY: &str = "sandboxed_gemini_weekly";
+
+/// Show the login's last-seen Gemini weekly window when Google reports only
+/// the 5-hour one, and store a fresh weekly reading in its auth file.
+pub(crate) fn remember_gemini_weekly(file: &str, windows: &mut Vec<Value>) {
+    let Some(dir) = super::cli_proxy_accounts::auth_dir() else {
+        return;
+    };
+    if file.contains('/') || file.contains("..") {
+        return;
+    }
+    let path = dir.join(file);
+    let Some(value) = read_json(&path) else {
+        return;
+    };
+    let stored = value.get(GEMINI_WEEKLY_KEY);
+    let next = super::antigravity_usage::with_remembered_gemini_weekly(
+        windows,
+        stored,
+        chrono::Utc::now().timestamp(),
+    );
+    if next.as_ref() == stored {
+        return;
+    }
+    let mut value = value.clone();
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    match next {
+        Some(next) => obj.insert(GEMINI_WEEKLY_KEY.into(), next),
+        None => obj.remove(GEMINI_WEEKLY_KEY),
+    };
+    if let Err(error) = write_auth_file(&path, &value) {
+        tracing::warn!(file, %error, "Could not store the Antigravity Gemini weekly window");
+    }
+}
+
 /// Rewrite an auth file atomically, keeping its owner and 0600 mode.
 fn write_auth_file(path: &Path, value: &Value) -> std::io::Result<()> {
     use std::io::Write;
