@@ -1624,6 +1624,24 @@ impl MeshManifest {
                 description: format!("Worker telemetry & LLM proxy {worker} -> agent-core:3000"),
             });
         }
+        for peer_to_core in [
+            "dgx-spark",
+            "thomas-md",
+            "polymath",
+            "maven-repo",
+            "macbook-air",
+        ] {
+            rules.push(CapabilityRule {
+                src_peer: peer_to_core.into(),
+                dst_peer: "agent-core".into(),
+                proto: MeshProto::Tcp,
+                port_min: 3000,
+                port_max: 3000,
+                description: format!(
+                    "Fleet security, heartbeat & bunker status {peer_to_core} -> agent-core:3000"
+                ),
+            });
+        }
         rules.push(CapabilityRule {
             src_peer: "agent-core".into(),
             dst_peer: "dgx-spark".into(),

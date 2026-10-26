@@ -49,13 +49,26 @@ use uuid::Uuid;
 use super::approval_flow::ApprovalState;
 use super::auth::AuthUser;
 use super::routes::AppState;
-use crate::orb_spec::BunkerState as OrbBunkerState;
+use crate::orb_spec::{
+    canary_tripwire_step, classify_actor_trust, classify_canary_class, ActorTrust,
+    BunkerState as OrbBunkerState, CanaryClass, CanaryTripwireAction, CanaryTripwireStepInput,
+    CanaryTripwireStepVerdict,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PeerRoamState {
     pub replay_window: ReplayWindow64,
     pub last_roam_seq: u64,
     pub last_roam_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeQuarantineRecord {
+    pub quarantined: bool,
+    pub quarantined_at: u64,
+    pub canary_kind: String,
+    pub event_seq: u64,
+    pub reason: String,
 }
 
 fn default_bunker_normal() -> MeshBunkerState {
@@ -72,6 +85,10 @@ pub struct PersistedMeshState {
     pub heartbeat_replay: BTreeMap<String, ReplayWindow64>,
     #[serde(default)]
     pub canary_replay: BTreeMap<String, ReplayWindow64>,
+    #[serde(default)]
+    pub quarantined_nodes: BTreeMap<String, NodeQuarantineRecord>,
+    #[serde(default)]
+    pub last_unbunker_at: u64,
     pub last_heartbeat_at: u64,
     pub is_sovereign_node: bool,
     #[serde(default = "default_bunker_normal")]
@@ -105,6 +122,8 @@ impl PersistedMeshState {
             peer_roam: BTreeMap::new(),
             heartbeat_replay: BTreeMap::new(),
             canary_replay: BTreeMap::new(),
+            quarantined_nodes: BTreeMap::new(),
+            last_unbunker_at: 0,
             last_heartbeat_at: now_epoch,
             is_sovereign_node: true,
             bunker_state: MeshBunkerState::HardLockdown,
@@ -356,6 +375,8 @@ impl MeshStore {
                                         peer_roam: BTreeMap::new(),
                                         heartbeat_replay: BTreeMap::new(),
                                         canary_replay: BTreeMap::new(),
+                                        quarantined_nodes: BTreeMap::new(),
+                                        last_unbunker_at: 0,
                                         last_heartbeat_at: now,
                                         is_sovereign_node: true,
                                         bunker_state: MeshBunkerState::Normal,
@@ -584,6 +605,68 @@ pub struct CanaryTripwireRequest {
     pub signature_hex: String,
 }
 
+/// Returns `true` when `node` is currently in node-scoped quarantine in `state.quarantined_nodes`.
+pub fn is_node_quarantined(state: &PersistedMeshState, node: &str) -> bool {
+    state
+        .quarantined_nodes
+        .get(node.trim())
+        .map(|r| r.quarantined)
+        .unwrap_or(false)
+}
+
+/// Evaluates the formal `Orb.Kernel.canaryTripwireStep` blast-radius verdict for a
+/// verified `CanaryTripwireRequest`:
+/// - Ambient filesystem decoys (`env_honeytoken`, `vault_canary`) accessed by a whitelisted
+///   agent file-search walk (`rg`, `grep`, `find`, `fd`, `ls`, `git`, `stat`, `file`, `du`, `tree`)
+///   return `CanaryTripwireAction::IgnoreWhitelisted` (`canary_whitelisted_ambient_no_bunker`).
+/// - Ambient filesystem decoys (`env_honeytoken`, `vault_canary`) read by a single mission
+///   process (`uid == Some(999)` / `sandboxed-node` mission job) when no other node is already
+///   quarantined return `CanaryTripwireAction::QuarantineNodeOnly`
+///   (`canary_mission_ambient_node_only`) — quarantining ONLY the reporting node and keeping
+///   global fleet `bunker_state` at `Normal (0)`.
+/// - High-signal attacker bait (`btc_wallet_canary`, `ssh_exfil_canary`), active TCP socket
+///   probes (`mongo_socket_27017`), untrusted/non-mission UIDs, or correlated multi-node
+///   canary trips escalate to `CanaryTripwireAction::EscalateFleetLockdown`
+///   (`canary_high_signal_bait_always_locks_down`).
+pub fn evaluate_canary_blast_radius(
+    state: &PersistedMeshState,
+    req: &CanaryTripwireRequest,
+) -> CanaryTripwireStepVerdict {
+    let peer_name = req.peer_name.trim();
+    let kind_lower = req.canary_kind.trim().to_ascii_lowercase();
+    let other_node_already_quarantined = state
+        .quarantined_nodes
+        .iter()
+        .any(|(node, rec)| rec.quarantined && node != peer_name);
+
+    let canary_class = if other_node_already_quarantined || kind_lower.contains("mongo") {
+        CanaryClass::HighSignalBait
+    } else {
+        classify_canary_class(&req.canary_kind)
+    };
+
+    let actor_trust = if matches!(req.uid, Some(u) if u != 999) {
+        ActorTrust::UntrustedOrSystem
+    } else {
+        classify_actor_trust(req.uid, req.cgroup.as_deref(), req.cmdline.as_deref())
+    };
+
+    let current_fleet_bunker = match state.bunker_state {
+        MeshBunkerState::Normal => OrbBunkerState::Normal,
+        MeshBunkerState::SoftQuarantine => OrbBunkerState::SoftQuarantine,
+        MeshBunkerState::HardLockdown | MeshBunkerState::SovereignDeadManTripped => {
+            OrbBunkerState::HardLockdown
+        }
+    };
+
+    canary_tripwire_step(CanaryTripwireStepInput {
+        canary_class,
+        actor_trust,
+        is_dry_run: false,
+        current_fleet_bunker,
+    })
+}
+
 /// Pure server-side canary tripwire verification & mesh bunker escalation step.
 ///
 /// Enforces:
@@ -595,9 +678,13 @@ pub struct CanaryTripwireRequest {
 ///    must verify against the peer's manifest-pinned `peer.sign_pubkey_hex`.
 /// 6. Only after all cryptographic checks succeed does `canary_replay` (`ReplayWindow64`)
 ///    check and advance `event_seq` (preventing unauthenticated packets from shifting the window).
-/// 7. When `dry_run == false`, transitions `state.bunker_state` via `step_bunker_isolate`
-///    with `canary_tripped = true, manual_trigger = 2` (`HardLockdown` or `SovereignDeadManTripped`).
-///    When `dry_run == true`, returns the simulated transition without mutating `state.bunker_state`.
+/// 7. Evaluates `evaluate_canary_blast_radius` (`Orb.Kernel.canaryTripwireStep`):
+///    - `IgnoreWhitelisted`: neither node quarantine nor fleet bunker is triggered.
+///    - `QuarantineNodeOnly`: when `dry_run == false`, quarantines ONLY `peer_name` in
+///      `state.quarantined_nodes` while keeping global `state.bunker_state` at `Normal`.
+///    - `EscalateFleetLockdown`: transitions `state.bunker_state` via `step_bunker_isolate`
+///      with `canary_tripped = true, manual_trigger = 2` (`HardLockdown` or `SovereignDeadManTripped`),
+///      and when `dry_run == false`, persists both the node quarantine and global `state.bunker_state`.
 pub fn process_canary_tripwire_step(
     state: &mut PersistedMeshState,
     req: &CanaryTripwireRequest,
@@ -682,15 +769,22 @@ pub fn process_canary_tripwire_step(
         ));
     }
 
+    let blast = evaluate_canary_blast_radius(state, req);
     let previous = state.bunker_state;
     let hb_fresh = state.last_heartbeat_at <= now_epoch
         && now_epoch.saturating_sub(state.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    let (canary_tripped_fleet, manual_trigger) = match blast.action {
+        CanaryTripwireAction::EscalateFleetLockdown => (true, 2),
+        CanaryTripwireAction::QuarantineNodeOnly | CanaryTripwireAction::IgnoreWhitelisted => {
+            (false, 0)
+        }
+    };
     let transition = step_bunker_isolate(
         previous,
         state.is_sovereign_node,
-        true,
+        canary_tripped_fleet,
         false,
-        2,
+        manual_trigger,
         false,
         hb_fresh,
         now_epoch,
@@ -698,6 +792,18 @@ pub fn process_canary_tripwire_step(
         LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
     );
     if !req.dry_run {
+        if blast.quarantine_reporting_node {
+            state.quarantined_nodes.insert(
+                peer_name.to_string(),
+                NodeQuarantineRecord {
+                    quarantined: true,
+                    quarantined_at: now_epoch,
+                    canary_kind: canary_kind.to_string(),
+                    event_seq: req.event_seq,
+                    reason: reason.to_string(),
+                },
+            );
+        }
         state.bunker_state = transition.next_state;
     }
     Ok((previous, transition))
@@ -836,15 +942,22 @@ pub async fn preview_canary_tripwire(
         .unwrap_or_default();
     let already_replayed = !test_window.check_and_advance(req.event_seq);
 
+    let blast = evaluate_canary_blast_radius(&guard, req);
     let previous = guard.bunker_state;
     let hb_fresh = guard.last_heartbeat_at <= now
         && now.saturating_sub(guard.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    let (canary_tripped_fleet, manual_trigger) = match blast.action {
+        CanaryTripwireAction::EscalateFleetLockdown => (true, 2),
+        CanaryTripwireAction::QuarantineNodeOnly | CanaryTripwireAction::IgnoreWhitelisted => {
+            (false, 0)
+        }
+    };
     let transition = step_bunker_isolate(
         previous,
         guard.is_sovereign_node,
-        true,
+        canary_tripped_fleet,
         false,
-        2,
+        manual_trigger,
         false,
         hb_fresh,
         now,
@@ -2199,6 +2312,138 @@ mod tests {
             let (_, live_trans) = process_canary_tripwire_step(&mut guard, &live_req, now).unwrap();
             assert_eq!(live_trans.next_state, MeshBunkerState::HardLockdown);
             assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
+        });
+    }
+
+    #[test]
+    fn single_mission_env_honeytoken_quarantines_only_reporting_node_and_high_signal_bait_locks_down_fleet(
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ms = MeshStore::open(tmp.path().to_path_buf());
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async {
+            let mut guard = ms.inner.lock().await;
+            let nippur_sk = enroll_test_peer_key(&mut guard, "nippur", 0x81);
+            let ashur_sk = enroll_test_peer_key(&mut guard, "ashur", 0x82);
+            let now = guard.manifest.issued_at + 10;
+
+            // 1. Whitelisted agent file-search (`rg --hidden`) on `.env.production.canary`
+            //    is ignored: neither `nippur` nor the fleet enters Bunker Mode.
+            let walk_reason = "auditd watch hit on /opt/paloma-canary/.env.production.canary";
+            let walk_hash = canonical_canary_evidence_sha256_hex(
+                walk_reason,
+                Some(2001),
+                Some(999),
+                Some("/system.slice/sandboxed-node.service"),
+                Some("rg --hidden API_KEY /var/lib/sandboxed-node"),
+            );
+            let walk_sig = sign_canary_trip(
+                &nippur_sk,
+                "nippur",
+                "env_honeytoken",
+                1,
+                now,
+                false,
+                &walk_hash,
+            );
+            let walk_req = CanaryTripwireRequest {
+                peer_name: "nippur".into(),
+                canary_kind: "env_honeytoken".into(),
+                event_seq: 1,
+                timestamp: now,
+                dry_run: false,
+                reason: walk_reason.into(),
+                pid: Some(2001),
+                uid: Some(999),
+                cgroup: Some("/system.slice/sandboxed-node.service".into()),
+                cmdline: Some("rg --hidden API_KEY /var/lib/sandboxed-node".into()),
+                detail_sha256_hex: walk_hash,
+                signature_hex: walk_sig,
+            };
+            let (_, walk_trans) = process_canary_tripwire_step(&mut guard, &walk_req, now).unwrap();
+            assert_eq!(walk_trans.next_state, MeshBunkerState::Normal);
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+            assert!(!is_node_quarantined(&guard, "nippur"));
+
+            // 2. Single mission job reading `.env.production.canary` (`cat`) on `nippur`
+            //    quarantines ONLY `nippur` while keeping global fleet `bunker_state` at `Normal`.
+            let read_reason = "mission process read /opt/paloma-canary/.env.production.canary";
+            let read_hash = canonical_canary_evidence_sha256_hex(
+                read_reason,
+                Some(2002),
+                Some(999),
+                Some("/system.slice/sandboxed-node.service"),
+                Some("cat /opt/paloma-canary/.env.production.canary"),
+            );
+            let read_sig = sign_canary_trip(
+                &nippur_sk,
+                "nippur",
+                "env_honeytoken",
+                2,
+                now,
+                false,
+                &read_hash,
+            );
+            let read_req = CanaryTripwireRequest {
+                peer_name: "nippur".into(),
+                canary_kind: "env_honeytoken".into(),
+                event_seq: 2,
+                timestamp: now,
+                dry_run: false,
+                reason: read_reason.into(),
+                pid: Some(2002),
+                uid: Some(999),
+                cgroup: Some("/system.slice/sandboxed-node.service".into()),
+                cmdline: Some("cat /opt/paloma-canary/.env.production.canary".into()),
+                detail_sha256_hex: read_hash,
+                signature_hex: read_sig,
+            };
+            let (_, read_trans) = process_canary_tripwire_step(&mut guard, &read_req, now).unwrap();
+            assert_eq!(read_trans.next_state, MeshBunkerState::Normal);
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+            assert!(is_node_quarantined(&guard, "nippur"));
+            assert!(!is_node_quarantined(&guard, "ashur"));
+            assert!(!is_node_quarantined(&guard, "babylon"));
+
+            // 3. High-signal attacker bait (`btc_wallet_canary` / fake Bitcoin private key)
+            //    accessed even by a whitelisted agent process (`rg`) immediately escalates
+            //    global fleet `bunker_state` to `HardLockdown`.
+            guard.quarantined_nodes.clear();
+            let btc_reason = "CRITICAL: fake Bitcoin private key bait accessed on ashur";
+            let btc_hash = canonical_canary_evidence_sha256_hex(
+                btc_reason,
+                Some(3001),
+                Some(999),
+                Some("/system.slice/sandboxed-node.service"),
+                Some("rg L5oV /opt/paloma-canary/btc-treasury-wallet.dat"),
+            );
+            let btc_sig = sign_canary_trip(
+                &ashur_sk,
+                "ashur",
+                "btc_wallet_canary",
+                1,
+                now,
+                false,
+                &btc_hash,
+            );
+            let btc_req = CanaryTripwireRequest {
+                peer_name: "ashur".into(),
+                canary_kind: "btc_wallet_canary".into(),
+                event_seq: 1,
+                timestamp: now,
+                dry_run: false,
+                reason: btc_reason.into(),
+                pid: Some(3001),
+                uid: Some(999),
+                cgroup: Some("/system.slice/sandboxed-node.service".into()),
+                cmdline: Some("rg L5oV /opt/paloma-canary/btc-treasury-wallet.dat".into()),
+                detail_sha256_hex: btc_hash,
+                signature_hex: btc_sig,
+            };
+            let (_, btc_trans) = process_canary_tripwire_step(&mut guard, &btc_req, now).unwrap();
+            assert_eq!(btc_trans.next_state, MeshBunkerState::HardLockdown);
+            assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
+            assert!(is_node_quarantined(&guard, "ashur"));
         });
     }
 
