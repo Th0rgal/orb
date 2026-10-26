@@ -36,4 +36,19 @@ class OrbTranscriptFollowTest {
         f.onDragStart()
         assertTrue(f.shouldFollow(anchoredInitial = false))
     }
+
+    @Test fun scrollEpochSuppressesSecondCorrectionInSameEpoch() {
+        val f = OrbTranscriptFollow()
+        assertTrue(f.shouldCorrectInEpoch(targetTopPx = 800, currentTopPx = 400))
+        assertFalse(f.shouldCorrectInEpoch(targetTopPx = 900, currentTopPx = 800))
+        f.advanceLayoutEpoch()
+        assertTrue(f.shouldCorrectInEpoch(targetTopPx = 1000, currentTopPx = 800))
+    }
+
+    @Test fun clientParityStepAdmitsValidProjection() {
+        val f = OrbTranscriptFollow()
+        val digest = f.verifyClientParity(transcriptSeq = 42, markdownBlocksCount = 8, sendQueueDepth = 0)
+        assertTrue(f.parityAdmitted)
+        assertTrue(digest != 0L)
+    }
 }

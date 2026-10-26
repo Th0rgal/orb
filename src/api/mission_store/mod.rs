@@ -79,27 +79,12 @@ pub struct MissionFilter {
 /// Live / waiting / blocked, plus unabsorbed `failed` / `interrupted`.
 /// Acknowledged, completed, and absorbed/replaced attempts drop out.
 pub fn default_attention_keeps(mission: &Mission) -> bool {
-    let superseded_or_archived = mission.project.tags.iter().any(|tag| tag == SUPERSEDED_TAG)
-        || matches!(
+    !mission.project.tags.iter().any(|tag| tag == SUPERSEDED_TAG)
+        && !matches!(
             mission.status,
             crate::api::control::events::MissionStatus::Acknowledged
                 | crate::api::control::events::MissionStatus::Completed
-        );
-    let host_keeps = !superseded_or_archived;
-    let updated_ms = chrono::DateTime::parse_from_rfc3339(&mission.updated_at)
-        .map(|dt| dt.timestamp_millis().max(0) as u64)
-        .unwrap_or(1);
-    let id_ord = (mission.id.as_u128() as u32).max(1);
-    let verdict = evaluate_sidebar_merge_gate(
-        0,
-        id_ord,
-        0,
-        updated_ms,
-        superseded_or_archived,
-        true,
-        host_keeps,
-    );
-    verdict.retain_or_upsert
+        )
 }
 
 static CURSOR_PAGE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
@@ -222,14 +207,25 @@ pub fn reconcile_sidebar_missions_page(
                 }
             }
         } else {
+            let (head_ord, head_ms) = out
+                .first()
+                .map(|head| {
+                    let mut ord = (head.id.as_u128() as u32).max(1);
+                    if ord == inc_ord {
+                        ord ^= 1;
+                    }
+                    (ord, parse_ms(&head.updated_at))
+                })
+                .unwrap_or((inc_ord ^ 1, inc_ms));
+            let host_retains_or_upserts = !inc_superseded_or_archived;
             let verdict = evaluate_sidebar_merge_gate(
-                0,
+                head_ord,
                 inc_ord,
-                0,
+                head_ms,
                 inc_ms,
                 inc_superseded_or_archived,
                 is_partial_page,
-                !inc_superseded_or_archived,
+                host_retains_or_upserts,
             );
             if verdict.insert_new {
                 out.push(inc.clone());
@@ -2362,11 +2358,23 @@ pub trait MissionStore: Send + Sync {
         loop {
             let page = self.list_missions(PAGE, scan_offset).await?;
             let page_len = page.len();
-            for mission in page {
-                if filter.matches(&mission) {
-                    matched.push(mission);
-                    if matched.len() >= want {
-                        break;
+            if filter.attention_only {
+                let mut candidates = Vec::new();
+                for mission in page {
+                    let mut non_attn = filter.clone();
+                    non_attn.attention_only = false;
+                    if non_attn.matches(&mission) {
+                        candidates.push(mission);
+                    }
+                }
+                matched = reconcile_sidebar_missions_page(&matched, &candidates, true);
+            } else {
+                for mission in page {
+                    if filter.matches(&mission) {
+                        matched.push(mission);
+                        if matched.len() >= want {
+                            break;
+                        }
                     }
                 }
             }

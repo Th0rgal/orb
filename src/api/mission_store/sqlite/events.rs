@@ -792,50 +792,48 @@ impl SqliteMissionStore {
                 })
             }
 
-            let events: Vec<StoredEvent> = if let Some(types) = types {
+            let raw_rows: Vec<StoredEvent> = if let Some(types) = types {
                 let types_json = serde_json::to_string(&types).unwrap_or_else(|_| "[]".to_string());
                 let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
                 let rows = stmt
                     .query_map(params![&mid, since_seq, &types_json, limit], parse_row)
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| e.to_string())?;
-                let mut result = Vec::new();
-                for row in rows {
-                    let ev = row.map_err(|e| e.to_string())?;
-                    let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
-                        Some(since_seq.max(0) as u64),
-                        None,
-                        ev.sequence.max(0) as u64,
-                        true,
-                        result.len() as u32,
-                        ev.sequence > since_seq,
-                    );
-                    if verdict.include_item {
-                        result.push(ev);
-                    }
-                }
-                result
+                rows
             } else {
                 let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
                 let rows = stmt
                     .query_map(params![&mid, since_seq, limit], parse_row)
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| e.to_string())?;
-                let mut result = Vec::new();
-                for row in rows {
-                    let ev = row.map_err(|e| e.to_string())?;
-                    let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
-                        Some(since_seq.max(0) as u64),
-                        None,
-                        ev.sequence.max(0) as u64,
-                        true,
-                        result.len() as u32,
-                        ev.sequence > since_seq,
-                    );
-                    if verdict.include_item {
-                        result.push(ev);
-                    }
-                }
-                result
+                rows
             };
+
+            let is_partial_response = (raw_rows.len() as i64) >= limit;
+            let mut events = Vec::with_capacity(raw_rows.len());
+            let mut prev_seq: Option<i64> = None;
+            for ev in raw_rows {
+                let effective_since = prev_seq
+                    .map(|p| p.max(since_seq))
+                    .unwrap_or(since_seq)
+                    .max(0) as u64;
+                let host_includes =
+                    ev.sequence > since_seq && prev_seq.is_none_or(|p| ev.sequence > p);
+                let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
+                    Some(effective_since),
+                    None,
+                    ev.sequence.max(0) as u64,
+                    is_partial_response,
+                    events.len() as u32,
+                    host_includes,
+                );
+                if verdict.include_item {
+                    prev_seq = Some(ev.sequence);
+                    events.push(ev);
+                }
+            }
 
             Ok(events)
         })
@@ -907,50 +905,47 @@ impl SqliteMissionStore {
                 })
             }
 
-            let events: Vec<StoredEvent> = if let Some(types) = types {
+            let raw_rows: Vec<StoredEvent> = if let Some(types) = types {
                 let types_json = serde_json::to_string(&types).unwrap_or_else(|_| "[]".to_string());
                 let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
                 let rows = stmt
                     .query_map(params![&mid, before_seq, &types_json, limit], parse_row)
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| e.to_string())?;
-                let mut result = Vec::new();
-                for row in rows {
-                    let ev = row.map_err(|e| e.to_string())?;
-                    let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
-                        None,
-                        Some(before_seq.max(0) as u64),
-                        ev.sequence.max(0) as u64,
-                        true,
-                        result.len() as u32,
-                        ev.sequence < before_seq,
-                    );
-                    if verdict.include_item {
-                        result.push(ev);
-                    }
-                }
-                result
+                rows
             } else {
                 let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
                 let rows = stmt
                     .query_map(params![&mid, before_seq, limit], parse_row)
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| e.to_string())?;
-                let mut result = Vec::new();
-                for row in rows {
-                    let ev = row.map_err(|e| e.to_string())?;
-                    let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
-                        None,
-                        Some(before_seq.max(0) as u64),
-                        ev.sequence.max(0) as u64,
-                        true,
-                        result.len() as u32,
-                        ev.sequence < before_seq,
-                    );
-                    if verdict.include_item {
-                        result.push(ev);
-                    }
-                }
-                result
+                rows
             };
+
+            let is_partial_response = (raw_rows.len() as i64) >= limit;
+            let b_seq = before_seq.max(0) as u64;
+            let mut events = Vec::with_capacity(raw_rows.len());
+            let mut prev_seq: Option<i64> = None;
+            for ev in raw_rows {
+                let effective_since = prev_seq.map(|p| p.max(0) as u64);
+                let host_includes = ev.sequence < before_seq
+                    && prev_seq.is_none_or(|p| ev.sequence > p)
+                    && effective_since.is_none_or(|s| s < b_seq);
+                let verdict = crate::api::mission_store::evaluate_cursor_page_gate(
+                    effective_since,
+                    Some(b_seq),
+                    ev.sequence.max(0) as u64,
+                    is_partial_response,
+                    events.len() as u32,
+                    host_includes,
+                );
+                if verdict.include_item {
+                    prev_seq = Some(ev.sequence);
+                    events.push(ev);
+                }
+            }
 
             Ok(events)
         })

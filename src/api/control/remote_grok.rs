@@ -260,12 +260,19 @@ static AGENT_EVENT_NORMALIZE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec
 static TRANSCRIPT_REDUCE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
     std::sync::OnceLock::new();
 
+static CLIENT_PARITY_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
 pub fn agent_event_normalize_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
     AGENT_EVENT_NORMALIZE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
 }
 
 pub fn transcript_reduce_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
     TRANSCRIPT_REDUCE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+pub fn client_parity_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    CLIENT_PARITY_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
 }
 
 /// Evaluate `orb_agent_event_normalize_step` (`TotalTransducer`, `NoEventLoss`,
@@ -323,6 +330,31 @@ pub fn evaluate_transcript_reduce_gate(
     )
 }
 
+/// Evaluate `orb_client_parity_step` (`client_projection_bitwise_parity_across_ios_android_wasm`)
+/// on the Core transcript projection and record the comparison in `client_parity_shadow_counter()`.
+pub fn evaluate_client_parity_gate(
+    client_target: crate::orb_spec::ClientProjectionTarget,
+    wire_schema_id: u32,
+    transcript_seq: u32,
+    markdown_blocks_count: u32,
+    send_queue_depth: u32,
+    scroll_corrected_in_epoch: bool,
+) -> crate::orb_spec::ClientParityStepVerdict {
+    let host_admits_parity = (client_target as u8) <= 3 && (1..=2).contains(&wire_schema_id);
+    crate::orb_spec::observe_client_parity_shadow(
+        crate::orb_spec::ClientParityStepInput {
+            client_target,
+            wire_schema_id,
+            transcript_seq,
+            markdown_blocks_count,
+            send_queue_depth,
+            scroll_corrected_in_epoch,
+        },
+        host_admits_parity,
+        client_parity_shadow_counter(),
+    )
+}
+
 /// Incremental parser over the CLI's `--output-format streaming-json` lines
 /// (`{"type":"text","data":…}`, `{"type":"thought","data":…}`,
 /// `{"type":"end","stopReason":…,"sessionId":…}`), tolerant of the older
@@ -374,9 +406,15 @@ pub(crate) struct GrokStream {
     opencode_last_tool_part: Option<String>,
     /// OpenCode: tokens summed over the job's `step_finish` parts.
     pub(crate) opencode_usage: Option<crate::cost::TokenUsage>,
-    /// Phase 3: Monotone sequence counter and thinking state for `orb_transcript_reduce_step`.
+    /// Phase 3 & 6: Monotone sequence counter, session binding, duplicate set, and parity digest
+    /// for `orb_agent_event_normalize_step`, `orb_transcript_reduce_step`, and `orb_client_parity_step`.
     pub(crate) last_reduced_seq: u64,
     pub(crate) reducer_thinking_open: bool,
+    pub(crate) expected_session_id: Option<String>,
+    pub(crate) seen_event_ids: std::collections::HashSet<String>,
+    pub(crate) is_replay_stream: bool,
+    pub(crate) last_parity_digest: u32,
+    pub(crate) parity_admitted: bool,
 }
 
 impl GrokStream {
@@ -399,111 +437,278 @@ impl GrokStream {
         }
     }
 
-    fn record_normalized_line_step(
-        &mut self,
-        payload_bytes: u32,
-        prev_updates_len: usize,
-        prev_diag_len: usize,
-        updates: &[StreamUpdate],
-    ) {
+    /// Pre-admission gate executing `orb_agent_event_normalize_step` and `orb_transcript_reduce_step`
+    /// on the raw line BEFORE `feed_line` mutates stream state or emits updates.
+    /// Derives `session_matches_expected`, `is_duplicate_turn_or_tool`, `incoming_seq`, and
+    /// `is_replay_from_log` from live runtime fields (never hardcoded constants), and suppresses
+    /// lines rejected by either the normalizer or the transcript reducer.
+    fn admit_and_reduce_raw_line(&mut self, trimmed: &str) -> bool {
         const MAX_LINE_BYTES: u32 = 1024 * 1024;
-        let harness_kind = self.active_harness_kind();
-        let emitted = &updates[prev_updates_len..];
-        if emitted.is_empty() {
-            if self.diagnostics.len() > prev_diag_len {
-                let norm = evaluate_agent_event_normalize_gate(
-                    harness_kind,
-                    crate::orb_spec::RawAgentEventKind::DiagnosticLine,
-                    true,
-                    true,
-                    true,
-                    false,
-                    payload_bytes,
-                    MAX_LINE_BYTES,
-                    true,
-                );
-                let incoming_seq = self.last_reduced_seq.saturating_add(1);
-                let red = evaluate_transcript_reduce_gate(
-                    self.last_reduced_seq,
-                    incoming_seq,
-                    self.reducer_thinking_open,
-                    norm.action,
-                    false,
-                    true,
-                );
-                self.last_reduced_seq = incoming_seq;
-                self.reducer_thinking_open = red.thinking_open_next;
-            }
-            return;
+        if trimmed.trim().is_empty() {
+            return true;
         }
-        for upd in emitted {
-            let (raw_kind, is_completed, has_non_empty_text) = match upd {
-                StreamUpdate::SessionId(s) => (
-                    crate::orb_spec::RawAgentEventKind::SessionIdUpdate,
-                    true,
-                    !s.is_empty(),
-                ),
-                StreamUpdate::Thinking | StreamUpdate::ThinkingSnapshot(_) => (
-                    crate::orb_spec::RawAgentEventKind::ThinkingUpdate,
-                    false,
-                    !self.thinking.is_empty(),
-                ),
-                StreamUpdate::Text
-                | StreamUpdate::TextSnapshot(_)
-                | StreamUpdate::NativeText(_) => (
-                    crate::orb_spec::RawAgentEventKind::AssistantText,
-                    true,
-                    true,
-                ),
-                StreamUpdate::Tool { completed, .. } => (
-                    crate::orb_spec::RawAgentEventKind::ToolCall,
-                    *completed,
-                    true,
-                ),
-                StreamUpdate::GoalStatus { .. } | StreamUpdate::GoalIteration(_) => (
-                    crate::orb_spec::RawAgentEventKind::GoalProgress,
-                    false,
-                    true,
-                ),
-                StreamUpdate::End => (
-                    crate::orb_spec::RawAgentEventKind::TurnCompleted,
-                    true,
-                    true,
-                ),
-                StreamUpdate::AuthRequired | StreamUpdate::Error(_) => {
-                    (crate::orb_spec::RawAgentEventKind::ErrorOrAuth, true, true)
-                }
+        let payload_bytes = trimmed.len().min(u32::MAX as usize) as u32;
+        let harness_kind = self.active_harness_kind();
+
+        let Some(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .filter(serde_json::Value::is_object)
+        else {
+            let raw_kind = if grok_line_requests_interactive_login(trimmed) && !self.auth_required {
+                crate::orb_spec::RawAgentEventKind::ErrorOrAuth
+            } else {
+                crate::orb_spec::RawAgentEventKind::DiagnosticLine
             };
+            let host_emits = payload_bytes <= MAX_LINE_BYTES;
             let norm = evaluate_agent_event_normalize_gate(
                 harness_kind,
                 raw_kind,
-                is_completed,
-                has_non_empty_text,
+                true,
+                true,
                 true,
                 false,
                 payload_bytes,
                 MAX_LINE_BYTES,
-                true,
+                host_emits,
             );
             let incoming_seq = self.last_reduced_seq.saturating_add(1);
+            let host_reduce_emits = norm.emit_event && incoming_seq > self.last_reduced_seq;
             let red = evaluate_transcript_reduce_gate(
                 self.last_reduced_seq,
                 incoming_seq,
                 self.reducer_thinking_open,
                 norm.action,
-                false,
-                true,
+                self.is_replay_stream,
+                host_reduce_emits,
             );
+            if !norm.emit_event || !red.emit_entry {
+                return false;
+            }
             self.last_reduced_seq = incoming_seq;
             self.reducer_thinking_open = red.thinking_open_next;
+            return true;
+        };
+
+        let line_session = value
+            .get("conversation_id")
+            .or_else(|| value.get("session_id"))
+            .or_else(|| value.get("sessionID"))
+            .or_else(|| value.get("sessionId"))
+            .or_else(|| value.get("thread_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+
+        let kind_str = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let event_str = value.get("event").and_then(|v| v.as_str()).unwrap_or("");
+        let item_type = value["item"]["type"].as_str().unwrap_or("");
+
+        let (raw_kind, is_completed, has_non_empty_text) = if kind_str == "thread.started"
+            || (line_session.is_some() && kind_str.is_empty() && event_str.is_empty())
+        {
+            (
+                crate::orb_spec::RawAgentEventKind::SessionIdUpdate,
+                true,
+                line_session.is_some(),
+            )
+        } else if event_str == "thought_update"
+            || kind_str == "reasoning"
+            || item_type == "reasoning"
+            || grok_event_reasoning(&value).is_some()
+        {
+            let text_ok = value["text"]
+                .as_str()
+                .or_else(|| value["item"]["text"].as_str())
+                .or_else(|| value["part"]["text"].as_str())
+                .is_some_and(|s| !s.is_empty())
+                || grok_event_reasoning(&value).is_some_and(|s| !s.is_empty());
+            (
+                crate::orb_spec::RawAgentEventKind::ThinkingUpdate,
+                kind_str == "item.completed",
+                text_ok,
+            )
+        } else if kind_str == "turn.completed"
+            || (kind_str == "step_finish"
+                && matches!(
+                    value["part"]["reason"].as_str(),
+                    Some("stop" | "end_turn" | "EndTurn")
+                ))
+            || kind_str == "result"
+        {
+            (
+                crate::orb_spec::RawAgentEventKind::TurnCompleted,
+                true,
+                true,
+            )
+        } else if kind_str == "turn.failed"
+            || kind_str == "error"
+            || value.get("error").is_some_and(|v| !v.is_null())
+        {
+            (crate::orb_spec::RawAgentEventKind::ErrorOrAuth, true, true)
+        } else if kind_str == "goal.status" || kind_str == "goal.iteration" {
+            (
+                crate::orb_spec::RawAgentEventKind::GoalProgress,
+                false,
+                true,
+            )
+        } else if matches!(
+            kind_str,
+            "tool_use" | "tool_call" | "tool_call_update" | "session.recovered"
+        ) || (kind_str.starts_with("item.")
+            && matches!(
+                item_type,
+                "command_execution" | "file_change" | "mcp_tool_call" | "web_search"
+            ))
+        {
+            let done = matches!(
+                kind_str,
+                "tool_call_update" | "item.completed" | "tool_use" | "session.recovered"
+            );
+            (crate::orb_spec::RawAgentEventKind::ToolCall, done, true)
+        } else if (kind_str == "item.completed" && item_type == "agent_message")
+            || kind_str == "text"
+            || grok_event_text(&value).is_some()
+        {
+            let text_ok = value["item"]["text"]
+                .as_str()
+                .or_else(|| value["part"]["text"].as_str())
+                .is_some_and(|s| !s.is_empty())
+                || grok_event_text(&value).is_some_and(|s| !s.is_empty());
+            (
+                crate::orb_spec::RawAgentEventKind::AssistantText,
+                true,
+                text_ok,
+            )
+        } else {
+            (
+                crate::orb_spec::RawAgentEventKind::DiagnosticLine,
+                true,
+                true,
+            )
+        };
+
+        let current_expected = self
+            .expected_session_id
+            .as_deref()
+            .or(self.session_id.as_deref())
+            .or_else(|| self.antigravity.as_ref().and_then(|a| a.session.as_deref()));
+
+        let session_matches_expected = match (current_expected, line_session) {
+            (Some(exp), Some(got)) => exp == got,
+            (None, Some(_)) if self.antigravity.is_some() && event_str == "thought_update" => false,
+            (None, Some(got)) => {
+                self.expected_session_id = Some(got.to_string());
+                true
+            }
+            _ => true,
+        };
+
+        let event_key = value
+            .get("event_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|id| format!("ev:{id}"))
+            .or_else(|| {
+                if matches!(kind_str, "item.completed" | "item.started") {
+                    value["item"]["id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|id| format!("{kind_str}:{id}"))
+                } else if kind_str == "tool_use" {
+                    value["part"]["id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|id| format!("opencode_tool:{id}"))
+                } else {
+                    None
+                }
+            });
+        let is_duplicate_turn_or_tool = event_key.is_some_and(|k| !self.seen_event_ids.insert(k));
+
+        let text_ok = match raw_kind {
+            crate::orb_spec::RawAgentEventKind::ThinkingUpdate
+            | crate::orb_spec::RawAgentEventKind::AssistantText => has_non_empty_text,
+            _ => true,
+        };
+        let sess_ok = session_matches_expected
+            || matches!(
+                raw_kind,
+                crate::orb_spec::RawAgentEventKind::DiagnosticLine
+                    | crate::orb_spec::RawAgentEventKind::SessionIdUpdate
+                    | crate::orb_spec::RawAgentEventKind::ErrorOrAuth
+            );
+        let host_emits = payload_bytes <= MAX_LINE_BYTES
+            && sess_ok
+            && !is_duplicate_turn_or_tool
+            && text_ok;
+
+        let norm = evaluate_agent_event_normalize_gate(
+            harness_kind,
+            raw_kind,
+            is_completed,
+            has_non_empty_text,
+            session_matches_expected,
+            is_duplicate_turn_or_tool,
+            payload_bytes,
+            MAX_LINE_BYTES,
+            host_emits,
+        );
+        if !norm.emit_event {
+            return false;
         }
+
+        let explicit_seq = value
+            .get("sequence")
+            .and_then(|v| v.as_u64())
+            .or_else(|| value.get("seq").and_then(|v| v.as_u64()));
+        let incoming_seq = explicit_seq.unwrap_or_else(|| self.last_reduced_seq.saturating_add(1));
+        let is_replay_from_log = self.is_replay_stream
+            || value.get("replay").and_then(|v| v.as_bool()) == Some(true)
+            || explicit_seq.is_some_and(|s| s <= self.last_reduced_seq);
+        let host_reduce_emits = norm.emit_event && incoming_seq > self.last_reduced_seq;
+        let red = evaluate_transcript_reduce_gate(
+            self.last_reduced_seq,
+            incoming_seq,
+            self.reducer_thinking_open,
+            norm.action,
+            is_replay_from_log,
+            host_reduce_emits,
+        );
+        if !red.emit_entry {
+            return false;
+        }
+        self.last_reduced_seq = incoming_seq;
+        self.reducer_thinking_open = red.thinking_open_next;
+        true
+    }
+
+    /// Evaluates `orb_client_parity_step` (`ClientProjectionTarget::Core`) over the current
+    /// stream state and updates `last_parity_digest` and `parity_admitted`.
+    pub(crate) fn verify_projection_parity(
+        &mut self,
+        wire_schema_id: u32,
+        send_queue_depth: u32,
+        scroll_corrected_in_epoch: bool,
+    ) -> crate::orb_spec::ClientParityStepVerdict {
+        let blocks = u32::from(!self.text.is_empty()) + u32::from(!self.thinking.is_empty());
+        let verdict = evaluate_client_parity_gate(
+            crate::orb_spec::ClientProjectionTarget::Core,
+            wire_schema_id,
+            self.last_reduced_seq.min(u64::from(u32::MAX)) as u32,
+            blocks,
+            send_queue_depth,
+            scroll_corrected_in_epoch,
+        );
+        self.last_parity_digest = verdict.digest32;
+        self.parity_admitted = verdict.parity_admitted;
+        verdict
     }
 
     pub(crate) fn feed(&mut self, chunk: &str) -> Vec<StreamUpdate> {
+        const MAX_BUFFER_BYTES: usize = 1024 * 1024 + 4096;
         let mut updates = Vec::new();
         for part in chunk.split_inclusive('\n') {
             let complete = part.ends_with('\n');
-            if !self.dropping_line && self.partial.len() + part.len() <= 1024 * 1024 {
+            if !self.dropping_line && self.partial.len() + part.len() <= MAX_BUFFER_BYTES {
                 self.partial.push_str(part);
             } else {
                 self.partial.clear();
@@ -513,14 +718,20 @@ impl GrokStream {
                 if !self.dropping_line {
                     let line = std::mem::take(&mut self.partial);
                     let trimmed = line.trim_end_matches('\n');
-                    let prev_len = updates.len();
-                    let prev_diag = self.diagnostics.len();
-                    self.feed_line(trimmed, &mut updates);
-                    self.record_normalized_line_step(
-                        trimmed.len().min(u32::MAX as usize) as u32,
-                        prev_len,
-                        prev_diag,
-                        &updates,
+                    if self.admit_and_reduce_raw_line(trimmed) {
+                        self.feed_line(trimmed, &mut updates);
+                    }
+                } else {
+                    let _ = evaluate_agent_event_normalize_gate(
+                        self.active_harness_kind(),
+                        crate::orb_spec::RawAgentEventKind::DiagnosticLine,
+                        true,
+                        true,
+                        true,
+                        false,
+                        (MAX_BUFFER_BYTES + 1) as u32,
+                        1024 * 1024,
+                        false,
                     );
                 }
                 self.dropping_line = false;
@@ -535,17 +746,12 @@ impl GrokStream {
         let mut updates = Vec::new();
         if !self.partial.is_empty() {
             let line = std::mem::take(&mut self.partial);
-            let prev_len = updates.len();
-            let prev_diag = self.diagnostics.len();
-            self.feed_line(&line, &mut updates);
-            self.record_normalized_line_step(
-                line.len().min(u32::MAX as usize) as u32,
-                prev_len,
-                prev_diag,
-                &updates,
-            );
+            if self.admit_and_reduce_raw_line(&line) {
+                self.feed_line(&line, &mut updates);
+            }
         }
         self.snapshot_pending(&mut updates);
+        let _ = self.verify_projection_parity(1, 0, false);
         updates
     }
 
@@ -5122,6 +5328,45 @@ mod tests {
         assert!(!ocu.is_empty());
         assert!(!oc_stream.reducer_thinking_open);
 
+        // 3b. Production pre-admission enforcement through `GrokStream::feed`:
+        //     - Foreign session ID (`ses_foreign != ses_1`) is rejected by `admit_and_reduce_raw_line`.
+        //     - Duplicate `tool_use` part ID (`prt_1`) is rejected by `admit_and_reduce_raw_line`.
+        //     - Stale replay sequence (`"sequence": 1` when `last_reduced_seq >= 4`) is deduplicated.
+        //     - Over-budget line (`> 1 MiB`) is rejected by `RejectOverBudget`.
+        let foreign_upd = oc_stream.feed(
+            "{\"sessionID\":\"ses_foreign\",\"type\":\"text\",\"part\":{\"id\":\"prt_9\",\"messageID\":\"m9\",\"text\":\"hijack\"}}\n",
+        );
+        assert!(
+            foreign_upd.is_empty(),
+            "foreign session must be rejected before feed_line"
+        );
+        let dup_tool_upd = oc_stream.feed(
+            "{\"sessionID\":\"ses_1\",\"type\":\"tool_use\",\"part\":{\"id\":\"prt_1\",\"callID\":\"c0\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{},\"output\":\"dup\"}}}\n",
+        );
+        assert!(
+            dup_tool_upd.is_empty(),
+            "duplicate tool_use part id must be rejected before feed_line"
+        );
+        let stale_seq_upd = oc_stream.feed(
+            "{\"sessionID\":\"ses_1\",\"sequence\":1,\"replay\":true,\"type\":\"text\",\"part\":{\"id\":\"prt_stale\",\"messageID\":\"m_stale\",\"text\":\"stale replay\"}}\n",
+        );
+        assert!(
+            stale_seq_upd.is_empty(),
+            "stale replay sequence must be deduplicated before feed_line"
+        );
+        let huge_payload = "x".repeat(1024 * 1024 + 512);
+        let over_budget_line = format!(
+            "{{\"sessionID\":\"ses_1\",\"type\":\"text\",\"part\":{{\"id\":\"prt_big\",\"messageID\":\"mbig\",\"text\":\"{huge_payload}\"}}}}\n"
+        );
+        let over_budget_upd = oc_stream.feed(&over_budget_line);
+        assert!(
+            over_budget_upd.is_empty(),
+            "over-budget line (> 1 MiB) must be rejected before feed_line"
+        );
+        let _ = oc_stream.finish();
+        assert!(oc_stream.parity_admitted);
+        assert_ne!(oc_stream.last_parity_digest, 0);
+
         // 4. Verify over-budget rejection (`TotalTransducer`), duplicate/stale sequence deduplication,
         //    and live-stream vs log-replay equivalence (`ReplayEquivalence`) across all 6 harnesses.
         for harness in [
@@ -5231,10 +5476,14 @@ mod tests {
             agent_event_normalize_shadow_counter().snapshot("orb_agent_event_normalize_step");
         let red_snap =
             transcript_reduce_shadow_counter().snapshot("orb_transcript_reduce_step");
+        let parity_snap =
+            client_parity_shadow_counter().snapshot("orb_client_parity_step");
         assert!(norm_snap.total_events >= 20);
         assert_eq!(norm_snap.total_divergences, 0);
         assert!(red_snap.total_events >= 20);
         assert_eq!(red_snap.total_divergences, 0);
+        assert!(parity_snap.total_events >= 1);
+        assert_eq!(parity_snap.total_divergences, 0);
     }
 }
 
