@@ -15,7 +15,6 @@ import {
 } from "solid-js";
 import {
   connectionVersion,
-  getApiUrl,
   isConnected,
   listProviders,
   type AIProvider,
@@ -43,10 +42,6 @@ const time = (value: string | null) =>
   value ? new Date(value).toLocaleString() : "—";
 
 export function RoutingSettings(p: { onOpenClient: () => void }) {
-  const serverUrl = createMemo(() => {
-    connectionVersion();
-    return getApiUrl();
-  });
   const [tab, setTab] = createSignal<"chains" | "health" | "events" | "keys">("chains");
   const [catalogLoading, setCatalogLoading] = createSignal(false);
   const [copiedId, setCopiedId] = createSignal("");
@@ -574,25 +569,24 @@ export function RoutingSettings(p: { onOpenClient: () => void }) {
           <h2>Models &amp; Routing</h2>
           <Show when={tab() !== "keys"}>
           <button
-            class="s-btn"
+            class="icon-btn settings-refresh"
+            classList={{ spinning: loading() }}
+            aria-label={loading() ? "Refreshing" : "Refresh"}
+            title="Refresh"
             disabled={loading() || !isConnected()}
             onClick={() => void refresh(true, true)}
           >
-            {loading() ? "Refreshing…" : "Refresh"}
+            <Ic.RefreshIcon size={14} />
           </button>
           </Show>
         </div>
-        <p class="s-lead">
-          Choose the order models are tried when a provider is unavailable.
-          <span class="routing-server" title="Applies to this server’s proxy. Direct local providers keep their own configuration.">{serverUrl()}</span>
-        </p>
         <Show
           when={isConnected()}
           fallback={
             <>
               <p class="s-lead">Connect to a backend to configure routing.</p>
               <button class="s-btn" onClick={p.onOpenClient}>
-                Open Client settings
+                Open Account settings
               </button>
             </>
           }

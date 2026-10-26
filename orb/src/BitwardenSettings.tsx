@@ -470,9 +470,6 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
         <div class="bw-header">
           <div>
             <h2>Secrets</h2>
-            <p class="s-lead">
-              Project secrets from Bitwarden Secrets Manager, unlocked with {bioStatus().label || "Touch ID"}.
-            </p>
           </div>
           <div class="bw-header-actions">
             <Show

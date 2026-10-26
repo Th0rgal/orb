@@ -303,12 +303,8 @@ describe("Routing settings", () => {
       ).toBe(true),
     );
   });
-  it("updates the server identity when reconnecting", async () => {
+  it("keeps infra details out of the page (the server URL lives in Account)", async () => {
     await mount();
-    setConnection("https://other-routing.test", "new-test");
-    await waitFor(() =>
-      expect(screen.getByText(/https:\/\/other-routing.test/)).toBeTruthy(),
-    );
     expect(screen.queryByText(/https:\/\/routing.test/)).toBeNull();
   });
   it("clears server data and drafts on disconnect", async () => {
