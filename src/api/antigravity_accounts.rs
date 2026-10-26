@@ -594,10 +594,19 @@ pub(crate) fn is_individual_quota_refusal(failure: &str) -> bool {
         && lower.contains("429")
 }
 
-/// `agy` refusing the signed-in login until its owner verifies it.
+/// `agy` refusing the signed-in login until its owner verifies it: a line of
+/// the CLI's own error output, not the phrase anywhere (model output may
+/// quote it, and must not move the shared machine sign-in). Wrongly marking
+/// a login is also bounded: the periodic eligibility check restores it.
 pub(crate) fn is_eligibility_refusal(failure: &str) -> bool {
-    let lower = failure.to_ascii_lowercase();
-    lower.contains("eligibility check failed") && lower.contains("not eligible for antigravity")
+    failure.lines().any(|line| {
+        let lower = line.trim_start().to_ascii_lowercase();
+        ["cli error: ", "error: "].iter().any(|prefix| {
+            lower.strip_prefix(prefix).is_some_and(|rest| {
+                rest.starts_with("eligibility check failed: your current account is not eligible for antigravity")
+            })
+        })
+    })
 }
 
 /// Longest real Antigravity quota window (weekly), plus margin.
@@ -904,6 +913,9 @@ mod tests {
     fn eligibility_refusal_is_recognized() {
         assert!(is_eligibility_refusal("CLI error: Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue."));
         assert!(!is_eligibility_refusal("Eligibility check failed: network"));
+        assert!(!is_eligibility_refusal(
+            "The model said: CLI error: Eligibility check failed: Your current account is not eligible for Antigravity."
+        ));
     }
 
     #[test]
