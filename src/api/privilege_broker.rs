@@ -948,7 +948,10 @@ impl PrivilegeBroker {
         data.requests[idx].lease_token_sha256 = Some(sha256_hex(&token));
         self.save(&data).await;
         drop(data);
-        self.live_tokens.lock().await.insert(request_id, token.clone());
+        self.live_tokens
+            .lock()
+            .await
+            .insert(request_id, token.clone());
         Some(token)
     }
 
@@ -2919,7 +2922,10 @@ mod tests {
         };
         let refused = broker.verify_and_log_command(on(Some("agent-core"))).await;
         assert!(refused.unwrap_err().contains("cannot run on agent-core"));
-        assert!(broker.verify_and_log_command(on(Some("thomas-md"))).await.is_ok());
+        assert!(broker
+            .verify_and_log_command(on(Some("thomas-md")))
+            .await
+            .is_ok());
         // Core's own SSH tunnel (execute_privileged_command) names no daemon.
         assert!(broker.verify_and_log_command(on(None)).await.is_ok());
         assert!(lease_runs_on("self", "anything") && lease_runs_on("all", "x"));

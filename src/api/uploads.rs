@@ -237,7 +237,10 @@ pub(crate) async fn forward_core_uploads_in_prompt(
             continue;
         };
         let replacement = if quoted || remote_path.contains([' ', '"']) {
-            format!("@\"{}\"", remote_path.replace('\\', "\\\\").replace('"', "\\\""))
+            format!(
+                "@\"{}\"",
+                remote_path.replace('\\', "\\\\").replace('"', "\\\"")
+            )
         } else {
             let token_len = 1 + raw_path.len();
             let trailing = &updated[at_start + token_len..at_end];
