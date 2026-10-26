@@ -592,15 +592,17 @@ impl GrokStream {
             .or(self.session_id.as_deref())
             .or_else(|| self.antigravity.as_ref().and_then(|a| a.session.as_deref()));
 
-        let session_matches_expected = match (current_expected, line_session) {
-            (Some(exp), Some(got)) => exp == got,
-            (None, Some(_)) if self.antigravity.is_some() && event_str == "thought_update" => false,
-            (None, Some(got)) => {
-                self.expected_session_id = Some(got.to_string());
-                true
-            }
-            _ => true,
-        };
+        let (session_matches_expected, candidate_session_to_bind) =
+            match (current_expected, line_session) {
+                (Some(exp), Some(got)) => (exp == got, None),
+                (None, Some(_))
+                    if self.antigravity.is_some() && event_str == "thought_update" =>
+                {
+                    (false, None)
+                }
+                (None, Some(got)) => (true, Some(got.to_string())),
+                _ => (true, None),
+            };
 
         let event_key = value
             .get("event_id")
@@ -622,7 +624,9 @@ impl GrokStream {
                     None
                 }
             });
-        let is_duplicate_turn_or_tool = event_key.is_some_and(|k| !self.seen_event_ids.insert(k));
+        let is_duplicate_turn_or_tool = event_key
+            .as_ref()
+            .is_some_and(|k| self.seen_event_ids.contains(k));
 
         let text_ok = match raw_kind {
             crate::orb_spec::RawAgentEventKind::ThinkingUpdate
@@ -675,6 +679,12 @@ impl GrokStream {
         );
         if !red.emit_entry {
             return false;
+        }
+        if let Some(bound) = candidate_session_to_bind {
+            self.expected_session_id = Some(bound);
+        }
+        if let Some(key) = event_key {
+            self.seen_event_ids.insert(key);
         }
         self.last_reduced_seq = incoming_seq;
         self.reducer_thinking_open = red.thinking_open_next;
@@ -5353,6 +5363,33 @@ mod tests {
         assert!(
             stale_seq_upd.is_empty(),
             "stale replay sequence must be deduplicated before feed_line"
+        );
+        // Sequential non-poisoning regressions:
+        // 1) A rejected foreign-session tool_use (`prt_unpoisoned_1`) must NOT enter `seen_event_ids`,
+        //    so a subsequent valid-session event with `prt_unpoisoned_1` is admitted.
+        let foreign_tool_upd = oc_stream.feed(
+            "{\"sessionID\":\"ses_foreign\",\"type\":\"tool_use\",\"part\":{\"id\":\"prt_unpoisoned_1\",\"callID\":\"c9\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{},\"output\":\"foreign\"}}}\n",
+        );
+        assert!(foreign_tool_upd.is_empty());
+        let valid_after_foreign = oc_stream.feed(
+            "{\"sessionID\":\"ses_1\",\"type\":\"tool_use\",\"part\":{\"id\":\"prt_unpoisoned_1\",\"callID\":\"c9\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{},\"output\":\"valid\"}}}\n",
+        );
+        assert!(
+            !valid_after_foreign.is_empty(),
+            "rejected foreign-session event must not poison seen_event_ids for subsequent valid event"
+        );
+        // 2) A rejected stale-sequence tool_use (`prt_unpoisoned_2`) must NOT enter `seen_event_ids`,
+        //    so a subsequent valid-sequence event with `prt_unpoisoned_2` is admitted.
+        let stale_tool_upd = oc_stream.feed(
+            "{\"sessionID\":\"ses_1\",\"sequence\":1,\"replay\":true,\"type\":\"tool_use\",\"part\":{\"id\":\"prt_unpoisoned_2\",\"callID\":\"c10\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{},\"output\":\"stale\"}}}\n",
+        );
+        assert!(stale_tool_upd.is_empty());
+        let valid_after_stale = oc_stream.feed(
+            "{\"sessionID\":\"ses_1\",\"type\":\"tool_use\",\"part\":{\"id\":\"prt_unpoisoned_2\",\"callID\":\"c10\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{},\"output\":\"fresh\"}}}\n",
+        );
+        assert!(
+            !valid_after_stale.is_empty(),
+            "rejected stale-sequence event must not poison seen_event_ids for subsequent valid event"
         );
         let huge_payload = "x".repeat(1024 * 1024 + 512);
         let over_budget_line = format!(

@@ -233,5 +233,15 @@ class OrbKernelTest {
         val badScroll = OrbKernel.clientParityStep(2, 1, 42, 7, 1, 2)
         assertFalse(badScroll.parityAdmitted)
         assertFalse(badScroll.singleScrollCorrectionOk)
+
+        // OrbTranscriptFollow production wrapper delegates directly to OrbKernel JNI without fallback
+        val follow = OrbTranscriptFollow()
+        assertTrue(follow.shouldCorrectInEpoch(targetTopPx = 800, currentTopPx = 400))
+        assertFalse(follow.shouldCorrectInEpoch(targetTopPx = 900, currentTopPx = 800))
+        val digest = follow.verifyClientParity(transcriptSeq = 42, markdownBlocksCount = 7, sendQueueDepth = 1)
+        assertTrue(follow.parityAdmitted)
+        assertEquals(android.digest32, digest)
+        follow.advanceLayoutEpoch()
+        assertTrue(follow.shouldCorrectInEpoch(targetTopPx = 1000, currentTopPx = 800))
     }
 }
