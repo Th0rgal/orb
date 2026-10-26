@@ -169,49 +169,6 @@ object OrbSfIcons {
     }
 
     @Composable
-    fun TrayFull(
-        color: Color = OrbStyle.icon,
-        size: Dp = 20.dp,
-        modifier: Modifier = Modifier
-    ) {
-        Canvas(modifier = modifier.size(size)) {
-            val w = this.size.width
-            val h = this.size.height
-            val sw = w * 0.082f
-            val stroke = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            val outer = Path().apply {
-                moveTo(w * 0.21f, h * 0.24f)
-                lineTo(w * 0.79f, h * 0.24f)
-                lineTo(w * 0.91f, h * 0.54f)
-                lineTo(w * 0.91f, h * 0.75f)
-                quadraticTo(w * 0.91f, h * 0.82f, w * 0.83f, h * 0.82f)
-                lineTo(w * 0.17f, h * 0.82f)
-                quadraticTo(w * 0.09f, h * 0.82f, w * 0.09f, h * 0.75f)
-                lineTo(w * 0.09f, h * 0.54f)
-                close()
-            }
-            drawPath(outer, color = color, style = stroke)
-
-            val shelf = Path().apply {
-                moveTo(w * 0.10f, h * 0.55f)
-                lineTo(w * 0.34f, h * 0.55f)
-                quadraticTo(w * 0.38f, h * 0.65f, w * 0.50f, h * 0.65f)
-                quadraticTo(w * 0.62f, h * 0.65f, w * 0.66f, h * 0.55f)
-                lineTo(w * 0.90f, h * 0.55f)
-            }
-            drawPath(shelf, color = color, style = stroke)
-
-            drawLine(
-                color = color,
-                start = Offset(w * 0.28f, h * 0.39f),
-                end = Offset(w * 0.72f, h * 0.39f),
-                strokeWidth = sw * 0.85f,
-                cap = StrokeCap.Round
-            )
-        }
-    }
-
-    @Composable
     fun CpuIcon(
         color: Color = OrbStyle.icon,
         size: Dp = 18.dp,
