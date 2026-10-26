@@ -38,9 +38,9 @@ test("settings has five sections with subtitles, tabs and attention dots", async
 
   await rows.filter({ hasText: "Models" }).click();
   await expect(title(page)).toHaveText("Models");
-  // Quotas live in Providers only; Models has no strip and no usage tab.
+  // Quotas live in Providers only; Models has no quota strip.
   await expect(page.locator(".quota-strip")).toHaveCount(0);
-  await expect(page.getByRole("tablist")).toHaveCount(0);
+  await expect(page.getByRole("tab")).toHaveText(["Fallback Chains", "Providers", "Usage", "API Keys"]);
 
   // Agents tabs move with the arrow keys and keep focus.
   await rows.filter({ hasText: "Agents" }).click();
@@ -58,8 +58,9 @@ test("settings has five sections with subtitles, tabs and attention dots", async
 });
 
 for (const [id, section, tab] of [
-  ["routing", "Models", null],
-  ["usage-settings", "Models", null],
+  ["routing", "Models", "Fallback Chains"],
+  ["usage-settings", "Models", "Usage"],
+  ["routing-keys", "Models", "API Keys"],
   ["hermes-settings", "Agents", "Assistant"],
   ["btw-settings", "Agents", "Quick questions (/btw)"],
   ["skills-settings", "Agents", "Skills"],
@@ -81,10 +82,10 @@ test("a saved old page id reopens in its new section", async ({ page }) => {
   await expect(page.getByRole("tab", { name: "Local agents" })).toHaveAttribute("aria-selected", "true");
 });
 
-test("Providers links to usage details, which opens inside Models", async ({ page }) => {
+test("Providers links to usage history, which opens the Models › Usage tab", async ({ page }) => {
   await setup(page);
   await page.getByRole("button", { name: "Providers", exact: true }).click();
-  await page.getByRole("button", { name: "Usage details", exact: true }).click();
+  await page.getByRole("button", { name: "Usage history", exact: true }).click();
   await expect(title(page)).toHaveText("Models");
   await expect(page.locator('[data-settings-section="models"]')).toHaveAttribute("aria-current", "page");
 });

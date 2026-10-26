@@ -303,7 +303,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           Refresh
         </button>
       </div>
-      <p class="s-lead">Configured providers from the connected sandboxed.sh backend. <button class="link-btn" onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "usage-settings" }))}>Usage details</button></p>
+      <p class="s-lead">Configured providers from the connected sandboxed.sh backend. <button class="link-btn" onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "usage-settings" }))}>Usage history</button></p>
       <Show when={p.loadError}>{error => <ErrorNotice title="Could not refresh providers" error={error()}>
         <button class="s-btn" onClick={p.onRefresh}>Try again</button>
       </ErrorNotice>}</Show>

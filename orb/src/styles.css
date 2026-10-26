@@ -4161,3 +4161,5 @@ select.orb-select-native:disabled { cursor: default; }
 .skills-seg button { height: 22px; padding: 0 9px; border: 0; border-radius: calc(var(--radius-sm) - 2px); background: transparent; color: var(--fg-2); font: 12px var(--sans); cursor: pointer; }
 .skills-seg button.on { background: var(--bg-active); color: var(--fg); }
 .skills-saved { margin-right: auto; color: var(--green); font-size: 12.5px; align-self: center; }
+/* Models tabs replace the routing panel's own sub-tabs. */
+.settings-page-content .routing-tabs { display: none; }
