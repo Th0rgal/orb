@@ -2,7 +2,7 @@ import { useNow } from "./time";
 import { For, Show, createSignal } from "solid-js";
 import { approveSecretRequest, listBitwardenProjects, rejectSecretRequest, secretChangeVerb, type SecretAccessRequest } from "./bitwardenApi";
 import { ApprovalCancelled, graceUntil } from "./deviceApproval";
-import { CloseIcon, TrashIcon } from "./icons";
+import { CloseIcon, PencilIcon, TrashIcon } from "./icons";
 import { dismissToast, notify } from "./toast";
 
 /**
@@ -160,10 +160,6 @@ export function SecretKindIcon(p: { request: SecretAccessRequest }) {
   return <span class="secret-kind" title={title()} aria-label={title()}>
     {p.request.kind === "delete" ? <TrashIcon /> : p.request.kind === "read" ? <EyeIcon /> : <PencilIcon />}
   </span>;
-}
-
-export function PencilIcon() {
-  return <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z" /></svg>;
 }
 
 export function FingerprintIcon(p: { size?: number }) {

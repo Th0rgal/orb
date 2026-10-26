@@ -3847,16 +3847,6 @@ select.orb-select-native:disabled { cursor: default; }
 
 .soul-preview { font-size: 13px; line-height: 1.55; }
 
-/* Live turn status above the composer. */
-/* A quiet line in the dock's flow, aligned with the composer text: no chip, so
-   it never covers transcript text and reads like the Codex/Claude status line. */
-.turn-status { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 16px 8px; font-size: 12px; line-height: 16px; color: var(--fg-3); pointer-events: none; }
-.turn-status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex: none; animation: turn-pulse 1.6s ease-in-out infinite; }
-.turn-status-step { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.turn-status-meta { flex: none; font-variant-numeric: tabular-nums; }
-@keyframes turn-pulse { 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .turn-status-dot { animation: none; } }
-
 /* /btw: the transient activity row is a single compact line, so it never sits under the dock fade. */
 .btw-thread .agent-activity { margin: 2px 0 0; font-size: 12px; }
 .btw-thread .agent-activity .agent-task-row, .btw-thread .agent-activity summary { min-height: 22px; padding-block: 2px; }
