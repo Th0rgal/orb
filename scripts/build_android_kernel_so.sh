@@ -58,6 +58,13 @@ for pair in "${ABIS[@]}"; do
   echo "$abi: $(abi_syms "$out/$abi/liborb_kernel.so" | wc -l | tr -d ' ') ABI exports (16 KB LOAD align 0x4000 verified)"
 done
 
+HOST_TEST_SO=android_dashboard/app/src/test/resources/jni/liborb_kernel.so
+if [ -f "$HOST_TEST_SO" ]; then
+  check_page_align_16k "$HOST_TEST_SO"
+  diff <(abi_syms "$JNILIBS/x86_64/liborb_kernel.so") <(abi_syms "$HOST_TEST_SO") \
+    || { echo "$HOST_TEST_SO exports differ from x86_64 jniLibs" >&2; exit 1; }
+fi
+
 if $check; then
   [ "$(cat android_dashboard/app/src/main/jni/liborb_kernel.so.sha256)" = "$(stamp)" ] \
     || { echo "$JNILIBS was built from different kernel/JNI sources; run $0" >&2; exit 1; }

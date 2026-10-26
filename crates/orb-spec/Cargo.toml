@@ -2,9 +2,12 @@
 name = "orb-spec"
 version = "1.3.0"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.85"
 description = "Zero-dependency typed Rust bindings and unboxed C-ABI archive builder for lean/Orb/Kernel.lean and LeanSys/Spec.lean"
 authors = ["sandboxed.sh Contributors"]
+
+[lib]
+doctest = false
 
 [dependencies]
 

@@ -2892,5 +2892,27 @@ mod tests {
         assert!(lean_sys_cabi::gfm_pipe_scan(0, 24, 64, 3, 3, false));
         assert!(lean_sys_cabi::tag_scan(0, 32, 4, 8, 64, 1));
         assert_ne!(lean_sys_cabi::transcript_index(0, 40, 128, 1, 9), 0);
+        assert!(lean_sys_cabi::verify_page_aligned_buffer(
+            0x10000,
+            12_000,
+            16_384,
+            100_000_000,
+            1_400_000_000,
+            16_383
+        ));
+        assert!(!lean_sys_cabi::verify_page_aligned_buffer(
+            0x10004,
+            12_000,
+            16_384,
+            100_000_000,
+            1_400_000_000,
+            16_383
+        ));
+        assert!(lean_sys_cabi::verify_worker_budget(6, 9, 12, 4096, 2));
+        assert!(!lean_sys_cabi::verify_worker_budget(6, 10, 12, 4096, 2));
+        assert_eq!(lean_sys_cabi::select_isa(927, 927, 4, 4), 4);
+        assert_eq!(lean_sys_cabi::select_isa(775, 927, 4, 4), 0);
+        assert!(lean_sys_cabi::verify_isa_selection(927, 927, 4, 4));
+        assert!(!lean_sys_cabi::verify_isa_selection(775, 927, 4, 4));
     }
 }
