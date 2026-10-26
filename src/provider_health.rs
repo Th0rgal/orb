@@ -322,17 +322,22 @@ pub fn observe_argmin_selection_shadow(
         now_epoch,
         candidates,
     );
-    let sim =
-        crate::orb_spec::shadow::RefinementSimulation::<Option<u32>, Option<u32>, u64, u32, u32> {
-            subsystem: "proxy_argmin_route_fold",
-            abs_state: |s| *s,
-            norm_effects: |effs| effs.to_vec(),
-            lean_step: |s, _ev, _ctx| {
-                let effs = s.iter().copied().collect();
-                (*s, effs)
-            },
-            classify_known_legacy_bug: |_, _, _, _| None,
-        };
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        Option<u32>,
+        Option<u32>,
+        u64,
+        u32,
+        u32,
+    > {
+        subsystem: "proxy_argmin_route_fold",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |s, _ev, _ctx| {
+            let effs = s.iter().copied().collect();
+            (*s, effs)
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
     let host_effects: Vec<u32> = host_selected_id.into_iter().collect();
     let ctx = crate::orb_spec::shadow::EventContext {
         now_ms: now_epoch.saturating_mul(1000),
@@ -2474,14 +2479,17 @@ impl ModelChainStore {
 
             for account in &store_accounts {
                 let is_healthy = health_tracker.is_healthy(account.id).await;
-                let antigravity_unverified = provider_type
-                    == crate::ai_providers::ProviderType::Antigravity
-                    && account
-                        .cli_proxy_auth_file
-                        .as_deref()
-                        .is_some_and(crate::api::antigravity_accounts::needs_verification);
-                let pool_cooling =
-                    health_tracker.pool_is_cooling(&entry.provider_id, account.id, &entry.model_id);
+                let antigravity_unverified =
+                    provider_type == crate::ai_providers::ProviderType::Antigravity
+                        && account
+                            .cli_proxy_auth_file
+                            .as_deref()
+                            .is_some_and(crate::api::antigravity_accounts::needs_verification);
+                let pool_cooling = health_tracker.pool_is_cooling(
+                    &entry.provider_id,
+                    account.id,
+                    &entry.model_id,
+                );
                 let cand_u32 = account_ordinals.intern(account.id);
                 let is_rejected = !is_healthy || antigravity_unverified || pool_cooling;
                 let host_admits_pool = !is_rejected
@@ -5057,10 +5065,7 @@ mod tests {
         let mut ordinals = AccountOrdinalTable::new();
         let ord_a = ordinals.intern(uuid_a);
         let ord_b = ordinals.intern(uuid_b);
-        assert_ne!(
-            ord_a, ord_b,
-            "distinct 128-bit UUIDs must receive distinct ordinals"
-        );
+        assert_ne!(ord_a, ord_b, "distinct 128-bit UUIDs must receive distinct ordinals");
         assert_eq!(ordinals.intern(uuid_a), ord_a);
         assert_eq!(ordinals.intern(uuid_b), ord_b);
         assert_eq!(ordinals.uuid_of(ord_a), Some(uuid_a));

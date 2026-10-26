@@ -640,8 +640,10 @@ impl GrokStream {
                     | crate::orb_spec::RawAgentEventKind::SessionIdUpdate
                     | crate::orb_spec::RawAgentEventKind::ErrorOrAuth
             );
-        let host_emits =
-            payload_bytes <= MAX_LINE_BYTES && sess_ok && !is_duplicate_turn_or_tool && text_ok;
+        let host_emits = payload_bytes <= MAX_LINE_BYTES
+            && sess_ok
+            && !is_duplicate_turn_or_tool
+            && text_ok;
 
         let norm = evaluate_agent_event_normalize_gate(
             harness_kind,
@@ -5296,21 +5298,19 @@ mod tests {
         assert_eq!(u1, vec![StreamUpdate::ThinkingSnapshot("analyzing".into())]);
         assert!(grok_stream.reducer_thinking_open);
 
-        let u2 = grok_stream
-            .feed("{\"type\":\"tool_call\",\"data\":{\"toolCallId\":\"c1\",\"name\":\"bash\"}}\n");
-        assert!(matches!(
-            &u2[0],
-            StreamUpdate::Tool {
-                completed: false,
-                ..
-            }
-        ));
+        let u2 = grok_stream.feed(
+            "{\"type\":\"tool_call\",\"data\":{\"toolCallId\":\"c1\",\"name\":\"bash\"}}\n",
+        );
+        assert!(matches!(&u2[0], StreamUpdate::Tool { completed: false, .. }));
         assert!(!grok_stream.reducer_thinking_open);
 
         let u3 = grok_stream.feed("{\"type\":\"text\",\"data\":\"done\"}\n{\"type\":\"end\",\"stopReason\":\"end_turn\"}\n");
         assert_eq!(
             u3,
-            vec![StreamUpdate::TextSnapshot("done".into()), StreamUpdate::End]
+            vec![
+                StreamUpdate::TextSnapshot("done".into()),
+                StreamUpdate::End
+            ]
         );
         assert!(!grok_stream.reducer_thinking_open);
         assert!(grok_stream.last_reduced_seq >= 4);
@@ -5465,15 +5465,24 @@ mod tests {
             assert!(complete.close_thinking);
 
             // Live vs replay equivalence (`ReplayEquivalence`)
-            let live_red =
-                evaluate_transcript_reduce_gate(10, 11, true, complete.action, false, true);
-            let replay_red =
-                evaluate_transcript_reduce_gate(10, 11, true, complete.action, true, true);
-            assert_eq!(live_red, replay_red);
-            assert_eq!(
-                live_red.action,
-                TranscriptReduceAction::AppendTranscriptEntry
+            let live_red = evaluate_transcript_reduce_gate(
+                10,
+                11,
+                true,
+                complete.action,
+                false,
+                true,
             );
+            let replay_red = evaluate_transcript_reduce_gate(
+                10,
+                11,
+                true,
+                complete.action,
+                true,
+                true,
+            );
+            assert_eq!(live_red, replay_red);
+            assert_eq!(live_red.action, TranscriptReduceAction::AppendTranscriptEntry);
             assert!(live_red.closed_previous_thinking);
             assert!(!live_red.thinking_open_next);
 
@@ -5488,16 +5497,24 @@ mod tests {
             assert_eq!(meta_red.action, TranscriptReduceAction::UpdateMetadata);
 
             // Stale / duplicate sequence (`incoming_seq <= last_applied_seq`) is deduplicated
-            let stale_red =
-                evaluate_transcript_reduce_gate(12, 12, false, complete.action, true, false);
+            let stale_red = evaluate_transcript_reduce_gate(
+                12,
+                12,
+                false,
+                complete.action,
+                true,
+                false,
+            );
             assert_eq!(stale_red.action, TranscriptReduceAction::DedupeOrSkip);
             assert!(!stale_red.emit_entry);
         }
 
         let norm_snap =
             agent_event_normalize_shadow_counter().snapshot("orb_agent_event_normalize_step");
-        let red_snap = transcript_reduce_shadow_counter().snapshot("orb_transcript_reduce_step");
-        let parity_snap = client_parity_shadow_counter().snapshot("orb_client_parity_step");
+        let red_snap =
+            transcript_reduce_shadow_counter().snapshot("orb_transcript_reduce_step");
+        let parity_snap =
+            client_parity_shadow_counter().snapshot("orb_client_parity_step");
         assert!(norm_snap.total_events >= 20);
         assert_eq!(norm_snap.total_divergences, 0);
         assert!(red_snap.total_events >= 20);

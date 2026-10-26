@@ -2,14 +2,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use lean_mesh::{
-    canonical_canary_evidence_sha256_hex, check_endpoint_roam, select_relay_path, sign_canary_trip,
-    step_bunker_isolate, verify_frame_bounds, verify_jit_lease, BunkerState, IpClass, MeshManifest,
-    MeshProto, NodeClass, RelayPathKind, ReplayWindow64, LEAN_MESH_FRAME_MAGIC,
-    LEAN_MESH_PROTOCOL_VERSION,
+    BunkerState, IpClass, LEAN_MESH_FRAME_MAGIC, LEAN_MESH_PROTOCOL_VERSION, MeshManifest,
+    MeshProto, NodeClass, RelayPathKind, ReplayWindow64, canonical_canary_evidence_sha256_hex,
+    check_endpoint_roam, select_relay_path, sign_canary_trip, step_bunker_isolate,
+    verify_frame_bounds, verify_jit_lease,
 };
 
 #[derive(Parser)]
@@ -248,9 +248,9 @@ fn main() -> Result<()> {
                 Some(hex_str) => {
                     let bytes =
                         hex::decode(hex_str.trim()).context("invalid --seed-hex encoding")?;
-                    bytes.try_into().map_err(|_| {
-                        anyhow::anyhow!("--seed-hex must decode to exactly 32 bytes")
-                    })?
+                    bytes
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("--seed-hex must decode to exactly 32 bytes"))?
                 }
                 None => generate_csprng_seed()?,
             };
@@ -336,7 +336,12 @@ fn main() -> Result<()> {
                     .to_string(),
                 None => "<NODE_WG_PRIVATE_KEY>".to_string(),
             };
-            let cfg = m.render_wireguard_config(&node, &priv_key, bunker.into(), now_epoch)?;
+            let cfg = m.render_wireguard_config(
+                &node,
+                &priv_key,
+                bunker.into(),
+                now_epoch,
+            )?;
             print!("{cfg}");
         }
         Commands::SignManifest {
@@ -348,8 +353,7 @@ fn main() -> Result<()> {
             let mut m: MeshManifest = serde_json::from_str(&raw)?;
             let key_hex = fs::read_to_string(&signing_key_file)
                 .with_context(|| format!("failed to read {}", signing_key_file.display()))?;
-            let seed_bytes =
-                hex::decode(key_hex.trim()).context("invalid hex in signing_key_file")?;
+            let seed_bytes = hex::decode(key_hex.trim()).context("invalid hex in signing_key_file")?;
             let seed: [u8; 32] = seed_bytes
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("signing_key_file must contain 32-byte hex seed"))?;
@@ -514,8 +518,8 @@ fn main() -> Result<()> {
                 1
             ));
             assert_eq!(
-                IpClass::classify_ipv4("127.0.0.1".parse().unwrap()) as u8,
-                IpClass::LoopbackOrLinkLocal as u8
+                 IpClass::classify_ipv4("127.0.0.1".parse().unwrap()) as u8,
+                 IpClass::LoopbackOrLinkLocal as u8
             );
             assert_eq!(
                 select_relay_path(true, false, false, true, 2, 11, 1, 0, 64, 1000, 0, 120),

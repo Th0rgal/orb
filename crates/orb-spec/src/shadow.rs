@@ -180,8 +180,7 @@ impl OrbWireFrame {
             return Err(OrbWireStatus::TruncatedOrOutOfBounds);
         }
 
-        let payload =
-            &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
+        let payload = &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
         let records_slice = &payload[..arena_off];
         let arena_slice = &payload[arena_off..arena_off + arena_len];
 
@@ -607,10 +606,7 @@ mod tests {
             now_epoch: 1_000,
             reset_epoch: 0,
         });
-        assert_eq!(
-            initial_dispatch.action,
-            ProviderPoolAction::DispatchPoolCandidate
-        );
+        assert_eq!(initial_dispatch.action, ProviderPoolAction::DispatchPoolCandidate);
         assert!(initial_dispatch.emit_dispatch_effect);
         assert!(!initial_dispatch.first_byte_locked_next);
 
@@ -625,10 +621,7 @@ mod tests {
             now_epoch: 1_000,
             reset_epoch: 0,
         });
-        assert_eq!(
-            pre_byte_retry.action,
-            ProviderPoolAction::DispatchPoolCandidate
-        );
+        assert_eq!(pre_byte_retry.action, ProviderPoolAction::DispatchPoolCandidate);
         assert!(pre_byte_retry.emit_dispatch_effect);
         assert!(!pre_byte_retry.first_byte_locked_next);
         assert_eq!(pre_byte_retry.dispatched_account_id, 303);
@@ -1094,10 +1087,7 @@ mod tests {
             }
         });
         assert_eq!(live_r1, replay_r1);
-        assert_eq!(
-            live_r1.action,
-            TranscriptReduceAction::AppendTranscriptEntry
-        );
+        assert_eq!(live_r1.action, TranscriptReduceAction::AppendTranscriptEntry);
         assert!(live_r1.emit_entry);
         assert!(live_r1.closed_previous_thinking);
         assert!(!live_r1.thinking_open_next);
@@ -1144,10 +1134,7 @@ mod tests {
             incoming_superseded_or_archived: false,
             is_partial_page: true,
         });
-        assert_eq!(
-            dup_sidebar.action,
-            SidebarMergeAction::UpdateExistingInPlace
-        );
+        assert_eq!(dup_sidebar.action, SidebarMergeAction::UpdateExistingInPlace);
         assert!(dup_sidebar.retain_or_upsert);
         assert!(!dup_sidebar.insert_new);
         assert!(dup_sidebar.unique_sidebar);

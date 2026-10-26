@@ -1630,8 +1630,7 @@ impl MeshManifest {
             proto: MeshProto::Tcp,
             port_min: 8000,
             port_max: 8000,
-            description: "Orb control-plane -> dgx-spark inference & voice transcription router"
-                .into(),
+            description: "Orb control-plane -> dgx-spark inference & voice transcription router".into(),
         });
         rules.push(CapabilityRule {
             src_peer: "agent-core".into(),

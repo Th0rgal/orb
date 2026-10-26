@@ -105,7 +105,11 @@ pub(super) fn observe_fork_home_shadow(
         },
         classify_known_legacy_bug: |_, _, _, _| None,
     };
-    let host_effects = if host_admits { vec![0u32] } else { vec![78u32] };
+    let host_effects = if host_admits {
+        vec![0u32]
+    } else {
+        vec![78u32]
+    };
     let ctx = crate::orb_spec::shadow::EventContext {
         now_ms: 0,
         fresh_nonce: 0,
@@ -114,7 +118,14 @@ pub(super) fn observe_fork_home_shadow(
         schema_id: 1,
     };
     if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
-        let _ = sim.observe_step(&false, &false, &input, &host_effects, ctx, &mut ring);
+        let _ = sim.observe_step(
+            &false,
+            &false,
+            &input,
+            &host_effects,
+            ctx,
+            &mut ring,
+        );
     }
     verdict
 }
@@ -1191,15 +1202,7 @@ mod tests {
             Arc::new(crate::api::mission_store::InMemoryMissionStore::new());
         let dir = tempfile::tempdir().unwrap();
         let mut mission = store
-            .create_mission(
-                Some("Codex Turn"),
-                None,
-                None,
-                None,
-                None,
-                Some("codex"),
-                None,
-            )
+            .create_mission(Some("Codex Turn"), None, None, None, None, Some("codex"), None)
             .await
             .unwrap();
         let job_id = Uuid::new_v4();
@@ -1239,11 +1242,7 @@ mod tests {
         assert!(v_fresh.emit_dispatch_effect);
 
         // 1. Missing rollout on node (no assistant_message yet) with fallback prompt -> SeedFallbackFreshSession
-        let events_no_rollout = vec![event(
-            "user_message",
-            "initial prompt",
-            serde_json::Value::Null,
-        )];
+        let events_no_rollout = vec![event("user_message", "initial prompt", serde_json::Value::Null)];
         let v_fallback = super::super::remote_jobs::evaluate_mission_control_gate(
             dir.path(),
             store.as_ref(),
@@ -1285,11 +1284,7 @@ mod tests {
         // 3. Verified rollout (assistant_message present) -> ResumeVerifiedSession
         let events_with_rollout = vec![
             event("user_message", "initial prompt", serde_json::Value::Null),
-            event(
-                "assistant_message",
-                "completed step 1",
-                serde_json::Value::Null,
-            ),
+            event("assistant_message", "completed step 1", serde_json::Value::Null),
         ];
         let v_verified = super::super::remote_jobs::evaluate_mission_control_gate(
             dir.path(),

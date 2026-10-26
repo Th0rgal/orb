@@ -963,8 +963,9 @@ async fn get_mesh_status(
         4096,
     );
 
-    let formal_verified =
-        !guard.corrupted_state && frame_gate_ok && guard.manifest.verify_formal(0, 0, now).is_ok();
+    let formal_verified = !guard.corrupted_state
+        && frame_gate_ok
+        && guard.manifest.verify_formal(0, 0, now).is_ok();
 
     Json(json!({
         "interface": LEAN_MESH_INTERFACE_NAME,
@@ -1559,7 +1560,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/heartbeat", post(post_heartbeat))
 }
 
-#[cfg(test)]
+    #[cfg(test)]
 mod tests {
     use super::*;
     use lean_mesh::{

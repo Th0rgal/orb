@@ -376,15 +376,15 @@ pub(super) async fn submit_leased_remote_job(
         && match resume_sid_opt {
             Some(req_sid) => {
                 let lineage_ok = stored_sid.is_some_and(|sid| {
-                    req_sid == sid || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
+                    req_sid == sid
+                        || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
                 });
                 let rollout_ok = resume_events.iter().any(|event| {
                     event.event_type == "assistant_message"
                         && !event.content.trim().is_empty()
                         && event.metadata["success"] != serde_json::json!(false)
                 });
-                lineage_ok
-                    && (rollout_ok || fallback_prompt_opt.is_some_and(|p| !p.trim().is_empty()))
+                lineage_ok && (rollout_ok || fallback_prompt_opt.is_some_and(|p| !p.trim().is_empty()))
             }
             None => true,
         };
@@ -2517,10 +2517,7 @@ mod boot_leftover_tests {
 
         // 1. Valid worker coding_only bundle (no control-plane secrets, valid cyber program)
         let mut clean_env = HashMap::new();
-        clean_env.insert(
-            "SANDBOXED_CYBER_PROGRAM".to_string(),
-            "standard".to_string(),
-        );
+        clean_env.insert("SANDBOXED_CYBER_PROGRAM".to_string(), "standard".to_string());
         let v_ok = evaluate_remote_ssh_and_codex_confinement(
             true,
             Some(&clean_env),
@@ -2572,7 +2569,8 @@ mod boot_leftover_tests {
         assert!(!v_priv_in_pub.admit);
 
         // 4. Attack vector: Symlinked parent directory for working_directory
-        let tmp_dir = std::env::temp_dir().join(format!("ssh-symlink-{}", uuid::Uuid::new_v4()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("ssh-symlink-{}", uuid::Uuid::new_v4()));
         let real_parent = tmp_dir.join("real_parent");
         let link_parent = tmp_dir.join("link_parent");
         std::fs::create_dir_all(&real_parent).unwrap();
