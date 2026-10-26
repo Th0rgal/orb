@@ -118,4 +118,36 @@ final class OrbPipeTablesTests: XCTestCase {
         XCTAssertTrue(OrbKernel.verifyIosJetsamBudget(dirtyRssBytes: 100_000_000, allocBytes: 16_384, maxJetsamBytes: 1_400_000_000))
         XCTAssertTrue(OrbKernel.verifyWorkerBudget(activeWorkers: 4, maxWorkers: 6, microChunks: 8, totalLen: 4096))
     }
+
+    func testWave8SatU32EdgeCasesAndHardwareGates() {
+        // Swift satU32 edge cases: NaN, +/-infinity, negative, and > UInt32.max
+        XCTAssertEqual(OrbKernel.satU32(Double.nan), 0)
+        XCTAssertEqual(OrbKernel.satU32(-Double.infinity), 0)
+        XCTAssertEqual(OrbKernel.satU32(Double.infinity), 0)
+        XCTAssertEqual(OrbKernel.satU32(-42.5), 0)
+        XCTAssertEqual(OrbKernel.satU32(0.0), 0)
+        XCTAssertEqual(OrbKernel.satU32(42.6), 43)
+        XCTAssertEqual(OrbKernel.satU32(Double(UInt32.max) + 10_000.0), UInt32.max)
+        XCTAssertEqual(OrbKernel.satU32(-1), 0)
+        XCTAssertEqual(OrbKernel.satU32(0), 0)
+        XCTAssertEqual(OrbKernel.satU32(Int(UInt32.max) + 10_000), UInt32.max)
+
+        // Page-aligned buffer gate (16 KB iPhone 13 mini / 15 Pro & 4 KB / 16 KB Android)
+        XCTAssertTrue(OrbKernel.verifyPageAlignedBuffer(addr: 0x10000, allocBytes: 12_000, capacityBytes: 16_384, dirtyRssBytes: 100_000_000, maxBudgetBytes: 1_400_000_000, pageAlignMask: 16_383))
+        XCTAssertTrue(OrbKernel.verifyPageAlignedBuffer(addr: 0x10000, allocBytes: 6_000, capacityBytes: 8_192, dirtyRssBytes: 100_000_000, maxBudgetBytes: 1_400_000_000, pageAlignMask: 4_095))
+        XCTAssertFalse(OrbKernel.verifyPageAlignedBuffer(addr: 0x10000, allocBytes: 6_000, capacityBytes: 8_192, dirtyRssBytes: 100_000_000, maxBudgetBytes: 1_400_000_000, pageAlignMask: 16_383))
+        XCTAssertFalse(OrbKernel.verifyPageAlignedBuffer(addr: 0x10004, allocBytes: 12_000, capacityBytes: 16_384, dirtyRssBytes: 100_000_000, maxBudgetBytes: 1_400_000_000, pageAlignMask: 16_383))
+
+        // 3-tier topology worker budget (topologyKind = 2: maxWorkers <= 9; topologyKind = 1: maxWorkers <= 6)
+        XCTAssertTrue(OrbKernel.verifyWorkerBudget(activeWorkers: 6, maxWorkers: 9, microChunks: 12, totalLen: 4096, topologyKind: 2))
+        XCTAssertFalse(OrbKernel.verifyWorkerBudget(activeWorkers: 6, maxWorkers: 10, microChunks: 12, totalLen: 4096, topologyKind: 2))
+        XCTAssertFalse(OrbKernel.verifyWorkerBudget(activeWorkers: 5, maxWorkers: 7, microChunks: 10, totalLen: 4096, topologyKind: 1))
+
+        // Runtime ISA selection & verification (0=Baseline[263], 1=AppleSilicon[775], 2=ApplePro16[799], 3=Armv82Server[895], 4=Armv9Sve2[927])
+        XCTAssertEqual(OrbKernel.selectIsa(detectedHwCaps: 927, requiredMask: 927, requestedVariantId: 4, maxVariantId: 4), 4)
+        XCTAssertEqual(OrbKernel.selectIsa(detectedHwCaps: 775, requiredMask: 927, requestedVariantId: 4, maxVariantId: 4), 0)
+        XCTAssertTrue(OrbKernel.verifyIsaSelection(detectedHwCaps: 927, requiredMask: 927, selectedVariantId: 4, maxVariantId: 4))
+        XCTAssertTrue(OrbKernel.verifyIsaSelection(detectedHwCaps: 775, requiredMask: 263, selectedVariantId: 0, maxVariantId: 4))
+        XCTAssertFalse(OrbKernel.verifyIsaSelection(detectedHwCaps: 775, requiredMask: 927, selectedVariantId: 4, maxVariantId: 4))
+    }
 }

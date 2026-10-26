@@ -258,7 +258,16 @@ internal func leansys_verify_dag_wave_step(_ inDegreeSum: UInt64, _ waveSize: UI
 internal func leansys_verify_ios_jetsam_budget(_ dirtyRssBytes: UInt64, _ allocBytes: UInt64, _ maxJetsamBytes: UInt64, _ pageAlignMask: UInt64, _ isAppExtension: UInt8) -> UInt8
 
 @_silgen_name("leansys_verify_worker_budget")
-internal func leansys_verify_worker_budget(_ activeWorkers: UInt64, _ maxWorkers: UInt64, _ microChunks: UInt64, _ totalLen: UInt64, _ isMobileHetero: UInt8) -> UInt8
+internal func leansys_verify_worker_budget(_ activeWorkers: UInt64, _ maxWorkers: UInt64, _ microChunks: UInt64, _ totalLen: UInt64, _ topologyKind: UInt8) -> UInt8
+
+@_silgen_name("leansys_verify_page_aligned_buffer")
+internal func leansys_verify_page_aligned_buffer(_ addr: UInt64, _ allocBytes: UInt64, _ capacityBytes: UInt64, _ dirtyRssBytes: UInt64, _ maxBudgetBytes: UInt64, _ pageAlignMask: UInt64) -> UInt8
+
+@_silgen_name("leansys_select_isa")
+internal func leansys_select_isa(_ detectedHwCaps: UInt64, _ requiredMask: UInt64, _ requestedVariantId: UInt8, _ maxVariantId: UInt8) -> UInt8
+
+@_silgen_name("leansys_verify_isa_selection")
+internal func leansys_verify_isa_selection(_ detectedHwCaps: UInt64, _ requiredMask: UInt64, _ selectedVariantId: UInt8, _ maxVariantId: UInt8) -> UInt8
 
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
@@ -275,8 +284,16 @@ enum OrbKernel {
     }
 
     @inline(__always)
-    private static func satU32(_ v: Int) -> UInt32 {
+    static func satU32(_ v: Int) -> UInt32 {
         v < 0 ? 0 : (v > Int(UInt32.max) ? UInt32.max : UInt32(v))
+    }
+
+    @inline(__always)
+    static func satU32(_ v: Double) -> UInt32 {
+        guard v.isFinite, v > 0 else { return 0 }
+        let r = v.rounded()
+        if r >= Double(UInt32.max) { return UInt32.max }
+        return UInt32(r)
     }
 
     @inline(__always)
@@ -615,5 +632,21 @@ enum OrbKernel {
 
     static func verifyWorkerBudget(activeWorkers: Int, maxWorkers: Int, microChunks: Int, totalLen: Int, isMobileHetero: Bool = true) -> Bool {
         leansys_verify_worker_budget(satU64(activeWorkers), satU64(maxWorkers), satU64(microChunks), satU64(totalLen), b8(isMobileHetero)) != 0
+    }
+
+    static func verifyWorkerBudget(activeWorkers: Int, maxWorkers: Int, microChunks: Int, totalLen: Int, topologyKind: Int) -> Bool {
+        leansys_verify_worker_budget(satU64(activeWorkers), satU64(maxWorkers), satU64(microChunks), satU64(totalLen), satU8(topologyKind)) != 0
+    }
+
+    static func verifyPageAlignedBuffer(addr: UInt64, allocBytes: UInt64, capacityBytes: UInt64, dirtyRssBytes: UInt64, maxBudgetBytes: UInt64, pageAlignMask: UInt64 = 16383) -> Bool {
+        leansys_verify_page_aligned_buffer(addr, allocBytes, capacityBytes, dirtyRssBytes, maxBudgetBytes, pageAlignMask) != 0
+    }
+
+    static func selectIsa(detectedHwCaps: UInt64, requiredMask: UInt64, requestedVariantId: Int, maxVariantId: Int = 4) -> Int {
+        Int(leansys_select_isa(detectedHwCaps, requiredMask, satU8(requestedVariantId), satU8(maxVariantId)))
+    }
+
+    static func verifyIsaSelection(detectedHwCaps: UInt64, requiredMask: UInt64, selectedVariantId: Int, maxVariantId: Int = 4) -> Bool {
+        leansys_verify_isa_selection(detectedHwCaps, requiredMask, satU8(selectedVariantId), satU8(maxVariantId)) != 0
     }
 }

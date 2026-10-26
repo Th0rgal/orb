@@ -177,6 +177,21 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyIosJetsamBudget(JNIEnv *e
 }
 
 JNIEXPORT jint JNICALL
-Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyWorkerBudget(JNIEnv *env, jclass clazz, jlong activeWorkers, jlong maxWorkers, jlong microChunks, jlong totalLen, jint isMobileHetero) {
-    return (jint)leansys_verify_worker_budget((uint64_t)activeWorkers, (uint64_t)maxWorkers, (uint64_t)microChunks, (uint64_t)totalLen, (uint8_t)isMobileHetero);
+Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyWorkerBudget(JNIEnv *env, jclass clazz, jlong activeWorkers, jlong maxWorkers, jlong microChunks, jlong totalLen, jint topologyKind) {
+    return (jint)leansys_verify_worker_budget((uint64_t)activeWorkers, (uint64_t)maxWorkers, (uint64_t)microChunks, (uint64_t)totalLen, (uint8_t)topologyKind);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyPageAlignedBuffer(JNIEnv *env, jclass clazz, jlong addr, jlong allocBytes, jlong capacityBytes, jlong dirtyRssBytes, jlong maxBudgetBytes, jlong pageAlignMask) {
+    return (jint)leansys_verify_page_aligned_buffer((uint64_t)addr, (uint64_t)allocBytes, (uint64_t)capacityBytes, (uint64_t)dirtyRssBytes, (uint64_t)maxBudgetBytes, (uint64_t)pageAlignMask);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSelectIsa(JNIEnv *env, jclass clazz, jlong detectedHwCaps, jlong requiredMask, jint requestedVariantId, jint maxVariantId) {
+    return (jint)leansys_select_isa((uint64_t)detectedHwCaps, (uint64_t)requiredMask, (uint8_t)requestedVariantId, (uint8_t)maxVariantId);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyIsaSelection(JNIEnv *env, jclass clazz, jlong detectedHwCaps, jlong requiredMask, jint selectedVariantId, jint maxVariantId) {
+    return (jint)leansys_verify_isa_selection((uint64_t)detectedHwCaps, (uint64_t)requiredMask, (uint8_t)selectedVariantId, (uint8_t)maxVariantId);
 }

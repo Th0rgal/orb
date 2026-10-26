@@ -69,6 +69,11 @@ const LEANSYS_EXPORTS: &[&str] = &[
     "leansys_gfm_pipe_scan",
     "leansys_tag_scan",
     "leansys_transcript_index",
+    "leansys_verify_ios_jetsam_budget",
+    "leansys_verify_worker_budget",
+    "leansys_verify_page_aligned_buffer",
+    "leansys_select_isa",
+    "leansys_verify_isa_selection",
 ];
 
 fn verify_lean_sources_if_requested(root: &Path, out_dir: &Path) {

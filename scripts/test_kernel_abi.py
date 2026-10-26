@@ -30,6 +30,23 @@ class Manifest(unittest.TestCase):
         self.assertEqual(sse["params"][-1]["type"], "uint8_t")
         self.assertEqual(sse["jni"], {"method": "leansysSseFrameScan", "ret": "jbyte"})
 
+    def test_wave8_page_aligned_buffer_and_isa_gates_in_manifest(self):
+        data = manifest()
+        wb = fn(data, "leansys_verify_worker_budget")
+        self.assertEqual(wb["params"][-1], {"name": "topologyKind", "type": "uint8_t"})
+        pab = fn(data, "leansys_verify_page_aligned_buffer")
+        self.assertEqual([p["name"] for p in pab["params"]],
+                         ["addr", "allocBytes", "capacityBytes", "dirtyRssBytes", "maxBudgetBytes", "pageAlignMask"])
+        self.assertEqual(pab["jni"], {"method": "leansysVerifyPageAlignedBuffer", "ret": "jint"})
+        sisa = fn(data, "leansys_select_isa")
+        self.assertEqual([p["name"] for p in sisa["params"]],
+                         ["detectedHwCaps", "requiredMask", "requestedVariantId", "maxVariantId"])
+        self.assertEqual(sisa["jni"], {"method": "leansysSelectIsa", "ret": "jint"})
+        visa = fn(data, "leansys_verify_isa_selection")
+        self.assertEqual([p["name"] for p in visa["params"]],
+                         ["detectedHwCaps", "requiredMask", "selectedVariantId", "maxVariantId"])
+        self.assertEqual(visa["jni"], {"method": "leansysVerifyIsaSelection", "ret": "jint"})
+
     def test_manifest_matches_cabi_exports(self):
         src = (ROOT / "shared/orb-spec/cabi/orb_kernel_unboxed.c").read_text()
         exports = {m.group(2): (m.group(1), [p.split()[0] for p in m.group(3).split(", ") if p])
@@ -85,6 +102,16 @@ class Generator(unittest.TestCase):
 
     def test_check_mode_reports_stale(self):
         self.assertEqual(gen.main(["--check"]), 0)
+
+    def test_kotlin_is_generated_without_fallback_mirrors(self):
+        data = manifest()
+        kt = gen.render_kotlin(data)
+        self.assertIn(ROOT / data["kotlin"]["path"], gen.outputs(data))
+        self.assertNotIn("if (nativeLoaded)", kt)
+        self.assertIn('check(nativeLoaded) { "liborb_kernel JNI not loaded" }', kt)
+        self.assertIn("external fun leansysVerifyPageAlignedBuffer(", kt)
+        self.assertIn("external fun leansysSelectIsa(", kt)
+        self.assertIn("external fun leansysVerifyIsaSelection(", kt)
 
 
 class Lint(unittest.TestCase):

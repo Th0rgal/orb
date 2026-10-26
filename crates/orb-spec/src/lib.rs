@@ -138,6 +138,40 @@ pub mod lean_sys_cabi {
             prev_digest: u64,
             block_hash: u64,
         ) -> u64;
+        pub fn leansys_verify_ios_jetsam_budget(
+            dirty_rss_bytes: u64,
+            alloc_bytes: u64,
+            max_jetsam_bytes: u64,
+            page_align_mask: u64,
+            is_app_extension: u8,
+        ) -> u8;
+        pub fn leansys_verify_worker_budget(
+            active_workers: u64,
+            max_workers: u64,
+            micro_chunks: u64,
+            total_len: u64,
+            topology_kind: u8,
+        ) -> u8;
+        pub fn leansys_verify_page_aligned_buffer(
+            addr: u64,
+            alloc_bytes: u64,
+            capacity_bytes: u64,
+            dirty_rss_bytes: u64,
+            max_budget_bytes: u64,
+            page_align_mask: u64,
+        ) -> u8;
+        pub fn leansys_select_isa(
+            detected_hw_caps: u64,
+            required_mask: u64,
+            requested_variant_id: u8,
+            max_variant_id: u8,
+        ) -> u8;
+        pub fn leansys_verify_isa_selection(
+            detected_hw_caps: u64,
+            required_mask: u64,
+            selected_variant_id: u8,
+            max_variant_id: u8,
+        ) -> u8;
     }
 
     pub const WAL_MAGIC: u32 = 0x4C53_5953;
@@ -449,6 +483,99 @@ pub mod lean_sys_cabi {
         block_hash: u64,
     ) -> u64 {
         unsafe { leansys_transcript_index(turn_off, turn_len, buf_len, prev_digest, block_hash) }
+    }
+
+    #[inline]
+    pub fn verify_ios_jetsam_budget(
+        dirty_rss_bytes: u64,
+        alloc_bytes: u64,
+        max_jetsam_bytes: u64,
+        page_align_mask: u64,
+        is_app_extension: bool,
+    ) -> bool {
+        unsafe {
+            leansys_verify_ios_jetsam_budget(
+                dirty_rss_bytes,
+                alloc_bytes,
+                max_jetsam_bytes,
+                page_align_mask,
+                u8::from(is_app_extension),
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_worker_budget(
+        active_workers: u64,
+        max_workers: u64,
+        micro_chunks: u64,
+        total_len: u64,
+        topology_kind: u8,
+    ) -> bool {
+        unsafe {
+            leansys_verify_worker_budget(
+                active_workers,
+                max_workers,
+                micro_chunks,
+                total_len,
+                topology_kind,
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_page_aligned_buffer(
+        addr: u64,
+        alloc_bytes: u64,
+        capacity_bytes: u64,
+        dirty_rss_bytes: u64,
+        max_budget_bytes: u64,
+        page_align_mask: u64,
+    ) -> bool {
+        unsafe {
+            leansys_verify_page_aligned_buffer(
+                addr,
+                alloc_bytes,
+                capacity_bytes,
+                dirty_rss_bytes,
+                max_budget_bytes,
+                page_align_mask,
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn select_isa(
+        detected_hw_caps: u64,
+        required_mask: u64,
+        requested_variant_id: u8,
+        max_variant_id: u8,
+    ) -> u8 {
+        unsafe {
+            leansys_select_isa(
+                detected_hw_caps,
+                required_mask,
+                requested_variant_id,
+                max_variant_id,
+            )
+        }
+    }
+
+    #[inline]
+    pub fn verify_isa_selection(
+        detected_hw_caps: u64,
+        required_mask: u64,
+        selected_variant_id: u8,
+        max_variant_id: u8,
+    ) -> bool {
+        unsafe {
+            leansys_verify_isa_selection(
+                detected_hw_caps,
+                required_mask,
+                selected_variant_id,
+                max_variant_id,
+            ) == 1
+        }
     }
 }
 

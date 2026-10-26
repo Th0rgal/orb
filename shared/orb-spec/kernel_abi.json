@@ -9,6 +9,9 @@
   "swift": {
     "path": "ios_dashboard/SandboxedDashboard/Orb/OrbKernelGenerated.swift"
   },
+  "kotlin": {
+    "path": "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbKernel.kt"
+  },
   "functions": [
     {
       "name": "orb_verify_writer_reuse",
@@ -2535,12 +2538,98 @@
           "type": "uint64_t"
         },
         {
-          "name": "isMobileHetero",
+          "name": "topologyKind",
           "type": "uint8_t"
         }
       ],
       "jni": {
         "method": "leansysVerifyWorkerBudget",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "leansys_verify_page_aligned_buffer",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "addr",
+          "type": "uint64_t"
+        },
+        {
+          "name": "allocBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "capacityBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "dirtyRssBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "maxBudgetBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "pageAlignMask",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "leansysVerifyPageAlignedBuffer",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "leansys_select_isa",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "detectedHwCaps",
+          "type": "uint64_t"
+        },
+        {
+          "name": "requiredMask",
+          "type": "uint64_t"
+        },
+        {
+          "name": "requestedVariantId",
+          "type": "uint8_t"
+        },
+        {
+          "name": "maxVariantId",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "leansysSelectIsa",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "leansys_verify_isa_selection",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "detectedHwCaps",
+          "type": "uint64_t"
+        },
+        {
+          "name": "requiredMask",
+          "type": "uint64_t"
+        },
+        {
+          "name": "selectedVariantId",
+          "type": "uint8_t"
+        },
+        {
+          "name": "maxVariantId",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "leansysVerifyIsaSelection",
         "ret": "jint"
       }
     }

@@ -97,6 +97,9 @@ uint8_t leansys_verify_counterexample_triage(uint8_t, uint8_t, uint8_t, uint8_t)
 uint8_t leansys_verify_dag_wave_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_ios_jetsam_budget(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
 uint8_t leansys_verify_worker_budget(uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
+uint8_t leansys_verify_page_aligned_buffer(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint8_t leansys_select_isa(uint64_t, uint64_t, uint8_t, uint8_t);
+uint8_t leansys_verify_isa_selection(uint64_t, uint64_t, uint8_t, uint8_t);
 #ifdef __cplusplus
 }
 #endif

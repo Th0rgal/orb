@@ -73,10 +73,10 @@ final class OrbTranscriptScroller {
     var showsJumpToLatest: Bool {
         OrbKernel.scrollShowsJump(
             pinned: pinned,
-            content: Int(max(0, metrics.contentHeight.rounded())),
-            viewport: Int(max(0, metrics.visibleHeight.rounded())),
-            top: Int(max(0, (metrics.offsetY + metrics.topInset).rounded())),
-            pillThreshold: Int(Self.pillThreshold)
+            content: Int(OrbKernel.satU32(Double(metrics.contentHeight))),
+            viewport: Int(OrbKernel.satU32(Double(metrics.visibleHeight))),
+            top: Int(OrbKernel.satU32(Double(metrics.offsetY + metrics.topInset))),
+            pillThreshold: Int(OrbKernel.satU32(Double(Self.pillThreshold)))
         )
     }
 
@@ -123,10 +123,10 @@ final class OrbTranscriptScroller {
         case .idle, .animating:
             interacting = false
             if OrbKernel.scrollUserStep(
-                content: Int(max(0, metrics.contentHeight.rounded())),
-                viewport: Int(max(0, metrics.visibleHeight.rounded())),
-                top: Int(max(0, (metrics.offsetY + metrics.topInset).rounded())),
-                threshold: Int(Self.pinTolerance)
+                content: Int(OrbKernel.satU32(Double(metrics.contentHeight))),
+                viewport: Int(OrbKernel.satU32(Double(metrics.visibleHeight))),
+                top: Int(OrbKernel.satU32(Double(metrics.offsetY + metrics.topInset))),
+                threshold: Int(OrbKernel.satU32(Double(Self.pinTolerance)))
             ) {
                 pinned = true
             }
