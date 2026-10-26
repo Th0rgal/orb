@@ -4,6 +4,7 @@ import SwiftUI
 import UIKit
 
 struct OrbBitwardenSettings: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var client = OrbSettingsClient()
     @State private var unlocked = false
     @State private var authError = ""
@@ -21,6 +22,7 @@ struct OrbBitwardenSettings: View {
     @State private var secrets: [OrbJSON] = []
     @State private var loadingSecrets = false
     @State private var searchQuery = ""
+    @State private var showAccountDetails = false
 
     @State private var revealedValues: [String: String] = [:]
     @State private var revealingIds: Set<String> = []
@@ -30,6 +32,11 @@ struct OrbBitwardenSettings: View {
     @State private var createSheet = false
     @State private var editingSecret: OrbEditingSecret?
     @State private var deletingSecret: OrbJSON?
+
+    @State private var devices: [OrbJSON] = []
+    @State private var approvalMode = ""
+    @State private var enrollmentCode = ""
+    @State private var enrolledHere = false
 
     private var filteredSecrets: [OrbJSON] {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -44,7 +51,7 @@ struct OrbBitwardenSettings: View {
             let name = found["name"].text
             if !name.isEmpty { return name }
         }
-        return selectedProjectId
+        return selectedProjectId.isEmpty ? "Default" : selectedProjectId
     }
 
     var body: some View {
@@ -70,8 +77,7 @@ struct OrbBitwardenSettings: View {
                     .accessibilityIdentifier("secrets.add")
 
                     Button {
-                        unlocked = false
-                        revealedValues.removeAll()
+                        lockSession()
                     } label: {
                         Image(systemName: "lock.fill")
                     }
@@ -81,7 +87,14 @@ struct OrbBitwardenSettings: View {
         }
         .task {
             detectBiometry()
-            await authenticate()
+            if !unlocked {
+                await authenticate()
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .background {
+                lockSession()
+            }
         }
         .task(id: unlocked) {
             // Missions can ask while the page is open: refresh requests every 10 s.
@@ -141,6 +154,12 @@ struct OrbBitwardenSettings: View {
         }
     }
 
+    private func lockSession() {
+        unlocked = false
+        revealedValues.removeAll()
+        OrbBiometric.clearUnlockedContext()
+    }
+
     private var lockedView: some View {
         VStack(spacing: 18) {
             Spacer()
@@ -148,13 +167,13 @@ struct OrbBitwardenSettings: View {
                 Circle()
                     .fill(Color.accentColor.opacity(0.14))
                     .frame(width: 68, height: 68)
-                Image(systemName: biometryName == "Touch ID" ? "touchid" : "faceid")
+                Image(systemName: OrbBiometric.symbolName)
                     .font(.system(size: 30, weight: .medium))
                     .foregroundStyle(Color.accentColor)
             }
-            Text("Project Secrets Locked")
+            Text("Secrets Locked")
                 .font(.headline)
-            Text("Authenticate with \(biometryName) to view or edit Bitwarden Secrets Manager credentials for project paloma.")
+            Text("Authenticate with \(biometryName) to view or manage your Bitwarden Secrets Manager credentials and mission access.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -172,7 +191,13 @@ struct OrbBitwardenSettings: View {
                 Task { await authenticate() }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: biometryName == "Touch ID" ? "touchid" : "faceid")
+                    if authenticating {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                    } else {
+                        Image(systemName: OrbBiometric.symbolName)
+                    }
                     Text(authenticating ? "Authenticating…" : "Unlock with \(biometryName)")
                         .fontWeight(.semibold)
                 }
@@ -193,33 +218,11 @@ struct OrbBitwardenSettings: View {
         List {
             OrbSettingsError(message: error)
 
-            accessSection
+            pendingRequestsSection
 
-            devicesSection
-
-            Section("Machine Account") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(status["configured"] == .bool(true) && isBwsAvailable ? Color.green : Color.orange)
-                                .frame(width: 8, height: 8)
-                            Text(statusHeadline)
-                                .font(.subheadline.weight(.medium))
-                        }
-                        Text(statusSubtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button(status["configured"] == .bool(true) ? "Token" : "Connect") {
-                        tokenSheet = true
-                    }
-                    .font(.subheadline)
-                }
-
+            Section {
                 if !projects.isEmpty {
-                    Picker("Bitwarden project", selection: $selectedProjectId) {
+                    Picker("Project", selection: $selectedProjectId) {
                         ForEach(projects, id: \.selfID) { proj in
                             Text(proj["name"].text).tag(proj["id"].text)
                         }
@@ -227,12 +230,102 @@ struct OrbBitwardenSettings: View {
                     .onChange(of: selectedProjectId) { _, newValue in
                         Task { await selectProject(newValue) }
                     }
-                } else {
+                }
+
+                DisclosureGroup(isExpanded: $showAccountDetails) {
                     HStack {
-                        Text("Connected project")
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(statusSubtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Spacer()
-                        Text("—")
-                            .font(.subheadline.monospaced())
+                        Button(status["configured"] == .bool(true) ? "Update Token" : "Connect") {
+                            tokenSheet = true
+                        }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 2)
+
+                    ForEach(devices, id: \.selfID) { d in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(d["name"].text + (d["public_key"].text == OrbApprovalKey.publicKey ? " (this iPhone)" : ""))
+                                    .font(.caption.weight(.medium))
+                                Text("Approval device · \(d["platform"].text)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Remove", role: .destructive) {
+                                Task {
+                                    do {
+                                        _ = try await OrbApprovalKey.signedCall(
+                                            "/api/approvals/devices/\(d["id"].text)", method: "DELETE",
+                                            summary: "Remove approval device \(d["name"].text)")
+                                    } catch {
+                                        if let msg = OrbBiometric.friendlyError(error) { self.error = msg }
+                                    }
+                                    await loadDevices()
+                                }
+                            }
+                            .font(.caption)
+                            .buttonStyle(.borderless)
+                        }
+                    }
+
+                    if !enrolledHere {
+                        if approvalMode == "enforce" {
+                            TextField("One-time code from Core host", text: $enrollmentCode)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .font(.caption)
+                        }
+                        Button {
+                            Task { await enroll() }
+                        } label: {
+                            Label("Enroll this iPhone (\(biometryName))", systemImage: OrbBiometric.symbolName)
+                                .font(.caption.weight(.semibold))
+                        }
+                        .disabled(approvalMode == "enforce" && enrollmentCode.trimmingCharacters(in: .whitespaces).count < 8)
+                    }
+
+                    if !grants.isEmpty {
+                        ForEach(grants, id: \.selfID) { g in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(g["scope"]["kind"].text == "all" ? "Grant: All projects"
+                                         : g["scope"]["kind"].text == "project" ? "Grant: Project \(projectName(g["scope"]["project_id"].text))"
+                                         : "Grant: Secret \(g["scope"]["key"].text)")
+                                        .font(.caption.weight(.medium))
+                                    Text(g["mission_title"].text)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button("Revoke", role: .destructive) {
+                                    Task {
+                                        _ = try? await client.call("/api/bitwarden/grants/\(g["id"].text)", method: "DELETE")
+                                        await loadBroker()
+                                    }
+                                }
+                                .font(.caption)
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(status["configured"] == .bool(true) && isBwsAvailable ? Color.green : Color.orange)
+                            .frame(width: 8, height: 8)
+                        Text(statusHeadline)
+                            .font(.subheadline.weight(.medium))
+                        Spacer()
+                        Text(accountSummaryBadge)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -240,14 +333,18 @@ struct OrbBitwardenSettings: View {
 
             Section {
                 if loading || loadingSecrets {
-                    HStack {
+                    HStack(spacing: 10) {
                         ProgressView()
                         Text("Loading secrets…")
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
+                    .padding(.vertical, 4)
                 } else if filteredSecrets.isEmpty {
                     Text(searchQuery.isEmpty ? "No secrets in this Bitwarden project." : "No secrets match \"\(searchQuery)\".")
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
                 } else {
                     ForEach(filteredSecrets, id: \.selfID) { secret in
                         secretRow(secret)
@@ -255,103 +352,178 @@ struct OrbBitwardenSettings: View {
                 }
             } header: {
                 HStack {
-                    Text("Secrets · \(selectedProjectName)")
+                    Text(selectedProjectName)
                     Spacer()
-                    Text("\(secrets.count)")
+                    Text(searchQuery.isEmpty ? "\(secrets.count)" : "\(filteredSecrets.count) of \(secrets.count)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
         }
         .scrollContentBackground(.hidden)
+        .safeAreaInset(edge: .bottom) {
+            Color.clear.frame(height: 20)
+        }
         .searchable(text: $searchQuery, prompt: "Filter keys or notes")
         .refreshable {
             await loadAll()
         }
     }
 
+    private var accountSummaryBadge: String {
+        var parts: [String] = []
+        if enrolledHere {
+            parts.append("iPhone enrolled")
+        } else if !devices.isEmpty {
+            parts.append("\(devices.count) device\(devices.count == 1 ? "" : "s")")
+        }
+        if !grants.isEmpty {
+            parts.append("\(grants.count) grant\(grants.count == 1 ? "" : "s")")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     @ViewBuilder
     private func secretRow(_ secret: OrbJSON) -> some View {
         let id = secret["id"].text
         let key = secret["key"].text
-        let note = secret["note"].text
+        let note = secret["note"].text.trimmingCharacters(in: .whitespacesAndNewlines)
         let revealed = revealedValues[id]
         let isRevealing = revealingIds.contains(id)
 
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(key)
-                    .font(.system(.subheadline, design: .monospaced).weight(.semibold))
-                    .lineLimit(1)
-                Spacer()
-                if copiedId == id {
-                    Text("Copied")
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.green)
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(key)
+                            .font(.system(.subheadline, design: .monospaced).weight(.semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if copiedId == id {
+                            Label("Copied", systemImage: "checkmark")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.green)
+                                .transition(.opacity)
+                        }
+                    }
+                    if !note.isEmpty {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(revealed != nil ? 4 : 1)
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                HStack(spacing: 2) {
+                    Button {
+                        Task { await copySecret(id: id) }
+                    } label: {
+                        Image(systemName: copiedId == id ? "checkmark.circle.fill" : "doc.on.doc")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(copiedId == id ? Color.green : Color.secondary)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Copy \(key)")
+
+                    Button {
+                        Task { await toggleReveal(id: id) }
+                    } label: {
+                        Group {
+                            if isRevealing {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            } else {
+                                Image(systemName: revealed != nil ? "eye.slash.fill" : "eye")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(revealed != nil ? Color.accentColor : Color.secondary)
+                            }
+                        }
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isRevealing)
+                    .accessibilityLabel(revealed != nil ? "Hide \(key)" : "Reveal \(key)")
+
+                    Menu {
+                        Button {
+                            Task { await copySecret(id: id) }
+                        } label: {
+                            Label("Copy Value", systemImage: "doc.on.doc")
+                        }
+                        Button {
+                            UIPasteboard.general.string = key
+                            OrbHaptics.light()
+                        } label: {
+                            Label("Copy Key Name", systemImage: "tag")
+                        }
+                        Button {
+                            Task { await toggleReveal(id: id) }
+                        } label: {
+                            Label(revealed != nil ? "Hide Value" : "Reveal Value", systemImage: revealed != nil ? "eye.slash" : "eye")
+                        }
+                        Button {
+                            editingSecret = OrbEditingSecret(secret: secret)
+                        } label: {
+                            Label("Edit Secret", systemImage: "pencil")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            deletingSecret = secret
+                        } label: {
+                            Label("Delete Secret", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("More actions for \(key)")
                 }
             }
 
             if let revealed {
-                Text(revealed.isEmpty ? "(empty)" : revealed)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            } else {
-                Text("••••••••••••••••••••")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                HStack(alignment: .top, spacing: 8) {
+                    Text(revealed.isEmpty ? "(empty)" : revealed)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(8)
+                .background(Color.white.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-
-            if !note.isEmpty {
-                Text(note)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            HStack(spacing: 16) {
-                Button {
-                    Task { await toggleReveal(id: id) }
-                } label: {
-                    Label(revealed != nil ? "Hide" : (isRevealing ? "Loading…" : "Reveal"), systemImage: revealed != nil ? "eye.slash" : "eye")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .disabled(isRevealing)
-
-                Button {
-                    Task { await copySecret(id: id) }
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-
-                Button {
-                    editingSecret = OrbEditingSecret(secret: secret)
-                } label: {
-                    Label("Edit", systemImage: "pencil")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-
-                Spacer()
-
-                Button(role: .destructive) {
-                    deletingSecret = secret
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-            }
-            .padding(.top, 2)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                deletingSecret = secret
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            Button {
+                editingSecret = OrbEditingSecret(secret: secret)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            .tint(.blue)
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            Button {
+                Task { await copySecret(id: id) }
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            .tint(.green)
+        }
     }
 
     private var isBwsAvailable: Bool {
@@ -360,7 +532,7 @@ struct OrbBitwardenSettings: View {
 
     private var statusHeadline: String {
         if status != .null && !isBwsAvailable { return "bws CLI not installed" }
-        if status["configured"] == .bool(true) { return "Connected" }
+        if status["configured"] == .bool(true) { return "Bitwarden Connected" }
         return "Access token required"
     }
 
@@ -375,18 +547,7 @@ struct OrbBitwardenSettings: View {
     }
 
     private func detectBiometry() {
-        let context = LAContext()
-        var error: NSError?
-        if context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) {
-            switch context.biometryType {
-            case .faceID: biometryName = "Face ID"
-            case .touchID: biometryName = "Touch ID"
-            case .opticID: biometryName = "Optic ID"
-            default: biometryName = "Biometrics"
-            }
-        } else {
-            biometryName = "Passcode"
-        }
+        biometryName = OrbBiometric.name
     }
 
     private func authenticate() async {
@@ -395,34 +556,17 @@ struct OrbBitwardenSettings: View {
         authError = ""
         defer { authenticating = false }
 
-        let context = LAContext()
-        context.localizedCancelTitle = "Cancel"
-        var policyError: NSError?
-        let policy: LAPolicy = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &policyError)
-            ? .deviceOwnerAuthenticationWithBiometrics
-            : .deviceOwnerAuthentication
-
-        guard context.canEvaluatePolicy(policy, error: &policyError) else {
-            // Simulator or device without passcode configured
-            unlocked = true
-            await loadAll()
+        if let message = await OrbBiometric.authenticate(
+            reason: "Unlock secrets and mission access requests",
+            reuseUnlocked: true
+        ) {
+            if !message.isEmpty {
+                authError = message
+            }
             return
         }
-
-        do {
-            let success = try await context.evaluatePolicy(
-                policy,
-                localizedReason: "Unlock secrets and mission access requests"
-            )
-            if success {
-                unlocked = true
-                await loadAll()
-            } else {
-                authError = "Authentication was not completed."
-            }
-        } catch {
-            authError = error.localizedDescription
-        }
+        unlocked = true
+        await loadAll()
     }
 
     private func loadAll() async {
@@ -443,9 +587,11 @@ struct OrbBitwardenSettings: View {
                     : (projs.first?["id"].text ?? defaultProj)
                 selectedProjectId = target
                 await loadSecrets(projectId: target)
+                showAccountDetails = !enrolledHere && approvalMode == "enforce"
             } else {
                 projects = []
                 secrets = []
+                showAccountDetails = true
             }
         } catch is CancellationError {
         } catch {
@@ -466,11 +612,6 @@ struct OrbBitwardenSettings: View {
             self.error = error.localizedDescription
         }
     }
-
-    @State private var devices: [OrbJSON] = []
-    @State private var approvalMode = ""
-    @State private var enrollmentCode = ""
-    @State private var enrolledHere = false
 
     private func loadDevices() async {
         guard let d = try? await client.call("/api/approvals/devices") else { return }
@@ -493,46 +634,13 @@ struct OrbBitwardenSettings: View {
             ]))
             OrbApprovalKey.deviceId = device["id"].text
             enrollmentCode = ""
+            OrbHaptics.success()
         } catch {
-            self.error = error.localizedDescription
+            if let msg = OrbBiometric.friendlyError(error) {
+                self.error = msg
+            }
         }
         await loadDevices()
-    }
-
-    @ViewBuilder
-    private var devicesSection: some View {
-        Section("Approval devices · \(approvalMode)") {
-            ForEach(devices, id: \.selfID) { d in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(d["name"].text + (d["public_key"].text == OrbApprovalKey.publicKey ? " (this iPhone)" : ""))
-                            .font(.subheadline)
-                        Text(d["platform"].text).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Remove", role: .destructive) {
-                        Task {
-                            do {
-                                _ = try await OrbApprovalKey.signedCall(
-                                    "/api/approvals/devices/\(d["id"].text)", method: "DELETE",
-                                    summary: "Remove approval device \(d["name"].text)")
-                            } catch { self.error = error.localizedDescription }
-                            await loadDevices()
-                        }
-                    }
-                    .font(.subheadline)
-                }
-            }
-            if !enrolledHere {
-                if approvalMode == "enforce" {
-                    TextField("One-time code from the Core host", text: $enrollmentCode)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
-                Button("Enroll this iPhone (Face ID)") { Task { await enroll() } }
-                    .disabled(approvalMode == "enforce" && enrollmentCode.trimmingCharacters(in: .whitespaces).count < 8)
-            }
-        }
     }
 
     // Browsing a project must not change any binding: bindings grant missions access.
@@ -576,16 +684,19 @@ struct OrbBitwardenSettings: View {
                 _ = try await OrbApprovalKey.signedCall("/api/bitwarden/requests/\(id)/reject", method: "POST", summary: "Decline: \(describe(r))")
             }
             OrbUsageTelemetry.recordGrant(id, approve: scope != nil, enrolled: true)
+            OrbHaptics.success()
         } catch {
-            self.error = error.localizedDescription
+            if let msg = OrbBiometric.friendlyError(error) {
+                self.error = msg
+            }
         }
         await loadBroker()
     }
 
     @ViewBuilder
-    private var accessSection: some View {
-        if !requests.isEmpty || !grants.isEmpty {
-            Section("Mission access") {
+    private var pendingRequestsSection: some View {
+        if !requests.isEmpty {
+            Section("Pending Mission Requests") {
                 ForEach(requests, id: \.selfID) { r in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(describe(r)).font(.subheadline.weight(.medium))
@@ -610,26 +721,8 @@ struct OrbBitwardenSettings: View {
                             Button("Decline", role: .destructive) { Task { await respond(r, scope: nil) } }
                         }
                         .buttonStyle(.bordered)
+                        .controlSize(.small)
                         .disabled(actingOn != nil)
-                    }
-                }
-                ForEach(grants, id: \.selfID) { g in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(g["scope"]["kind"].text == "all" ? "All projects"
-                                 : g["scope"]["kind"].text == "project" ? "Project \(projectName(g["scope"]["project_id"].text))"
-                                 : "Secret \(g["scope"]["key"].text)")
-                                .font(.subheadline)
-                            Text(g["mission_title"].text).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Revoke") {
-                            Task {
-                                _ = try? await client.call("/api/bitwarden/grants/\(g["id"].text)", method: "DELETE")
-                                await loadBroker()
-                            }
-                        }
-                        .font(.subheadline)
                     }
                 }
             }
@@ -646,9 +739,10 @@ struct OrbBitwardenSettings: View {
         do {
             let detail = try await OrbApprovalKey.signedCall("/api/bitwarden/secrets/\(id)/reveal", summary: "Reveal a secret")
             revealedValues[id] = detail["value"].text
-        } catch is CancellationError {
         } catch {
-            self.error = error.localizedDescription
+            if let msg = OrbBiometric.friendlyError(error) {
+                self.error = msg
+            }
         }
     }
 
@@ -662,12 +756,14 @@ struct OrbBitwardenSettings: View {
                 val = detail["value"].text
             }
             UIPasteboard.general.string = val
+            OrbHaptics.success()
             copiedId = id
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             if copiedId == id { copiedId = nil }
-        } catch is CancellationError {
         } catch {
-            self.error = error.localizedDescription
+            if let msg = OrbBiometric.friendlyError(error) {
+                self.error = msg
+            }
         }
     }
 
@@ -676,9 +772,11 @@ struct OrbBitwardenSettings: View {
             _ = try await OrbApprovalKey.signedCall("/api/bitwarden/secrets/\(id)", method: "DELETE", summary: "Delete a secret")
             secrets.removeAll { $0["id"].text == id }
             revealedValues.removeValue(forKey: id)
-        } catch is CancellationError {
+            OrbHaptics.success()
         } catch {
-            self.error = error.localizedDescription
+            if let msg = OrbBiometric.friendlyError(error) {
+                self.error = msg
+            }
         }
     }
 }
@@ -752,7 +850,9 @@ private struct OrbBitwardenTokenSheet: View {
             onSaved()
             dismiss()
         } catch {
-            self.error = error.localizedDescription
+            if let msg = OrbBiometric.friendlyError(error) {
+                self.error = msg
+            }
         }
     }
 }
@@ -864,7 +964,9 @@ private struct OrbBitwardenSecretEditorSheet: View {
             onSaved()
             dismiss()
         } catch {
-            self.error = error.localizedDescription
+            if let msg = OrbBiometric.friendlyError(error) {
+                self.error = msg
+            }
         }
     }
 }
@@ -878,8 +980,8 @@ struct OrbEditingSecret: Identifiable {
 
 /// Device-signed approvals: Core accepts sensitive secret operations only with a
 /// signature from an enrolled device key. Here the key lives in the Secure
-/// Enclave, only works with the currently enrolled Face ID, and signs one
-/// request after a fresh Face ID check.
+/// Enclave, reuses the unlocked foreground authentication context when active,
+/// and signs one request without duplicate biometric prompts.
 @MainActor
 enum OrbApprovalKey {
     private static var keyURL: URL {
@@ -900,9 +1002,12 @@ enum OrbApprovalKey {
 
     static func create() throws -> String {
         var cfError: Unmanaged<CFError>?
-        guard let access = SecAccessControlCreateWithFlags(
+        let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .userPresence], &cfError
+        ) ?? SecAccessControlCreateWithFlags(
             nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage, .biometryCurrentSet], &cfError
-        ) else { throw OrbHTTPError(status: 0, detail: "Secure Enclave access control unavailable") }
+        )
+        guard let access else { throw OrbHTTPError(status: 0, detail: "Secure Enclave access control unavailable") }
         let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
         try FileManager.default.createDirectory(at: keyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try key.dataRepresentation.write(to: keyURL, options: [.atomic, .completeFileProtection])
@@ -910,18 +1015,36 @@ enum OrbApprovalKey {
     }
 
     static func sign(_ payload: String, reason: String) async throws -> String {
-        let context = LAContext()
-        context.localizedCancelTitle = "Cancel"
+        let blob = try Data(contentsOf: keyURL)
+        let data = Data(payload.utf8)
         // Core writes the summary into the signed payload: show that, not caller text.
         let shown = payload.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) ?? reason
+
+        // 1. If the user already unlocked biometrics in this active foreground session,
+        // reuse that LAContext first so Reveal/Copy/Edit doesn't re-prompt on every tap.
+        if let reused = OrbBiometric.activeUnlockedContext() {
+            reused.localizedReason = shown
+            if let key = try? SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: reused),
+               let sig = try? key.signature(for: data) {
+                return sig.derRepresentation.base64EncodedString()
+            }
+        }
+
+        // 2. Otherwise evaluate once and pass the authenticated LAContext to Secure Enclave.
+        let context = LAContext()
+        context.localizedCancelTitle = "Cancel"
+        context.localizedReason = shown
+        context.touchIDAuthenticationAllowableReuseDuration = 60
         var authError: NSError?
-        let policy: LAPolicy = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &authError)
-            ? .deviceOwnerAuthenticationWithBiometrics
-            : .deviceOwnerAuthentication
-        _ = try await context.evaluatePolicy(policy, localizedReason: shown)
-        let blob = try Data(contentsOf: keyURL)
+        let policy: LAPolicy = context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError)
+            ? .deviceOwnerAuthentication
+            : .deviceOwnerAuthenticationWithBiometrics
+        if context.canEvaluatePolicy(policy, error: &authError) {
+            _ = try await context.evaluatePolicy(policy, localizedReason: shown)
+            OrbBiometric.recordUnlockedContext(context)
+        }
         let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: context)
-        return try key.signature(for: Data(payload.utf8)).derRepresentation.base64EncodedString()
+        return try key.signature(for: data).derRepresentation.base64EncodedString()
     }
 
     /// Ensures this device's Secure Enclave P-256 key is matched or enrolled on Core.

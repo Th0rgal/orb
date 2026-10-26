@@ -73,11 +73,17 @@ async fn context_manifest(
     AxumPath(slug): AxumPath<String>,
 ) -> Result<Json<crate::project_context::Manifest>, ApiError> {
     let store = context_store(&state, &slug)?;
-    tokio::task::spawn_blocking(move || store.manifest())
-        .await
-        .map_err(internal)?
-        .map(Json)
-        .map_err(internal)
+    tokio::task::spawn_blocking(move || {
+        let mut manifest = store.manifest()?;
+        manifest
+            .entries
+            .retain(|path, _| path != "attachments" && !path.starts_with("attachments/"));
+        Ok::<_, String>(manifest)
+    })
+    .await
+    .map_err(internal)?
+    .map(Json)
+    .map_err(internal)
 }
 async fn context_history(
     State(state): State<Arc<super::routes::AppState>>,
@@ -280,7 +286,7 @@ async fn list_files(
     let read = std::fs::read_dir(&dir).map_err(internal)?;
     for entry in read.flatten().take(MAX_ENTRIES) {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
+        if name.starts_with('.') || (q.path.trim().is_empty() && name == "attachments") {
             continue;
         }
         let meta = entry.metadata().ok();

@@ -68,10 +68,13 @@ final class FidoApprovalState {
     /// device passcode fallback. A failed or cancelled check leaves the request pending.
     func approveWithAuthentication(_ requestId: String) async {
         guard !inFlightRequestIds.contains(requestId) else { return }
-        guard await authenticateDeviceOwner() else {
+        lastError = nil
+        if let message = await OrbBiometric.authenticate(reason: "Approve the SSH signing request") {
             Self.recordApproval(requestId, .dismissed, method: .deviceOwner, consume: false)
-            lastError = "Authentication was not completed."
-            OrbHaptics.error()
+            if !message.isEmpty {
+                lastError = message
+                OrbHaptics.error()
+            }
             return
         }
         await approve(requestId)

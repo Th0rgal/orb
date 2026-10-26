@@ -14,6 +14,7 @@
 
 pub mod env_crypto;
 mod git;
+pub use git::set_trusted_remote;
 pub mod rename;
 pub mod types;
 

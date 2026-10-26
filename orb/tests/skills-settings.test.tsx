@@ -358,7 +358,11 @@ describe("SkillsSettings", () => {
     // Delete through the in-app confirmation; sync prunes.
     await waitFor(() => expect((screen.getByRole("button", { name: "Delete…" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Delete skill" }));
+    // Confirms inside the panel: no second dialog.
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByText("spark-lean-offload")).toBeNull();
     await waitFor(() => expect(syncCalls.at(-1)).toMatchObject({ prune_removed: true, library_skills: [] }));
     expect(requests).toContain("DELETE /api/library/skill/spark-lean-offload");
     expect(requests).toContain("POST /api/library/commit skill: delete spark-lean-offload");
@@ -373,5 +377,36 @@ describe("SkillsSettings", () => {
       expect(screen.getByText("This backend does not support project skill selection yet.")).toBeTruthy();
       expect(screen.getByText("Resolved delivery (1)")).toBeTruthy();
     });
+  });
+
+  it("keeps a failed delete in the confirm with Retry and the row back in the list", async () => {
+    setConnection("https://agent-backend.thomas.md", "test-jwt");
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string) => Promise<unknown> } } }).__TAURI__ = { core: { invoke: async () => null } };
+    let commitFails = true;
+    let deleted = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input), method = init?.method ?? "GET";
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill")) return ok(deleted && !commitFails ? [] : [{ name: "agent-browser", description: "Drive a browser.", path: "skill/agent-browser" }]);
+      if (url.endsWith("/api/library/skill/agent-browser")) {
+        if (method === "DELETE") { if (deleted) return new Response("Skill not found: agent-browser", { status: 404 }); deleted = true; return new Response("Skill deleted successfully", { status: 200 }); }
+        return ok({ name: "agent-browser", path: "skill/agent-browser", content: "---\nname: agent-browser\n---\n# Browser\n", files: [], references: [] });
+      }
+      if (url.endsWith("/api/library/commit")) return commitFails ? new Response("git commit failed: gpg failed to sign the data", { status: 500 }) : new Response("Committed successfully", { status: 200 });
+      if (url.endsWith("/api/library/push")) return new Response("Pushed successfully", { status: 200 });
+      return ok({});
+    });
+    render(() => <SkillsSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Actions for agent-browser" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Delete/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    // The row is back, the dialog stays open with plain words and Retry.
+    expect(await screen.findByText(/Core couldn’t sign the Library commit, so agent-browser is still there/)).toBeTruthy();
+    expect(screen.getByText("agent-browser")).toBeTruthy();
+    commitFails = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    // Retry only commits: the file is already gone, so the 404 is fine.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByText("agent-browser")).toBeNull();
   });
 });

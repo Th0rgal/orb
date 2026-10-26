@@ -1068,7 +1068,7 @@ fun OrbProjectPage(
         val entries = OrbJSON.dict(cachedManifest?.get("entries"))
         val initialDirs = entries?.mapNotNull { (k, v) ->
             val d = OrbJSON.dict(v)
-            if (OrbJSON.bool(d, "directory") == true) k else null
+            if (OrbJSON.bool(d, "directory") == true && k != "attachments" && !k.startsWith("attachments/")) k else null
         } ?: emptyList()
         mutableStateOf(initialDirs)
     }
@@ -1121,7 +1121,7 @@ fun OrbProjectPage(
                 if (entries != null) {
                     val dirs = entries.mapNotNull { (k, v) ->
                         val d = OrbJSON.dict(v)
-                        if (OrbJSON.bool(d, "directory") == true) k else null
+                        if (OrbJSON.bool(d, "directory") == true && k != "attachments" && !k.startsWith("attachments/")) k else null
                     }
                     manifestFolders = dirs
                 }

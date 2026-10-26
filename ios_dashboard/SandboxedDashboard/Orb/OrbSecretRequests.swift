@@ -5,7 +5,12 @@ import SwiftUI
 /// Device-owner check shared by every secret-granting action. Falls back to the
 /// passcode, and lets simulators without any credential through, like the
 /// Secrets settings page.
+@MainActor
 enum OrbBiometric {
+    private static var unlockedContext: LAContext?
+    private static var unlockedUntil: Date = .distantPast
+    private static let sessionReuseSeconds: TimeInterval = 120
+
     static var name: String {
         let context = LAContext()
         var error: NSError?
@@ -18,8 +23,71 @@ enum OrbBiometric {
         }
     }
 
+    static var symbolName: String {
+        switch name {
+        case "Touch ID": return "touchid"
+        case "Optic ID": return "opticid"
+        case "Passcode": return "lock.fill"
+        default: return "faceid"
+        }
+    }
+
+    static func activeUnlockedContext() -> LAContext? {
+        guard let ctx = unlockedContext, Date() < unlockedUntil else {
+            clearUnlockedContext()
+            return nil
+        }
+        unlockedUntil = Date().addingTimeInterval(sessionReuseSeconds)
+        return ctx
+    }
+
+    static func recordUnlockedContext(_ context: LAContext) {
+        unlockedContext = context
+        unlockedUntil = Date().addingTimeInterval(sessionReuseSeconds)
+    }
+
+    static func clearUnlockedContext() {
+        unlockedContext?.invalidate()
+        unlockedContext = nil
+        unlockedUntil = .distantPast
+    }
+
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let ns = error as NSError
+        if ns.domain == LAError.errorDomain,
+           let code = LAError.Code(rawValue: ns.code),
+           [.userCancel, .systemCancel, .appCancel, .notInteractive].contains(code) {
+            return true
+        }
+        return false
+    }
+
+    /// Returns `nil` when the error was a user/system cancel so callers don't show a scary banner.
+    static func friendlyError(_ error: Error) -> String? {
+        if isCancellation(error) { return nil }
+        let ns = error as NSError
+        if ns.domain == LAError.errorDomain, let code = LAError.Code(rawValue: ns.code) {
+            switch code {
+            case .biometryLockout:
+                return "Biometrics are temporarily locked. Use your device passcode to continue."
+            case .biometryNotEnrolled:
+                return "Set up Face ID, Touch ID, or a device passcode in iOS Settings."
+            case .biometryNotAvailable:
+                return "Biometrics are unavailable right now. Try again or use your device passcode."
+            case .passcodeNotSet:
+                return "Set a device passcode in iOS Settings to protect secrets."
+            case .authenticationFailed:
+                return "Authentication was not recognized. Try again."
+            default:
+                break
+            }
+        }
+        return error.localizedDescription
+    }
+
     /// Returns nil on success, or a message to show. Cancellation returns "".
-    static func authenticate(reason: String) async -> String? {
+    static func authenticate(reason: String, reuseUnlocked: Bool = false) async -> String? {
         #if DEBUG
         // UI tests on the loopback fixture: the simulator cannot do Face ID and
         // its passcode sheet blocks XCUITest. Same guard as `orb_test_reset`.
@@ -29,18 +97,28 @@ enum OrbBiometric {
             return nil
         }
         #endif
+        if reuseUnlocked, activeUnlockedContext() != nil {
+            return nil
+        }
         let context = LAContext()
         context.localizedCancelTitle = "Cancel"
+        context.touchIDAuthenticationAllowableReuseDuration = 30
         var policyError: NSError?
-        let policy: LAPolicy = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &policyError)
-            ? .deviceOwnerAuthenticationWithBiometrics : .deviceOwnerAuthentication
+        // Use `.deviceOwnerAuthentication` so iOS natively offers "Enter Passcode" on biometric retry/lockout.
+        let policy: LAPolicy = context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError)
+            ? .deviceOwnerAuthentication
+            : .deviceOwnerAuthenticationWithBiometrics
         guard context.canEvaluatePolicy(policy, error: &policyError) else { return nil }
         do {
-            return try await context.evaluatePolicy(policy, localizedReason: reason) ? nil : "Authentication was not completed."
-        } catch let error as LAError where [.userCancel, .systemCancel, .appCancel].contains(error.code) {
-            return ""
+            let ok = try await context.evaluatePolicy(policy, localizedReason: reason)
+            if ok {
+                recordUnlockedContext(context)
+                return nil
+            }
+            return "Authentication was not completed."
         } catch {
-            return error.localizedDescription
+            guard let msg = friendlyError(error) else { return "" }
+            return msg
         }
     }
 }
@@ -232,7 +310,9 @@ struct OrbSecretRequestsSheet: View {
                 OrbHaptics.success()
                 OrbUsageTelemetry.recordGrant(id, approve: scope != nil, enrolled: false)
             } catch {
-                self.error = error.localizedDescription
+                if let msg = OrbBiometric.friendlyError(error) {
+                    self.error = msg
+                }
             }
             await monitor.refresh()
         }
@@ -307,8 +387,11 @@ struct OrbProjectSecretAccess: View {
         do {
             status = try await OrbApprovalKey.signedCall("/api/bitwarden/default-access/\(OrbCore.escape(slug))", method: "PUT", body: .object(["project_ids": .array(next.map { .string($0) })]), summary: reason)
             error = ""
-        } catch is CancellationError {
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            if let msg = OrbBiometric.friendlyError(error) {
+                self.error = msg
+            }
+        }
     }
 }
 
@@ -460,7 +543,7 @@ struct OrbMissionAccessList: View {
                 Button {
                     act(r, approve: true)
                 } label: {
-                    Label("Allow read", systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                    Label("Allow read", systemImage: OrbBiometric.symbolName)
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.borderedProminent)
@@ -523,7 +606,9 @@ struct OrbMissionAccessList: View {
                 OrbHaptics.success()
                 OrbUsageTelemetry.recordGrant(id, approve: approve, enrolled: enrolled)
             } catch {
-                self.error = error.localizedDescription
+                if let msg = OrbBiometric.friendlyError(error) {
+                    self.error = msg
+                }
             }
             await monitor.refresh()
         }

@@ -193,7 +193,7 @@ struct OrbPrivilegeAccessList: View {
                             Button {
                                 toggleBunker(lock: false)
                             } label: {
-                                Label("Exit Bunker Mode", systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                                Label("Exit Bunker Mode", systemImage: OrbBiometric.symbolName)
                                     .foregroundStyle(.black)
                             }
                             .buttonStyle(.borderedProminent)
@@ -203,7 +203,7 @@ struct OrbPrivilegeAccessList: View {
                             Button(role: .destructive) {
                                 toggleBunker(lock: true)
                             } label: {
-                                Label("Lock Down Fleet", systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                                Label("Lock Down Fleet", systemImage: OrbBiometric.symbolName)
                             }
                             .buttonStyle(.bordered)
                             .accessibilityIdentifier("privilege.bunker")
@@ -266,7 +266,7 @@ struct OrbPrivilegeAccessList: View {
                 Button {
                     act(r, approve: true)
                 } label: {
-                    Label("Allow", systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                    Label("Allow", systemImage: OrbBiometric.symbolName)
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.borderedProminent)
@@ -324,7 +324,9 @@ struct OrbPrivilegeAccessList: View {
                 OrbHaptics.success()
                 OrbUsageTelemetry.recordGrant(id, approve: approve, enrolled: enrolled)
             } catch {
-                self.error = error.localizedDescription
+                if let msg = OrbBiometric.friendlyError(error) {
+                    self.error = msg
+                }
             }
             await monitor.refresh()
         }
@@ -368,7 +370,9 @@ struct OrbPrivilegeAccessList: View {
                 error = ""
                 OrbHaptics.success()
             } catch {
-                self.error = error.localizedDescription
+                if let msg = OrbBiometric.friendlyError(error) {
+                    self.error = msg
+                }
             }
             await monitor.refresh()
         }

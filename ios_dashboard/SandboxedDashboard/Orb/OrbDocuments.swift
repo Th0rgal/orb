@@ -164,13 +164,13 @@ struct OrbDocuments: View {
     private func reload(initial: Bool) async {
         let cacheKey = "docs:\(project):\(path)"
         if initial, let cached = OrbReadCache.read(cacheKey) {
-            entries = cached["entries"].items
+            entries = cached["entries"].items.filter { !(path.isEmpty && $0["name"].text == "attachments") }
             loading = false
         }
         defer { loading = false }
         do {
             let fresh = try await api.call("/api/projects/\(OrbCore.escape(project))/files?path=\(OrbCore.escape(path))")
-            entries = fresh["entries"].items
+            entries = fresh["entries"].items.filter { !(path.isEmpty && $0["name"].text == "attachments") }
             OrbReadCache.seed(cacheKey, value: fresh)
             error = ""
         } catch {
