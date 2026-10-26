@@ -302,15 +302,6 @@ impl ControlHub {
         self.telegram_bridge = Some(bridge);
     }
 
-    /// Get the events broadcast sender from any active session.
-    /// Used by the FIDO signing hub to broadcast signing requests to all
-    /// connected SSE clients regardless of which user session they belong to.
-    pub fn get_any_session_events_tx(&self) -> Option<broadcast::Sender<AgentEvent>> {
-        // Try to read without blocking — best-effort for the FIDO relay.
-        let sessions = self.sessions.try_read().ok()?;
-        sessions.values().next().map(|s| s.events_tx.clone())
-    }
-
     pub(crate) async fn identity_for_store(
         &self,
         store: &Arc<dyn MissionStore>,

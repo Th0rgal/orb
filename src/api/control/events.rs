@@ -302,11 +302,6 @@ impl AgentTreeNode {
         self
     }
 
-    pub fn with_complexity(mut self, complexity: f64) -> Self {
-        self.complexity = Some(complexity);
-        self
-    }
-
     pub fn with_model(mut self, model: &str) -> Self {
         self.selected_model = Some(model.to_string());
         self

@@ -77,22 +77,8 @@ pub fn is_recent_deploy_force_kill(reason: Option<&str>, deploy_age_secs: Option
 /// gone (see module docs, class 3).
 pub const ORPHANED_TAG: &str = "orphaned";
 
-fn env_flag(var: &str, default: bool) -> bool {
-    match std::env::var(var) {
-        Ok(v) => {
-            let v = v.trim();
-            if default {
-                v != "0" && !v.eq_ignore_ascii_case("false")
-            } else {
-                v == "1" || v.eq_ignore_ascii_case("true")
-            }
-        }
-        Err(_) => default,
-    }
-}
-
 fn boot_reconcile_enabled() -> bool {
-    env_flag("BOOT_RECONCILE_ENABLED", true)
+    crate::util::env_var_bool("BOOT_RECONCILE_ENABLED", true)
 }
 
 /// Delay before the boot pass so per-session startup recovery

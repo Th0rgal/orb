@@ -93,7 +93,7 @@ use crate::agents::{
 use crate::config::Config;
 use crate::mcp::McpRegistry;
 use crate::secrets::SecretsStore;
-use crate::task::{extract_deliverables, DeliverableSet};
+use crate::task::extract_deliverables;
 use crate::util::{auth_entry_has_credentials, build_history_context, env_var_bool, home_dir};
 use crate::workspace::{self, Workspace, WorkspaceType};
 use crate::workspace_exec::WorkspaceExec;
@@ -1934,20 +1934,6 @@ fn order_codex_lease_candidates<T>(
     pick_codex_lease_pool(fresh, cooled)
 }
 
-pub(crate) async fn lease_codex_account(
-    working_dir: &std::path::Path,
-    tried_fingerprints: &HashSet<String>,
-    cancel: &CancellationToken,
-) -> Option<LeasedCodexAccount> {
-    lease_codex_account_from_pool(
-        working_dir,
-        tried_fingerprints,
-        cancel,
-        collect_codex_credentials(working_dir),
-    )
-    .await
-}
-
 pub(crate) async fn lease_codex_account_from_pool(
     working_dir: &std::path::Path,
     tried_fingerprints: &HashSet<String>,
@@ -3067,8 +3053,6 @@ pub enum MissionHealth {
         last_state: String,
         severity: MissionStallSeverity,
     },
-    /// Mission completed without deliverables
-    MissingDeliverables { missing: Vec<String> },
     /// Mission ended unexpectedly
     UnexpectedEnd { reason: String },
     /// Durable row, actor registry, or presentation status disagree. The
@@ -3254,9 +3238,6 @@ pub struct MissionRunner {
     /// Progress snapshot for this mission
     pub progress_snapshot: Arc<RwLock<ExecutionProgress>>,
 
-    /// Expected deliverables extracted from the initial message
-    pub deliverables: DeliverableSet,
-
     /// Last activity timestamp for health monitoring
     pub last_activity: Instant,
 
@@ -3346,7 +3327,6 @@ impl MissionRunner {
             running_handle: None,
             tree_snapshot: Arc::new(RwLock::new(None)),
             progress_snapshot: Arc::new(RwLock::new(ExecutionProgress::default())),
-            deliverables: DeliverableSet::default(),
             last_activity: Instant::now(),
             explicitly_completed: false,
             current_activity: None,
@@ -3477,59 +3457,6 @@ impl MissionRunner {
     fn reset_turn_tool_calls(&self) {
         self.active_tool_calls
             .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Check the health of this mission.
-    pub async fn check_health(&self) -> MissionHealth {
-        let seconds_since = self.last_activity.elapsed().as_secs();
-        let tool_alive = self
-            .active_tool_calls
-            .load(std::sync::atomic::Ordering::Relaxed)
-            > 0;
-
-        // If running and no activity for a while, consider stalled.
-        // Severe stall requires BOTH no recent activity AND no live tool
-        // subprocess — otherwise long honest `lake build` / `make check`
-        // calls get killed at 5 minutes.
-        if self.is_running() {
-            if let Some(severity) = stall_severity(seconds_since, tool_alive) {
-                return MissionHealth::Stalled {
-                    seconds_since_activity: seconds_since,
-                    last_state: format!("{:?}", self.state),
-                    severity,
-                };
-            }
-        }
-
-        // If finished without explicit completion and has deliverables, check them
-        if !self.is_running()
-            && !self.explicitly_completed
-            && !self.deliverables.deliverables.is_empty()
-        {
-            let missing = self.deliverables.missing_paths().await;
-            if !missing.is_empty() {
-                return MissionHealth::MissingDeliverables { missing };
-            }
-        }
-
-        MissionHealth::Healthy
-    }
-
-    /// Extract deliverables from initial mission message.
-    pub fn set_initial_message(&mut self, message: &str) {
-        self.deliverables = extract_deliverables(message);
-        if !self.deliverables.deliverables.is_empty() {
-            tracing::info!(
-                "Mission {} has {} expected deliverables: {:?}",
-                self.mission_id,
-                self.deliverables.deliverables.len(),
-                self.deliverables
-                    .deliverables
-                    .iter()
-                    .filter_map(|d| d.path())
-                    .collect::<Vec<_>>()
-            );
-        }
     }
 
     /// Queue a message for this mission.
@@ -3832,18 +3759,6 @@ impl MissionRunner {
                     {
                         self.history
                             .push(("assistant".to_string(), result.2.output.clone()));
-                    }
-
-                    // Log warning if deliverables are missing and task ended
-                    if !self.explicitly_completed && !self.deliverables.deliverables.is_empty() {
-                        let missing = self.deliverables.missing_paths().await;
-                        if !missing.is_empty() {
-                            tracing::warn!(
-                                "Mission {} ended but deliverables are missing: {:?}",
-                                self.mission_id,
-                                missing
-                            );
-                        }
                     }
 
                     Some(result)
