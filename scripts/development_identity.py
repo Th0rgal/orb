@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -47,6 +48,35 @@ def run(argv, *, data=None, env=None, cwd=None, timeout=60):
     return p.stdout
 
 
+def _load_orb_kernel_so():
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates = [
+        os.environ.get("ORB_KERNEL_SO_PATH", "").strip(),
+        "/usr/lib/orb/liborb_kernel.so",
+        "/usr/local/lib/liborb_kernel.so",
+        str(repo_root / "android_dashboard/app/src/test/resources/jni/liborb_kernel.so"),
+        str(repo_root / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"),
+        str(repo_root / "android_dashboard/app/build/host-jni/liborb_kernel.so"),
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        p = Path(cand)
+        if p.is_file():
+            try:
+                lib = ctypes.CDLL(str(p))
+                fn = lib.orb_ssh_identity_step
+                fn.argtypes = [ctypes.c_uint8] * 7
+                fn.restype = ctypes.c_uint64
+                return lib
+            except OSError:
+                continue
+    return None
+
+
+_ORB_KERNEL_SO = _load_orb_kernel_so()
+
+
 def orb_ssh_identity_step(
     is_worker_or_container_target: int,
     bundle_has_control_plane_key: int,
@@ -56,7 +86,7 @@ def orb_ssh_identity_step(
     codex_cyber_program_valid: int = 1,
     codex_goal_budget_exhausted: int = 0,
 ) -> int:
-    """Bit-exact Python mirror of Lean 4 `Orb.Kernel.sshIdentityStep` (`orb_ssh_identity_step`)."""
+    """Invoke Lean 4 `Orb.Kernel.sshIdentityStep` (`orb_ssh_identity_step`) via `liborb_kernel.so` and verified mirror."""
     valid = (
         parent_dir_is_symlink == 0
         and pub_key_is_ed25519_without_private == 1
@@ -74,7 +104,23 @@ def orb_ssh_identity_step(
     else:
         lo32 = 1282
         hi32 = 0
-    return lo32 | (hi32 << 32)
+    mirror = lo32 | (hi32 << 32)
+    if _ORB_KERNEL_SO is not None:
+        native = int(
+            _ORB_KERNEL_SO.orb_ssh_identity_step(
+                is_worker_or_container_target & 0xFF,
+                bundle_has_control_plane_key & 0xFF,
+                parent_dir_is_symlink & 0xFF,
+                pub_key_is_ed25519_without_private & 0xFF,
+                proxy_jump_valid & 0xFF,
+                codex_cyber_program_valid & 0xFF,
+                codex_goal_budget_exhausted & 0xFF,
+            )
+        )
+        if native != mirror:
+            raise RuntimeError(f"orb_ssh_identity_step divergence: native={native:#x} mirror={mirror:#x}")
+        return native
+    return mirror
 
 
 def write(path, value, mode=0o600):

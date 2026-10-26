@@ -14,11 +14,13 @@ outside `sandboxed-node.service`'s `NoNewPrivileges=true` cgroup:
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -98,6 +100,41 @@ UNSAFE_ENV_KEYS = {
 }
 
 
+TRUSTED_EXEC_DIRS = ("/bin", "/usr/bin", "/sbin", "/usr/sbin")
+TRUSTED_EXEC_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _load_orb_kernel_so():
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates = [
+        os.environ.get("ORB_KERNEL_SO_PATH", "").strip(),
+        "/usr/lib/orb/liborb_kernel.so",
+        "/usr/local/lib/liborb_kernel.so",
+        str(repo_root / "android_dashboard/app/src/test/resources/jni/liborb_kernel.so"),
+        str(repo_root / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"),
+        str(repo_root / "android_dashboard/app/build/host-jni/liborb_kernel.so"),
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        p = Path(cand)
+        if p.is_file():
+            try:
+                lib = ctypes.CDLL(str(p))
+                fn = lib.orb_privd_command_step
+                fn.argtypes = [ctypes.c_uint8] * 8
+                fn.restype = ctypes.c_uint64
+                return lib
+            except OSError:
+                continue
+    if os.environ.get("ORB_PRIVD_REQUIRE_NATIVE_SO") == "1":
+        raise RuntimeError("liborb_kernel.so with orb_privd_command_step is required")
+    return None
+
+
+_ORB_KERNEL_SO = _load_orb_kernel_so()
+
+
 def orb_privd_command_step(
     lease_valid: int,
     grant_scope: int,
@@ -108,7 +145,7 @@ def orb_privd_command_step(
     has_unsafe_env_var: int,
     require_force_cmd: int,
 ) -> int:
-    """Bit-exact Python mirror of Lean 4 `Orb.Kernel.privdCommandStep` (`orb_privd_command_step`)."""
+    """Invoke Lean 4 `Orb.Kernel.privdCommandStep` (`orb_privd_command_step`) via `liborb_kernel.so` and verified mirror."""
     safe_input = (
         lease_valid == 1
         and has_shell_metachar_or_flag_bypass == 0
@@ -128,7 +165,50 @@ def orb_privd_command_step(
     else:
         lo32 = 1536
     hi32 = 126 if lo32 == 1536 else 0
-    return lo32 | (hi32 << 32)
+    mirror = lo32 | (hi32 << 32)
+    if _ORB_KERNEL_SO is not None:
+        native = int(
+            _ORB_KERNEL_SO.orb_privd_command_step(
+                lease_valid & 0xFF,
+                grant_scope & 0xFF,
+                command_class & 0xFF,
+                unit_matches_allowed & 0xFF,
+                has_shell_metachar_or_flag_bypass & 0xFF,
+                has_path_traversal_or_symlink & 0xFF,
+                has_unsafe_env_var & 0xFF,
+                require_force_cmd & 0xFF,
+            )
+        )
+        if native != mirror:
+            raise RuntimeError(f"orb_privd_command_step divergence: native={native:#x} mirror={mirror:#x}")
+        return native
+    return mirror
+
+
+def _is_trusted_executable_token(raw_exe: str) -> bool:
+    if not raw_exe or raw_exe in (".", ".."):
+        return False
+    if "/" not in raw_exe and "\\" not in raw_exe:
+        return True
+    if (
+        "\\" in raw_exe
+        or raw_exe.startswith("./")
+        or raw_exe.startswith("../")
+        or "/./" in raw_exe
+        or "/../" in raw_exe
+    ):
+        return False
+    exe_path = Path(raw_exe)
+    if not exe_path.is_absolute() or str(exe_path.parent) not in TRUSTED_EXEC_DIRS:
+        return False
+    if exe_path.is_symlink():
+        try:
+            canon_parent = str(exe_path.resolve().parent)
+        except OSError:
+            return False
+        if canon_parent not in TRUSTED_EXEC_DIRS:
+            return False
+    return True
 
 
 def _read_only_arg(prog: str, arg: str) -> bool:
@@ -166,7 +246,8 @@ def check_scope_restrictions(
         tok == ".." or tok.startswith("../") or tok.endswith("/..") or "/../" in tok
         for tok in argv
     )
-    has_path_traversal_or_symlink = int(cwd_bad or argv_traversal)
+    exe_trusted = _is_trusted_executable_token(argv[0])
+    has_path_traversal_or_symlink = int(cwd_bad or argv_traversal or not exe_trusted)
     has_metachar = any(
         not tok
         or "\x00" in tok
@@ -180,6 +261,19 @@ def check_scope_restrictions(
         or (scope != "root_exec" and (">" in tok or "<" in tok))
         for tok in argv
     )
+    if not exe_trusted:
+        packed = orb_privd_command_step(
+            1,
+            scope_rank,
+            5,
+            0,
+            int(has_metachar),
+            1,
+            has_unsafe_env,
+            int(require_force_cmd),
+        )
+        assert (packed & 256) == 0 and (packed & 1536) == 1536
+        raise ValueError(f"Untrusted executable path '{argv[0]}' rejected by orb_privd_command_step confinement gate")
     prog = Path(argv[0]).name
     if scope == "ops_read":
         if prog not in OPS_READ_BINARIES:
@@ -332,15 +426,21 @@ def handle_exec(req: dict) -> dict:
         require_force_cmd=bool(verdict.get("require_force_cmd")),
     )
 
-    # 2. Execute command in clean root environment
+    # 2. Execute command in clean root environment using resolved trusted executable path
+    resolved_exe = (
+        argv[0]
+        if Path(argv[0]).is_absolute()
+        else (shutil.which(Path(argv[0]).name, path=TRUSTED_EXEC_PATH) or argv[0])
+    )
+    exec_argv = [resolved_exe, *argv[1:]]
     t0 = time.monotonic()
     proc = subprocess.run(
-        argv,
+        exec_argv,
         cwd=cwd if Path(cwd).is_dir() else "/root",
         capture_output=True,
         timeout=int(req.get("timeout_secs", 600)),
         env={
-            "PATH": "/opt/orb-tools/bin:/opt/sandboxed-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH": TRUSTED_EXEC_PATH,
             "HOME": "/root",
             "LANG": "C.UTF-8",
             "ORB_MISSION_ID": mission_id,
