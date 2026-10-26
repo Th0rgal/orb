@@ -53,42 +53,31 @@ class OrbTranscriptFollow {
     /**
      * Evaluate `OrbKernel.scrollEpochStep` (`scroll_correction_at_most_once_per_epoch`) in the
      * current layout epoch so at most one programmatic scroll correction fires per epoch.
+     * Requires the verified Lean 4 JNI kernel (`OrbKernel.scrollEpochStep`), failing closed
+     * without any handwritten host fallback.
      */
     fun shouldCorrectInEpoch(targetTopPx: Int, currentTopPx: Int): Boolean {
-        if (OrbKernel.nativeLoaded) {
-            val verdict = OrbKernel.scrollEpochStep(
-                layoutEpoch = layoutEpoch,
-                lastCorrectedEpoch = lastCorrectedEpoch,
-                correctionsInEpoch = correctionsInEpoch,
-                isPinnedToBottom = pinned,
-                userIsDragging = dragging,
-                targetScrollTopPx = targetTopPx,
-                currentScrollTopPx = currentTopPx
-            )
-            correctionsInEpoch = verdict.nextCorrectionsInEpoch
-            if (verdict.applyCorrection) {
-                lastCorrectedEpoch = layoutEpoch
-            }
-            return verdict.applyCorrection
+        val verdict = OrbKernel.scrollEpochStep(
+            layoutEpoch = layoutEpoch,
+            lastCorrectedEpoch = lastCorrectedEpoch,
+            correctionsInEpoch = correctionsInEpoch,
+            isPinnedToBottom = pinned,
+            userIsDragging = dragging,
+            targetScrollTopPx = targetTopPx,
+            currentScrollTopPx = currentTopPx
+        )
+        correctionsInEpoch = verdict.nextCorrectionsInEpoch
+        if (verdict.applyCorrection) {
+            lastCorrectedEpoch = layoutEpoch
         }
-        val newEpoch = layoutEpoch > lastCorrectedEpoch
-        val effCorrections = if (newEpoch) 0 else correctionsInEpoch
-        if (!pinned || dragging || targetTopPx == currentTopPx) {
-            correctionsInEpoch = effCorrections
-            return false
-        }
-        if (effCorrections > 0) {
-            correctionsInEpoch = effCorrections
-            return false
-        }
-        correctionsInEpoch = 1
-        lastCorrectedEpoch = layoutEpoch
-        return true
+        return verdict.applyCorrection
     }
 
     /**
      * Evaluate `OrbKernel.clientParityStep` (`client_projection_bitwise_parity_across_ios_android_wasm`)
      * for the Android projection (`clientTarget = 2`).
+     * Requires the verified Lean 4 JNI kernel (`OrbKernel.clientParityStep`), failing closed
+     * without any handwritten host fallback.
      */
     fun verifyClientParity(
         transcriptSeq: Int,
@@ -96,23 +85,16 @@ class OrbTranscriptFollow {
         sendQueueDepth: Int,
         wireSchemaId: Int = 1
     ): Long {
-        if (OrbKernel.nativeLoaded) {
-            val verdict = OrbKernel.clientParityStep(
-                clientTarget = 2,
-                wireSchemaId = wireSchemaId,
-                transcriptSeq = transcriptSeq,
-                markdownBlocksCount = markdownBlocksCount,
-                sendQueueDepth = sendQueueDepth,
-                scrollCorrectedInEpoch = correctionsInEpoch
-            )
-            parityAdmitted = verdict.parityAdmitted
-            parityDigest = verdict.digest32
-            return parityDigest
-        }
-        parityAdmitted = wireSchemaId in 1..2
-        parityDigest = ((transcriptSeq.toLong() and 0xFFFF_FFFFL) xor
-            ((markdownBlocksCount.toLong() shl 16) and 0xFFFF_FFFFL) xor
-            ((sendQueueDepth.toLong() shl 24) and 0xFFFF_FFFFL)) and 0xFFFF_FFFFL
+        val verdict = OrbKernel.clientParityStep(
+            clientTarget = 2,
+            wireSchemaId = wireSchemaId,
+            transcriptSeq = transcriptSeq,
+            markdownBlocksCount = markdownBlocksCount,
+            sendQueueDepth = sendQueueDepth,
+            scrollCorrectedInEpoch = correctionsInEpoch
+        )
+        parityAdmitted = verdict.parityAdmitted
+        parityDigest = verdict.digest32
         return parityDigest
     }
 }
