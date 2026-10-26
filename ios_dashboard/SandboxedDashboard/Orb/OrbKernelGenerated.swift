@@ -197,6 +197,30 @@ internal func orb_mission_control_step(_ isArchived: UInt8, _ activeTrackWriters
 @_silgen_name("orb_fork_home_step")
 internal func orb_fork_home_step(_ isForkOrSide: UInt8, _ sourceExists: UInt8, _ sourceIsSymlink: UInt8, _ sameWorkspace: UInt8, _ sameNode: UInt8, _ hasCommittedTransfer: UInt8, _ requestedOverrideHome: UInt8) -> UInt64
 
+@_silgen_name("orb_privd_command_step")
+internal func orb_privd_command_step(_ leaseValid: UInt8, _ grantScope: UInt8, _ commandClass: UInt8, _ unitMatchesAllowed: UInt8, _ hasShellMetacharOrFlagBypass: UInt8, _ hasPathTraversalOrSymlink: UInt8, _ hasUnsafeEnvVar: UInt8, _ requireForceCmd: UInt8) -> UInt64
+
+@_silgen_name("orb_ssh_identity_step")
+internal func orb_ssh_identity_step(_ isWorkerOrContainerTarget: UInt8, _ bundleHasControlPlaneKey: UInt8, _ parentDirIsSymlink: UInt8, _ pubKeyIsEd25519WithoutPrivate: UInt8, _ proxyJumpValid: UInt8, _ codexCyberProgramValid: UInt8, _ codexGoalBudgetExhausted: UInt8) -> UInt64
+
+@_silgen_name("orb_agent_event_normalize_step")
+internal func orb_agent_event_normalize_step(_ harnessKind: UInt8, _ rawEventKind: UInt8, _ isCompleted: UInt8, _ hasNonEmptyText: UInt8, _ sessionMatchesExpected: UInt32, _ isDuplicateTurnOrTool: UInt32, _ payloadBytes: UInt32, _ maxPayloadBytes: UInt32) -> UInt64
+
+@_silgen_name("orb_transcript_reduce_step")
+internal func orb_transcript_reduce_step(_ lastAppliedSeq: UInt64, _ incomingSeq: UInt64, _ thinkingOpen: UInt8, _ normalizedAction: UInt8, _ isReplayFromLog: UInt8) -> UInt64
+
+@_silgen_name("orb_cursor_page_step")
+internal func orb_cursor_page_step(_ sinceSeq: UInt64, _ beforeSeq: UInt64, _ itemSeq: UInt64, _ hasSinceCursor: UInt32, _ hasBeforeCursor: UInt32, _ isPartialResponse: UInt32, _ existingCount: UInt32) -> UInt64
+
+@_silgen_name("orb_sidebar_merge_step")
+internal func orb_sidebar_merge_step(_ existingIdOrd: UInt32, _ incomingIdOrd: UInt32, _ existingUpdatedAtMs: UInt64, _ incomingUpdatedAtMs: UInt64, _ incomingSupersededOrArchived: UInt8, _ isPartialPage: UInt8) -> UInt64
+
+@_silgen_name("orb_scroll_epoch_step")
+internal func orb_scroll_epoch_step(_ layoutEpoch: UInt32, _ lastCorrectedEpoch: UInt32, _ correctionsInEpoch: UInt8, _ isPinnedToBottom: UInt8, _ userIsDragging: UInt8, _ targetScrollTopPx: UInt32, _ currentScrollTopPx: UInt32) -> UInt64
+
+@_silgen_name("orb_client_parity_step")
+internal func orb_client_parity_step(_ clientTarget: UInt8, _ wireSchemaId: UInt32, _ transcriptSeq: UInt32, _ markdownBlocksCount: UInt32, _ sendQueueDepth: UInt32, _ scrollCorrectedInEpoch: UInt8) -> UInt64
+
 @_silgen_name("leansys_verify_slice_bounds")
 internal func leansys_verify_slice_bounds(_ off: UInt64, _ len: UInt64, _ cap: UInt64) -> UInt8
 
@@ -672,5 +696,58 @@ enum OrbKernel {
 
     static func verifyIsaSelection(detectedHwCaps: UInt64, requiredMask: UInt64, selectedVariantId: Int, maxVariantId: Int = 4) -> Bool {
         leansys_verify_isa_selection(detectedHwCaps, requiredMask, satU8(selectedVariantId), satU8(maxVariantId)) != 0
+    }
+
+    static func scrollEpochStep(
+        layoutEpoch: UInt32,
+        lastCorrectedEpoch: UInt32,
+        correctionsInEpoch: UInt8,
+        isPinnedToBottom: Bool,
+        userIsDragging: Bool,
+        targetScrollTopPx: Int,
+        currentScrollTopPx: Int
+    ) -> (action: Int, applyCorrection: Bool, nextCorrectionsInEpoch: UInt8, nextCorrectedEpoch: UInt32, resolvedScrollTopPx: Int) {
+        let raw = orb_scroll_epoch_step(
+            layoutEpoch,
+            lastCorrectedEpoch,
+            correctionsInEpoch,
+            b8(isPinnedToBottom),
+            b8(userIsDragging),
+            satU32(targetScrollTopPx),
+            satU32(currentScrollTopPx)
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        let action = Int(lo32 & 0xFF)
+        let applyCorrection = ((lo32 >> 8) & 1) != 0
+        let nextCorrections = UInt8((lo32 >> 10) & 1)
+        let nextEpoch = applyCorrection ? layoutEpoch : lastCorrectedEpoch
+        return (action, applyCorrection, nextCorrections, nextEpoch, Int(hi32))
+    }
+
+    static func clientParityStep(
+        clientTarget: Int,
+        wireSchemaId: UInt32,
+        transcriptSeq: UInt32,
+        markdownBlocksCount: UInt32,
+        sendQueueDepth: UInt32,
+        scrollCorrectedInEpoch: UInt8
+    ) -> (action: Int, parityAdmitted: Bool, singleScrollCorrectionOk: Bool, digest32: UInt32) {
+        let raw = orb_client_parity_step(
+            satU8(clientTarget),
+            wireSchemaId,
+            transcriptSeq,
+            markdownBlocksCount,
+            sendQueueDepth,
+            scrollCorrectedInEpoch
+        )
+        let lo32 = UInt32(truncatingIfNeeded: raw)
+        let hi32 = UInt32(truncatingIfNeeded: raw >> 32)
+        return (
+            Int(lo32 & 0xFF),
+            ((lo32 >> 8) & 1) != 0,
+            ((lo32 >> 9) & 1) != 0,
+            hi32
+        )
     }
 }

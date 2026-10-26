@@ -63,7 +63,7 @@ function MissionAccessCard() {
       <div class="toast-body">
         <span class="toast-title">
           <Show when={one()} fallback={<>{list().length} mission access requests</>}>
-            {(r) => <>Read <strong>{target(r())}</strong></>}
+            {(r) => <span class="access-target">Read <strong>{target(r())}</strong></span>}
           </Show>
           <Show when={one()}>{(r) => <span class="toast-sub" title={r().requester_mission_id}>asked by {who(r())}</span>}</Show>
         </span>

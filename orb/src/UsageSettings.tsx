@@ -6,14 +6,13 @@ import { Select } from "./Select";
 import {
   CALLER_KINDS, CALLER_KIND_LABEL, USAGE_WINDOWS, chartBuckets, costTitle, formatCost, formatTokens,
   getUsageSummary, hourlyAvailable, totalTokens,
-  type ChartBucket, type UsageFilters, type UsageSummary, type UsageTotals,
+  type UsageFilters, type UsageSummary, type UsageTotals,
 } from "./usageApi";
 import { RELIABILITY_WINDOWS, getProxyHealth, type ProxyHealth } from "./proxyHealthApi";
 import { ReliabilityView } from "./ReliabilityView";
+import { FallbackActivity, ProviderStackedChart, type Granularity, type Metric } from "./UsageCharts";
 
-type Metric = "tokens" | "cost" | "requests";
 type GroupBy = "caller_kind" | "model" | "provider" | "source" | "mission" | "root_mission" | "api_key" | "backend" | "purpose";
-type Granularity = "hour" | "day";
 
 const GROUPS: { value: GroupBy; label: string }[] = [
   { value: "caller_kind", label: "Caller" },
@@ -57,37 +56,6 @@ function rowsFor(s: UsageSummary, by: GroupBy): Row[] {
   }));
 }
 
-function metricValue(b: ChartBucket, m: Metric) { return m === "tokens" ? b.tokens : m === "cost" ? b.cost_cents : b.requests; }
-function metricText(n: number, m: Metric) { return m === "tokens" ? formatTokens(n) : m === "cost" ? `$${(n / 100).toFixed(2)}` : n.toLocaleString(); }
-
-export function UsageChart(p: { summary: UsageSummary; metric: Metric; granularity?: Granularity }) {
-  const data = createMemo(() => chartBuckets(p.summary, new Date(), p.granularity ?? "hour"));
-  const max = createMemo(() => Math.max(1, ...data().buckets.map(b => metricValue(b, p.metric))));
-  const width = 600, height = 120;
-  const step = () => width / Math.max(1, data().buckets.length);
-  const tick = () => Math.max(1, Math.ceil(data().buckets.length / 6));
-  return <figure class="usage-chart" aria-label={`${p.metric} per ${data().granularity}`}>
-    <svg viewBox={`0 0 ${width} ${height + 16}`} preserveAspectRatio="none" role="img">
-      <For each={data().buckets}>{(b, i) => {
-        const v = () => metricValue(b, p.metric);
-        const h = () => (v() / max()) * height;
-        const routerShare = () => b.requests ? b.router_requests / b.requests : 0;
-        return <g>
-          <title>{`${b.key}: ${metricText(v(), p.metric)} · ${b.requests.toLocaleString()} requests (${b.router_requests.toLocaleString()} router)`}</title>
-          <rect class="usage-bar" x={i() * step() + 1} width={Math.max(1, step() - 2)} y={height - h()} height={h()} rx="1.5" />
-          <Show when={routerShare() > 0 && h() > 0}>
-            <rect class="usage-bar router" x={i() * step() + 1} width={Math.max(1, step() - 2)} y={height - h()} height={h() * routerShare()} rx="1.5" />
-          </Show>
-          <Show when={i() % tick() === 0}>
-            <text class="usage-tick" x={i() * step() + step() / 2} y={height + 12} text-anchor="middle">{b.label}</text>
-          </Show>
-        </g>;
-      }}</For>
-    </svg>
-    <figcaption class="usage-legend"><span class="usage-swatch" />Harness<span class="usage-swatch router" />Router share of requests<span class="usage-max">Peak {metricText(max(), p.metric)} per {data().granularity}</span></figcaption>
-  </figure>;
-}
-
 function Tile(p: { label: string; value: string; title?: string }) {
   return <div class="usage-tile" title={p.title}><span>{p.label}</span><strong>{p.value}</strong></div>;
 }
@@ -127,8 +95,8 @@ export function ReliabilitySection() {
 export function UsageSettings() {
   const [window, setWindow] = createSignal("24h");
   const [filters, setFilters] = createSignal<UsageFilters>({});
-  const [groupBy, setGroupBy] = createSignal<GroupBy>("model");
-  const [metric, setMetric] = createSignal<Metric>("tokens");
+  const [groupBy, setGroupBy] = createSignal<GroupBy>("mission");
+  const [metric, setMetric] = createSignal<Metric>("cost");
   const [granularity, setGranularity] = createSignal<Granularity>("hour");
   const [summary, setSummary] = createSignal<UsageSummary | null>(null);
   const [options, setOptions] = createSignal<UsageSummary | null>(null);
@@ -158,7 +126,8 @@ export function UsageSettings() {
   createEffect(on([connectionVersion, window, filters], () => void load()));
 
   const setFilter = (key: keyof UsageFilters, value: string) => setFilters(f => ({ ...f, [key]: value || undefined }));
-  const rows = createMemo(() => summary() ? rowsFor(summary()!, groupBy()) : []);
+  // Top missions and callers by cost first.
+  const rows = createMemo(() => summary() ? rowsFor(summary()!, groupBy()).sort((a, b) => b.cost_cents - a.cost_cents) : []);
   const maxRow = createMemo(() => Math.max(1, ...rows().map(r => totalTokens(r))));
   const routerShare = () => {
     const s = summary(); if (!s?.totals.requests) return "—";
@@ -184,7 +153,6 @@ export function UsageSettings() {
           <button class="s-btn" disabled={loading()} onClick={() => void load()}>{loading() ? "Refreshing…" : "Refresh"}</button>
         </div>
       </div>
-      <p class="routing-muted usage-intro">Tokens and estimated list-price cost from mission harnesses and the /v1 router, attributed to the caller that owns the credential. Costs marked + or Unknown include models without a published price.</p>
       <Show when={!isConnected()}><p class="routing-muted">Connect to Core in General settings to see usage.</p></Show>
       <Show when={error()}><ErrorNotice error={`Could not load usage: ${error()}`} /></Show>
 
@@ -213,13 +181,13 @@ export function UsageSettings() {
         <div class="usage-tiles">
           <Tile label="Requests" value={s().totals.requests.toLocaleString()} />
           <Tile label="Tokens" value={formatTokens(totalTokens(s().totals))} title={`${s().totals.input_tokens.toLocaleString()} input · ${s().totals.output_tokens.toLocaleString()} output · ${s().totals.cache_read_tokens.toLocaleString()} cache read · ${s().totals.cache_creation_tokens.toLocaleString()} cache write`} />
-          <Tile label="Cost" value={formatCost(s().totals)} title={costTitle(s().totals)} />
+          <Tile label="Cost" value={formatCost(s().totals)} title={`${costTitle(s().totals)}\nEstimated list price from mission harnesses and the /v1 router. + or Unknown: models without a published price.`} />
           <Tile label="Via router" value={routerShare()} />
         </div>
 
         <section class="s-sec">
           <div class="routing-heading usage-section-head">
-            <h3>Over time</h3>
+            <h3>Over time by provider</h3>
             <div class="usage-seg" role="radiogroup" aria-label="Chart granularity">
               <For each={["hour", "day"] as Granularity[]}>{g =>
                 <button role="radio" aria-checked={(hourlyAvailable(window()) ? granularity() : "day") === g}
@@ -235,12 +203,17 @@ export function UsageSettings() {
               }</For>
             </div>
           </div>
-          <div class="s-card usage-chart-card"><UsageChart summary={s()} metric={metric()} granularity={granularity()} /></div>
+          <div class="s-card usage-chart-card"><ProviderStackedChart summary={s()} filters={filters()} metric={metric()} granularity={hourlyAvailable(window()) ? granularity() : "day"} /></div>
+        </section>
+
+        <section class="s-sec">
+          <div class="routing-heading usage-section-head"><h3>Fallbacks</h3></div>
+          <div class="s-card usage-chart-card"><FallbackActivity summary={s()} granularity={hourlyAvailable(window()) ? granularity() : "day"} /></div>
         </section>
 
         <section class="s-sec">
           <div class="routing-heading usage-section-head">
-            <h3>Breakdown</h3>
+            <h3>Top spenders</h3>
             <Select aria-label="Group by" value={groupBy()} onChange={e => setGroupBy(e.currentTarget.value as GroupBy)}>
               <For each={GROUPS}>{g => <option value={g.value}>{g.label}</option>}</For>
             </Select>

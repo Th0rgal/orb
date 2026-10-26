@@ -79,14 +79,162 @@ pub struct MissionFilter {
 /// Live / waiting / blocked, plus unabsorbed `failed` / `interrupted`.
 /// Acknowledged, completed, and absorbed/replaced attempts drop out.
 pub fn default_attention_keeps(mission: &Mission) -> bool {
-    if mission.project.tags.iter().any(|tag| tag == SUPERSEDED_TAG) {
-        return false;
-    }
-    !matches!(
-        mission.status,
-        crate::api::control::events::MissionStatus::Acknowledged
-            | crate::api::control::events::MissionStatus::Completed
+    !mission.project.tags.iter().any(|tag| tag == SUPERSEDED_TAG)
+        && !matches!(
+            mission.status,
+            crate::api::control::events::MissionStatus::Acknowledged
+                | crate::api::control::events::MissionStatus::Completed
+        )
+}
+
+static CURSOR_PAGE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+static SIDEBAR_MERGE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+pub fn cursor_page_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    CURSOR_PAGE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+pub fn sidebar_merge_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    SIDEBAR_MERGE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+/// Evaluate `orb_cursor_page_step` (`cursor_pagination_exclusive_no_gap_no_dup`,
+/// `partial_response_never_wipes_existing`) over live pagination cursors and record
+/// the comparison in `cursor_page_shadow_counter()`.
+pub fn evaluate_cursor_page_gate(
+    since_seq: Option<u64>,
+    before_seq: Option<u64>,
+    item_seq: u64,
+    is_partial_response: bool,
+    existing_count: u32,
+    host_includes: bool,
+) -> crate::orb_spec::CursorPageStepVerdict {
+    crate::orb_spec::observe_cursor_page_shadow(
+        crate::orb_spec::CursorPageStepInput {
+            since_seq,
+            before_seq,
+            item_seq,
+            is_partial_response,
+            existing_count,
+        },
+        host_includes,
+        cursor_page_shadow_counter(),
     )
+}
+
+/// Evaluate `orb_sidebar_merge_step` (`sidebar_merge_prevents_duplicates_and_preserves_partial`)
+/// over live mission list / sidebar reconciliation inputs and record the comparison
+/// in `sidebar_merge_shadow_counter()`.
+pub fn evaluate_sidebar_merge_gate(
+    existing_id_ord: u32,
+    incoming_id_ord: u32,
+    existing_updated_at_ms: u64,
+    incoming_updated_at_ms: u64,
+    incoming_superseded_or_archived: bool,
+    is_partial_page: bool,
+    host_retains_or_upserts: bool,
+) -> crate::orb_spec::SidebarMergeStepVerdict {
+    crate::orb_spec::observe_sidebar_merge_shadow(
+        crate::orb_spec::SidebarMergeStepInput {
+            existing_id_ord,
+            incoming_id_ord,
+            existing_updated_at_ms,
+            incoming_updated_at_ms,
+            incoming_superseded_or_archived,
+            is_partial_page,
+        },
+        host_retains_or_upserts,
+        sidebar_merge_shadow_counter(),
+    )
+}
+
+/// Reconciles an incoming page of missions into an existing sidebar mission list
+/// using `orb_sidebar_merge_step`:
+/// - Never creates duplicate mission rows (`unique_sidebar`).
+/// - Removes an existing row if an incoming update marks it superseded or archived (`RemoveSuperseded`).
+/// - Preserves unmentioned existing rows when `is_partial_page == true` (`preserve_unmentioned`).
+pub fn reconcile_sidebar_missions_page(
+    existing: &[Mission],
+    incoming_page: &[Mission],
+    is_partial_page: bool,
+) -> Vec<Mission> {
+    let parse_ms = |ts: &str| -> u64 {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|dt| dt.timestamp_millis().max(0) as u64)
+            .unwrap_or(0)
+    };
+    let mut out: Vec<Mission> = if is_partial_page {
+        existing.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    for inc in incoming_page {
+        let inc_superseded_or_archived = inc.project.tags.iter().any(|t| t == SUPERSEDED_TAG)
+            || matches!(
+                inc.status,
+                crate::api::control::events::MissionStatus::Acknowledged
+                    | crate::api::control::events::MissionStatus::Completed
+            );
+        let inc_ms = parse_ms(&inc.updated_at);
+        let inc_ord = (inc.id.as_u128() as u32).max(1);
+
+        if let Some(pos) = out.iter().position(|m| m.id == inc.id) {
+            let ex_ms = parse_ms(&out[pos].updated_at);
+            let verdict = evaluate_sidebar_merge_gate(
+                inc_ord,
+                inc_ord,
+                ex_ms,
+                inc_ms,
+                inc_superseded_or_archived,
+                is_partial_page,
+                !inc_superseded_or_archived,
+            );
+            match verdict.action {
+                crate::orb_spec::SidebarMergeAction::RemoveSuperseded
+                | crate::orb_spec::SidebarMergeAction::SkipArchivedOrSuperseded => {
+                    out.remove(pos);
+                }
+                crate::orb_spec::SidebarMergeAction::UpdateExistingInPlace => {
+                    out[pos] = inc.clone();
+                }
+                crate::orb_spec::SidebarMergeAction::RetainExistingNewer => {}
+                crate::orb_spec::SidebarMergeAction::InsertNewUnique => {
+                    out[pos] = inc.clone();
+                }
+            }
+        } else {
+            let (head_ord, head_ms) = out
+                .first()
+                .map(|head| {
+                    let mut ord = (head.id.as_u128() as u32).max(1);
+                    if ord == inc_ord {
+                        ord ^= 1;
+                    }
+                    (ord, parse_ms(&head.updated_at))
+                })
+                .unwrap_or((inc_ord ^ 1, inc_ms));
+            let host_retains_or_upserts = !inc_superseded_or_archived;
+            let verdict = evaluate_sidebar_merge_gate(
+                head_ord,
+                inc_ord,
+                head_ms,
+                inc_ms,
+                inc_superseded_or_archived,
+                is_partial_page,
+                host_retains_or_upserts,
+            );
+            if verdict.insert_new {
+                out.push(inc.clone());
+            }
+        }
+    }
+
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    out
 }
 
 impl MissionFilter {
@@ -2210,11 +2358,23 @@ pub trait MissionStore: Send + Sync {
         loop {
             let page = self.list_missions(PAGE, scan_offset).await?;
             let page_len = page.len();
-            for mission in page {
-                if filter.matches(&mission) {
-                    matched.push(mission);
-                    if matched.len() >= want {
-                        break;
+            if filter.attention_only {
+                let mut candidates = Vec::new();
+                for mission in page {
+                    let mut non_attn = filter.clone();
+                    non_attn.attention_only = false;
+                    if non_attn.matches(&mission) {
+                        candidates.push(mission);
+                    }
+                }
+                matched = reconcile_sidebar_missions_page(&matched, &candidates, true);
+            } else {
+                for mission in page {
+                    if filter.matches(&mission) {
+                        matched.push(mission);
+                        if matched.len() >= want {
+                            break;
+                        }
                     }
                 }
             }
@@ -5760,5 +5920,146 @@ mod harness_session_tests {
                 .await
                 .is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences() {
+        use super::{
+            cursor_page_shadow_counter, evaluate_cursor_page_gate, reconcile_sidebar_missions_page,
+            sidebar_merge_shadow_counter, MissionFilter, MissionProjectPatch, MissionStatus,
+            MissionStore, SqliteMissionStore, SUPERSEDED_TAG,
+        };
+        use crate::api::control::AgentEvent;
+        use crate::orb_spec::CursorPageAction;
+        use uuid::Uuid;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteMissionStore::new(dir.path().to_path_buf(), "phase4-sqlite")
+            .await
+            .unwrap();
+
+        let m1 = store
+            .create_mission(Some("Alpha"), None, None, None, None, Some("codex"), None)
+            .await
+            .unwrap();
+        let m2 = store
+            .create_mission(Some("Beta"), None, None, None, None, Some("codex"), None)
+            .await
+            .unwrap();
+        let m3 = store
+            .create_mission(Some("Gamma"), None, None, None, None, Some("codex"), None)
+            .await
+            .unwrap();
+
+        // Log 6 sequential events on m1 and verify exclusive cursor pagination (`since_seq < seq < before_seq`)
+        for idx in 1..=6 {
+            store
+                .log_event(
+                    m1.id,
+                    &AgentEvent::UserMessage {
+                        mission_id: Some(m1.id),
+                        id: Uuid::new_v4(),
+                        content: format!("msg-{idx}"),
+                        queued: false,
+                        source: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let since_2 = store.get_events_since(m1.id, 2, None, None).await.unwrap();
+        let since_seqs: Vec<i64> = since_2.iter().map(|e| e.sequence).collect();
+        assert_eq!(since_seqs, vec![3, 4, 5, 6]);
+
+        let before_5 = store
+            .get_events_before(m1.id, 5, None, Some(2))
+            .await
+            .unwrap();
+        let before_seqs: Vec<i64> = before_5.iter().map(|e| e.sequence).collect();
+        assert_eq!(before_seqs, vec![3, 4]);
+
+        // Verify invalid window (`since_seq >= before_seq`) is rejected and preserves existing count
+        let bad_win = evaluate_cursor_page_gate(Some(10), Some(10), 10, true, 42, false);
+        assert_eq!(bad_win.action, CursorPageAction::RejectInvalidWindow);
+        assert!(!bad_win.include_item);
+        assert!(bad_win.preserve_existing);
+        assert_eq!(bad_win.next_count, 42);
+
+        // Verify sidebar reconciliation:
+        // 1) Duplicate incoming mission ID updates in place without duplicating row (`unique_sidebar`)
+        // 2) Partial page preserves unmentioned existing missions (`preserve_unmentioned`)
+        // 3) Superseded/archived mission is removed from sidebar (`RemoveSuperseded`)
+        let initial_sidebar = vec![m1.clone(), m2.clone(), m3.clone()];
+        let mut m2_newer = m2.clone();
+        m2_newer.title = Some("Beta (Updated)".into());
+        m2_newer.updated_at = "2099-01-01T00:00:00Z".into();
+
+        let merged_partial =
+            reconcile_sidebar_missions_page(&initial_sidebar, &[m2_newer.clone()], true);
+        assert_eq!(
+            merged_partial.len(),
+            3,
+            "partial page must preserve unmentioned rows without duplicates"
+        );
+        assert_eq!(merged_partial[0].id, m2.id);
+        assert_eq!(merged_partial[0].title.as_deref(), Some("Beta (Updated)"));
+
+        // Mark m3 superseded -> must be removed on reconciliation and excluded by attention_only filter
+        store
+            .update_mission_project(
+                m3.id,
+                MissionProjectPatch {
+                    tags: Some(vec![SUPERSEDED_TAG.to_string()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let m3_superseded = store.get_mission(m3.id).await.unwrap().unwrap();
+        let after_supersede =
+            reconcile_sidebar_missions_page(&merged_partial, &[m3_superseded], true);
+        assert_eq!(after_supersede.len(), 2);
+        assert!(after_supersede.iter().all(|m| m.id != m3.id));
+
+        let attention_list = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    attention_only: true,
+                    ..Default::default()
+                },
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(attention_list.len(), 2);
+        assert!(attention_list.iter().all(|m| m.id != m3.id));
+
+        // Acknowledge m1 -> also excluded from attention_only
+        store
+            .update_mission_status(m1.id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        let attention_after_ack = store
+            .list_missions_filtered(
+                &MissionFilter {
+                    attention_only: true,
+                    ..Default::default()
+                },
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(attention_after_ack.len(), 1);
+        assert_eq!(attention_after_ack[0].id, m2.id);
+
+        let cur_snap = cursor_page_shadow_counter().snapshot("orb_cursor_page_step");
+        let side_snap = sidebar_merge_shadow_counter().snapshot("orb_sidebar_merge_step");
+        assert!(cur_snap.total_events >= 6);
+        assert_eq!(cur_snap.total_divergences, 0);
+        assert!(side_snap.total_events >= 5);
+        assert_eq!(side_snap.total_divergences, 0);
     }
 }

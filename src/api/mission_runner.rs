@@ -4882,6 +4882,12 @@ pub(crate) async fn run_mission_turn(
             "Failed to clean up old debug files"
         );
     }
+    let upload_root = super::mission_payload::storage_root(&config.working_dir).join("uploads");
+    crate::uploads::cleanup_prompt_uploads(&upload_root, &user_message);
+    crate::uploads::prune_expired_uploads(
+        &upload_root,
+        std::time::Duration::from_secs(crate::uploads::BATCH_OPEN_SECS),
+    );
 
     result
 }

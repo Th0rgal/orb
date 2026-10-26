@@ -2736,6 +2736,7 @@ fn is_codex_backend_model_id(model_id: &str) -> bool {
         || matches!(
             model_id,
             "gpt-6.1-sol"
+                | "gpt-6.1-terra"
                 | "gpt-6-astra"
                 | "gpt-6"
                 | "gpt-5.5"

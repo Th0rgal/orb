@@ -24,7 +24,8 @@ for (const theme of ['dark', 'light']) test(`provider accounts and machine detai
   await page.getByRole('button', { name: 'Providers', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const native = page.getByRole('region', { name: 'Antigravity execution', exact: true });
-  await expect(native.getByRole('status')).toHaveText('Available on Core, old-agent');
+  await expect(native.getByRole('status')).toHaveText('Available on Core +1');
+  await expect(native.getByRole('status')).toHaveAttribute('title', /Available on Core, old-agent/);
   await expect(native.getByLabel('Antigravity machine')).toHaveCount(0);
   await expect(native.getByRole('button', { name: '21 models available' })).toBeVisible();
   await expect(native.getByRole('list')).toHaveCount(0);
@@ -128,7 +129,10 @@ for (const theme of ['dark','light']) test(`Antigravity quota groups show shared
   await expect(groups).toHaveCount(2);
   await expect(groups.locator('.provider-usage-group-title')).toHaveText(['Gemini','Claude & GPT']);
   await expect(groups.nth(1).getByRole('progressbar',{name:'Weekly usage'})).toHaveAttribute('aria-valuenow','91');
-  await expect(groups.nth(0).getByText('Resets in 6d')).toBeVisible();
+  // Each pool is one row; resets are short inline hints with the full text as tooltip.
+  for (const g of await groups.all()) expect((await g.boundingBox())!.height).toBeLessThan(30);
+  await expect(groups.nth(0).locator('.provider-usage-chip-reset').nth(1)).toHaveText('6d');
+  await expect(groups.nth(0).locator('.provider-usage-chip').nth(1)).toHaveAttribute('title', /resets in 6d/);
   await groups.nth(0).scrollIntoViewIfNeeded();
   await page.screenshot({path:`test-results/antigravity-quota-${info.project.name}-${theme}.png`,fullPage:true});
   // Collapsed: one chip per group, and the title keeps its width.

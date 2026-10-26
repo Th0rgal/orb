@@ -274,6 +274,7 @@ export const PasteIcon = (p: P) => <I {...p}>
   <path d="M5.5 3H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-1.5" />
   <rect x="5.5" y="1.5" width="5" height="3" rx="1" /><path d="M5.5 8h5M5.5 11h3" />
 </I>;
+export const RefreshIcon = (p: P) => <I {...p}><path d="M13 8a5 5 0 1 1-1.5-3.6"/><path d="M13 2.5v3h-3"/></I>;
 export const ReopenIcon = (p: P) => <I {...p}>
   <path d="M3 6a5 5 0 1 1 0 4M3 2v4h4" />
 </I>;

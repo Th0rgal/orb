@@ -462,6 +462,19 @@ pub struct LibraryStatus {
     pub behind: u32,
     /// List of modified/untracked files
     pub modified_files: Vec<String>,
+    /// Unix time of the last fetch from the remote (`.git/FETCH_HEAD`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_synced_at: Option<i64>,
+}
+
+/// One commit that changed a Library file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryHistoryEntry {
+    pub rev: String,
+    pub author: String,
+    /// Unix time of the commit.
+    pub timestamp: i64,
+    pub subject: String,
 }
 
 /// Migration report showing what changed during library structure migration.

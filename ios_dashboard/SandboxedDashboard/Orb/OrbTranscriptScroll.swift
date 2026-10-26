@@ -64,6 +64,30 @@ final class OrbTranscriptScroller {
     var metrics = OrbScrollMetrics()
     var interacting = false
     var maxHorizontalOffset: CGFloat = 0
+    var layoutEpoch: UInt32 = 1
+    var lastCorrectedEpoch: UInt32 = 0
+    var correctionsInEpoch: UInt8 = 0
+
+    /// Evaluate `OrbKernel.scrollEpochStep` (`scroll_single_correction_per_epoch`) within the
+    /// current layout epoch. At most one programmatic scroll correction is admitted per epoch.
+    @discardableResult
+    func evaluateEpochScrollCorrection(targetTop: Int, currentTop: Int) -> Bool {
+        let verdict = OrbKernel.scrollEpochStep(
+            layoutEpoch: layoutEpoch,
+            lastCorrectedEpoch: lastCorrectedEpoch,
+            correctionsInEpoch: correctionsInEpoch,
+            isPinnedToBottom: pinned,
+            userIsDragging: interacting,
+            targetScrollTopPx: targetTop,
+            currentScrollTopPx: currentTop
+        )
+        correctionsInEpoch = verdict.nextCorrectionsInEpoch
+        lastCorrectedEpoch = verdict.nextCorrectedEpoch
+        if verdict.applyCorrection {
+            request { $0.scrollTo(edge: .bottom) }
+        }
+        return verdict.applyCorrection
+    }
 
     /// Distance from the bottom that still counts as "at the latest message".
     static let pinTolerance: CGFloat = 40
@@ -100,16 +124,28 @@ final class OrbTranscriptScroller {
         let old = metrics
         metrics = value
         maxHorizontalOffset = max(maxHorizontalOffset, abs(value.offsetX))
+        let geometryChanged =
+            value.contentHeight != old.contentHeight ||
+            value.visibleHeight != old.visibleHeight ||
+            value.bottomInset != old.bottomInset ||
+            value.distanceFromBottom > old.distanceFromBottom + 0.5 ||
+            old.contentHeight == 0
+        if geometryChanged {
+            layoutEpoch &+= 1
+            correctionsInEpoch = 0
+        }
         if interacting {
             if value.distanceFromBottom <= 2 { pinned = true }
             return
         }
         // Content grew (new message, streaming, late rich-text layout) or the viewport
-        // shrank (keyboard): keep the latest message in view while pinned.
-        if pinned && value.distanceFromBottom > 1 &&
-            (value.contentHeight != old.contentHeight || value.visibleHeight != old.visibleHeight ||
-             value.bottomInset != old.bottomInset || value.distanceFromBottom > old.distanceFromBottom + 0.5 || old.contentHeight == 0) {
-            request { $0.scrollTo(edge: .bottom) }
+        // shrank (keyboard): keep the latest message in view while pinned, gated by
+        // `OrbKernel.scrollEpochStep` (`scroll_single_correction_per_epoch`).
+        if pinned && value.distanceFromBottom > 1 && geometryChanged {
+            let targetTop = Int(OrbKernel.satU32(Double(max(1, value.maxOffsetY + value.topInset))))
+            let gap = max(1, Int(OrbKernel.satU32(Double(value.distanceFromBottom))))
+            let currentTop = max(0, targetTop - gap)
+            _ = evaluateEpochScrollCorrection(targetTop: targetTop, currentTop: currentTop)
         }
     }
 

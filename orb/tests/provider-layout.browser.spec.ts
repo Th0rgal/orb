@@ -1,6 +1,6 @@
 import {test,expect} from '@playwright/test';
 test.use({browserName:'webkit'});
-test('full-width meters, separate account actions and API key add/edit',async({page})=>{
+test('compact quota rows, separate account actions and API key add/edit',async({page})=>{
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
  const accounts=[{id:'quota',name:'OpenAI (person@example.com)',account_email:'person@example.com',provider_type:'openai',uses_oauth:true,status:{type:'connected'}},{id:'key',name:'Work key',provider_type:'openai',uses_oauth:false,status:{type:'connected'}}];
  const usage={provider_type:'openai',codex_primary_used_percent:100,codex_primary_window_minutes:10080,codex_primary_reset_at:Math.floor(Date.now()/1000)+7200};
@@ -15,8 +15,9 @@ test('full-width meters, separate account actions and API key add/edit',async({p
  await account.locator('.p-acc-btn').click();
  await expect(account.getByRole('button',{name:'Reconnect',exact:true})).toHaveCount(0);
  const meter=account.getByRole('progressbar');await expect(meter).toHaveAttribute('aria-valuenow','100');
- const body=await account.locator('.p-acc-body').boundingBox(),bar=await meter.boundingBox();
- expect(bar!.width).toBeGreaterThan(body!.width-85);
+ // Quotas sit on one compact row per pool.
+ const row=await account.locator('.provider-usage-row').first().boundingBox();
+ expect(row!.height).toBeLessThan(30);
  await expect(account.locator('.p-chip')).toHaveCount(0);
  await account.getByRole('button',{name:/Actions for/}).click();await expect(page.getByRole('menuitem',{name:'Re-authenticate'})).toBeVisible();await page.keyboard.press('Escape');
  await page.getByRole('button',{name:'Add API key',exact:true}).click();
@@ -27,7 +28,7 @@ test('full-width meters, separate account actions and API key add/edit',async({p
  await expect(dialog.locator('input[type=password]')).toHaveValue('');await dialog.locator('input[type=password]').fill('replacement-test-key');await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog).toHaveCount(0);
  expect(writes[1]).toEqual({method:'PUT',body:{name:'Work key',api_key:'replacement-test-key'}});
  await account.locator('.p-acc-btn').click();
- await expect(account.locator('.provider-usage-heading')).toContainText('Weekly');
+ await expect(account.locator('.provider-usage-chip-label')).toContainText(['Weekly']);
  const cloud=page.getByRole('region',{name:'Cloud agents'});
  await cloud.getByRole('button',{name:/Cursor Cloud/}).click();
  await expect(cloud.getByRole('button',{name:/View usage in Cursor/})).toBeVisible();

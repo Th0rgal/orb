@@ -105,11 +105,7 @@ pub(super) fn observe_fork_home_shadow(
         },
         classify_known_legacy_bug: |_, _, _, _| None,
     };
-    let host_effects = if host_admits {
-        vec![0u32]
-    } else {
-        vec![78u32]
-    };
+    let host_effects = if host_admits { vec![0u32] } else { vec![78u32] };
     let ctx = crate::orb_spec::shadow::EventContext {
         now_ms: 0,
         fresh_nonce: 0,
@@ -118,14 +114,7 @@ pub(super) fn observe_fork_home_shadow(
         schema_id: 1,
     };
     if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
-        let _ = sim.observe_step(
-            &false,
-            &false,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
+        let _ = sim.observe_step(&false, &false, &input, &host_effects, ctx, &mut ring);
     }
     verdict
 }
@@ -1202,7 +1191,15 @@ mod tests {
             Arc::new(crate::api::mission_store::InMemoryMissionStore::new());
         let dir = tempfile::tempdir().unwrap();
         let mut mission = store
-            .create_mission(Some("Codex Turn"), None, None, None, None, Some("codex"), None)
+            .create_mission(
+                Some("Codex Turn"),
+                None,
+                None,
+                None,
+                None,
+                Some("codex"),
+                None,
+            )
             .await
             .unwrap();
         let job_id = Uuid::new_v4();
@@ -1222,8 +1219,31 @@ mod tests {
             .unwrap();
         mission = store.get_mission(mission.id).await.unwrap().unwrap();
 
+        // 0. Fresh submission (`resume_session_id: None`) -> DispatchFreshTurn
+        let v_fresh = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            &owner,
+            None,
+            &[],
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_fresh.action,
+            crate::orb_spec::MissionControlAction::DispatchFreshTurn
+        );
+        assert!(v_fresh.emit_dispatch_effect);
+
         // 1. Missing rollout on node (no assistant_message yet) with fallback prompt -> SeedFallbackFreshSession
-        let events_no_rollout = vec![event("user_message", "initial prompt", serde_json::Value::Null)];
+        let events_no_rollout = vec![event(
+            "user_message",
+            "initial prompt",
+            serde_json::Value::Null,
+        )];
         let v_fallback = super::super::remote_jobs::evaluate_mission_control_gate(
             dir.path(),
             store.as_ref(),
@@ -1265,7 +1285,11 @@ mod tests {
         // 3. Verified rollout (assistant_message present) -> ResumeVerifiedSession
         let events_with_rollout = vec![
             event("user_message", "initial prompt", serde_json::Value::Null),
-            event("assistant_message", "completed step 1", serde_json::Value::Null),
+            event(
+                "assistant_message",
+                "completed step 1",
+                serde_json::Value::Null,
+            ),
         ];
         let v_verified = super::super::remote_jobs::evaluate_mission_control_gate(
             dir.path(),
@@ -1305,7 +1329,7 @@ mod tests {
         );
         assert!(!v_conflict.emit_dispatch_effect);
 
-        // 5. Already-accepted side launch receipt -> DedupeDeliveredMessage
+        // 5. Already-accepted side launch receipt on initial launch (`None`) -> DedupeDeliveredMessage
         super::record_side_launch(dir.path(), mission.id, "k1", "fp1").unwrap();
         super::accept_side_launch(dir.path(), mission.id).unwrap();
         let v_dedupe = super::super::remote_jobs::evaluate_mission_control_gate(
@@ -1313,9 +1337,9 @@ mod tests {
             store.as_ref(),
             &mission,
             &owner,
-            Some("thread-1"),
-            &events_with_rollout,
-            Some("recovered history"),
+            None,
+            &[],
+            None,
             false,
         )
         .await
@@ -1326,27 +1350,73 @@ mod tests {
         );
         assert!(!v_dedupe.emit_dispatch_effect);
 
-        // 6. Archived mission (`MissionStatus::Acknowledged`) -> RejectArchived
-        let mut archived_mission = mission.clone();
-        archived_mission.status = MissionStatus::Acknowledged;
-        let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
+        // 6. Archived mission (`MissionStatus::Acknowledged` and `SUPERSEDED_TAG`) -> RejectArchived
+        for is_superseded_tag in [false, true] {
+            let mut archived_mission = mission.clone();
+            if is_superseded_tag {
+                archived_mission
+                    .project
+                    .tags
+                    .push(crate::api::mission_store::SUPERSEDED_TAG.to_string());
+            } else {
+                archived_mission.status = MissionStatus::Acknowledged;
+            }
+            let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
+                dir.path(),
+                store.as_ref(),
+                &archived_mission,
+                &owner,
+                Some("thread-1"),
+                &events_with_rollout,
+                Some("recovered history"),
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                v_archived.action,
+                crate::orb_spec::MissionControlAction::RejectArchived
+            );
+            assert!(!v_archived.emit_dispatch_effect);
+            assert!(v_archived.archived_next);
+        }
+
+        // 7. Usage-limit replay gate: while `run` is active -> RejectTrackWriterConflict;
+        //    once `run` finishes -> SeedFallbackFreshSession on FRESH_SESSION_FALLBACK
+        let v_replay_busy = super::super::remote_jobs::evaluate_usage_limit_replay_gate(
             dir.path(),
             store.as_ref(),
-            &archived_mission,
-            &owner,
-            Some("thread-1"),
-            &events_with_rollout,
-            Some("recovered history"),
-            false,
+            &mission,
+            super::super::usage_limit_wait::FRESH_SESSION_FALLBACK,
+            Some("fallback history"),
         )
         .await
         .unwrap();
         assert_eq!(
-            v_archived.action,
-            crate::orb_spec::MissionControlAction::RejectArchived
+            v_replay_busy.action,
+            crate::orb_spec::MissionControlAction::RejectTrackWriterConflict
         );
-        assert!(!v_archived.emit_dispatch_effect);
-        assert!(v_archived.archived_next);
+        assert!(!v_replay_busy.emit_dispatch_effect);
+
+        store
+            .finish_mission_run(run.run_id, run.generation, Some("failed"))
+            .await
+            .unwrap();
+        let v_replay_ready = super::super::remote_jobs::evaluate_usage_limit_replay_gate(
+            dir.path(),
+            store.as_ref(),
+            &mission,
+            super::super::usage_limit_wait::FRESH_SESSION_FALLBACK,
+            Some("fallback history"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_replay_ready.action,
+            crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+        );
+        assert!(v_replay_ready.emit_dispatch_effect);
+        assert!(v_replay_ready.seed_fallback_session);
         assert_eq!(super::control_shadow_snapshot().total_divergences, 0);
     }
 }

@@ -108,6 +108,9 @@ mod tests {
             "ultrafast"
         );
         assert!(Tier::Ultrafast.supports_model("openai/gpt-6.1-sol"));
+        // gpt-6.1-terra advertises Fast only (live Codex catalog, 2026-10-26).
+        assert!(Tier::Fast.supports_model("gpt-6.1-terra"));
+        assert!(!Tier::Ultrafast.supports_model("gpt-6.1-terra"));
         assert!(!Tier::Ultrafast.supports_model("gpt-6-luna"));
     }
 }
