@@ -163,12 +163,23 @@ pub fn parse_summary(payload: &Value) -> Vec<Value> {
     out
 }
 
-/// One "Gemini · 5h" window from the per-model view: the least remaining
-/// Gemini model and its reset. `None` when no Gemini model is metered.
+/// One Gemini window from the per-model view: the least remaining Gemini
+/// model and its reset. The view carries no period, so it is named after the
+/// reset: a quota that resets in days is not the 5-hour window (Google's
+/// individual quota resets about weekly). `None` when no Gemini model is metered.
 pub fn gemini_window(payload: &Value) -> Option<Value> {
+    gemini_window_at(payload, chrono::Utc::now().timestamp())
+}
+
+fn gemini_window_at(payload: &Value, now: i64) -> Option<Value> {
     let (remaining, reset) = super::antigravity_accounts::gemini_quota(payload);
     let used = (1.0 - remaining?).clamp(0.0, 1.0) * 100.0;
-    let mut v = json!({"label": "Gemini · 5h", "used_percent": (used * 10.0).round() / 10.0});
+    let window = match reset.map(|at| at - now) {
+        Some(left) if left > 24 * 3600 => "Weekly",
+        Some(left) if left > 5 * 3600 => "Daily",
+        _ => "5h",
+    };
+    let mut v = json!({"label": format!("Gemini · {window}"), "used_percent": (used * 10.0).round() / 10.0});
     if let Some(reset) = reset {
         v["reset_at"] = json!(reset);
     }
@@ -286,6 +297,24 @@ pub async fn read(client: &reqwest::Client, access_token: &str) -> Quota {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_model_gemini_window_is_named_after_its_reset() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-26T08:00:00Z")
+            .unwrap()
+            .timestamp();
+        let at = |reset: &str| json!({"models": {"gemini-4-argon-medium": {"quotaInfo": {"remainingFraction": 0.01, "resetTime": reset}}}});
+        let label = |reset: &str| {
+            gemini_window_at(&at(reset), now).unwrap()["label"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(label("2026-10-26T12:00:00Z"), "Gemini · 5h");
+        assert_eq!(label("2026-10-26T20:00:00Z"), "Gemini · Daily");
+        // The individual quota Google reported as "Resets in 129h" is not the 5-hour window.
+        assert_eq!(label("2026-10-31T17:00:00Z"), "Gemini · Weekly");
+    }
 
     #[test]
     fn summary_gives_shared_5h_and_weekly_windows_per_group() {
