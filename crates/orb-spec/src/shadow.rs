@@ -1094,7 +1094,10 @@ mod tests {
             }
         });
         assert_eq!(live_r1, replay_r1);
-        assert_eq!(live_r1.action, TranscriptReduceAction::AppendTranscriptEntry);
+        assert_eq!(
+            live_r1.action,
+            TranscriptReduceAction::AppendTranscriptEntry
+        );
         assert!(live_r1.emit_entry);
         assert!(live_r1.closed_previous_thinking);
         assert!(!live_r1.thinking_open_next);
@@ -1141,7 +1144,10 @@ mod tests {
             incoming_superseded_or_archived: false,
             is_partial_page: true,
         });
-        assert_eq!(dup_sidebar.action, SidebarMergeAction::UpdateExistingInPlace);
+        assert_eq!(
+            dup_sidebar.action,
+            SidebarMergeAction::UpdateExistingInPlace
+        );
         assert!(dup_sidebar.retain_or_upsert);
         assert!(!dup_sidebar.insert_new);
         assert!(dup_sidebar.unique_sidebar);

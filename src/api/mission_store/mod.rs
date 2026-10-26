@@ -5964,7 +5964,10 @@ mod harness_session_tests {
         let since_seqs: Vec<i64> = since_2.iter().map(|e| e.sequence).collect();
         assert_eq!(since_seqs, vec![3, 4, 5, 6]);
 
-        let before_5 = store.get_events_before(m1.id, 5, None, Some(2)).await.unwrap();
+        let before_5 = store
+            .get_events_before(m1.id, 5, None, Some(2))
+            .await
+            .unwrap();
         let before_seqs: Vec<i64> = before_5.iter().map(|e| e.sequence).collect();
         assert_eq!(before_seqs, vec![3, 4]);
 
@@ -5986,7 +5989,11 @@ mod harness_session_tests {
 
         let merged_partial =
             reconcile_sidebar_missions_page(&initial_sidebar, &[m2_newer.clone()], true);
-        assert_eq!(merged_partial.len(), 3, "partial page must preserve unmentioned rows without duplicates");
+        assert_eq!(
+            merged_partial.len(),
+            3,
+            "partial page must preserve unmentioned rows without duplicates"
+        );
         assert_eq!(merged_partial[0].id, m2.id);
         assert_eq!(merged_partial[0].title.as_deref(), Some("Beta (Updated)"));
 
