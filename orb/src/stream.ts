@@ -49,7 +49,7 @@ async function apiRaw(path: string): Promise<Response> {
   if (connectionVersion() !== version) throw new Error("Connection changed");
   if (res.status === 401) {
     clearConnection();
-    throw new Error("401 Unauthorized — reconnect in Settings → Backend");
+    throw new Error("401 Unauthorized — reconnect in Settings → Account");
   }
   if (!res.ok) throw new Error(`${res.status} ${await res.text().catch(() => "")}`.trim());
   return res;

@@ -3700,6 +3700,306 @@ pub fn observe_client_parity_shadow(
     verdict
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Wave 10: Fleet Security — Canary Blast-Radius Isolation, Process Whitelist,
+//          High-Signal Attacker Bait, Enforcer Convergence & Biometric/Mesh Gates
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Classification of a canary tripwire sensor (`Orb.Kernel.canaryTripwireStep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CanaryClass {
+    /// Ambient filesystem or socket decoy (`.env.production.canary`, `.vault-recovery.age`, `mongo_27017`).
+    AmbientDecoy = 0,
+    /// High-signal attacker-only bait (e.g., fake Bitcoin WIF / BIP-39 wallet seed `btc_wallet_canary`
+    /// or `ssh_exfil_canary`) that legitimate agents never touch; a hit even from an agent process
+    /// implies process or inference compromise and escalates to fleet `HardLockdown`.
+    HighSignalBait = 1,
+}
+
+/// Classification of the process that triggered a canary (`Orb.Kernel.canaryTripwireStep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ActorTrust {
+    /// Known agent/mission process performing a routine file/directory walk (`rg`, `fd`, `find`, `ls`, `git`).
+    WhitelistedAgentWalk = 0,
+    /// Mission job process directly reading or probing an ambient decoy.
+    MissionProcess = 1,
+    /// Non-agent, unknown, root, or external process.
+    UntrustedOrSystem = 2,
+}
+
+/// Blast-radius action returned by [`canary_tripwire_step`] (`Orb.Kernel.canaryTripwireStep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CanaryTripwireAction {
+    /// Whitelisted agent walk or synthetic `--dry-run`: do not quarantine node or lock down fleet.
+    IgnoreWhitelisted = 0,
+    /// Single mission process reading an ambient decoy: quarantine ONLY the reporting node;
+    /// keep global fleet `bunker_state` unchanged (`Normal`).
+    QuarantineNodeOnly = 1,
+    /// High-signal attacker bait (even from our own agent process) or untrusted system process:
+    /// quarantine node AND escalate global fleet `bunker_state` to `HardLockdown (2)`.
+    EscalateFleetLockdown = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanaryTripwireStepInput {
+    pub canary_class: CanaryClass,
+    pub actor_trust: ActorTrust,
+    pub is_dry_run: bool,
+    pub current_fleet_bunker: BunkerState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanaryTripwireStepVerdict {
+    pub action: CanaryTripwireAction,
+    pub quarantine_reporting_node: bool,
+    pub escalate_fleet_lockdown: bool,
+    pub alert_operator: bool,
+    pub next_fleet_bunker: BunkerState,
+    pub raw: u64,
+}
+
+/// Pure implementation of `Orb.Kernel.canaryTripwireStep` verified by
+/// `canary_whitelisted_ambient_no_bunker`, `canary_mission_ambient_node_only`, and
+/// `canary_high_signal_bait_always_locks_down` in `lean/Orb/Spec.lean`.
+#[inline]
+pub fn canary_tripwire_step(input: CanaryTripwireStepInput) -> CanaryTripwireStepVerdict {
+    let clamped_bunker = (input.current_fleet_bunker as u8).min(2);
+    let is_high_signal = (input.canary_class as u8) >= 1;
+    let action_code: u8 = if input.is_dry_run {
+        0
+    } else if is_high_signal {
+        2
+    } else if input.actor_trust == ActorTrust::WhitelistedAgentWalk {
+        0
+    } else if input.actor_trust == ActorTrust::MissionProcess {
+        1
+    } else {
+        2
+    };
+    let next_bunker_code: u8 = if action_code == 2 { 2 } else { clamped_bunker };
+    let quarantine_bit: u32 = if action_code >= 1 { 256 } else { 0 };
+    let lockdown_bit: u32 = if action_code == 2 { 512 } else { 0 };
+    let alert_bit: u32 = if action_code >= 1 || input.is_dry_run {
+        1024
+    } else {
+        0
+    };
+    let lo32 = u32::from(action_code) | quarantine_bit | lockdown_bit | alert_bit;
+    let hi32 = u32::from(next_bunker_code);
+    let raw = u64::from(lo32) | (u64::from(hi32) << 32);
+    let action = match action_code {
+        1 => CanaryTripwireAction::QuarantineNodeOnly,
+        2 => CanaryTripwireAction::EscalateFleetLockdown,
+        _ => CanaryTripwireAction::IgnoreWhitelisted,
+    };
+    let next_fleet_bunker = match next_bunker_code {
+        0 => BunkerState::Normal,
+        1 => BunkerState::SoftQuarantine,
+        _ => BunkerState::HardLockdown,
+    };
+    CanaryTripwireStepVerdict {
+        action,
+        quarantine_reporting_node: (lo32 & 256) != 0,
+        escalate_fleet_lockdown: (lo32 & 512) != 0,
+        alert_operator: (lo32 & 1024) != 0,
+        next_fleet_bunker,
+        raw,
+    }
+}
+
+/// Classifies a `canary_kind` identifier into [`CanaryClass::AmbientDecoy`] vs
+/// [`CanaryClass::HighSignalBait`].
+pub fn classify_canary_class(canary_kind: &str) -> CanaryClass {
+    let k = canary_kind.trim().to_ascii_lowercase();
+    if k.contains("btc")
+        || k.contains("bitcoin")
+        || k.contains("wallet")
+        || k.contains("mnemonic")
+        || k.contains("seed")
+        || k.contains("ssh_exfil")
+        || k.contains("high_signal")
+        || k.contains("attacker_bait")
+    {
+        CanaryClass::HighSignalBait
+    } else {
+        CanaryClass::AmbientDecoy
+    }
+}
+
+/// Whitelisted agent file-search / directory-traversal binaries that may walk workspace trees
+/// during normal coding missions without intending to exfiltrate ambient decoys.
+pub const WHITELISTED_AGENT_WALK_BINARIES: &[&str] = &[
+    "rg", "ripgrep", "grep", "egrep", "fgrep", "find", "fd", "fdfind", "ls", "stat", "file", "du",
+    "tree", "git",
+];
+
+/// Classifies the process that tripped a canary into [`ActorTrust`]:
+/// - Checks whether `uid` (`999` / `sandboxed-node`), `cgroup`, or `cmdline` belongs to a
+///   managed Paloma agent/mission execution context (`sandboxed-node`, `opencode`, `antigravity`,
+///   `claude`, `codex`).
+/// - If it is an agent/mission process AND the executable is a passive search/traversal tool in
+///   [`WHITELISTED_AGENT_WALK_BINARIES`], returns [`ActorTrust::WhitelistedAgentWalk`].
+/// - If it is an agent/mission process running any other command (e.g. `cat`, `curl`, `python3`),
+///   returns [`ActorTrust::MissionProcess`] (quarantines ONLY that node on ambient decoys, or
+///   locks down the whole fleet on [`CanaryClass::HighSignalBait`]).
+/// - Otherwise returns [`ActorTrust::UntrustedOrSystem`].
+pub fn classify_actor_trust(
+    uid: Option<u32>,
+    cgroup: Option<&str>,
+    cmdline: Option<&str>,
+) -> ActorTrust {
+    let cg = cgroup.unwrap_or("").to_ascii_lowercase();
+    let cmd = cmdline.unwrap_or("").trim();
+    let cmd_lower = cmd.to_ascii_lowercase();
+
+    let is_agent_context = uid == Some(999)
+        || cg.contains("sandboxed-node")
+        || cg.contains("sandboxed_node")
+        || cg.contains("opencode")
+        || cg.contains("antigravity")
+        || cmd_lower.contains("/var/lib/sandboxed-node/")
+        || cmd_lower.contains("fast_9024_scanner");
+
+    if !is_agent_context {
+        return ActorTrust::UntrustedOrSystem;
+    }
+
+    let first_token = cmd.split_whitespace().next().unwrap_or("");
+    let exe_name = first_token
+        .rsplit('/')
+        .next()
+        .unwrap_or(first_token)
+        .to_ascii_lowercase();
+
+    if WHITELISTED_AGENT_WALK_BINARIES.contains(&exe_name.as_str()) {
+        ActorTrust::WhitelistedAgentWalk
+    } else {
+        ActorTrust::MissionProcess
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BunkerEnforcerAction {
+    ReleaseQuarantine = 0,
+    ApplyOrKeepQuarantine = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BunkerEnforcerStepInput {
+    pub status_reachable: bool,
+    pub fleet_bunker: u8,
+    pub node_quarantined_by_core: bool,
+    pub has_local_trip_marker: bool,
+    pub local_trip_epoch: u64,
+    pub last_unbunker_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BunkerEnforcerStepVerdict {
+    pub action: BunkerEnforcerAction,
+    pub apply_or_keep_quarantine: bool,
+    pub clear_local_marker: bool,
+    pub raw: u32,
+}
+
+/// Pure implementation of `Orb.Kernel.bunkerEnforcerStep` verified by
+/// `bunker_enforcer_converges_on_unbunker` in `lean/Orb/Spec.lean`.
+#[inline]
+pub fn bunker_enforcer_step(input: BunkerEnforcerStepInput) -> BunkerEnforcerStepVerdict {
+    let fleet_lockdown = input.fleet_bunker >= 2;
+    let marker_cleared =
+        !input.has_local_trip_marker || input.last_unbunker_epoch >= input.local_trip_epoch;
+    let raw: u32 = if !input.status_reachable {
+        if input.has_local_trip_marker {
+            257
+        } else {
+            0
+        }
+    } else if fleet_lockdown || input.node_quarantined_by_core || !marker_cleared {
+        257
+    } else if input.has_local_trip_marker {
+        512
+    } else {
+        0
+    };
+    let apply_or_keep = (raw & 256) != 0;
+    BunkerEnforcerStepVerdict {
+        action: if apply_or_keep {
+            BunkerEnforcerAction::ApplyOrKeepQuarantine
+        } else {
+            BunkerEnforcerAction::ReleaseQuarantine
+        },
+        apply_or_keep_quarantine: apply_or_keep,
+        clear_local_marker: (raw & 512) != 0,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BiometricGateVerdict {
+    pub admitted: bool,
+    pub surface_error: bool,
+    pub raw: u32,
+}
+
+/// Pure implementation of `Orb.Kernel.biometricGateStep` verified by
+/// `biometric_gate_never_fails_open` in `lean/Orb/Spec.lean`.
+#[inline]
+pub fn biometric_gate_step(
+    surface_requires_bio: bool,
+    hardware_enrolled: bool,
+    eval_succeeded: bool,
+    passcode_fallback_succeeded: bool,
+) -> BiometricGateVerdict {
+    let raw: u32 = if !surface_requires_bio
+        || (hardware_enrolled && eval_succeeded)
+        || (!hardware_enrolled && passcode_fallback_succeeded)
+    {
+        257
+    } else {
+        512
+    };
+    BiometricGateVerdict {
+        admitted: (raw & 256) != 0,
+        surface_error: (raw & 512) != 0,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshServiceRouteVerdict {
+    pub admitted: bool,
+    pub rejected_retired_tailnet: bool,
+    pub raw: u32,
+}
+
+/// Pure implementation of `Orb.Kernel.meshServiceRouteStep` verified by
+/// `mesh_service_route_rejects_retired_tailnet` in `lean/Orb/Spec.lean`.
+#[inline]
+pub fn mesh_service_route_step(
+    endpoint_in_mesh_overlay: bool,
+    endpoint_in_retired_tailnet: bool,
+    has_mesh_auth_or_bearer: bool,
+    is_loopback: bool,
+) -> MeshServiceRouteVerdict {
+    let raw: u32 = if endpoint_in_retired_tailnet {
+        512
+    } else if is_loopback || endpoint_in_mesh_overlay || has_mesh_auth_or_bearer {
+        257
+    } else {
+        512
+    };
+    MeshServiceRouteVerdict {
+        admitted: (raw & 256) != 0,
+        rejected_retired_tailnet: endpoint_in_retired_tailnet,
+        raw,
+    }
+}
+
 #[cfg(test)]
 mod privilege_bunker_deploy_tests {
     use super::*;
@@ -4531,5 +4831,116 @@ mod tests {
         assert_eq!(scroll_snap.total_divergences, 0);
         assert_eq!(parity_snap.total_events, 4);
         assert_eq!(parity_snap.total_divergences, 0);
+    }
+
+    #[test]
+    fn wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gates() {
+        // 1. Whitelisted agent walk (`rg --hidden` by sandboxed-node) on an ambient decoy
+        //    is ignored: no node quarantine, no fleet bunker escalation (`canary_whitelisted_ambient_no_bunker`).
+        let actor = classify_actor_trust(
+            Some(999),
+            Some("/system.slice/sandboxed-node.service"),
+            Some("rg --hidden --no-ignore CANT_MATCH ."),
+        );
+        assert_eq!(actor, ActorTrust::WhitelistedAgentWalk);
+        let class = classify_canary_class("env_honeytoken");
+        assert_eq!(class, CanaryClass::AmbientDecoy);
+
+        let v_walk = canary_tripwire_step(CanaryTripwireStepInput {
+            canary_class: class,
+            actor_trust: actor,
+            is_dry_run: false,
+            current_fleet_bunker: BunkerState::Normal,
+        });
+        assert_eq!(v_walk.action, CanaryTripwireAction::IgnoreWhitelisted);
+        assert!(!v_walk.quarantine_reporting_node);
+        assert!(!v_walk.escalate_fleet_lockdown);
+        assert!(!v_walk.alert_operator);
+        assert_eq!(v_walk.next_fleet_bunker, BunkerState::Normal);
+
+        // 2. Single mission process reading `.env.production.canary` (`cat`) quarantines ONLY that node
+        //    and leaves global fleet bunker at `Normal` (`canary_mission_ambient_node_only`).
+        let actor_cat = classify_actor_trust(
+            Some(999),
+            Some("/system.slice/sandboxed-node.service"),
+            Some("cat /opt/paloma-canary/.env.production.canary"),
+        );
+        assert_eq!(actor_cat, ActorTrust::MissionProcess);
+        let v_mission = canary_tripwire_step(CanaryTripwireStepInput {
+            canary_class: CanaryClass::AmbientDecoy,
+            actor_trust: actor_cat,
+            is_dry_run: false,
+            current_fleet_bunker: BunkerState::Normal,
+        });
+        assert_eq!(v_mission.action, CanaryTripwireAction::QuarantineNodeOnly);
+        assert!(v_mission.quarantine_reporting_node);
+        assert!(!v_mission.escalate_fleet_lockdown);
+        assert!(v_mission.alert_operator);
+        assert_eq!(v_mission.next_fleet_bunker, BunkerState::Normal);
+
+        // 3. High-signal attacker bait (`btc_wallet_canary` / fake Bitcoin private key) ALWAYS escalates
+        //    to fleet `HardLockdown (2)` EVEN when accessed by a whitelisted agent process
+        //    (`canary_high_signal_bait_always_locks_down`).
+        let btc_class = classify_canary_class("btc_wallet_canary");
+        assert_eq!(btc_class, CanaryClass::HighSignalBait);
+        for trust in [
+            ActorTrust::WhitelistedAgentWalk,
+            ActorTrust::MissionProcess,
+            ActorTrust::UntrustedOrSystem,
+        ] {
+            let v_btc = canary_tripwire_step(CanaryTripwireStepInput {
+                canary_class: btc_class,
+                actor_trust: trust,
+                is_dry_run: false,
+                current_fleet_bunker: BunkerState::Normal,
+            });
+            assert_eq!(v_btc.action, CanaryTripwireAction::EscalateFleetLockdown);
+            assert!(v_btc.quarantine_reporting_node);
+            assert!(v_btc.escalate_fleet_lockdown);
+            assert!(v_btc.alert_operator);
+            assert_eq!(v_btc.next_fleet_bunker, BunkerState::HardLockdown);
+        }
+
+        // 4. Worker node bunker enforcer converges to `ReleaseQuarantine` and clears local marker
+        //    once `last_unbunker_epoch >= local_trip_epoch` and `fleet_bunker == Normal`
+        //    (`bunker_enforcer_converges_on_unbunker`).
+        let enf_keep = bunker_enforcer_step(BunkerEnforcerStepInput {
+            status_reachable: true,
+            fleet_bunker: 0,
+            node_quarantined_by_core: false,
+            has_local_trip_marker: true,
+            local_trip_epoch: 200,
+            last_unbunker_epoch: 150,
+        });
+        assert_eq!(enf_keep.action, BunkerEnforcerAction::ApplyOrKeepQuarantine);
+        assert!(enf_keep.apply_or_keep_quarantine);
+
+        let enf_release = bunker_enforcer_step(BunkerEnforcerStepInput {
+            status_reachable: true,
+            fleet_bunker: 0,
+            node_quarantined_by_core: false,
+            has_local_trip_marker: true,
+            local_trip_epoch: 200,
+            last_unbunker_epoch: 205,
+        });
+        assert_eq!(enf_release.action, BunkerEnforcerAction::ReleaseQuarantine);
+        assert!(!enf_release.apply_or_keep_quarantine);
+        assert!(enf_release.clear_local_marker);
+
+        // 5. Biometric gate never fails open (`biometric_gate_never_fails_open`).
+        let bio_fail = biometric_gate_step(true, true, false, false);
+        assert!(!bio_fail.admitted);
+        assert!(bio_fail.surface_error);
+        let bio_ok = biometric_gate_step(true, true, true, false);
+        assert!(bio_ok.admitted);
+        assert!(!bio_ok.surface_error);
+
+        // 6. Mesh service route rejects retired Tailscale CGNAT (`mesh_service_route_rejects_retired_tailnet`).
+        let route_retired = mesh_service_route_step(true, true, true, false);
+        assert!(!route_retired.admitted);
+        assert!(route_retired.rejected_retired_tailnet);
+        let route_mesh = mesh_service_route_step(true, false, false, false);
+        assert!(route_mesh.admitted);
+        assert!(!route_mesh.rejected_retired_tailnet);
     }
 }

@@ -1128,6 +1128,14 @@ impl MeshManifest {
                 "    # Sovereign Dead-Man Switch tripped: drop all wg-leanmesh0 traffic\n",
             );
             out.push_str("    counter drop\n");
+            out.push_str("  }\n\n");
+            out.push_str("  chain mesh_output {\n");
+            out.push_str("    type filter hook output priority -5; policy accept;\n");
+            out.push_str(&format!(
+                "    oifname != \"{}\" accept\n",
+                LEAN_MESH_INTERFACE_NAME
+            ));
+            out.push_str("    counter drop\n");
             out.push_str("  }\n}\n");
             return Ok(out);
         }
@@ -1182,6 +1190,73 @@ impl MeshManifest {
                     out.push_str(&format!(
                         "    ip saddr {} ip daddr {} {} dport {} accept # {}\n",
                         src_peer.overlay_ip, self_peer.overlay_ip, l4, port_expr, rule.description
+                    ));
+                }
+            }
+        }
+
+        out.push_str("    counter drop\n");
+        out.push_str("  }\n\n");
+
+        out.push_str("  chain mesh_output {\n");
+        out.push_str("    type filter hook output priority -5; policy accept;\n");
+        out.push_str(&format!(
+            "    oifname != \"{}\" accept\n",
+            LEAN_MESH_INTERFACE_NAME
+        ));
+        out.push_str("    meta nfproto ipv6 counter drop\n");
+        out.push_str("    ct state established,related accept\n");
+
+        for rule in &self.rules {
+            if rule.src_peer != node_name {
+                continue;
+            }
+            let Some(dst_peer) = peer_by_name.get(rule.dst_peer.as_str()) else {
+                continue;
+            };
+            let decision = evaluate_route_kernel(
+                self_peer.id,
+                dst_peer.id,
+                self_peer.node_class,
+                dst_peer.node_class,
+                self_peer.revoked,
+                dst_peer.revoked,
+                true,
+                rule.proto,
+                rule.port_min,
+                rule.port_min,
+                rule.port_max,
+                false,
+                bunker_state,
+                now_epoch,
+                self_peer.expires_at,
+                dst_peer.expires_at,
+                0,
+            );
+            if !decision.allowed {
+                continue;
+            }
+            match rule.proto {
+                MeshProto::Icmp => {
+                    out.push_str(&format!(
+                        "    ip saddr {} ip daddr {} ip protocol icmp accept # {}\n",
+                        self_peer.overlay_ip, dst_peer.overlay_ip, rule.description
+                    ));
+                }
+                MeshProto::Tcp | MeshProto::Udp => {
+                    let l4 = if rule.proto == MeshProto::Tcp {
+                        "tcp"
+                    } else {
+                        "udp"
+                    };
+                    let port_expr = if rule.port_min == rule.port_max {
+                        format!("{}", rule.port_min)
+                    } else {
+                        format!("{}-{}", rule.port_min, rule.port_max)
+                    };
+                    out.push_str(&format!(
+                        "    ip saddr {} ip daddr {} {} dport {} accept # {}\n",
+                        self_peer.overlay_ip, dst_peer.overlay_ip, l4, port_expr, rule.description
                     ));
                 }
             }
@@ -1372,6 +1447,9 @@ impl MeshManifest {
             "nippur",
             "old-agent",
             "watchtower",
+            "rpc-starknet-id",
+            "utu-lfglabs",
+            "agent-starknet-id",
             "api-starknet-id",
             "sepolia-starknet-id",
             "macbook-air",
@@ -1565,6 +1643,45 @@ impl MeshManifest {
                 expires_at,
             },
             MeshPeer {
+                id: 16,
+                name: "rpc-starknet-id".into(),
+                node_class: NodeClass::FreeCompute,
+                overlay_ip: "10.88.0.16".into(),
+                prefix_len: 32,
+                wg_pubkey: det_wg_pub("rpc-starknet-id"),
+                sign_pubkey_hex: req_sign_pub("rpc-starknet-id")?,
+                endpoint: Some("135.181.75.104:51888".into()),
+                pinned_static: true,
+                revoked: false,
+                expires_at,
+            },
+            MeshPeer {
+                id: 17,
+                name: "utu-lfglabs".into(),
+                node_class: NodeClass::FreeCompute,
+                overlay_ip: "10.88.0.17".into(),
+                prefix_len: 32,
+                wg_pubkey: det_wg_pub("utu-lfglabs"),
+                sign_pubkey_hex: req_sign_pub("utu-lfglabs")?,
+                endpoint: Some("88.99.67.234:51888".into()),
+                pinned_static: true,
+                revoked: false,
+                expires_at,
+            },
+            MeshPeer {
+                id: 18,
+                name: "agent-starknet-id".into(),
+                node_class: NodeClass::FreeCompute,
+                overlay_ip: "10.88.0.18".into(),
+                prefix_len: 32,
+                wg_pubkey: det_wg_pub("agent-starknet-id"),
+                sign_pubkey_hex: req_sign_pub("agent-starknet-id")?,
+                endpoint: Some("51.195.100.33:51888".into()),
+                pinned_static: true,
+                revoked: false,
+                expires_at,
+            },
+            MeshPeer {
                 id: 21,
                 name: "api-starknet-id".into(),
                 node_class: NodeClass::RetiredFree,
@@ -1606,7 +1723,18 @@ impl MeshManifest {
         ];
 
         let mut rules = Vec::new();
-        for worker in ["ashur", "babylon", "nippur", "old-agent", "watchtower"] {
+        // 1. Orb Remote Compute Nodes (`sandboxed-node` `:3088`): only compute workers + dgx-spark.
+        // (`polymath`, `thomas-md`, `maven-repo`, and `watchtower` are RESERVED/SHARED_PROTECTED
+        // non-compute hosts and do not run `sandboxed-node` `:3088`.)
+        for worker in [
+            "ashur",
+            "babylon",
+            "nippur",
+            "old-agent",
+            "rpc-starknet-id",
+            "utu-lfglabs",
+            "agent-starknet-id",
+        ] {
             rules.push(CapabilityRule {
                 src_peer: "agent-core".into(),
                 dst_peer: worker.into(),
@@ -1620,8 +1748,49 @@ impl MeshManifest {
                 dst_peer: "agent-core".into(),
                 proto: MeshProto::Tcp,
                 port_min: 3000,
-                port_max: 3000,
-                description: format!("Worker telemetry & LLM proxy {worker} -> agent-core:3000"),
+                port_max: 3002,
+                description: format!(
+                    "Worker telemetry, LLM proxy & bunker status {worker} -> agent-core:3000-3002"
+                ),
+            });
+            rules.push(CapabilityRule {
+                src_peer: worker.into(),
+                dst_peer: "dgx-spark".into(),
+                proto: MeshProto::Tcp,
+                port_min: 8888,
+                port_max: 8890,
+                description: format!(
+                    "Worker mission Hindsight & spark-memory access {worker} -> dgx-spark:8888-8890"
+                ),
+            });
+        }
+        rules.push(CapabilityRule {
+            src_peer: "agent-core".into(),
+            dst_peer: "dgx-spark".into(),
+            proto: MeshProto::Tcp,
+            port_min: 3088,
+            port_max: 3089,
+            description: "Orb control-plane dispatch & admin agent-core -> dgx-spark:3088-3089"
+                .into(),
+        });
+        // 2. Full-Fleet Orb Security Enrollment (`lean-mesh`, Canary tripwires, Bunker status, Sovereign heartbeat):
+        for peer_to_core in [
+            "dgx-spark",
+            "thomas-md",
+            "polymath",
+            "maven-repo",
+            "watchtower",
+            "macbook-air",
+        ] {
+            rules.push(CapabilityRule {
+                src_peer: peer_to_core.into(),
+                dst_peer: "agent-core".into(),
+                proto: MeshProto::Tcp,
+                port_min: 3000,
+                port_max: 3002,
+                description: format!(
+                    "Fleet security, heartbeat & bunker status {peer_to_core} -> agent-core:3000-3002"
+                ),
             });
         }
         rules.push(CapabilityRule {
@@ -1641,7 +1810,21 @@ impl MeshManifest {
             port_max: 8890,
             description: "Orb control-plane -> dgx-spark Hindsight memory & remarkablesync".into(),
         });
+        // 3. Control-Plane JIT Privileged Broker SSH (`agent-core -> <peer>:22`) & Operator Breakglass SSH (`macbook-air -> <peer>:22`):
         for peer in &peers {
+            if peer.name != "agent-core" {
+                rules.push(CapabilityRule {
+                    src_peer: "agent-core".into(),
+                    dst_peer: peer.name.clone(),
+                    proto: MeshProto::Tcp,
+                    port_min: 22,
+                    port_max: 22,
+                    description: format!(
+                        "Orb JIT privilege broker & sentinel SSH agent-core -> {}:22",
+                        peer.name
+                    ),
+                });
+            }
             if peer.name != "macbook-air" {
                 rules.push(CapabilityRule {
                     src_peer: "macbook-air".into(),
@@ -2038,7 +2221,7 @@ mod tests {
         assert!(
             MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut short_rng).is_err()
         );
-        let mut zero_rng = std::io::Cursor::new(vec![0u8; 32 * 13]);
+        let mut zero_rng = std::io::Cursor::new(vec![0u8; 32 * 16]);
         assert!(
             MeshManifest::paloma_fleet_with_csprng_peers_from(now, &sk, &mut zero_rng).is_err()
         );
@@ -2246,9 +2429,14 @@ mod tests {
             .render_nftables_policy("ashur", BunkerState::Normal, now + 10)
             .unwrap();
         assert!(nft_normal.contains("chain mesh_forward"));
+        assert!(nft_normal.contains("chain mesh_output"));
+        assert!(nft_normal.contains("oifname != \"wg-leanmesh0\" accept"));
         assert!(nft_normal.contains("meta nfproto ipv6 counter drop"));
         assert!(nft_normal.contains("ip saddr 10.88.0.1 ip daddr 10.88.0.11 tcp dport 3088 accept"));
         assert!(nft_normal.contains("ip saddr 10.88.0.100 ip daddr 10.88.0.11 tcp dport 22 accept"));
+        assert!(
+            !nft_normal.contains("ip saddr 10.88.0.11 ip daddr 10.88.0.100 tcp dport 22 accept")
+        );
 
         let nft_lockdown = manifest
             .render_nftables_policy("ashur", BunkerState::HardLockdown, now + 10)

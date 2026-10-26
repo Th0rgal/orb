@@ -964,6 +964,9 @@ impl JobRunner {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&job.id);
         self.clear_dead_since(job.id);
+        if let JobPayload::RawCommand { command, .. } = &job.payload {
+            crate::uploads::cleanup_prompt_uploads(&self.work_root.join("uploads"), command);
+        }
     }
 
     async fn execute(

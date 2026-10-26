@@ -93,3 +93,39 @@ export async function getSkillDelivery(project: string, workspaceId?: string): P
     throw e;
   }
 }
+
+/** Library repo state for the Skills header ("Th0rgal/sandboxed-library · synced 2 min ago"). */
+export interface LibraryStatus {
+  remote?: string;
+  branch: string;
+  clean: boolean;
+  ahead: number;
+  behind: number;
+  modified_files: string[];
+  /** Unix seconds of the last fetch; absent on older cores. */
+  last_synced_at?: number;
+}
+export const getLibraryStatus = () => api<LibraryStatus>("/api/library/status");
+/** Pull from the remote. */
+export const syncLibrary = () => apiText("/api/library/sync", { method: "POST" });
+
+/** Commit the Library and push it, so a save lands in the repo. */
+export async function commitAndPush(message: string): Promise<void> {
+  await apiText("/api/library/commit", { method: "POST", ...json({ message }) });
+  await apiText("/api/library/push", { method: "POST" });
+}
+
+/** "git@github.com:Th0rgal/sandboxed-library.git" → "Th0rgal/sandboxed-library". */
+export function repoLabel(remote?: string): string {
+  if (!remote) return "Library";
+  const m = remote.replace(/\.git$/, "").match(/[:/]([^/:]+\/[^/:]+)$/);
+  return m ? m[1] : remote;
+}
+
+export interface SkillVersion { rev: string; author: string; timestamp: number; subject: string }
+/** Git versions of a skill's SKILL.md; older cores answer 404 (UnsupportedEndpoint). */
+export async function getSkillHistory(name: string): Promise<SkillVersion[]> {
+  try { return await api<SkillVersion[]>(`${skillPath(name)}/history`); }
+  catch (e) { if (isNotFound(e)) throw new UnsupportedEndpoint("history"); throw e; }
+}
+export const getSkillAt = (name: string, rev: string) => apiText(`${skillPath(name)}/history/${enc(rev)}`);

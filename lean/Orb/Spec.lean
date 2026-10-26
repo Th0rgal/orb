@@ -3031,4 +3031,236 @@ theorem client_projection_bitwise_parity_across_ios_android_wasm
   have h3 : decide ((3 : UInt8) ≤ 3) = true := by decide
   simp only [h0, h1, h2, h3, and_self]
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 10: Fleet Security — Canary Blast-Radius Isolation, Process Whitelist,
+--          High-Signal Attacker Bait, Enforcer Convergence & Biometric/Mesh Gates
+-- ═══════════════════════════════════════════════════════════════════════════
+
+structure CanaryTripwireCheck where
+  canaryClass        : UInt8
+  actorTrust         : UInt8
+  isDryRun           : UInt8
+  currentFleetBunker : UInt8
+  deriving Repr, DecidableEq
+
+def CanaryTripwireCheck.RequiresFleetLockdown (c : CanaryTripwireCheck) : Bool :=
+  !(c.isDryRun == 1) && (c.canaryClass >= 1 || (!(c.actorTrust == 0) && !(c.actorTrust == 1)))
+
+set_option linter.unusedSimpArgs false in
+def canaryTripwireLockdownMetaGate : MetaGateSpec CanaryTripwireCheck
+    (fun c => c.RequiresFleetLockdown = true) where
+  gate c :=
+    ((canaryTripwireStep c.canaryClass c.actorTrust c.isDryRun c.currentFleetBunker &&& 0xFFFFFFFF) &&& 512) != 0
+  sound c h := by
+    unfold CanaryTripwireCheck.RequiresFleetLockdown
+    unfold canaryTripwireStep at h
+    rw [pack32_lo] at h
+    cases hd : (c.isDryRun == 1) <;>
+      cases hc : decide (1 ≤ c.canaryClass) <;>
+      cases ha0 : (c.actorTrust == 0) <;>
+      cases ha1 : (c.actorTrust == 1) <;>
+      (simp only [hd, hc, ha0, ha1] at h ⊢; revert h; decide)
+  complete c h := by
+    unfold CanaryTripwireCheck.RequiresFleetLockdown at h
+    unfold canaryTripwireStep
+    rw [pack32_lo]
+    cases hd : (c.isDryRun == 1) <;>
+      cases hc : decide (1 ≤ c.canaryClass) <;>
+      cases ha0 : (c.actorTrust == 0) <;>
+      cases ha1 : (c.actorTrust == 1) <;>
+      (simp only [hd, hc, ha0, ha1] at h ⊢; revert h; decide)
+  posWitness := ⟨1, 0, 0, 0⟩
+  negWitness := ⟨0, 1, 0, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 70 (`ScopedAuthority` — `canaryTripwireStep`, Whitelisted Agent Walk Never Triggers Bunker):
+    When a whitelisted agent process (`actorTrust = 0`, e.g., `rg`, `fd`, `find`, `ls`, `git`) touches
+    an ambient decoy (`canaryClass = 0`, e.g., `.env.production.canary` or `.vault-recovery.age`),
+    neither node quarantine (`bit 8 = 256`) nor fleet lockdown (`bit 9 = 512`) is triggered,
+    and `nextFleetBunker = 0` (`hi32 = 0`) when starting from `Normal (0)`. -/
+theorem canary_whitelisted_ambient_no_bunker :
+    canaryTripwireStep 0 0 0 0 = 0 ∧
+    ((canaryTripwireStep 0 0 0 0 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((canaryTripwireStep 0 0 0 0 &&& 0xFFFFFFFF) &&& 512) = 0 ∧
+    (canaryTripwireStep 0 0 0 0 >>> 32) = 0 := by
+  decide
+
+/-- Corollary 71 (`ScopedAuthority` — `canaryTripwireStep`, Single Mission Honeytoken Read Quarantines Node Only):
+    When a mission job process (`actorTrust = 1`) reads an ambient decoy (`canaryClass = 0`,
+    e.g., `.env.production.canary`), the step returns `action = 1 (QuarantineNodeOnly)` (`bit 8 = 256`
+    quarantines ONLY the reporting node), while `fleetLockdownBit = 0` (`bit 9 = 512`) and
+    `nextFleetBunker` (`hi32`) stays `0 (Normal)` — never locking down the entire fleet. -/
+theorem canary_mission_ambient_node_only :
+    ((canaryTripwireStep 0 1 0 0 &&& 0xFFFFFFFF) &&& 0xFF) = 1 ∧
+    ((canaryTripwireStep 0 1 0 0 &&& 0xFFFFFFFF) &&& 256) = 256 ∧
+    ((canaryTripwireStep 0 1 0 0 &&& 0xFFFFFFFF) &&& 512) = 0 ∧
+    (canaryTripwireStep 0 1 0 0 >>> 32) = 0 := by
+  decide
+
+/-- Corollary 72 (`StickyFence` — `canaryTripwireStep`, High-Signal Attacker Bait Always Locks Down Fleet Even From Own Agent):
+    Accessing high-signal attacker bait (`canaryClass >= 1`, e.g., fake Bitcoin private key / seed wallet
+    `btc_wallet_canary` or `ssh_exfil_canary`) ALWAYS escalates to fleet `HardLockdown (2)` (`lo32 = 1794`,
+    `action = 2`, `quarantineBit = 256`, `lockdownBit = 512`, `hi32 = 2`), EVEN when the actor is a
+    whitelisted agent walk (`actorTrust = 0`) or mission process (`actorTrust = 1`). -/
+theorem canary_high_signal_bait_always_locks_down
+    (canaryClass actorTrust currentBunker : UInt8)
+    (h_bait : 1 ≤ canaryClass) :
+    (canaryTripwireStep canaryClass actorTrust 0 currentBunker &&& 0xFFFFFFFF) = 1794 ∧
+    (canaryTripwireStep canaryClass actorTrust 0 currentBunker >>> 32) = 2 := by
+  have hc : decide (1 ≤ canaryClass) = true := decide_eq_true h_bait
+  refine ⟨?_, ?_⟩
+  · unfold canaryTripwireStep
+    rw [pack32_lo]
+    simp [hc]
+  · unfold canaryTripwireStep
+    rw [pack32_hi]
+    simp [hc]
+
+def canaryTripwireMachineStep (curBunker : UInt8) (e : CanaryTripwireCheck) : UInt8 × List UInt8 :=
+  let e' : CanaryTripwireCheck := { e with currentFleetBunker := curBunker }
+  let lock := canaryTripwireLockdownMetaGate.gate e'
+  (if lock then 2 else curBunker, if lock then [2] else [])
+
+/-- Concrete `MetaStepSpec` instance #7 for Wave 10 (`canaryTripwireStep`). -/
+def canaryTripwireMetaStepSpec : MetaStepSpec UInt8 CanaryTripwireCheck UInt8 where
+  safety := {
+    step := canaryTripwireMachineStep
+    authorized := fun s e eff =>
+      eff == 2 && ({ e with currentFleetBunker := s } : CanaryTripwireCheck).RequiresFleetLockdown
+    sound := fun s e eff h_in => by
+      dsimp [canaryTripwireMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := canaryTripwireLockdownMetaGate.sound { e with currentFleetBunker := s } h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := 0
+    step := canaryTripwireMachineStep
+    progressRequired := fun s e => ({ e with currentFleetBunker := s } : CanaryTripwireCheck).RequiresFleetLockdown
+    expectedEffect := fun _ eff => eff == 2
+    live := fun s e h_req => by
+      have h_gate := canaryTripwireLockdownMetaGate.complete { e with currentFleetBunker := s } h_req
+      dsimp [canaryTripwireMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0, 0, 0, 0⟩, ⟨0, 1, 0, 0⟩]
+    posEvent := ⟨1, 0, 0, 0⟩
+    negEvent := ⟨0, 1, 0, 0⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := canaryTripwireMachineStep
+    cpuFuel := fun _ _ => 1
+    inputBytes := fun _ => 4
+    outputBytes := fun _ _ => 4
+    c0 := 1
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 4
+    fuel_bound := fun _ _ => by omega
+    eff_bound := fun s e => by
+      dsimp [canaryTripwireMachineStep]
+      split <;> simp
+    out_bound := fun _ _ => by omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Corollary 73 (`ClockDiscipline` — `bunkerEnforcerStep`, Worker Enforcer Converges to Normal on Unbunker):
+    When status is reachable (`statusReachable = 1`), fleet bunker is below lockdown (`¬ (2 ≤ fleetBunker)`),
+    the node is not individually quarantined (`nodeQuarantinedByCore = 0`), and `lastUnbunkerEpoch ≥ localTripEpoch`,
+    the enforcer releases quarantine (`bit 8 = 0`) and clears any local trip marker (`bit 9 = 512` when `hasMarker = 1`). -/
+theorem bunker_enforcer_converges_on_unbunker
+    (fleetBunker hasMarker : UInt8) (localTripEpoch lastUnbunkerEpoch : UInt64)
+    (h_norm : ¬ (2 ≤ fleetBunker))
+    (h_unbunkered : localTripEpoch ≤ lastUnbunkerEpoch) :
+    (bunkerEnforcerStep 1 fleetBunker 0 hasMarker localTripEpoch lastUnbunkerEpoch &&& 256) = 0 := by
+  have hf : decide (2 ≤ fleetBunker) = false := decide_eq_false h_norm
+  have hu : decide (localTripEpoch ≤ lastUnbunkerEpoch) = true := decide_eq_true h_unbunkered
+  unfold bunkerEnforcerStep
+  cases hm : (hasMarker == 0) <;> cases hm1 : (hasMarker == 1) <;>
+    (simp only [hf, hu, hm, hm1]; decide)
+
+/-- Corollary 74 (`ScopedAuthority` — `biometricGateStep`, Mobile Biometric Gate Never Fails Open):
+    When `surfaceRequiresBio = 1` and neither hardware biometric evaluation (`hardwareEnrolled == 1 && evalSucceeded == 1`)
+    nor passcode fallback (`hardwareEnrolled == 0 && passcodeFallbackSucceeded == 1`) succeeded,
+    `biometricGateStep` rejects the action (`admittedBit = 0`) and sets `surfaceErrorBit = 512`. -/
+theorem biometric_gate_never_fails_open
+    (hwEnrolled evalOk fallbackOk : UInt8)
+    (h_no_bio : ¬ (hwEnrolled == 1 && evalOk == 1) = true)
+    (h_no_fb : ¬ (hwEnrolled == 0 && fallbackOk == 1) = true) :
+    biometricGateStep 1 hwEnrolled evalOk fallbackOk = 512 := by
+  unfold biometricGateStep
+  cases hb : (hwEnrolled == 1 && evalOk == 1)
+  · cases hf : (hwEnrolled == 0 && fallbackOk == 1)
+    · rfl
+    · exact False.elim (h_no_fb hf)
+  · exact False.elim (h_no_bio hb)
+
+/-- Corollary 75 (`GrammarConfinement` — `meshServiceRouteStep`, Retired Tailscale CGNAT Endpoint Always Rejected):
+    Any internal service request targeting a retired Tailscale CGNAT address (`endpointInRetiredTailnet = 1`)
+    is rejected (`512`, `admittedBit = 0`) regardless of overlay/auth flags, preventing 5000ms timeouts on
+    retired addresses such as `100.77.4.93:8000`. -/
+theorem mesh_service_route_rejects_retired_tailnet
+    (overlay auth loopback : UInt8) :
+    meshServiceRouteStep overlay 1 auth loopback = 512 := by
+  rfl
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 11: SOC 2 Type I Compliance Proofs — 3-Key SSH & macOS Remote Login,
+--          Off-Host B2 Audit Log Shipper, and OS Lifecycle / Boundary Scope
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/-- Corollary 76 (`ScopedAuthority` — `soc2SshHostKeyPolicyStep`, SOC 2 CC6.1/CC6.6 3-Key & Key-Only SSH):
+    Any host that retains the shared legacy `paloma` key (`hasSharedLegacyKey = 1`), retains a provisioning
+    `ssh-rsa` key (`hasProvisioningRsaKey = 1`), stores a fleet private key on a worker (`workerHasFleetPrivateKey = 1`),
+    or leaves password / keyboard-interactive authentication enabled (`passwordAuthDisabled = 0` or
+    `kbdInteractiveDisabled = 0`, e.g. unhardened macOS Remote Login) is strictly rejected (`512`),
+    while a hardened 3-key host (`1, 1, 1, 0, 0, 0, 1, 1, 1`) is admitted (`257`). -/
+theorem soc2_ssh_host_key_policy_enforces_three_key_and_no_password
+    (yubi brk uniq leg rsa priv pw kbd rootPw : UInt8) :
+    soc2SshHostKeyPolicyStep yubi brk uniq 1 rsa priv pw kbd rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep yubi brk uniq leg 1 priv pw kbd rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep yubi brk uniq leg rsa 1 pw kbd rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep yubi brk uniq leg rsa priv 0 kbd rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep yubi brk uniq leg rsa priv pw 0 rootPw = 512 ∧
+    soc2SshHostKeyPolicyStep 1 1 1 0 0 0 1 1 1 = 257 := by
+  unfold soc2SshHostKeyPolicyStep
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 77 (`ConservedResource` & `ScopedAuthority` — `soc2AuditShipperStep`, SOC 2 CC7.2/C1.1 Off-Host B2 Audit Sink):
+    Unredacted logs (`secretsRedacted = 0`), missing Object-Lock/append-only mode (`objectLockOrAppendOnly = 0`),
+    unverified SHA-256 digests (`sha256DigestVerified = 0`), empty batches (`batchBytes = 0`), and oversized
+    batches (`batchBytes > maxBatchBytes`) are unconditionally rejected (`512`). -/
+theorem soc2_audit_shipper_requires_redaction_object_lock_and_bounds
+    (b2 lock red sha : UInt8) (bytes maxBytes : UInt64) :
+    soc2AuditShipperStep b2 0 red sha bytes maxBytes = 512 ∧
+    soc2AuditShipperStep b2 lock 0 sha bytes maxBytes = 512 ∧
+    soc2AuditShipperStep b2 lock red 0 bytes maxBytes = 512 ∧
+    soc2AuditShipperStep b2 lock red sha 0 maxBytes = 512 ∧
+    soc2AuditShipperStep 1 1 1 1 4096 65536 = 257 := by
+  unfold soc2AuditShipperStep
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 78 (`ScopedAuthority` — `soc2HostScopeStep`, SOC 2 CC7.1/CC6.8 EOL OS & Mesh Egress Boundary):
+    1. Any in-scope host on an EOL OS (`osSupportedLts = 0`, e.g. Ubuntu 23.04 `watchtower` before upgrade)
+       or missing `chain mesh_output` (`meshOutputEgressFilterActive = 0`) is rejected (`512`).
+    2. Any out-of-scope retiring host (`isOutOfScopeDecommission = 1`) that is enrolled in `lean-mesh`
+       (`enrolledInLeanMesh = 1`) or holds fleet credentials (`holdsFleetCredentials = 1`) is rejected (`512`).
+    3. Both compliant in-scope peers (`0, 1, 1, 1, 1, c -> 257`) and fenced out-of-scope retiring hosts
+       (`1, lts, uu, 0, eg, 0 -> 258`) are admitted. -/
+theorem soc2_host_scope_rejects_eol_os_missing_egress_or_unfenced_legacy
+    (lts uu mesh eg cred : UInt8) :
+    soc2HostScopeStep 0 0 uu mesh eg cred = 512 ∧
+    soc2HostScopeStep 0 lts uu mesh 0 cred = 512 ∧
+    soc2HostScopeStep 1 lts uu 1 eg cred = 512 ∧
+    soc2HostScopeStep 1 lts uu mesh eg 1 = 512 ∧
+    soc2HostScopeStep 0 1 1 1 1 cred = 257 ∧
+    soc2HostScopeStep 1 lts uu 0 eg 0 = 258 := by
+  unfold soc2HostScopeStep
+  repeat (first | constructor | split | decide | simp_all)
+
 end Orb.Spec

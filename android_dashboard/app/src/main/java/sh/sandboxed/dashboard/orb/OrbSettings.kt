@@ -84,6 +84,7 @@ import kotlin.math.roundToInt
 
 enum class OrbSettingsRoute {
     Root,
+    Section,
     Fido,
     Backend,
     Providers,
@@ -93,6 +94,7 @@ enum class OrbSettingsRoute {
     Bitwarden,
     Dictation,
     SideQuestions,
+    Usage,
     DebugInfo
 }
 
@@ -105,12 +107,32 @@ fun OrbSettingsSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var route by remember { mutableStateOf(initialRoute) }
+    var section by remember { mutableStateOf(OrbSettingsSection.of(initialRoute)) }
+    // A page returns to its section; the section returns to the list.
+    val back = { route = if (route != OrbSettingsRoute.Section && section != null) OrbSettingsRoute.Section else OrbSettingsRoute.Root }
     val pendingSecrets by core.pendingSecretRequests.collectAsState()
     val settingsContext = LocalContext.current
     remember(settingsContext) { OrbBtwSettings.init(settingsContext); true }
     val baseURL by core.baseURLFlow.collectAsState()
     val providers by core.providers.collectAsState()
     val nodes by core.nodes.collectAsState()
+    var bunkerActive by remember { mutableStateOf(false) }
+    var deviceEnrolled by remember { mutableStateOf(true) }
+    var quotaExhausted by remember { mutableStateOf(false) }
+    val attention = OrbSettingsSection.attention(bunkerActive, deviceEnrolled, quotaExhausted)
+    LaunchedEffect(baseURL) {
+        runCatching { (OrbJSON.dict(core.request("/api/privilege-access"))?.get("bunker_state") as? Number)?.toInt() ?: 0 }
+            .onSuccess { bunkerActive = it > 0 }
+        runCatching {
+            val mine = OrbApprovalKey.publicKey()
+            val devices = OrbJSON.dictList(OrbJSON.dict(core.request("/api/approvals/devices"))?.get("devices"))
+            mine == null || devices.any { it["public_key"] == mine }
+        }.onSuccess { deviceEnrolled = it }
+        runCatching {
+            val entries = OrbJSON.dict(core.fetchDict("/api/ai/providers/usage")["entries"]) ?: emptyMap()
+            entries.values.any { v -> quotaStatus(providerQuotaWindows(OrbJSON.dict(v)))?.level == OrbQuotaLevel.Exhausted }
+        }.onSuccess { quotaExhausted = it }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -159,121 +181,59 @@ fun OrbSettingsSheet(
                             )
                         }
 
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(OrbStyle.surface)
-                                .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
-                        ) {
-                            OrbSettingsRow(
-                                icon = Icons.Default.Dns,
-                                title = "Backend",
-                                subtitle = baseURL.ifEmpty { "Not connected" },
-                                onClick = { route = OrbSettingsRoute.Backend }
-                            )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
-                            )
-                            OrbSettingsRow(
-                                icon = Icons.Default.Key,
-                                title = "Providers",
-                                subtitle = "${providers.size} configured",
-                                onClick = { route = OrbSettingsRoute.Providers }
-                            )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
-                            )
-                            OrbSettingsRow(
-                                icon = Icons.Default.Memory,
-                                title = "Machines",
-                                subtitle = "${nodes.size} nodes",
-                                onClick = { route = OrbSettingsRoute.Machines }
-                            )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
-                            )
-                            val inboxSubtitle = if (OrbInboxSettings.aiSummary) {
-                                "AI Overview · ${OrbInboxSettings.model}"
-                            } else {
-                                "AI Overview off"
+                        OrbSettingsGroup {
+                            OrbSettingsSection.entries.forEachIndexed { i, sec ->
+                                if (i > 0) HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 52.dp))
+                                OrbSettingsRow(
+                                    icon = sectionIcon(sec),
+                                    title = sec.label,
+                                    subtitle = if (sec == OrbSettingsSection.Security && pendingSecrets > 0) {
+                                        "$pendingSecrets access request${if (pendingSecrets == 1) "" else "s"} waiting"
+                                    } else sec.subtitle,
+                                    attention = sec in attention,
+                                    onClick = { section = sec; route = OrbSettingsRoute.Section }
+                                )
                             }
-                            OrbSettingsRow(
-                                icon = Icons.Default.Terminal,
-                                title = "Inbox",
-                                subtitle = inboxSubtitle,
-                                onClick = { route = OrbSettingsRoute.Inbox }
+                        }
+                    }
+                }
+                OrbSettingsRoute.Section -> {
+                    val sec = section ?: OrbSettingsSection.Account
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                            .padding(horizontal = 20.dp, vertical = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = Color.White,
+                                modifier = Modifier.clip(CircleShape).orbPressClickable { section = null; route = OrbSettingsRoute.Root }.padding(8.dp)
                             )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
+                            Text(
+                                text = sec.label,
+                                color = Color.White,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
                             )
-                            OrbSettingsRow(
-                                icon = Icons.Default.Lock,
-                                title = "Secrets",
-                                subtitle = if (pendingSecrets > 0) {
-                                    "$pendingSecrets access request${if (pendingSecrets == 1) "" else "s"} waiting"
-                                } else {
-                                    "Mission requests and approval devices"
-                                },
-                                onClick = { route = OrbSettingsRoute.Secrets }
-                            )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
-                            )
-                            OrbSettingsRow(
-                                icon = Icons.Default.Key,
-                                title = "Bitwarden vault",
-                                subtitle = "Token, default project, secrets, default access",
-                                onClick = { route = OrbSettingsRoute.Bitwarden }
-                            )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
-                            )
-                            OrbSettingsRow(
-                                icon = Icons.Default.Lock,
-                                title = "SSH signing",
-                                subtitle = "Biometric approvals · trust window ${OrbFidoSettings.trust.minutes.let { if (it <= 0) "off" else "$it min" }}",
-                                onClick = { route = OrbSettingsRoute.Fido }
-                            )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
-                            )
-                            OrbSettingsRow(
-                                icon = Icons.Default.Mic,
-                                title = "Dictation",
-                                subtitle = OrbDictationSettings.stored.let {
-                                    if (it.isEmpty()) "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})"
-                                    else OrbDictationSettings.name(it)
-                                },
-                                onClick = { route = OrbSettingsRoute.Dictation }
-                            )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
-                            )
-                            OrbSettingsRow(
-                                icon = Icons.Default.Psychology,
-                                title = "Side questions",
-                                subtitle = "${serviceName(OrbBtwSettings.harness)} · ${OrbBtwSettings.model}",
-                                onClick = { route = OrbSettingsRoute.SideQuestions }
-                            )
-                            HorizontalDivider(
-                                color = OrbStyle.border,
-                                modifier = Modifier.padding(start = 52.dp)
-                            )
-                            OrbSettingsRow(
-                                icon = Icons.Default.Info,
-                                title = "Debug info",
-                                subtitle = "Version, endpoint, recent errors",
-                                onClick = { route = OrbSettingsRoute.DebugInfo }
-                            )
+                            Spacer(modifier = Modifier.width(40.dp))
+                        }
+                        Text(text = sec.subtitle, color = OrbStyle.textMuted, fontSize = 13.sp)
+                        OrbSettingsGroup {
+                            sec.pages.forEachIndexed { i, (_, label, target) ->
+                                if (i > 0) HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 52.dp))
+                                OrbSettingsRow(
+                                    icon = sectionIcon(sec),
+                                    title = label,
+                                    subtitle = pageSubtitle(target, baseURL, providers.size, nodes.size),
+                                    onClick = { route = target }
+                                )
+                            }
                         }
                     }
                 }
@@ -281,51 +241,54 @@ fun OrbSettingsSheet(
                     OrbSetupView(
                         core = core,
                         title = "Backend",
-                        onBack = { route = OrbSettingsRoute.Root },
-                        onConnected = { route = OrbSettingsRoute.Root }
+                        onBack = back,
+                        onConnected = back
                     )
                 }
                 OrbSettingsRoute.Providers -> {
                     OrbProvidersSettingsPage(
                         core = core,
-                        onBack = { route = OrbSettingsRoute.Root }
+                        onBack = back
                     )
                 }
                 OrbSettingsRoute.Secrets -> {
                     OrbSecretsSettingsPage(
                         core = core,
-                        onBack = { route = OrbSettingsRoute.Root }
+                        onBack = back
                     )
                 }
                 OrbSettingsRoute.Machines -> {
                     OrbMachinesSettingsPage(
                         core = core,
-                        onBack = { route = OrbSettingsRoute.Root }
+                        onBack = back
                     )
                 }
                 OrbSettingsRoute.Inbox -> {
                     OrbInboxSettingsPage(
-                        onBack = { route = OrbSettingsRoute.Root }
+                        onBack = back
                     )
                 }
                 OrbSettingsRoute.Bitwarden -> {
                     OrbBitwardenSettingsPage(
                         core = core,
-                        onBack = { route = OrbSettingsRoute.Root },
+                        onBack = back,
                         onOpenRequests = { route = OrbSettingsRoute.Secrets }
                     )
                 }
                 OrbSettingsRoute.Fido -> {
-                    OrbFidoSettingsPage(onBack = { route = OrbSettingsRoute.Root })
+                    OrbFidoSettingsPage(onBack = back)
                 }
                 OrbSettingsRoute.Dictation -> {
-                    OrbDictationSettingsPage(onBack = { route = OrbSettingsRoute.Root })
+                    OrbDictationSettingsPage(onBack = back)
                 }
                 OrbSettingsRoute.SideQuestions -> {
-                    OrbBtwSettingsPage(onBack = { route = OrbSettingsRoute.Root })
+                    OrbBtwSettingsPage(onBack = back)
+                }
+                OrbSettingsRoute.Usage -> {
+                    OrbUsageSettingsPage(core = core, onBack = back)
                 }
                 OrbSettingsRoute.DebugInfo -> {
-                    OrbDebugInfoPage(core = core, onBack = { route = OrbSettingsRoute.Root })
+                    OrbDebugInfoPage(core = core, onBack = back)
                 }
             }
         }
@@ -333,10 +296,47 @@ fun OrbSettingsSheet(
 }
 
 @Composable
+private fun OrbSettingsGroup(content: @Composable () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(OrbStyle.surface)
+            .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+    ) { content() }
+}
+
+private fun sectionIcon(section: OrbSettingsSection): ImageVector = when (section) {
+    OrbSettingsSection.Account -> Icons.Default.Dns
+    OrbSettingsSection.Models -> Icons.Default.Key
+    OrbSettingsSection.Agents -> Icons.Default.Psychology
+    OrbSettingsSection.Security -> Icons.Default.Lock
+    OrbSettingsSection.Notifications -> Icons.Default.Terminal
+}
+
+private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: Int, nodes: Int): String = when (route) {
+    OrbSettingsRoute.Backend -> baseURL.ifEmpty { "Not connected" }
+    OrbSettingsRoute.Providers -> "$providers configured"
+    OrbSettingsRoute.Machines -> "$nodes nodes"
+    OrbSettingsRoute.Inbox -> if (OrbInboxSettings.aiSummary) "AI Overview · ${OrbInboxSettings.model}" else "AI Overview off"
+    OrbSettingsRoute.Secrets -> "Approval devices, Fleet Bunker Mode, privileged and mission access"
+    OrbSettingsRoute.Bitwarden -> "Token, default project, secrets, default access"
+    OrbSettingsRoute.Fido -> "Biometric approvals · trust window ${OrbFidoSettings.trust.minutes.let { if (it <= 0) "off" else "$it min" }}"
+    OrbSettingsRoute.Dictation -> OrbDictationSettings.stored.let {
+        if (it.isEmpty()) "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})" else OrbDictationSettings.name(it)
+    }
+    OrbSettingsRoute.SideQuestions -> "${serviceName(OrbBtwSettings.harness)} · ${OrbBtwSettings.model}"
+    OrbSettingsRoute.DebugInfo -> "Logs, version, endpoint, recent errors"
+    OrbSettingsRoute.Usage -> "Spend over time and top missions"
+    else -> ""
+}
+
+@Composable
 private fun OrbSettingsRow(
     icon: ImageVector,
     title: String,
     subtitle: String,
+    attention: Boolean = false,
     onClick: () -> Unit
 ) {
     Row(
@@ -369,6 +369,15 @@ private fun OrbSettingsRow(
                 fontSize = 12.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (attention) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFFE5484D))
+                    .semantics { contentDescription = "Needs attention" }
             )
         }
         Icon(
