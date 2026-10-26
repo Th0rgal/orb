@@ -56,6 +56,8 @@ pub struct ApprovalItem {
     pub created_at: DateTime<Utc>,
     /// SHA-256 over every field that changes what approving grants.
     pub digest: String,
+    /// The kind's own request as its list endpoint shows it, for labels.
+    pub request: Value,
     #[serde(skip)]
     pub risk_tier: ApprovalRisk,
 }
@@ -94,6 +96,7 @@ impl ApprovalItem {
         reason: &str,
         created_at: DateTime<Utc>,
         extra: &[&str],
+        request: Value,
     ) -> Self {
         let mut fields = vec![tier, target.as_str()];
         fields.extend_from_slice(extra);
@@ -109,6 +112,7 @@ impl ApprovalItem {
             risk_tier: risk,
             reason: reason.into(),
             created_at,
+            request,
         }
     }
 
@@ -133,6 +137,7 @@ impl ApprovalItem {
                 &r.ttl_minutes.to_string(),
                 if r.session_scoped { "session" } else { "fixed" },
             ],
+            json!(r),
         )
     }
 
@@ -166,6 +171,7 @@ impl ApprovalItem {
                 // A write is pinned to the value it would store.
                 r.value_sha256.as_deref().unwrap_or(""),
             ],
+            r.public(),
         )
     }
 
@@ -181,6 +187,7 @@ impl ApprovalItem {
             &r.reason,
             r.created_at,
             &[&r.ttl_hours.to_string()],
+            json!(r),
         )
     }
 }
