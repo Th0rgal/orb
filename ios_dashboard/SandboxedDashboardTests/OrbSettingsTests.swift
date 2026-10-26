@@ -43,6 +43,22 @@ final class OrbSettingsTests: XCTestCase {
             XCTAssertEqual(Set(got.map(\.rawValue)), Set(c["expected"] as? [String] ?? []), c["name"] as? String ?? "?")
         }
     }
+    func testSkillsRepoLineNamesTheRepoAndSyncAge() {
+        let status = OrbJSON.object(["remote": .string("git@github.com:Th0rgal/sandboxed-library.git"), "last_synced_at": .number(1_000)])
+        XCTAssertEqual(OrbSkillsSettings.repoLine(status, now: 1_120), "Th0rgal/sandboxed-library · synced 2m ago")
+        XCTAssertEqual(OrbSkillsSettings.repoLine(.object(["remote": .string("https://github.com/Th0rgal/sandboxed-library")]), now: 0), "Th0rgal/sandboxed-library · not synced yet")
+        XCTAssertEqual(OrbSkillsSettings.repoLine(nil), "Library")
+    }
+    func testUsageSpendPerDayAndTopMissionsByCost() {
+        let s = OrbJSON.object([
+            "by_day": .array([.object(["day": .string("2026-10-25"), "cost_cents": .number(250)]), .object(["day": .string("2026-10-26"), "cost_cents": .number(1200)])]),
+            "by_mission": .array([.object(["key": .string("a"), "label": .string("Cheap"), "cost_cents": .number(10), "requests": .number(2)]),
+                                  .object(["key": .string("b"), "label": .string("Pricey"), "cost_cents": .number(900), "requests": .number(40)])]),
+        ])
+        XCTAssertEqual(OrbUsageSettings.days(s).map(\.usd), [2.5, 12])
+        XCTAssertEqual(OrbUsageSettings.days(s).map(\.label), ["10-25", "10-26"])
+        XCTAssertEqual(OrbUsageSettings.topMissions(s).map(\.name), ["Pricey", "Cheap"])
+    }
     func testQuotaExhaustedLabelMatchesSharedSpec() throws {
         let spec = try OrbSpec.json("fixtures/quota-exhausted.json")
         let cases = try XCTUnwrap(spec["cases"] as? [[String: Any]])

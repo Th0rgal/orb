@@ -9,7 +9,7 @@ package sh.sandboxed.dashboard.orb
  */
 enum class OrbSettingsSection(val id: String, val label: String, val subtitle: String) {
     Account("account", "Account", "Your server connection, connected accounts and how Orb looks."),
-    Models("models", "Models", "Which models agents use and in what order when a provider is unavailable."),
+    Models("models", "Models", "Fallback order, provider health, usage over time and API keys."),
     Agents("agents", "Agents", "What agents know and can do, the Assistant, and the agents on this computer."),
     Security("security", "Security", "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets."),
     Notifications("notifications", "Notifications", "What reaches your Inbox and when Orb tells you.");
@@ -22,7 +22,10 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
                 Triple("dictation", "Dictation", OrbSettingsRoute.Dictation),
                 Triple("debug", "Advanced", OrbSettingsRoute.DebugInfo),
             )
-            Models -> listOf(Triple("providers", "Providers", OrbSettingsRoute.Providers))
+            Models -> listOf(
+                Triple("providers", "Providers", OrbSettingsRoute.Providers),
+                Triple("usage-settings", "Usage", OrbSettingsRoute.Usage),
+            )
             Agents -> listOf(
                 Triple("btw-settings", "Quick questions (/btw)", OrbSettingsRoute.SideQuestions),
                 Triple("machines", "Machines", OrbSettingsRoute.Machines),

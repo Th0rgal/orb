@@ -15,6 +15,12 @@ struct OrbSettingsClient {
         try Task.checkCancellation()
         return result
     }
+    func callText(_ path: String, method: String = "GET", body: OrbJSON? = nil) async throws -> String {
+        guard current else { throw CancellationError() }
+        let result = try await OrbCore.shared.callText(path, method: method, body: body)
+        guard current else { throw CancellationError() }
+        return result
+    }
 }
 
 extension OrbJSON {

@@ -94,6 +94,7 @@ enum class OrbSettingsRoute {
     Bitwarden,
     Dictation,
     SideQuestions,
+    Usage,
     DebugInfo
 }
 
@@ -283,6 +284,9 @@ fun OrbSettingsSheet(
                 OrbSettingsRoute.SideQuestions -> {
                     OrbBtwSettingsPage(onBack = back)
                 }
+                OrbSettingsRoute.Usage -> {
+                    OrbUsageSettingsPage(core = core, onBack = back)
+                }
                 OrbSettingsRoute.DebugInfo -> {
                     OrbDebugInfoPage(core = core, onBack = back)
                 }
@@ -323,6 +327,7 @@ private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: In
     }
     OrbSettingsRoute.SideQuestions -> "${serviceName(OrbBtwSettings.harness)} · ${OrbBtwSettings.model}"
     OrbSettingsRoute.DebugInfo -> "Logs, version, endpoint, recent errors"
+    OrbSettingsRoute.Usage -> "Spend over time and top missions"
     else -> ""
 }
 

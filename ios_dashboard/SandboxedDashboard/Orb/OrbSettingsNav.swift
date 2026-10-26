@@ -21,7 +21,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .account: "Your server connection, connected accounts and how Orb looks."
-        case .models: "Which models agents use and in what order when a provider is unavailable."
+        case .models: "Fallback order, provider health, usage over time and API keys."
         case .agents: "What agents know and can do, the Assistant, and the agents on this computer."
         case .security: "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets."
         case .notifications: "What reaches your Inbox and when Orb tells you."
@@ -40,7 +40,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
     var pages: [(id: String, label: String)] {
         switch self {
         case .account: [("settings", "Account"), ("dictation", "Dictation"), ("debug", "Advanced")]
-        case .models: [("routing", "Routing"), ("providers", "Providers"), ("proxy-keys", "Proxy API keys")]
+        case .models: [("routing", "Fallback Chains"), ("providers", "Providers"), ("usage-settings", "Usage"), ("routing-keys", "API Keys")]
         case .agents: [("skills-settings", "Skills"), ("hermes-settings", "Assistant"), ("btw-settings", "Quick questions (/btw)"), ("machines", "Machines")]
         case .security: [("security-settings", "Access"), ("mission-access", "Mission access"), ("bitwarden-settings", "Secrets vault")]
         case .notifications: [("inbox-settings", "Notifications")]
@@ -112,7 +112,8 @@ struct OrbSettingsHome: View {
         case "debug": OrbDebugInfoView()
         case "routing": OrbRoutingSettings()
         case "providers": OrbProvidersSettings()
-        case "proxy-keys": OrbProxyKeysSettings()
+        case "routing-keys": OrbProxyKeysSettings()
+        case "usage-settings": OrbUsageSettings()
         case "skills-settings": OrbSkillsSettings()
         case "hermes-settings": OrbHermesSettings()
         case "btw-settings": OrbBtwSettingsView()
