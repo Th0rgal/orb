@@ -2674,7 +2674,7 @@ mod tests {
             dry_run: false,
             detail_sha256_hex: "ABCD".repeat(16),
             signature_hex: "22".repeat(64),
-            reason: None,
+            reason: "TCP probe".into(),
             pid: None,
             uid: None,
             cgroup: None,
