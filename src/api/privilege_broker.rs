@@ -181,6 +181,7 @@ fn read_only_option_allowed(prog: &str, arg: &str) -> bool {
 /// `EnvironmentConfinement`, `NoPrivilegeEscalation`, `AuditCompleteness`) over
 /// live runtime command / argv / cwd / environment inputs and record the decision
 /// in `privd_command_shadow_counter()`.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_privd_command_confinement(
     lease_valid: bool,
     grant_scope: PrivilegeScope,
