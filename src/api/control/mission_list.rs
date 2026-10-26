@@ -554,7 +554,11 @@ pub async fn list_missions(
             .await
             .map_err(internal_error)?;
         populate_workspace_names(&state, &mut page).await;
-        page
+        if filter.attention_only {
+            crate::api::mission_store::reconcile_sidebar_missions_page(&[], &page, false)
+        } else {
+            page
+        }
     } else {
         const PAGE: usize = 200;
         // Bounds how many STORE-FILTERED candidates we resolve workspace names
@@ -576,6 +580,7 @@ pub async fn list_missions(
                 .map_err(internal_error)?;
             let page_len = page.len();
             populate_workspace_names(&state, &mut page).await;
+            let mut page_matches = Vec::new();
             for m in page {
                 let keep = match (workspace_raw, workspace_lower.as_deref()) {
                     (Some(raw), Some(lower)) => {
@@ -587,6 +592,17 @@ pub async fn list_missions(
                     _ => true,
                 };
                 if keep {
+                    page_matches.push(m);
+                }
+            }
+            if filter.attention_only {
+                matched = crate::api::mission_store::reconcile_sidebar_missions_page(
+                    &matched,
+                    &page_matches,
+                    true,
+                );
+            } else {
+                for m in page_matches {
                     matched.push(m);
                     if matched.len() >= want {
                         break;
@@ -1034,6 +1050,7 @@ pub(super) async fn populate_activity(control: &ControlState, missions: &mut [Mi
         }
     };
     let now = chrono::Utc::now();
+    let capacity = control.dispatch_capacity.read().await.clone();
     for mission in missions.iter_mut() {
         if let Some((last_event, last_output)) = activity.get(&mission.id) {
             mission.activity.last_agent_event_at = last_event.clone();
@@ -1060,10 +1077,27 @@ pub(super) async fn populate_activity(control: &ControlState, missions: &mut [Mi
             .map(|ts| (now - ts.with_timezone(&chrono::Utc)).num_seconds().max(0) as u64);
         mission.activity.idle_seconds = idle_seconds;
         mission.activity.idle_for = idle_seconds.map(humanize_idle);
+        mission.activity.queue_wait =
+            super::dispatch_capacity::queue_wait_for(mission, capacity.as_ref(), now);
         mission.activity.health_verdict = idle_seconds
-            .and_then(|idle| mission_health_verdict(mission.status, idle))
+            .and_then(|idle| {
+                activity_verdict(mission.status, idle, mission.activity.queue_wait.as_ref())
+            })
             .map(str::to_string);
     }
+}
+
+/// `mission_health_verdict`, except a mission waiting for a parallel slot
+/// reads `waiting_for_slot`: waiting its turn is not stuck, however long.
+pub(crate) fn activity_verdict(
+    status: MissionStatus,
+    idle_seconds: u64,
+    queue_wait: Option<&super::super::mission_store::QueueWait>,
+) -> Option<&'static str> {
+    if queue_wait.is_some() {
+        return Some("waiting_for_slot");
+    }
+    mission_health_verdict(status, idle_seconds)
 }
 
 /// Render a duration in seconds as a compact human string ("45s", "12m",

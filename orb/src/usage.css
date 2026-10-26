@@ -55,3 +55,22 @@
 .rel-detail dt { color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .rel-detail dd { margin: 0; font-variant-numeric: tabular-nums; }
 .rel-detail-id { color: var(--fg-3); }
+
+/* Providers keep one validated categorical slot each (dataviz palette, light and dark). */
+.usage-page, .settings-page { --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4; --series-0: #9a9a96; --series-fallback: #6250d6; }
+:root[data-theme="dark"] :is(.usage-page, .settings-page) { --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-0: #6f6f6b; --series-fallback: #9085e9; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) :is(.usage-page, .settings-page) { --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-0: #6f6f6b; --series-fallback: #9085e9; } }
+.usage-seg-fill.series-0 { fill: var(--series-0); } .usage-seg-fill.series-1 { fill: var(--series-1); } .usage-seg-fill.series-2 { fill: var(--series-2); }
+.usage-seg-fill.series-3 { fill: var(--series-3); } .usage-seg-fill.series-4 { fill: var(--series-4); } .usage-seg-fill.series-5 { fill: var(--series-5); }
+.usage-seg-fill.fallback { fill: var(--series-fallback); }
+.usage-seg-fill:hover { opacity: .8; }
+.usage-swatch.series-0 { background: var(--series-0); opacity: 1; } .usage-swatch.series-1 { background: var(--series-1); opacity: 1; } .usage-swatch.series-2 { background: var(--series-2); opacity: 1; }
+.usage-swatch.series-3 { background: var(--series-3); opacity: 1; } .usage-swatch.series-4 { background: var(--series-4); opacity: 1; } .usage-swatch.series-5 { background: var(--series-5); opacity: 1; }
+.usage-chart-skel { height: 152px; width: 100%; }
+.usage-chart-skel.small { height: 62px; }
+.usage-chart-small svg { height: 40px; }
+.usage-events { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.usage-events li { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto; gap: 10px; color: var(--fg-2); }
+.usage-events time { color: var(--fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-events-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-events-reason { color: var(--fg-3); }

@@ -285,7 +285,7 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
   let prompt=makePrompt(snapshot.context);
   let binding=local?localBinding(parent):undefined;
   let bin='';
-  if(local){await restoreLocalBindings();binding=localBinding(parent);if(!bin)bin=(await localAgentForLaunch(config.harness))?.path??'';if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Client.`);}
+  if(local){await restoreLocalBindings();binding=localBinding(parent);if(!bin)bin=(await localAgentForLaunch(config.harness))?.path??'';if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');if(!bin)throw new Error(`${config.harness} is not installed. Configure it in Settings → Agents → Local agents.`);}
   if(launchSignal.aborted||connectionVersion()!==version)throw new Error('Side question launch cancelled or connection changed.');
   const createSide=async()=>{
    const attemptKey=key+':attempt:'+config.harness+':'+config.model+':'+placement;

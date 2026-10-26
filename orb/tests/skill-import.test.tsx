@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
-import { SkillDetail } from "../src/SkillDetail";
+import { SkillDetail, middleTruncate } from "../src/SkillDetail";
 import type { SkillRow } from "../src/skillRows";
 
 const row: SkillRow = {
@@ -26,21 +26,31 @@ const row: SkillRow = {
 };
 
 describe("legacy import", () => {
-  it("lists allowed reference files checked by default and imports only the kept ones", async () => {
+  it("shows one quiet old-copy line that imports SKILL.md and its allowlisted files in one click", async () => {
     const onImport = vi.fn(async () => {});
+    const onClose = vi.fn();
     render(() => (
-      <SkillDetail row={row} connected harnessTotal={6} onClose={() => {}} onSave={async () => {}} onImport={onImport}
+      <SkillDetail row={row} connected harnessTotal={6} onClose={onClose} onSave={async () => {}} onImport={onImport}
         onDelete={async () => {}} onFilesChanged={async () => {}} />
     ));
-    fireEvent.click(screen.getByRole("button", { name: "Import to Library" }));
-    const a = await screen.findByRole("checkbox", { name: /references\/a\.md/ }) as HTMLInputElement;
-    const s = screen.getByRole("checkbox", { name: /scripts\/run\.sh/ }) as HTMLInputElement;
-    expect(a.checked && s.checked).toBe(true);
-    expect(screen.getByText("2.0 KB")).toBeTruthy();
-    fireEvent.click(s);
-    expect(s.checked).toBe(false);
+    const line = document.querySelector(".skills-oldcopy")!;
+    expect(line.textContent).toContain("Old copy in Paloma Skills");
+    expect(line.getAttribute("title")).toBe("~/work/paloma/skills/old-skill");
+    // No copies panel, no Compare.
+    expect(screen.queryByRole("button", { name: "Compare" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
-    await waitFor(() => expect(onImport).toHaveBeenCalledTimes(1));
-    expect(onImport).toHaveBeenCalledWith("old-skill", row.sources[0], ["references/a.md"]);
+    await waitFor(() => expect(onImport).toHaveBeenCalledWith("old-skill", row.sources[0], ["references/a.md", "scripts/run.sh"]));
+    expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe("middleTruncate", () => {
+  it("keeps both ends of a long path", () => {
+    expect(middleTruncate("short/path.md")).toBe("short/path.md");
+    const out = middleTruncate("/Users/thomas/work/paloma/skills/agent-browser/references/selectors.md", 32);
+    expect(out).toHaveLength(32);
+    expect(out.startsWith("/Users/thomas/wo")).toBe(true);
+    expect(out.endsWith("selectors.md")).toBe(true);
+    expect(out).toContain("…");
   });
 });

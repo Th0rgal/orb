@@ -59,3 +59,26 @@ fn idle_durations_render_compactly() {
     assert_eq!(humanize_idle(16 * 3600), "16h");
     assert_eq!(humanize_idle(3 * 86_400), "3d");
 }
+
+#[test]
+fn pending_mission_waiting_for_a_slot_is_not_stuck() {
+    let wait = super::super::mission_store::QueueWait {
+        reason: "waiting_for_slot".to_string(),
+        slots_used: 1,
+        slots_max: 1,
+        running_mission_ids: vec![Uuid::new_v4()],
+    };
+    // An hour behind a busy slot used to read `stuck_queued`.
+    assert_eq!(
+        activity_verdict(MissionStatus::Pending, 3600, Some(&wait)),
+        Some("waiting_for_slot")
+    );
+    assert_eq!(
+        activity_verdict(MissionStatus::Pending, 3600, None),
+        Some("stuck_queued")
+    );
+    assert_eq!(
+        activity_verdict(MissionStatus::Pending, 60, None),
+        Some("queued")
+    );
+}

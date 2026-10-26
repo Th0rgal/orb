@@ -139,7 +139,7 @@ describe("SkillsSettings", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders harness compatibility matrix, detects drift, and syncs all harnesses", async () => {
+  it("shows harness drift under Advanced without a manual sync button", async () => {
     let synced = false;
     const invokeMock = vi.fn(async (cmd: string) => {
       if (cmd === "local_skills_status") return sampleLocalReport(synced);
@@ -176,27 +176,51 @@ describe("SkillsSettings", () => {
       core: { invoke: invokeMock },
     };
 
-    render(() => <SkillsSettings />);
-
+    const { container } = render(() => <SkillsSettings />);
+    await waitFor(() => expect(knownSkillNames()).toContain("paloma-backends"));
+    expect(screen.queryByRole("button", { name: /Sync all harnesses/ })).toBeNull();
+    const advanced = container.querySelector<HTMLDetailsElement>("details.skills-advanced")!;
+    advanced.open = true;
+    fireEvent(advanced, new Event("toggle"));
     await waitFor(() => {
       expect(screen.getByText("Out of sync · 2/37")).toBeTruthy();
       expect(screen.getByText("Out of sync · 0/37")).toBeTruthy();
     });
-
     expect(screen.getByText("Ready · Python 3.12.4 + PyYAML")).toBeTruthy();
     expect(screen.getByText("Active · 4C8811A0")).toBeTruthy();
-    expect(knownSkillNames()).toContain("paloma-backends");
+  });
 
-    const syncBtn = screen.getByRole("button", { name: /Sync all harnesses \(2 out of date\)/i });
-    fireEvent.click(syncBtn);
-
-    await waitFor(() => {
-      expect(screen.getByRole("status").textContent).toContain(
-        "Synchronized 37 skills across all 6 local harness directories",
-      );
+  it("shows rows from the Library index first, then syncs drifted harnesses on its own", async () => {
+    setConnection("https://agent-backend.thomas.md", "test-jwt");
+    const syncCalls: unknown[] = [];
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string, args?: any) => {
+          if (cmd === "local_skills_status") return sampleLocalReport(false);
+          if (cmd === "local_skills_sync") { syncCalls.push(args.request); return { synced_skills: 1, harnesses_updated: 2, skipped_unmanaged: [], pruned: [], report: sampleLocalReport(true) }; }
+          return null;
+        },
+      },
+    };
+    let releaseBody!: () => void;
+    const bodyGate = new Promise<void>((resolve) => (releaseBody = resolve));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill")) return ok([{ name: "paloma-backends", description: "Inspect Paloma backends.", path: "skill/paloma-backends" }]);
+      if (url.endsWith("/api/library/skill/paloma-backends")) { await bodyGate; return ok({ name: "paloma-backends", path: "skill/paloma-backends", content: "---\nname: paloma-backends\n---\n", files: [], references: [] }); }
+      if (url.endsWith("/api/library/status")) return ok({ remote: "git@github.com:Th0rgal/sandboxed-library.git", branch: "main", clean: true, ahead: 0, behind: 0, modified_files: [], last_synced_at: Math.floor(Date.now() / 1000) - 120 });
+      return ok({});
     });
-
-    expect(screen.queryByText("Out of sync · 2/37")).toBeNull();
+    render(() => <SkillsSettings />);
+    // The row is there while every skill body is still loading.
+    expect(await screen.findByText("paloma-backends")).toBeTruthy();
+    expect(await screen.findByText(/Th0rgal\/sandboxed-library/)).toBeTruthy();
+    expect(screen.getByText(/synced 2m ago/)).toBeTruthy();
+    expect(syncCalls).toHaveLength(0);
+    releaseBody();
+    await waitFor(() => expect(syncCalls).toHaveLength(1));
+    expect(syncCalls[0]).toMatchObject({ prune_removed: false });
   });
 
   it("loads Core Library skills and project skills when connected", async () => {
@@ -268,7 +292,6 @@ describe("SkillsSettings", () => {
 
     await waitFor(() => {
       expect(screen.getByText("spark-lean-offload")).toBeTruthy();
-      expect(screen.getAllByText("Erdos 647 Proof").length).toBeGreaterThan(0);
       expect(screen.getByText("aristotle-tactics")).toBeTruthy();
     });
 
@@ -296,7 +319,7 @@ describe("SkillsSettings", () => {
     const requests: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input), method = init?.method ?? "GET";
-      requests.push(`${method} ${url.replace("https://agent-backend.thomas.md", "")}`);
+      requests.push(`${method} ${url.replace("https://agent-backend.thomas.md", "")}${url.endsWith("/commit") ? ` ${JSON.parse(String(init?.body)).message}` : ""}`);
       const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
       if (url.endsWith("/api/library/skill")) return ok([{ name: "spark-lean-offload", path: "skill/spark-lean-offload", audience: ["mission", "local"] }]);
       if (url.endsWith("/api/library/skill/spark-lean-offload")) {
@@ -306,6 +329,8 @@ describe("SkillsSettings", () => {
       }
       if (url.endsWith("/api/projects")) return ok({ projects: [{ slug: "erdos-647", title: "Erdos 647 Proof", status: "active", updated_at: "2026-10-08T12:00:00Z" }] });
       if (url.includes("/api/projects/erdos-647/skills")) return new Response("", { status: 404 });
+      if (url.endsWith("/api/library/commit")) return new Response("Committed successfully", { status: 200 });
+      if (url.endsWith("/api/library/push")) return new Response("Pushed successfully", { status: 200 });
       if (url.includes("/api/library/skill-delivery")) return ok({ skills: [{ name: "spark-lean-offload", reasons: ["base", "project"] }], missing: [] });
       return ok({});
     });
@@ -316,31 +341,72 @@ describe("SkillsSettings", () => {
     const dialog = await screen.findByRole("dialog");
     // Lint: missing metadata.sandboxed.
     expect(dialog.textContent).toContain("No metadata.sandboxed block");
-    // Make it Common (every mission + coordinator) through the places picker, then save.
-    fireEvent.click(screen.getByRole("button", { name: /Local/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /Common/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Save & sync" }));
-    await waitFor(() => expect(syncCalls.length).toBe(1));
+    // The Assistant also uses it, and it is always loaded; Save commits and pushes to the repo.
+    const before = syncCalls.length;
+    fireEvent.click(screen.getByRole("checkbox", { name: "Assistant" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Always" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByText("Saved to repo")).toBeTruthy());
     expect(content).toContain("audience: [mission, coordinator, local]");
     expect(content).toContain("scope: global");
-    expect(syncCalls[0].prune_removed).toBe(false);
-    expect(syncCalls[0].library_skills.map((s) => s.name)).toEqual(["spark-lean-offload"]);
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("across all 6 local harness directories"));
+    expect(requests).toContain("POST /api/library/commit skill: update spark-lean-offload");
+    expect(requests).toContain("POST /api/library/push");
+    await waitFor(() => expect(syncCalls.length).toBe(before + 1));
+    expect(syncCalls.at(-1)!.prune_removed).toBe(false);
+    expect(syncCalls.at(-1)!.library_skills.map((s) => s.name)).toEqual(["spark-lean-offload"]);
 
     // Delete through the in-app confirmation; sync prunes.
     await waitFor(() => expect((screen.getByRole("button", { name: "Delete…" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Delete skill" }));
-    await waitFor(() => expect(syncCalls.length).toBe(2));
+    // Confirms inside the panel: no second dialog.
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByText("spark-lean-offload")).toBeNull();
+    await waitFor(() => expect(syncCalls.at(-1)).toMatchObject({ prune_removed: true, library_skills: [] }));
     expect(requests).toContain("DELETE /api/library/skill/spark-lean-offload");
-    expect(syncCalls[1]).toMatchObject({ prune_removed: true, library_skills: [] });
+    expect(requests).toContain("POST /api/library/commit skill: delete spark-lean-offload");
 
-    // Delivery preview degrades when project skills are unsupported.
-    const select = screen.getByLabelText("Preview project") as HTMLSelectElement;
+    // Delivery preview (under Advanced) degrades when project skills are unsupported.
+    const advanced = document.querySelector<HTMLDetailsElement>("details.skills-advanced")!;
+    advanced.open = true;
+    fireEvent(advanced, new Event("toggle"));
+    const select = (await screen.findByLabelText("Preview project")) as HTMLSelectElement;
     fireEvent.change(select, { target: { value: "erdos-647" } });
     await waitFor(() => {
       expect(screen.getByText("This backend does not support project skill selection yet.")).toBeTruthy();
       expect(screen.getByText("Resolved delivery (1)")).toBeTruthy();
     });
+  });
+
+  it("keeps a failed delete in the confirm with Retry and the row back in the list", async () => {
+    setConnection("https://agent-backend.thomas.md", "test-jwt");
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string) => Promise<unknown> } } }).__TAURI__ = { core: { invoke: async () => null } };
+    let commitFails = true;
+    let deleted = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input), method = init?.method ?? "GET";
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill")) return ok(deleted && !commitFails ? [] : [{ name: "agent-browser", description: "Drive a browser.", path: "skill/agent-browser" }]);
+      if (url.endsWith("/api/library/skill/agent-browser")) {
+        if (method === "DELETE") { if (deleted) return new Response("Skill not found: agent-browser", { status: 404 }); deleted = true; return new Response("Skill deleted successfully", { status: 200 }); }
+        return ok({ name: "agent-browser", path: "skill/agent-browser", content: "---\nname: agent-browser\n---\n# Browser\n", files: [], references: [] });
+      }
+      if (url.endsWith("/api/library/commit")) return commitFails ? new Response("git commit failed: gpg failed to sign the data", { status: 500 }) : new Response("Committed successfully", { status: 200 });
+      if (url.endsWith("/api/library/push")) return new Response("Pushed successfully", { status: 200 });
+      return ok({});
+    });
+    render(() => <SkillsSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Actions for agent-browser" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Delete/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    // The row is back, the dialog stays open with plain words and Retry.
+    expect(await screen.findByText(/Core couldn’t sign the Library commit, so agent-browser is still there/)).toBeTruthy();
+    expect(screen.getByText("agent-browser")).toBeTruthy();
+    commitFails = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    // Retry only commits: the file is already gone, so the 404 is fine.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByText("agent-browser")).toBeNull();
   });
 });

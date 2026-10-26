@@ -462,6 +462,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Read library_remote from settings (which falls back to env var if not configured)
     let library_remote = settings.get_library_remote().await;
     if let Some(library_remote) = library_remote {
+        crate::library::set_trusted_remote(&library_remote);
         let library_clone = Arc::clone(&library);
         let library_path = config.library_path.clone();
         let workspaces_clone = Arc::clone(&workspaces);

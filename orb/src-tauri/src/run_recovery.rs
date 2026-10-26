@@ -264,6 +264,8 @@ async fn recover(
     .await
 }
 
+// Protocol tests only: a shared workspace skips the machine-wide process scan, which
+// otherwise sees other tests' (or the CI runner's) processes. `process_tests` cover the scan.
 #[cfg(test)]
 async fn inspect_and_settle(
     c: &Connection,
@@ -271,7 +273,7 @@ async fn inspect_and_settle(
     cwd: &str,
     client_id: &str,
 ) -> Result<bool, String> {
-    inspect_and_settle_for(c, id, cwd, client_id, None).await
+    inspect_and_settle_for(c, id, cwd, client_id, Some("protocol-test")).await
 }
 
 async fn inspect_and_settle_for(

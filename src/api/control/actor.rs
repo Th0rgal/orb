@@ -87,6 +87,7 @@ pub(super) fn spawn_control_session(
         running_missions: Arc::clone(&running_missions),
         assignment_owners: Arc::new(RwLock::new(HashSet::new())),
         max_parallel,
+        dispatch_capacity: Arc::new(RwLock::new(None)),
         mission_store: Arc::clone(&mission_store),
         mission_search_cache,
     };
@@ -156,6 +157,7 @@ pub(super) fn spawn_control_session(
         user_id,
         Arc::clone(&background_tasks),
         Arc::clone(&state.assignment_owners),
+        Arc::clone(&state.dispatch_capacity),
     ));
 
     // Recover missions stopped by the previous backend process. Graceful
@@ -432,6 +434,7 @@ pub(super) async fn control_actor_loop(
     // here from the `ToolResult` event arm; read by the auto-resume watcher.
     background_tasks: super::super::mission_runner::BackgroundTaskRegistry,
     assignment_owners: Arc<RwLock<HashSet<Uuid>>>,
+    dispatch_capacity: Arc<RwLock<Option<super::dispatch_capacity::DispatchCapacity>>>,
 ) {
     // A process-local actor cannot reattach a harness JoinHandle after restart.
     // Close any inherited execution lease before accepting new work; durable
@@ -6363,6 +6366,20 @@ pub(super) async fn control_actor_loop(
                                         parallel_running + if running.is_some() { 1 } else { 0 };
                                     let max_parallel = crate::settings::max_parallel_missions_cached_or(
                                         config.max_parallel_missions,
+                                    );
+                                    let mut slot_holders: Vec<Uuid> = parallel_runners
+                                        .iter()
+                                        .filter(|(_, r)| r.is_running())
+                                        .map(|(id, _)| *id)
+                                        .collect();
+                                    if running.is_some() {
+                                        slot_holders.extend(running_mission_id);
+                                    }
+                                    *dispatch_capacity.write().await = Some(
+                                        super::dispatch_capacity::DispatchCapacity::new(
+                                            max_parallel,
+                                            slot_holders,
+                                        ),
                                     );
                                     if total_running < max_parallel {
                                         if let Some(next) =

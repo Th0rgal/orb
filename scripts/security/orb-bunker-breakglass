@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Paloma / Orb Breakglass SSH Bunker Recovery Utility (Wave 10)
+# Allows Thomas to recover any node (`dgx-spark`, `agent-core`, `ashur`, `babylon`,
+# `nippur`, `old-agent`, `thomas-md`) and the entire Paloma fleet from Bunker Mode
+# over breakglass SSH (`sudo orb-bunker-breakglass unbunker`) even if no mobile/web
+# client is reachable.
+set -euo pipefail
+
+CMD="${1:-status}"
+NODE_NAME="$(hostname -s)"
+QUARANTINE_BIN="/usr/local/sbin/orb-canary-quarantine"
+MARKER="/run/paloma-canary-tripped"
+
+case "$CMD" in
+  unbunker|release)
+    rm -f "$MARKER"
+    if [[ -x "$QUARANTINE_BIN" ]]; then
+      "$QUARANTINE_BIN" release || true
+    elif nft list table inet paloma_canary_quarantine >/dev/null 2>&1; then
+      nft delete table inet paloma_canary_quarantine || true
+    fi
+
+    # If running on `agent-core` (or able to reach local `:3001`), also unbunker Core's
+    # PrivilegeBroker + MeshStore so all fleet nodes converge to Normal (0) automatically.
+    if curl -fsS -m 3 -X POST "http://127.0.0.1:3001/api/privilege-access/unbunker" >/dev/null 2>&1; then
+      echo "core_unbunkered=true (via 127.0.0.1:3001)"
+    fi
+    echo "local_quarantine_released=true node=${NODE_NAME}"
+    ;;
+  status)
+    if [[ -x "$QUARANTINE_BIN" ]]; then
+      "$QUARANTINE_BIN" status
+    fi
+    for URL in \
+      "http://127.0.0.1:3001/api/bunker/status?node=${NODE_NAME}" \
+      "http://10.88.0.1:3000/api/bunker/status?node=${NODE_NAME}" \
+      "http://10.88.0.1:3001/api/bunker/status?node=${NODE_NAME}"; do
+      if RESP="$(curl -fsS -m 3 "$URL" 2>/dev/null)" && [[ -n "$RESP" ]]; then
+        echo "$RESP"
+        break
+      fi
+    done
+    ;;
+  *)
+    echo "Usage: $0 {unbunker|release|status}" >&2
+    exit 2
+    ;;
+esac

@@ -188,6 +188,17 @@ fn has_quota(health: Option<&Health>, now: i64) -> bool {
     })
 }
 
+/// How many pools are spent or refused: with no login usable for every
+/// model, the one that still serves some pools beats one that serves none.
+fn spent_pools(health: Option<&Health>, now: i64) -> u64 {
+    let Some(h) = health else { return 0 };
+    if h.refused_until.is_some_and(|at| at > now) {
+        return 2;
+    }
+    u64::from(pool_spent(h.gemini_remaining, h.gemini_reset, now))
+        + u64::from(pool_spent(h.claude_remaining, h.claude_reset, now))
+}
+
 /// When a spent login is expected back (its latest blocking reset).
 fn usable_again(health: Option<&Health>, now: i64) -> i64 {
     let Some(h) = health else { return now };
@@ -206,7 +217,7 @@ fn usable_again(health: Option<&Health>, now: i64) -> i64 {
 
 /// The login that should serve native runs: highest priority among eligible
 /// accounts with quota left in every pool; failing that, the eligible one
-/// that comes back first; never an account Google refuses to serve.
+/// with the fewest spent pools, then the one that comes back first; never an account Google refuses to serve.
 pub(crate) fn choose<'a>(
     candidates: &'a [Candidate],
     health: &HashMap<String, Health>,
@@ -227,9 +238,7 @@ pub(crate) fn choose<'a>(
             .then_with(|| a.file.cmp(&b.file))
     });
     let now_epoch = now.max(0) as u64;
-    let any_has_quota = eligible
-        .iter()
-        .any(|c| has_quota(health.get(&c.file), now));
+    let any_has_quota = eligible.iter().any(|c| has_quota(health.get(&c.file), now));
     let route_candidates: Vec<crate::orb_spec::RouteCandidate> = eligible
         .iter()
         .enumerate()
@@ -250,9 +259,12 @@ pub(crate) fn choose<'a>(
             } else {
                 crate::orb_spec::RouteCandidate {
                     account_id: (rank + 1) as u32,
-                    score: reset_at
-                        .saturating_mul(1000)
-                        .saturating_add(rank as u64),
+                    score: (spent_pools(health.get(&c.file), now) << 56).saturating_add(
+                        reset_at
+                            .min(1 << 45)
+                            .saturating_mul(1000)
+                            .saturating_add(rank as u64),
+                    ),
                     is_rejected: false,
                     reset_epoch: 0,
                 }
@@ -264,10 +276,10 @@ pub(crate) fn choose<'a>(
         .copied()
         .find(|c| has_quota(health.get(&c.file), now))
         .or_else(|| {
-            eligible
-                .iter()
-                .copied()
-                .min_by_key(|c| usable_again(health.get(&c.file), now))
+            eligible.iter().copied().min_by_key(|c| {
+                let h = health.get(&c.file);
+                (spent_pools(h, now), usable_again(h, now))
+            })
         });
     let host_id = host_choice.and_then(|chosen| {
         eligible
@@ -519,8 +531,13 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
 /// sign-in at that moment is spent until the announced reset, whatever its
 /// quota figures say. Returns the (spent, next) logins' identities when the
 /// choice moves to another login; the next dispatch pushes it to its node.
+///
+/// "Eligibility check failed" means Google wants the owner to verify that
+/// login: it is marked unverified so the machine moves to a sibling, and the
+/// periodic check restores it once verified.
 pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option<String>)> {
-    if !is_individual_quota_refusal(failure) {
+    let ineligible = is_eligibility_refusal(failure);
+    if !ineligible && !is_individual_quota_refusal(failure) {
         return None;
     }
     let dir = super::cli_proxy_accounts::auth_dir()?;
@@ -544,7 +561,11 @@ pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option
             claude_reset: None,
             refused_until: None,
         });
-        health.refused_until = Some(until);
+        if ineligible {
+            health.eligibility = Eligibility::NeedsVerification;
+        } else {
+            health.refused_until = Some(until);
+        }
     }
     let next = chosen_file(&dir).filter(|next| *next != spent);
     let identity = |file: &str| {
@@ -571,6 +592,21 @@ pub(crate) fn is_individual_quota_refusal(failure: &str) -> bool {
     lower.contains("individual quota reached")
         && lower.contains("resource_exhausted")
         && lower.contains("429")
+}
+
+/// `agy` refusing the signed-in login until its owner verifies it: a line of
+/// the CLI's own error output, not the phrase anywhere (model output may
+/// quote it, and must not move the shared machine sign-in). Wrongly marking
+/// a login is also bounded: the periodic eligibility check restores it.
+pub(crate) fn is_eligibility_refusal(failure: &str) -> bool {
+    failure.lines().any(|line| {
+        let lower = line.trim_start().to_ascii_lowercase();
+        ["cli error: ", "error: "].iter().any(|prefix| {
+            lower.strip_prefix(prefix).is_some_and(|rest| {
+                rest.starts_with("eligibility check failed: your current account is not eligible for antigravity")
+            })
+        })
+    })
 }
 
 /// Longest real Antigravity quota window (weekly), plus margin.
@@ -874,6 +910,15 @@ mod tests {
     }
 
     #[test]
+    fn eligibility_refusal_is_recognized() {
+        assert!(is_eligibility_refusal("CLI error: Eligibility check failed: Your current account is not eligible for Antigravity. Verify your account to continue."));
+        assert!(!is_eligibility_refusal("Eligibility check failed: network"));
+        assert!(!is_eligibility_refusal(
+            "The model said: CLI error: Eligibility check failed: Your current account is not eligible for Antigravity."
+        ));
+    }
+
+    #[test]
     fn individual_quota_refusal_is_recognized() {
         let raw = "CLI error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 129h43m31s. (RESOURCE_EXHAUSTED (code 429))";
         assert!(is_individual_quota_refusal(raw));
@@ -890,6 +935,23 @@ mod tests {
             crate::account_limits::parse_limit_reset(raw, now, crate::account_limits::Zone::UTC)
                 .unwrap();
         assert_eq!((reset - now).num_minutes(), 129 * 60 + 43);
+    }
+
+    #[test]
+    fn with_no_fully_usable_login_the_one_still_serving_a_pool_wins() {
+        // Screenshot 2026-10-26: 1st login spent on both pools, 2nd spent on
+        // Gemini only. Claude must keep flowing through the 2nd.
+        let c = [cand("first", 20), cand("second", 10)];
+        let mut both = h(Eligibility::Eligible, Some(0.0), Some(500));
+        both.claude_remaining = Some(0.0);
+        both.claude_reset = Some(400);
+        let mut gemini_only = h(Eligibility::Eligible, Some(0.0), Some(900));
+        gemini_only.claude_remaining = Some(1.0);
+        let m = HashMap::from([("first".into(), both), ("second".into(), gemini_only)]);
+        let before = crate::provider_health::proxy_shadow_snapshot();
+        assert_eq!(choose(&c, &m, 100).unwrap().file, "second");
+        let after = crate::provider_health::proxy_shadow_snapshot();
+        assert_eq!(after.total_divergences, before.total_divergences);
     }
 
     #[test]

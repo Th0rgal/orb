@@ -74,6 +74,23 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         ],
         pricing: pricing(3_000, 15_000, Some(3_750), Some(300)),
     },
+    // Listed before `claude-sonnet-5`: its numeric alias would otherwise match
+    // `claude-sonnet-5-5` as a version suffix.
+    PricingEntry {
+        canonical: "claude-sonnet-5-5",
+        aliases: &[
+            "claude-sonnet-5-5",
+            "claude-sonnet-5.5",
+            "claude-5-5-sonnet",
+        ],
+        pricing: pricing(2_000, 10_000, Some(2_500), Some(200)),
+    },
+    // Rates for prompts up to 100K tokens.
+    PricingEntry {
+        canonical: "claude-haiku-5-5",
+        aliases: &["claude-haiku-5-5", "claude-haiku-5.5", "claude-5-5-haiku"],
+        pricing: pricing(100, 500, Some(125), Some(10)),
+    },
     PricingEntry {
         canonical: "claude-sonnet-5",
         aliases: &["claude-sonnet-5", "claude-5-sonnet"],
@@ -193,6 +210,12 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         canonical: "gpt-6.1-sol",
         aliases: &["gpt-6.1-sol", "gpt-6-1-sol", "gpt-6.1"],
         pricing: pricing(5_000, 30_000, Some(6_250), Some(500)),
+    },
+    // GPT-6.1 Terra (Codex catalog 2026-10-26): GPT-5.6 Terra rates likewise.
+    PricingEntry {
+        canonical: "gpt-6.1-terra",
+        aliases: &["gpt-6.1-terra", "gpt-6-1-terra"],
+        pricing: pricing(2_500, 15_000, Some(3_125), Some(250)),
     },
     PricingEntry {
         canonical: "gpt-6-sol",
@@ -982,6 +1005,21 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "unpriced routed models: {missing:#?}");
+    }
+
+    #[test]
+    fn claude_55_models_do_not_fall_back_to_the_5_release() {
+        assert_eq!(normalized_model("claude-sonnet-5-5"), "claude-sonnet-5-5");
+        assert_eq!(
+            normalized_model("anthropic/claude-sonnet-5.5"),
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(normalized_model("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(normalized_model("claude-haiku-5-5"), "claude-haiku-5-5");
+        let haiku = pricing_for_model("claude-haiku-5-5").unwrap();
+        assert_eq!(haiku.input_nano_per_token, 100);
+        assert_eq!(haiku.output_nano_per_token, 500);
+        assert_eq!(haiku.cache_read_nano_per_token, Some(10));
     }
 
     #[test]

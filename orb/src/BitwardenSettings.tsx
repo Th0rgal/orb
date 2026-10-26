@@ -28,9 +28,6 @@ import {
   type BitwardenStatus,
 } from "./bitwardenApi";
 import { SecretAccessPanel } from "./SecretAccessPanel";
-import { MissionAccessPanel } from "./MissionAccessPanel";
-import { PrivilegeAccessPanel } from "./PrivilegeAccessPanel";
-import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
 import { enrolledDeviceId } from "./deviceApproval";
 import { copyText } from "./clipboard";
 import { ConfirmDialog, Dialog, DialogButton, Field } from "./Dialog";
@@ -473,9 +470,6 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
         <div class="bw-header">
           <div>
             <h2>Secrets</h2>
-            <p class="s-lead">
-              Project secrets from Bitwarden Secrets Manager, unlocked with {bioStatus().label || "Touch ID"}.
-            </p>
           </div>
           <div class="bw-header-actions">
             <Show
@@ -538,7 +532,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                   <div class="s-row-text">
                     <div class="s-row-title">Not connected to Core</div>
                     <div class="s-row-desc">
-                      Connect to the sandboxed.sh backend in Client settings to manage Bitwarden secrets.
+                      Connect to the sandboxed.sh backend on the Account page to manage Bitwarden secrets.
                     </div>
                   </div>
                 </div>
@@ -625,10 +619,6 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
             />
           </Show>
 
-          <PrivilegeAccessPanel onError={(m) => setToastError(m)} />
-          <MissionAccessPanel onError={(m) => setToastError(m)} />
-          {/* Mission access approvals always need an enrolled device, Bitwarden or not. */}
-          <ApprovalDevicesPanel onError={(m) => setToastError(m)} />
 
           {/* Secrets Table Section */}
           <Show when={status()?.configured}>

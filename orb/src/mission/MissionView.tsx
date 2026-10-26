@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, remoteJobEnded } from "../missionStatus";
+import { isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, queueWaitLabel, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -659,7 +659,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     return busy() || optimisticList().some(item => !item.waiting && !item.failed) || awaitingTurn() || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));
   };
   // A remote job queued for capacity has not started: say so instead of "Working".
-  const phaseLabel = () => handoff() ? "Sending" : sendingImmediate() ? "Stopping the current turn…" : mission()?.remote_job?.node_state === "queued" ? "Waiting for a free slot" : mission()?.backend === "claudecode" && !activity() ? "Waiting for Claude Code" : "Working";
+  const phaseLabel = () => handoff() ? "Sending" : sendingImmediate() ? "Stopping the current turn…" : mission()?.remote_job?.node_state === "queued" ? "Waiting for a free slot" : queueWaitLabel(mission()) ?? (mission()?.backend === "claudecode" && !activity() ? "Waiting for Claude Code" : "Working");
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());

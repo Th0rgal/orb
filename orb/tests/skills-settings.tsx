@@ -204,6 +204,9 @@ function buildReport(): LocalSkillsReport {
 const origFetch = window.fetch.bind(window);
 window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
+  if (url.endsWith("/api/library/status")) {
+    return new Response(JSON.stringify({ remote: "git@github.com:Th0rgal/sandboxed-library.git", branch: "main", clean: true, ahead: 0, behind: 0, modified_files: [], last_synced_at: Math.floor(Date.now() / 1000) - 120 }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
   if (url.endsWith("/api/library/skill")) {
     return new Response(
       JSON.stringify([

@@ -341,12 +341,40 @@ struct OrbProviderQuota: View {
                 .font(.caption).foregroundStyle(limit.tone == .error ? Color.red : Color.orange)
         }
         if windows.isEmpty { Text("No quota information available.").font(.caption).foregroundStyle(.secondary) }
+        // One row per pool with every window the API returns for it (desktop: provider-usage-row).
+        ForEach(Self.pools(windows), id: \.name) { pool in
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { poolName(pool.name); chips(pool.windows) }
+                VStack(alignment: .leading, spacing: 4) { poolName(pool.name); HStack(spacing: 12) { chips(pool.windows) } }
+            }
+            .font(.caption)
+        }
+    }
+    /// Windows grouped by pool in API order; "Gemini · 5h" → ("Gemini", "5h").
+    static func pools(_ windows: [(String, Double)]) -> [(name: String, windows: [(String, Double)])] {
+        var out: [(name: String, windows: [(String, Double)])] = []
+        for (label, used) in windows {
+            let pool = quotaPool(label)
+            let short = pool.isEmpty ? label : String(label.dropFirst(pool.count + 3))
+            if let i = out.firstIndex(where: { $0.name == pool }) { out[i].windows.append((short, used)) }
+            else { out.append((pool, [(short, used)])) }
+        }
+        return out
+    }
+    @ViewBuilder private func poolName(_ name: String) -> some View {
+        if !name.isEmpty { Text(name).fontWeight(.medium).lineLimit(1) }
+    }
+    private func chips(_ windows: [(String, Double)]) -> some View {
         ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
             let level = OrbQuotaLevel.of(window.1)
-            VStack(alignment: .leading) {
-                LabeledContent(window.0) { Text("\(Int((window.1 * 100).rounded()))% used").foregroundStyle(level.color ?? .secondary).fontWeight(level == .normal ? nil : .semibold) }
-                ProgressView(value: window.1).tint(level.color)
+            let pct = Int((window.1 * 100).rounded())
+            HStack(spacing: 5) {
+                Text(window.0 == "7d" ? "Weekly" : window.0).foregroundStyle(.secondary)
+                ProgressView(value: min(1, max(0, window.1))).tint(level.color).frame(width: 44)
+                Text("\(pct)%").monospacedDigit().foregroundStyle(level.color ?? .secondary).fontWeight(level == .normal ? nil : .semibold)
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(window.0) \(pct)% used")
         }
     }
 }

@@ -204,11 +204,13 @@ export function insertMention(
 export async function loadAttachItems(slug: string): Promise<AttachItem[]> {
   try {
     const manifest = await contextManifest(slug);
-    return Object.entries(manifest.entries).map(([path, entry]) => ({
-      id: `context:${slug}:${path}`, kind: "context", project: slug, path,
-      label: `${path}${entry.directory ? "/" : ""}`,
-      section: entry.directory ? "Folders" : "Files",
-    }));
+    return Object.entries(manifest.entries)
+      .filter(([path]) => path !== "attachments" && !path.startsWith("attachments/"))
+      .map(([path, entry]) => ({
+        id: `context:${slug}:${path}`, kind: "context", project: slug, path,
+        label: `${path}${entry.directory ? "/" : ""}`,
+        section: entry.directory ? "Folders" : "Files",
+      }));
   } catch {
     // Older servers only expose the project file listing.
     const items: AttachItem[] = [];
@@ -227,6 +229,7 @@ async function walkFiles(slug: string, path: string, items: AttachItem[], depth:
   }
   for (const entry of entries) {
     if (items.length >= 200) break;
+    if (!path && entry.name === "attachments") continue;
     const rel = path ? `${path}/${entry.name}` : entry.name;
     if (entry.kind === "dir") {
       items.push({ id: `folder:${rel}`, kind: "folder", section: "Folders", path: rel, label: `${rel}/` });
