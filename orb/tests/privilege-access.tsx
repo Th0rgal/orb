@@ -16,5 +16,6 @@ const realFetch=window.fetch;
 window.fetch=(async(input:any,init?:any)=>{const url=String(input);if(url.includes('/api/')){w.calls.push({url,method:init?.method,body:init?.body});return new Response(JSON.stringify({...deploy,state:'approved'}),{status:200,headers:{'Content-Type':'application/json'}});}return realFetch(input,init);}) as any;
 w.showOne=()=>syncPrivilegeAccessNotices([deploy] as any,()=>{w.opened=true;});
 w.showMany=()=>syncPrivilegeAccessNotices([deploy,root] as any,()=>{w.opened=true;});
+w.showBatch=()=>syncPrivilegeAccessNotices([deploy,root,{...deploy,id:'p4',scope:'ops_read',target_host:'ashur',requester_title:'Fleet health',reason:'Read RAID status'}] as any,()=>{w.opened=true;});
 w.showOne();
 render(()=><div style="max-width:760px;padding:16px"><PrivilegeAccessPanel onError={(m)=>{w.error=m;}} initial={{bunker_state:0,requests:[root,grant,{...deploy,id:'p3',state:'denied',decided_at:iso(-120_000)}] as any,audit:[],command_audit:[{id:'c1',at:iso(-30_000),grant_id:'g1',mission_id:grant.requester_mission_id,target_host:'ashur',scope:'ops_read',command:'mdadm --detail /dev/md0',exit_code:0,duration_ms:40}]}} /></div>,document.getElementById('root')!);

@@ -36,4 +36,42 @@ class OrbPrivilegeAccessTest {
             OrbPrivilegeAccess.approveBody(mapOf("ttl_minutes" to 240.0, "session_scoped" to true))
         )
     }
+
+    @Test fun approveAllSummaryMatchesSharedFixture() {
+        val spec = OrbSpec.dict("fixtures/privilege-access.json")
+        val cases = OrbJSON.dictList(spec["cases"])
+        val batches = OrbJSON.dictList(spec["batches"])
+        assertTrue(batches.isNotEmpty())
+        for (b in batches) {
+            val rs = (b["requests"] as List<*>).mapIndexed { n, i ->
+                (cases[(i as Number).toInt()]["request"] as Map<String, Any?>) + ("id" to "b$n")
+            }
+            val s = OrbPrivilegeAccess.batchSummary(rs)
+            assertEquals(b["tiers"], s.tiers)
+            assertEquals(b["hosts"], s.hosts)
+            assertEquals(b["missions"], s.missions)
+            assertEquals((b["root"] as Number).toInt(), s.root)
+            assertEquals((b["without_root"] as Number).toInt(), OrbPrivilegeAccess.batchApprovable(rs, false).size)
+            assertEquals(rs.size, OrbPrivilegeAccess.batchApprovable(rs, true).size)
+        }
+    }
+
+    @Test fun approveAllBodyListsEachRequestAndConfirmsRootOnlyWhenIncluded() {
+        val deploy = mapOf("id" to "p1", "requester_mission_id" to "m1", "target_host" to "agent-core", "scope" to "service_deploy",
+            "allowed_unit" to null, "ttl_minutes" to 240.0, "session_scoped" to true, "reason" to "x")
+        val root = mapOf("id" to "p2", "requester_mission_id" to "m2", "target_host" to "self", "scope" to "root_exec",
+            "allowed_unit" to "", "ttl_minutes" to 60.0, "session_scoped" to false)
+        val body = OrbPrivilegeAccess.batchBody(listOf(deploy, root))
+        assertEquals(true, body["confirm_root"])
+        assertEquals(
+            listOf(
+                mapOf("id" to "p1", "requester_mission_id" to "m1", "target_host" to "agent-core", "scope" to "service_deploy",
+                    "allowed_unit" to null, "ttl_minutes" to 240, "session_scoped" to true),
+                mapOf("id" to "p2", "requester_mission_id" to "m2", "target_host" to "self", "scope" to "root_exec",
+                    "allowed_unit" to null, "ttl_minutes" to 60, "session_scoped" to false),
+            ),
+            body["items"]
+        )
+        assertEquals(false, OrbPrivilegeAccess.batchBody(listOf(deploy))["confirm_root"])
+    }
 }

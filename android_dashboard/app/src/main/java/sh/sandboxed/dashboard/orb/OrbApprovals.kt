@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -215,6 +216,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var grants by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var access by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var privilege by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    var includeRoot by remember { mutableStateOf(false) }
     var devices by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var mode by remember { mutableStateOf("") }
     var projects by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -371,7 +373,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     val who = OrbPrivilegeAccess.requester(r)
                     val what = OrbPrivilegeAccess.title(r)
                     Column(Modifier.padding(vertical = 6.dp)) {
-                        Text(what, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(what, color = if (r["scope"] == "root_exec") Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Text("asked by $who", color = OrbStyle.textMuted, fontSize = 12.sp)
                         (r["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
                             Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp)
@@ -398,6 +400,35 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 }
                             }) { Text("Deny", color = Color(0xFFFF6B6B)) }
                         }
+                    }
+                }
+                if (pendingPrivilege.size > 1) {
+                    // One fingerprint for every request shown; root only when ticked.
+                    val summary = OrbPrivilegeAccess.batchSummary(pendingPrivilege)
+                    val ready = OrbPrivilegeAccess.batchApprovable(pendingPrivilege, includeRoot)
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text("${summary.tiers} · on ${summary.hosts}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Text("for ${summary.missions}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        if (summary.root > 0) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = includeRoot, onCheckedChange = { includeRoot = it })
+                                Text(
+                                    if (summary.root == 1) "Include the root request (any command as root)" else "Include ${summary.root} root requests (any command as root)",
+                                    color = Color(0xFFFF6B6B), fontSize = 12.sp
+                                )
+                            }
+                        }
+                        TextButton(enabled = !busy && ready.isNotEmpty(), onClick = {
+                            act {
+                                val s = OrbPrivilegeAccess.batchSummary(ready)
+                                OrbApprovalKey.signedRequest(
+                                    core, activity, "POST", "/api/privilege-access/approve-all",
+                                    OrbPrivilegeAccess.batchBody(ready),
+                                    "Grant ${ready.size} privileged requests (${s.tiers}) on ${s.hosts}"
+                                )
+                                includeRoot = false
+                            }
+                        }) { Text(if (ready.size == pendingPrivilege.size) "Approve all" else "Approve ${ready.size}") }
                     }
                 }
                 livePrivilege.forEach { g ->

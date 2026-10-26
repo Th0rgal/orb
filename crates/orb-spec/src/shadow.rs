@@ -180,7 +180,8 @@ impl OrbWireFrame {
             return Err(OrbWireStatus::TruncatedOrOutOfBounds);
         }
 
-        let payload = &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
+        let payload =
+            &bytes[ORB_WIRE_HEADER_BYTES..ORB_WIRE_HEADER_BYTES + hdr.payload_len as usize];
         let records_slice = &payload[..arena_off];
         let arena_slice = &payload[arena_off..arena_off + arena_len];
 

@@ -4111,3 +4111,7 @@ select.orb-select-native:disabled { cursor: default; }
 .app[data-files-split="true"] > .file-panel:not(.maximized) { position:relative; inset:auto; width:auto; box-shadow:none; }
 .app[data-files-split="true"] > .file-panel > .file-panel-resize { display:none; }
 @media(max-width:1150px) { .app[data-files-split="true"], .app.sb-hidden[data-files-split="true"] { grid-template-columns:0 minmax(0,1fr) minmax(0,1fr); } }
+.privilege-batch { padding: 6px 14px 0; }
+.bw-requests + .privilege-batch { padding: 6px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.secret-row.privilege-root .secret-row-key { color: var(--danger); }
+.privilege-root-confirm { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--danger); }

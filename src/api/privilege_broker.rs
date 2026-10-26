@@ -363,6 +363,36 @@ pub struct NewPrivilegeRequest {
     pub ttl_minutes: Option<i64>,
 }
 
+/// Turn a request into a live grant: lifetime, decision time and a fresh lease
+/// token (returned once, stored hashed). The caller applies the state change.
+fn grant(
+    r: &mut PrivilegeRequest,
+    now: DateTime<Utc>,
+    ttl_minutes: Option<i64>,
+    session_scoped: Option<bool>,
+) -> (String, String) {
+    let ttl = clamp_ttl_minutes(ttl_minutes.or(Some(r.ttl_minutes)));
+    let sess = session_scoped.unwrap_or(r.session_scoped);
+    r.ttl_minutes = ttl;
+    r.session_scoped = sess;
+    let exp = now + chrono::Duration::minutes(ttl);
+    r.expires_at = Some(exp);
+    r.session_expires_at = Some(exp);
+    r.decided_at = Some(now);
+    let token = format!(
+        "orb-jit-{}-{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    r.lease_token_sha256 = Some(sha256_hex(&token));
+    let detail = if sess {
+        format!("session (max {ttl}m)")
+    } else {
+        format!("{ttl}m")
+    };
+    (token, detail)
+}
+
 fn clamp_ttl_minutes(ttl: Option<i64>) -> i64 {
     ttl.unwrap_or(DEFAULT_SESSION_MAX_MINUTES)
         .clamp(1, MAX_TTL_MINUTES)
@@ -526,26 +556,9 @@ impl PrivilegeBroker {
         let mut minted_token: Option<String> = None;
         let detail = match event {
             ApprovalEvent::Approve => {
-                let ttl = clamp_ttl_minutes(ttl_minutes.or(Some(r.ttl_minutes)));
-                let sess = session_scoped.unwrap_or(r.session_scoped);
-                r.ttl_minutes = ttl;
-                r.session_scoped = sess;
-                let exp = now + chrono::Duration::minutes(ttl);
-                r.expires_at = Some(exp);
-                r.session_expires_at = Some(exp);
-                r.decided_at = Some(now);
-                let token = format!(
-                    "orb-jit-{}-{}",
-                    Uuid::new_v4().simple(),
-                    Uuid::new_v4().simple()
-                );
-                r.lease_token_sha256 = Some(sha256_hex(&token));
+                let (token, detail) = grant(r, now, ttl_minutes, session_scoped);
                 minted_token = Some(token);
-                Some(if sess {
-                    format!("session (max {ttl}m)")
-                } else {
-                    format!("{ttl}m")
-                })
+                Some(detail)
             }
             ApprovalEvent::Deny => {
                 r.decided_at = Some(now);
@@ -603,6 +616,84 @@ impl PrivilegeBroker {
             session_scoped,
         )
         .await
+    }
+
+    /// Approve several pending requests with one signature ("Approve all").
+    /// The signed body lists every request with what it grants; nothing is
+    /// approved unless each listed request is still pending, belongs to
+    /// `owner` and matches its entry exactly. `root_exec` needs `confirm_root`.
+    /// Each request still takes its own `Approve` transition (and every later
+    /// command its own `orb_privilege_step` admission); this is not a bypass.
+    pub async fn approve_batch(
+        &self,
+        owner: &str,
+        batch: &ApproveBatchBody,
+    ) -> Result<Vec<PrivilegeRequest>, String> {
+        batch.check_shape()?;
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        data.prune(now);
+        if data.current_bunker() != BunkerState::Normal {
+            return Err("Cannot approve privilege grant while Bunker Mode is active".into());
+        }
+        let mut idxs = Vec::with_capacity(batch.items.len());
+        for item in &batch.items {
+            let idx = data
+                .requests
+                .iter()
+                .position(|r| r.id == item.id && r.owner == owner)
+                .ok_or_else(|| format!("Request {} not found", item.id))?;
+            let r = &data.requests[idx];
+            if !r.state.is_pending() {
+                return Err(format!(
+                    "Request {} is {}, not pending; nothing was approved",
+                    item.id,
+                    r.state_label()
+                ));
+            }
+            if !item.matches(r) {
+                return Err(format!(
+                    "Request {} changed since it was shown; nothing was approved",
+                    item.id
+                ));
+            }
+            if r.scope == PrivilegeScope::RootExec && !batch.confirm_root {
+                return Err(
+                    "Root requests must be confirmed explicitly; nothing was approved".into(),
+                );
+            }
+            idxs.push(idx);
+        }
+        let before: Vec<PrivilegeRequest> =
+            idxs.iter().map(|&i| data.requests[i].clone()).collect();
+        let audit_len = data.audit.len();
+        let mut out = Vec::with_capacity(idxs.len());
+        let mut tokens = Vec::with_capacity(idxs.len());
+        for &idx in &idxs {
+            let r = &mut data.requests[idx];
+            r.state = r.state.apply(ApprovalEvent::Approve)?;
+            let (token, detail) = grant(r, now, None, None);
+            let snapshot = r.clone();
+            data.log(
+                &snapshot,
+                "approved",
+                Some(format!("{detail}; batch of {}", idxs.len())),
+                now,
+            );
+            tokens.push((snapshot.id, token));
+            out.push(snapshot);
+        }
+        if let Err(e) = self.commit(&data).await {
+            for (&idx, r) in idxs.iter().zip(before) {
+                data.requests[idx] = r;
+            }
+            data.audit.truncate(audit_len);
+            return Err(e);
+        }
+        drop(data);
+        self.live_tokens.lock().await.extend(tokens);
+        self.changed.notify_waiters();
+        Ok(out)
     }
 
     pub async fn deny(&self, owner: &str, id: Uuid) -> Result<PrivilegeRequest, String> {
@@ -1230,6 +1321,7 @@ type ApiError = (StatusCode, String);
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list))
+        .route("/approve-all", post(approve_all))
         .route("/:id/approve", post(approve))
         .route("/:id/deny", post(deny))
         .route("/:id", delete(revoke))
@@ -1278,6 +1370,77 @@ async fn approve(
         .map_err(|e| (StatusCode::CONFLICT, e))?;
     notify_requester(&state, &r).await;
     Ok(Json(r))
+}
+
+/// Most requests one "Approve all" may cover: the Touch ID prompt must still
+/// be able to say what it grants.
+pub const MAX_BATCH: usize = 20;
+
+/// One request as the approver saw it. Every field must still match.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveBatchItem {
+    pub id: Uuid,
+    pub requester_mission_id: Uuid,
+    pub target_host: String,
+    pub scope: PrivilegeScope,
+    #[serde(default)]
+    pub allowed_unit: Option<String>,
+    pub ttl_minutes: i64,
+    pub session_scoped: bool,
+}
+
+impl ApproveBatchItem {
+    fn matches(&self, r: &PrivilegeRequest) -> bool {
+        self.id == r.id
+            && self.requester_mission_id == r.requester_mission_id
+            && self.target_host == r.target_host
+            && self.scope == r.scope
+            && self.allowed_unit == r.allowed_unit
+            && self.ttl_minutes == r.ttl_minutes
+            && self.session_scoped == r.session_scoped
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveBatchBody {
+    pub items: Vec<ApproveBatchItem>,
+    /// Root requests are only approved in a batch when the approver ticked
+    /// them explicitly; the signed summary then says ROOT.
+    #[serde(default)]
+    pub confirm_root: bool,
+}
+
+impl ApproveBatchBody {
+    pub fn check_shape(&self) -> Result<(), String> {
+        if self.items.is_empty() {
+            return Err("Nothing to approve".into());
+        }
+        if self.items.len() > MAX_BATCH {
+            return Err(format!("At most {MAX_BATCH} requests per approval"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !self.items.iter().all(|i| seen.insert(i.id)) {
+            return Err("A request is listed twice".into());
+        }
+        Ok(())
+    }
+}
+
+async fn approve_all(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(body): Json<ApproveBatchBody>,
+) -> Result<Json<Vec<PrivilegeRequest>>, ApiError> {
+    let out = store(&state)
+        .approve_batch(&user.id, &body)
+        .await
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    for r in &out {
+        notify_requester(&state, r).await;
+    }
+    Ok(Json(out))
 }
 
 async fn deny(
@@ -1392,6 +1555,73 @@ pub async fn describe_for_approval(
             super::approvals::quoted(&r.target_host),
         ),
     })
+}
+
+/// Core's text for the Touch ID prompt of an "Approve all". Counts per tier
+/// come first so the cap on prompt length never hides a root grant.
+pub async fn describe_batch_for_approval(
+    state: &Arc<AppState>,
+    owner: &str,
+    batch: &ApproveBatchBody,
+) -> Result<String, String> {
+    batch.check_shape()?;
+    let broker = store(state);
+    let mut found = Vec::with_capacity(batch.items.len());
+    for item in &batch.items {
+        let r = broker
+            .get(owner, item.id)
+            .await
+            .filter(|r| r.state.is_pending() && item.matches(r))
+            .ok_or("A listed request is gone or changed; reload and try again")?;
+        if r.scope == PrivilegeScope::RootExec && !batch.confirm_root {
+            return Err("Root requests must be confirmed explicitly".into());
+        }
+        found.push(r);
+    }
+    Ok(batch_summary(&found))
+}
+
+fn batch_summary(rs: &[PrivilegeRequest]) -> String {
+    use super::approvals::quoted;
+    let count = |s: PrivilegeScope| rs.iter().filter(|r| r.scope == s).count();
+    let tiers: Vec<String> = [
+        PrivilegeScope::RootExec,
+        PrivilegeScope::ServiceDeploy,
+        PrivilegeScope::OpsRead,
+    ]
+    .into_iter()
+    .filter(|s| count(*s) > 0)
+    .map(|s| format!("{} {}", count(s), s.as_str().to_uppercase()))
+    .collect();
+    let mut hosts: Vec<&str> = rs.iter().map(|r| r.target_host.as_str()).collect();
+    hosts.sort_unstable();
+    hosts.dedup();
+    let mut missions: Vec<String> = rs
+        .iter()
+        .map(|r| {
+            r.requester_title
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| format!("mission {}", &r.requester_mission_id.to_string()[..8]))
+        })
+        .collect();
+    missions.sort_unstable();
+    missions.dedup();
+    format!(
+        "Grant {} privileged requests ({}) on {} for {}",
+        rs.len(),
+        tiers.join(", "),
+        hosts
+            .iter()
+            .map(|h| quoted(h))
+            .collect::<Vec<_>>()
+            .join(", "),
+        missions
+            .iter()
+            .map(|m| quoted(m))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 #[cfg(test)]
@@ -1603,6 +1833,212 @@ mod tests {
         assert_eq!(
             broker.get("thomas", req.id).await.unwrap().state,
             ApprovalState::Expired
+        );
+    }
+
+    fn item(r: &PrivilegeRequest) -> ApproveBatchItem {
+        ApproveBatchItem {
+            id: r.id,
+            requester_mission_id: r.requester_mission_id,
+            target_host: r.target_host.clone(),
+            scope: r.scope,
+            allowed_unit: r.allowed_unit.clone(),
+            ttl_minutes: r.ttl_minutes,
+            session_scoped: r.session_scoped,
+        }
+    }
+
+    fn batch(items: Vec<ApproveBatchItem>, confirm_root: bool) -> ApproveBatchBody {
+        ApproveBatchBody {
+            items,
+            confirm_root,
+        }
+    }
+
+    async fn all_pending(broker: &PrivilegeBroker, ids: &[Uuid]) -> bool {
+        for id in ids {
+            if broker.get("thomas", *id).await.unwrap().state != ApprovalState::Pending {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[tokio::test]
+    async fn approve_all_grants_exactly_the_signed_list() {
+        let broker = temp_broker();
+        let a = broker
+            .request(deploy_request(
+                Uuid::new_v4(),
+                PrivilegeScope::ServiceDeploy,
+            ))
+            .await
+            .unwrap();
+        let b = broker
+            .request(deploy_request(Uuid::new_v4(), PrivilegeScope::OpsRead))
+            .await
+            .unwrap();
+        // Arrives after the approver saw the list: not in it, so not granted.
+        let late = broker
+            .request(deploy_request(
+                Uuid::new_v4(),
+                PrivilegeScope::ServiceDeploy,
+            ))
+            .await
+            .unwrap();
+        let out = broker
+            .approve_batch("thomas", &batch(vec![item(&a), item(&b)], false))
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.state == ApprovalState::Approved));
+        assert!(broker.lease_token_for(a.id).await.is_some());
+        assert!(broker.lease_token_for(b.id).await.is_some());
+        assert!(all_pending(&broker, &[late.id]).await);
+        assert!(broker.lease_token_for(late.id).await.is_none());
+        let snap = broker.snapshot("thomas").await;
+        let approved = snap["audit"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["action"] == "approved")
+            .count();
+        assert_eq!(approved, 2, "one audit entry per request");
+        // Already approved: a replayed batch is refused.
+        assert!(broker
+            .approve_batch("thomas", &batch(vec![item(&a)], false))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn approve_all_rejects_tampered_expired_foreign_and_unconfirmed_root() {
+        let broker = temp_broker();
+        let a = broker
+            .request(deploy_request(Uuid::new_v4(), PrivilegeScope::OpsRead))
+            .await
+            .unwrap();
+        let b = broker
+            .request(deploy_request(
+                Uuid::new_v4(),
+                PrivilegeScope::ServiceDeploy,
+            ))
+            .await
+            .unwrap();
+        let ids = [a.id, b.id];
+
+        // Tampered: the listed tier, host, mission or lifetime differs from Core's.
+        let tampers: [fn(&mut ApproveBatchItem); 5] = [
+            |i: &mut ApproveBatchItem| i.scope = PrivilegeScope::OpsRead,
+            |i: &mut ApproveBatchItem| i.target_host = "ashur".into(),
+            |i: &mut ApproveBatchItem| i.requester_mission_id = Uuid::new_v4(),
+            |i: &mut ApproveBatchItem| i.ttl_minutes = 240,
+            |i: &mut ApproveBatchItem| i.session_scoped = false,
+        ];
+        for tamper in tampers {
+            let mut bad = item(&b);
+            tamper(&mut bad);
+            assert!(broker
+                .approve_batch("thomas", &batch(vec![item(&a), bad], false))
+                .await
+                .is_err());
+            assert!(all_pending(&broker, &ids).await, "nothing approved");
+        }
+        // Unknown id, duplicates, empty.
+        let mut ghost = item(&a);
+        ghost.id = Uuid::new_v4();
+        assert!(broker
+            .approve_batch("thomas", &batch(vec![item(&a), ghost], false))
+            .await
+            .is_err());
+        assert!(broker
+            .approve_batch("thomas", &batch(vec![item(&a), item(&a)], false))
+            .await
+            .is_err());
+        assert!(broker
+            .approve_batch("thomas", &batch(vec![], false))
+            .await
+            .is_err());
+
+        // Another user's request.
+        let mut foreign = deploy_request(Uuid::new_v4(), PrivilegeScope::OpsRead);
+        foreign.owner = "mallory".into();
+        let foreign = broker.request(foreign).await.unwrap();
+        assert!(broker
+            .approve_batch("thomas", &batch(vec![item(&a), item(&foreign)], false))
+            .await
+            .is_err());
+        assert_eq!(
+            broker.get("mallory", foreign.id).await.unwrap().state,
+            ApprovalState::Pending
+        );
+
+        // Root without explicit confirmation, then with it.
+        let root = broker
+            .request(deploy_request(Uuid::new_v4(), PrivilegeScope::RootExec))
+            .await
+            .unwrap();
+        assert!(broker
+            .approve_batch("thomas", &batch(vec![item(&a), item(&root)], false))
+            .await
+            .is_err());
+        assert!(all_pending(&broker, &[a.id, root.id]).await);
+
+        // Expired while pending.
+        {
+            let mut data = broker.data.lock().await;
+            let r = data.requests.iter_mut().find(|r| r.id == b.id).unwrap();
+            r.created_at = Utc::now() - chrono::Duration::hours(PENDING_TTL_HOURS + 1);
+        }
+        assert!(broker
+            .approve_batch("thomas", &batch(vec![item(&a), item(&b)], false))
+            .await
+            .is_err());
+        assert!(all_pending(&broker, &[a.id]).await);
+
+        let ok = broker
+            .approve_batch("thomas", &batch(vec![item(&a), item(&root)], true))
+            .await
+            .unwrap();
+        assert_eq!(ok.len(), 2);
+        assert!(ok
+            .iter()
+            .all(|r| r.live_grant(Utc::now(), BunkerState::Normal)));
+    }
+
+    #[test]
+    fn batch_summary_puts_counts_and_root_first() {
+        let mk = |scope, host: &str, title: &str| PrivilegeRequest {
+            id: Uuid::new_v4(),
+            owner: "thomas".into(),
+            owner_username: "thomas".into(),
+            requester_mission_id: Uuid::new_v4(),
+            requester_title: Some(title.into()),
+            target_host: host.into(),
+            scope,
+            allowed_unit: None,
+            reason: "x".into(),
+            session_scoped: true,
+            ttl_minutes: 60,
+            state: ApprovalState::Pending,
+            created_at: Utc::now(),
+            decided_at: None,
+            expires_at: None,
+            session_expires_at: None,
+            revoked_at: None,
+            lease_token_sha256: None,
+        };
+        let s = batch_summary(&[
+            mk(PrivilegeScope::OpsRead, "ashur", "Fleet health"),
+            mk(PrivilegeScope::RootExec, "self", "Disk cleanup"),
+            mk(PrivilegeScope::OpsRead, "ashur", "Fleet health"),
+        ]);
+        assert!(
+            s.starts_with("Grant 3 privileged requests (1 ROOT_EXEC, 2 OPS_READ) on "),
+            "{s}"
+        );
+        assert!(
+            s.contains("\"ashur\", \"self\"") && s.contains("\"Disk cleanup\", \"Fleet health\"")
         );
     }
 }

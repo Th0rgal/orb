@@ -111,3 +111,56 @@ export const revokePrivilegeAccess = (id: string) =>
 /** Approved and not yet expired (Core still decides every command). */
 export const livePrivilegeGrant = (r: PrivilegeRequest, now = Date.now()) =>
   r.state === "approved" && !r.revoked_at && !!r.expires_at && Date.parse(r.expires_at) > now;
+
+/** Highest tier first, so a root grant leads every batch summary. */
+const TIER_ORDER: PrivilegeScope[] = ["root_exec", "service_deploy", "ops_read"];
+const uniqSorted = (xs: string[]) => [...new Set(xs)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+/** What one "Approve all" would grant: count per tier, hosts and missions. */
+export function batchSummary(rs: PrivilegePick[]) {
+  const tiers = TIER_ORDER
+    .map((s) => [s, rs.filter((r) => r.scope === s).length] as const)
+    .filter(([, n]) => n > 0)
+    .map(([s, n]) => `${n} ${scopeLabel(s)}`)
+    .join(" · ");
+  return {
+    tiers,
+    hosts: uniqSorted(rs.map((r) => r.target_host)).map(hostLabel).join(", "),
+    missions: uniqSorted(rs.map(requesterLabel)).join(", "),
+    root: rs.filter((r) => r.scope === "root_exec").length,
+  };
+}
+type PrivilegePick = Pick<PrivilegeRequest, "scope" | "target_host" | "requester_title" | "requester_mission_id">;
+
+/**
+ * The requests "Approve all" covers. Root is left out unless the approver
+ * ticked it: one fingerprint should never grant root by accident. Core
+ * enforces the same rule (`confirm_root`).
+ */
+export const batchApprovable = <T extends Pick<PrivilegeRequest, "scope">>(rs: T[], includeRoot: boolean) =>
+  rs.filter((r) => includeRoot || r.scope !== "root_exec");
+
+/** One signature for exactly these requests, as shown; Core refuses the whole batch if any changed. */
+export const approveAllPrivilegeAccess = (rs: PrivilegeRequest[]) => {
+  const s = batchSummary(rs);
+  return signedApi<PrivilegeRequest[]>(
+    "POST",
+    "/api/privilege-access/approve-all",
+    {
+      items: rs.map((r) => ({
+        id: r.id,
+        requester_mission_id: r.requester_mission_id,
+        target_host: r.target_host,
+        scope: r.scope,
+        allowed_unit: r.allowed_unit ?? null,
+        ttl_minutes: r.ttl_minutes,
+        session_scoped: r.session_scoped,
+      })),
+      confirm_root: s.root > 0,
+    },
+    `grant ${rs.length} privileged requests (${s.tiers}) on ${s.hosts}`,
+  ).then((out) => {
+    for (const r of rs) window.dispatchEvent(new CustomEvent("orb:privilege-access-answered", { detail: { id: r.id } }));
+    return out;
+  });
+};

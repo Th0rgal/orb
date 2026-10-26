@@ -39,3 +39,23 @@ test('settings lists pending requests, live grants with revoke, and the command 
  await g.getByRole('button',{name:'Revoke'}).click();
  await expect.poll(()=>sent(page)).toContain('DELETE /api/privilege-access/g1');
 });
+test('approve all: summary per tier, root left out until ticked, one signed batch',async({page})=>{
+ await page.goto('/tests/privilege-access.html');
+ await page.evaluate(()=>(window as any).showBatch());
+ const card=page.getByTestId('privilege-access-card');
+ await expect(card.locator('.toast-title')).toContainText('3 privileged access requests');
+ const sum=card.getByTestId('privilege-batch-summary');
+ await expect(sum).toContainText('1 Root · 1 Service deploy · 1 Read-only ops · on agent-core, ashur, its own node');
+ await expect(sum).toContainText('for Disk cleanup, Fleet health, Ship usage fix');
+ await expect(card.locator('.secret-row.privilege-root')).toHaveCount(1);
+ const approve=card.locator('.secret-bar').getByRole('button',{name:'Approve 2'});
+ await expect(approve).toBeEnabled();
+ await card.screenshot({path:`${shots}/desktop-privilege-approve-all.png`});
+ await sum.getByRole('checkbox').check();
+ await card.locator('.secret-bar').getByRole('button',{name:'Approve all'}).click();
+ await expect.poll(()=>sent(page)).toContain('POST /api/privilege-access/approve-all');
+ const body=JSON.parse(await page.evaluate(()=>(window as any).calls.find((c:any)=>c.url.includes('/approve-all')).body));
+ expect(body.confirm_root).toBe(true);
+ expect(body.items.map((i:any)=>[i.id,i.scope,i.target_host])).toEqual([['p1','service_deploy','agent-core'],['p2','root_exec','self'],['p4','ops_read','ashur']]);
+ await expect(card).toHaveCount(0);
+});

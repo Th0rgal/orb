@@ -50,4 +50,36 @@ object OrbPrivilegeAccess {
     /** Body Core expects on approve: keep the lifetime the mission asked for. */
     fun approveBody(r: Map<String, Any?>): Map<String, Any?> =
         mapOf("ttl_minutes" to (r["ttl_minutes"] as? Number)?.toInt(), "session_scoped" to (r["session_scoped"] == true))
+
+    /** What one "Approve all" grants: count per tier (root first), hosts and missions. Same strings as desktop `batchSummary`. */
+    data class Batch(val tiers: String, val hosts: String, val missions: String, val root: Int)
+
+    fun batchSummary(rs: List<Map<String, Any?>>): Batch = Batch(
+        tiers = listOf("root_exec", "service_deploy", "ops_read")
+            .mapNotNull { s -> rs.count { it["scope"] == s }.takeIf { it > 0 }?.let { "$it ${scopeLabel(s)}" } }
+            .joinToString(" · "),
+        hosts = rs.map { (it["target_host"] as? String).orEmpty() }.toSortedSet().joinToString(", ") { host(it) },
+        missions = rs.map { requester(it) }.toSortedSet().joinToString(", "),
+        root = rs.count { it["scope"] == "root_exec" },
+    )
+
+    /** Root stays out of "Approve all" unless ticked; Core enforces it too (`confirm_root`). */
+    fun batchApprovable(rs: List<Map<String, Any?>>, includeRoot: Boolean): List<Map<String, Any?>> =
+        rs.filter { includeRoot || it["scope"] != "root_exec" }
+
+    /** The signed body: every request as shown. Core refuses the whole batch if one changed. */
+    fun batchBody(rs: List<Map<String, Any?>>): Map<String, Any?> = mapOf(
+        "items" to rs.map { r ->
+            mapOf(
+                "id" to r["id"],
+                "requester_mission_id" to r["requester_mission_id"],
+                "target_host" to r["target_host"],
+                "scope" to r["scope"],
+                "allowed_unit" to (r["allowed_unit"] as? String)?.takeIf { it.isNotEmpty() },
+                "ttl_minutes" to (r["ttl_minutes"] as? Number)?.toInt(),
+                "session_scoped" to (r["session_scoped"] == true),
+            )
+        },
+        "confirm_root" to (batchSummary(rs).root > 0),
+    )
 }

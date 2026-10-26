@@ -59,6 +59,43 @@ final class OrbPrivilegeAccessMonitor {
         OrbMissionAccessMonitor.mission(r["requester_title"].text, r["requester_mission_id"].text)
     }
 
+    /// What one "Approve all" grants: count per tier (root first), hosts and
+    /// missions. Same strings as desktop `batchSummary`.
+    struct Batch: Equatable { let tiers: String; let hosts: String; let missions: String; let root: Int }
+    static func batchSummary(_ rs: [OrbJSON]) -> Batch {
+        let tiers = ["root_exec", "service_deploy", "ops_read"].compactMap { s -> String? in
+            let n = rs.filter { $0["scope"].text == s }.count
+            return n > 0 ? "\(n) \(scopeLabel(s))" : nil
+        }
+        return Batch(
+            tiers: tiers.joined(separator: " · "),
+            hosts: Set(rs.map { $0["target_host"].text }).sorted().map(host).joined(separator: ", "),
+            missions: Set(rs.map(requester)).sorted().joined(separator: ", "),
+            root: rs.filter { $0["scope"].text == "root_exec" }.count
+        )
+    }
+    /// Root stays out of "Approve all" unless ticked; Core enforces it too (`confirm_root`).
+    static func batchApprovable(_ rs: [OrbJSON], includeRoot: Bool) -> [OrbJSON] {
+        rs.filter { includeRoot || $0["scope"].text != "root_exec" }
+    }
+    /// The signed body: every request as shown. Core refuses the whole batch if one changed.
+    static func batchBody(_ rs: [OrbJSON]) -> OrbJSON {
+        .object([
+            "items": .array(rs.map { r in
+                .object([
+                    "id": r["id"],
+                    "requester_mission_id": r["requester_mission_id"],
+                    "target_host": r["target_host"],
+                    "scope": r["scope"],
+                    "allowed_unit": r["allowed_unit"].text.isEmpty ? .null : r["allowed_unit"],
+                    "ttl_minutes": r["ttl_minutes"],
+                    "session_scoped": .bool(r["session_scoped"].flag),
+                ])
+            }),
+            "confirm_root": .bool(batchSummary(rs).root > 0),
+        ])
+    }
+
     @discardableResult
     func refresh() async -> Bool {
         let current = OrbCore.shared.endpoint
@@ -125,6 +162,7 @@ struct OrbPrivilegeAccessList: View {
     @State private var monitor = OrbPrivilegeAccessMonitor.shared
     @State private var acting: String?
     @State private var error = ""
+    @State private var includeRoot = false
 
     var body: some View {
         List {
@@ -135,6 +173,7 @@ struct OrbPrivilegeAccessList: View {
             Section {
                 if monitor.pending.isEmpty { Text("No pending requests.").foregroundStyle(.secondary) }
                 ForEach(monitor.pending, id: \.selfID) { pendingRow($0) }
+                if monitor.pending.count > 1 { approveAllRow }
             } header: { Text("Pending") } footer: {
                 Text("A grant lasts at most the mission session. Core checks and logs every command, and you can revoke it at any time.")
             }
@@ -165,9 +204,64 @@ struct OrbPrivilegeAccessList: View {
         .task { await monitor.refresh() }
     }
 
+    /// One Face ID / Touch ID for every pending request shown, root only when ticked.
+    private var approveAllRow: some View {
+        let summary = OrbPrivilegeAccessMonitor.batchSummary(monitor.pending)
+        let ready = OrbPrivilegeAccessMonitor.batchApprovable(monitor.pending, includeRoot: includeRoot)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("\(summary.tiers) · on \(summary.hosts)").font(.caption.weight(.medium))
+            Text("for \(summary.missions)").font(.caption).foregroundStyle(.secondary)
+            if summary.root > 0 {
+                Toggle(isOn: $includeRoot) {
+                    Text(summary.root == 1 ? "Include the root request (any command as root)" : "Include \(summary.root) root requests (any command as root)")
+                        .font(.caption).foregroundStyle(OrbStyle.error)
+                }
+                .accessibilityIdentifier("privilege.approve-all.include-root")
+            }
+            Button {
+                approveAll(ready)
+            } label: {
+                Label(ready.count == monitor.pending.count ? "Approve all" : "Approve \(ready.count)",
+                      systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                    .foregroundStyle(.black)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(OrbStyle.success)
+            .controlSize(.small)
+            .disabled(acting != nil || ready.isEmpty)
+            .accessibilityIdentifier("privilege.approve-all")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func approveAll(_ rs: [OrbJSON]) {
+        Task {
+            let s = OrbPrivilegeAccessMonitor.batchSummary(rs)
+            let reason = "Grant \(rs.count) privileged requests (\(s.tiers)) on \(s.hosts)"
+            let enrolled = OrbApprovalKey.deviceId != nil && OrbApprovalKey.publicKey != nil
+            if !enrolled, let message = await OrbBiometric.authenticate(reason: reason) {
+                if !message.isEmpty { error = message }
+                return
+            }
+            acting = "all"
+            defer { acting = nil }
+            do {
+                _ = try await OrbApprovalKey.signedCall("/api/privilege-access/approve-all", method: "POST",
+                                                        body: OrbPrivilegeAccessMonitor.batchBody(rs), summary: reason)
+                error = ""
+                includeRoot = false
+                OrbHaptics.success()
+            } catch {
+                self.error = error.localizedDescription
+            }
+            await monitor.refresh()
+        }
+    }
+
     private func pendingRow(_ r: OrbJSON) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(OrbPrivilegeAccessMonitor.title(r)).font(.subheadline.weight(.medium))
+                .foregroundStyle(r["scope"].text == "root_exec" ? OrbStyle.error : Color.primary)
             Text("asked by \(OrbPrivilegeAccessMonitor.requester(r)) · \(OrbStyle.relativeTime(r["created_at"].text))").font(.caption).foregroundStyle(.secondary)
             if !r["reason"].text.isEmpty { Text("“\(r["reason"].text)”").font(.caption).italic() }
             Text("Allows \(OrbPrivilegeAccessMonitor.unlocks(r)) · \(OrbPrivilegeAccessMonitor.lifetime(r))").font(.caption).foregroundStyle(.secondary)
