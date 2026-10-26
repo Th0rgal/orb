@@ -1652,15 +1652,15 @@ async fn agent_view(broker: &PrivilegeBroker, r: &PrivilegeRequest) -> Value {
 pub fn resolve_fleet_ssh_target(target_host: &str) -> Result<Option<&'static str>, String> {
     match target_host.trim() {
         "self" | "agent-core" => Ok(None),
-        "dgx-spark" | "spark" | "spark-de79" => Ok(Some("thomas@10.88.0.2")),
+        "dgx-spark" | "spark" | "spark-de79" => Ok(Some("root@10.88.0.2")),
         "thomas-md" | "thomas.md" => Ok(Some("root@10.88.0.3")),
-        "polymath" => Ok(Some("root@10.88.0.4")),
-        "maven-repo" => Ok(Some("root@10.88.0.5")),
+        "polymath" => Ok(Some("ubuntu@10.88.0.4")),
+        "maven-repo" => Ok(Some("ubuntu@10.88.0.5")),
         "ashur" => Ok(Some("root@10.88.0.11")),
-        "babylon" => Ok(Some("root@10.88.0.12")),
-        "nippur" => Ok(Some("root@10.88.0.13")),
+        "babylon" => Ok(Some("ubuntu@10.88.0.12")),
+        "nippur" => Ok(Some("ubuntu@10.88.0.13")),
         "old-agent" => Ok(Some("root@10.88.0.14")),
-        "watchtower" => Ok(Some("root@10.88.0.15")),
+        "watchtower" => Ok(Some("ubuntu@10.88.0.15")),
         other => Err(format!(
             "unsupported or unknown fleet target_host `{other}`"
         )),
@@ -1889,7 +1889,17 @@ pub async fn handle_tool(
                     remote_cmd.push_str(&shell_single_quote(dir));
                     remote_cmd.push_str(" && ");
                 }
-                remote_cmd.push_str("exec");
+                if dest.starts_with("ubuntu@")
+                    && matches!(
+                        pre_verified.scope,
+                        PrivilegeScope::RootExec | PrivilegeScope::ServiceDeploy
+                    )
+                    && argv.first().map(String::as_str) != Some("sudo")
+                {
+                    remote_cmd.push_str("exec sudo -n --");
+                } else {
+                    remote_cmd.push_str("exec");
+                }
                 for arg in &argv {
                     remote_cmd.push(' ');
                     remote_cmd.push_str(&shell_single_quote(arg));
