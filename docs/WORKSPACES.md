@@ -30,7 +30,7 @@ define:
   built. This is where you install packages, configure SSH keys, set up
   development tools, etc.
 - **Skills** --- Library skills to sync into the workspace (e.g.,
-  `github-cli`, `deployment-management`).
+  `github-cli`, `ops`).
 - **Environment variables** --- secrets and configuration injected at build time
   and available during missions.
 - **Encrypted keys** --- env var names whose values are encrypted at rest.
@@ -189,7 +189,7 @@ Templates live in `workspace-template/<name>.json` in your Library repo:
   "name": "my-template",
   "description": "A workspace for my project",
   "distro": "ubuntu-noble",
-  "skills": ["github-cli", "deployment-management"],
+  "skills": ["github-cli", "ops"],
   "env_vars": {
     "SSH_PRIVATE_KEY_B64": "<base64-encoded key>",
     "MY_API_KEY": "sk-..."
