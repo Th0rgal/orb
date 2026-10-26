@@ -15,50 +15,11 @@ struct OrbSettingsClient {
         try Task.checkCancellation()
         return result
     }
-}
-
-struct OrbSettingsHome: View {
-    let onBackendChanged: () -> Void
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        NavigationStack {
-            List {
-                NavigationLink { SetupSheet(onComplete: onBackendChanged, allowsDismissal: true, embedded: true) } label: {
-                    Label("Backend", systemImage: "server.rack")
-                }.accessibilityIdentifier("settings.backend")
-                NavigationLink { OrbProvidersSettings() } label: { Label("Providers", systemImage: "key.horizontal") }
-                    .accessibilityIdentifier("settings.providers")
-                NavigationLink { OrbBitwardenSettings() } label: { Label("Secrets", systemImage: "lock.shield") }
-                    .accessibilityIdentifier("settings.secrets")
-                NavigationLink { OrbMissionAccessList().navigationTitle("Mission access").navigationBarTitleDisplayMode(.inline) } label: { Label("Mission access", systemImage: "eye") }
-                    .accessibilityIdentifier("settings.mission-access")
-                NavigationLink { OrbPrivilegeAccessList().navigationTitle("Privileged access").navigationBarTitleDisplayMode(.inline) } label: { Label("Privileged access", systemImage: "lock.shield") }
-                    .accessibilityIdentifier("settings.privilege-access")
-                NavigationLink { OrbRoutingSettings() } label: { Label("Models & Routing", systemImage: "arrow.triangle.swap") }
-                    .accessibilityIdentifier("settings.routing")
-                NavigationLink { OrbProxyKeysSettings() } label: { Label("Proxy API keys", systemImage: "key") }
-                    .accessibilityIdentifier("settings.proxy-keys")
-                NavigationLink { OrbSkillsSettings() } label: { Label("Skills", systemImage: "book.closed") }
-                    .accessibilityIdentifier("settings.skills")
-                NavigationLink { OrbHermesSettings() } label: { Label("Hermes", systemImage: "bubble.left.and.bubble.right") }
-                    .accessibilityIdentifier("settings.hermes")
-                NavigationLink { OrbBtwSettingsView() } label: { Label("Side questions", systemImage: "bubble.left.and.text.bubble.right") }
-                    .accessibilityIdentifier("settings.btw")
-                NavigationLink { OrbMachinesSettings() } label: { Label("Machines", systemImage: "desktopcomputer") }
-                    .accessibilityIdentifier("settings.machines")
-                NavigationLink { OrbInboxSettingsView() } label: { Label("Inbox", systemImage: "tray.full") }
-                    .accessibilityIdentifier("settings.inbox")
-                NavigationLink { OrbDictationSettingsView() } label: { Label("Dictation", systemImage: "mic") }
-                    .accessibilityIdentifier("settings.dictation")
-                NavigationLink { OrbDebugInfoView() } label: { Label("Debug info", systemImage: "ladybug") }
-                    .accessibilityIdentifier("settings.debug")
-            }
-            .scrollContentBackground(.hidden).background(OrbStyle.background)
-            .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-        }
-        .id(OrbCore.shared.connectionGeneration)
-        .presentationDetents([.large]).presentationDragIndicator(.visible)
+    func callText(_ path: String, method: String = "GET", body: OrbJSON? = nil) async throws -> String {
+        guard current else { throw CancellationError() }
+        let result = try await OrbCore.shared.callText(path, method: method, body: body)
+        guard current else { throw CancellationError() }
+        return result
     }
 }
 

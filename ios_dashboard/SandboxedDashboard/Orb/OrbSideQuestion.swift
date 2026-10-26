@@ -42,7 +42,7 @@ struct OrbBtwSettingsView: View {
             }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
-        .navigationTitle("Side questions").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Quick questions (/btw)").navigationBarTitleDisplayMode(.inline)
     }
 }
 

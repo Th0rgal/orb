@@ -676,6 +676,18 @@ final class OrbCore {
         return try await decode(OrbJSON.self, from: data, label: "\(method) \(path)")
     }
 
+    /// For endpoints that answer plain text ("Committed successfully", a file at a revision).
+    func callText(_ path: String, method: String = "GET", body: OrbJSON? = nil) async throws -> String {
+        guard let url = URL(string: endpoint + path) else { throw OrbHTTPError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 45
+        request.setValue("Bearer \(authToken ?? "")", forHTTPHeaderField: "Authorization")
+        if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        let (data, _) = try await send(request, session: .shared, label: "\(method) \(path)", failure: "Request failed")
+        return String(decoding: data, as: UTF8.self)
+    }
+
     func transcribe(_ wav: Data, language: String) async throws -> String {
         guard wav.count <= 4 * 1024 * 1024,
               let url = URL(string: endpoint + "/api/voice/transcribe?language=" + Self.escape(language)) else { throw OrbHTTPError.invalidURL }
