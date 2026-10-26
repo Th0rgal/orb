@@ -1300,4 +1300,88 @@ def routeArgminStep
     else 0
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
 
+/-! ## Wave 9 — Phase 1: Control Core — Mission Lifecycle, Codex Resume, Fork `HOME` & Track Leases -/
+
+/--
+  Unboxed C-ABI Mission Control & Codex Resume Stepper (`orb_mission_control_step`):
+  Pure decision machine for mission lifecycle, archived mission fencing, single-writer track
+  admission, message replay deduplication, and verified Codex session resume vs. seeded fallback:
+  - If `isArchived == 1`, returns `action = 0 (RejectArchived)` with `archivedNext = 1` (`bit 16 = 65536`)
+    and zero dispatch (`bit 8 = 0`, `StickyFence` — archived missions never revive).
+  - Else if `msgAlreadyDelivered == 1`, returns `action = 4 (DedupeDeliveredMessage)` with zero dispatch
+    (`ReplayIdempotence` — no user message is delivered twice).
+  - Else if `!(hasLease == 1 && activeTrackWriters == 0)`, returns `action = 5 (RejectTrackWriterConflict)`
+    with zero dispatch (`at_most_one_writer_per_track`).
+  - Else if `isResume == 1`:
+    - If `sessionCreated == 1 && lineageVerified == 1 && rolloutExists == 1`, returns
+      `action = 2 (ResumeVerifiedSession)` with `emitDispatch = 256` (`bit 8 = 1`) and `hi32 = 1`.
+    - Else if `hasFallbackPrompt == 1`, returns `action = 3 (SeedFallbackFreshSession)` with
+      `emitDispatch = 256` (`bit 8 = 1`), `seedFallback = 512` (`bit 9 = 1`), and `hi32 = 1`
+      (prevents the phantom Codex session bug `16b74dd4` / `c96df4f9`).
+    - Else returns `action = 6 (RejectUnverifiedResume)` with zero dispatch.
+  - Otherwise (`isResume == 0`), returns `action = 1 (DispatchFreshTurn)` with `emitDispatch = 256`
+    and `hi32 = 1` (`no_user_message_lost_or_duplicated`).
+-/
+@[inline, export orb_mission_control_step]
+def missionControlStep
+    (isArchived : UInt8) (activeTrackWriters : UInt32)
+    (hasLease msgAlreadyDelivered isResume : UInt8)
+    (sessionCreated lineageVerified rolloutExists hasFallbackPrompt : UInt8) : UInt64 :=
+  let lo32 : UInt32 :=
+    if isArchived == 1 then 65536
+    else if msgAlreadyDelivered == 1 then 4
+    else if !(hasLease == 1 && activeTrackWriters == 0) then 5
+    else if isResume == 1 then
+      if sessionCreated == 1 && lineageVerified == 1 && rolloutExists == 1 then 258
+      else if hasFallbackPrompt == 1 then 771
+      else 6
+    else 257
+  let hi32 : UInt32 :=
+    if isArchived == 1 then 0
+    else if msgAlreadyDelivered == 1 then 0
+    else if !(hasLease == 1 && activeTrackWriters == 0) then 0
+    else if isResume == 1 then
+      if sessionCreated == 1 && lineageVerified == 1 && rolloutExists == 1 then 1
+      else if hasFallbackPrompt == 1 then 1
+      else 0
+    else 1
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Fork & `/btw` Workspace / `HOME` Isolation Stepper (`orb_fork_home_step`):
+  Pure decision machine for conversation fork and `/btw` side-agent workspace resolution:
+  - Under ALL inputs (`isForkOrSide == 0` or `1`, regardless of `requestedOverrideHome`),
+    `overrideHomeBit` (`bit 16 = 65536`) is ALWAYS `0`: a fork or `/btw` job NEVER overrides
+    its own job `HOME` directory with the source workspace (preventing the `#1302` / `9178bd08`
+    harness sign-out bug).
+  - If `isForkOrSide == 0`:
+    returns `action = 1 (StandardJobWorkspace)` with `admitBit = 256` (`bit 8 = 1`),
+    `jobHomePreservedBit = 131072` (`bit 17 = 1`), `useSourceCwdBit = 0`, `hi32 = 0` (`lo32 = 131329`).
+  - Else (`isForkOrSide == 1`):
+    - If `!(sourceExists == 1 && sourceIsSymlink == 0 && sameWorkspace == 1 && sameNode == 1)`,
+      returns `action = 0 (RejectForkWorkspace)` with `admitBit = 0` and `hi32 = 78` (`EX_CONFIG`).
+    - Else if `hasCommittedTransfer == 1`, returns `action = 3 (UseTransferredRootCwdKeepJobHome)`
+      with `admitBit = 256`, `useSourceCwdBit = 512`, `jobHomePreservedBit = 131072`, `hi32 = 0`
+      (`lo32 = 131843`).
+    - Else returns `action = 2 (UseSiblingSourceCwdKeepJobHome)` with `admitBit = 256`,
+      `useSourceCwdBit = 512`, `jobHomePreservedBit = 131072`, `hi32 = 0` (`lo32 = 131842`).
+-/
+@[inline, export orb_fork_home_step]
+def forkHomeStep
+    (isForkOrSide sourceExists sourceIsSymlink sameWorkspace sameNode : UInt8)
+    (hasCommittedTransfer requestedOverrideHome : UInt8) : UInt64 :=
+  let _ := requestedOverrideHome
+  let validForkSource : Bool :=
+    sourceExists == 1 && sourceIsSymlink == 0 && sameWorkspace == 1 && sameNode == 1
+  let lo32 : UInt32 :=
+    if isForkOrSide == 0 then 131329
+    else if !validForkSource then 0
+    else if hasCommittedTransfer == 1 then 131843
+    else 131842
+  let hi32 : UInt32 :=
+    if isForkOrSide == 0 then 0
+    else if !validForkSource then 78
+    else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
 end Orb.Kernel

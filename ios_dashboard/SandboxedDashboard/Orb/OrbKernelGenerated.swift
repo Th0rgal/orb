@@ -191,6 +191,12 @@ internal func orb_provider_pool_step(_ hasBoundAccount: UInt8, _ boundAccountId:
 @_silgen_name("orb_route_argmin_step")
 internal func orb_route_argmin_step(_ hasBest: UInt8, _ bestId: UInt32, _ bestScore: UInt64, _ candId: UInt32, _ candScore: UInt64, _ candAdmissible: UInt8) -> UInt64
 
+@_silgen_name("orb_mission_control_step")
+internal func orb_mission_control_step(_ isArchived: UInt8, _ activeTrackWriters: UInt32, _ hasLease: UInt8, _ msgAlreadyDelivered: UInt8, _ isResume: UInt8, _ sessionCreated: UInt8, _ lineageVerified: UInt8, _ rolloutExists: UInt8, _ hasFallbackPrompt: UInt8) -> UInt64
+
+@_silgen_name("orb_fork_home_step")
+internal func orb_fork_home_step(_ isForkOrSide: UInt8, _ sourceExists: UInt8, _ sourceIsSymlink: UInt8, _ sameWorkspace: UInt8, _ sameNode: UInt8, _ hasCommittedTransfer: UInt8, _ requestedOverrideHome: UInt8) -> UInt64
+
 @_silgen_name("leansys_verify_slice_bounds")
 internal func leansys_verify_slice_bounds(_ off: UInt64, _ len: UInt64, _ cap: UInt64) -> UInt8
 
