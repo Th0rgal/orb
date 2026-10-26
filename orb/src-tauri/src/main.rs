@@ -278,6 +278,7 @@ fn main() {
             local_agents::local_codex_speed_options,
             local_agents::local_agents_scan,
             local_agents::local_antigravity_models,
+            local_agents::local_claude_models,
             local_agents::local_agents_workspace,
             local_agents::local_agents_directory,
             local_agents::local_agents_write,
