@@ -81,6 +81,56 @@ READ_ONLY_OPTIONS = {
 }
 
 
+UNSAFE_ENV_KEYS = {
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "BASH_ENV",
+    "ENV",
+    "PROMPT_COMMAND",
+    "PYTHONPATH",
+    "PERL5LIB",
+    "RUBYLIB",
+    "NODE_OPTIONS",
+    "DYLD_INSERT_LIBRARIES",
+    "ORB_CORE_API_URL",
+    "ORB_CORE_API_TOKEN",
+}
+
+
+def orb_privd_command_step(
+    lease_valid: int,
+    grant_scope: int,
+    command_class: int,
+    unit_matches_allowed: int,
+    has_shell_metachar_or_flag_bypass: int,
+    has_path_traversal_or_symlink: int,
+    has_unsafe_env_var: int,
+    require_force_cmd: int,
+) -> int:
+    """Bit-exact Python mirror of Lean 4 `Orb.Kernel.privdCommandStep` (`orb_privd_command_step`)."""
+    safe_input = (
+        lease_valid == 1
+        and has_shell_metachar_or_flag_bypass == 0
+        and has_path_traversal_or_symlink == 0
+        and has_unsafe_env_var == 0
+    )
+    if not safe_input or not (0 <= grant_scope <= 2):
+        lo32 = 1536
+    elif command_class == 1:
+        lo32 = 1793
+    elif command_class == 2 and 1 <= grant_scope and unit_matches_allowed == 1:
+        lo32 = 1794
+    elif command_class == 3 and 1 <= grant_scope:
+        lo32 = 1794
+    elif command_class == 4 and grant_scope == 2 and require_force_cmd == 0:
+        lo32 = 1795
+    else:
+        lo32 = 1536
+    hi32 = 126 if lo32 == 1536 else 0
+    return lo32 | (hi32 << 32)
+
+
 def _read_only_arg(prog: str, arg: str) -> bool:
     if not arg.startswith("-"):
         # journalctl values (unit names, times, counts); mdadm/smartctl device paths or option values.
@@ -88,16 +138,55 @@ def _read_only_arg(prog: str, arg: str) -> bool:
     return arg.split("=", 1)[0] in READ_ONLY_OPTIONS[prog]
 
 
-def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[str]) -> None:
+def check_scope_restrictions(
+    scope: str,
+    allowed_unit: str | None,
+    argv: list[str],
+    *,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    require_force_cmd: bool = False,
+) -> int:
     if not argv:
         raise ValueError("Empty command argv")
+    scope_rank = {"ops_read": 0, "service_deploy": 1, "root_exec": 2}.get(scope, 255)
+    has_unsafe_env = int(
+        bool(env and any(str(k).strip().upper() in UNSAFE_ENV_KEYS for k in env))
+        or any(
+            "=" in tok and tok.split("=", 1)[0].strip().upper() in UNSAFE_ENV_KEYS
+            for tok in argv
+        )
+    )
+    cwd_bad = False
+    if cwd is not None and str(cwd).strip():
+        cwd_path = Path(str(cwd).strip())
+        if not cwd_path.is_absolute() or ".." in cwd_path.parts or cwd_path.is_symlink():
+            cwd_bad = True
+    argv_traversal = any(
+        tok == ".." or tok.startswith("../") or tok.endswith("/..") or "/../" in tok
+        for tok in argv
+    )
+    has_path_traversal_or_symlink = int(cwd_bad or argv_traversal)
+    has_metachar = any(
+        not tok
+        or "\x00" in tok
+        or "\n" in tok
+        or "\r" in tok
+        or ";" in tok
+        or "|" in tok
+        or "&" in tok
+        or "`" in tok
+        or "$(" in tok
+        or (scope != "root_exec" and (">" in tok or "<" in tok))
+        for tok in argv
+    )
     prog = Path(argv[0]).name
     if scope == "ops_read":
         if prog not in OPS_READ_BINARIES:
             raise ValueError(f"ops_read grant does not allow binary '{prog}'")
-        if prog == "systemctl" and len(argv) >= 2 and argv[1] not in {"status", "show", "list-units", "is-active", "is-failed"}:
+        if prog == "systemctl" and (len(argv) < 2 or argv[1] not in {"status", "show", "list-units", "is-active", "is-failed"}):
             raise ValueError("ops_read grant only allows read-only systemctl subcommands")
-        if prog == "docker" and len(argv) >= 2 and argv[1] not in {"ps", "logs", "inspect", "stats", "info", "version"}:
+        if prog == "docker" and (len(argv) < 2 or argv[1] not in {"ps", "logs", "inspect", "stats", "info", "version"}):
             raise ValueError("ops_read grant only allows read-only docker subcommands")
         if prog == "nft" and argv[1:] != ["list", "ruleset"]:
             raise ValueError("ops_read grant only allows 'nft list ruleset'")
@@ -105,6 +194,8 @@ def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[st
             raise ValueError("ops_read grant only allows 'mdadm --detail/--examine/--query'")
         if prog in READ_ONLY_OPTIONS and not all(_read_only_arg(prog, a) for a in argv[1:]):
             raise ValueError(f"ops_read grant only allows read-only {prog} options")
+        command_class = 1
+        unit_matches = 1
     elif scope == "service_deploy":
         if prog == "systemctl":
             if len(argv) < 2 or argv[1] not in {"restart", "reload", "status", "start", "stop", "daemon-reload"}:
@@ -114,6 +205,8 @@ def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[st
             if argv[1] == "daemon-reload":
                 if len(argv) != 2:
                     raise ValueError("systemctl daemon-reload does not take target unit arguments")
+                command_class = 3
+                unit_matches = 1
             else:
                 targets = argv[2:]
                 if not targets:
@@ -125,11 +218,33 @@ def check_scope_restrictions(scope: str, allowed_unit: str | None, argv: list[st
                             raise ValueError(
                                 f"service_deploy grant is restricted to unit '{allowed_unit}' (rejected '{target}')"
                             )
+                command_class = 2
+                unit_matches = 1
         elif prog == "nginx":
             if argv[1:] not in (["-t"], ["-s", "reload"]):
                 raise ValueError("service_deploy grant only allows 'nginx -t' or 'nginx -s reload'")
+            command_class = 3
+            unit_matches = 1
         else:
             raise ValueError(f"service_deploy grant does not allow arbitrary binary '{prog}'; request root_exec if needed")
+    else:
+        command_class = 4
+        unit_matches = 1
+
+    packed = orb_privd_command_step(
+        1,
+        scope_rank,
+        command_class,
+        unit_matches,
+        int(has_metachar),
+        has_path_traversal_or_symlink,
+        has_unsafe_env,
+        int(require_force_cmd),
+    )
+    lo32 = packed & 0xFFFFFFFF
+    if (lo32 & 256) == 0 or (lo32 & 1536) != 1536:
+        raise ValueError("Rejected by orb_privd_command_step confinement gate")
+    return packed
 
 
 def call_core_verify(payload: dict) -> dict:
@@ -208,8 +323,14 @@ def handle_exec(req: dict) -> dict:
 
     scope = str(verdict.get("scope", "root_exec"))
     allowed_unit = verdict.get("allowed_unit")
-    if scope != "root_exec" or verdict.get("require_force_cmd"):
-        check_scope_restrictions(scope, allowed_unit, argv)
+    check_scope_restrictions(
+        scope,
+        allowed_unit,
+        argv,
+        cwd=cwd,
+        env=req.get("env") if isinstance(req.get("env"), dict) else None,
+        require_force_cmd=bool(verdict.get("require_force_cmd")),
+    )
 
     # 2. Execute command in clean root environment
     t0 = time.monotonic()

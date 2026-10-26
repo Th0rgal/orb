@@ -23,6 +23,37 @@ def is_capacity_error(error):
 
 
 GOAL_CONTROLS = ('pause', 'status', 'clear')
+VALID_CYBER_PROGRAMS = ('standard', 'daybreak_blue', 'daybreak_red')
+
+
+def orb_ssh_identity_step(
+    is_worker_or_container_target: int,
+    bundle_has_control_plane_key: int,
+    parent_dir_is_symlink: int,
+    pub_key_is_ed25519_without_private: int,
+    proxy_jump_valid: int,
+    codex_cyber_program_valid: int,
+    codex_goal_budget_exhausted: int,
+) -> int:
+    """Bit-exact Python mirror of Lean 4 `Orb.Kernel.sshIdentityStep` (`orb_ssh_identity_step`)."""
+    valid = (
+        parent_dir_is_symlink == 0
+        and pub_key_is_ed25519_without_private == 1
+        and proxy_jump_valid == 1
+        and codex_cyber_program_valid == 1
+        and codex_goal_budget_exhausted == 0
+        and not (is_worker_or_container_target == 1 and bundle_has_control_plane_key == 1)
+    )
+    if not valid:
+        lo32 = 1536 if is_worker_or_container_target == 1 else 1024
+        hi32 = 78
+    elif is_worker_or_container_target == 1:
+        lo32 = 1793
+        hi32 = 0
+    else:
+        lo32 = 1282
+        hi32 = 0
+    return lo32 | (hi32 << 32)
 
 
 def goal_control(goal, prompt):
@@ -42,7 +73,9 @@ def goal_action(goal, prompt):
                 raise RuntimeError('Native goal is complete; explicit new goal required')
             return None
         budget = goal.get('tokenBudget')
-        if budget is not None and goal.get('tokensUsed', 0) >= budget:
+        exhausted = int(budget is not None and goal.get('tokensUsed', 0) >= budget)
+        packed = orb_ssh_identity_step(1, 0, 0, 1, 1, 1, exhausted)
+        if exhausted or (packed & 256) == 0:
             raise RuntimeError('Native goal budget exhausted; refusing to reset usage')
         return {'status': 'active'}
     if requested:
@@ -89,7 +122,9 @@ class NativeSession:
             command = [os.environ['SANDBOXED_MCP_WRAPPER'], 'launch', '--harness', 'codex', '--', 'codex']
         program = os.environ.get('SANDBOXED_CYBER_PROGRAM')
         if program is not None:
-            if program not in ('standard', 'daybreak_blue', 'daybreak_red'):
+            prog_valid = int(program in VALID_CYBER_PROGRAMS)
+            packed = orb_ssh_identity_step(1, 0, 0, 1, 1, prog_valid, 0)
+            if not prog_valid or (packed & 256) == 0:
                 raise RuntimeError('Invalid cyber program; no request was sent')
             # API-key proxy auth ignores native cyberAccessProgram. The authenticated
             # core maps this explicit selection to Responses API access_programs.

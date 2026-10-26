@@ -34,8 +34,343 @@ use super::approval_flow::{self, ApprovalEvent, ApprovalState};
 use super::auth::AuthUser;
 use super::routes::AppState;
 use crate::orb_spec::{
-    bunker_step, privilege_step, BunkerState, PrivilegeScopeRank, PrivilegeStepInput,
+    bunker_step, observe_privd_command_shadow, privilege_step, BunkerState, PrivdCommandClass,
+    PrivdCommandStepInput, PrivdCommandVerdict, PrivdGrantScope, PrivilegeScopeRank,
+    PrivilegeStepInput, ShadowCounter,
 };
+
+static PRIVD_COMMAND_SHADOW_COUNTER: OnceLock<ShadowCounter> = OnceLock::new();
+
+pub fn privd_command_shadow_counter() -> &'static ShadowCounter {
+    PRIVD_COMMAND_SHADOW_COUNTER.get_or_init(ShadowCounter::new)
+}
+
+const OPS_READ_BINARIES: &[&str] = &[
+    "journalctl",
+    "systemctl",
+    "docker",
+    "nft",
+    "ss",
+    "ps",
+    "df",
+    "du",
+    "free",
+    "uptime",
+    "uname",
+    "cat",
+    "head",
+    "tail",
+    "ls",
+    "stat",
+    "grep",
+    "mdadm",
+    "lsblk",
+    "smartctl",
+];
+
+const UNSAFE_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "BASH_ENV",
+    "ENV",
+    "PROMPT_COMMAND",
+    "PYTHONPATH",
+    "PERL5LIB",
+    "RUBYLIB",
+    "NODE_OPTIONS",
+    "DYLD_INSERT_LIBRARIES",
+    "ORB_CORE_API_URL",
+    "ORB_CORE_API_TOKEN",
+];
+
+pub fn unit_matches_deploy_service(allowed_unit: &str, target_service: &str) -> bool {
+    let a = allowed_unit.trim().trim_end_matches(".service");
+    let b = target_service.trim().trim_end_matches(".service");
+    if a == b {
+        return true;
+    }
+    let is_prod_orb = |s: &str| {
+        matches!(
+            s,
+            "orb"
+                | "orb-core"
+                | "orb-prod"
+                | "assistant-mcp"
+                | "sandboxed-sh"
+                | "sandboxed-sh-prod"
+        )
+    };
+    is_prod_orb(a) && is_prod_orb(b)
+}
+
+fn read_only_option_allowed(prog: &str, arg: &str) -> bool {
+    if !arg.starts_with('-') {
+        return prog == "journalctl"
+            || arg.starts_with("/dev/")
+            || (!arg.is_empty()
+                && arg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ',' | '=' | '-')));
+    }
+    let flag = arg.split('=').next().unwrap_or(arg);
+    match prog {
+        "journalctl" => matches!(
+            flag,
+            "-u"
+                | "--unit"
+                | "-n"
+                | "--lines"
+                | "--since"
+                | "--until"
+                | "-p"
+                | "--priority"
+                | "-b"
+                | "--boot"
+                | "--no-pager"
+                | "-o"
+                | "--output"
+                | "-k"
+                | "--dmesg"
+                | "-r"
+                | "--reverse"
+                | "-x"
+                | "--catalog"
+                | "-e"
+                | "--pager-end"
+                | "--list-boots"
+                | "--disk-usage"
+                | "-g"
+                | "--grep"
+        ),
+        "mdadm" => matches!(
+            flag,
+            "--detail"
+                | "-D"
+                | "--examine"
+                | "-E"
+                | "--query"
+                | "-Q"
+                | "--scan"
+                | "-s"
+                | "--verbose"
+                | "-v"
+                | "--brief"
+                | "-b"
+        ),
+        "smartctl" => matches!(
+            flag,
+            "-a"
+                | "--all"
+                | "-x"
+                | "--xall"
+                | "-i"
+                | "--info"
+                | "-H"
+                | "--health"
+                | "-A"
+                | "--attributes"
+                | "-d"
+                | "--device"
+                | "-j"
+                | "--json"
+        ),
+        _ => true,
+    }
+}
+
+/// Evaluate `orb_privd_command_step` (`GrammarConfinement`, `PathConfinement`,
+/// `EnvironmentConfinement`, `NoPrivilegeEscalation`, `AuditCompleteness`) over
+/// live runtime command / argv / cwd / environment inputs and record the decision
+/// in `privd_command_shadow_counter()`.
+pub fn evaluate_privd_command_confinement(
+    lease_valid: bool,
+    grant_scope: PrivilegeScope,
+    allowed_unit: Option<&str>,
+    command: &str,
+    argv: &[String],
+    cwd: Option<&str>,
+    env_vars: &[(&str, &str)],
+    require_force_cmd: bool,
+) -> PrivdCommandVerdict {
+    let stripped_cmd = command.trim().trim_start_matches("[pre-exec] ").trim();
+    let tokens: Vec<&str> = if !argv.is_empty() {
+        argv.iter().map(String::as_str).collect()
+    } else if !stripped_cmd.is_empty() {
+        stripped_cmd.split_whitespace().collect()
+    } else {
+        Vec::new()
+    };
+
+    let has_unsafe_env_var = env_vars.iter().any(|(k, _)| {
+        let up = k.trim().to_ascii_uppercase();
+        UNSAFE_ENV_KEYS.contains(&up.as_str())
+    }) || tokens.iter().any(|tok| {
+        tok.split_once('=').is_some_and(|(k, _)| {
+            let up = k.trim().to_ascii_uppercase();
+            UNSAFE_ENV_KEYS.contains(&up.as_str())
+        })
+    });
+
+    let cwd_traversal_or_symlink = cwd.is_some_and(|dir| {
+        let trimmed = dir.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let p = std::path::Path::new(trimmed);
+        if !p.is_absolute()
+            || p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return true;
+        }
+        std::fs::symlink_metadata(p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    });
+    let argv_traversal = tokens.iter().any(|tok| {
+        *tok == ".."
+            || tok.starts_with("../")
+            || tok.ends_with("/..")
+            || tok.contains("/../")
+    });
+    let has_path_traversal_or_symlink = cwd_traversal_or_symlink || argv_traversal;
+
+    let token_has_metachar = tokens.is_empty()
+        || command.contains('\0')
+        || tokens.iter().any(|tok| {
+            tok.is_empty()
+                || tok.contains('\0')
+                || tok.contains('\n')
+                || tok.contains('\r')
+                || tok.contains(';')
+                || tok.contains('|')
+                || tok.contains('&')
+                || tok.contains('`')
+                || tok.contains("$(")
+                || (grant_scope != PrivilegeScope::RootExec
+                    && (tok.contains('>') || tok.contains('<')))
+        });
+
+    let prog = tokens
+        .first()
+        .and_then(|s| std::path::Path::new(s).file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    let is_service_deploy_reload = (prog == "systemctl"
+        && tokens.get(1..) == Some(&["daemon-reload"]))
+        || (prog == "nginx"
+            && (tokens.get(1..) == Some(&["-t"])
+                || tokens.get(1..) == Some(&["-s", "reload"])));
+
+    let is_service_deploy_unit = prog == "systemctl"
+        && tokens.len() >= 3
+        && matches!(
+            tokens[1],
+            "restart" | "reload" | "status" | "start" | "stop"
+        )
+        && tokens[1..].iter().all(|a| !a.starts_with('-'));
+
+    let is_ops_read_safe = OPS_READ_BINARIES.contains(&prog) && {
+        match prog {
+            "systemctl" => {
+                tokens.len() >= 2
+                    && matches!(
+                        tokens[1],
+                        "status" | "show" | "list-units" | "is-active" | "is-failed"
+                    )
+                    && tokens[2..].iter().all(|a| !a.starts_with('-'))
+            }
+            "docker" => {
+                tokens.len() >= 2
+                    && matches!(
+                        tokens[1],
+                        "ps" | "logs" | "inspect" | "stats" | "info" | "version"
+                    )
+            }
+            "nft" => tokens.get(1..) == Some(&["list", "ruleset"]),
+            "mdadm" => {
+                tokens.get(1).is_some_and(|a| {
+                    matches!(*a, "--detail" | "-D" | "--examine" | "-E" | "--query" | "-Q")
+                }) && tokens[1..]
+                    .iter()
+                    .all(|a| read_only_option_allowed("mdadm", a))
+            }
+            "journalctl" | "smartctl" => tokens[1..]
+                .iter()
+                .all(|a| read_only_option_allowed(prog, a)),
+            _ => tokens[1..].iter().all(|a| !a.starts_with("--force")),
+        }
+    };
+
+    let flag_bypass = (grant_scope == PrivilegeScope::ServiceDeploy
+        && prog == "systemctl"
+        && tokens[1..].iter().any(|a| a.starts_with('-')))
+        || (grant_scope == PrivilegeScope::OpsRead
+            && matches!(prog, "journalctl" | "mdadm" | "smartctl")
+            && !tokens[1..]
+                .iter()
+                .all(|a| read_only_option_allowed(prog, a)));
+
+    let has_shell_metachar_or_flag_bypass = token_has_metachar || flag_bypass;
+
+    let (command_class, unit_matches_allowed) = if is_service_deploy_reload {
+        (PrivdCommandClass::ServiceDeployReload, true)
+    } else if is_service_deploy_unit {
+        if grant_scope == PrivilegeScope::OpsRead && is_ops_read_safe {
+            (PrivdCommandClass::OpsReadSafe, true)
+        } else {
+            let unit_ok = match allowed_unit {
+                Some(u) if !u.trim().is_empty() => tokens[2..]
+                    .iter()
+                    .all(|target| unit_matches_deploy_service(u, target)),
+                _ => true,
+            };
+            (PrivdCommandClass::ServiceDeployUnit, unit_ok)
+        }
+    } else if is_ops_read_safe {
+        (PrivdCommandClass::OpsReadSafe, true)
+    } else if !tokens.is_empty() {
+        (PrivdCommandClass::RootExecCommand, true)
+    } else {
+        (PrivdCommandClass::UnknownOrForbidden, false)
+    };
+
+    let host_allow_exec = lease_valid
+        && !has_shell_metachar_or_flag_bypass
+        && !has_path_traversal_or_symlink
+        && !has_unsafe_env_var
+        && match command_class {
+            PrivdCommandClass::UnknownOrForbidden => false,
+            PrivdCommandClass::OpsReadSafe => true,
+            PrivdCommandClass::ServiceDeployUnit => {
+                matches!(
+                    grant_scope,
+                    PrivilegeScope::ServiceDeploy | PrivilegeScope::RootExec
+                ) && unit_matches_allowed
+            }
+            PrivdCommandClass::ServiceDeployReload => matches!(
+                grant_scope,
+                PrivilegeScope::ServiceDeploy | PrivilegeScope::RootExec
+            ),
+            PrivdCommandClass::RootExecCommand => {
+                grant_scope == PrivilegeScope::RootExec && !require_force_cmd
+            }
+        };
+
+    let input = PrivdCommandStepInput {
+        lease_valid,
+        grant_scope: PrivdGrantScope::from(grant_scope.to_rank() as u8),
+        command_class,
+        unit_matches_allowed,
+        has_shell_metachar_or_flag_bypass,
+        has_path_traversal_or_symlink,
+        has_unsafe_env_var,
+        require_force_cmd,
+    };
+    observe_privd_command_shadow(input, host_allow_exec, privd_command_shadow_counter())
+}
 
 /// Default ceiling for a `"session"`-scoped grant (reaped earlier when the
 /// mission session ends via [`reap_mission_grants`]).
@@ -806,6 +1141,31 @@ impl PrivilegeBroker {
         if !verdict.allow_exec {
             return Err("Privilege grant is expired, revoked, or blocked by Bunker Mode".into());
         }
+        let effective_scope = if requested_scope.to_rank() <= grant.scope.to_rank() {
+            requested_scope
+        } else {
+            grant.scope
+        };
+        let cmd_verdict = evaluate_privd_command_confinement(
+            verdict.allow_exec,
+            effective_scope,
+            if effective_scope == PrivilegeScope::RootExec {
+                None
+            } else {
+                grant.allowed_unit.as_deref()
+            },
+            &req.command,
+            &req.argv,
+            req.cwd.as_deref(),
+            &[],
+            verdict.require_force_cmd,
+        );
+        if !cmd_verdict.allow_exec || !cmd_verdict.scrub_env || !cmd_verdict.audit_required {
+            return Err(format!(
+                "Command rejected by orb_privd_command_step confinement gate ({:?}, exit={})",
+                cmd_verdict.action, cmd_verdict.exit_code_on_reject
+            ));
+        }
         let entry = CommandAuditEntry {
             id: Uuid::new_v4(),
             at: now,
@@ -844,26 +1204,6 @@ impl PrivilegeBroker {
         mission_id: Uuid,
         target_service: &str,
     ) -> Option<Uuid> {
-        fn unit_matches_deploy_service(allowed_unit: &str, target_service: &str) -> bool {
-            let a = allowed_unit.trim().trim_end_matches(".service");
-            let b = target_service.trim().trim_end_matches(".service");
-            if a == b {
-                return true;
-            }
-            let is_prod_orb = |s: &str| {
-                matches!(
-                    s,
-                    "orb"
-                        | "orb-core"
-                        | "orb-prod"
-                        | "assistant-mcp"
-                        | "sandboxed-sh"
-                        | "sandboxed-sh-prod"
-                )
-            };
-            is_prod_orb(a) && is_prod_orb(b)
-        }
-
         let now = Utc::now();
         let mut data = self.data.lock().await;
         data.prune(now);
@@ -872,17 +1212,34 @@ impl PrivilegeBroker {
             .iter()
             .rev()
             .find(|r| {
-                r.requester_mission_id == mission_id
-                    && (r.target_host == target_service
+                if r.requester_mission_id != mission_id
+                    || !(r.target_host == target_service
                         || r.target_host == "agent-core"
                         || r.target_host == "orb-core")
-                    && (r.scope == PrivilegeScope::RootExec
-                        || r.allowed_unit
-                            .as_deref()
-                            .map(|u| unit_matches_deploy_service(u, target_service))
-                            .unwrap_or(true))
-                    && r.evaluate(now, true, PrivilegeScope::ServiceDeploy, bunker)
-                        .allow_exec
+                {
+                    return false;
+                }
+                let priv_verdict = r.evaluate(now, true, PrivilegeScope::ServiceDeploy, bunker);
+                let deploy_argv = vec![
+                    "systemctl".to_string(),
+                    "restart".to_string(),
+                    target_service.to_string(),
+                ];
+                let cmd_verdict = evaluate_privd_command_confinement(
+                    priv_verdict.allow_exec,
+                    r.scope,
+                    if r.scope == PrivilegeScope::RootExec {
+                        None
+                    } else {
+                        r.allowed_unit.as_deref()
+                    },
+                    "systemctl restart",
+                    &deploy_argv,
+                    None,
+                    &[],
+                    priv_verdict.require_force_cmd,
+                );
+                cmd_verdict.allow_exec && cmd_verdict.scrub_env && cmd_verdict.audit_required
             })
             .map(|r| r.id)
     }
@@ -2196,5 +2553,251 @@ mod tests {
         assert_eq!(inc_json["previous_bunker_state"].as_u64(), Some(0));
         assert_eq!(inc_json["new_bunker_state"].as_u64(), Some(2));
         assert_eq!(inc_json["epoch"].as_u64(), Some(9));
+    }
+
+    #[tokio::test]
+    async fn phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences() {
+        let broker = temp_broker();
+        let mission_ro = Uuid::new_v4();
+        let mission_deploy = Uuid::new_v4();
+        let mission_root = Uuid::new_v4();
+
+        let ro_req = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: mission_ro,
+                requester_title: Some("Read-Only Ops".into()),
+                target_host: "agent-core".into(),
+                scope: PrivilegeScope::OpsRead,
+                allowed_unit: None,
+                reason: "inspect logs".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker.approve("thomas", ro_req.id, None, None).await.unwrap();
+        let ro_token = broker.lease_token_for(ro_req.id).await.unwrap();
+
+        let deploy_req = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: mission_deploy,
+                requester_title: Some("Deploy Orb".into()),
+                target_host: "agent-core".into(),
+                scope: PrivilegeScope::ServiceDeploy,
+                allowed_unit: Some("orb-core".into()),
+                reason: "restart orb-core".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker
+            .approve("thomas", deploy_req.id, None, None)
+            .await
+            .unwrap();
+        let deploy_token = broker.lease_token_for(deploy_req.id).await.unwrap();
+
+        let root_req = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: mission_root,
+                requester_title: Some("Root Exec".into()),
+                target_host: "self".into(),
+                scope: PrivilegeScope::RootExec,
+                allowed_unit: None,
+                reason: "kernel maintenance".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        broker
+            .approve("thomas", root_req.id, None, None)
+            .await
+            .unwrap();
+        let root_token = broker.lease_token_for(root_req.id).await.unwrap();
+
+        // 1. Valid OpsRead command (`journalctl -u orb-core -n 50 --no-pager`) is admitted
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                mission_id: mission_ro,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "journalctl -u orb-core -n 50 --no-pager".into(),
+                argv: vec![
+                    "journalctl".into(),
+                    "-u".into(),
+                    "orb-core".into(),
+                    "-n".into(),
+                    "50".into(),
+                    "--no-pager".into(),
+                ],
+                cwd: Some("/var/log".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_ok());
+
+        // 2. Attack vector: OpsRead attempting privilege escalation to `systemctl restart orb-core`
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                mission_id: mission_ro,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "systemctl restart orb-core".into(),
+                argv: vec!["systemctl".into(), "restart".into(), "orb-core".into()],
+                cwd: Some("/root".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+
+        // 3. Attack vector: OpsRead flag bypass (`journalctl --cursor-file=/etc/shadow`)
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                mission_id: mission_ro,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "journalctl --cursor-file=/etc/shadow".into(),
+                argv: vec!["journalctl".into(), "--cursor-file=/etc/shadow".into()],
+                cwd: Some("/root".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+
+        // 4. Attack vector: ServiceDeploy attempting wrong unit (`postgres.service` instead of `orb-core`)
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                mission_id: mission_deploy,
+                lease_token: deploy_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::ServiceDeploy),
+                command: "systemctl restart postgres.service".into(),
+                argv: vec![
+                    "systemctl".into(),
+                    "restart".into(),
+                    "postgres.service".into(),
+                ],
+                cwd: Some("/root".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+        assert!(broker
+            .has_active_deploy_grant(mission_deploy, "postgres.service")
+            .await
+            .is_none());
+        assert_eq!(
+            broker
+                .has_active_deploy_grant(mission_deploy, "orb-core.service")
+                .await,
+            Some(deploy_req.id)
+        );
+
+        // 5. Attack vector: Path traversal in `cwd` (`/var/lib/../../etc`) and `argv` (`../../etc/shadow`)
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                mission_id: mission_root,
+                lease_token: root_token.clone(),
+                target_host: "self".into(),
+                requested_scope: Some(PrivilegeScope::RootExec),
+                command: "id".into(),
+                argv: vec!["id".into()],
+                cwd: Some("/var/lib/../../etc".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                mission_id: mission_ro,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "cat ../../etc/shadow".into(),
+                argv: vec!["cat".into(), "../../etc/shadow".into()],
+                cwd: Some("/root".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+
+        // 6. Attack vector: Symlinked `cwd` directory rejected fail-closed
+        let tmp_dir = std::env::temp_dir().join(format!("privd-symlink-{}", Uuid::new_v4()));
+        let real_dir = tmp_dir.join("real");
+        let link_dir = tmp_dir.join("link");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                mission_id: mission_root,
+                lease_token: root_token.clone(),
+                target_host: "self".into(),
+                requested_scope: Some(PrivilegeScope::RootExec),
+                command: "id".into(),
+                argv: vec!["id".into()],
+                cwd: Some(link_dir.to_string_lossy().to_string()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+
+        // 7. Attack vector: Shell metacharacter injection (`;`, `|`, `$(`) and unsafe env (`LD_PRELOAD`, `BASH_ENV`)
+        assert!(broker
+            .verify_and_log_command(VerifyLeaseRequest {
+                mission_id: mission_ro,
+                lease_token: ro_token.clone(),
+                target_host: "agent-core".into(),
+                requested_scope: Some(PrivilegeScope::OpsRead),
+                command: "ps; id".into(),
+                argv: vec!["ps; id".into()],
+                cwd: Some("/root".into()),
+                exit_code: None,
+                duration_ms: None,
+                stdout_sha256: None,
+            })
+            .await
+            .is_err());
+        let env_verdict = evaluate_privd_command_confinement(
+            true,
+            PrivilegeScope::RootExec,
+            None,
+            "id",
+            &["id".to_string()],
+            Some("/root"),
+            &[("LD_PRELOAD", "/tmp/evil.so"), ("BASH_ENV", "/tmp/rc")],
+            false,
+        );
+        assert!(!env_verdict.allow_exec);
+        assert!(env_verdict.scrub_env);
+        assert!(env_verdict.audit_required);
+        assert_eq!(env_verdict.exit_code_on_reject, 126);
+
+        let snap = privd_command_shadow_counter().snapshot("orb_privd_command_step");
+        assert!(snap.total_events >= 10);
+        assert_eq!(snap.total_divergences, 0);
     }
 }

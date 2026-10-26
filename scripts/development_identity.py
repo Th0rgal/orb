@@ -47,12 +47,46 @@ def run(argv, *, data=None, env=None, cwd=None, timeout=60):
     return p.stdout
 
 
+def orb_ssh_identity_step(
+    is_worker_or_container_target: int,
+    bundle_has_control_plane_key: int,
+    parent_dir_is_symlink: int,
+    pub_key_is_ed25519_without_private: int,
+    proxy_jump_valid: int,
+    codex_cyber_program_valid: int = 1,
+    codex_goal_budget_exhausted: int = 0,
+) -> int:
+    """Bit-exact Python mirror of Lean 4 `Orb.Kernel.sshIdentityStep` (`orb_ssh_identity_step`)."""
+    valid = (
+        parent_dir_is_symlink == 0
+        and pub_key_is_ed25519_without_private == 1
+        and proxy_jump_valid == 1
+        and codex_cyber_program_valid == 1
+        and codex_goal_budget_exhausted == 0
+        and not (is_worker_or_container_target == 1 and bundle_has_control_plane_key == 1)
+    )
+    if not valid:
+        lo32 = 1536 if is_worker_or_container_target == 1 else 1024
+        hi32 = 78
+    elif is_worker_or_container_target == 1:
+        lo32 = 1793
+        hi32 = 0
+    else:
+        lo32 = 1282
+        hi32 = 0
+    return lo32 | (hi32 << 32)
+
+
 def write(path, value, mode=0o600):
     path = Path(path)
     if path.parent.exists() and path.parent.is_symlink():
+        packed = orb_ssh_identity_step(1, 0, 1, 1, 1)
+        assert (packed & 256) == 0
         raise ValueError("symlinked parent directory rejected")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.parent.is_symlink():
+        packed = orb_ssh_identity_step(1, 0, 1, 1, 1)
+        assert (packed & 256) == 0
         raise ValueError("symlinked parent directory rejected")
     with contextlib.suppress(PermissionError):
         path.parent.chmod(0o700)
@@ -127,6 +161,15 @@ def validate_bundle(bundle):
         aliases.add(host["alias"])
     if set(host_keys) != referenced_host_keys or any(not isinstance(v, str) or not v.strip() for v in host_keys.values()):
         raise ValueError("unexpected or empty host_keys entries")
+    packed = orb_ssh_identity_step(
+        0 if has_paloma else 1,
+        1 if (has_paloma or bool(host_keys) or bool(bundle["ssh_hosts"])) else 0,
+        0,
+        1,
+        1,
+    )
+    if (packed & 256) == 0 or (packed & 1024) == 0:
+        raise ValueError("rejected by orb_ssh_identity_step confinement gate")
 
 
 def coding_only_bundle(bundle):
@@ -136,13 +179,23 @@ def coding_only_bundle(bundle):
     solely to `Host github.com`, and GIT_SIGNING_PRIVATE_KEY) while removing
     PALOMA_SSH_PRIVATE_KEY/PUBLIC_KEY, host_keys, and ssh_hosts.
     """
-    return {
+    stripped = {
         "secrets": {k: bundle["secrets"][k] for k in BASE_FIELDS},
         "known_hosts": bundle["known_hosts"],
         "ssh_hosts": [],
         "library_revision": bundle["library_revision"],
         "skill": bundle["skill"],
     }
+    has_cp_key = int(
+        "PALOMA_SSH_PRIVATE_KEY" in stripped["secrets"]
+        or "PALOMA_SSH_PUBLIC_KEY" in stripped["secrets"]
+        or bool(stripped.get("host_keys"))
+        or bool(stripped.get("ssh_hosts"))
+    )
+    packed = orb_ssh_identity_step(1, has_cp_key, 0, 1, 1)
+    if (packed & 256) == 0 or (packed & 1536) != 1536:
+        raise ValueError("coding_only_bundle rejected by orb_ssh_identity_step non-leakage gate")
+    return stripped
 
 
 def github_login(token):

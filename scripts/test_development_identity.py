@@ -335,6 +335,55 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 identity.export_bundle({"bitwarden_command": ["bws"], "ssh_hosts": []})
 
+    def test_orb_ssh_identity_step_enforces_worker_secret_stripping_and_symlink_rejection(self):
+        # Worker coding_only bundle without control-plane keys -> admitted (1793)
+        self.assertEqual(identity.orb_ssh_identity_step(1, 0, 0, 1, 1), 1793)
+        # Worker bundle with control-plane keys -> rejected (exit 78 in hi32, admitBit=0)
+        leak = identity.orb_ssh_identity_step(1, 1, 0, 1, 1)
+        self.assertEqual(leak & 256, 0)
+        self.assertEqual(leak >> 32, 78)
+        # Symlink parent directory -> rejected
+        sym = identity.orb_ssh_identity_step(1, 0, 1, 1, 1)
+        self.assertEqual(sym & 256, 0)
+        self.assertEqual(sym >> 32, 78)
+
+    def test_orb_privd_command_confinement_rejects_attack_vectors(self):
+        import importlib.util
+        privd_path = Path(__file__).with_name("orb-privd.py")
+        spec = importlib.util.spec_from_file_location("orb_privd", privd_path)
+        privd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(privd)
+
+        # Valid ops_read command
+        packed = privd.check_scope_restrictions(
+            "ops_read", None, ["journalctl", "-u", "orb-core", "-n", "20", "--no-pager"], cwd="/var/log"
+        )
+        self.assertEqual(packed, 1793)
+
+        # Valid service_deploy command for matching unit
+        packed_deploy = privd.check_scope_restrictions(
+            "service_deploy", "orb-core", ["systemctl", "restart", "orb-core.service"], cwd="/root"
+        )
+        self.assertEqual(packed_deploy, 1794)
+
+        # Attack vectors: shell metacharacters, path traversal, unsafe env, wrong unit, escalation
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions("ops_read", None, ["ps; id"], cwd="/root")
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions("root_exec", None, ["id"], cwd="/var/lib/../../etc")
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions(
+                "root_exec", None, ["id"], cwd="/root", env={"LD_PRELOAD": "/tmp/evil.so"}
+            )
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions(
+                "service_deploy", "orb-core", ["systemctl", "restart", "postgres.service"], cwd="/root"
+            )
+        with self.assertRaises(ValueError):
+            privd.check_scope_restrictions(
+                "ops_read", None, ["systemctl", "restart", "orb-core"], cwd="/root"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
