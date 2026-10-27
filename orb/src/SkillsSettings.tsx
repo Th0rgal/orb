@@ -34,9 +34,10 @@ import {
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
 import { effectiveAudience, newSkillTemplate, normalizeSkillName, parseSkillMeta, setSandboxedMeta } from "./skillModel";
 import { SKILL_BADGE_LABEL, buildSkillRows, isOldCopy, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
-import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, getLibraryStatus, getProjectSkills, putLibrarySkill, putProjectSkills, putSkillFile, readSkillFile, repoLabel, syncLibrary, type LibraryStatus } from "./skillsApi";
+import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, getLibraryStatus, putLibrarySkill, putSkillFile, readSkillFile, repoLabel, syncLibrary, type LibraryStatus } from "./skillsApi";
 import { orbRelativeTimeString } from "./orbKernel";
-import { SkillDetail, dropsSandboxedMetadata, middleTruncate } from "./SkillDetail";
+import { cachedSkillsReport, rememberSkillsReport } from "./skillCache";
+import { deleteMessage, dropsSandboxedMetadata, middleTruncate } from "./SkillPage";
 import { SkillDeliveryPreview } from "./SkillDelivery";
 
 export interface HarnessCatalogRow {
@@ -128,8 +129,6 @@ let cachedSkillNames: string[] = [
 ];
 
 /** Reactive list of known skill names for autocomplete in ControllerSettings. */
-let cachedReport: LocalSkillsReport | null = null;
-
 export function knownSkillNames(): string[] {
   return cachedSkillNames;
 }
@@ -145,27 +144,18 @@ export function rememberKnownSkillNames(names: Iterable<string>) {
 
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
-/** Plain words instead of a raw 500 dump; the detail stays in the message for support. */
-function deleteMessage(name: string, e: unknown): string {
-  const raw = errorText(e).replace(/^\d{3}\s+/, "");
-  if (/gpg|sign/i.test(raw)) return `Core couldn’t sign the Library commit, so ${name} is still there. (${raw.slice(0, 120)})`;
-  if (/push|rejected|denied/i.test(raw)) return `Core couldn’t push the Library, so the delete isn’t saved yet. (${raw.slice(0, 120)})`;
-  return `Couldn’t delete ${name}: ${raw}`;
-}
 
 export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const [machine, setMachine] = createSignal<string>("local");
   const [remoteNodes, setRemoteNodes] = createSignal<RemoteNodeView[]>([]);
   // Per-harness reads are cached for the session; reopening shows them at once and refreshes behind.
-  const [localReport, setLocalReport] = createSignal<LocalSkillsReport | null>(cachedReport);
+  const [localReport, setLocalReport] = createSignal<LocalSkillsReport | null>(cachedSkillsReport());
   const [librarySkills, setLibrarySkills] = createSignal<LibrarySkillSummary[]>([]);
   const [libraryFull, setLibraryFull] = createSignal<Record<string, LibrarySkill>>({});
   const [libraryLoaded, setLibraryLoaded] = createSignal(false);
   const [libraryError, setLibraryError] = createSignal<string | null>(null);
   const [projects, setProjects] = createSignal<ProjectSummary[]>([]);
   const [projectSkills, setProjectSkills] = createSignal<ProjectContextSkill[]>([]);
-  // Library skills each project lists (PUT /api/projects/:slug/skills), keyed by project slug.
-  const [projectSelections, setProjectSelections] = createSignal<Record<string, string[]>>({});
   const [loading, setLoading] = createSignal(false);
   const [syncing, setSyncing] = createSignal(false);
   const [syncNotice, setSyncNotice] = createSignal<string | null>(null);
@@ -185,20 +175,17 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     catch (e) { setResolveError(errorText(e)); }
     finally { setResolveBusy(false); }
   };
-  const [openView, setOpenView] = createSignal<"edit" | "history">("edit");
   const [confirmRowDelete, setConfirmRowDelete] = createSignal<string | null>(null);
   const [rowDeleteBusy, setRowDeleteBusy] = createSignal(false);
   const [rowDeleteError, setRowDeleteError] = createSignal<string | null>(null);
   const [repo, setRepo] = createSignal<LibraryStatus | null>(null);
   const [pulling, setPulling] = createSignal(false);
-  const [openSkill, setOpenSkill] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
   const [newName, setNewName] = createSignal("");
   const [newDesc, setNewDesc] = createSignal("");
   const [createBusy, setCreateBusy] = createSignal(false);
   const [createError, setCreateError] = createSignal<string | null>(null);
 
-  const harnessTotal = () => localReport()?.harnesses.length || HARNESS_IDS.length;
 
   const payloadFor = (skill: LibrarySkill, summary?: LibrarySkillSummary, extra: SyncSkillPayload["files"] = []): SyncSkillPayload => ({
     name: skill.name,
@@ -239,7 +226,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const refreshReport = async () => {
     const rep = await localSkillsStatus(libraryPayloads());
     if (rep) {
-      cachedReport = rep;
+      rememberSkillsReport(rep);
       setLocalReport(rep);
       rememberKnownSkillNames(rep.skills.map((s) => s.name));
     }
@@ -280,8 +267,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     if (!isConnected()) return;
     const projs: ProjectSummary[] = await listProjects().catch(() => []);
     setProjects(projs);
-    void Promise.all(projs.map(async (proj) => [proj.slug, (await getProjectSkills(proj.slug).catch(() => ({ skills: [] as string[] }))).skills] as const))
-      .then((pairs) => setProjectSelections(Object.fromEntries(pairs)));
     const resolved = await Promise.all(
       projs.map(async (proj) => {
         try {
@@ -461,7 +446,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       localHarnessIds: HARNESS_IDS,
     }),
   );
-  const membership = (name: string) => Object.entries(projectSelections()).filter(([, names]) => names.includes(name)).map(([slug]) => slug).sort();
   const searched = createMemo(() => {
     const q = search().trim().toLowerCase();
     return q ? rows().filter((row) => row.name.toLowerCase().includes(q) || row.description.toLowerCase().includes(q)) : rows();
@@ -472,18 +456,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const hideOld = (name: string) => { const next = [...new Set([...hiddenOld(), name])]; setHiddenOld(next); writeJson("orb.skills.hiddenOldCopies", next); };
   const oldCopies = createMemo(() => searched().filter((row) => isOldCopy(row) && !hiddenOld().includes(row.name)));
   const filteredRows = createMemo(() => (attentionOnly() ? searched().filter(needsAttention) : searched()).filter((row) => !isOldCopy(row) && !deleting().has(row.name)));
-  const saveProjects = async (name: string, next: string[]) => {
-    const current = projectSelections();
-    const changed = projects().filter((proj) => (current[proj.slug] ?? []).includes(name) !== next.includes(proj.slug));
-    const updated = { ...current };
-    for (const proj of changed) {
-      const list = current[proj.slug] ?? [];
-      const skills = next.includes(proj.slug) ? [...list, name] : list.filter((n) => n !== name);
-      updated[proj.slug] = (await putProjectSkills(proj.slug, skills)).skills;
-    }
-    setProjectSelections(updated);
-  };
-  const openRow = createMemo(() => rows().find((r) => r.name === openSkill() && !r.name.startsWith("project:")) ?? null);
 
   /** Sync local harnesses from the Library snapshot. Pruning removes Orb-managed leftovers only. */
   const syncNow = async (prune: boolean, label?: string, replaceUnmanaged: string[] = []) => {
@@ -502,7 +474,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: prune && libraryLoaded(), replaceUnmanaged });
       setLocalReport(result.report);
       rememberKnownSkillNames(result.report.skills.map((s) => s.name));
-      cachedReport = result.report;
+      rememberSkillsReport(result.report);
       if (label) setSyncNotice(label);
     } catch (e) {
       setSyncError(errorText(e));
@@ -609,8 +581,8 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     const local = row.sources.find((x) => x.id !== "library" && x.content);
     const act = (fn: () => Promise<void>) => () => { setSyncError(null); void fn().catch((e) => setSyncError(errorText(e))); };
     return [
-      { kind: "item", label: "Edit", icon: Ic.PencilIcon, onClick: () => { setOpenView("edit"); openRowDetail(row); } },
-      ...(row.inLibrary ? [{ kind: "item" as const, label: "History", icon: Ic.ReopenIcon, onClick: () => { setOpenView("history"); openRowDetail(row); } }] : []),
+      { kind: "item", label: "Edit", icon: Ic.PencilIcon, onClick: () => openRowDetail(row) },
+      ...(row.inLibrary ? [{ kind: "item" as const, label: "History", icon: Ic.ReopenIcon, onClick: () => openRowDetail(row, true) }] : []),
       ...(badge === "edited" && isConnected() ? [
         { kind: "sep" as const },
         { kind: "item" as const, label: "Resolve…", onClick: () => setResolving(row) },
@@ -631,11 +603,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     ];
   };
 
-  const filesChanged = async (name: string) => {
-    await commitAndPush(`skill: update ${name} files`);
-    await refetchSkill(name);
-    await syncNow(false);
-  };
 
   const createSkill = async () => {
     const name = normalizeSkillName(newName());
@@ -657,7 +624,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       setCreating(false);
       setNewName("");
       setNewDesc("");
-      setOpenSkill(name);
+      p.onOpenPage?.(`sk:${name}`);
       void syncNow(false);
     } catch (e) {
       setCreateError(errorText(e));
@@ -666,12 +633,13 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     }
   };
 
-  const openRowDetail = (row: SkillRow) => {
-    if (!row.inLibrary && !row.sources.length && row.projectFile) {
+  /** A skill opens as its own page, like a project file. */
+  const openRowDetail = (row: SkillRow, history = false) => {
+    if (!row.inLibrary && row.projectFile) {
       p.onOpenPage?.(`pf:${row.projectFile.slug}:${row.projectFile.path}`);
       return;
     }
-    setOpenSkill(row.name);
+    if (row.inLibrary) p.onOpenPage?.(`sk:${row.name}${history ? "#history" : ""}`);
   };
 
   const preflight = () => localReport()?.preflight;
@@ -735,7 +703,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
                   const badge = () => skillBadge(row);
                   return (
                     <div class="skills-item" data-skill={row.name} onContextMenu={(e) => { e.preventDefault(); setRowMenu({ row, x: e.clientX, y: e.clientY }); }}>
-                      <button type="button" class="skills-item-head" onClick={() => { setOpenView("edit"); openRowDetail(row); }}>
+                      <button type="button" class="skills-item-head" onClick={() => openRowDetail(row)}>
                         <Ic.FileIcon size={14} />
                         <span class="skills-item-name">{row.name}</span>
                         <span class="skills-item-desc">{row.description || "No description."}</span>
@@ -948,26 +916,6 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
           action={rowDeleteError() ? "Retry" : "Delete"} busy={rowDeleteBusy()} error={rowDeleteError()}
           onClose={() => setConfirmRowDelete(null)} onConfirm={() => void confirmDeleteRow()} />
       }</Show>
-      <Show when={openRow()}>
-        {(row) => (
-          <SkillDetail
-            row={row()}
-            initialView={openView()}
-            library={libraryFull()[row().name]}
-            connected={isConnected()}
-            harnessTotal={harnessTotal()}
-            onClose={() => setOpenSkill(null)}
-            onSave={saveSkill}
-            onImport={importSkill}
-            onDelete={removeSkill}
-            onFilesChanged={filesChanged}
-            projects={projects().map((proj) => ({ slug: proj.slug, title: proj.title ?? undefined }))}
-            projectMembership={membership(row().name)}
-            onSaveProjects={saveProjects}
-            onOpenProjectFile={(slug, path) => p.onOpenPage?.(`pf:${slug}:${path}`)}
-          />
-        )}
-      </Show>
       <Show when={creating()}>
         <NameDialog title="New Library skill" label="Name" placeholder="lean-prover" value={newName()} onInput={setNewName} action="Create" busy={createBusy()} error={createError()}
           onAction={() => void createSkill()} onClose={() => setCreating(false)}>

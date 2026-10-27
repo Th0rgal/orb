@@ -1963,8 +1963,9 @@ button.fork-trigger:hover { color: var(--fg); }
 .mermaid-zoom-level { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
 .mermaid-fit { height: 24px; padding: 0 8px; border-radius: var(--radius-sm); color: var(--fg-2); font: 12px var(--sans); }
 .mermaid-fit:hover { background: var(--bg-active); color: var(--fg); }
-.code-copy { position: absolute; right: 6px; bottom: 6px; color: var(--fg-3); opacity: .55; background: var(--bg-inset); }
-.md-code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
+/* Opaque so long lines never show through; only the icon is quiet until hover. */
+.code-copy { position: absolute; right: 6px; bottom: 6px; color: color-mix(in srgb, var(--fg-3) 55%, transparent); background: var(--bg-inset); box-shadow: -8px 0 8px var(--bg-inset); }
+.md-code-block:hover .code-copy, .code-copy:focus-visible { color: var(--fg-3); }
 .code-copy-feedback { position: absolute; bottom: 7px; right: 36px; max-width: calc(100% - 48px); padding: 3px 6px; border-radius: var(--radius-xs); background: var(--bg-inset); color: var(--fg-2); font: 11px var(--sans); }
 :is(.md-code-block, .file-source-code) .token.comment, :is(.md-code-block, .file-source-code) .token.prolog { color: var(--fg-3); }
 :is(.md-code-block, .file-source-code) .token.keyword, :is(.md-code-block, .file-source-code) .token.operator { color: #89cecf; }
@@ -4220,3 +4221,21 @@ select.orb-select-native:disabled { cursor: default; }
 .skills-oldcopies .skills-item-head { cursor: default; }
 .skills-oldcopy-actions { white-space: nowrap; font-size: 12.5px; }
 .skills-badge.removed { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--fg); }
+
+/* A skill opens like a project file: one page, breadcrumb bar, slim file tree,
+   the shared FileDocument at full width. Margins come from .pf-bar/.scroll/.col. */
+.skill-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.skill-crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.skill-crumbs .link-btn { text-decoration: none; color: var(--fg-3); }
+.skill-crumbs .link-btn:hover { color: var(--fg); }
+.skill-crumb-name { font: 500 12.5px var(--mono); color: var(--fg); white-space: nowrap; }
+.skill-strip { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 12px 24px; border-bottom: 1px solid var(--stroke-soft); }
+.skill-strip .skills-lint, .skill-strip .skills-oldcopy { margin: 0; }
+.skill-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); }
+.skill-body .skills-files-tree { overflow-y: auto; padding: 16px 12px 16px 16px; border-right: 1px solid var(--stroke-soft); }
+.skill-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.skill-dirty { margin-left: auto; color: var(--fg-3); }
+@media (max-width: 720px) {
+  .skill-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .skill-body .skills-files-tree { border-right: 0; border-bottom: 1px solid var(--stroke-soft); max-height: 140px; }
+}

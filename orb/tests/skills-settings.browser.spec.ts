@@ -45,31 +45,6 @@ test("skills pane: one repo line, one badge per row, attention filter, automatic
   await delivery.getByLabel("Preview project").selectOption("erdos-647");
   await expect(delivery).toContainText("Resolved delivery (4)");
 
-  // One panel: the skill's files as a tree, the open file on the right.
-  await policy.locator(".skills-item-head").click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("tree", { name: "controllers-policy files" })).toBeVisible();
-  await expect(dialog.locator(".skills-version, .skills-diff")).toHaveCount(0);
-  await expect(dialog.locator(".skills-oldcopy")).toContainText("Old copy in");
-  // Opens on the rendered markdown; Edit shows the source.
-  await expect(dialog.locator(".skills-md-view")).toContainText("STATE_SIGNATURE");
-  await expect(dialog.getByRole("button", { name: "Edit" })).toBeVisible();
-  await expect(dialog.getByRole("group", { name: "Who uses it" }).getByRole("checkbox")).toHaveCount(3);
-  await expect(dialog.getByRole("radio", { name: "Always" })).toHaveAttribute("aria-checked", "true");
-  await expect(dialog.getByRole("button", { name: "History" })).toBeVisible();
-  // Nothing touches the panel edges.
-  const box = (await dialog.boundingBox())!, body = (await dialog.locator(".skills-panel").boundingBox())!;
-  expect(body.x - box.x).toBeGreaterThanOrEqual(16);
-  expect(box.x + box.width - (body.x + body.width)).toBeGreaterThanOrEqual(16);
-  // Delete confirms inside the panel, never as a dialog on top.
-  await dialog.getByRole("button", { name: "Delete…" }).click();
-  await expect(page.getByRole("dialog")).toHaveCount(1);
-  await expect(dialog.getByRole("alertdialog", { name: "Delete controllers-policy?" })).toBeVisible();
-  await dialog.getByRole("button", { name: "Cancel" }).click();
-  await page.waitForTimeout(250);
-  await page.screenshot({ path: "test-results/skills-detail-dark.png" });
-  await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
-
   await page.evaluate(() => { document.documentElement.dataset.theme = "light"; document.querySelector(".s-body")?.scrollTo(0, 0); });
   await page.screenshot({ path: "test-results/skills-settings-light.png" });
 });

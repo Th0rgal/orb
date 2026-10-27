@@ -26,8 +26,12 @@ const LEGACY_PAGES: Record<string, string> = { execution: "local-agents" };
 /** The current id for a page id, old or new. */
 export const settingsPageId = (id: string): string => LEGACY_PAGES[id] ?? id;
 
+/** A skill page (`sk:<name>`, optionally `#history`) belongs to Agents › Skills. */
+export const skillPageName = (id: string | null | undefined): { name: string; history: boolean } | null =>
+  id?.startsWith("sk:") ? { name: id.slice(3).replace(/#history$/, ""), history: id.endsWith("#history") } : null;
+
 export const settingsSectionFor = (id: string | null | undefined): SettingsSection | undefined =>
-  id == null ? undefined : SETTINGS_SECTIONS.find(s => s.tabs.some(t => t.id === settingsPageId(id)));
+  id == null ? undefined : skillPageName(id) ? settingsSectionFor("skills-settings") : SETTINGS_SECTIONS.find(s => s.tabs.some(t => t.id === settingsPageId(id)));
 
 export const SETTINGS_PAGE_IDS: string[] = [...SETTINGS_SECTIONS.flatMap(s => s.tabs.map(t => t.id)), ...Object.keys(LEGACY_PAGES)];
 

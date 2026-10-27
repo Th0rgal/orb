@@ -299,80 +299,33 @@ describe("SkillsSettings", () => {
     fireEvent.click(screen.getByText("aristotle-tactics"));
     expect(opened).toEqual(["pf:erdos-647:skills/aristotle-tactics/SKILL.md"]);
   });
-  it("edits, deletes and previews delivery against the Library", async () => {
+  it("opens a skill as its own page and previews delivery under Advanced", async () => {
     setConnection("https://agent-backend.thomas.md", "test-jwt");
-    const syncCalls: Array<{ library_skills: Array<{ name: string }>; prune_removed: boolean }> = [];
-    const statusCalls: unknown[] = [];
-    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
-      core: {
-        invoke: async (cmd: string, args?: any) => {
-          if (cmd === "local_skills_status") { statusCalls.push(args); return sampleLocalReport(true); }
-          if (cmd === "local_skills_sync") {
-            syncCalls.push(args.request);
-            return { synced_skills: 1, harnesses_updated: 6, skipped_unmanaged: [], pruned: [], report: sampleLocalReport(true) };
-          }
-          if (cmd === "local_agents_scan") return [];
-          return null;
-        },
-      },
-    };
-    let content = "---\nname: spark-lean-offload\ndescription: Offload Lean 4 builds to the DGX Spark arbiter safely.\n---\n# Spark\n";
-    const requests: string[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input), method = init?.method ?? "GET";
-      requests.push(`${method} ${url.replace("https://agent-backend.thomas.md", "")}${url.endsWith("/commit") ? ` ${JSON.parse(String(init?.body)).message}` : ""}`);
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string) => Promise<unknown> } } }).__TAURI__ = { core: { invoke: async () => null } };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
       const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
       if (url.endsWith("/api/library/skill")) return ok([{ name: "spark-lean-offload", path: "skill/spark-lean-offload", audience: ["mission", "local"] }]);
-      if (url.endsWith("/api/library/skill/spark-lean-offload")) {
-        if (method === "PUT") { content = JSON.parse(String(init?.body)).content; return new Response("Skill saved successfully", { status: 200 }); }
-        if (method === "DELETE") return new Response("Skill deleted successfully", { status: 200 });
-        return ok({ name: "spark-lean-offload", path: "skill/spark-lean-offload", content, files: [], references: [] });
-      }
       if (url.endsWith("/api/projects")) return ok({ projects: [{ slug: "erdos-647", title: "Erdos 647 Proof", status: "active", updated_at: "2026-10-08T12:00:00Z" }] });
       if (url.includes("/api/projects/erdos-647/skills")) return new Response("", { status: 404 });
-      if (url.endsWith("/api/library/commit")) return new Response("Committed successfully", { status: 200 });
-      if (url.endsWith("/api/library/push")) return new Response("Pushed successfully", { status: 200 });
       if (url.includes("/api/library/skill-delivery")) return ok({ skills: [{ name: "spark-lean-offload", reasons: ["base", "project"] }], missing: [] });
       return ok({});
     });
-
-    render(() => <SkillsSettings />);
-    await waitFor(() => expect(statusCalls.some((c: any) => c?.request?.library_skills?.length === 1)).toBe(true));
+    const opened: string[] = [];
+    render(() => <SkillsSettings onOpenPage={(id) => opened.push(id)} />);
     fireEvent.click(await screen.findByText("spark-lean-offload"));
-    const dialog = await screen.findByRole("dialog");
-    // Lint: missing metadata.sandboxed.
-    expect(dialog.textContent).toContain("No metadata.sandboxed block");
-    // The Assistant also uses it, and it is always loaded; Save commits and pushes to the repo.
-    const before = syncCalls.length;
-    fireEvent.click(screen.getByRole("checkbox", { name: "Assistant" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Always" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(screen.getByText("Saved to repo")).toBeTruthy());
-    expect(content).toContain("audience: [mission, coordinator, local]");
-    expect(content).toContain("scope: global");
-    expect(requests).toContain("POST /api/library/commit skill: update spark-lean-offload");
-    expect(requests).toContain("POST /api/library/push");
-    await waitFor(() => expect(syncCalls.length).toBe(before + 1));
-    expect(syncCalls.at(-1)!.prune_removed).toBe(false);
-    expect(syncCalls.at(-1)!.library_skills.map((s) => s.name)).toEqual(["spark-lean-offload"]);
+    expect(opened).toEqual(["sk:spark-lean-offload"]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Actions for spark-lean-offload" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "History" }));
+    expect(opened.at(-1)).toBe("sk:spark-lean-offload#history");
 
-    // Delete through the in-app confirmation; sync prunes.
-    await waitFor(() => expect((screen.getByRole("button", { name: "Delete…" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
-    // Confirms inside the panel: no second dialog.
-    expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(screen.queryByText("spark-lean-offload")).toBeNull();
-    await waitFor(() => expect(syncCalls.at(-1)).toMatchObject({ prune_removed: true, library_skills: [] }));
-    expect(requests).toContain("DELETE /api/library/skill/spark-lean-offload");
-    expect(requests).toContain("POST /api/library/commit skill: delete spark-lean-offload");
-
-    // Delivery preview (under Advanced) degrades when project skills are unsupported.
     const advanced = document.querySelector<HTMLDetailsElement>("details.skills-advanced")!;
     advanced.open = true;
     fireEvent(advanced, new Event("toggle"));
     const select = (await screen.findByLabelText("Preview project")) as HTMLSelectElement;
+    // Rows show before projects load; wait for the project to be offered.
+    await waitFor(() => expect(Array.from(select.options).some((o) => o.value === "erdos-647")).toBe(true));
     fireEvent.change(select, { target: { value: "erdos-647" } });
     await waitFor(() => {
       expect(screen.getByText("This backend does not support project skill selection yet.")).toBeTruthy();
