@@ -56,8 +56,8 @@ pub(super) async fn start(
     let mission_id = req
         .started_by_mission_id
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Mission required"))?;
-    let _mutation =
-        crate::api::control::machine_transfer::workspace_mutation_lock(mission_id).await;
+    // start_job holds workspace -> process admission -> durable admission locks.
+    // Reacquiring the workspace lock here would deadlock remote submissions.
     let control = control_for_user(state, user).await;
     crate::api::control::machine_transfer::guard(&control.mission_store, mission_id)
         .await

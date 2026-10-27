@@ -459,6 +459,8 @@ async fn prepare(
         .get_mission(id)
         .await?
         .ok_or_else(|| format!("Mission {id} not found"))?;
+    // The authenticated store must own this mission before global receipt I/O.
+    super::workspace_purge::revoke_store_locked(&admission.state, &store, id).await?;
     if resume
         && !matches!(
             before.status,

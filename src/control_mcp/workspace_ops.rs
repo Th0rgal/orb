@@ -48,6 +48,13 @@ pub async fn preflight(state: &Arc<AppState>, p: &Principal, args: &Value) -> Re
         return Err("Mission is outside the project scope".into());
     }
     crate::api::control::machine_transfer::guard(&control.mission_store, id).await?;
+    {
+        let _admission = crate::api::control::dispatch_admission::DISPATCH_ADMISSION
+            .lock()
+            .await;
+        let _durable = crate::api::control::dispatch_admission::durable_lock(&state.config).await?;
+        crate::api::control::workspace_purge::revoke_owned_locked(state, id, &p.sub)?;
+    }
     if crate::api::control::client_placement::is_tagged(&mission.project.tags) {
         return Err(
             "Workspace is owned by the desktop client; no Core command was executed".into(),

@@ -13482,3 +13482,133 @@ async fn pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs()
     NATIVE_FIXTURES.lock().unwrap().remove(&holder.id);
     NATIVE_FIXTURES.lock().unwrap().remove(&queued);
 }
+
+#[tokio::test]
+async fn workspace_purge_archived_fork_still_protects_quarantined_source() {
+    let h = Harness::new().await;
+    let source = h.writer(MissionStatus::Acknowledged, None).await;
+    let ws = h.state.workspaces.get(source.workspace_id).await.unwrap();
+    let dir = workspace::mission_workspace_dir_for_workspace(&ws, source.id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("archived fork"),
+            Some(source.workspace_id),
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(source.id),
+            Some(dir.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(child.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    let before = execution_ownership::snapshot(&h.state.control)
+        .await
+        .unwrap();
+    assert!(before
+        .require_unshared_directory(&h.state, source.id, &dir)
+        .await
+        .is_err());
+    // The fork retains ownership even if its source pathname is absent while
+    // the original inode is quarantined. Absence is not proof of disjointness.
+    let canonical = dir.canonicalize().unwrap();
+    std::fs::rename(&dir, dir.with_file_name("test-quarantine")).unwrap();
+    let after = execution_ownership::snapshot(&h.state.control)
+        .await
+        .unwrap();
+    assert!(after
+        .require_unshared_directory(&h.state, source.id, &canonical)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn workspace_purge_unreadable_durable_receipt_fails_closed() {
+    let h = Harness::new().await;
+    let path = h
+        .state
+        .config
+        .working_dir
+        .join(".sandboxed-sh/durable-jobs")
+        .join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("job.json"), b"{invalid").unwrap();
+    assert!(crate::api::durable_jobs::has_unsettled_workspace_jobs(
+        &h.state,
+        Uuid::nil(),
+        h._dir.path(),
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn workspace_purge_other_user_uncertain_job_protects_alias_directory() {
+    let h = Harness::new().await;
+    let source = h._dir.path().join("shared-source");
+    std::fs::create_dir(&source).unwrap();
+    let id = Uuid::new_v4();
+    let path = h
+        .state
+        .config
+        .working_dir
+        .join(".sandboxed-sh/durable-jobs")
+        .join(id.to_string());
+    std::fs::create_dir_all(&path).unwrap();
+    let job = serde_json::json!({
+        "id":id, "command":"test-only", "cwd": source, "status":"unknown",
+        "pid":null, "exit_code":null, "signal":null,
+        "created_at":chrono::Utc::now() - chrono::Duration::hours(1),
+        "updated_at":chrono::Utc::now(), "started_by_mission_id":Uuid::new_v4(),
+        "workspace_id":Uuid::new_v4(), "owner_user_id":"another-user",
+        "stdout_log":path.join("stdout"), "stderr_log":path.join("stderr"),
+        "status_file":path.join("status"), "spawn_accepted":true
+    });
+    std::fs::write(path.join("job.json"), serde_json::to_vec(&job).unwrap()).unwrap();
+    assert!(
+        crate::api::durable_jobs::has_unsettled_workspace_jobs(
+            &h.state,
+            Uuid::nil(),
+            &source.canonicalize().unwrap(),
+        )
+        .await
+        .unwrap(),
+        "another owner's uncertain physical alias must block reclamation"
+    );
+    assert!(source.exists());
+}
+
+#[tokio::test]
+async fn workspace_purge_history_delete_does_not_rpc_into_locked_actor() {
+    let h = Harness::new().await;
+    let mission = h.writer(MissionStatus::Acknowledged, None).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        delete_mission(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Path(mission.id),
+            Query(DeleteMissionQuery::default()),
+        ),
+    )
+    .await
+    .expect("history deletion deadlocked admission against the actor");
+    result.unwrap();
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(mission.id)
+        .await
+        .unwrap()
+        .is_none());
+}

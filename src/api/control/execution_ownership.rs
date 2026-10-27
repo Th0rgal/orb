@@ -14,8 +14,17 @@ struct Owner {
     read_only: bool,
 }
 
+#[derive(Clone)]
+struct DirectoryOwner {
+    id: Uuid,
+    workspace_id: Uuid,
+    working_directory: Option<String>,
+    directory_owner: Uuid,
+}
+
 #[derive(Default)]
 pub(crate) struct Snapshot {
+    directories: Vec<DirectoryOwner>,
     owners: HashMap<Uuid, Vec<Owner>>,
     unresolved: HashSet<Uuid>,
     queued_assignments: HashSet<Uuid>,
@@ -72,6 +81,12 @@ fn pr_repository(canonical_pr: &str) -> Option<String> {
 
 impl Snapshot {
     fn mission(&mut self, mission: Mission) {
+        self.directories.push(DirectoryOwner {
+            id: mission.id,
+            workspace_id: mission.workspace_id,
+            working_directory: mission.working_directory.clone(),
+            directory_owner: fork_directory_owner(mission.id, &mission.project.tags),
+        });
         let read_only = crate::api::track_leases::lease_mode(
             None,
             &mission.project.tags,
@@ -130,6 +145,46 @@ impl Snapshot {
                 native_goal_holds: native_holds,
             },
         ))
+    }
+
+    /// Every persisted owner counts, even archived missions. A different mission
+    /// can resume from the same physical checkout after a fork or alias.
+    pub(crate) async fn require_unshared_directory(
+        &self,
+        state: &AppState,
+        id: Uuid,
+        source: &std::path::Path,
+    ) -> Result<(), String> {
+        for owner in self.directories.iter().filter(|owner| owner.id != id) {
+            let ws = state
+                .workspaces
+                .get(owner.workspace_id)
+                .await
+                .ok_or("Cannot verify another mission's workspace placement")?;
+            let path = match &owner.working_directory {
+                Some(path) => std::path::PathBuf::from(path),
+                None => workspace::mission_workspace_dir_for_workspace(&ws, owner.directory_owner),
+            };
+            // Resolve the parent even while the source is quarantined. A
+            // fork's path may be temporarily absent but still owns this inode.
+            let physical = if path.try_exists().map_err(|e| e.to_string())? {
+                path.canonicalize()
+                    .map_err(|e| format!("Cannot verify shared workspace: {e}"))?
+            } else {
+                let parent = path.parent().ok_or("Missing workspace parent")?;
+                let parent = parent
+                    .canonicalize()
+                    .map_err(|e| format!("Cannot verify workspace root: {e}"))?;
+                parent.join(path.file_name().ok_or("Missing workspace directory name")?)
+            };
+            if physical.starts_with(source) || source.starts_with(&physical) {
+                return Err(format!(
+                    "Workspace is shared with mission {}; retain it",
+                    owner.id
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Whether this mission's accepted remote work can touch `target`'s
@@ -192,6 +247,15 @@ impl Snapshot {
     }
 }
 
+fn fork_directory_owner(id: Uuid, tags: &[String]) -> Uuid {
+    tags.iter()
+        .find_map(|tag| {
+            tag.strip_prefix("fork-workspace:")
+                .and_then(|id| Uuid::parse_str(id).ok())
+        })
+        .unwrap_or(id)
+}
+
 fn columns(conn: &Connection, table: &str) -> Result<HashSet<String>, String> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({table})"))
@@ -217,11 +281,13 @@ fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), St
         }
     };
     let query = format!(
-        "SELECT id,status,{},{},{},{} FROM missions",
+        "SELECT id,status,{},{},{},{},{},{} FROM missions",
         optional("terminal_reason"),
         optional("github_pr"),
         optional("tags"),
-        optional("intent")
+        optional("intent"),
+        optional("workspace_id"),
+        optional("working_directory")
     );
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
     let rows = stmt
@@ -233,11 +299,14 @@ fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), St
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     for row in rows {
-        let (id, status, reason, pr, tags, intent) = row.map_err(|e| e.to_string())?;
+        let (id, status, reason, pr, tags, intent, workspace_id, working_directory) =
+            row.map_err(|e| e.to_string())?;
         let id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
         let status =
             serde_json::from_value(serde_json::Value::String(status)).map_err(|e| e.to_string())?;
@@ -246,6 +315,17 @@ fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), St
             .transpose()
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
+        snapshot.directories.push(DirectoryOwner {
+            id,
+            workspace_id: workspace_id
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(Uuid::nil()),
+            working_directory,
+            directory_owner: fork_directory_owner(id, &tags),
+        });
         let read_only =
             crate::api::track_leases::lease_mode(None, &tags, intent.as_deref()) == "reader";
         snapshot.owners.entry(id).or_default().push(Owner {
