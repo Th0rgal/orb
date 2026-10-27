@@ -417,12 +417,14 @@ pub(crate) fn sync_cli_proxy_priorities(accounts: &[crate::ai_providers::AIProvi
     }
 }
 
-/// Auth file key holding the last Gemini weekly window seen for the login.
+/// Auth file key holding the last Gemini 5h and weekly readings for the login.
+const GEMINI_WINDOWS_KEY: &str = "sandboxed_gemini_windows";
+/// Earlier weekly-only record, read once and replaced.
 const GEMINI_WEEKLY_KEY: &str = "sandboxed_gemini_weekly";
 
-/// Show the login's last-seen Gemini weekly window when Google reports only
-/// the 5-hour one, and store a fresh weekly reading in its auth file.
-pub(crate) fn remember_gemini_weekly(file: &str, windows: &mut Vec<Value>) {
+/// Fill in the Gemini window Google did not report from the login's last
+/// reading, and store the fresh readings in its auth file.
+pub(crate) fn remember_gemini_windows(file: &str, windows: &mut Vec<Value>) {
     let Some(dir) = super::cli_proxy_accounts::auth_dir() else {
         return;
     };
@@ -430,28 +432,29 @@ pub(crate) fn remember_gemini_weekly(file: &str, windows: &mut Vec<Value>) {
         return;
     }
     let path = dir.join(file);
-    let Some(value) = read_json(&path) else {
+    let Some(mut value) = read_json(&path) else {
         return;
     };
-    let stored = value.get(GEMINI_WEEKLY_KEY);
-    let next = super::antigravity_usage::with_remembered_gemini_weekly(
+    let stored = value.get(GEMINI_WINDOWS_KEY).cloned().or_else(|| {
+        value
+            .get(GEMINI_WEEKLY_KEY)
+            .map(|weekly| json!({"Weekly": weekly}))
+    });
+    let next = super::antigravity_usage::with_remembered_gemini_windows(
         windows,
-        stored,
+        stored.as_ref(),
         chrono::Utc::now().timestamp(),
     );
-    if next.as_ref() == stored {
-        return;
-    }
-    let mut value = value.clone();
     let Some(obj) = value.as_object_mut() else {
         return;
     };
-    match next {
-        Some(next) => obj.insert(GEMINI_WEEKLY_KEY.into(), next),
-        None => obj.remove(GEMINI_WEEKLY_KEY),
-    };
+    if obj.get(GEMINI_WINDOWS_KEY) == Some(&next) && !obj.contains_key(GEMINI_WEEKLY_KEY) {
+        return;
+    }
+    obj.remove(GEMINI_WEEKLY_KEY);
+    obj.insert(GEMINI_WINDOWS_KEY.into(), next);
     if let Err(error) = write_auth_file(&path, &value) {
-        tracing::warn!(file, %error, "Could not store the Antigravity Gemini weekly window");
+        tracing::warn!(file, %error, "Could not store the Antigravity Gemini windows");
     }
 }
 
