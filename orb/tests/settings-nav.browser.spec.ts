@@ -29,7 +29,7 @@ test("settings has five sections with subtitles, tabs and attention dots", async
   const rows = page.locator("[data-settings-section]");
   await expect(rows.locator(".row-label")).toHaveText(["Account", "Models", "Agents", "Security", "Notifications"]);
   await expect(title(page)).toHaveText("Account");
-  await expect(page.locator(".settings-subtitle")).toHaveText("Your server connection, connected accounts and how Orb looks.");
+  await expect(page.locator(".settings-subtitle")).toHaveText("Your server connection, connected accounts, how Orb looks and usage telemetry.");
 
   // Bunker Mode is active and a provider quota is spent.
   await expect(page.locator('[data-settings-section="security"] .row-dot')).toBeVisible();
