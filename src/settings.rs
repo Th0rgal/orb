@@ -152,23 +152,19 @@ pub struct Settings {
     /// When None, falls back to the MAX_CONCURRENT_TASKS env var (default: 5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_tasks: Option<usize>,
-    /// Whether the background GC task should delete on-disk workspace dirs of
-    /// missions that have been in a terminal state longer than
-    /// `auto_cleanup_days`. When None, treat as disabled.
+    /// Whether retention inventory reports old terminal mission directories.
+    /// Retention never authorizes discard. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_cleanup_enabled: Option<bool>,
-    /// Retention window in days for terminal-mission workspace dirs. Anything
-    /// older than this becomes eligible for GC. When None, defaults to 7.
+    /// Minimum age in days for advisory retention candidates. Defaults to 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_cleanup_days: Option<u32>,
-    /// Long-stop retention (days) for AwaitingUser/Paused mission workspace
-    /// dirs. These are exempt from the normal window (the user may come
-    /// back) but not forever. When None, defaults to 30.
+    /// Legacy setting retained for API/config compatibility. Parked and
+    /// resumable directories are never discarded by age.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_cleanup_stopped_days: Option<u32>,
-    /// Whether the GC also removes `mission-*` dirs that match no mission in
-    /// any store (hard-deleted missions, legacy DBs). When None, follows
-    /// `auto_cleanup_enabled`.
+    /// Legacy setting retained for compatibility. Unknown directories require
+    /// reconciliation; absence from the mission index never authorizes purge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_cleanup_orphans_enabled: Option<bool>,
     /// Model for the Ask assistant (sidecar co-pilot). When None, falls back to

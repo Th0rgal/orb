@@ -36,8 +36,11 @@ their bytes can be attributed without authorizing cache deletion.
 The background mission-directory retention sweep is also dry-run by default.
 With cleanup enabled in Settings, it emits structured `mission GC audit` logs
 with `action=would_remove`, ownership identifiers, size, path, and reason. It
-will execute only if an operator explicitly sets `WORKSPACE_GC_EXECUTE=1` on
-the service and restarts it. The default retention is one day for terminal
+never deletes filesystem content, including with `WORKSPACE_GC_EXECUTE=1`.
+That switch only enables the separate [explicit mission discard lifecycle](specs/mission-workspace-purge.md):
+a persisted owner authorization, execution checks, recoverable quarantine, and a
+seven-day delay are all required. Archive and conversation DELETE preserve files;
+unindexed and legacy quarantine directories remain retained. The default retention is one day for terminal
 missions and seven days for AwaitingUser/Paused missions. The normal sweep is
 hourly unless `WORKSPACE_GC_INTERVAL_MINUTES` is set. While disk pressure is at
 Warn or Critical, the disk watcher requests the same configured sweep every

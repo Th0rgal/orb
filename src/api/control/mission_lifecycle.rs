@@ -308,6 +308,15 @@ pub async fn clone_mission(
     Path(mission_id): Path<Uuid>,
     body: Option<Json<CloneMissionRequest>>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
+    let _workspace = machine_transfer::workspace_mutation_lock(mission_id).await;
+    {
+        let _admission = DISPATCH_ADMISSION.lock().await;
+        let _durable = dispatch_admission::durable_lock(&state.config)
+            .await
+            .map_err(internal_error)?;
+        workspace_purge::revoke_owned_locked(&state, mission_id, &user.id)
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
+    }
     let overrides = body.map(|b| b.0).unwrap_or_default();
     let actor = resolve_actor(overrides.actor.clone(), &user);
     let clone_messages = overrides.clone_messages;
@@ -720,6 +729,7 @@ pub async fn delete_mission(
     Path(mission_id): Path<Uuid>,
     Query(query): Query<DeleteMissionQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _workspace_mutation = machine_transfer::workspace_mutation_lock(mission_id).await;
     let control = control_for_user(&state, &user).await;
     let child_ids = collect_child_mission_ids(&control.mission_store, mission_id).await?;
     if !child_ids.is_empty() && query.include_descendants != Some(true) {
@@ -739,6 +749,50 @@ pub async fn delete_mission(
     let mut ids_to_delete = HashSet::with_capacity(child_ids.len() + 1);
     ids_to_delete.insert(mission_id);
     ids_to_delete.extend(child_ids);
+    #[cfg(test)]
+    dispatch_admission_tests::notify_wait(mission_id, "delete_admission");
+    let _admission = DISPATCH_ADMISSION.lock().await;
+    let _durable = dispatch_admission::durable_lock(&state.config)
+        .await
+        .map_err(internal_error)?;
+    {
+        let conn = state.projects.connection.lock().map_err(internal_error)?;
+        workspace_purge::require_no_accepted_actions(&conn)
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
+    }
+    // Descendant creation is admission-serialized. Recompute after acquiring
+    // the fence and reject if the validated deletion set changed while waiting.
+    let final_child_ids = collect_child_mission_ids(&control.mission_store, mission_id).await?;
+    let initial_children: HashSet<Uuid> = ids_to_delete
+        .iter()
+        .copied()
+        .filter(|id| *id != mission_id)
+        .collect();
+    if final_child_ids.iter().copied().collect::<HashSet<_>>() != initial_children {
+        return Err((
+            StatusCode::CONFLICT,
+            "Mission descendants changed while deletion was waiting; retry".into(),
+        ));
+    }
+    for id in &ids_to_delete {
+        machine_transfer::guard(&control.mission_store, *id)
+            .await
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
+        workspace_purge::require_history_deletable_locked(&state, *id)
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
+    }
+    // Durable jobs may outlive runners; fail closed before filesystem/history mutation.
+    for id in &ids_to_delete {
+        if crate::api::durable_jobs::has_unsettled_mission_jobs(&state, &user, *id)
+            .await
+            .map_err(|error| (StatusCode::CONFLICT, error))?
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "Workspace jobs are still running or uncertain; settle them before deleting".into(),
+            ));
+        }
+    }
     let mut mission_statuses = HashMap::new();
     for id in &ids_to_delete {
         if let Some(m) = control
@@ -774,18 +828,38 @@ pub async fn delete_mission(
     {
         return Err((StatusCode::CONFLICT, "Cloud work is still active or unconfirmed; archive the conversation or confirm cancellation before deleting its receipts".into()));
     }
-    let running = get_running_missions(&control).await?;
+    // The actor also takes DISPATCH_ADMISSION. Never RPC into it while
+    // holding that mutex: persisted runs, accepted queues and assignment owners
+    // provide the authoritative final check under the same admission fence.
+    let ownership = execution_ownership::snapshot(&state.control)
+        .await
+        .map_err(internal_error)?;
+    for id in &ids_to_delete {
+        if ownership.holds_track(*id) != Some(false) {
+            return Err((
+                StatusCode::CONFLICT,
+                "Mission execution or accepted work is still unresolved".into(),
+            ));
+        }
+    }
+    let running = Vec::new();
 
-    let deleted_workspace_dirs = cleanup_mission_workspace_dirs_for_delete(
+    let deleted_workspace_dirs = cleanup_mission_workspace_dirs_for_ids(
         &control.mission_store,
         &state.workspaces,
         mission_id,
+        final_child_ids.clone(),
         &running,
     )
     .await?;
 
-    let deleted_ids =
-        delete_mission_with_children(&control.mission_store, mission_id, &running).await?;
+    let deleted_ids = delete_mission_with_child_ids(
+        &control.mission_store,
+        mission_id,
+        final_child_ids,
+        &running,
+    )
+    .await?;
 
     for id in &deleted_ids {
         clear_mission_metadata_refresh_state(*id);
@@ -827,9 +901,20 @@ pub(super) async fn collect_child_mission_ids(
     Ok(child_ids)
 }
 
+#[cfg(test)]
 pub(super) async fn delete_mission_with_children(
     mission_store: &Arc<dyn MissionStore>,
     mission_id: Uuid,
+    running: &[super::super::mission_runner::RunningMissionInfo],
+) -> Result<Vec<Uuid>, (StatusCode, String)> {
+    let child_ids = collect_child_mission_ids(mission_store, mission_id).await?;
+    delete_mission_with_child_ids(mission_store, mission_id, child_ids, running).await
+}
+
+pub(super) async fn delete_mission_with_child_ids(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    child_ids: Vec<Uuid>,
     running: &[super::super::mission_runner::RunningMissionInfo],
 ) -> Result<Vec<Uuid>, (StatusCode, String)> {
     let Some(target) = mission_store
@@ -853,7 +938,6 @@ pub(super) async fn delete_mission_with_children(
         ));
     }
 
-    let child_ids = collect_child_mission_ids(mission_store, mission_id).await?;
     let mut ids_to_delete = Vec::with_capacity(child_ids.len() + 1);
     ids_to_delete.push(mission_id);
     ids_to_delete.extend(child_ids.iter().copied());
@@ -889,57 +973,34 @@ pub(super) async fn delete_mission_with_children(
     Ok(ids_to_delete)
 }
 
-/// Renamed deletion directories are the durable cleanup queue. Scan only known
-/// workspace parents and the exact reserved UUID format; never follow symlinks.
-pub(crate) fn start_deleted_workspace_cleanup(workspaces: workspace::SharedWorkspaceStore) {
-    tokio::spawn(async move {
-        loop {
-            let mut parents = HashSet::new();
-            for ws in workspaces.list().await {
-                for root in workspace::mission_workspace_roots_for_workspace(&ws) {
-                    parents.insert(workspace::workspaces_root_for(&root));
-                }
-            }
-            for parent in parents {
-                let Ok(mut entries) = tokio::fs::read_dir(&parent).await else {
-                    continue;
-                };
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let name = entry.file_name();
-                    let Some(ids) = name
-                        .to_str()
-                        .and_then(|name| name.strip_prefix(".deleted-mission-"))
-                    else {
-                        continue;
-                    };
-                    if !ids.is_ascii()
-                        || ids.len() != 73
-                        || ids.as_bytes()[36] != b'-'
-                        || Uuid::parse_str(&ids[..36]).is_err()
-                        || Uuid::parse_str(&ids[37..]).is_err()
-                    {
-                        continue;
-                    }
-                    if !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
-                        continue;
-                    }
-                    if let Err(error) = tokio::fs::remove_dir_all(entry.path()).await {
-                        if error.kind() != std::io::ErrorKind::NotFound {
-                            tracing::warn!(path = %entry.path().display(), %error,
-                                "quarantined workspace cleanup will retry");
-                        }
-                    }
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        }
-    });
-}
+/// Legacy quarantine names do not carry discard permission. They are retained
+/// for recovery; only workspace_purge receipts authorize deferred deletion.
+#[cfg(test)]
+pub(crate) fn start_deleted_workspace_cleanup(_workspaces: workspace::SharedWorkspaceStore) {}
 
+#[cfg(test)]
 pub(super) async fn cleanup_mission_workspace_dirs_for_delete(
     mission_store: &Arc<dyn MissionStore>,
     workspaces: &workspace::SharedWorkspaceStore,
     mission_id: Uuid,
+    running: &[super::super::mission_runner::RunningMissionInfo],
+) -> Result<Vec<String>, (StatusCode, String)> {
+    let child_ids = collect_child_mission_ids(mission_store, mission_id).await?;
+    cleanup_mission_workspace_dirs_for_ids(
+        mission_store,
+        workspaces,
+        mission_id,
+        child_ids,
+        running,
+    )
+    .await
+}
+
+pub(super) async fn cleanup_mission_workspace_dirs_for_ids(
+    mission_store: &Arc<dyn MissionStore>,
+    workspaces: &workspace::SharedWorkspaceStore,
+    mission_id: Uuid,
+    child_ids: Vec<Uuid>,
     running: &[super::super::mission_runner::RunningMissionInfo],
 ) -> Result<Vec<String>, (StatusCode, String)> {
     let Some(root_mission) = mission_store
@@ -950,7 +1011,6 @@ pub(super) async fn cleanup_mission_workspace_dirs_for_delete(
         return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
     };
 
-    let child_ids = collect_child_mission_ids(mission_store, mission_id).await?;
     let mut ids_to_delete = Vec::with_capacity(child_ids.len() + 1);
     ids_to_delete.push(mission_id);
     ids_to_delete.extend(child_ids.iter().copied());
@@ -996,7 +1056,7 @@ pub(super) async fn cleanup_mission_workspace_dirs_for_delete(
             ),
         ));
     }
-    let mut deleted_dirs = Vec::new();
+    let deleted_dirs = Vec::new();
     for mission in missions {
         let Some(ws) = workspaces.get(mission.workspace_id).await else {
             // Do not finalize the database deletion when the workspace that
@@ -1028,34 +1088,10 @@ pub(super) async fn cleanup_mission_workspace_dirs_for_delete(
         if !dir.exists() {
             continue;
         }
-        // Quarantine on the same filesystem before removing the record. Recursive
-        // cleanup can take minutes for build trees and must not hold the request.
-        let trash = dir.with_file_name(format!(
-            ".deleted-mission-{}-{}",
-            mission.id,
-            Uuid::new_v4()
-        ));
-        match tokio::fs::rename(&dir, &trash).await {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "Failed to delete mission workspace directory {}: {}",
-                        dir.display(),
-                        err
-                    ),
-                ));
-            }
-        }
-        tracing::info!(
-            mission_id = %mission.id,
-            workspace_id = %mission.workspace_id,
-            path = %dir.display(),
-            "quarantined mission workspace directory during explicit delete",
-        );
-        deleted_dirs.push(dir.to_string_lossy().to_string());
+        // Conversation deletion preserves all filesystem work. Discarding it
+        // requires a separate persisted workspace-purge authorization.
+        tracing::info!(mission_id = %mission.id, path = %dir.display(),
+            "retained mission workspace during history deletion");
     }
 
     Ok(deleted_dirs)

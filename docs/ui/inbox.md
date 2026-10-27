@@ -124,3 +124,13 @@ the list, unread count and background digest prefetch. Existing settings without
 the preference default to off. Child details remain available from their parent.
 
 Server-scheduled provider recovery stays in Working with a neutral `Recovering` badge. It is not ready for review and does not expose an extra Retry action while a retry is already scheduled. A live permission question still takes priority.
+
+## Browser fixture contract
+
+Fixtures that mount App must return a complete privilege-access snapshot with an
+explicit `bunker_state`; a catch-all `{}` or `[]` is not the privilege API contract.
+An ordinary Inbox fixture uses state 0. The triage regression also runs with state
+2 and verifies that the real Bunker warning remains visible alongside the archive
+Undo toast. Assertions identify the intended toast by its action text, without
+assuming the global toast collection has only one item or dismissing security
+warnings to make the test pass.

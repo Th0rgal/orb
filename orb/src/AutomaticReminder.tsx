@@ -1,5 +1,5 @@
 import { useNow } from "./time";
-import {createEffect, createMemo, createSignal, onCleanup, Show} from 'solid-js';
+import {createEffect, createMemo, createSignal, on, onCleanup, Show} from 'solid-js';
 import {api, connectionVersion, isConnected} from './api';
 import {copyText} from './clipboard';
 import type {StreamItem} from './transcriptModel';
@@ -43,18 +43,22 @@ export function nextReminder(rows: Wakeup[]): number | undefined {
 /** Archiving cancels a mission's reminders in Core, so an archived mission shows none. */
 export function NextReminder(p: {mission: string; busy: boolean; archived?: boolean}) {
   const [due, setDue] = createSignal<number>(); const now = useNow(10000);
-  createEffect(() => {
-    const mission = p.mission; connectionVersion(); setDue(undefined);
-    if (!mission || p.archived || !isConnected()) return;
+  // Refetch only when the mission or the connection changes: the mission
+  // object refreshes often, and clearing on each refresh made the line blink.
+  const archived = createMemo(() => !!p.archived);
+  createEffect(on([() => p.mission, connectionVersion, archived], ([mission]) => {
+    setDue(undefined);
+    if (!mission || archived() || !isConnected()) return;
     let alive = true, timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
+      // A failed poll keeps the last known reminder instead of hiding it.
       try { const rows = await api<Wakeup[]>(`/api/control/missions/${encodeURIComponent(mission)}/automations`); if (alive) setDue(nextReminder(rows)); }
-      catch { if (alive) setDue(undefined); }
+      catch { /* keep the previous value */ }
       if (alive) timer = setTimeout(refresh, 30000);
     };
     void refresh();
     onCleanup(() => {alive = false; clearTimeout(timer);});
-  });
+  }));
   const remaining = createMemo(() => due() === undefined ? 0 : Math.max(0, Math.ceil((due()! - now()) / 60000)));
   return <Show when={due() !== undefined && !p.busy && !p.archived}><div class="next-reminder"><span aria-hidden="true">◷</span> Next reminder at {new Date(due()!).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} · {remaining() ? `in ${remaining()} min` : 'waiting to run'}</div></Show>;
 }

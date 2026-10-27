@@ -954,6 +954,14 @@ async fn call_inner(
                     .map_or(0, |run| run.generation),
             );
         }
+        // Reservation is acceptance of work. Serialize it with filesystem
+        // lifecycle admission, before taking the projects database mutex.
+        let _admission = crate::api::control::dispatch_admission::DISPATCH_ADMISSION
+            .lock()
+            .await;
+        let _durable = crate::api::control::dispatch_admission::durable_lock(&state.config)
+            .await
+            .map_err(|e| ToolError::denied(&e))?;
         return super::actions::reserve(
             &*state
                 .projects

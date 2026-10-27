@@ -189,16 +189,29 @@ fn unknown_tagged_scope_is_reapable(
 
 /// List all `sandboxed-exec-*.scope` unit names currently known to systemd.
 pub(crate) async fn try_list_exec_scope_units() -> Result<Vec<String>, String> {
-    let output = Command::new("systemctl")
-        .args([
-            "list-units",
-            "--plain",
-            "--no-legend",
-            "--all",
-            "sandboxed-exec-*.scope",
-            "orb-exec-*.scope",
-            "orb-jit-*.scope",
-        ])
+    list_scope_inventory(false).await
+}
+
+/// GC includes durable scopes without enrolling them in mission scope teardown.
+pub(crate) async fn try_list_workspace_gc_scope_units() -> Result<Vec<String>, String> {
+    list_scope_inventory(true).await
+}
+
+async fn list_scope_inventory(include_durable: bool) -> Result<Vec<String>, String> {
+    let mut command = Command::new("systemctl");
+    command.args([
+        "list-units",
+        "--plain",
+        "--no-legend",
+        "--all",
+        "sandboxed-exec-*.scope",
+        "orb-exec-*.scope",
+        "orb-jit-*.scope",
+    ]);
+    if include_durable {
+        command.arg("sandboxed-durable-*.scope");
+    }
+    let output = command
         .output()
         .await
         .map_err(|err| format!("systemctl list-units failed: {err}"))?;
@@ -215,6 +228,7 @@ pub(crate) async fn try_list_exec_scope_units() -> Result<Vec<String>, String> {
         .filter_map(|line| line.split_whitespace().next())
         .filter(|unit| {
             (unit.starts_with("sandboxed-exec-")
+                || (include_durable && unit.starts_with("sandboxed-durable-"))
                 || unit.starts_with("orb-exec-")
                 || unit.starts_with("orb-jit-"))
                 && unit.ends_with(".scope")

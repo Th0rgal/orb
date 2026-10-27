@@ -1134,8 +1134,24 @@ pub async fn start_job(
     if command.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "command is required"));
     }
+    let (_, mission_id, _) =
+        authorize_start(&state, &user, req.workspace_id, req.started_by_mission_id).await?;
+    let _workspace =
+        crate::api::control::machine_transfer::workspace_mutation_lock(mission_id).await;
+    let _admission = crate::api::control::dispatch_admission::DISPATCH_ADMISSION
+        .lock()
+        .await;
+    let _durable = crate::api::control::dispatch_admission::durable_lock(&state.config)
+        .await
+        .map_err(|message| err(StatusCode::CONFLICT, message))?;
     let (workspace_id, started_by_mission_id, mission_working_directory) =
         authorize_start(&state, &user, req.workspace_id, req.started_by_mission_id).await?;
+    crate::api::control::workspace_purge::revoke_owned_locked(
+        &state,
+        started_by_mission_id,
+        &user.id,
+    )
+    .map_err(|message| err(StatusCode::CONFLICT, message))?;
     let control = control_for_user(&state, &user).await;
     if let Some(placement) = crate::api::control::remote_grok::placement(
         &state.config.working_dir,
@@ -1476,6 +1492,108 @@ pub async fn list_jobs(
     Json(jobs)
 }
 
+/// Presentation status can settle before asynchronous cancellation finishes.
+/// Destructive lifecycle operations require an independent termination check.
+async fn job_blocks_reclamation(job: &DurableJob) -> Result<bool, String> {
+    if matches!(
+        job.status,
+        DurableJobStatus::Running | DurableJobStatus::Unknown
+    ) {
+        return Ok(true);
+    }
+    if job.remote.is_some() {
+        return Err("Remote job termination requires node-local observation".into());
+    }
+    if let Some(unit) = &job.scope_unit {
+        let unit = if unit.ends_with(".scope") {
+            unit.clone()
+        } else {
+            format!("{unit}.scope")
+        };
+        let output = tokio::process::Command::new("systemctl")
+            .args([
+                "show",
+                "--property=ActiveState",
+                "--property=ControlGroup",
+                &unit,
+            ])
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err("Cannot verify durable job scope termination".into());
+        }
+        let output = std::str::from_utf8(&output.stdout).map_err(|e| e.to_string())?;
+        let active = output
+            .lines()
+            .find_map(|l| l.strip_prefix("ActiveState="))
+            .ok_or("Missing durable scope state")?;
+        let group = output
+            .lines()
+            .find_map(|l| l.strip_prefix("ControlGroup="))
+            .ok_or("Missing durable scope cgroup observation")?;
+        // A retained cgroup may contain payloads even after a failed wrapper.
+        if !matches!(active, "inactive" | "failed") || !group.is_empty() {
+            return Ok(true);
+        }
+    }
+    #[cfg(unix)]
+    if let Some(pid) = job.pid {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err("Invalid durable job process identity".into());
+        }
+        for target in [pid as i32, -(pid as i32)] {
+            // Check both wrapper and process group, including after wrapper exit.
+            if unsafe { libc::kill(target, 0) } == 0 {
+                return Ok(true);
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                return Err("Cannot verify durable job process termination".into());
+            }
+        }
+        return Ok(false);
+    }
+    // An accepted pidless, scopeless launch has no termination observation.
+    Ok(job.scope_unit.is_none() && job.spawn_accepted)
+}
+
+/// Filesystem reclamation must account for jobs from every owner sharing a
+/// workspace. Authorization to view a receipt cannot prove it is quiescent.
+pub(crate) async fn has_unsettled_workspace_jobs(
+    state: &Arc<AppState>,
+    workspace_id: Uuid,
+    source: &Path,
+) -> Result<bool, String> {
+    let mut entries = match tokio::fs::read_dir(jobs_root(state)).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("Cannot verify workspace job state".into()),
+    };
+    while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+        if !entry.file_type().await.map_err(|e| e.to_string())?.is_dir() {
+            continue;
+        }
+        let bytes = tokio::fs::read(entry.path().join("job.json"))
+            .await
+            .map_err(|e| e.to_string())?;
+        let job: DurableJob = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        // A different registered workspace may name the same physical checkout.
+        // Only a verified disjoint local cwd can exclude it before observation.
+        if job.workspace_id.is_some_and(|id| id != workspace_id) && job.remote.is_none() {
+            if let Ok(cwd) = Path::new(&job.cwd).canonicalize() {
+                if !cwd.starts_with(source) && !source.starts_with(&cwd) {
+                    continue;
+                }
+            }
+        }
+        let job = refresh_job(state, job).await;
+        if job_blocks_reclamation(&job).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) async fn has_unsettled_mission_jobs(
     state: &Arc<AppState>,
     user: &AuthUser,
@@ -1504,13 +1622,7 @@ pub(crate) async fn has_unsettled_mission_jobs(
             && authorize_job(state, user, &job).await.is_ok()
         {
             let job = refresh_job(state, job).await;
-            if matches!(
-                job.status,
-                DurableJobStatus::Running | DurableJobStatus::Unknown
-            ) || (job.remote.is_none()
-                && job.status == DurableJobStatus::Cancelled
-                && job_requires_force_clear(&job))
-            {
+            if job_blocks_reclamation(&job).await? {
                 return Ok(true);
             }
         }
@@ -1991,6 +2103,24 @@ mod tests {
         assert!(try_acquire_submission_claim(&claim_path).unwrap().is_none());
         drop(first);
         assert!(try_acquire_submission_claim(&claim_path).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_purge_failed_receipt_does_not_prove_process_termination() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut job = test_job(DurableJobStatus::Failed);
+        job.pid = child.id();
+        job.scope_unit = None;
+        assert!(job_blocks_reclamation(&job).await.unwrap());
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        assert!(!job_blocks_reclamation(&job).await.unwrap());
+        job.pid = None;
+        assert!(
+            job_blocks_reclamation(&job).await.unwrap(),
+            "accepted pidless launch is uncertain"
+        );
     }
 
     #[test]
