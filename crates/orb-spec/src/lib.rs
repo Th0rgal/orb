@@ -3882,37 +3882,48 @@ pub const WHITELISTED_AGENT_WALK_BINARIES: &[&str] = &[
     "tree", "git",
 ];
 
-/// Classifies the process that tripped a canary into [`ActorTrust`]:
-/// - Checks whether `uid` (`999` / `sandboxed-node`), `cgroup`, or `cmdline` belongs to a
-///   managed Paloma agent/mission execution context (`sandboxed-node`, `opencode`, `antigravity`,
-///   `claude`, `codex`).
-/// - If it is an agent/mission process AND the executable is a passive search/traversal tool in
-///   [`WHITELISTED_AGENT_WALK_BINARIES`], returns [`ActorTrust::WhitelistedAgentWalk`].
-/// - If it is an agent/mission process running any other command (e.g. `cat`, `curl`, `python3`),
-///   returns [`ActorTrust::MissionProcess`] (quarantines ONLY that node on ambient decoys, or
-///   locks down the whole fleet on [`CanaryClass::HighSignalBait`]).
-/// - Otherwise returns [`ActorTrust::UntrustedOrSystem`].
+/// Numeric uid of the `sandboxed-node` service user that runs agent and mission processes.
+pub const AGENT_UID: u32 = 999;
+
+/// Whether a cgroup v2 path (`/proc/<pid>/cgroup`, either the raw `0::<path>` line or the
+/// bare path) is exactly a managed agent context: the node service itself
+/// (`orb-node.service`, alias `sandboxed-node.service`) or one mission scope directly under
+/// `missions.slice`. Substring matches are not accepted.
+pub fn is_agent_cgroup(cgroup: &str) -> bool {
+    let path = cgroup
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("0::"))
+        .unwrap_or(cgroup)
+        .trim();
+    matches!(
+        path,
+        "/system.slice/orb-node.service" | "/system.slice/sandboxed-node.service"
+    ) || path.strip_prefix("/missions.slice/").is_some_and(|unit| {
+        unit.ends_with(".scope") && unit.len() > ".scope".len() && !unit.contains('/')
+    })
+}
+
+/// Classifies the process that tripped a canary into [`ActorTrust`] from kernel-attested
+/// facts only:
+/// - The audit record's numeric `uid` must be [`AGENT_UID`]; an unknown uid is untrusted.
+/// - When the cgroup could be read, it must be exactly an agent cgroup ([`is_agent_cgroup`]);
+///   a process that already exited (no cgroup) is judged by its uid alone.
+/// - The first `cmdline` token is the audit record's `exe` (the watcher substitutes it for the
+///   attacker-controlled `argv[0]`). A passive search/traversal tool in
+///   [`WHITELISTED_AGENT_WALK_BINARIES`] is [`ActorTrust::WhitelistedAgentWalk`]; anything else
+///   is [`ActorTrust::MissionProcess`].
+/// - Everything else is [`ActorTrust::UntrustedOrSystem`]. Argument text never grants trust.
 pub fn classify_actor_trust(
     uid: Option<u32>,
     cgroup: Option<&str>,
     cmdline: Option<&str>,
 ) -> ActorTrust {
-    let cg = cgroup.unwrap_or("").to_ascii_lowercase();
-    let cmd = cmdline.unwrap_or("").trim();
-    let cmd_lower = cmd.to_ascii_lowercase();
-
-    let is_agent_context = uid == Some(999)
-        || cg.contains("sandboxed-node")
-        || cg.contains("sandboxed_node")
-        || cg.contains("opencode")
-        || cg.contains("antigravity")
-        || cmd_lower.contains("/var/lib/sandboxed-node/")
-        || cmd_lower.contains("fast_9024_scanner");
-
-    if !is_agent_context {
+    let cgroup = cgroup.map(str::trim).filter(|cg| !cg.is_empty());
+    if uid != Some(AGENT_UID) || cgroup.is_some_and(|cg| !is_agent_cgroup(cg)) {
         return ActorTrust::UntrustedOrSystem;
     }
 
+    let cmd = cmdline.unwrap_or("").trim();
     let first_token = cmd.split_whitespace().next().unwrap_or("");
     let exe_name = first_token
         .rsplit('/')
@@ -4923,6 +4934,51 @@ mod tests {
         assert_eq!(parity_snap.total_divergences, 0);
     }
 
+    /// Argument text is attacker-controlled; only the audit uid and an exact cgroup count.
+    #[test]
+    fn canary_actor_trust_ignores_argv_and_unknown_uid() {
+        // Spoofed argv markers from a non-agent uid/cgroup.
+        for cmd in [
+            "rg /var/lib/sandboxed-node/ .env.production.canary",
+            "fast_9024_scanner cat .env.production.canary",
+        ] {
+            assert_eq!(
+                classify_actor_trust(
+                    Some(1000),
+                    Some("0::/user.slice/user-1000.slice/session-3.scope"),
+                    Some(cmd)
+                ),
+                ActorTrust::UntrustedOrSystem
+            );
+            assert_eq!(
+                classify_actor_trust(None, None, Some(cmd)),
+                ActorTrust::UntrustedOrSystem
+            );
+        }
+        // An unresolvable uid is never the trusted agent uid.
+        assert_eq!(
+            classify_actor_trust(
+                None,
+                Some("0::/system.slice/orb-node.service"),
+                Some("rg x")
+            ),
+            ActorTrust::UntrustedOrSystem
+        );
+        // Agent uid in a cgroup that only contains an agent name as a substring.
+        for cg in [
+            "0::/user.slice/opencode-evil.scope",
+            "0::/system.slice/sandboxed-node.service.d/evil",
+            "0::/missions.slice/a.scope/nested",
+            "0::/missions.slice/.scope",
+        ] {
+            assert_eq!(
+                classify_actor_trust(Some(999), Some(cg), Some("rg x")),
+                ActorTrust::UntrustedOrSystem,
+                "{cg}"
+            );
+        }
+    }
+
     #[test]
     fn wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gates() {
         // 1. Whitelisted agent walk (`rg --hidden` by sandboxed-node) on an ambient decoy
@@ -4947,6 +5003,19 @@ mod tests {
         assert!(!v_walk.escalate_fleet_lockdown);
         assert!(!v_walk.alert_operator);
         assert_eq!(v_walk.next_fleet_bunker, BunkerState::Normal);
+
+        // Today's false positive: the node runs as `orb-node.service`, and a short-lived `rg`
+        // exits before its cgroup is read. Both stay a whitelisted walk via the attested uid.
+        for cg in [
+            Some("0::/system.slice/orb-node.service\n"),
+            Some("0::/missions.slice/sandboxed-exec-host-mf0fbffbb-81226671.scope"),
+            None,
+        ] {
+            assert_eq!(
+                classify_actor_trust(Some(999), cg, Some("/usr/bin/rg --hidden x .")),
+                ActorTrust::WhitelistedAgentWalk
+            );
+        }
 
         // 2. Single mission process reading `.env.production.canary` (`cat`) quarantines ONLY that node
         //    and leaves global fleet bunker at `Normal` (`canary_mission_ambient_node_only`).
