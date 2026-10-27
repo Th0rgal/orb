@@ -170,35 +170,6 @@ final class OrbSecretRequestMonitor {
     }
 }
 
-/// Home banner: one tap opens the approval sheet.
-struct OrbSecretRequestBanner: View {
-    let count: Int
-    let open: () -> Void
-    var body: some View {
-        if count > 0 {
-            Button(action: open) {
-                HStack(spacing: 10) {
-                    Image(systemName: "key.viewfinder").foregroundStyle(OrbStyle.warning)
-                    Text(count == 1 ? "A mission is asking for a secret" : "\(count) missions are asking for secrets")
-                        .font(.footnote.weight(.semibold))
-                    Spacer()
-                    Text("\(count)")
-                        .font(.system(.caption, weight: .bold)).monospacedDigit()
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(OrbStyle.warning.opacity(0.25), in: Capsule())
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(OrbStyle.textSecondary)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
-                .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.borderStrong))
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .accessibilityIdentifier("home.secret-requests")
-        }
-    }
-}
-
 /// Approve (secret, project or all, with a grant lifetime) or decline pending
 /// secret requests. Every approval is gated by Face ID / Touch ID.
 struct OrbSecretRequestsSheet: View {
@@ -224,7 +195,7 @@ struct OrbSecretRequestsSheet: View {
                     Section { Text("No pending requests.").foregroundStyle(.secondary) }
                 } else {
                     Section("Pending") {
-                        ForEach(monitor.pending, id: \.selfID) { requestRow($0) }
+                        ForEach(monitor.pending, id: \.selfID) { r in requestRow(r).onAppear { OrbUsageTelemetry.shared.approvalShown(r["id"].text) } }
                     }
                 }
             }
@@ -308,6 +279,7 @@ struct OrbSecretRequestsSheet: View {
                 }
                 error = ""
                 OrbHaptics.success()
+                OrbUsageTelemetry.recordGrant(id, approve: scope != nil, enrolled: false)
             } catch {
                 if let msg = OrbBiometric.friendlyError(error) {
                     self.error = msg
@@ -405,8 +377,6 @@ final class OrbMissionAccessMonitor {
     static let shared = OrbMissionAccessMonitor()
     private(set) var requests: [OrbJSON] = []
     private(set) var audit: [OrbJSON] = []
-    /// Set when a mission access notification is tapped; the home view opens the sheet.
-    var openRequested = false
     private var endpoint = ""
     private var announced: Set<String> = []
 
@@ -456,34 +426,6 @@ final class OrbMissionAccessMonitor {
     }
 }
 
-struct OrbMissionAccessBanner: View {
-    let count: Int
-    let open: () -> Void
-    var body: some View {
-        if count > 0 {
-            Button(action: open) {
-                HStack(spacing: 10) {
-                    Image(systemName: "eye.trianglebadge.exclamationmark").foregroundStyle(OrbStyle.warning)
-                    Text(count == 1 ? "A mission asks to read another mission" : "\(count) missions ask for read access")
-                        .font(.footnote.weight(.semibold))
-                    Spacer()
-                    Text("\(count)")
-                        .font(.system(.caption, weight: .bold)).monospacedDigit()
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(OrbStyle.warning.opacity(0.25), in: Capsule())
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(OrbStyle.textSecondary)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
-                .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.borderStrong))
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .accessibilityIdentifier("home.access-requests")
-        }
-    }
-}
-
 /// Pending requests (approve with Face ID / Touch ID, or deny), live grants
 /// (revoke) and recent history. Used as the home sheet and in Settings.
 struct OrbMissionAccessList: View {
@@ -505,7 +447,7 @@ struct OrbMissionAccessList: View {
             }
             Section("Pending") {
                 if monitor.pending.isEmpty { Text("No pending requests.").foregroundStyle(.secondary) }
-                ForEach(monitor.pending, id: \.selfID) { pendingRow($0) }
+                ForEach(monitor.pending, id: \.selfID) { r in pendingRow(r).onAppear { OrbUsageTelemetry.shared.approvalShown(r["id"].text) } }
             }
             Section("Active grants") {
                 if monitor.grants.isEmpty { Text("No active grants.").foregroundStyle(.secondary) }
@@ -603,6 +545,7 @@ struct OrbMissionAccessList: View {
                                                         summary: reason)
                 error = ""
                 OrbHaptics.success()
+                OrbUsageTelemetry.recordGrant(id, approve: approve, enrolled: enrolled)
             } catch {
                 if let msg = OrbBiometric.friendlyError(error) {
                     self.error = msg

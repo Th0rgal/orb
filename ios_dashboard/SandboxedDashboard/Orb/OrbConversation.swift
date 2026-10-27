@@ -187,6 +187,7 @@ struct OrbConversation: View {
             conversationContainer(scroll: scroll)
                 .background(OrbStyle.background)
                 .scrollDismissesKeyboard(.interactively)
+                .orbTrackPage("mission")
                 .navigationTitle(resolvedNavigationTitle)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
@@ -207,15 +208,15 @@ struct OrbConversation: View {
                     }
                 }
                 .environment(\.orbFiles, OrbFileContext(scope: fileScope, shared: transcript.sharedFiles) { fileRef = $0 })
-                .sheet(item: $fileRef) { OrbFileViewerSheet(ref: $0, scope: fileScope) }
-                .sheet(isPresented: $showFiles) { OrbFilesSheet(scope: fileScope) }
-                .sheet(item: $preview) { OrbPreviewSheet(file: $0) }
-                .sheet(isPresented: $showSelection) { OrbAgentPicker(selection: $selection, existing: id != nil) }
+                .sheet(item: $fileRef) { OrbFileViewerSheet(ref: $0, scope: fileScope).orbTrackPage("file_viewer", surface: .sheet, entryPoint: "mission") }
+                .sheet(isPresented: $showFiles) { OrbFilesSheet(scope: fileScope).orbTrackPage("files", surface: .sheet, entryPoint: "mission") }
+                .sheet(item: $preview) { OrbPreviewSheet(file: $0).orbTrackPage("attachment_preview", surface: .sheet) }
+                .sheet(isPresented: $showSelection) { OrbAgentPicker(selection: $selection, existing: id != nil).orbTrackPage("agent_picker", surface: .sheet) }
                 .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
                 .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
-                .sheet(isPresented: $moving) { moveConversationSheet }
-                .sheet(isPresented: $forking) { OrbForkSheet(mission: mission) { forkedMission = $0["id"].text } }
-                .sheet(item: $sideQuestion) { OrbSideQuestionSheet(parentID: $0.parent, question: $0.question) }
+                .sheet(isPresented: $moving) { moveConversationSheet.orbTrackPage("move", surface: .sheet) }
+                .sheet(isPresented: $forking) { OrbForkSheet(mission: mission) { forkedMission = $0["id"].text }.orbTrackPage("fork", surface: .sheet) }
+                .sheet(item: $sideQuestion) { OrbSideQuestionSheet(parentID: $0.parent, question: $0.question).orbTrackPage("btw", surface: .sheet) }
                 // Warm the /btw history so the side sheet opens on it, not on a spinner.
                 .task(id: id) {
                     guard let id, !id.isEmpty else { return }

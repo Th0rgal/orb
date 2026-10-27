@@ -211,26 +211,6 @@ struct GlassButtonStyle: ButtonStyle {
     }
 }
 
-struct GlassProminentButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .foregroundStyle(.white)
-            .background(
-                LinearGradient(
-                    colors: [Theme.accent, Theme.accent.opacity(0.85)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .shadow(color: Theme.accent.opacity(0.3), radius: 12, y: 6)
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .animation(.easeInOut(duration: 0.15), value: configuration.isPressed)
-    }
-}
-
 extension ButtonStyle where Self == GlassButtonStyle {
     static var glass: GlassButtonStyle { GlassButtonStyle() }
     static var glassProminent: GlassButtonStyle { GlassButtonStyle(isProminent: true) }

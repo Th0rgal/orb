@@ -12,7 +12,7 @@ import {
   type MissionAccessSnapshot,
 } from "./missionAccessApi";
 import { pollWhileVisible } from "./poll";
-import { EyeIcon, FingerprintIcon } from "./secretRequestNotices";
+import { EyeIcon, FingerprintIcon } from "./approvalIcons";
 import { Select } from "./Select";
 import { ago, useNow } from "./time";
 

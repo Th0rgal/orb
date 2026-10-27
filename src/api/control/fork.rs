@@ -1350,36 +1350,65 @@ mod tests {
         );
         assert!(!v_dedupe.emit_dispatch_effect);
 
-        // 6. Archived mission (`MissionStatus::Acknowledged` and `SUPERSEDED_TAG`) -> RejectArchived
-        for is_superseded_tag in [false, true] {
-            let mut archived_mission = mission.clone();
-            if is_superseded_tag {
-                archived_mission
-                    .project
-                    .tags
-                    .push(crate::api::mission_store::SUPERSEDED_TAG.to_string());
-            } else {
-                archived_mission.status = MissionStatus::Acknowledged;
-            }
-            let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
-                dir.path(),
-                store.as_ref(),
-                &archived_mission,
-                &owner,
-                Some("thread-1"),
-                &events_with_rollout,
-                Some("recovered history"),
-                false,
-            )
-            .await
-            .unwrap();
-            assert_eq!(
-                v_archived.action,
-                crate::orb_spec::MissionControlAction::RejectArchived
-            );
-            assert!(!v_archived.emit_dispatch_effect);
-            assert!(v_archived.archived_next);
-        }
+        // 6. Archived mission (`MissionStatus::Acknowledged`) -> RejectArchived.
+        //    A Completed mission is finished but still live: an explicit
+        //    follow-up, resume or transfer continues it, while the automatic
+        //    usage-limit replay treats it as archived.
+        let mut archived_mission = mission.clone();
+        archived_mission.status = MissionStatus::Acknowledged;
+        let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &archived_mission,
+            &owner,
+            Some("thread-1"),
+            &events_with_rollout,
+            Some("recovered history"),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_archived.action,
+            crate::orb_spec::MissionControlAction::RejectArchived
+        );
+        assert!(!v_archived.emit_dispatch_effect);
+        assert!(v_archived.archived_next);
+        let mut completed_mission = mission.clone();
+        completed_mission.status = MissionStatus::Completed;
+        let v_completed = super::super::remote_jobs::evaluate_mission_control_gate(
+            dir.path(),
+            store.as_ref(),
+            &completed_mission,
+            &owner,
+            Some("thread-1"),
+            &events_with_rollout,
+            Some("recovered history"),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_completed.action,
+            crate::orb_spec::MissionControlAction::ResumeVerifiedSession,
+            "an explicit follow-up continues a Completed mission"
+        );
+        assert!(v_completed.emit_dispatch_effect);
+        assert!(!v_completed.archived_next);
+        let v_completed_replay = super::super::remote_jobs::evaluate_usage_limit_replay_gate(
+            dir.path(),
+            store.as_ref(),
+            &completed_mission,
+            super::super::usage_limit_wait::FRESH_SESSION_FALLBACK,
+            Some("fallback history"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            v_completed_replay.action,
+            crate::orb_spec::MissionControlAction::RejectArchived,
+            "nothing replays a finished mission on its own"
+        );
 
         // 7. Usage-limit replay gate: while `run` is active -> RejectTrackWriterConflict;
         //    once `run` finishes -> SeedFallbackFreshSession on FRESH_SESSION_FALLBACK

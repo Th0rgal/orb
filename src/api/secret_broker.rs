@@ -70,6 +70,7 @@ pub enum RequestKind {
 /// files reads as `denied`).
 pub use super::approval_flow::ApprovalState as RequestStatus;
 use super::approval_flow::{self, ApprovalEvent};
+use super::approval_queue::{self, ApprovalItem, BatchRef};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRequest {
@@ -454,7 +455,12 @@ impl SecretBroker {
             .requests
             .iter()
             .rev()
-            .map(SecretRequest::public)
+            .take(100)
+            .map(|r| {
+                approval_queue::listed(r.public(), r.status.is_pending(), || {
+                    ApprovalItem::secret(r)
+                })
+            })
             .collect();
         requests.truncate(100);
         json!({
@@ -512,6 +518,59 @@ impl SecretBroker {
         ttl_hours: Option<i64>,
     ) -> Result<SecretRequest, String> {
         let _resolving = self.resolving.lock().await;
+        self.approve_resolving(state, id, scope, ttl_hours).await
+    }
+
+    /// Pending requests in the shared approval shape. Secrets belong to the
+    /// backend's single Bitwarden account, so every pending request is the
+    /// approver's (as with the per-request endpoints).
+    pub async fn pending_items(&self) -> Vec<ApprovalItem> {
+        let mut data = self.data.lock().await;
+        Self::prune(&mut data, Utc::now());
+        data.requests
+            .iter()
+            .filter(|r| r.status.is_pending())
+            .map(ApprovalItem::secret)
+            .collect()
+    }
+
+    /// Approve the listed requests with their default scope. Every item is
+    /// checked with [`approval_queue::admit`] before any is applied, while
+    /// holding the lock that serializes approvals; a write that Bitwarden then
+    /// refuses comes back denied with its error, the others still apply.
+    pub async fn approve_batch(
+        &self,
+        state: &Arc<AppState>,
+        refs: &[BatchRef],
+        confirm_critical: bool,
+    ) -> Result<Vec<SecretRequest>, String> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _resolving = self.resolving.lock().await;
+        let current = self.pending_items().await;
+        for want in refs {
+            let c = current.iter().find(|c| c.id == want.id);
+            approval_queue::admit(c, want, confirm_critical)?;
+        }
+        let mut out = Vec::with_capacity(refs.len());
+        for want in refs {
+            match self.approve_resolving(state, want.id, None, None).await {
+                Ok(r) => out.push(r),
+                Err(_) => out.extend(self.request(want.id).await),
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Self::approve`] with the `resolving` lock already held.
+    async fn approve_resolving(
+        &self,
+        state: &Arc<AppState>,
+        id: Uuid,
+        scope: Option<&str>,
+        ttl_hours: Option<i64>,
+    ) -> Result<SecretRequest, String> {
         let request = self.request(id).await.ok_or("Request not found")?;
         request.status.apply(ApprovalEvent::Approve)?;
         let now = Utc::now();

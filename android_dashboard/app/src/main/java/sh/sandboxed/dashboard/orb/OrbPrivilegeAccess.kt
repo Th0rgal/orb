@@ -68,4 +68,22 @@ object OrbPrivilegeAccess {
         "canary_tripped" to (level >= 2),
         "auth_failure_burst" to (level == 1)
     )
+
+    /** Home card while bunkered; a dismissal hides it until the level changes (desktop `BunkerModeCard`). */
+    fun showsBunkerCard(state: Int, dismissedLevel: Int): Boolean = state > 0 && dismissedLevel != state
+
+    /** Core lists incidents newest first; canary dry runs do not change the posture. */
+    fun latestIncidentReason(incidents: List<Map<String, Any?>>): String? =
+        incidents.firstOrNull { it["dry_run"] != true && !(it["reason"] as? String).isNullOrEmpty() }?.get("reason") as? String
+
+    /** Run on the Core host; Core deletes the file when a device uses it. */
+    const val ENROLLMENT_CODE_COMMAND =
+        "ssh agent-core 'umask 077; head -c 12 /dev/urandom | base64 | tr -dc A-Za-z0-9 | tee /root/.sandboxed-sh/approval_enrollment_code; echo'"
+
+    /** Prompt only where Core asks for signatures and this key is not enrolled (iOS `OrbApprovalEnrollmentMonitor`). */
+    fun shouldPromptEnrollment(mode: String, enrolled: Boolean, dismissedMode: String?): Boolean =
+        (mode == "warn" || mode == "enforce") && !enrolled && dismissedMode != mode
+
+    fun isEnrolled(publicKey: String?, devices: List<Map<String, Any?>>): Boolean =
+        !publicKey.isNullOrEmpty() && devices.any { it["public_key"] == publicKey }
 }

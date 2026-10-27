@@ -625,14 +625,7 @@ struct OrbBitwardenSettings: View {
 
     private func enroll() async {
         do {
-            let pub = try OrbApprovalKey.publicKey ?? OrbApprovalKey.create()
-            let device = try await client.call("/api/approvals/devices", method: "POST", body: .object([
-                "name": .string("Orb on \(UIDevice.current.name)"),
-                "platform": .string("ios"),
-                "public_key": .string(pub),
-                "enrollment_code": .string(enrollmentCode.trimmingCharacters(in: .whitespacesAndNewlines))
-            ]))
-            OrbApprovalKey.deviceId = device["id"].text
+            try await OrbApprovalKey.enroll(code: enrollmentCode)
             enrollmentCode = ""
             OrbHaptics.success()
         } catch {
@@ -684,6 +677,7 @@ struct OrbBitwardenSettings: View {
                 _ = try await OrbApprovalKey.signedCall("/api/bitwarden/requests/\(id)/reject", method: "POST", summary: "Decline: \(describe(r))")
             }
             OrbHaptics.success()
+            OrbUsageTelemetry.recordGrant(id, approve: scope != nil, enrolled: true)
         } catch {
             if let msg = OrbBiometric.friendlyError(error) {
                 self.error = msg
@@ -1066,27 +1060,25 @@ enum OrbApprovalKey {
         }
         deviceId = nil
         guard d["mode"].text != "enforce" else { return false }
-        do {
-            let pub = try publicKey ?? create()
-            let enrolled = try await OrbCore.shared.call(
-                "/api/approvals/devices",
-                method: "POST",
-                body: .object([
-                    "name": .string("Orb on \(UIDevice.current.name)"),
-                    "platform": .string("ios"),
-                    "public_key": .string(pub),
-                    "enrollment_code": .string("")
-                ])
-            )
-            let id = enrolled["id"].text
-            if !id.isEmpty {
-                deviceId = id
-                return true
-            }
-        } catch {
-            return false
-        }
-        return false
+        return (try? await enroll(code: "")) != nil
+    }
+
+    /// Enrolls this phone's Secure Enclave key, creating it first if needed.
+    /// `code` is the one-time enrollment code Core requires in enforce mode.
+    @discardableResult
+    static func enroll(code: String) async throws -> String {
+        let pub = try publicKey ?? create()
+        let device = try await OrbCore.shared.call("/api/approvals/devices", method: "POST", body: .object([
+            "name": .string("Orb on \(UIDevice.current.name)"),
+            "platform": .string("ios"),
+            "public_key": .string(pub),
+            "enrollment_code": .string(code.trimmingCharacters(in: .whitespacesAndNewlines))
+        ]))
+        let id = device["id"].text
+        guard !id.isEmpty else { throw OrbHTTPError(status: 0, detail: "Core did not return a device id") }
+        deviceId = id
+        OrbApprovalEnrollmentMonitor.shared.markEnrolled()
+        return id
     }
 
     /// Send a protected request, signed when this phone is enrolled.

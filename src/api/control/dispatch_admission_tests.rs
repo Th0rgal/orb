@@ -9841,6 +9841,7 @@ async fn transferred_claude_starts_with_context_then_resumes_same_session() {
     fixture.set_state("succeeded");
 }
 
+#[tokio::test]
 async fn core_child_keeps_its_own_directory_and_inherits_the_workspace() {
     let harness = Harness::new().await;
     let host = crate::workspace::DEFAULT_WORKSPACE_ID;
@@ -13363,6 +13364,8 @@ async fn retired_chatgpt_ui_backend_is_rejected_with_the_opencode_alternative() 
 /// wait, and the mission must still start once the slot frees.
 #[tokio::test]
 async fn pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs() {
+    // Creates a local mission over HTTP: keep it independent of the host's free
+    // disk (CI runners have less than the production 150 GiB floor).
     if isolated_track_http_test(
         "pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs",
     ) {
@@ -13414,7 +13417,7 @@ async fn pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs()
         .state
         .http_client
         .post(format!("{}/missions", h.url))
-        .json(&json!({"title":"queued behind the slot", "backend":"codex", "prompt":"Say ACK", "estimated_disk_gib": 1}))
+        .json(&json!({"title":"queued behind the slot", "backend":"codex", "prompt":"Say ACK"}))
         .send()
         .await
         .unwrap();

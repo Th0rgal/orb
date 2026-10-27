@@ -15,7 +15,7 @@ import {
 import * as Ic from "./icons";
 import { Select } from "./Select";
 import { ApprovalCancelled, approvalGraceSecs, graceUntil, setApprovalGraceSecs } from "./deviceApproval";
-import { FingerprintIcon, SecretKindIcon } from "./secretRequestNotices";
+import { FingerprintIcon, SecretKindIcon } from "./approvalIcons";
 
 const POLL_MS = 5000;
 

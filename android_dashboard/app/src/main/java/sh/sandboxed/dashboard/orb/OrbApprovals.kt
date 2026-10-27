@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -175,13 +176,21 @@ object OrbApprovalKey {
         method: String,
         path: String,
         body: Map<String, Any?>?,
-        summary: String
+        summary: String,
+        /** Usage telemetry for this decision: wait and method are measured here, never the payload. */
+        telemetry: UsageTelemetry.Approval? = null
     ): Any? {
         val text = body?.let { OrbJSON.stringify(it) } ?: ""
+        fun record(decision: UsageTelemetry.Decision, method: UsageTelemetry.Method, waitMs: Long) {
+            telemetry?.let { UsageTelemetry.trackApproval(it.kind, decision, method, waitMs, it.toolName, it.commandClass) }
+        }
         val context = activity ?: return core.request(path, method, rawBody = body?.let { text })
+            .also { record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.None, 0) }
         val device = deviceId(context, core.baseURLFlow.value)
         val headers = mutableMapOf<String, String>()
-        if (device != null && publicKey() != null) {
+        if (device == null || publicKey() == null) {
+            record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.None, 0)
+        } else {
             val challenge = dictOf(
                 core.request(
                     "/api/approvals/challenge",
@@ -191,7 +200,17 @@ object OrbApprovalKey {
             )
             val id = OrbJSON.str(challenge, "challenge_id") ?: error("No challenge")
             val payload = OrbJSON.str(challenge, "payload") ?: error("No challenge payload")
-            headers["X-Paloma-Approval"] = "$id.$device.${sign(context, payload, summary)}"
+            // Wait = biometric prompt shown -> decision. Strong biometric only, so face and
+            // fingerprint cannot be told apart: reported as touch_id (see UsageTelemetry).
+            val shown = System.currentTimeMillis()
+            val signed = try {
+                sign(context, payload, summary)
+            } catch (e: Cancelled) {
+                record(UsageTelemetry.Decision.Dismissed, UsageTelemetry.Method.TouchId, System.currentTimeMillis() - shown)
+                throw e
+            }
+            record(telemetry?.decision ?: UsageTelemetry.Decision.Approved, UsageTelemetry.Method.TouchId, System.currentTimeMillis() - shown)
+            headers["X-Paloma-Approval"] = "$id.$device.$signed"
         }
         return core.request(path, method, headers = headers, rawBody = body?.let { text })
     }
@@ -220,6 +239,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var bunkerState by remember { mutableStateOf(0) }
     var meshEpoch by remember { mutableStateOf<Int?>(null) }
     var meshVerified by remember { mutableStateOf(false) }
+    var queue by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    var includeCritical by remember { mutableStateOf(false) }
     var devices by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var mode by remember { mutableStateOf("") }
     var projects by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -245,6 +266,13 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             bunkerState = maxOf(snapBunker, mBunker)
             meshEpoch = (meshSnap["epoch"] as? Number)?.toInt()
             meshVerified = meshSnap["formal_verified"] == true
+        } catch (_: Throwable) {
+        }
+        try {
+            val next = OrbJSON.dictList(dictOf(core.request("/api/approvals/queue"))["items"])
+            // A different list (or a changed item) must be ticked again.
+            if (next.map { it["digest"] } != queue.map { it["digest"] }) includeCritical = false
+            queue = next
         } catch (_: Throwable) {
         }
         try {
@@ -328,6 +356,67 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         ) {
             error?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 13.sp) }
 
+            Card("Approvals") {
+                // Every pending request, of every kind: Allow / Deny each, or
+                // Approve all with one fingerprint (critical ones only when ticked).
+                if (queue.isEmpty()) Text("Nothing is waiting for your approval.", color = OrbStyle.textMuted, fontSize = 13.sp)
+                queue.forEach { i ->
+                    val critical = OrbApprovalQueue.isCritical(i)
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text(OrbApprovalQueue.title(i), color = if (critical) Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("asked by ${OrbApprovalQueue.requester(i)}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        (i["reason"] as? String)?.takeIf { it.isNotBlank() }?.let { Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp) }
+                        OrbApprovalQueue.detail(i) { projects[it] ?: it.take(8) }.takeIf { it.isNotEmpty() }?.let {
+                            Text(it, color = OrbStyle.textMuted, fontSize = 12.sp)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(enabled = !busy, onClick = {
+                                act {
+                                    OrbApprovalKey.signedRequest(
+                                        core, activity, "POST", "/api/approvals/approve-all",
+                                        OrbApprovalQueue.batchBody(listOf(i)), OrbApprovalQueue.signingReason(listOf(i))
+                                    )
+                                }
+                            }) { Text("Allow") }
+                            TextButton(enabled = !busy, onClick = {
+                                act {
+                                    OrbApprovalKey.signedRequest(
+                                        core, activity, "POST", OrbApprovalQueue.denyPath(i) { core.encodeComponent(it) },
+                                        null, "Decline: ${OrbApprovalQueue.title(i)}"
+                                    )
+                                }
+                            }) { Text("Deny", color = Color(0xFFFF6B6B)) }
+                        }
+                    }
+                }
+                if (queue.size > 1) {
+                    val summary = OrbApprovalQueue.summary(queue)
+                    val ready = OrbApprovalQueue.batchApprovable(queue, includeCritical)
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text(summary.risks, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Text("for ${summary.missions}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        if (summary.critical > 0) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = includeCritical, onCheckedChange = { includeCritical = it })
+                                Text(
+                                    if (summary.critical == 1) "Include the critical request (root, secret delete or move)" else "Include ${summary.critical} critical requests (root, secret delete or move)",
+                                    color = Color(0xFFFF6B6B), fontSize = 12.sp
+                                )
+                            }
+                        }
+                        TextButton(enabled = !busy && ready.isNotEmpty(), onClick = {
+                            act {
+                                OrbApprovalKey.signedRequest(
+                                    core, activity, "POST", "/api/approvals/approve-all",
+                                    OrbApprovalQueue.batchBody(ready), OrbApprovalQueue.signingReason(ready)
+                                )
+                                includeCritical = false
+                            }
+                        }) { Text(if (ready.size == queue.size) "Approve all" else "Approve ${ready.size}") }
+                    }
+                }
+            }
+
             Card("Mission requests") {
                 if (requests.isEmpty()) Text("No pending requests.", color = OrbStyle.textMuted, fontSize = 13.sp)
                 requests.forEach { r ->
@@ -347,7 +436,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                         core, activity, "POST",
                                         "/api/bitwarden/requests/${core.encodeComponent(id)}/approve",
                                         if (scopeName == null) emptyMap() else mapOf("scope" to scopeName),
-                                        "$label: ${describe(r)} for $who"
+                                        "$label: ${describe(r)} for $who",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
                                     )
                                 }
                             }) { Text(label) }
@@ -363,7 +453,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     OrbApprovalKey.signedRequest(
                                         core, activity, "POST",
                                         "/api/bitwarden/requests/${core.encodeComponent(id)}/reject",
-                                        null, "Decline: ${describe(r)}"
+                                        null, "Decline: ${describe(r)}",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
                                     )
                                 }
                             }) { Text("Decline", color = Color(0xFFFF6B6B)) }
@@ -428,7 +519,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     val who = OrbPrivilegeAccess.requester(r)
                     val what = OrbPrivilegeAccess.title(r)
                     Column(Modifier.padding(vertical = 6.dp)) {
-                        Text(what, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(what, color = if (r["scope"] == "root_exec") Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Text("asked by $who", color = OrbStyle.textMuted, fontSize = 12.sp)
                         (r["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
                             Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp)
@@ -441,7 +532,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                         core, activity, "POST",
                                         "/api/privilege-access/${core.encodeComponent(id)}/approve",
                                         OrbPrivilegeAccess.approveBody(r),
-                                        "Grant $what to $who"
+                                        "Grant $what to $who",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
                                     )
                                 }
                             }) { Text("Allow") }
@@ -450,7 +542,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     OrbApprovalKey.signedRequest(
                                         core, activity, "POST",
                                         "/api/privilege-access/${core.encodeComponent(id)}/deny",
-                                        null, "Decline: $who asks for $what"
+                                        null, "Decline: $who asks for $what",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
                                     )
                                 }
                             }) { Text("Deny", color = Color(0xFFFF6B6B)) }
@@ -524,7 +617,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                         core, activity, "POST",
                                         "/api/mission-access/${core.encodeComponent(id)}/approve",
                                         mapOf("ttl_hours" to hours),
-                                        "Let $who read $target for $hours h"
+                                        "Let $who read $target for $hours h",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
                                     )
                                 }
                             }) { Text("Allow read") }
@@ -533,7 +627,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     OrbApprovalKey.signedRequest(
                                         core, activity, "POST",
                                         "/api/mission-access/${core.encodeComponent(id)}/deny",
-                                        null, "Decline: $who wants to read $target"
+                                        null, "Decline: $who wants to read $target",
+                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
                                     )
                                 }
                             }) { Text("Deny", color = Color(0xFFFF6B6B)) }
@@ -600,9 +695,13 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 if (!enrolledHere) {
                     Text(
                         "Enroll this phone: its Keystore key signs approvals after a fingerprint or face check. " +
-                            "Enter the one-time code created on the Core host.",
+                            "Enter the one-time code created on the Core host; Core deletes it once a device uses it:",
                         color = OrbStyle.textMuted, fontSize = 12.sp
                     )
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(OrbPrivilegeAccess.ENROLLMENT_CODE_COMMAND, color = Color.White, fontSize = 11.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    }
                     OutlinedTextField(value = code, onValueChange = { code = it }, singleLine = true,
                         label = { Text("One-time code") }, modifier = Modifier.fillMaxWidth())
                     TextButton(enabled = !busy && code.trim().length >= 8, onClick = {

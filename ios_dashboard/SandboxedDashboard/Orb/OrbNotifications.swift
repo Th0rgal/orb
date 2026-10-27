@@ -521,11 +521,11 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
-        // Mission access requests open the access sheet, not a mission.
+        // Access requests open the approval queue, not a mission.
         if userInfo["orb_mission_access"] is String {
             nonisolated(unsafe) let finish = completionHandler
             Task { @MainActor in
-                OrbMissionAccessMonitor.shared.openRequested = true
+                OrbApprovalQueue.shared.openRequested = true
                 finish()
             }
             return
@@ -533,7 +533,7 @@ extension OrbNotificationCenter: UNUserNotificationCenterDelegate {
         if userInfo["orb_privilege_access"] is String {
             nonisolated(unsafe) let finish = completionHandler
             Task { @MainActor in
-                OrbPrivilegeAccessMonitor.shared.openRequested = true
+                OrbApprovalQueue.shared.openRequested = true
                 finish()
             }
             return

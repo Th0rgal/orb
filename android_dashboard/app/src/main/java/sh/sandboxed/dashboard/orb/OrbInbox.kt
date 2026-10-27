@@ -1171,11 +1171,11 @@ object OrbInboxModel {
 
     private fun displayTitle(raw: String): String {
         val trimmed = raw.trim()
-        if (trimmed.startsWith("/goal")) {
+        if (trimmed.startsWith("/goal") && (trimmed.length == 5 || trimmed[5].isWhitespace())) {
             val rest = trimmed.drop(5).trim()
             if (rest.isNotEmpty()) return rest.lineSequence().first().trim()
         }
-        if (trimmed.startsWith("/plan")) {
+        if (trimmed.startsWith("/plan") && (trimmed.length == 5 || trimmed[5].isWhitespace())) {
             val rest = trimmed.drop(5).trim()
             if (rest.isNotEmpty()) return rest.lineSequence().first().trim()
         }
@@ -1363,8 +1363,6 @@ object OrbInboxModel {
         trimmed = trimmed.replace(Regex("(?i)^Job\\s+[0-9a-f-]{36}\\s+on\\s+node\\s+'([^']+)'\\s+"), "Remote run on $1 ")
         return trimmed
     }
-
-    fun cleanMarkdownPreview(raw: String): String = clipToSentence(raw)
 
     fun stripMarkdownToProse(raw: String): String {
         if (raw.isEmpty()) return ""
@@ -1657,6 +1655,7 @@ fun OrbInboxView(
     }
 
     fun dismissWithUndo(item: OrbInboxItem) {
+        UsageTelemetry.trackAction(UsageTelemetry.Action.InboxDone, "inbox")
         markItemAndChildrenRead(item)
         OrbInboxModel.dismiss(item)
         lastDismissedItem = item
@@ -2121,6 +2120,7 @@ fun OrbInboxView(
                                     peekTurns = peekTurnsByItem[item.id] ?: emptyList(),
                                     isLoadingPeek = loadingPeekId == item.id,
                                     onSelectMission = {
+                                        UsageTelemetry.trackAction(UsageTelemetry.Action.InboxOpen, "inbox")
                                         markItemAndChildrenRead(item)
                                         onSelectMission(item.mission, item.project)
                                     },
@@ -2191,6 +2191,7 @@ fun OrbInboxView(
                                     peekTurns = peekTurnsByItem[item.id] ?: emptyList(),
                                     isLoadingPeek = loadingPeekId == item.id,
                                     onSelectMission = {
+                                        UsageTelemetry.trackAction(UsageTelemetry.Action.InboxOpen, "inbox")
                                         markItemAndChildrenRead(item)
                                         onSelectMission(item.mission, item.project)
                                     },

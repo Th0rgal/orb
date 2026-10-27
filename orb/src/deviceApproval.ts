@@ -1,6 +1,7 @@
 import { nativeInvoke } from "./native";
 import { createSignal } from "solid-js";
 import { api, ApiError, getApiUrl } from "./api";
+import { usageTelemetry, type ApprovalDecision, type ApprovalKind, type ApprovalMethod } from "./usageTelemetry";
 
 /**
  * Device-signed approvals. Core accepts sensitive operations (approving
@@ -112,6 +113,33 @@ export class ApprovalCancelled extends Error {
  * (accepted only while Core is in warn mode).
  */
 export async function signedApi<T>(method: string, path: string, body: unknown, summary: string): Promise<T> {
+  const decided = approvalDecisionPath(path);
+  const started = Date.now();
+  const report = (decision: ApprovalDecision, method: ApprovalMethod, result?: unknown) => {
+    if (!decided) return;
+    const created = Date.parse(String((result as { created_at?: unknown } | undefined)?.created_at ?? ""));
+    usageTelemetry.approval({ kind: decided.kind, decision, method, waitMs: Date.now() - (Number.isFinite(created) ? created : started) });
+  };
+  try {
+    const result = await signedApiInner<T>(method, path, body, summary);
+    report(decided?.decision ?? "approved", enrolledDeviceId() && invoke() ? "touch_id" : "desktop_click", result);
+    return result;
+  } catch (e) {
+    if (e instanceof ApprovalCancelled) report("dismissed", "touch_id");
+    throw e;
+  }
+}
+
+/** Approval decisions on mission requests: `kind` and `decision` from the
+ * route, never from the request payload. */
+export function approvalDecisionPath(path: string): { kind: ApprovalKind; decision: ApprovalDecision } | null {
+  const m = /^\/api\/(privilege-access|mission-access|bitwarden\/requests|payments?)\/[^/]+\/(approve|deny|reject)$/.exec(path);
+  if (!m) return null;
+  const kind: ApprovalKind = m[1] === "privilege-access" ? "command_class" : m[1].startsWith("payment") ? "payment" : "grant";
+  return { kind, decision: m[2] === "approve" ? "approved" : "denied" };
+}
+
+async function signedApiInner<T>(method: string, path: string, body: unknown, summary: string): Promise<T> {
   const text = body === undefined ? "" : JSON.stringify(body);
   const headers: Record<string, string> = body === undefined ? {} : { "Content-Type": "application/json" };
   const device = enrolledDeviceId();

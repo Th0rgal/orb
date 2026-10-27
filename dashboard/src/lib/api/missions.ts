@@ -200,7 +200,6 @@ export type MissionHealth =
       last_state: string;
       severity: MissionStallSeverity;
     }
-  | { status: "missing_deliverables"; missing: string[] }
   | { status: "unexpected_end"; reason: string };
 
 export interface MissionSearchResult {

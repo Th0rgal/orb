@@ -34,30 +34,16 @@ use crate::workspace_exec::{
     machine_name_for_path, machine_name_from_exec_unit, mission_short_id_from_exec_unit,
 };
 
-fn env_flag(var: &str, default: bool) -> bool {
-    match std::env::var(var) {
-        Ok(v) => {
-            let v = v.trim();
-            if default {
-                v != "0" && !v.eq_ignore_ascii_case("false")
-            } else {
-                v == "1" || v.eq_ignore_ascii_case("true")
-            }
-        }
-        Err(_) => default,
-    }
-}
-
 fn stop_on_awaiting_user() -> bool {
-    env_flag("SCOPE_STOP_ON_AWAITING_USER", true)
+    crate::util::env_var_bool("SCOPE_STOP_ON_AWAITING_USER", true)
 }
 
 fn stop_on_pause() -> bool {
-    env_flag("SCOPE_STOP_ON_PAUSE", true)
+    crate::util::env_var_bool("SCOPE_STOP_ON_PAUSE", true)
 }
 
 fn reaper_enabled() -> bool {
-    env_flag("SCOPE_REAPER_ENABLED", true)
+    crate::util::env_var_bool("SCOPE_REAPER_ENABLED", true)
 }
 
 fn reaper_interval() -> Duration {

@@ -23,6 +23,7 @@ import { CloudAgentPage } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
 import {startLocalQueueWorker} from "./localMessageQueue";
 import {BtwSettings} from "./btwSettings";
+import { screenName, startUsageTelemetry, usageTelemetry } from "./usageTelemetry";
 import {type PlanProgressData} from "./PlanProgress";
 import { startLocalOrigin, localAgentForLaunch } from "./localAgents";
 import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, recordFleet, recordMissions } from "./machineLoad";
@@ -56,11 +57,8 @@ import { cacheRecents } from "./pageCache";
 import { effortLabel, normalizeEffort } from "./effort";
 import { loadTranscript, peekReadyTranscript, prefetchTranscript, transcriptVersion } from "./missionCache";
 import { mergeById, pollWhileVisible } from "./poll";
-import { getSecretBroker } from "./bitwardenApi";
-import { syncSecretRequestNotices } from "./secretRequestNotices";
-import { syncMissionAccessNotices } from "./missionAccessNotices";
-import { getMissionAccess } from "./missionAccessApi";
-import { syncPrivilegeAccessNotices } from "./privilegeAccessNotices";
+import { syncApprovalQueue, syncBunkerNotice } from "./approvalQueueNotices";
+import { getApprovalQueue } from "./approvalQueue";
 import { getPrivilegeAccess } from "./privilegeAccessApi";
 import { listApprovalDevices, localApprovalKey, thisDeviceEnrollment } from "./deviceApproval";
 import { LiveProjectsSection, ProjectFileView, isMissionDeleting } from "./ProjectFiles";
@@ -102,6 +100,7 @@ import {
 const UsageSettings = lazy(() => import("./UsageSettings").then(module => ({ default: module.UsageSettings })));
 const HermesSettings = lazy(() => import("./HermesSettings").then(module => ({ default: module.HermesSettings })));
 const SkillsSettings = lazy(() => import("./SkillsSettings").then(module => ({ default: module.SkillsSettings })));
+const UsageTelemetrySettings = lazy(() => import("./UsageTelemetrySettings").then(module => ({ default: module.UsageTelemetrySettings })));
 const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module => ({ default: module.BitwardenSettings })));
 import { InboxPage } from "./Inbox";
 import { requestInboxDigest } from "./inboxDigest";
@@ -133,6 +132,12 @@ export default function App() {
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
   const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => { writeString("orb.selectedConversation", selected() ?? ""); });
+  onMount(() => onCleanup(startUsageTelemetry()));
+  // One page view per selected page; the previous page is the entry point.
+  createEffect(on(() => screenName(selected()), (screen, previous) => {
+    const close = usageTelemetry.page(screen, "screen", previous ?? "launch");
+    onCleanup(close);
+  }));
   const [sidebar, setSidebar] = createSignal(!window.matchMedia("(max-width: 720px)").matches);
   const [sbWidth, setSbWidth] = createSignal(220);
   const [deleteMissionRequest, setDeleteMissionRequest] = createSignal<string | null>(null);
@@ -811,62 +816,46 @@ export default function App() {
     void loadQuota();
     const stopQuota = pollWhileVisible(loadQuota, 60000, "app.quota");
     onCleanup(stopQuota);
-    const loadSecretRequests = () =>
+    const loadApprovals = () =>
         isConnected()
-          ? getSecretBroker()
-              .then((b) => {
-                const pending = b.requests.filter((r) => r.status === "pending");
-                setSecretRequests(pending.length);
-                syncSecretRequestNotices(pending, () => open("bitwarden-settings"));
+          ? getApprovalQueue()
+              .then(({ items }) => {
+                // One queue for every kind: the card shows them all, the badges count each.
+                setSecretRequests(items.filter((i) => i.kind === "secret").length);
+                setAccessRequests(items.filter((i) => i.kind === "mission_access").length);
+                setPrivilegeRequests(items.filter((i) => i.kind === "privilege").length);
+                syncApprovalQueue(items, () => open("bitwarden-settings"));
               })
-              .catch(swallow("app.secretRequests"))
+              .catch(swallow("app.approvalQueue"))
           : undefined;
-    const stopSecretRequests = pollWhileVisible(loadSecretRequests, 10000, "app.secretRequests");
-    const loadAccessRequests = () =>
-        isConnected()
-          ? getMissionAccess()
-              .then((snap) => {
-                const pending = snap.requests.filter((r) => r.state === "pending");
-                setAccessRequests(pending.length);
-                syncMissionAccessNotices(pending, () => open("security-settings"));
-              })
-              .catch(swallow("app.accessRequests"))
-          : undefined;
-    const stopAccessRequests = pollWhileVisible(loadAccessRequests, 10000, "app.accessRequests");
-    const onAccessAnswered = () => { setAccessRequests((n) => Math.max(0, n - 1)); void loadAccessRequests(); };
-    const onAccessFocus = () => void loadAccessRequests();
-    window.addEventListener("orb:mission-access-answered", onAccessAnswered);
-    window.addEventListener("focus", onAccessFocus);
-    onCleanup(() => { stopAccessRequests(); window.removeEventListener("orb:mission-access-answered", onAccessAnswered); window.removeEventListener("focus", onAccessFocus); });
-    const loadPrivilegeRequests = () =>
+    const stopApprovals = pollWhileVisible(loadApprovals, 10000, "app.approvalQueue");
+    const loadBunkerState = () =>
         isConnected()
           ? getPrivilegeAccess()
               .then((snap) => {
-                const pending = snap.requests.filter((r) => r.state === "pending");
-                setPrivilegeRequests(pending.length);
                 setBunkerActive(snap.bunker_state > 0);
-                syncPrivilegeAccessNotices(pending, () => open("security-settings"), snap.bunker_state);
+                syncBunkerNotice(snap.bunker_state, () => open("security-settings"));
               })
-              .catch(swallow("app.privilegeRequests"))
+              .catch(swallow("app.bunkerState"))
           : undefined;
-    const stopPrivilegeRequests = pollWhileVisible(loadPrivilegeRequests, 10000, "app.privilegeRequests");
-    // Bunker Mode shows at launch, not after the first poll.
-    void loadPrivilegeRequests();
-    const onPrivilegeAnswered = () => { setPrivilegeRequests((n) => Math.max(0, n - 1)); void loadPrivilegeRequests(); };
-    const onPrivilegeFocus = () => void loadPrivilegeRequests();
-    window.addEventListener("orb:privilege-access-answered", onPrivilegeAnswered);
-    window.addEventListener("focus", onPrivilegeFocus);
-    onCleanup(() => { stopPrivilegeRequests(); window.removeEventListener("orb:privilege-access-answered", onPrivilegeAnswered); window.removeEventListener("focus", onPrivilegeFocus); });
-    // Answering from a notification or the Secrets page updates the badge at once, then confirms.
-    const onSecretAnswered = () => { setSecretRequests((n) => Math.max(0, n - 1)); void loadSecretRequests(); };
-    const onFocus = () => void loadSecretRequests();
-    window.addEventListener("orb:secret-request-answered", onSecretAnswered);
-    window.addEventListener("focus", onFocus);
-    onCleanup(() => { window.removeEventListener("orb:secret-request-answered", onSecretAnswered); window.removeEventListener("focus", onFocus); });
+    const stopBunkerState = pollWhileVisible(loadBunkerState, 10000, "app.bunkerState");
+    void loadBunkerState();
+    onCleanup(stopBunkerState);
+    // Answering anywhere (card, notification, Secrets page) refreshes the queue at once.
+    const answeredEvents = ["orb:secret-request-answered", "orb:mission-access-answered", "orb:privilege-access-answered", "focus"];
+    let reloadQueued = false;
+    const onApprovalsChanged = () => {
+      // A batch answers several requests at once: reload once.
+      if (reloadQueued) return;
+      reloadQueued = true;
+      queueMicrotask(() => { reloadQueued = false; void loadApprovals(); void loadBunkerState(); });
+    };
+    for (const e of answeredEvents) window.addEventListener(e, onApprovalsChanged);
+    onCleanup(() => { for (const e of answeredEvents) window.removeEventListener(e, onApprovalsChanged); });
     onCleanup(() => {
       stopMissions();
       stopFleet();
-      stopSecretRequests();
+      stopApprovals();
     });
   });
   onCleanup(() => {
@@ -1311,7 +1300,7 @@ export default function App() {
                 missions={inboxMissions()}
                 projects={liveProjects()}
                 loading={missionsLoading()}
-                onOpenMission={(id) => open(`m:${id}`)}
+                onOpenMission={(id) => { usageTelemetry.action("inbox_open", "inbox"); open(`m:${id}`); }}
                 onOpenSettings={openSettings}
                 onOpenInboxSettings={() => open("inbox-settings")}
                 onNewAgent={() => open(null)}
@@ -1340,6 +1329,7 @@ export default function App() {
             <SettingsShell page={selected()!} onOpen={open}>
               <Switch>
                 <Match when={selected() === "settings"}><Settings onOpenPage={open} /></Match>
+                <Match when={selected() === "usage-telemetry"}><UsageTelemetrySettings /></Match>
                 <Match when={selected() === "routing" || selected() === "routing-providers" || selected() === "routing-keys"}>
                   <RoutingSettings onOpenClient={() => open("settings")} tab={selected() === "routing-providers" ? "health" : selected() === "routing-keys" ? "keys" : "chains"} />
                 </Match>

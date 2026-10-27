@@ -123,8 +123,15 @@ custom axioms are allowed: `crates/orb-spec/build.rs` compiles with
   (seconds-level or invalid) is refused. The run is still ended, and the
   resume prompt tells the agent why.
 - Each schedule expires 7 days after registration (`__schedule_expires_at`),
-  and stops when its mission is `completed` or `not_feasible`. An
-  acknowledged or awaiting mission keeps it. The scheduler deactivates the row
-  through `orb_schedule_step` (owner ended → drop).
+  and stops when its mission is `completed` or `not_feasible`. An awaiting
+  mission keeps it. The scheduler deactivates the row through
+  `orb_schedule_step` (owner ended → drop).
+- Archiving (`acknowledged`) ends all automatic work: Core cancels and fences
+  the mission's wake-ups, agent schedules and unfired deliveries
+  (`continuations::drop_for_archived`). A reminder that still comes due for an
+  archived mission (staged before the archive, or auto-archived by Core) is
+  dropped and recorded on its execution ("Mission archived; reminder dropped"), never delivered. Orb shows no
+  "Next reminder" for an archived mission. Reopening and sending a new turn
+  lets the agent schedule again.
 - A tick that finds the mission busy waits. The slot fires once, at the first
   idle tick.

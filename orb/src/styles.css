@@ -192,6 +192,9 @@ button:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset:
 .sb-top { height: 35px; flex: none; }
 /* Keyboard focus only (mouse clicks stay quiet). */
 :focus-visible { outline: 1.5px solid var(--focus-border); outline-offset: 1px; border-radius: var(--radius-sm); }
+/* Text fields show focus with their own border, as in Cursor: no second ring outside it. */
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 0; }
+input:not([type=checkbox], [type=radio], [type=range]):focus, textarea:focus, select:focus { border-color: var(--focus-border); }
 /* The composer is one surface: its outer border brightens on focus, the
    textarea inside must never draw its own ring (Cursor does the same). */
 .composer textarea:focus-visible, .composer textarea:focus { outline: 0; box-shadow: none; }
@@ -3625,7 +3628,7 @@ select.orb-select-native:disabled { cursor: default; }
 .toast-btn { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; border-radius: 6px; background: var(--bg-active); color: var(--fg); font-size: 12px; }
 .toast-btn:hover { background: var(--overlay-hover); }
 .toast-actions { display: contents; }
-.toast.secret { align-items: flex-start; }
+.toast.secret { align-items: flex-start; align-self: stretch; }
 .toast.secret .toast-actions { display: flex; flex-direction: column; gap: 4px; flex: none; }
 .toast.secret .toast-btn { min-height: 24px; padding: 0 10px; justify-content: center; font-size: 11.5px; }
 .toast-links { display: flex; gap: 12px; margin-top: 2px; }
@@ -3645,6 +3648,8 @@ select.orb-select-native:disabled { cursor: default; }
 .toast-icon-btn { flex: none; width: 24px; height: 24px; align-self: flex-start; }
 .toast.custom { padding: 0; overflow: hidden; }
 .secret-card { display: flex; flex-direction: column; width: min(520px, calc(100vw - 32px)); }
+/* Over a composer the toaster takes its width, and approval cards fill it. */
+.toaster.fit .secret-card { width: 100%; }
 .secret-card-top { display: flex; align-items: flex-start; gap: 10px; padding: 10px 8px 10px 14px; }
 .secret-rows { border-top: 1px solid var(--overlay-border); }
 .secret-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 14px; }
@@ -3846,16 +3851,6 @@ select.orb-select-native:disabled { cursor: default; }
 .soul-editor { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; resize: vertical; tab-size: 2; }
 
 .soul-preview { font-size: 13px; line-height: 1.55; }
-
-/* Live turn status above the composer. */
-/* A quiet line in the dock's flow, aligned with the composer text: no chip, so
-   it never covers transcript text and reads like the Codex/Claude status line. */
-.turn-status { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 16px 8px; font-size: 12px; line-height: 16px; color: var(--fg-3); pointer-events: none; }
-.turn-status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex: none; animation: turn-pulse 1.6s ease-in-out infinite; }
-.turn-status-step { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.turn-status-meta { flex: none; font-variant-numeric: tabular-nums; }
-@keyframes turn-pulse { 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .turn-status-dot { animation: none; } }
 
 /* /btw: the transient activity row is a single compact line, so it never sits under the dock fade. */
 .btw-thread .agent-activity { margin: 2px 0 0; font-size: 12px; }
@@ -4219,3 +4214,9 @@ select.orb-select-native:disabled { cursor: default; }
   .skills-catalog-card .skills-item-head { grid-template-columns: 14px minmax(0, 1fr) auto; }
   .skills-catalog-card .skills-item-desc { display: none; }
 }
+
+.approval-batch { padding: 6px 14px 0; }
+.bw-requests + .approval-batch { padding: 6px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.secret-row.approval-critical .secret-row-key, .toast-title strong.approval-critical { color: var(--danger); }
+.approval-critical-confirm { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--danger); }
+.approval-row-detail { font: 11px var(--sans, inherit); color: var(--fg-3); font-weight: 400; }

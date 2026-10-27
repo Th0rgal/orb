@@ -5407,7 +5407,7 @@ fn queue_wait_recommendation(status: &str, queue_wait: &Value) -> Option<String>
 
 fn build_recommendation(
     status: &str,
-    backend: Option<&str>,
+    _backend: Option<&str>,
     live: &Value,
     analysis: &TraceAnalysis,
 ) -> String {

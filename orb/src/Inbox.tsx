@@ -78,6 +78,7 @@ import {
   refreshLocalBindings,
   writeLocalFiles,
 } from "./localAgents";
+import { usageTelemetry } from "./usageTelemetry";
 import { enqueueLocalMessage } from "./localMessageQueue";
 import { pendingMissionInteraction } from "./missionAttention";
 import {
@@ -781,6 +782,7 @@ export function InboxPage(p: {
     setUndoItem({ id: item.id, title: item.headline, mission: item.mission, wasUnread });
     undoTimer = setTimeout(() => setUndoItem(null), 6000);
 
+    usageTelemetry.action("inbox_done", "inbox");
     try {
       await archiveMission(item.id);
       void p.onRefresh();
@@ -809,6 +811,7 @@ export function InboxPage(p: {
       for (const id of ids) next.add(id);
       return next;
     });
+    usageTelemetry.action("inbox_archive", "inbox", ids.length);
     try {
       await Promise.all(ids.map((id) => archiveMission(id)));
       void p.onRefresh();

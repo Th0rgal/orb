@@ -938,11 +938,6 @@ class OrbCore private constructor(context: Context) {
         return v
     }
 
-    fun setError(message: String?, log: String? = null) {
-        _lastError.value = message
-        recordErrorLog(log, message)
-    }
-
     private fun resetInMemoryAccountState() {
         _projects.value = emptyList()
         _missions.value = emptyList()

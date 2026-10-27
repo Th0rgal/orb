@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { isFailedStatus, isLive, isRunning, isSettingsIdle, queueWaitLabel, remoteJobEnded } from "../missionStatus";
+import { isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, queueWaitLabel, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -82,6 +82,7 @@ import { missionActivity, beginHandoff, endHandoff, missionHandoff } from "../mi
 import { createHandoffTracker } from "./handoff";
 import { createOptimisticList } from "./optimisticList";
 import { notify } from "../toast";
+import { usageTelemetry } from "../usageTelemetry";
 
 function MissionDock(p: {
   mission: Mission | null;
@@ -822,6 +823,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   });
   const sendMsg = (text: string, images: DraftImage[] = [], chips: AttachChip[] = followAttach(), explicitId?: ReturnType<typeof crypto.randomUUID>, replace = false) => {
     setSentOverStop(mission() ? `${mission()!.status}|${mission()!.updated_at}` : null);
+    if (!replace && working()) usageTelemetry.action("queue", "composer");
     const attemptId = explicitId ?? sendingIds.shift() ?? crypto.randomUUID();
     const run = sendChain.then(async () => {
       drafts.setFailed(attemptId, false);
@@ -852,6 +854,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     }
   };
   const sendEditedPrompt = (text: string, messageId?: string) => {
+    usageTelemetry.action("message_edit", "transcript");
     // A stored message is replaced, like Cursor: a new version of the
     // conversation keeps the history before it and continues with the new
     // text. The old version is stopped, not archived: it stays listed as an
@@ -1062,7 +1065,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
           </Show>
 
-          <NextReminder mission={p.id} busy={busy()} />
+          <NextReminder mission={p.id} busy={busy()} archived={isArchived(mission()?.status)} />
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>
@@ -1109,6 +1112,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             onSend={async (text,images)=>{
               const id=editingQueued();
               if(!id)return sendMsg(text,images);
+              usageTelemetry.action("message_edit","queue");
               if(queuedEdit.editingRemote()&&remoteQueue){
                 // Edit in place: the row updates now and keeps its id and place;
                 // the chip clears at once and a refusal reverts with a toast.
