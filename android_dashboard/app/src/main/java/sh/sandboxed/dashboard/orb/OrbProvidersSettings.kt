@@ -230,11 +230,40 @@ internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String 
     val detailError = OrbJSON.str(detail, "error") ?: ""
     val state = when {
         provider.bool("enabled") == false -> "Disabled"
+        detailStatus == "needs_verification" -> "Verification required"
         statusType == "needs_reauth" || detailStatus == "needs_reauth" -> "Reconnect"
         detailError.isNotEmpty() -> "Usage unavailable"
         else -> quotaStatus(providerQuotaWindows(detail))?.label ?: statusType.replace("_", " ")
     }
     return if (providerType.isNotEmpty()) "$providerType · $state" else state
+}
+
+/**
+ * Where the owner verifies an Antigravity account Google refuses: Google's
+ * validation page when the refusal carried one, else signing in to
+ * Antigravity with that account. Same as the desktop `verificationUrl`.
+ */
+internal fun antigravityVerificationUrl(detail: OrbDict?, email: String?): String {
+    OrbJSON.str(detail, "verification_url")?.takeIf { it.startsWith("https://") }?.let { return it }
+    val query = buildString {
+        append("continue=").append(java.net.URLEncoder.encode("https://antigravity.google/", "UTF-8"))
+        if (!email.isNullOrEmpty()) append("&Email=").append(java.net.URLEncoder.encode(email, "UTF-8"))
+    }
+    return "https://accounts.google.com/AccountChooser?$query"
+}
+
+@Composable
+private fun OrbProviderPill(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(OrbStyle.card)
+            .border(1.dp, OrbStyle.border, CircleShape)
+            .orbPressClickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Text(text = text, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -747,12 +776,31 @@ fun OrbProvidersSettingsPage(
                                             OrbJSON.str(detail, "error")?.takeIf { it.isNotEmpty() }?.let { errText ->
                                                 Text(text = errText, color = OrbStyle.warning, fontSize = 12.sp)
                                             }
+                                            val unverified = OrbJSON.str(detail, "status") == "needs_verification"
+                                            if (unverified) {
+                                                // Google refuses this login until its owner verifies it; the
+                                                // OAuth sign-in itself is fine, so no Reconnect here.
+                                                Text(text = "Google requires you to verify this account.", color = OrbStyle.warning, fontSize = 12.sp)
+                                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                    OrbProviderPill("Verify account") {
+                                                        val url = antigravityVerificationUrl(detail, provider.str("account_email"))
+                                                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                                                    }
+                                                    OrbProviderPill("Check again") {
+                                                        scope.launch {
+                                                            runCatching {
+                                                                OrbJSON.dict(core.request("/api/ai/providers/${core.encodeComponent(pid)}/antigravity/recheck", method = "POST"))
+                                                            }.getOrNull()?.let { usageEntries = usageEntries + (pid to it) }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             OrbJSON.str(detail, "usage_note")?.takeIf { it.isNotEmpty() }?.let { noteText ->
                                                 Text(text = noteText, color = OrbStyle.textMuted, fontSize = 12.sp)
                                             }
 
                                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                                if (usesOauth) {
+                                                if (usesOauth && !unverified) {
                                                     Box(
                                                         modifier = Modifier
                                                             .clip(CircleShape)

@@ -509,6 +509,8 @@ export interface ProviderUsage {
   xai_prepaid_usd?: number;
   provider_type: string;
   usage_note?: string;
+  /** Google's page where the owner verifies an Antigravity account it refuses. */
+  verification_url?: string;
   error?: string;
   status?: string;
   account_email?: string | null;
@@ -561,6 +563,11 @@ export interface ProviderUsage {
 
 export async function getProviderUsage(id: string, force = false): Promise<ProviderUsage> {
   return api(`/api/ai/providers/${encodeURIComponent(id)}/usage${force ? "?force=true" : ""}`);
+}
+
+/** "Check again" after verifying an Antigravity account with Google. */
+export async function recheckAntigravity(id: string): Promise<ProviderUsage> {
+  return api(`/api/ai/providers/${encodeURIComponent(id)}/antigravity/recheck`, { method: "POST" });
 }
 
 /** Connect the Mistral console session that reads the monthly Vibe usage. */
