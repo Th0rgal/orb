@@ -17,7 +17,7 @@ test('Download in the image viewer saves the original name and bytes through the
   await page.goto('/tests/image-actions.html');
   await page.getByRole('button', {name: /Benchmark chart/}).click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('heading')).toHaveText('bench chart.png');
+  await expect(dialog.getByRole('heading')).toHaveText('Benchmark chart');
   await dialog.getByRole('button', {name: 'Download image'}).click();
   await expect(page.getByRole('status')).toHaveText('Image saved');
   const [call] = await page.evaluate(() => (window as any).calls);
@@ -41,6 +41,7 @@ test('right-clicking an image offers save, copy image and copy path instead of t
   expect(await page.evaluate(() => (window as any).copied)).toBe('reports/bench chart.png');
   // Full-screen viewer: same menu on the zoomable image.
   await image.click();
+  await expect(page.getByRole('button', {name: 'Actual size'})).toBeEnabled();
   await page.locator('.image-viewport').click({button: 'right'});
   await page.getByRole('menuitem', {name: 'Copy image'}).click();
   await expect(page.getByRole('status')).toHaveText('Image copied');

@@ -75,7 +75,8 @@ export function createImageMenu(image: () => { src: string | null; label: string
   onCleanup(() => clearTimeout(timer));
   const report = (message: string) => { clearTimeout(timer); setStatus(message); timer = setTimeout(() => setStatus(""), 2500); };
   const run = (action: () => Promise<unknown>, done?: string) => void action().then(ok => ok !== false && done && report(done), e => report(e instanceof Error ? e.message : String(e)));
-  const save = () => { const { src, label } = image(); if (src) run(() => saveImage(src, label), "Image saved"); };
+  // A mission file keeps its own name and extension; other images are named after their label.
+  const save = () => { const { src, label, path } = image(); if (src) run(() => saveImage(src, path ?? label), "Image saved"); };
   const items = (): MenuEntry[] => {
     const { src, path } = image();
     return [

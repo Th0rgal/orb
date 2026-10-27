@@ -40,6 +40,6 @@ export function WorkspaceImage(p: { path: string; alt: string }) {
     </Show>
     <Show when={url()}><button type="button" class="md-image-download" aria-label="Download image" title="Save image as…" onClick={menu.save}><Ic.DownloadIcon size={14} /></button></Show>
     {menu.view()}
-    <Show when={open()}><Lightbox items={[{ src: url(), label: p.path.split("/").at(-1) || p.alt, path: p.path }]} index={0} onClose={() => setOpen(false)} /></Show>
+    <Show when={open()}><Lightbox items={[{ src: url(), label: p.alt, path: p.path }]} index={0} onClose={() => setOpen(false)} /></Show>
   </span>;
 }
