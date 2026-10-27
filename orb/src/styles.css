@@ -192,6 +192,9 @@ button:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset:
 .sb-top { height: 35px; flex: none; }
 /* Keyboard focus only (mouse clicks stay quiet). */
 :focus-visible { outline: 1.5px solid var(--focus-border); outline-offset: 1px; border-radius: var(--radius-sm); }
+/* Text fields show focus with their own border, as in Cursor: no second ring outside it. */
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 0; }
+input:not([type=checkbox], [type=radio], [type=range]):focus, textarea:focus, select:focus { border-color: var(--focus-border); }
 /* The composer is one surface: its outer border brightens on focus, the
    textarea inside must never draw its own ring (Cursor does the same). */
 .composer textarea:focus-visible, .composer textarea:focus { outline: 0; box-shadow: none; }

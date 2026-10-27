@@ -424,7 +424,7 @@ export async function transferFile(
     const s = stat ?? (await statUploadSource(source));
     const { receipt } = await uploadDirectMachineResumable(destination, source, s.size, s.modified, options);
     if (connection !== connectionVersion()) throw new Error("The backend changed during the upload. Choose the file again.");
-    return { source, path: receipt.path, destination, connection, endpoint: getApiUrl(), confirmedLarge: options.confirmedLarge };
+    return { source, path: receiptPath(receipt), destination, connection, endpoint: getApiUrl(), confirmedLarge: options.confirmedLarge };
   }
 
   const data = await encoded(source, softLimit);
@@ -434,7 +434,14 @@ export async function transferFile(
     body: JSON.stringify({ node_id: destination, ...machineName(source, options.batchId, options.batchToken), data_base64: data }),
   });
   if (connection !== connectionVersion()) throw new Error("The backend changed during the upload. Choose the file again.");
-  return { source, path: receipt.path, destination, connection, endpoint: getApiUrl() };
+  return { source, path: receiptPath(receipt), destination, connection, endpoint: getApiUrl() };
+}
+
+/** The machine's path for an uploaded file; a receipt without one must never become an empty mention. */
+function receiptPath(receipt: UploadReceipt | undefined): string {
+  const path = receipt?.path;
+  if (typeof path !== "string" || !path.trim()) throw new Error("The machine did not return where it saved the file. Try again.");
+  return path;
 }
 
 const samePath = (a: string, b: string) => a.normalize("NFC") === b.normalize("NFC");
