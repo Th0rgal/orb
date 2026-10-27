@@ -22,7 +22,7 @@ pub async fn operate(
         Some(
             super::control::get_mission(
                 State(state.clone()),
-                Extension(user),
+                Extension(user.clone()),
                 axum::extract::Path(id),
             )
             .await?
@@ -99,12 +99,61 @@ pub async fn operate(
             super::cloud_agents::media::mission_media_dir(&state.config.working_dir, id),
         ));
     }
+    // Earlier and later attempts of a replacement chain on the same node: the
+    // node keeps each one's workspace, and agents cite those files. Read-only.
+    let mut sessions: Vec<(uuid::Uuid, Value)> = Vec::new();
+    if let (Some(remote), Some(id)) = (remote, req.mission_id) {
+        let control = super::control::control_for_user(&state, &user).await;
+        let (earlier, later) =
+            super::mission_horizon::replacement_chain(control.mission_store.as_ref(), id)
+                .await
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Mission chain unavailable".into(),
+                    )
+                })?;
+        for (group, other) in earlier
+            .into_iter()
+            .map(|m| ("earlier", m))
+            .chain(later.into_iter().map(|m| ("later", m)))
+        {
+            // The same per-user lookup as the current mission: authorization stays here.
+            let Ok(Json(m)) = super::control::get_mission(
+                State(state.clone()),
+                Extension(user.clone()),
+                axum::extract::Path(other),
+            )
+            .await
+            else {
+                continue;
+            };
+            let job = &m["remote_job"];
+            if job["node_id"] != remote["node_id"] || !job["job_id"].is_string() {
+                continue;
+            }
+            let short = &other.to_string()[..8];
+            let title = m["title"].as_str().unwrap_or("Untitled");
+            sessions.push((
+                other,
+                json!({"id":format!("{group}:{other}"),"label":format!("{title} · {short}"),
+                    "group":group,"mission":other,"machine":remote["node_id"],
+                    "job":job["job_id"],"available":true,"readonly":true}),
+            ));
+        }
+    }
     if req.operation.action == "roots" {
         let mut sources:Vec<Value>=roots.iter().map(|(id,label,path)|json!({"id":id,"label":label,"path":path,"available":path.is_dir()})).collect();
         if let Some(t) = transfer {
             sources.insert(0,json!({"id":"workspace","label":"Workspace","machine":t["destination"]["id"],"available":true}));
         } else if let Some(remote) = remote {
-            sources.insert(0,json!({"id":"workspace","label":"Workspace","machine":remote["node_id"],"available":true}));
+            sources.insert(0,json!({"id":"workspace","label":"Workspace","machine":remote["node_id"],"mission":req.mission_id,"available":true}));
+        }
+        let at = usize::from(!sources.is_empty() && (transfer.is_some() || remote.is_some()));
+        for (index, (_, session)) in sessions.iter().enumerate() {
+            let mut session = session.clone();
+            session.as_object_mut().map(|o| o.remove("job"));
+            sources.insert(at + index, session);
         }
         return Ok(Json(json!({"sources":sources})));
     }
@@ -140,49 +189,30 @@ pub async fn operate(
             })?));
         }
         if let Some(remote) = remote {
-            let node = remote["node_id"]
-                .as_str()
-                .and_then(|id| state.config.remote_nodes.node(id))
-                .ok_or((
-                    StatusCode::CONFLICT,
-                    "Remote file source is unavailable".into(),
-                ))?;
+            let node = remote["node_id"].as_str().unwrap_or_default();
             let job = remote["job_id"]
                 .as_str()
                 .ok_or((StatusCode::CONFLICT, "Remote job is unavailable".into()))?;
-            let token = crate::remote_node::node_token(&node.token_env).map_err(|_| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Remote file source is unavailable".into(),
-                )
-            })?;
-            let response = state
-                .http_client
-                .post(format!("{}/jobs/{}/files", node.base_url, job))
-                .bearer_auth(token)
-                .timeout(std::time::Duration::from_secs(15))
-                .json(&req.operation)
-                .send()
+            return node_files(&state, node, job, &req.operation)
                 .await
-                .map_err(|_| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        "Remote file source is unreachable".into(),
-                    )
-                })?;
-            if !response.status().is_success() {
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    "Remote file browser unavailable; update the node or retry".into(),
-                ));
-            }
-            return Ok(Json(response.json().await.map_err(|_| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "Invalid remote file response".into(),
-                )
-            })?));
+                .map(Json);
         }
+    }
+    if let Some((_, session)) = sessions
+        .iter()
+        .find(|(_, s)| s["id"].as_str() == Some(req.source.as_str()))
+    {
+        let job = session["job"].as_str().unwrap_or_default();
+        let node = session["machine"].as_str().unwrap_or_default();
+        return node_files(&state, node, job, &req.operation)
+            .await
+            .map(Json);
+    }
+    if session_source(&req.source).is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "That file is outside this mission's workspaces".into(),
+        ));
     }
     let root = roots
         .into_iter()
@@ -218,4 +248,88 @@ pub async fn operate(
         }
     }
     Ok(Json(value))
+}
+
+/// `earlier:<id>` / `later:<id>`: the mission a session source names.
+fn session_source(source: &str) -> Option<uuid::Uuid> {
+    let (group, id) = source.split_once(':')?;
+    matches!(group, "earlier" | "later")
+        .then(|| id.parse().ok())
+        .flatten()
+}
+
+/// One node job's workspace, through the node's own path-checked browser.
+async fn node_files(
+    state: &AppState,
+    node_id: &str,
+    job: &str,
+    operation: &crate::file_browser::Request,
+) -> Result<Value, Error> {
+    let node = state.config.remote_nodes.node(node_id).ok_or((
+        StatusCode::CONFLICT,
+        format!("Machine {node_id} is no longer configured"),
+    ))?;
+    let token = crate::remote_node::node_token(&node.token_env).map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Core has no credentials for {node_id}"),
+        )
+    })?;
+    let response = state
+        .http_client
+        .post(format!("{}/jobs/{}/files", node.base_url, job))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(15))
+        .json(operation)
+        .send()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("{node_id} is offline or unreachable"),
+            )
+        })?;
+    match response.status() {
+        s if s.is_success() => response.json().await.map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "Invalid remote file response".into(),
+            )
+        }),
+        StatusCode::NOT_FOUND => Err((
+            StatusCode::GONE,
+            format!("{node_id} no longer keeps this session's workspace"),
+        )),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err((
+            StatusCode::BAD_GATEWAY,
+            format!("{node_id} refused Core's credentials"),
+        )),
+        StatusCode::BAD_REQUEST => Err((
+            StatusCode::BAD_REQUEST,
+            response
+                .text()
+                .await
+                .ok()
+                .filter(|t| !t.is_empty() && t.len() < 200)
+                .unwrap_or_else(|| "File is unavailable".into()),
+        )),
+        _ => Err((
+            StatusCode::BAD_GATEWAY,
+            "Remote file browser unavailable; update the node or retry".into(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_source;
+
+    #[test]
+    fn only_chain_groups_name_a_session() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(session_source(&format!("earlier:{id}")), Some(id));
+        assert_eq!(session_source(&format!("later:{id}")), Some(id));
+        assert_eq!(session_source(&format!("workspace:{id}")), None);
+        assert_eq!(session_source("earlier:../../etc"), None);
+    }
 }

@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.PictureAsPdf
@@ -552,6 +553,10 @@ fun OrbFilesSheet(core: OrbCore, scope: OrbFileScope, onDismiss: () -> Unit) {
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var workspace by remember { mutableStateOf(false) }
+    var sessions by remember { mutableStateOf<List<OrbFileSession>>(emptyList()) }
+    // The source being browsed: the workspace, or an earlier session of the chain.
+    var browsing by remember(scope) { mutableStateOf(scope) }
+    var browseTitle by remember { mutableStateOf("Workspace") }
     var viewing by remember { mutableStateOf<OrbFileRef?>(null) }
     var viewingFile by remember { mutableStateOf<File?>(null) }
     val browse = remember { mutableStateListOf<String>() }
@@ -560,17 +565,17 @@ fun OrbFilesSheet(core: OrbCore, scope: OrbFileScope, onDismiss: () -> Unit) {
 
     LaunchedEffect(scope) {
         coroutineScope {
-            val hasWorkspace = async { service.hasWorkspace(scope) }
+            val roots = async { runCatching { service.roots(scope) }.getOrNull() }
             try { files = OrbFileRefs.collect(service.messages(scope)); error = null } catch (e: Throwable) { error = e.message }
             loading = false
-            workspace = hasWorkspace.await()
+            roots.await()?.let { (hasWorkspace, found) -> workspace = hasWorkspace; sessions = found }
         }
     }
     val currentDir = browse.lastOrNull()
     LaunchedEffect(currentDir) {
         val dir = currentDir ?: return@LaunchedEffect
         entries = emptyList(); browseError = null
-        try { entries = service.list(scope, dir) } catch (e: Throwable) { browseError = e.message }
+        try { entries = service.list(browsing, dir) } catch (e: Throwable) { browseError = e.message }
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = OrbStyle.background, contentColor = Color.White) {
@@ -579,10 +584,10 @@ fun OrbFilesSheet(core: OrbCore, scope: OrbFileScope, onDismiss: () -> Unit) {
             when {
                 open != null -> {
                     OrbSheetHeader(open.label, { viewing = null; viewingFile = null }, viewingFile, onDismiss)
-                    OrbFileViewer(core, open, scope) { viewingFile = it }
+                    OrbFileViewer(core, open, if (currentDir != null) browsing else scope) { viewingFile = it }
                 }
                 currentDir != null -> {
-                    OrbSheetHeader(if (currentDir.isEmpty()) "Workspace" else OrbFileRefs.fileName(currentDir), { browse.removeAt(browse.lastIndex) }, null, onDismiss)
+                    OrbSheetHeader(if (currentDir.isEmpty()) browseTitle else OrbFileRefs.fileName(currentDir), { browse.removeAt(browse.lastIndex) }, null, onDismiss)
                     browseError?.let { OrbNotice(title = it, log = null) }
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         items(entries, key = { it.path }) { entry ->
@@ -615,7 +620,17 @@ fun OrbFilesSheet(core: OrbCore, scope: OrbFileScope, onDismiss: () -> Unit) {
                         }
                         if (workspace) {
                             item { Spacer(Modifier.height(12.dp)); OrbSectionLabel("Workspace") }
-                            item { OrbFileRow(Icons.Default.Folder, "Browse workspace", "Read-only view of the mission’s files, wherever it runs.", "files.workspace") { browse.add("") } }
+                            item { OrbFileRow(Icons.Default.Folder, "Browse workspace", "Read-only view of the mission’s files, wherever it runs.", "files.workspace") { browsing = scope; browseTitle = "Workspace"; browse.add("") } }
+                        }
+                        for (later in listOf(false, true)) {
+                            val group = sessions.filter { it.later == later }
+                            if (group.isEmpty()) continue
+                            item { Spacer(Modifier.height(12.dp)); OrbSectionLabel(if (later) "Later sessions" else "Earlier sessions") }
+                            items(group, key = { it.id }) { session ->
+                                OrbFileRow(Icons.Default.History, session.label, "Read-only workspace of that session on the same machine.", "files.session.${session.id}") {
+                                    browsing = scope.copy(source = session.id); browseTitle = session.label; browse.add("")
+                                }
+                            }
                         }
                     }
                 }

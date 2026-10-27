@@ -2684,6 +2684,8 @@ select.orb-select-native:disabled { cursor: default; }
 .file-root-text { display:flex; flex-direction:column; min-width:0; gap:1px; }
 .file-root .file-source-label { color:var(--fg-2); font-size:12px; line-height:17px; }
 .file-root-children { margin-left:26px; }
+.file-group-label { margin:10px 0 2px 12px; color:var(--fg-3); font-size:11px; line-height:16px; }
+.file-root-session > .file-source { padding-left:24px; }
 .file-tree-node { position:relative; padding-left:10px; }
 .file-tree-node::before { content:""; position:absolute; top:0; bottom:0; left:0; border-left:1px solid var(--stroke-soft); pointer-events:none; }
 .file-tree-node:last-child::before { bottom:auto; height:13px; }

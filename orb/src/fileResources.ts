@@ -27,6 +27,9 @@ export interface FileSource {
   available: boolean;
   legacy?: boolean;
   local?: boolean;
+  /** Another attempt of a replacement chain on the same machine (read-only). */
+  group?: "earlier" | "later";
+  mission?: string;
 }
 export interface FileEntry {
   name: string;
@@ -180,7 +183,7 @@ export function createFileClient(scope: FileScope) {
   }
   async function call(source: string, op: FileOp): Promise<FileReply> {
     const root = sources.find((s) => s.id === source);
-    if (!root?.available) throw new Error("File source is unavailable");
+    if (!root?.available) throw new Error(unavailableReason(source, root));
     if (source === "controller" || source === "artifacts") {
       const entries: FileEntry[] =
         source === "controller"
@@ -368,6 +371,18 @@ export function createFileClient(scope: FileScope) {
     return null;
   }
   return { roots, call, loadUploadedImage, imagePreview: (path: string) => version === connectionVersion() ? imagePreview(previewScope, path) : undefined };
+}
+/** Why a source cannot be read, in the user's terms. */
+export function unavailableReason(id: string, root?: FileSource): string {
+  if (/^(earlier|later):/.test(id))
+    return root
+      ? `The session's workspace on ${root.machine ?? "its machine"} can't be reached`
+      : "That session is no longer linked to this mission";
+  if (root?.machine) return `${root.machine} is offline or unreachable`;
+  if (id === "unavailable") return "Update the backend to browse this workspace";
+  return root
+    ? `${root.label.split(" · ")[0]} isn't available yet`
+    : "That file is outside this mission's workspaces";
 }
 function stripRootPrefix(reference: string, rootPath: string): string {
   const normRoot = rootPath.replace(/\/+$/, "");
