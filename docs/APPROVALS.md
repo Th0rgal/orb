@@ -74,3 +74,14 @@ unlocks; several show a row each, a summary by risk, and "Approve all", which
 waits 1.5 s after the list changes so it never catches a request that just
 appeared. The Secrets / Privileged access / Mission access settings sections
 keep per-request Allow and Deny.
+
+### Older Core
+
+A Core that predates the queue answers `GET /api/approvals/queue` with 404.
+Clients then build the same items from the per-kind lists the earlier
+clients used (`/api/privilege-access`, `/api/bitwarden/broker`,
+`/api/mission-access`), each list on its own so one failure hides nothing
+else, mark them `legacy`, and approve each through its kind's own signed
+route with the lifetime it asked for (there is no batch route to sign).
+Any other error keeps what is on screen.
+

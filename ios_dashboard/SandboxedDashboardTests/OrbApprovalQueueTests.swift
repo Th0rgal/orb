@@ -65,4 +65,46 @@ final class OrbApprovalQueueTests: XCTestCase {
         XCTAssertEqual(OrbApprovalQueue.denyPath(try item(labels[2], 2)), "/api/bitwarden/requests/i2/reject")
         XCTAssertEqual(OrbApprovalQueue.denyPath(try item(labels[7], 7)), "/api/mission-access/i7/deny")
     }
+
+    func testRiskMatchesCoreRiskTable() throws {
+        let risks = try XCTUnwrap(try OrbSpec.json("fixtures/approvals.json")["risk"] as? [[String: Any]])
+        for c in risks {
+            let request = try json(["all_projects": (c["all_projects"] as? Bool) ?? false])
+            XCTAssertEqual(OrbApprovalQueue.riskOf(kind: c["kind"] as! String, tier: c["tier"] as! String, request: request), c["risk"] as? String, "\(c)")
+        }
+    }
+
+    /// A Core without /api/approvals: the per-kind lists still produce cards,
+    /// and a list that failed (nil) hides nothing else.
+    func testLegacyListsBuildTheSameItems() throws {
+        let privilege = try json(["requests": [
+            ["id": "p1", "state": "pending", "scope": "service_deploy", "target_host": "agent-core", "requester_mission_id": "m1",
+             "requester_title": "Ship usage fix", "reason": "deploy", "ttl_minutes": 240, "session_scoped": true, "created_at": "2026-10-27T10:00:00Z"],
+            ["id": "p0", "state": "approved", "scope": "ops_read", "target_host": "ashur", "requester_mission_id": "m1", "created_at": "2026-10-27T08:00:00Z"],
+        ]])
+        let missions = try json(["requests": [
+            ["id": "a1", "state": "pending", "requester_mission_id": "m2", "requester_title": "Fleet health", "target_mission_id": "t1",
+             "target_title": "Disk cleanup", "reason": "r", "ttl_hours": 24, "created_at": "2026-10-27T09:00:00Z"],
+        ]])
+        let items = OrbApprovalQueue.legacyItems(privilege: privilege, secrets: nil, missions: missions)
+        XCTAssertEqual(items.map { OrbApprovalQueue.title($0) }, ["Service deploy on agent-core", "Read Disk cleanup"])
+        XCTAssertEqual(items.map { OrbApprovalQueue.requester($0) }, ["Ship usage fix", "Fleet health"])
+        XCTAssertEqual(items.map { $0["risk"].text }, ["elevated", "elevated"])
+        XCTAssertTrue(items.allSatisfy { $0["legacy"].flag })
+        XCTAssertEqual(OrbApprovalQueue.detail(items[0]), "Allows restart and deploy services, including production · for this session (max 4 h)")
+        let (path, body) = OrbApprovalQueue.legacyApprove(items[0])
+        XCTAssertEqual(path, "/api/privilege-access/p1/approve")
+        XCTAssertEqual(body, .object(["ttl_minutes": .number(240), "session_scoped": .bool(true)]))
+        XCTAssertEqual(OrbApprovalQueue.legacyApprove(items[1]).0, "/api/mission-access/a1/approve")
+        let secret = OrbApprovalQueue.legacyItem(kind: "secret", try json(["id": "s1", "status": "pending", "kind": "delete", "mission_id": "m3", "key": "OLD", "reason": "x"]))
+        XCTAssertEqual(secret["risk"].text, "critical")
+        XCTAssertEqual(OrbApprovalQueue.legacyApprove(secret).0, "/api/bitwarden/requests/s1/approve")
+    }
+
+    func testCriticalLegacyItemsAreNeverBatchedAndNewOnesResetTheTick() throws {
+        let root = OrbApprovalQueue.legacyItem(kind: "privilege", try json(["id": "p1", "state": "pending", "scope": "root_exec", "target_host": "self", "requester_mission_id": "m1"]))
+        let read = OrbApprovalQueue.legacyItem(kind: "privilege", try json(["id": "p2", "state": "pending", "scope": "ops_read", "target_host": "ashur", "requester_mission_id": "m1"]))
+        XCTAssertEqual(OrbApprovalQueue.batchApprovable([root, read], includeCritical: true).map { $0["id"].text }, ["p2"])
+        XCTAssertNotEqual(OrbApprovalQueue.listKey([read]), OrbApprovalQueue.listKey([read, root]), "a new legacy item changes the list")
+    }
 }
