@@ -703,6 +703,10 @@ export interface DiscoveredSkill {
   scope?: string | null;
   stale_harnesses?: string[];
   lines?: number;
+  /** Orb installed it (marker) but the Library no longer has it; a pruning sync removes it. */
+  removed_from_library?: boolean;
+  /** The user's own installed copy of a Library skill, differing from the Library. */
+  edited_copy?: { harness: string; path: string; content: string } | null;
 }
 
 export interface LocalSkillsReport {
@@ -738,13 +742,14 @@ export async function localSkillsStatus(librarySkills?: SyncSkillPayload[]): Pro
   return (await invoke("local_skills_status", { request: { library_skills: librarySkills ?? [] } })) as LocalSkillsReport;
 }
 
-export async function localSkillsSync(options: { librarySkills?: SyncSkillPayload[]; pruneRemoved?: boolean } = {}): Promise<SyncSkillsResult> {
+export async function localSkillsSync(options: { librarySkills?: SyncSkillPayload[]; pruneRemoved?: boolean; replaceUnmanaged?: string[] } = {}): Promise<SyncSkillsResult> {
   const invoke = tauriInvoke();
   if (!invoke) throw new Error("Unified local skill sync requires the Orb desktop app.");
   return (await invoke("local_skills_sync", {
     request: {
       library_skills: options.librarySkills ?? [],
       prune_removed: options.pruneRemoved ?? false,
+      replace_unmanaged: options.replaceUnmanaged ?? [],
     },
   })) as SyncSkillsResult;
 }

@@ -2268,28 +2268,35 @@ export function ProjectFileView(p: { slug: string; path: string }) {
           {editing() ? "Preview" : "Edit"}
         </button>
       </div>
-      <Show
-        when={editing()}
-        fallback={
-          <div class="scroll">
-            <div class="col">
-              <Show when={state() === "error"}>
-                <ErrorNotice error={error()!} />
-              </Show>
-              <Show when={text() !== null} fallback={<FileSkeleton />}>
-                <MdView text={text() ?? ""} />
-              </Show>
-            </div>
-          </div>
-        }
-      >
-        <div class="file-view">
-          <Show when={state() === "error"}><ErrorNotice error={error()!}/></Show>
-          <Show when={text() !== null} fallback={<p class="s-lead shimmer">Loading {name()}…</p>}>
-            <MdSource text={text() ?? ""} onInput={onInput} />
-          </Show>
-        </div>
-      </Show>
+      <FileDocument text={text()} name={name()} error={state() === "error" ? error() : null} onInput={onInput} />
     </>
+  );
+}
+
+/** The body of an open text file: rendered Markdown, or its source while editing
+ * (⌘/ toggles both, shared with project files). Used by project files and skills. */
+export function FileDocument(p: { text: string | null; name: string; error?: string | null; onInput: (text: string) => void; readOnly?: boolean; markdown?: boolean }) {
+  const markdown = () => p.markdown ?? /\.(md|markdown)$/i.test(p.name);
+  return (
+    <Show
+      when={mdSource() || !markdown()}
+      fallback={
+        <div class="scroll">
+          <div class="col">
+            <Show when={p.error}><ErrorNotice error={p.error!} /></Show>
+            <Show when={p.text !== null} fallback={<FileSkeleton />}>
+              <MdView text={p.text ?? ""} />
+            </Show>
+          </div>
+        </div>
+      }
+    >
+      <div class="file-view">
+        <Show when={p.error}><ErrorNotice error={p.error!}/></Show>
+        <Show when={p.text !== null} fallback={<p class="s-lead shimmer">Loading {p.name}…</p>}>
+          <MdSource text={p.text ?? ""} onInput={p.onInput} readOnly={p.readOnly} />
+        </Show>
+      </div>
+    </Show>
   );
 }

@@ -505,6 +505,9 @@ private struct OrbSkillEditor: View {
     @State private var error = ""
     @State private var saved = false
     @State private var history: [OrbJSON]?
+    @State private var confirmDelete = false
+    @State private var deleteError = ""
+    @Environment(\.dismiss) private var dismiss
 
     /// Save lands in the Library repo (desktop: commitAndPush in skillsApi.ts).
     static func commitAndPush(_ message: String, client: OrbSettingsClient) async throws {
@@ -561,10 +564,34 @@ private struct OrbSkillEditor: View {
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle(name).navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) { Button(editing ? "Done" : "Edit") { editing.toggle() }.disabled(!loaded) }
-            ToolbarItem(placement: .topBarTrailing) { Button(saving ? "Saving…" : "Save") { Task { await save(content, message: "skill: update \(name)") } }.disabled(!loaded || saving || content == original) }
+            // Like a document: Edit/Save in the bar, everything else in the … menu.
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button(editing ? "Done" : "Edit") { editing.toggle() }.disabled(!loaded)
+                Button(saving ? "Saving…" : "Save") { Task { await save(content, message: "skill: update \(name)") } }.disabled(!loaded || saving || content == original)
+                Menu {
+                    Button { withAnimation { proxy.scrollTo("history", anchor: .top) } } label: { Label("History", systemImage: "clock.arrow.circlepath") }
+                    Button(role: .destructive) { deleteError = ""; confirmDelete = true } label: { Label("Delete…", systemImage: "trash") }
+                } label: { Image(systemName: "ellipsis.circle") }.accessibilityLabel("Actions for \(name)")
+            }
         }
+        // A failed delete stays here in plain words, with Retry.
+        .alert("Delete \(name)?", isPresented: $confirmDelete) {
+            Button(deleteError.isEmpty ? "Delete" : "Retry", role: .destructive) { Task { await delete() } }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text(deleteError.isEmpty ? "It leaves the Library and every agent." : deleteError) }
         .task { await load(); if startOnHistory { withAnimation { proxy.scrollTo("history", anchor: .top) } } }
+        }
+    }
+
+    private func delete() async {
+        do {
+            do { _ = try await client.callText("/api/library/skill/\(OrbCore.escape(name))", method: "DELETE") }
+            catch { if !"\(error)".localizedCaseInsensitiveContains("not found") && !"\(error)".contains("404") { throw error } }
+            try await Self.commitAndPush("skill: delete \(name)", client: client)
+            dismiss()
+        } catch is CancellationError {} catch {
+            deleteError = OrbSkillsSettings.deleteMessage(name, error.localizedDescription)
+            confirmDelete = true
         }
     }
 

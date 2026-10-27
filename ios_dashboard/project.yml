@@ -12,7 +12,7 @@ settings:
     # (both Info.plists read these). Bump CURRENT_PROJECT_VERSION (YYYYMMDDNN) for a
     # release; Xcode Cloud appends its run number (ci_scripts/ci_pre_xcodebuild.sh).
     MARKETING_VERSION: "1.15.0"
-    CURRENT_PROJECT_VERSION: "2026102604"
+    CURRENT_PROJECT_VERSION: "2026102701"
     SWIFT_VERSION: "6.0"
     CODE_SIGN_STYLE: "Automatic"
     ENABLE_PREVIEWS: "YES"
