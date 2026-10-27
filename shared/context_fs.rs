@@ -81,6 +81,7 @@ pub fn read_with_limit(root: &Path, path: &str, limit: usize) -> Result<Vec<u8>,
     Ok(bytes)
 }
 #[cfg(unix)]
+#[allow(dead_code)]
 pub fn write(root: &Path, path: &str, bytes: &[u8]) -> Result<(), String> {
     let (parent, name) = parent(root, path, true)?;
     let temp = CString::new(format!(".context-{}.tmp", uuid::Uuid::new_v4())).unwrap();

@@ -15,6 +15,7 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_verify_job_transition",
     "orb_verify_bundle_budget",
     "orb_verify_token_rotation",
+    "orb_verify_approval",
     "orb_verify_log_window",
     "orb_mix64_word",
     "orb_proxy_step",

@@ -188,3 +188,4 @@ export const unbunkerFleet = () =>
 /** Approved and not yet expired (Core still decides every command). */
 export const livePrivilegeGrant = (r: PrivilegeRequest, now = Date.now()) =>
   r.state === "approved" && !r.revoked_at && !!r.expires_at && Date.parse(r.expires_at) > now;
+

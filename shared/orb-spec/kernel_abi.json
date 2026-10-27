@@ -258,6 +258,40 @@
       ]
     },
     {
+      "name": "orb_verify_approval",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "signed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "owned",
+          "type": "uint8_t"
+        },
+        {
+          "name": "pending",
+          "type": "uint8_t"
+        },
+        {
+          "name": "unexpired",
+          "type": "uint8_t"
+        },
+        {
+          "name": "unchanged",
+          "type": "uint8_t"
+        },
+        {
+          "name": "risk",
+          "type": "uint8_t"
+        },
+        {
+          "name": "confirmed",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
       "name": "orb_verify_log_window",
       "ret": "uint8_t",
       "params": [

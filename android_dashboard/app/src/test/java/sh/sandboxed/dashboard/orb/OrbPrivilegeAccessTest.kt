@@ -3,6 +3,7 @@ package sh.sandboxed.dashboard.orb
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -51,5 +52,42 @@ class OrbPrivilegeAccessTest {
             ),
             OrbPrivilegeAccess.bunkerBody(2, "Canary test")
         )
+    }
+
+    @Test
+    fun bunkerCardShowsAboveNormalUntilDismissedAtThatLevel() {
+        assertFalse(OrbPrivilegeAccess.showsBunkerCard(0, 0))
+        assertTrue(OrbPrivilegeAccess.showsBunkerCard(2, 0))
+        assertFalse(OrbPrivilegeAccess.showsBunkerCard(2, 2))
+        assertTrue(OrbPrivilegeAccess.showsBunkerCard(3, 2))
+    }
+
+    @Test
+    fun latestIncidentReasonSkipsCanaryDryRuns() {
+        val incidents = listOf(
+            mapOf("reason" to "canary test", "dry_run" to true),
+            mapOf("reason" to "honeytoken read by pid 4242", "dry_run" to false),
+            mapOf("reason" to "older", "dry_run" to false),
+        )
+        assertEquals("honeytoken read by pid 4242", OrbPrivilegeAccess.latestIncidentReason(incidents))
+        assertNull(OrbPrivilegeAccess.latestIncidentReason(emptyList()))
+    }
+
+    @Test
+    fun enrollmentPromptOnlyWhenSignaturesAreAskedAndThisKeyIsMissing() {
+        assertFalse(OrbPrivilegeAccess.shouldPromptEnrollment("off", false, null))
+        assertTrue(OrbPrivilegeAccess.shouldPromptEnrollment("warn", false, null))
+        assertTrue(OrbPrivilegeAccess.shouldPromptEnrollment("enforce", false, null))
+        assertFalse(OrbPrivilegeAccess.shouldPromptEnrollment("enforce", true, null))
+        assertFalse(OrbPrivilegeAccess.shouldPromptEnrollment("warn", false, "warn"))
+        assertTrue(OrbPrivilegeAccess.shouldPromptEnrollment("enforce", false, "warn"))
+    }
+
+    @Test
+    fun thisDeviceIsEnrolledOnlyWhenItsKeyIsListed() {
+        val devices = listOf(mapOf("public_key" to "AAA"), mapOf("public_key" to "BBB"))
+        assertTrue(OrbPrivilegeAccess.isEnrolled("BBB", devices))
+        assertFalse(OrbPrivilegeAccess.isEnrolled("CCC", devices))
+        assertFalse(OrbPrivilegeAccess.isEnrolled(null, devices))
     }
 }

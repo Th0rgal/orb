@@ -393,11 +393,13 @@ struct OrbHome: View {
     @State private var deleteTargets: [String] = []
     @State private var deleteConfirmBusy = false
     @State private var secretRequests = OrbSecretRequestMonitor.shared
-    @State private var secretSheet = false
     @State private var accessRequests = OrbMissionAccessMonitor.shared
-    @State private var accessSheet = false
     @State private var privilegeRequests = OrbPrivilegeAccessMonitor.shared
+    @State private var approvalEnrollment = OrbApprovalEnrollmentMonitor.shared
+    @State private var enrollSheet = false
     @State private var privilegeSheet = false
+    @State private var approvals = OrbApprovalQueue.shared
+    @State private var approvalsSheet = false
     @State private var deepLinks = OrbDeepLinks.shared
     @State private var homeReady = false
     @Environment(\.scenePhase) private var scenePhase
@@ -446,15 +448,22 @@ struct OrbHome: View {
         }
         .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
         .safeAreaInset(edge: .top, spacing: 0) { secretBanner }
-        .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet().orbTrackPage("secret_requests", surface: .sheet) }
-        .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet().orbTrackPage("mission_access", surface: .sheet) }
+        .sheet(isPresented: $approvalsSheet) { OrbApprovalQueueSheet().orbTrackPage("approval_queue", surface: .sheet) }
         .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet().orbTrackPage("privilege_access", surface: .sheet) }
-        .onChange(of: accessRequests.openRequested, initial: true) { _, open in
-            if open { accessRequests.openRequested = false; accessSheet = true }
+        .sheet(isPresented: $enrollSheet) { OrbApprovalEnrollmentSheet().orbTrackPage("approval_enrollment", surface: .sheet) }
+        .onChange(of: approvalEnrollment.sheetRequested) { _, open in
+            if open { approvalEnrollment.sheetRequested = false; enrollSheet = true }
         }
+        .task(id: scenePhase) { if scenePhase == .active { await approvalEnrollment.refresh() } }
         .onChange(of: privilegeRequests.openRequested, initial: true) { _, open in
             if open { privilegeRequests.openRequested = false; privilegeSheet = true }
         }
+        .onChange(of: approvals.openRequested, initial: true) { _, open in
+            if open { approvals.openRequested = false; approvalsSheet = true }
+        }
+        // The queue drives the banner and sheet; the per-kind monitors keep
+        // their local notifications and Settings history.
+        .task(id: scenePhase) { if scenePhase == .active { await approvals.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await secretRequests.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await accessRequests.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await privilegeRequests.poll() } }
@@ -462,13 +471,9 @@ struct OrbHome: View {
 
     private var secretBanner: some View {
         VStack(spacing: 0) {
-            OrbSecretRequestBanner(count: secretRequests.pending.count) { secretSheet = true }
-            OrbMissionAccessBanner(count: accessRequests.pending.count) { accessSheet = true }
-            OrbPrivilegeAccessBanner(
-                count: privilegeRequests.pending.count,
-                bunkered: privilegeRequests.bunkered,
-                bunkerState: privilegeRequests.bunkerState
-            ) { privilegeSheet = true }
+            OrbBunkerModeCard { privilegeSheet = true }
+            OrbApprovalQueueBanner(count: approvals.items.count, critical: approvals.items.filter(OrbApprovalQueue.isCritical).count) { approvalsSheet = true }
+            OrbApprovalEnrollmentBanner()
         }
     }
 

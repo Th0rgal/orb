@@ -2,27 +2,6 @@ import {test,expect} from '@playwright/test';
 test.use({browserName:'webkit'});
 const shots=process.env.ORB_ACCESS_SHOTS||'test-results';
 const sent=(page:any)=>page.evaluate(()=>(window as any).calls.map((c:any)=>`${c.method} ${new URL(c.url).pathname}`));
-test('privileged access card: scope, host, what it unlocks, session lifetime, Touch ID approve and deny',async({page})=>{
- await page.goto('/tests/privilege-access.html');
- const card=page.getByTestId('privilege-access-card');
- await expect(card.locator('.toast-title strong')).toHaveText('Service deploy on agent-core');
- await expect(card.locator('.toast-sub')).toHaveText('asked by Ship usage fix');
- await expect(card.locator('.access-scope')).toHaveText('Allows restart and deploy services, including production · for this session (max 4 h)');
- await card.screenshot({path:`${shots}/desktop-privilege-card-one.png`});
- await card.locator('.secret-bar').getByRole('button',{name:'Allow'}).click();
- await expect.poll(()=>sent(page)).toContain('POST /api/privilege-access/p1/approve');
- const body=await page.evaluate(()=>(window as any).calls.find((c:any)=>c.url.includes('/approve')).body);
- expect(JSON.parse(body)).toEqual({ttl_minutes:240,session_scoped:true});
- await page.evaluate(()=>(window as any).showMany());
- // The answered request stays hidden while Core catches up; only the other one is left.
- await expect(card.locator('.toast-title strong')).toHaveText('Root on its own node');
- await expect(card.locator('.access-scope')).toContainText('any command as root');
- await page.emulateMedia({colorScheme:'dark'});
- await card.screenshot({path:`${shots}/desktop-privilege-card-dark.png`});
- await page.emulateMedia({colorScheme:'light'});
- await card.locator('.secret-bar').getByRole('button',{name:'Deny'}).click();
- await expect.poll(()=>sent(page)).toContain('POST /api/privilege-access/p2/deny');
-});
 test('settings lists pending requests, live grants with revoke, and the command audit',async({page})=>{
  await page.goto('/tests/privilege-access.html');
  const s=page.getByTestId('privilege-access-settings');

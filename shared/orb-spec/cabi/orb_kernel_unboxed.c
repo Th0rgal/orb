@@ -9777,6 +9777,90 @@ goto v___jp_4166_;
 }
 }
 
+LEAN_EXPORT uint8_t orb_verify_approval(uint8_t v_signed_4464_, uint8_t v_owned_4465_, uint8_t v_pending_4466_, uint8_t v_unexpired_4467_, uint8_t v_unchanged_4468_, uint8_t v_risk_4469_, uint8_t v_confirmed_4470_){
+_start:
+{
+uint8_t v___x_4471_; uint8_t v___x_4472_;
+v___x_4471_ = 1;
+v___x_4472_ = lean_uint8_dec_eq(v_signed_4464_, v___x_4471_);
+if (v___x_4472_ == 0)
+{
+uint8_t v___x_4473_;
+v___x_4473_ = 0;
+return v___x_4473_;
+}
+else
+{
+uint8_t v___x_4474_;
+v___x_4474_ = lean_uint8_dec_eq(v_owned_4465_, v___x_4471_);
+if (v___x_4474_ == 0)
+{
+uint8_t v___x_4475_;
+v___x_4475_ = 0;
+return v___x_4475_;
+}
+else
+{
+uint8_t v___x_4476_;
+v___x_4476_ = lean_uint8_dec_eq(v_pending_4466_, v___x_4471_);
+if (v___x_4476_ == 0)
+{
+uint8_t v___x_4477_;
+v___x_4477_ = 0;
+return v___x_4477_;
+}
+else
+{
+uint8_t v___x_4478_;
+v___x_4478_ = lean_uint8_dec_eq(v_unexpired_4467_, v___x_4471_);
+if (v___x_4478_ == 0)
+{
+uint8_t v___x_4479_;
+v___x_4479_ = 0;
+return v___x_4479_;
+}
+else
+{
+uint8_t v___x_4480_;
+v___x_4480_ = lean_uint8_dec_eq(v_unchanged_4468_, v___x_4471_);
+if (v___x_4480_ == 0)
+{
+uint8_t v___x_4481_;
+v___x_4481_ = 0;
+return v___x_4481_;
+}
+else
+{
+uint8_t v___x_4482_; uint8_t v___x_4483_;
+v___x_4482_ = 2;
+v___x_4483_ = lean_uint8_dec_lt(v_risk_4469_, v___x_4482_);
+if (v___x_4483_ == 0)
+{
+uint8_t v___x_4484_;
+v___x_4484_ = lean_uint8_dec_eq(v_confirmed_4470_, v___x_4471_);
+if (v___x_4484_ == 0)
+{
+uint8_t v___x_4485_;
+v___x_4485_ = 0;
+return v___x_4485_;
+}
+else
+{
+return v___x_4471_;
+}
+}
+else
+{
+return v___x_4471_;
+}
+}
+}
+}
+}
+}
+}
+}
+
 LEAN_EXPORT uint8_t leansys_verify_slice_bounds(uint64_t v_off_143_, uint64_t v_len_144_, uint64_t v_cap_145_){
 _start:
 {

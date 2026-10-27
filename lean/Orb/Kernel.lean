@@ -1789,4 +1789,18 @@ def soc2HostScopeStep
     else
       512
 
+/--
+  Unboxed C-ABI Approval Admission Gate (`orb_verify_approval`), shared by every approval kind
+  (secret access, privileged access, mission access) and by single and batch approvals:
+  admits one request iff it carries a device signature (`signed == 1`), belongs to the approver
+  (`owned == 1`), is still pending (`pending == 1`), has not expired (`unexpired == 1`), matches
+  what the approver was shown (`unchanged == 1`), and is either below critical risk
+  (`risk < 2`; `0 = routine`, `1 = elevated`, `2 = critical`) or explicitly confirmed
+  (`confirmed == 1`). A batch is admitted only when every item is.
+-/
+@[inline, export orb_verify_approval]
+def verifyApproval (signed owned pending unexpired unchanged risk confirmed : UInt8) : UInt8 :=
+  if signed == 1 && owned == 1 && pending == 1 && unexpired == 1 && unchanged == 1 &&
+     (risk < 2 || confirmed == 1) then 1 else 0
+
 end Orb.Kernel

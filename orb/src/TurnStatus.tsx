@@ -1,8 +1,6 @@
-import { formatElapsed, useNow } from "./time";
+import { formatElapsed } from "./time";
 import { isRecord, readJson, writeJson } from "./storage";
-import { createMemo, Show } from "solid-js";
 import type { StreamItem } from "./transcriptModel";
-import { latestTaskList } from "./taskList";
 
 // Live events and cached transcripts carry no timestamp. Remember when each message was first
 // seen (its send time when observed live) so leaving and reopening a mission keeps the count.
@@ -60,23 +58,3 @@ export function currentStep(items: StreamItem[]): string {
   return "Working";
 }
 export { formatElapsed };
-
-/** Compact live status above the composer (Codex goal chip / Claude Code spinner):
- * elapsed turn time, the current step and checklist progress, without scrolling. */
-export function TurnStatus(p: { items: StreamItem[] }) {
-  const now = useNow(1000);
-  const seen = Date.now();
-  const started = createMemo(() => turnStartedAt(p.items) ?? seen);
-  const checklist = createMemo(() => latestTaskList(p.items));
-  const done = () => checklist()?.tasks.filter((t) => t.status === "completed").length ?? 0;
-  return (
-    <div class="turn-status" role="status" aria-live="off">
-      <span class="turn-status-dot" aria-hidden="true" />
-      <span class="turn-status-step shimmer">{currentStep(p.items)}</span>
-      <span class="turn-status-meta">{formatElapsed(now() - started())}</span>
-      <Show when={checklist()?.tasks.length}>
-        <span class="turn-status-meta">· {done()}/{checklist()!.tasks.length} tasks</span>
-      </Show>
-    </div>
-  );
-}

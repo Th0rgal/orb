@@ -1073,7 +1073,7 @@ pub(super) async fn control_actor_loop(
                                 }
                             }
                         };
-                        for (run, backend_id, active_tool_calls, idle_secs) in leases {
+                        for (run, _backend_id, active_tool_calls, idle_secs) in leases {
                             let mut live_registered_tools = 0usize;
                             let mut has_registered_user_wait = false;
                             let has_durable_remote_job = remote_jobs_by_mission.contains(&run.mission_id);
@@ -3037,6 +3037,9 @@ pub(super) async fn control_actor_loop(
                                         new_status,
                                     );
                                     if new_status == MissionStatus::Acknowledged {
+                                        if let Err(error) = continuations::drop_for_archived(&mission_store, id, None).await {
+                                            tracing::error!(mission = %id, %error, "Could not cancel reminders of an archived mission");
+                                        }
                                         if let Ok(child_ids) =
                                             collect_child_mission_ids(&mission_store, id).await
                                         {

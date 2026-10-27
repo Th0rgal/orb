@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -238,6 +239,8 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var bunkerState by remember { mutableStateOf(0) }
     var meshEpoch by remember { mutableStateOf<Int?>(null) }
     var meshVerified by remember { mutableStateOf(false) }
+    var queue by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    var includeCritical by remember { mutableStateOf(false) }
     var devices by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var mode by remember { mutableStateOf("") }
     var projects by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -263,6 +266,13 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             bunkerState = maxOf(snapBunker, mBunker)
             meshEpoch = (meshSnap["epoch"] as? Number)?.toInt()
             meshVerified = meshSnap["formal_verified"] == true
+        } catch (_: Throwable) {
+        }
+        try {
+            val next = OrbJSON.dictList(dictOf(core.request("/api/approvals/queue"))["items"])
+            // A different list (or a changed item) must be ticked again.
+            if (next.map { it["digest"] } != queue.map { it["digest"] }) includeCritical = false
+            queue = next
         } catch (_: Throwable) {
         }
         try {
@@ -345,6 +355,67 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             error?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 13.sp) }
+
+            Card("Approvals") {
+                // Every pending request, of every kind: Allow / Deny each, or
+                // Approve all with one fingerprint (critical ones only when ticked).
+                if (queue.isEmpty()) Text("Nothing is waiting for your approval.", color = OrbStyle.textMuted, fontSize = 13.sp)
+                queue.forEach { i ->
+                    val critical = OrbApprovalQueue.isCritical(i)
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text(OrbApprovalQueue.title(i), color = if (critical) Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("asked by ${OrbApprovalQueue.requester(i)}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        (i["reason"] as? String)?.takeIf { it.isNotBlank() }?.let { Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp) }
+                        OrbApprovalQueue.detail(i) { projects[it] ?: it.take(8) }.takeIf { it.isNotEmpty() }?.let {
+                            Text(it, color = OrbStyle.textMuted, fontSize = 12.sp)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(enabled = !busy, onClick = {
+                                act {
+                                    OrbApprovalKey.signedRequest(
+                                        core, activity, "POST", "/api/approvals/approve-all",
+                                        OrbApprovalQueue.batchBody(listOf(i)), OrbApprovalQueue.signingReason(listOf(i))
+                                    )
+                                }
+                            }) { Text("Allow") }
+                            TextButton(enabled = !busy, onClick = {
+                                act {
+                                    OrbApprovalKey.signedRequest(
+                                        core, activity, "POST", OrbApprovalQueue.denyPath(i) { core.encodeComponent(it) },
+                                        null, "Decline: ${OrbApprovalQueue.title(i)}"
+                                    )
+                                }
+                            }) { Text("Deny", color = Color(0xFFFF6B6B)) }
+                        }
+                    }
+                }
+                if (queue.size > 1) {
+                    val summary = OrbApprovalQueue.summary(queue)
+                    val ready = OrbApprovalQueue.batchApprovable(queue, includeCritical)
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text(summary.risks, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Text("for ${summary.missions}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        if (summary.critical > 0) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = includeCritical, onCheckedChange = { includeCritical = it })
+                                Text(
+                                    if (summary.critical == 1) "Include the critical request (root, secret delete or move)" else "Include ${summary.critical} critical requests (root, secret delete or move)",
+                                    color = Color(0xFFFF6B6B), fontSize = 12.sp
+                                )
+                            }
+                        }
+                        TextButton(enabled = !busy && ready.isNotEmpty(), onClick = {
+                            act {
+                                OrbApprovalKey.signedRequest(
+                                    core, activity, "POST", "/api/approvals/approve-all",
+                                    OrbApprovalQueue.batchBody(ready), OrbApprovalQueue.signingReason(ready)
+                                )
+                                includeCritical = false
+                            }
+                        }) { Text(if (ready.size == queue.size) "Approve all" else "Approve ${ready.size}") }
+                    }
+                }
+            }
 
             Card("Mission requests") {
                 if (requests.isEmpty()) Text("No pending requests.", color = OrbStyle.textMuted, fontSize = 13.sp)
@@ -448,7 +519,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     val who = OrbPrivilegeAccess.requester(r)
                     val what = OrbPrivilegeAccess.title(r)
                     Column(Modifier.padding(vertical = 6.dp)) {
-                        Text(what, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(what, color = if (r["scope"] == "root_exec") Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Text("asked by $who", color = OrbStyle.textMuted, fontSize = 12.sp)
                         (r["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
                             Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp)
@@ -624,9 +695,13 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 if (!enrolledHere) {
                     Text(
                         "Enroll this phone: its Keystore key signs approvals after a fingerprint or face check. " +
-                            "Enter the one-time code created on the Core host.",
+                            "Enter the one-time code created on the Core host; Core deletes it once a device uses it:",
                         color = OrbStyle.textMuted, fontSize = 12.sp
                     )
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(OrbPrivilegeAccess.ENROLLMENT_CODE_COMMAND, color = Color.White, fontSize = 11.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    }
                     OutlinedTextField(value = code, onValueChange = { code = it }, singleLine = true,
                         label = { Text("One-time code") }, modifier = Modifier.fillMaxWidth())
                     TextButton(enabled = !busy && code.trim().length >= 8, onClick = {

@@ -38,15 +38,21 @@ pub fn write_file_0600(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
 
 /// Parse an environment variable as a boolean, returning `default` if unset.
 ///
-/// Recognises `1`, `true`, `yes`, `y`, `on` (case-insensitive) as `true`;
-/// everything else (including unset) maps to `default`.
+/// Recognises `1`, `true`, `yes`, `y`, `on` as `true` and `0`, `false`,
+/// `no`, `n`, `off` as `false` (case-insensitive); anything else, including
+/// unset or empty, maps to `default`.
 pub fn env_var_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(value) => matches!(
-            value.trim().to_lowercase().as_str(),
-            "1" | "true" | "yes" | "y" | "on"
-        ),
-        Err(_) => default,
+    std::env::var(name)
+        .ok()
+        .and_then(|value| parse_bool(&value))
+        .unwrap_or(default)
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -581,6 +587,19 @@ pub fn is_eloop(e: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_bool_accepts_both_polarities_and_rejects_noise() {
+        for v in ["1", "true", "YES", " y ", "On"] {
+            assert_eq!(parse_bool(v), Some(true), "{v}");
+        }
+        for v in ["0", "false", "No", "n", " OFF "] {
+            assert_eq!(parse_bool(v), Some(false), "{v}");
+        }
+        for v in ["", "maybe", "2"] {
+            assert_eq!(parse_bool(v), None, "{v}");
+        }
+    }
 
     #[test]
     fn build_history_context_formats_entries() {

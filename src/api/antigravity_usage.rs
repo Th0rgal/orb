@@ -186,6 +186,36 @@ fn gemini_window_at(payload: &Value, now: i64) -> Option<Value> {
     Some(v)
 }
 
+/// Merge the remembered Gemini weekly window into `windows`. Google reports
+/// one Gemini window at a time (the summary omits the Gemini group and the
+/// per-model view shows whichever window binds), so a weekly reading is kept
+/// until its reset passes and shown, marked `last_seen`, while the 5-hour
+/// window is the one reported. Returns the record to store from now on.
+pub fn with_remembered_gemini_weekly(
+    windows: &mut Vec<Value>,
+    remembered: Option<&Value>,
+    now: i64,
+) -> Option<Value> {
+    const LABEL: &str = "Gemini · Weekly";
+    if let Some(live) = windows.iter().find(|w| w["label"] == LABEL) {
+        return live["reset_at"]
+            .as_i64()
+            .map(|reset| json!({"used_percent": live["used_percent"], "reset_at": reset}));
+    }
+    let kept = remembered.filter(|r| {
+        r["reset_at"].as_i64().is_some_and(|reset| reset > now) && r["used_percent"].is_number()
+    })?;
+    // The marker rides in the window name so every client shows it as is.
+    let window = json!({"label": "Gemini · Weekly (last seen)", "used_percent": kept["used_percent"], "reset_at": kept["reset_at"], "last_seen": true});
+    // After the other Gemini windows, so 5h precedes Weekly.
+    let at = windows
+        .iter()
+        .rposition(|w| w["label"].as_str().is_some_and(|l| l.starts_with("Gemini")))
+        .map_or(windows.len(), |i| i + 1);
+    windows.insert(at, window);
+    Some(kept.clone())
+}
+
 /// Plan name: the paid Google One tier when present, else the base tier.
 pub fn parse_plan(payload: &Value) -> Option<String> {
     ["paidTier", "currentTier"].iter().find_map(|tier| {
@@ -297,6 +327,47 @@ pub async fn read(client: &reqwest::Client, access_token: &str) -> Quota {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_weekly_is_remembered_while_google_reports_only_5h() {
+        let now = 1_761_480_000;
+        // Per-model view while the weekly window binds: remember it.
+        let mut weekly = vec![
+            json!({"label": "Claude & GPT · 5h", "used_percent": 7.0}),
+            json!({"label": "Gemini · Weekly", "used_percent": 98.2, "reset_at": now + 4 * 86400}),
+        ];
+        let stored = with_remembered_gemini_weekly(&mut weekly, None, now).unwrap();
+        assert_eq!(
+            stored,
+            json!({"used_percent": 98.2, "reset_at": now + 4 * 86400})
+        );
+        assert_eq!(weekly.len(), 2);
+        // Later the 5-hour window binds: the weekly bar comes back marked last seen.
+        let mut five = vec![
+            json!({"label": "Gemini · 5h", "used_percent": 26.0, "reset_at": now + 1000}),
+            json!({"label": "Claude & GPT · 5h", "used_percent": 7.0}),
+        ];
+        let kept = with_remembered_gemini_weekly(&mut five, Some(&stored), now + 3600);
+        assert_eq!(kept.as_ref(), Some(&stored));
+        let labels: Vec<_> = five.iter().map(|w| w["label"].as_str().unwrap()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Gemini · 5h",
+                "Gemini · Weekly (last seen)",
+                "Claude & GPT · 5h"
+            ]
+        );
+        assert_eq!(five[1]["last_seen"], true);
+        assert_eq!(five[1]["used_percent"], 98.2);
+        // Once its reset passes it is forgotten.
+        let mut after = vec![json!({"label": "Gemini · 5h", "used_percent": 1.0})];
+        assert_eq!(
+            with_remembered_gemini_weekly(&mut after, Some(&stored), now + 5 * 86400),
+            None
+        );
+        assert_eq!(after.len(), 1);
+    }
 
     #[test]
     fn per_model_gemini_window_is_named_after_its_reset() {

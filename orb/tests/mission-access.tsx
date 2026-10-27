@@ -1,6 +1,5 @@
 import '../src/styles.css';
 import {render} from 'solid-js/web';
-import {syncMissionAccessNotices} from '../src/missionAccessNotices';
 import {MissionAccessPanel} from '../src/MissionAccessPanel';
 const now=Date.now();
 const iso=(ms:number)=>new Date(now+ms).toISOString();
@@ -14,7 +13,4 @@ w.calls=[];
 // Record what the card would send instead of reaching Core.
 const realFetch=window.fetch;
 window.fetch=(async(input:any,init?:any)=>{const url=String(input);if(url.includes('/api/')){w.calls.push({url,method:init?.method,body:init?.body});return new Response(JSON.stringify({...one,state:'approved'}),{status:200,headers:{'Content-Type':'application/json'}});}return realFetch(input,init);}) as any;
-w.showOne=()=>syncMissionAccessNotices([one] as any,()=>{w.opened=true;});
-w.showMany=()=>syncMissionAccessNotices([one,two] as any,()=>{w.opened=true;});
-w.showOne();
 render(()=><div style="max-width:760px;padding:16px"><MissionAccessPanel onError={(m)=>{w.error=m;}} initial={{requests:[one,grant,{...two,state:'denied',decided_at:iso(-120_000)}] as any,audit:[{at:iso(-30_000),request_id:'g1',requester_mission_id:grant.requester_mission_id,target_mission_id:grant.target_mission_id,action:'read',detail:'get_mission_events'},{at:iso(-3_600_000),request_id:'g1',requester_mission_id:grant.requester_mission_id,target_mission_id:grant.target_mission_id,action:'approved',detail:'24h'}]}} /></div>,document.getElementById('root')!);

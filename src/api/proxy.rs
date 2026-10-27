@@ -13177,7 +13177,7 @@ mod latency_tests {
                 )])
             })
         });
-        let t0 = tokio::time::Instant::now();
+        let _t0 = tokio::time::Instant::now();
         let resp = client_stream_response(stalled, cell.clone(), Some(reroute));
         let mut data = resp.into_body().into_data_stream();
         let mut text = String::new();

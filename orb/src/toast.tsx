@@ -188,15 +188,17 @@ function ToastItem(p: { toast: Toast }) {
 export function Toaster() {
   toasterMounted = true;
   onCleanup(() => { toasterMounted = false; });
-  const [pos, setPos] = createSignal<{ bottom: number; left: string }>({ bottom: 20, left: "50%" });
+  const [pos, setPos] = createSignal<{ bottom: number; left: string; width?: number }>({ bottom: 20, left: "50%" });
   const place = () => {
-    const rect = [...document.querySelectorAll(".composer")].map(el => el.getBoundingClientRect())
+    const visible = (sel: string) => [...document.querySelectorAll(sel)].map(el => el.getBoundingClientRect())
       .filter(r => r.height > 0 && r.width > 0 && r.top < window.innerHeight && r.bottom > 0)
       .sort((a, b) => b.bottom - a.bottom)[0];
+    // The conversation's own composer wins over side-panel ones (/btw, files).
+    const rect = visible(".dock .composer") ?? visible(".composer");
     if (!rect) return setPos({ bottom: 20, left: "50%" });
-    // Centre on the composer's column; lift above it only when it sits at the bottom.
+    // Centre on the composer's column, as wide as it; lift above it only when it sits at the bottom.
     const docked = window.innerHeight - rect.bottom < 120;
-    setPos({ bottom: docked ? window.innerHeight - rect.top + 12 : 20, left: `${rect.left + rect.width / 2}px` });
+    setPos({ bottom: docked ? window.innerHeight - rect.top + 12 : 20, left: `${rect.left + rect.width / 2}px`, width: rect.width });
   };
   // Views swap and composers grow while a toast is up; re-measure cheaply
   // only while one is visible.
@@ -218,7 +220,7 @@ export function Toaster() {
     onCleanup(() => { window.removeEventListener("resize", place); window.removeEventListener("keydown", onKey); });
   });
   return <Show when={toasts().length}>
-    <div class="toaster" style={{ bottom: `${pos().bottom}px`, left: pos().left }}>
+    <div class="toaster" classList={{ fit: !!pos().width }} style={{ bottom: `${pos().bottom}px`, left: pos().left, ...(pos().width ? { width: `${pos().width}px`, "max-width": "calc(100vw - 32px)" } : {}) }}>
       <For each={toasts()}>{t => <ToastItem toast={t} />}</For>
     </div>
   </Show>;

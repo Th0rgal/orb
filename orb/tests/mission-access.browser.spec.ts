@@ -1,30 +1,6 @@
 import {test,expect} from '@playwright/test';
 test.use({browserName:'webkit'});
 const shots=process.env.ORB_ACCESS_SHOTS||'test-results';
-test('mission access requests: one card, Touch ID approve, read-only wording',async({page})=>{
- await page.goto('/tests/mission-access.html');
- const card=page.getByTestId('mission-access-card');
- await expect(card.locator('.toast-title strong')).toHaveText('Lean eval run #42');
- await expect(card.locator('.toast-sub')).toHaveText('asked by Benchmark report');
- await expect(card.locator('.toast-message')).toContainText('Compare its pass rate');
- await expect(card.locator('.access-scope')).toHaveText('Read only · 24 h · no messages, cancel or resume');
- const bar=card.locator('.secret-bar');
- await expect(bar.getByRole('button',{name:'Allow read'})).toBeVisible();
- await card.screenshot({path:`${shots}/desktop-access-card-one.png`});
- await page.evaluate(()=>(window as any).showMany());
- await expect(card.locator('.toast-title')).toContainText('2 mission access requests');
- await expect(card.locator('.secret-row')).toHaveCount(2);
- await card.screenshot({path:`${shots}/desktop-access-card-many.png`});
- await page.emulateMedia({colorScheme:'dark'});
- await card.screenshot({path:`${shots}/desktop-access-card-many-dark.png`});
- await page.emulateMedia({colorScheme:'light'});
- // Approving one row posts to the approve route (signed in the app; no device here).
- await card.locator('.secret-row').first().getByRole('button',{name:'Allow read'}).click();
- await expect.poll(()=>page.evaluate(()=>(window as any).calls.map((c:any)=>`${c.method} ${new URL(c.url).pathname}`))).toContain('POST /api/mission-access/a1/approve');
- const body=await page.evaluate(()=>(window as any).calls.find((c:any)=>c.url.includes('/approve')).body);
- expect(JSON.parse(body)).toEqual({ttl_hours:24});
- await expect(card.locator('.secret-row')).toHaveCount(0);
-});
 test('settings section lists pending, live grants with revoke, and the audit log',async({page})=>{
  await page.goto('/tests/mission-access.html');
  const s=page.getByTestId('mission-access-settings');

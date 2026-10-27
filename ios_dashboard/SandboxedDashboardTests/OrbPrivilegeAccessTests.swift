@@ -55,4 +55,41 @@ final class OrbPrivilegeAccessTests: XCTestCase {
         let local = try json(["id": "m1"])
         XCTAssertEqual(OrbContinuation.remoteNodeID(for: local), "core")
     }
+
+    func testBunkerCardShowsAboveNormalUntilDismissedAtThatLevel() {
+        XCTAssertFalse(OrbPrivilegeAccessMonitor.showsBunkerCard(state: 0, dismissedLevel: 0))
+        XCTAssertTrue(OrbPrivilegeAccessMonitor.showsBunkerCard(state: 2, dismissedLevel: 0))
+        XCTAssertFalse(OrbPrivilegeAccessMonitor.showsBunkerCard(state: 2, dismissedLevel: 2))
+        // Escalating after a dismissal shows the card again.
+        XCTAssertTrue(OrbPrivilegeAccessMonitor.showsBunkerCard(state: 3, dismissedLevel: 2))
+    }
+
+    func testLatestIncidentReasonSkipsCanaryDryRuns() throws {
+        let incidents = try json([
+            ["reason": "canary test", "dry_run": true, "new_bunker_state": 0],
+            ["reason": "honeytoken read by pid 4242", "dry_run": false, "new_bunker_state": 2],
+            ["reason": "older", "dry_run": false, "new_bunker_state": 1],
+        ]).items
+        XCTAssertEqual(OrbPrivilegeAccessMonitor.latestIncidentReason(incidents), "honeytoken read by pid 4242")
+        XCTAssertNil(OrbPrivilegeAccessMonitor.latestIncidentReason([]))
+    }
+
+    func testEnrollmentPromptOnlyWhenSignaturesAreAskedAndThisKeyIsMissing() {
+        XCTAssertFalse(OrbApprovalEnrollmentMonitor.shouldPrompt(mode: "off", enrolled: false, dismissedMode: nil))
+        XCTAssertFalse(OrbApprovalEnrollmentMonitor.shouldPrompt(mode: "", enrolled: false, dismissedMode: nil))
+        XCTAssertTrue(OrbApprovalEnrollmentMonitor.shouldPrompt(mode: "warn", enrolled: false, dismissedMode: nil))
+        XCTAssertTrue(OrbApprovalEnrollmentMonitor.shouldPrompt(mode: "enforce", enrolled: false, dismissedMode: nil))
+        XCTAssertFalse(OrbApprovalEnrollmentMonitor.shouldPrompt(mode: "enforce", enrolled: true, dismissedMode: nil))
+        XCTAssertFalse(OrbApprovalEnrollmentMonitor.shouldPrompt(mode: "warn", enrolled: false, dismissedMode: "warn"))
+        // Core moving from warn to enforce asks again.
+        XCTAssertTrue(OrbApprovalEnrollmentMonitor.shouldPrompt(mode: "enforce", enrolled: false, dismissedMode: "warn"))
+    }
+
+    func testThisDeviceIsEnrolledOnlyWhenItsKeyIsListed() throws {
+        let devices = try json([["public_key": "AAA"], ["public_key": "BBB"]]).items
+        XCTAssertTrue(OrbApprovalEnrollmentMonitor.isEnrolled(publicKey: "BBB", devices: devices))
+        XCTAssertFalse(OrbApprovalEnrollmentMonitor.isEnrolled(publicKey: "CCC", devices: devices))
+        XCTAssertFalse(OrbApprovalEnrollmentMonitor.isEnrolled(publicKey: nil, devices: devices))
+        XCTAssertFalse(OrbApprovalEnrollmentMonitor.isEnrolled(publicKey: "", devices: [try json(["public_key": ""])]))
+    }
 }

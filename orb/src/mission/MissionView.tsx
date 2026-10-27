@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { isFailedStatus, isLive, isRunning, isSettingsIdle, queueWaitLabel, remoteJobEnded } from "../missionStatus";
+import { isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, queueWaitLabel, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -1065,7 +1065,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
           </Show>
 
-          <NextReminder mission={p.id} busy={busy()} />
+          <NextReminder mission={p.id} busy={busy()} archived={isArchived(mission()?.status)} />
           <Show when={refreshing()}><div class="agent-wait-status" role="status">Refreshing conversation…</div></Show>
         </div>
       </div>

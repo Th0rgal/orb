@@ -374,7 +374,6 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::mission_store::MissionStore;
 
     async fn store() -> (tempfile::TempDir, SqliteMissionStore) {
         let dir = tempfile::tempdir().expect("tempdir");

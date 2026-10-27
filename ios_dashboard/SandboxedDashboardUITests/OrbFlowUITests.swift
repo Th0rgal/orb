@@ -102,19 +102,23 @@ final class OrbFlowUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-api_base_url", "http://127.0.0.1:18790", "-orb_test_reset", "YES", "-orb_test_biometric_pass", "YES"]
         app.launch()
-        let banner = app.buttons["home.access-requests"]
+        let banner = app.buttons["home.approvals"]
         XCTAssertTrue(banner.waitForExistence(timeout: 30))
         captureFile(app, "access-home-banner")
         banner.tap()
-        let approve = app.buttons["access.approve.acc-1"]
+        // The shared approval queue lists the request and approves it with one signature.
+        let approve = app.buttons["approvals.approve.mission_access.acc-1"]
         XCTAssertTrue(approve.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Lean eval run #42"].exists)
-        XCTAssertTrue(app.buttons["access.revoke.acc-2"].exists, "live grant listed")
-        captureFile(app, "access-sheet-pending")
+        XCTAssertTrue(app.staticTexts["Read Lean eval run #42"].exists)
+        captureFile(app, "approvals-sheet-pending")
         approve.tap()
+        XCTAssertTrue(approve.waitForNonExistence(timeout: 10), "approved request leaves the queue")
+        XCTAssertTrue(app.staticTexts["Nothing is waiting for your approval."].waitForExistence(timeout: 10))
+        // Grants and revocation stay in the mission access sheet.
+        app.buttons["Mission access: grants and activity"].tap()
         let revoke = app.buttons["access.revoke.acc-1"]
         XCTAssertTrue(revoke.waitForExistence(timeout: 10), "approved request becomes a grant")
-        XCTAssertFalse(app.buttons["access.approve.acc-1"].exists)
+        XCTAssertTrue(app.buttons["access.revoke.acc-2"].exists, "live grant listed")
         captureFile(app, "access-sheet-approved")
         revoke.tap()
         XCTAssertTrue(revoke.waitForNonExistence(timeout: 10), "revoked grant leaves the list")
@@ -122,6 +126,7 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["access.revoke.acc-2"].waitForNonExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["No active grants."].waitForExistence(timeout: 5))
         captureFile(app, "access-sheet-revoked")
+        app.buttons["Done"].tap()
         app.buttons["Done"].tap()
         XCTAssertTrue(banner.waitForNonExistence(timeout: 15), "no pending request left")
         app.buttons["Settings"].tap()

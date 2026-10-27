@@ -10077,7 +10077,15 @@ async fn get_provider_usage(
             });
             if let Some(login) = login {
                 match super::antigravity_usage::read(&client, &login.oauth.access_token).await {
-                    super::subscription_usage::Quota::Fields(fields) => {
+                    super::subscription_usage::Quota::Fields(mut fields) => {
+                        if let Some(serde_json::Value::Array(windows)) =
+                            fields.get_mut("antigravity_windows")
+                        {
+                            super::antigravity_accounts::remember_gemini_weekly(
+                                &login.file,
+                                windows,
+                            );
+                        }
                         let unverified = fields.get("antigravity_eligibility")
                             == Some(&serde_json::json!("needs_verification"));
                         if let Some(obj) = info.as_object_mut() {

@@ -170,35 +170,6 @@ final class OrbSecretRequestMonitor {
     }
 }
 
-/// Home banner: one tap opens the approval sheet.
-struct OrbSecretRequestBanner: View {
-    let count: Int
-    let open: () -> Void
-    var body: some View {
-        if count > 0 {
-            Button(action: open) {
-                HStack(spacing: 10) {
-                    Image(systemName: "key.viewfinder").foregroundStyle(OrbStyle.warning)
-                    Text(count == 1 ? "A mission is asking for a secret" : "\(count) missions are asking for secrets")
-                        .font(.footnote.weight(.semibold))
-                    Spacer()
-                    Text("\(count)")
-                        .font(.system(.caption, weight: .bold)).monospacedDigit()
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(OrbStyle.warning.opacity(0.25), in: Capsule())
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(OrbStyle.textSecondary)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
-                .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.borderStrong))
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .accessibilityIdentifier("home.secret-requests")
-        }
-    }
-}
-
 /// Approve (secret, project or all, with a grant lifetime) or decline pending
 /// secret requests. Every approval is gated by Face ID / Touch ID.
 struct OrbSecretRequestsSheet: View {
@@ -406,8 +377,6 @@ final class OrbMissionAccessMonitor {
     static let shared = OrbMissionAccessMonitor()
     private(set) var requests: [OrbJSON] = []
     private(set) var audit: [OrbJSON] = []
-    /// Set when a mission access notification is tapped; the home view opens the sheet.
-    var openRequested = false
     private var endpoint = ""
     private var announced: Set<String> = []
 
@@ -453,34 +422,6 @@ final class OrbMissionAccessMonitor {
             content.userInfo = ["orb_mission_access": r["id"].text]
             let request = UNNotificationRequest(identifier: "orb.mission-access.\(r["id"].text)", content: content, trigger: nil)
             UNUserNotificationCenter.current().add(request) { _ in }
-        }
-    }
-}
-
-struct OrbMissionAccessBanner: View {
-    let count: Int
-    let open: () -> Void
-    var body: some View {
-        if count > 0 {
-            Button(action: open) {
-                HStack(spacing: 10) {
-                    Image(systemName: "eye.trianglebadge.exclamationmark").foregroundStyle(OrbStyle.warning)
-                    Text(count == 1 ? "A mission asks to read another mission" : "\(count) missions ask for read access")
-                        .font(.footnote.weight(.semibold))
-                    Spacer()
-                    Text("\(count)")
-                        .font(.system(.caption, weight: .bold)).monospacedDigit()
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(OrbStyle.warning.opacity(0.25), in: Capsule())
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(OrbStyle.textSecondary)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
-                .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.borderStrong))
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .accessibilityIdentifier("home.access-requests")
         }
     }
 }

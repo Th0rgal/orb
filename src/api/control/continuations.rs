@@ -197,6 +197,19 @@ pub async fn deliver(
         let Some(m) = store.get_mission(e.mission_id).await? else {
             continue;
         };
+        if m.status == MissionStatus::Acknowledged
+            && !e.variables_used.contains_key("__delivery_manual")
+        {
+            // The archive cancels deliveries; this catches one staged before it.
+            e.status = ExecutionStatus::Cancelled;
+            e.error = Some("Mission archived; reminder dropped".into());
+            e.completed_at = Some(crate::api::mission_store::now_string());
+            store.update_automation_execution(e).await?;
+            store.fence_mission_wakeups(m.id).await?;
+            store.cancel_mission_continuations(m.id).await?;
+            tracing::info!(mission = %m.id, "Dropped scheduled delivery for an archived mission");
+            continue;
+        }
         let paused_or_interrupted = match m.status {
             MissionStatus::Paused => true,
             MissionStatus::Interrupted => m.terminal_reason.as_deref() != Some("client_runner"),
@@ -432,6 +445,38 @@ pub async fn stop_for_mission(store: &Arc<dyn MissionStore>, mission: Uuid) -> R
     let _guard = mutex.lock().await;
     store.fence_mission_wakeups(mission).await?;
     store.cancel_mission_continuations(mission).await
+}
+
+/// Archiving ends a mission's automatic work: its wake-ups, agent schedules
+/// and unfired deliveries are cancelled and fenced, so a reminder cannot
+/// bring the conversation back. `dropped` is the reminder that tried to fire
+/// (or was cancelled by the archive); it is kept as a skipped execution.
+pub async fn drop_for_archived(
+    store: &Arc<dyn MissionStore>,
+    mission: Uuid,
+    dropped: Option<&Automation>,
+) -> Result<(), String> {
+    stop_for_mission(store, mission).await?;
+    let Some(a) = dropped else {
+        return Ok(());
+    };
+    tracing::info!(%mission, automation = %a.id, "Dropped reminder for an archived mission");
+    store
+        .create_automation_execution(AutomationExecution {
+            id: Uuid::new_v4(),
+            automation_id: a.id,
+            mission_id: mission,
+            triggered_at: crate::api::mission_store::now_string(),
+            trigger_source: "archived".into(),
+            status: ExecutionStatus::Skipped,
+            webhook_payload: None,
+            variables_used: a.variables.clone(),
+            completed_at: Some(crate::api::mission_store::now_string()),
+            error: Some("Mission archived; reminder dropped".into()),
+            retry_count: 0,
+        })
+        .await
+        .map(|_| ())
 }
 
 pub async fn cancel_for_mission(
@@ -1082,38 +1127,53 @@ mod tests {
         assert!(!store.get_automation(a.id).await.unwrap().unwrap().active);
     }
 
+    /// Replays the production order: the agent schedules a wake-up, the user
+    /// archives, then the wake-up comes due. Nothing reaches the mission.
     #[tokio::test]
-    async fn continuation_acknowledged_mission_still_receives_due_wakeup() {
+    async fn continuation_archived_mission_drops_due_wakeup() {
         let (_dir, store, a) = fixture().await;
+        stage(&store, &a, "resume after archive".into())
+            .await
+            .unwrap();
         store
             .update_mission_status(a.mission_id, MissionStatus::Acknowledged)
             .await
             .unwrap();
-        stage(&store, &a, "resume after reading".into())
-            .await
-            .unwrap();
         let (tx, mut rx) = mpsc::channel(1);
         let (events, _) = broadcast::channel(8);
-        let receive = tokio::spawn(async move {
-            let Some(ControlCommand::UserMessage {
-                respond, content, ..
-            }) = rx.recv().await
-            else {
-                panic!("expected delivery")
-            };
-            assert_eq!(content, "resume after reading");
-            respond.send(UserMessageAck::Queued).unwrap();
-        });
         deliver(&store, &tx, &events, None).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), receive)
-            .await
-            .unwrap()
-            .unwrap();
+        assert!(rx.try_recv().is_err(), "archived mission was woken");
+        let rows = store.get_automation_executions(a.id, None).await.unwrap();
+        assert_eq!(rows[0].status, ExecutionStatus::Cancelled);
         assert_eq!(
-            store.get_automation_executions(a.id, None).await.unwrap()[0].variables_used
-                ["__delivery_accepted"],
-            "true"
+            rows[0].error.as_deref(),
+            Some("Mission archived; reminder dropped")
         );
+        assert!(!store.get_automation(a.id).await.unwrap().unwrap().active);
+        // A later sweep has nothing left to send.
+        deliver(&store, &tx, &events, None).await.unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn archiving_cancels_reminders_and_records_the_drop() {
+        let (_dir, store, a) = fixture().await;
+        stage(&store, &a, "resume later".into()).await.unwrap();
+        drop_for_archived(&store, a.mission_id, Some(&a))
+            .await
+            .unwrap();
+        assert!(!store.get_automation(a.id).await.unwrap().unwrap().active);
+        assert!(store.list_scheduled_deliveries().await.unwrap().is_empty());
+        let rows = store.get_automation_executions(a.id, None).await.unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| r.status == ExecutionStatus::Skipped && r.trigger_source == "archived"));
+        assert!(rows.iter().all(|r| r.status != ExecutionStatus::Pending));
+        // The archived turn cannot schedule a fresh wake-up either.
+        assert!(!store
+            .wakeup_creation_allowed(a.mission_id, 0)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

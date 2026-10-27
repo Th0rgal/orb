@@ -109,7 +109,7 @@ pub async fn create(
     state: Arc<AppState>,
     user: AuthUser,
     req: CreateMissionRequest,
-    mut selection: Selection,
+    selection: Selection,
 ) -> Result<(axum::http::HeaderMap, Json<Value>), Error> {
     if !matches!(selection.provider, Provider::CursorCloud | Provider::Hermes)
         && !selection.model_params.is_empty()

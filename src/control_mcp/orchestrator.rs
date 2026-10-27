@@ -279,6 +279,7 @@ struct ReviewTaskParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct MergeBranchParams {
     /// Branch to merge from (a worker's worktree branch)
     source_branch: String,

@@ -32,6 +32,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::approval_flow::{self, ApprovalEvent, ApprovalState};
+use super::approval_queue::{self, ApprovalItem, BatchRef};
 use super::auth::AuthUser;
 use super::routes::AppState;
 
@@ -345,13 +346,7 @@ impl MissionAccess {
         let r = &mut data.requests[idx];
         let next = r.state.apply(event)?;
         let detail = match event {
-            ApprovalEvent::Approve => {
-                let ttl = clamp_ttl(ttl_hours.or(Some(r.ttl_hours)));
-                r.ttl_hours = ttl;
-                r.expires_at = Some(now + chrono::Duration::hours(ttl));
-                r.decided_at = Some(now);
-                Some(format!("{ttl}h"))
-            }
+            ApprovalEvent::Approve => Some(grant(r, now, ttl_hours)),
             ApprovalEvent::Deny => {
                 r.decided_at = Some(now);
                 None
@@ -391,6 +386,67 @@ impl MissionAccess {
     ) -> Result<AccessRequest, String> {
         self.transition(owner, id, ApprovalEvent::Approve, ttl_hours)
             .await
+    }
+
+    /// Pending requests of `owner` in the shared approval shape.
+    pub async fn pending_items(&self, owner: &str) -> Vec<ApprovalItem> {
+        let mut data = self.data.lock().await;
+        if data.prune(Utc::now()) {
+            self.save(&data).await;
+        }
+        data.requests
+            .iter()
+            .filter(|r| r.owner == owner && r.state.is_pending())
+            .map(ApprovalItem::mission_access)
+            .collect()
+    }
+
+    /// Approve the listed requests, all or none, each through
+    /// [`approval_queue::admit`]. The caller checks that `owner` owns every
+    /// target mission (as the single approve does).
+    pub async fn approve_batch(
+        &self,
+        owner: &str,
+        refs: &[BatchRef],
+        confirm_critical: bool,
+    ) -> Result<Vec<AccessRequest>, String> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        data.prune(now);
+        let mut idxs = Vec::with_capacity(refs.len());
+        for want in refs {
+            let idx = data
+                .requests
+                .iter()
+                .position(|r| r.id == want.id && r.owner == owner && r.state.is_pending());
+            let current = idx.map(|i| ApprovalItem::mission_access(&data.requests[i]));
+            approval_queue::admit(current.as_ref(), want, confirm_critical)?;
+            idxs.extend(idx);
+        }
+        let before: Vec<AccessRequest> = idxs.iter().map(|&i| data.requests[i].clone()).collect();
+        let audit_len = data.audit.len();
+        let mut out = Vec::with_capacity(idxs.len());
+        for &idx in &idxs {
+            let r = &mut data.requests[idx];
+            r.state = r.state.apply(ApprovalEvent::Approve)?;
+            let detail = grant(r, now, None);
+            let snapshot = r.clone();
+            data.log(&snapshot, "approved", Some(detail), now);
+            out.push(snapshot);
+        }
+        if let Err(e) = self.commit(&data).await {
+            for (&idx, r) in idxs.iter().zip(before) {
+                data.requests[idx] = r;
+            }
+            data.audit.truncate(audit_len);
+            return Err(e);
+        }
+        drop(data);
+        self.changed.notify_waiters();
+        Ok(out)
     }
 
     pub async fn deny(&self, owner: &str, id: Uuid) -> Result<AccessRequest, String> {
@@ -479,12 +535,17 @@ impl MissionAccess {
         if data.prune(Utc::now()) {
             self.save(&data).await;
         }
-        let requests: Vec<&AccessRequest> = data
+        let requests: Vec<Value> = data
             .requests
             .iter()
             .rev()
             .filter(|r| r.owner == owner)
             .take(200)
+            .map(|r| {
+                approval_queue::listed(json!(r), r.state.is_pending(), || {
+                    ApprovalItem::mission_access(r)
+                })
+            })
             .collect();
         let audit: Vec<&AuditEntry> = data
             .audit
@@ -695,7 +756,17 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
 }
 
 /// Wake the requesting mission with the decision (best effort).
-async fn notify_requester(state: &Arc<AppState>, r: &AccessRequest) {
+/// Turn a pending request into a grant: lifetime and decision time. The
+/// caller applies the state change. Returns the audit detail.
+fn grant(r: &mut AccessRequest, now: DateTime<Utc>, ttl_hours: Option<i64>) -> String {
+    let ttl = clamp_ttl(ttl_hours.or(Some(r.ttl_hours)));
+    r.ttl_hours = ttl;
+    r.expires_at = Some(now + chrono::Duration::hours(ttl));
+    r.decided_at = Some(now);
+    format!("{ttl}h")
+}
+
+pub(crate) async fn notify_requester(state: &Arc<AppState>, r: &AccessRequest) {
     use crate::api::control::{ControlCommand, MissionStatus};
     let user = AuthUser {
         id: r.owner.clone(),
@@ -1136,5 +1207,51 @@ mod tests {
             *t,
             "send_message_to_mission" | "cancel_mission" | "resume_mission" | "start_mission"
         )));
+    }
+
+    #[tokio::test]
+    async fn approve_all_is_all_or_nothing_and_owner_scoped() {
+        let s = temp();
+        let a = s
+            .request(new("thomas", Uuid::new_v4(), Uuid::new_v4()))
+            .await
+            .unwrap();
+        let b = s
+            .request(new("thomas", Uuid::new_v4(), Uuid::new_v4()))
+            .await
+            .unwrap();
+        let theirs = s
+            .request(new("mallory", Uuid::new_v4(), Uuid::new_v4()))
+            .await
+            .unwrap();
+        let seen = |r: &AccessRequest| {
+            let i = ApprovalItem::mission_access(r);
+            BatchRef {
+                kind: i.kind,
+                id: i.id,
+                digest: i.digest,
+            }
+        };
+        assert_eq!(s.pending_items("thomas").await.len(), 2);
+        assert!(s
+            .approve_batch("thomas", &[seen(&a), seen(&theirs)], false)
+            .await
+            .is_err());
+        assert_eq!(
+            s.get("thomas", a.id).await.unwrap().state,
+            ApprovalState::Pending
+        );
+        let mut changed = b.clone();
+        changed.ttl_hours += 1;
+        assert!(s
+            .approve_batch("thomas", &[seen(&a), seen(&changed)], false)
+            .await
+            .is_err());
+        let ok = s
+            .approve_batch("thomas", &[seen(&a), seen(&b)], false)
+            .await
+            .unwrap();
+        assert!(ok.iter().all(|r| r.state == ApprovalState::Approved));
+        assert!(s.pending_items("thomas").await.is_empty());
     }
 }

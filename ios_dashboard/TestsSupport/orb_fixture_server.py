@@ -333,6 +333,9 @@ class Handler(BaseHTTPRequestHandler):
         if p=='/api/control/stream' and parse_qs(u.query).get('mission',[''])[0] in REPLAY: return self.stream_replay(u)
         if p=='/api/control/inbox-state': return self.send(INBOX_STATE)
         if p=='/api/mission-access': return self.send({'requests':list(reversed(ACCESS)),'audit':list(reversed(ACCESS_AUDIT))})
+        if p=='/api/approvals/queue':
+            # The shared approval queue over the fixture's mission access requests.
+            return self.send({'items':[dict(kind='mission_access',id=r['id'],requester_mission_id=r['requester_mission_id'],requester_title=r['requester_title'],tier='read_mission',target=r['target_mission_id'],risk='elevated',reason=r['reason'],created_at=r['created_at'],digest='d-'+r['id'],request=r) for r in reversed(ACCESS) if r['state']=='pending']})
         if p=='/api/ai/providers': return self.send(list(PROVIDERS.values()))
         if p=='/api/ai/providers/usage': return self.send({'entries': {'fixture-provider': {'provider_type':'openai', 'codex_primary_used_percent':25}}})
         if p=='/api/cloud/usage': return self.send({'accounts':{}})
@@ -439,6 +442,15 @@ class Handler(BaseHTTPRequestHandler):
             if body.get('password') != 'orb-test-password': return self.send({'error':'Invalid password'},401)
             return self.send({'token':VALID_TOKEN,'exp':int(time.time())+3600})
         if p=='/__reset': reset(); return self.send({})
+        if p=='/api/approvals/approve-all':
+            # All or nothing, like Core: every item pending with the digest the client saw.
+            items=body.get('items',[]); found=[next((x for x in ACCESS if x['id']==i.get('id') and x['state']=='pending' and 'd-'+x['id']==i.get('digest')),None) for i in items]
+            if not items or None in found: return self.send({'error':'Request is no longer pending; nothing was approved'},409)
+            for r in found:
+                r['state']='approved'; r['decided_at']=iso(time.time()); r['expires_at']=iso(time.time()+3600*r['ttl_hours'])
+                ACCESS_AUDIT.append(dict(at=iso(time.time()),request_id=r['id'],requester_mission_id=r['requester_mission_id'],target_mission_id=r['target_mission_id'],action='approved',detail=None,signed=bool(self.headers.get('X-Paloma-Approval'))))
+            RECEIVED.append(f"{self.command} {p}")
+            return self.send({'mission_access':found,'privilege':[],'secret':[]})
         if p.startswith('/api/mission-access/'):
             # Mission access: approve (Core requires a device signature; the simulator
             # cannot sign, so the fixture records whether one was sent), deny, revoke.

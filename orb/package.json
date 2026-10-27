@@ -22,7 +22,6 @@
     "@playwright/test": "1.55.0",
     "@solidjs/testing-library": "0.8.10",
     "@tauri-apps/cli": "^2.9.0",
-    "@types/katex": "^0.16.8",
     "@types/prismjs": "^1.26.6",
     "jsdom": "26.1.0",
     "typescript": "^5.6.0",
