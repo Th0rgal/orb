@@ -219,19 +219,39 @@ async fn chain_usage_limit(
             None,
         )
         .await;
+    // The resolver tries an auth.json account only when no store account of
+    // its provider is routable; once the store account is parked it becomes
+    // the fallback, so it counts as a candidate here.
+    let standard_fallbacks = chain_entries.iter().flat_map(|entry| {
+        let provider_type = ProviderType::from_id(&entry.provider_id);
+        standard_accounts
+            .iter()
+            .filter(move |sa| {
+                Some(sa.provider_type) == provider_type && (sa.api_key.is_some() || sa.has_oauth)
+            })
+            .map(move |sa| (sa.account_id, None, entry))
+    });
     let mut earliest: Option<crate::account_limits::LimitCooldown> = None;
-    for entry in &candidates {
+    for (account_id, subscription, entry) in candidates
+        .iter()
+        .map(|e| {
+            let entry = crate::provider_health::ChainEntry {
+                provider_id: e.provider_id.clone(),
+                model_id: e.model_id.clone(),
+            };
+            (e.account_id, e.subscription_key.clone(), entry)
+        })
+        .chain(standard_fallbacks.map(|(id, sub, entry)| (id, sub, entry.clone())))
+    {
         // Antigravity parks one quota pool (Gemini, Claude & GPT) of the
         // login, not the whole account.
         let limit = state
             .health_tracker
-            .blocking_limit(entry.account_id, entry.subscription_key.as_ref())
+            .blocking_limit(account_id, subscription.as_ref())
             .or_else(|| {
-                state.health_tracker.pool_limit(
-                    &entry.provider_id,
-                    entry.account_id,
-                    &entry.model_id,
-                )
+                state
+                    .health_tracker
+                    .pool_limit(&entry.provider_id, account_id, &entry.model_id)
             })?;
         if earliest.as_ref().is_none_or(|e| limit.until < e.until) {
             earliest = Some(limit);
