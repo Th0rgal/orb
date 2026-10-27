@@ -81,6 +81,15 @@ final class OrbFileService {
     struct Scope: Hashable, Sendable {
         var missionID: String?
         var workspaceID: String?
+        /// Another session of the replacement chain (`earlier:<id>`); nil is the mission's own workspace.
+        var source: String? = nil
+    }
+
+    /// An earlier or later attempt of this mission on the same machine, browsable read-only.
+    struct Session: Identifiable, Hashable, Sendable {
+        let id: String
+        let label: String
+        let later: Bool
     }
 
     private struct Chunk: Decodable { let bytes: [UInt8]?; let next: Int64?; let size: Int64? }
@@ -90,7 +99,7 @@ final class OrbFileService {
         struct Entry: Decodable { let name: String; let path: String; let kind: String?; let size: Int64? }
         let entries: [Entry]?
     }
-    private struct Roots: Decodable { struct Source: Decodable { let id: String; let available: Bool? }; let sources: [Source]? }
+    private struct Roots: Decodable { struct Source: Decodable { let id: String; let label: String?; let group: String?; let available: Bool? }; let sources: [Source]? }
 
     private var core: OrbCore { .shared }
     private var inflight: [String: Task<URL, Error>] = [:]
@@ -100,7 +109,7 @@ final class OrbFileService {
     }
 
     private func cacheKey(_ ref: OrbFileRef, _ scope: Scope) -> String {
-        let raw = [core.endpoint, scope.missionID ?? "", ref.url ?? "", ref.path, ref.size.map(String.init) ?? ""].joined(separator: "\u{1f}")
+        let raw = [core.endpoint, scope.missionID ?? "", scope.source ?? "", ref.url ?? "", ref.path, ref.size.map(String.init) ?? ""].joined(separator: "\u{1f}")
         return SHA256.hash(data: Data(raw.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -146,7 +155,7 @@ final class OrbFileService {
         // 2. The mission workspace, wherever it runs.
         if let mission = scope.missionID {
             do {
-                try await workspaceDownload(ref, mission: mission, to: partial, progress: progress)
+                try await workspaceDownload(ref, mission: mission, sources: downloadSources(ref, scope), to: partial, progress: progress)
                 return try finish(partial, target)
             } catch { remember(error); if failure.rank >= OrbFileError.machineOffline.rank { throw failure } }
         }
@@ -216,11 +225,23 @@ final class OrbFileService {
         return reply
     }
 
-    private func workspaceDownload(_ ref: OrbFileRef, mission: String, to file: URL, progress: @escaping @MainActor (Double?) -> Void) async throws {
-        let base: [String: Any] = ["mission_id": mission, "source": "workspace"]
-        let resolvedData = try await fileResources(base.merging(["action": "resolve", "paths": [ref.path]]) { $1 }, name: ref.label)
-        let resolved = try JSONDecoder().decode(Resolved.self, from: resolvedData)
-        guard let match = resolved.results?.first?.matches?.first else { throw OrbFileError.notFound(ref.label) }
+    /// The workspace first; an absolute path agents cite from an earlier
+    /// session of the chain resolves in that session (Core checks the chain).
+    private func downloadSources(_ ref: OrbFileRef, _ scope: Scope) async -> [String] {
+        if let source = scope.source { return [source] }
+        guard ref.path.hasPrefix("/") else { return ["workspace"] }
+        return ["workspace"] + ((try? await roots(scope).sessions) ?? []).map(\.id)
+    }
+
+    private func workspaceDownload(_ ref: OrbFileRef, mission: String, sources: [String], to file: URL, progress: @escaping @MainActor (Double?) -> Void) async throws {
+        var found: (String, Match)?
+        for source in sources where found == nil {
+            let resolvedData = try await fileResources(["mission_id": mission, "source": source, "action": "resolve", "paths": [ref.path]], name: ref.label)
+            let resolved = try JSONDecoder().decode(Resolved.self, from: resolvedData)
+            found = resolved.results?.first?.matches?.first.map { (source, $0) }
+        }
+        guard let (source, match) = found else { throw OrbFileError.notFound(ref.label) }
+        let base: [String: Any] = ["mission_id": mission, "source": source]
         FileManager.default.createFile(atPath: file.path, contents: nil)
         let handle = try FileHandle(forWritingTo: file)
         defer { try? handle.close() }
@@ -241,19 +262,23 @@ final class OrbFileService {
         progress(1)
     }
 
-    /// True when the mission has a browsable workspace (local, node, managed machine or transfer).
-    func hasWorkspace(_ scope: Scope) async -> Bool {
-        guard let mission = scope.missionID,
-              let data = try? await fileResources(["mission_id": mission, "action": "roots"], name: "workspace"),
-              let roots = try? JSONDecoder().decode(Roots.self, from: data) else { return false }
-        return roots.sources?.contains { $0.id == "workspace" && $0.available != false } ?? false
+    /// Whether the mission has a workspace, and the other sessions of its chain on the same machine.
+    func roots(_ scope: Scope) async throws -> (workspace: Bool, sessions: [Session]) {
+        guard let mission = scope.missionID else { return (false, []) }
+        let data = try await fileResources(["mission_id": mission, "action": "roots"], name: "workspace")
+        let sources = try JSONDecoder().decode(Roots.self, from: data).sources ?? []
+        return (
+            sources.contains { $0.id == "workspace" && $0.available != false },
+            sources.filter { $0.group != nil && $0.available != false }
+                .map { Session(id: $0.id, label: $0.label ?? $0.id, later: $0.group == "later") }
+        )
     }
 
     /// Read-only listing of one workspace directory ("" is the root).
     func list(_ scope: Scope, path: String) async throws -> [OrbWorkspaceEntry] {
         guard let mission = scope.missionID else { return [] }
         do {
-            let data = try await fileResources(["mission_id": mission, "source": "workspace", "action": "list", "path": path], name: path.isEmpty ? "Workspace" : path)
+            let data = try await fileResources(["mission_id": mission, "source": scope.source ?? "workspace", "action": "list", "path": path], name: path.isEmpty ? "Workspace" : path)
             let listing = try JSONDecoder().decode(Listing.self, from: data)
             return (listing.entries ?? []).map { OrbWorkspaceEntry(name: $0.name, path: $0.path, isDirectory: $0.kind == "dir", size: $0.size) }
         } catch { throw OrbFileError.from(error, name: path.isEmpty ? "Workspace" : path) }

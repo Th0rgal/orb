@@ -64,6 +64,7 @@ struct OrbProviderLogo: View {
 
 struct OrbProvidersSettings: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     @State private var client = OrbSettingsClient()
     @State private var providers: [OrbJSON] = []
     @State private var usage: OrbJSON = .null
@@ -88,9 +89,17 @@ struct OrbProvidersSettings: View {
                         let detail = usage[provider["id"].text]
                         OrbProviderQuota(value: detail)
                         if !detail["error"].text.isEmpty { Text(detail["error"].text).font(.caption).foregroundStyle(.orange) }
+                        let unverified = detail["status"].text == "needs_verification"
+                        if unverified {
+                            // Google refuses this login until its owner verifies it; the
+                            // OAuth sign-in itself is fine, so no Reconnect here.
+                            Text("Google requires you to verify this account.").font(.caption).foregroundStyle(.orange)
+                            Button("Verify account") { openURL(Self.verificationURL(detail, email: provider["account_email"].text)) }
+                            Button("Check again") { Task { await recheck(provider) } }.disabled(!ready || busy)
+                        }
                         if !detail["usage_note"].text.isEmpty { Text(detail["usage_note"].text).font(.caption).foregroundStyle(.secondary) }
                         if Self.canEditKey(provider) { Button("Edit API key") { editKey = provider; keySheet = true }.disabled(!ready || busy) }
-                        if Self.canConnectOAuth(provider) {
+                        if Self.canConnectOAuth(provider) && !unverified {
                             if let spec = Self.loginSpec(provider) { Button("Connect / Reconnect") { login = spec }.disabled(!ready || busy) }
                             else { Text("This account must be connected on its credential owner.").font(.caption).foregroundStyle(.secondary) }
                         }
@@ -140,6 +149,17 @@ struct OrbProvidersSettings: View {
         }
         .sheet(item: $login) { spec in OrbProviderLoginView(spec: spec, client: client) { Task { await load() } } }
     }
+    /// Where the owner verifies an Antigravity account Google refuses: Google's
+    /// validation page when the refusal carried one, else signing in to
+    /// Antigravity with that account. Same as the desktop `verificationUrl`.
+    static func verificationURL(_ detail: OrbJSON, email: String) -> URL {
+        let given = detail["verification_url"].text
+        if given.hasPrefix("https://"), let url = URL(string: given) { return url }
+        var parts = URLComponents(string: "https://accounts.google.com/AccountChooser")!
+        parts.queryItems = [URLQueryItem(name: "continue", value: "https://antigravity.google/")]
+        if !email.isEmpty { parts.queryItems?.append(URLQueryItem(name: "Email", value: email)) }
+        return parts.url!
+    }
     static func canEditKey(_ provider: OrbJSON) -> Bool {
         provider["has_api_key"].flag || !provider["uses_oauth"].flag
     }
@@ -160,6 +180,7 @@ struct OrbProvidersSettings: View {
         let detail = usage[p["id"].text]
         let state: String
         if p["enabled"] == .bool(false) { state = "Disabled" }
+        else if detail["status"].text == "needs_verification" { state = "Verification required" }
         else if p["status"]["type"].text == "needs_reauth" || detail["status"].text == "needs_reauth" { state = "Reconnect" }
         else if !detail["error"].text.isEmpty { state = "Usage unavailable" }
         else if let quota = OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail)) { state = quota.label }
@@ -214,6 +235,17 @@ struct OrbProvidersSettings: View {
             }
         } catch is CancellationError { return }
         catch { usageError = "Usage is unavailable. \(error.localizedDescription)" }
+    }
+    /// "Check again" after verifying the account with Google.
+    private func recheck(_ provider: OrbJSON) async {
+        guard !busy else { return }; busy = true; defer { busy = false }
+        let id = provider["id"].text
+        do {
+            let value = try await client.call("/api/ai/providers/\(OrbCore.escape(id))/antigravity/recheck", method: "POST")
+            var entries: [String: OrbJSON] = { if case .object(let existing) = usage { return existing }; return [:] }()
+            entries[id] = value
+            usage = .object(entries)
+        } catch is CancellationError {} catch { usageError = error.localizedDescription }
     }
     private func toggle(_ provider: OrbJSON) async {
         guard !busy else { return }; busy = true; defer { busy = false }

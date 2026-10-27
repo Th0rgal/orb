@@ -682,6 +682,36 @@ fun OrbImageGallery(
                 modifier = Modifier.weight(1f)
             )
             Spacer(modifier = Modifier.width(12.dp))
+            // Share sheet: Save to Photos / Files, copy, send.
+            val context = LocalContext.current
+            val scope = rememberCoroutineScope()
+            images.getOrNull(pagerState.currentPage)?.let { ref ->
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.14f))
+                        .orbPressClickable {
+                            val bmp = OrbRemoteImageLoader.cached("${ref.path}|${ref.url ?: ""}") ?: return@orbPressClickable
+                            scope.launch {
+                                val png = withContext(Dispatchers.Default) {
+                                    java.io.ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+                                }
+                                val name = ref.filename.substringBeforeLast('.').ifBlank { "image" } + ".png"
+                                shareBytes(context, name, png, "image/png")
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "Share image",
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
             Box(
                 modifier = Modifier
                     .size(34.dp)
@@ -862,7 +892,7 @@ fun OrbPreviewSheet(
     }
 }
 
-fun shareBytes(context: Context, fileName: String, bytes: ByteArray) {
+fun shareBytes(context: Context, fileName: String, bytes: ByteArray, mimeType: String = "*/*") {
     try {
         val dir = File(context.cacheDir, "orb_shared")
         if (!dir.exists()) dir.mkdirs()
@@ -870,7 +900,7 @@ fun shareBytes(context: Context, fileName: String, bytes: ByteArray) {
         file.writeBytes(bytes)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "*/*"
+            type = mimeType
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }

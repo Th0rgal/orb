@@ -8,7 +8,10 @@
 //!   `ineligibleTiers` entry such as `VALIDATION_REQUIRED`). Such an account
 //!   cannot serve a single request, so it is excluded from Core routing,
 //!   demoted below every eligible login in CLIProxyAPI, and never handed to a
-//!   machine as the native sign-in;
+//!   machine as the native sign-in. Google can also accept the login yet
+//!   refuse every generation with `403 VALIDATION_REQUIRED`: CLIProxyAPI
+//!   keeps that body as the auth file's `status_message`, which the periodic
+//!   check reads (see [`validation_required`]);
 //! - remaining Gemini quota (`retrieveUserQuota`), so the native sign-in moves
 //!   to an account with quota left when the preferred one is exhausted, and
 //!   back once its window resets.
@@ -52,6 +55,110 @@ pub(crate) struct Health {
     /// A native run was refused with "Individual quota reached" on this
     /// login: unusable until then (Unix seconds), whatever the figures say.
     pub refused_until: Option<i64>,
+    /// Google refused a proxied request with `VALIDATION_REQUIRED`.
+    pub validation: Option<Validation>,
+}
+
+/// A `403 VALIDATION_REQUIRED` CLIProxyAPI reported for one auth file.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Validation {
+    /// When CLIProxyAPI recorded the refusal (Unix seconds).
+    pub seen_at: i64,
+    /// Google's page where the owner verifies the account, when given.
+    pub url: Option<String>,
+}
+
+/// How long a proxied `VALIDATION_REQUIRED` keeps a login out of routing.
+/// Core no longer sends it requests meanwhile, so the refusal cannot renew
+/// itself: once this passes the login is tried again, and a new refusal
+/// excludes it for another period.
+const VALIDATION_HOLD_SECS: i64 = 6 * 3600;
+
+/// Refusals recorded at or before this time are ignored for a file: set by
+/// "Check again" once the owner says they verified the account.
+static RECHECKED: LazyLock<RwLock<HashMap<String, i64>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Google's structured "verify your account" refusal, from an error body
+/// (object, or the JSON string CLIProxyAPI stores). Matches the ErrorInfo
+/// `reason` and `domain`, never the message text. Returns the validation
+/// URL, if Google gave one.
+pub(crate) fn validation_required(body: &Value) -> Option<Option<String>> {
+    let parsed;
+    let body = match body {
+        Value::String(text) => {
+            parsed = serde_json::from_str::<Value>(text).ok()?;
+            &parsed
+        }
+        other => other,
+    };
+    let error = &body["error"];
+    if error["code"].as_i64() != Some(403) {
+        return None;
+    }
+    error["details"].as_array()?.iter().find_map(|detail| {
+        (detail["reason"] == "VALIDATION_REQUIRED"
+            && detail["domain"] == "cloudcode-pa.googleapis.com")
+            .then(|| {
+                detail["metadata"]["validation_url"]
+                    .as_str()
+                    .filter(|url| url.starts_with("https://"))
+                    .map(str::to_string)
+            })
+    })
+}
+
+/// The validation refusal CLIProxyAPI currently holds for an auth file
+/// (one row of `GET /auth-files`).
+fn proxy_validation(row: &Value) -> Option<Validation> {
+    let url = validation_required(&row["status_message"])?;
+    let seen_at = row["updated_at"]
+        .as_str()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map_or_else(|| chrono::Utc::now().timestamp(), |t| t.timestamp());
+    Some(Validation { seen_at, url })
+}
+
+/// Eligibility once a proxied refusal is taken into account: a recent
+/// `VALIDATION_REQUIRED` wins over `loadCodeAssist`, which accepts such a
+/// login.
+fn effective_eligibility(
+    assist: Eligibility,
+    validation: Option<&Validation>,
+    rechecked: Option<i64>,
+    now: i64,
+) -> Eligibility {
+    match validation {
+        Some(v)
+            if v.seen_at > now - VALIDATION_HOLD_SECS
+                && rechecked.is_none_or(|at| v.seen_at > at) =>
+        {
+            Eligibility::NeedsVerification
+        }
+        _ => assist,
+    }
+}
+
+/// Google's verification page for a login refused as unverified.
+pub(crate) fn validation_url(file: &str) -> Option<String> {
+    health(file)
+        .filter(|h| h.eligibility == Eligibility::NeedsVerification)?
+        .validation?
+        .url
+}
+
+/// "Check again": forget the refusals seen so far for this login, so the
+/// next check judges it by Google's current answer.
+pub(crate) fn recheck(file: &str) {
+    if let Ok(mut map) = RECHECKED.write() {
+        map.insert(file.to_string(), chrono::Utc::now().timestamp());
+    }
+    if let Ok(mut map) = HEALTH.write() {
+        if let Some(h) = map.get_mut(file) {
+            h.validation = None;
+            h.eligibility = Eligibility::Unknown;
+        }
+    }
 }
 
 /// Below this remaining fraction Google refuses requests ("Individual quota
@@ -417,12 +524,14 @@ pub(crate) fn sync_cli_proxy_priorities(accounts: &[crate::ai_providers::AIProvi
     }
 }
 
-/// Auth file key holding the last Gemini weekly window seen for the login.
+/// Auth file key holding the last Gemini 5h and weekly readings for the login.
+const GEMINI_WINDOWS_KEY: &str = "sandboxed_gemini_windows";
+/// Earlier weekly-only record, read once and replaced.
 const GEMINI_WEEKLY_KEY: &str = "sandboxed_gemini_weekly";
 
-/// Show the login's last-seen Gemini weekly window when Google reports only
-/// the 5-hour one, and store a fresh weekly reading in its auth file.
-pub(crate) fn remember_gemini_weekly(file: &str, windows: &mut Vec<Value>) {
+/// Fill in the Gemini window Google did not report from the login's last
+/// reading, and store the fresh readings in its auth file.
+pub(crate) fn remember_gemini_windows(file: &str, windows: &mut Vec<Value>) {
     let Some(dir) = super::cli_proxy_accounts::auth_dir() else {
         return;
     };
@@ -430,28 +539,29 @@ pub(crate) fn remember_gemini_weekly(file: &str, windows: &mut Vec<Value>) {
         return;
     }
     let path = dir.join(file);
-    let Some(value) = read_json(&path) else {
+    let Some(mut value) = read_json(&path) else {
         return;
     };
-    let stored = value.get(GEMINI_WEEKLY_KEY);
-    let next = super::antigravity_usage::with_remembered_gemini_weekly(
+    let stored = value.get(GEMINI_WINDOWS_KEY).cloned().or_else(|| {
+        value
+            .get(GEMINI_WEEKLY_KEY)
+            .map(|weekly| json!({"Weekly": weekly}))
+    });
+    let next = super::antigravity_usage::with_remembered_gemini_windows(
         windows,
-        stored,
+        stored.as_ref(),
         chrono::Utc::now().timestamp(),
     );
-    if next.as_ref() == stored {
-        return;
-    }
-    let mut value = value.clone();
     let Some(obj) = value.as_object_mut() else {
         return;
     };
-    match next {
-        Some(next) => obj.insert(GEMINI_WEEKLY_KEY.into(), next),
-        None => obj.remove(GEMINI_WEEKLY_KEY),
-    };
+    if obj.get(GEMINI_WINDOWS_KEY) == Some(&next) && !obj.contains_key(GEMINI_WEEKLY_KEY) {
+        return;
+    }
+    obj.remove(GEMINI_WEEKLY_KEY);
+    obj.insert(GEMINI_WINDOWS_KEY.into(), next);
     if let Err(error) = write_auth_file(&path, &value) {
-        tracing::warn!(file, %error, "Could not store the Antigravity Gemini weekly window");
+        tracing::warn!(file, %error, "Could not store the Antigravity Gemini windows");
     }
 }
 
@@ -481,6 +591,14 @@ fn write_auth_file(path: &Path, value: &Value) -> std::io::Result<()> {
 /// native sign-in changed (including the first selection after startup).
 pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
     let dir = super::cli_proxy_accounts::auth_dir()?;
+    let rows = match super::cli_proxy_login::ManagementClient::configured() {
+        Ok(client) => client
+            .request(reqwest::Method::GET, "/auth-files", None)
+            .await
+            .ok(),
+        Err(_) => None,
+    };
+    let now = chrono::Utc::now().timestamp();
     for account in super::cli_proxy_accounts::accounts_in(&dir) {
         if account.provider != crate::ai_providers::ProviderType::Antigravity
             || account.disabled
@@ -497,9 +615,26 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
         )
         .await
         .ok();
-        let eligibility = assist.as_ref().map_or(Eligibility::Unknown, eligibility);
-        let project = assist.as_ref().and_then(project);
         let previous = health(&account.file);
+        // Keep the last refusal when CLIProxyAPI is unreachable or reloaded
+        // the file and dropped its status.
+        let validation = rows
+            .as_ref()
+            .and_then(|rows| rows["files"].as_array())
+            .and_then(|files| files.iter().find(|f| f["name"] == account.file.as_str()))
+            .and_then(proxy_validation)
+            .or_else(|| previous.as_ref().and_then(|h| h.validation.clone()));
+        let rechecked = RECHECKED
+            .read()
+            .ok()
+            .and_then(|m| m.get(&account.file).copied());
+        let eligibility = effective_eligibility(
+            assist.as_ref().map_or(Eligibility::Unknown, eligibility),
+            validation.as_ref(),
+            rechecked,
+            now,
+        );
+        let project = assist.as_ref().and_then(project);
         if eligibility == Eligibility::NeedsVerification
             && previous.as_ref().map(|h| h.eligibility) != Some(Eligibility::NeedsVerification)
         {
@@ -549,6 +684,7 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
                 claude_remaining,
                 claude_reset,
                 refused_until: previous.as_ref().and_then(|h| h.refused_until),
+                validation,
             },
         );
     }
@@ -598,6 +734,7 @@ pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option
             claude_remaining: None,
             claude_reset: None,
             refused_until: None,
+            validation: None,
         });
         if ineligible {
             health.eligibility = Eligibility::NeedsVerification;
@@ -655,32 +792,34 @@ const MAX_REFUSAL_SECS: i64 = 8 * 24 * 3600;
 pub(crate) fn spawn_refresh_loop(state: std::sync::Arc<super::routes::AppState>) {
     tokio::spawn(async move {
         loop {
-            if super::oauth_owner::management_enabled()
-                && refresh_once(&state.http_client).await.is_some()
-            {
-                {
-                    let ids: Vec<String> = state
-                        .config
-                        .remote_nodes
-                        .nodes
-                        .iter()
-                        .map(|n| n.id.clone())
-                        .collect();
-                    for id in ids {
-                        match super::antigravity_native::sync_node(&state, &id).await {
-                            Ok(sync) => {
-                                tracing::info!(node = %id, ?sync, "Antigravity sign-in switched")
-                            }
-                            Err(error) => {
-                                tracing::warn!(node = %id, "Antigravity sign-in not switched: {error}")
-                            }
-                        }
-                    }
-                }
-            }
+            refresh_and_sync(&state).await;
             tokio::time::sleep(REFRESH_EVERY).await;
         }
     });
+}
+
+/// One check of every login, then the new sign-in pushed to every static
+/// node when the choice changed.
+pub(crate) async fn refresh_and_sync(state: &super::routes::AppState) {
+    if !super::oauth_owner::management_enabled() || refresh_once(&state.http_client).await.is_none()
+    {
+        return;
+    }
+    let ids: Vec<String> = state
+        .config
+        .remote_nodes
+        .nodes
+        .iter()
+        .map(|n| n.id.clone())
+        .collect();
+    for id in ids {
+        match super::antigravity_native::sync_node(state, &id).await {
+            Ok(sync) => tracing::info!(node = %id, ?sync, "Antigravity sign-in switched"),
+            Err(error) => {
+                tracing::warn!(node = %id, "Antigravity sign-in not switched: {error}")
+            }
+        }
+    }
 }
 
 /// Providers whose catalog is the proxy's own per-login model list, so a
@@ -823,7 +962,103 @@ mod tests {
             claude_remaining: None,
             claude_reset: None,
             refused_until: None,
+            validation: None,
         }
+    }
+
+    /// The body Google returned on agent-core for a freshly connected login
+    /// (2026-10-27), as CLIProxyAPI stores it in `status_message`.
+    const VALIDATION_403: &str = r#"{
+  "error": {
+    "code": 403,
+    "message": "Verify your account to continue.",
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "VALIDATION_REQUIRED",
+        "domain": "cloudcode-pa.googleapis.com",
+        "metadata": {
+          "validation_url_link_text": "Verify your account",
+          "validation_url": "https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsbs",
+          "validation_learn_more_link_text": "Learn more",
+          "validation_learn_more_url": "https://support.google.com/accounts?p=al_alert",
+          "validation_error_message": "Verify your account to continue."
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.Help",
+        "links": [{"description": "Verify your account", "url": "https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsbs"}]
+      }
+    ]
+  }
+}"#;
+
+    #[test]
+    fn proxied_validation_403_excludes_the_login_until_rechecked_or_expired() {
+        let row = json!({
+            "name": "antigravity-new.json",
+            "status": "error",
+            "status_message": VALIDATION_403,
+            "updated_at": "2026-10-27T10:35:13.87142056+01:00",
+        });
+        let seen = proxy_validation(&row).unwrap();
+        assert_eq!(seen.seen_at, 1_793_093_713);
+        assert_eq!(
+            seen.url.as_deref(),
+            Some("https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsbs")
+        );
+        let now = seen.seen_at + 60;
+        // loadCodeAssist accepts the login; the proxied refusal wins.
+        let e = effective_eligibility(Eligibility::Eligible, Some(&seen), None, now);
+        assert_eq!(e, Eligibility::NeedsVerification);
+        let mut m = HashMap::new();
+        m.insert(
+            "antigravity-new.json".into(),
+            Health {
+                validation: Some(seen.clone()),
+                ..h(e, Some(1.0), None)
+            },
+        );
+        m.insert("old".into(), h(Eligibility::Eligible, Some(1.0), None));
+        let c = [cand("antigravity-new.json", 10), cand("old", 1)];
+        assert_eq!(choose(&c, &m, now).unwrap().file, "old");
+        // "Check again" after verifying, then the hold ending, restore it.
+        assert_eq!(
+            effective_eligibility(Eligibility::Eligible, Some(&seen), Some(now), now),
+            Eligibility::Eligible
+        );
+        assert_eq!(
+            effective_eligibility(
+                Eligibility::Eligible,
+                Some(&seen),
+                None,
+                now + VALIDATION_HOLD_SECS
+            ),
+            Eligibility::Eligible
+        );
+    }
+
+    #[test]
+    fn validation_required_matches_the_structured_reason_only() {
+        assert!(validation_required(&json!(VALIDATION_403)).is_some());
+        let parsed: Value = serde_json::from_str(VALIDATION_403).unwrap();
+        assert!(validation_required(&parsed).is_some());
+        let mut other_domain = parsed.clone();
+        other_domain["error"]["details"][0]["domain"] = json!("example.com");
+        assert!(validation_required(&other_domain).is_none());
+        // The words alone (e.g. quoted by a model) are not the refusal.
+        assert!(validation_required(&json!(
+            "Verify your account to continue. VALIDATION_REQUIRED"
+        ))
+        .is_none());
+        assert!(validation_required(
+            &json!({"error":{"code":403,"message":"Verify your account to continue."}})
+        )
+        .is_none());
+        let mut no_url = parsed;
+        no_url["error"]["details"][0]["metadata"] = json!({});
+        assert_eq!(validation_required(&no_url), Some(None));
     }
 
     #[test]

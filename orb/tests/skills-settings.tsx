@@ -138,6 +138,7 @@ function buildReport(): LocalSkillsReport {
         origin: "Library",
         in_library: true,
         divergent: true,
+        edited_copy: { harness: "Claude Code", path: "/Users/thomas/.claude/skills/controllers-policy", content: "---\nname: controllers-policy\n---\n\n# Controllers Policy\n\nMy local tweak.\n" },
         audience: ["coordinator"],
         sources: [
           { id: "library", label: "Library", legacy: false, hash: "aa11", lines: 9 },

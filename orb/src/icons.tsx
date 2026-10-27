@@ -219,6 +219,7 @@ export const StopIcon = (p: P) => (
     <rect x="4.500" y="4.500" width="7" height="7" rx="1.500" />
   </svg>
 );
+export const DownloadIcon = (p: P) => <I {...p}><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/></I>;
 export const CopyIcon = (p: P) => (
   <I {...p}>
     <rect x="5.500" y="5.500" width="8" height="8" rx="1.500" />

@@ -1,3 +1,4 @@
+import { privilegeSnapshot } from "./privilegeAccessFixture";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function expectReference(locator: Locator, name: string) {
@@ -41,6 +42,7 @@ async function openInbox(page: Page, theme = "dark", empty = false, aiSummary = 
   ].map((m, i) => ({ ...m, backend: "claudecode", created_at: "2026-10-09T09:00:00Z", updated_at: `2026-10-09T11:${50 - i * 5}:00Z` }));
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
+    if (path === "/api/privilege-access") return route.fulfill({ json: privilegeSnapshot() });
     if (path === "/api/projects") return route.fulfill({ json: { projects: [{ slug: "orb", title: "Orb", color: "blue" }, { slug: "infra", title: "Infrastructure", color: "purple" }] } });
     if (path === "/api/control/missions") return route.fulfill({ json: missions });
     const match = path.match(/^\/api\/control\/missions\/([^/]+)(\/events)?$/);

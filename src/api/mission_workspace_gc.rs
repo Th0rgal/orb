@@ -1,4 +1,5 @@
-//! Background GC for stale mission workspace directories.
+//! Retention inventory for mission workspace directories.
+//! Filesystem mutation is owned by explicit workspace_purge receipts.
 //!
 //! When `auto_cleanup_enabled` is on in `SettingsStore`, this task wakes up
 //! once an hour, walks every live control session's mission store, and for
@@ -71,6 +72,11 @@ async fn run_loop(state: Arc<AppState>) {
     loop {
         interval.tick().await;
         sweep_disk_reservations(&state).await;
+        if gc_execution_enabled() {
+            if let Err(error) = super::control::workspace_purge::sweep(&state).await {
+                tracing::warn!(%error, "authorized workspace purge sweep failed closed");
+            }
+        }
         run_configured_sweep(&state, "scheduled").await;
         // Container `/tmp` scratch shares this cadence but not this GC's
         // settings: it is disk hygiene for a path no mission record points at,
@@ -674,12 +680,12 @@ pub struct SweepReport {
 
 /// Cutoffs and toggles for one sweep.
 pub struct SweepParams {
-    /// Terminal missions older than this are collected.
+    /// Terminal missions older than this are reported as approval candidates.
     pub cutoff: DateTime<Utc>,
     /// Legacy long-stop cutoff; retained for configuration compatibility.
     /// Resumable/replyable mission source is no longer collected by age.
     pub stopped_cutoff: DateTime<Utc>,
-    /// Whether unmatched `mission-*` dirs are collected.
+    /// Legacy orphan setting. Unmatched directories are always retained.
     pub orphans_enabled: bool,
     /// When true, report candidates without touching the filesystem.
     pub dry_run: bool,
@@ -871,8 +877,8 @@ pub async fn run_once(state: &Arc<AppState>, params: &SweepParams) -> SweepRepor
                     continue;
                 }
                 let size = directory_size_bytes(&dir).await;
+                dry_run_candidates.insert(dir.clone());
                 if params.dry_run {
-                    dry_run_candidates.insert(dir.clone());
                     report.proposed += 1;
                     tracing::info!(
                         action = "would_remove",
@@ -885,28 +891,10 @@ pub async fn run_once(state: &Arc<AppState>, params: &SweepParams) -> SweepRepor
                     );
                     continue;
                 }
-                match tokio::fs::remove_dir_all(&dir).await {
-                    Ok(()) => {
-                        report.removed += 1;
-                        report.bytes_freed = report.bytes_freed.saturating_add(size);
-                        tracing::info!(
-                            mission_id = %mission.id,
-                            workspace_id = %workspace_id,
-                            path = %dir.display(),
-                            bytes = size,
-                            "mission GC: removed workspace directory",
-                        );
-                    }
-                    Err(err) => {
-                        report.errors += 1;
-                        tracing::warn!(
-                            mission_id = %mission.id,
-                            path = %dir.display(),
-                            ?err,
-                            "mission GC: failed to remove workspace directory",
-                        );
-                    }
-                }
+                // Retention is advisory. Only the explicit lifecycle receipt
+                // path may mutate a mission filesystem.
+                report.proposed += 1;
+                tracing::info!(path = %dir.display(), action = "requires_authorization", "mission GC audit");
             }
             if page_len < LIST_PAGE_SIZE {
                 break;
@@ -1016,24 +1004,14 @@ async fn orphan_sweep(
                         } else if !index_full.complete {
                             Verdict::Keep("mission index incomplete; not trusting orphan verdicts")
                         } else {
-                            // No mission anywhere claims this dir. Use the dir
-                            // mtime as the age signal, with the normal retention
-                            // as a grace period for freshly-created dirs whose
-                            // mission row hasn't landed yet.
-                            let old_enough = match tokio::fs::metadata(&dir).await {
-                                Ok(meta) => match meta.modified() {
-                                    Ok(mtime) => {
-                                        chrono::DateTime::<Utc>::from(mtime) < params.cutoff
-                                    }
-                                    Err(_) => false,
-                                },
-                                Err(_) => false,
-                            };
-                            if old_enough {
-                                Verdict::Delete("no mission in any store", true, false)
-                            } else {
-                                Verdict::Keep("unmatched but too recent")
-                            }
+                            // Absence from the index is insufficient evidence:
+                            // a delayed/offline store, shared root, or failed
+                            // reconciliation can make a live mission invisible.
+                            // Orphans remain recoverable until an explicit,
+                            // persisted authorization path exists.
+                            Verdict::Keep(
+                                "unmatched mission directory; explicit authorization required",
+                            )
                         }
                     }
                 };
@@ -1042,7 +1020,7 @@ async fn orphan_sweep(
                         tracing::debug!(path = %dir.display(), reason, "mission GC: kept");
                     }
                     Verdict::Delete(reason, orphan, stopped) => {
-                        if params.dry_run && dry_run_candidates.contains(&dir) {
+                        if dry_run_candidates.contains(&dir) {
                             tracing::debug!(
                                 path = %dir.display(),
                                 reason,
@@ -1066,33 +1044,8 @@ async fn orphan_sweep(
                             );
                             continue;
                         }
-                        match tokio::fs::remove_dir_all(&dir).await {
-                            Ok(()) => {
-                                report.removed += 1;
-                                if orphan {
-                                    report.orphans_removed += 1;
-                                }
-                                if stopped {
-                                    report.stopped_removed += 1;
-                                }
-                                report.bytes_freed = report.bytes_freed.saturating_add(size);
-                                tracing::info!(
-                                    path = %dir.display(),
-                                    workspace = %ws.name,
-                                    bytes = size,
-                                    reason,
-                                    "mission GC: removed workspace directory (orphan sweep)",
-                                );
-                            }
-                            Err(err) => {
-                                report.errors += 1;
-                                tracing::warn!(
-                                    path = %dir.display(),
-                                    ?err,
-                                    "mission GC: failed to remove directory (orphan sweep)",
-                                );
-                            }
-                        }
+                        report.proposed += 1;
+                        tracing::info!(path = %dir.display(), action = "requires_authorization", reason, "mission GC audit");
                     }
                 }
             }

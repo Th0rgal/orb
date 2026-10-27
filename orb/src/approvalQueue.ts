@@ -1,7 +1,8 @@
-import { api } from "./api";
+import { api, ApiError } from "./api";
+import { approveSecretRequest, getSecretBroker, type SecretAccessRequest } from "./bitwardenApi";
 import { signedApi } from "./deviceApproval";
-import { missionLabel } from "./missionAccessApi";
-import { lifetimeLabel, requestTitle, scopeUnlocks, type PrivilegeScope } from "./privilegeAccessApi";
+import { approveMissionAccess, getMissionAccess, missionLabel, type MissionAccessRequest } from "./missionAccessApi";
+import { approvePrivilegeAccess, getPrivilegeAccess, lifetimeLabel, requestTitle, scopeUnlocks, type PrivilegeRequest, type PrivilegeScope } from "./privilegeAccessApi";
 
 /**
  * Every request a mission raises for the user's approval, of any kind, as
@@ -28,9 +29,63 @@ export interface ApprovalItem {
   digest: string;
   /** The kind's own request, for labels. */
   request: Record<string, unknown>;
+  /**
+   * Built by this client from a per-kind list because Core has no queue yet
+   * (it predates /api/approvals). No digest: approved through the kind's own
+   * signed route, one request at a time.
+   */
+  legacy?: boolean;
 }
 
-export const getApprovalQueue = () => api<{ items: ApprovalItem[] }>("/api/approvals/queue");
+/** Risk of a kind's tier, as Core assigns it (approvals.json `risk`). */
+export function riskOf(kind: ApprovalKind, tier: string, request: Record<string, unknown> = {}): ApprovalRisk {
+  if (kind === "privilege") return tier === "root_exec" ? "critical" : tier === "service_deploy" ? "elevated" : "routine";
+  if (kind === "mission_access") return "elevated";
+  if (tier === "delete" || tier === "move") return "critical";
+  return tier === "write" || request.all_projects === true ? "elevated" : "routine";
+}
+
+/** A per-kind request as a queue item, for a Core without the queue. */
+export function legacyItem(kind: ApprovalKind, r: PrivilegeRequest | SecretAccessRequest | MissionAccessRequest): ApprovalItem {
+  const request = r as unknown as Record<string, unknown>;
+  const tier = kind === "privilege" ? str(request.scope) : kind === "secret" ? str(request.kind) : "read_mission";
+  const target = kind === "privilege" ? str(request.target_host) : kind === "mission_access" ? str(request.target_mission_id) : str(request.key) || str(request.project_id) || "*";
+  return {
+    kind,
+    id: r.id,
+    requester_mission_id: str(request.requester_mission_id) || str(request.mission_id),
+    requester_title: (request.requester_title ?? request.mission_title ?? null) as string | null,
+    tier,
+    target,
+    risk: riskOf(kind, tier, request),
+    reason: str(request.reason),
+    created_at: str(request.created_at),
+    digest: "",
+    request,
+    legacy: true,
+  };
+}
+
+/**
+ * Every pending approval. A Core that predates the queue answers 404; then
+ * the per-kind lists the earlier clients used build the same items, each
+ * list on its own so one failure never hides the others' requests.
+ */
+export async function getApprovalQueue(): Promise<{ items: ApprovalItem[] }> {
+  try {
+    return await api<{ items: ApprovalItem[] }>("/api/approvals/queue");
+  } catch (e) {
+    if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 405)) throw e;
+  }
+  const [privilege, secrets, missions] = await Promise.allSettled([getPrivilegeAccess(), getSecretBroker(), getMissionAccess()]);
+  const items = [
+    ...(privilege.status === "fulfilled" ? privilege.value.requests.filter((r) => r.state === "pending").map((r) => legacyItem("privilege", r)) : []),
+    ...(secrets.status === "fulfilled" ? secrets.value.requests.filter((r) => r.status === "pending").map((r) => legacyItem("secret", r)) : []),
+    ...(missions.status === "fulfilled" ? missions.value.requests.filter((r) => r.state === "pending").map((r) => legacyItem("mission_access", r)) : []),
+  ];
+  if (!items.length && [privilege, secrets, missions].every((x) => x.status === "rejected")) throw (privilege as PromiseRejectedResult).reason;
+  return { items: items.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)) };
+}
 
 const SECRET_VERB: Record<string, string> = { read: "Read", write: "Store", delete: "Delete", move: "Move" };
 const RISK_ORDER: ApprovalRisk[] = ["critical", "elevated", "routine"];
@@ -96,8 +151,22 @@ export function signingReason(items: ApprovalItem[]): string {
 }
 
 /** What "Approve all" covers: critical items only when the approver ticked them. */
-export const batchApprovable = (items: ApprovalItem[], includeCritical: boolean) =>
-  items.filter((i) => includeCritical || i.risk !== "critical");
+/** Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs). */
+export const MAX_BATCH = 20;
+
+/**
+ * What "Approve N" under the normal rows covers: the non-critical items only,
+ * at most MAX_BATCH (the rest stay for the next signature).
+ */
+export const normalBatch = (items: ApprovalItem[]) => items.filter((i) => i.risk !== "critical").slice(0, MAX_BATCH);
+
+/**
+ * What the footer's "Approve all" covers: every item, critical ones included,
+ * critical first so the device prompt names them before anything else. The
+ * button names the critical count and is a separate, explicit signature.
+ */
+export const allBatch = (items: ApprovalItem[]) =>
+  [...items].sort((a, b) => RISK_ORDER.indexOf(a.risk) - RISK_ORDER.indexOf(b.risk)).slice(0, MAX_BATCH);
 
 const answeredEvent: Record<ApprovalKind, string> = {
   secret: "orb:secret-request-answered",
@@ -114,6 +183,7 @@ const answered = (items: Pick<ApprovalItem, "kind" | "id">[]) => {
  * (the caller passes them in `items` only then).
  */
 export async function approveItems(items: ApprovalItem[]) {
+  if (items.some((i) => i.legacy)) return approveLegacy(items);
   const s = queueSummary(items);
   const out = await signedApi<unknown>(
     "POST",
@@ -123,6 +193,19 @@ export async function approveItems(items: ApprovalItem[]) {
   );
   answered(items);
   return out;
+}
+
+/**
+ * A Core without the queue has no batch route: approve each request through
+ * its kind's own signed route, with the lifetime it asked for (as the
+ * clients before the queue did). Each call dispatches its "answered" event.
+ */
+async function approveLegacy(items: ApprovalItem[]) {
+  for (const i of items) {
+    if (i.kind === "privilege") await approvePrivilegeAccess(i.request as unknown as PrivilegeRequest);
+    else if (i.kind === "mission_access") await approveMissionAccess(i.request as unknown as MissionAccessRequest);
+    else await approveSecretRequest(i.id, undefined, undefined, signingReason([i]));
+  }
 }
 
 const DENY_PATH: Record<ApprovalKind, (id: string) => string> = {

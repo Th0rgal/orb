@@ -27,8 +27,8 @@ class OrbApprovalQueueTest {
             val got = OrbApprovalQueue.summary(items)
             assertEquals(s["risks"], got.risks)
             assertEquals(s["missions"], got.missions)
-            assertEquals((s["without_critical"] as Number).toInt(), OrbApprovalQueue.batchApprovable(items, false).size)
-            assertEquals(items.size, OrbApprovalQueue.batchApprovable(items, true).size)
+            assertEquals((s["without_critical"] as Number).toInt(), OrbApprovalQueue.normalBatch(items).size)
+            assertEquals(items.size, OrbApprovalQueue.allBatch(items).size)
         }
     }
 
@@ -46,9 +46,55 @@ class OrbApprovalQueueTest {
         )
     }
 
+    @Test fun neverAsksCoreForMoreThanOneSignatureCanApprove() {
+        val many = (0 until OrbApprovalQueue.MAX_BATCH + 5).map { item(2) + ("id" to "i$it") }
+        assertEquals(OrbApprovalQueue.MAX_BATCH, OrbApprovalQueue.allBatch(many).size)
+        assertEquals(OrbApprovalQueue.MAX_BATCH, OrbApprovalQueue.normalBatch(many).size)
+    }
+
     @Test fun deniesThroughEachKindsRoute() {
         assertEquals("/api/privilege-access/i0/deny", OrbApprovalQueue.denyPath(item(0)) { it })
         assertEquals("/api/bitwarden/requests/i2/reject", OrbApprovalQueue.denyPath(item(2)) { it })
         assertEquals("/api/mission-access/i7/deny", OrbApprovalQueue.denyPath(item(7)) { it })
+    }
+
+    @Test fun riskMatchesCoreRiskTable() {
+        for (c in OrbJSON.dictList(spec["risk"])) {
+            assertEquals(c.toString(), c["risk"], OrbApprovalQueue.riskOf(c["kind"] as String, c["tier"] as String, mapOf("all_projects" to (c["all_projects"] == true))))
+        }
+    }
+
+    /** A Core without /api/approvals: the per-kind lists still produce cards, and an empty list hides nothing else. */
+    @Test fun legacyListsBuildTheSameItems() {
+        val privilege = listOf(
+            mapOf("id" to "p1", "state" to "pending", "scope" to "service_deploy", "target_host" to "agent-core", "requester_mission_id" to "m1",
+                "requester_title" to "Ship usage fix", "reason" to "deploy", "ttl_minutes" to 240.0, "session_scoped" to true, "created_at" to "2026-10-27T10:00:00Z"),
+            mapOf("id" to "p0", "state" to "approved", "scope" to "ops_read", "target_host" to "ashur", "created_at" to "2026-10-27T08:00:00Z"),
+        )
+        val missions = listOf(
+            mapOf("id" to "a1", "state" to "pending", "requester_mission_id" to "m2", "requester_title" to "Fleet health", "target_mission_id" to "t1",
+                "target_title" to "Disk cleanup", "reason" to "r", "ttl_hours" to 24.0, "created_at" to "2026-10-27T09:00:00Z"),
+        )
+        val items = OrbApprovalQueue.legacyItems(privilege, emptyList(), missions)
+        assertEquals(listOf("Service deploy on agent-core", "Read Disk cleanup"), items.map { OrbApprovalQueue.title(it) })
+        assertEquals(listOf("Ship usage fix", "Fleet health"), items.map { OrbApprovalQueue.requester(it) })
+        assertEquals(listOf("elevated", "elevated"), items.map { it["risk"] })
+        assertTrue(items.all { it["legacy"] == true })
+        assertEquals("Allows restart and deploy services, including production · for this session (max 4 h)", OrbApprovalQueue.detail(items[0]))
+        assertEquals("/api/privilege-access/p1/approve" to mapOf("ttl_minutes" to 240, "session_scoped" to true), OrbApprovalQueue.legacyApprove(items[0]) { it })
+        assertEquals("/api/mission-access/a1/approve" to mapOf("ttl_hours" to 24), OrbApprovalQueue.legacyApprove(items[1]) { it })
+        val secret = OrbApprovalQueue.legacyItem("secret", mapOf("id" to "s1", "status" to "pending", "kind" to "delete", "mission_id" to "m3", "key" to "OLD", "reason" to "x"))
+        assertEquals("critical", secret["risk"])
+        assertEquals("/api/bitwarden/requests/s1/approve", OrbApprovalQueue.legacyApprove(secret) { it }.first)
+    }
+
+    /** "Approve N" covers the normal items only; "Approve all" covers everything, critical first, and says how many are critical. */
+    @Test fun twoButtonsNormalOnlyAndAllWithCriticalFirst() {
+        val root = OrbApprovalQueue.legacyItem("privilege", mapOf("id" to "p1", "state" to "pending", "scope" to "root_exec", "target_host" to "self", "requester_mission_id" to "m1"))
+        val read = OrbApprovalQueue.legacyItem("privilege", mapOf("id" to "p2", "state" to "pending", "scope" to "ops_read", "target_host" to "ashur", "requester_mission_id" to "m1"))
+        assertEquals(listOf("p2"), OrbApprovalQueue.normalBatch(listOf(read, root)).map { it["id"] })
+        assertEquals(listOf("p1", "p2"), OrbApprovalQueue.allBatch(listOf(read, root)).map { it["id"] })
+        assertEquals("Approve all (2, incl. 1 critical)", OrbApprovalQueue.approveAllLabel(listOf(read, root)))
+        assertEquals("Approve all", OrbApprovalQueue.approveAllLabel(listOf(read)))
     }
 }

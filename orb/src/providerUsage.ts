@@ -58,17 +58,29 @@ export function usageWindows(u: ProviderUsage) {
   return windows;
 }
 
+/** Where the owner verifies an Antigravity account Google refuses to serve:
+ *  Google's own validation page when the refusal carried one, else signing
+ *  in to Antigravity with that account. */
+export function verificationUrl(usage: ProviderUsage | undefined, email: string | undefined) {
+  if (usage?.verification_url?.startsWith("https://")) return usage.verification_url;
+  const query = new URLSearchParams({ continue: "https://antigravity.google/" });
+  if (email) query.set("Email", email);
+  return `https://accounts.google.com/AccountChooser?${query}`;
+}
+
 export function effectiveProviderStatus(a: AIProvider, usage?: ProviderUsage, health?: AccountHealthSnapshot) {
   // Checked first: the backend skips a disabled account whatever its quota.
   if (a.enabled === false) return "disabled";
   // The router's circuit breaker saw the account fail as a whole (402 / no
   // credit, 401 / 403): it is skipped until its next probe, whatever the
   // saved credential says.
+  // Google refuses to serve the account until its owner verifies it. Its
+  // 403 also trips the breaker, but the login itself is fine: verifying,
+  // not re-authenticating, is the fix.
+  if (usage?.status === "needs_verification") return "needs_verification";
   if (health?.account_state === "out_of_credit") return "out_of_credit";
   if (health?.account_state === "auth_failed") return "auth_failed";
   if (a.status.type === "needs_reauth" || usage?.status === "needs_reauth") return "needs_reauth";
-  // Google refuses to serve the account until its owner verifies it.
-  if (usage?.status === "needs_verification") return "needs_verification";
   if (usage?.error) return "error";
   const quota = usage ? quotaStatus(usageWindows(usage)) : null;
   if (quota?.level === "exhausted") return quota.accountWide ? "quota_exhausted" : "pool_exhausted";

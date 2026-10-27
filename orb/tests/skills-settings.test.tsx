@@ -220,7 +220,8 @@ describe("SkillsSettings", () => {
     expect(syncCalls).toHaveLength(0);
     releaseBody();
     await waitFor(() => expect(syncCalls).toHaveLength(1));
-    expect(syncCalls[0]).toMatchObject({ prune_removed: false });
+    // Auto-sync also prunes: only copies carrying Orb's marker are ever removed.
+    expect(syncCalls[0]).toMatchObject({ prune_removed: true });
   });
 
   it("loads Core Library skills and project skills when connected", async () => {
@@ -298,80 +299,33 @@ describe("SkillsSettings", () => {
     fireEvent.click(screen.getByText("aristotle-tactics"));
     expect(opened).toEqual(["pf:erdos-647:skills/aristotle-tactics/SKILL.md"]);
   });
-  it("edits, deletes and previews delivery against the Library", async () => {
+  it("opens a skill as its own page and previews delivery under Advanced", async () => {
     setConnection("https://agent-backend.thomas.md", "test-jwt");
-    const syncCalls: Array<{ library_skills: Array<{ name: string }>; prune_removed: boolean }> = [];
-    const statusCalls: unknown[] = [];
-    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
-      core: {
-        invoke: async (cmd: string, args?: any) => {
-          if (cmd === "local_skills_status") { statusCalls.push(args); return sampleLocalReport(true); }
-          if (cmd === "local_skills_sync") {
-            syncCalls.push(args.request);
-            return { synced_skills: 1, harnesses_updated: 6, skipped_unmanaged: [], pruned: [], report: sampleLocalReport(true) };
-          }
-          if (cmd === "local_agents_scan") return [];
-          return null;
-        },
-      },
-    };
-    let content = "---\nname: spark-lean-offload\ndescription: Offload Lean 4 builds to the DGX Spark arbiter safely.\n---\n# Spark\n";
-    const requests: string[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input), method = init?.method ?? "GET";
-      requests.push(`${method} ${url.replace("https://agent-backend.thomas.md", "")}${url.endsWith("/commit") ? ` ${JSON.parse(String(init?.body)).message}` : ""}`);
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string) => Promise<unknown> } } }).__TAURI__ = { core: { invoke: async () => null } };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
       const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
       if (url.endsWith("/api/library/skill")) return ok([{ name: "spark-lean-offload", path: "skill/spark-lean-offload", audience: ["mission", "local"] }]);
-      if (url.endsWith("/api/library/skill/spark-lean-offload")) {
-        if (method === "PUT") { content = JSON.parse(String(init?.body)).content; return new Response("Skill saved successfully", { status: 200 }); }
-        if (method === "DELETE") return new Response("Skill deleted successfully", { status: 200 });
-        return ok({ name: "spark-lean-offload", path: "skill/spark-lean-offload", content, files: [], references: [] });
-      }
       if (url.endsWith("/api/projects")) return ok({ projects: [{ slug: "erdos-647", title: "Erdos 647 Proof", status: "active", updated_at: "2026-10-08T12:00:00Z" }] });
       if (url.includes("/api/projects/erdos-647/skills")) return new Response("", { status: 404 });
-      if (url.endsWith("/api/library/commit")) return new Response("Committed successfully", { status: 200 });
-      if (url.endsWith("/api/library/push")) return new Response("Pushed successfully", { status: 200 });
       if (url.includes("/api/library/skill-delivery")) return ok({ skills: [{ name: "spark-lean-offload", reasons: ["base", "project"] }], missing: [] });
       return ok({});
     });
-
-    render(() => <SkillsSettings />);
-    await waitFor(() => expect(statusCalls.some((c: any) => c?.request?.library_skills?.length === 1)).toBe(true));
+    const opened: string[] = [];
+    render(() => <SkillsSettings onOpenPage={(id) => opened.push(id)} />);
     fireEvent.click(await screen.findByText("spark-lean-offload"));
-    const dialog = await screen.findByRole("dialog");
-    // Lint: missing metadata.sandboxed.
-    expect(dialog.textContent).toContain("No metadata.sandboxed block");
-    // The Assistant also uses it, and it is always loaded; Save commits and pushes to the repo.
-    const before = syncCalls.length;
-    fireEvent.click(screen.getByRole("checkbox", { name: "Assistant" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Always" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(screen.getByText("Saved to repo")).toBeTruthy());
-    expect(content).toContain("audience: [mission, coordinator, local]");
-    expect(content).toContain("scope: global");
-    expect(requests).toContain("POST /api/library/commit skill: update spark-lean-offload");
-    expect(requests).toContain("POST /api/library/push");
-    await waitFor(() => expect(syncCalls.length).toBe(before + 1));
-    expect(syncCalls.at(-1)!.prune_removed).toBe(false);
-    expect(syncCalls.at(-1)!.library_skills.map((s) => s.name)).toEqual(["spark-lean-offload"]);
+    expect(opened).toEqual(["sk:spark-lean-offload"]);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Actions for spark-lean-offload" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "History" }));
+    expect(opened.at(-1)).toBe("sk:spark-lean-offload#history");
 
-    // Delete through the in-app confirmation; sync prunes.
-    await waitFor(() => expect((screen.getByRole("button", { name: "Delete…" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "Delete…" }));
-    // Confirms inside the panel: no second dialog.
-    expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(screen.queryByText("spark-lean-offload")).toBeNull();
-    await waitFor(() => expect(syncCalls.at(-1)).toMatchObject({ prune_removed: true, library_skills: [] }));
-    expect(requests).toContain("DELETE /api/library/skill/spark-lean-offload");
-    expect(requests).toContain("POST /api/library/commit skill: delete spark-lean-offload");
-
-    // Delivery preview (under Advanced) degrades when project skills are unsupported.
     const advanced = document.querySelector<HTMLDetailsElement>("details.skills-advanced")!;
     advanced.open = true;
     fireEvent(advanced, new Event("toggle"));
     const select = (await screen.findByLabelText("Preview project")) as HTMLSelectElement;
+    // Rows show before projects load; wait for the project to be offered.
+    await waitFor(() => expect(Array.from(select.options).some((o) => o.value === "erdos-647")).toBe(true));
     fireEvent.change(select, { target: { value: "erdos-647" } });
     await waitFor(() => {
       expect(screen.getByText("This backend does not support project skill selection yet.")).toBeTruthy();
@@ -408,5 +362,47 @@ describe("SkillsSettings", () => {
     // Retry only commits: the file is already gone, so the 404 is fine.
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(screen.queryByText("agent-browser")).toBeNull();
+  });
+
+  it("separates removed skills, real local edits and old copies", async () => {
+    setConnection("https://agent-backend.thomas.md", "test-jwt");
+    const report = sampleLocalReport(true);
+    report.skills = [
+      { name: "agent-browser", origin: "User global", harnesses: ["claudecode"], managed: true, removed_from_library: true, legacy_only: false, divergent: true, sources: [{ id: "agent-skills-repo", label: "Agent Skills Repo", path: "/Users/thomas/work/skills/skills/agent-browser", legacy: true, hash: "a", lines: 3, content: "---\nname: agent-browser\n---\n" }] },
+      { name: "spark-lean-offload", origin: "Library", harnesses: ["claudecode"], managed: false, in_library: true, edited_copy: { harness: "Claude Code", path: "/Users/thomas/.claude/skills/spark-lean-offload", content: "# mine" } },
+      { name: "backblaze-b2-backups", origin: "Agent Skills Repo", harnesses: [], managed: false, legacy_only: true, sources: [{ id: "agent-skills-repo", label: "Agent Skills Repo", path: "/Users/thomas/work/skills/skills/backblaze-b2-backups", legacy: true, hash: "b", lines: 3, content: "---\nname: backblaze-b2-backups\n---\n" }] },
+    ];
+    const syncCalls: any[] = [];
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: { invoke: async (cmd: string, args?: any) => {
+        if (cmd === "local_skills_status") return report;
+        if (cmd === "local_skills_sync") { syncCalls.push(args.request); return { synced_skills: 1, harnesses_updated: 1, skipped_unmanaged: [], pruned: ["~/.claude/skills/agent-browser"], report }; }
+        return null;
+      } },
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill")) return ok([{ name: "spark-lean-offload", path: "skill/spark-lean-offload" }]);
+      if (url.endsWith("/api/library/skill/spark-lean-offload")) return ok({ name: "spark-lean-offload", path: "skill/spark-lean-offload", content: "---\nname: spark-lean-offload\n---\n# Library\n", files: [], references: [] });
+      return ok({});
+    });
+    const { container } = render(() => <SkillsSettings />);
+    const removed = await waitFor(() => { const el = container.querySelector('.skills-catalog-card [data-skill="agent-browser"]'); expect(el?.textContent).toContain("Removed"); return el!; });
+    expect(removed.textContent).toContain("Removed from Library");
+    expect(container.querySelector('[data-skill="spark-lean-offload"]')!.textContent).toContain("Edited on this Mac");
+    // Old copies are not in the main list nor in "Needs attention".
+    const main = container.querySelectorAll(".skills-catalog-card")[0];
+    expect(main.querySelector('[data-skill="backblaze-b2-backups"]')).toBeNull();
+    expect(container.querySelector(".skills-oldcopies")!.textContent).toContain("Old copies (1)");
+    expect(screen.getByRole("button", { name: /Needs attention/ }).textContent).toContain("2");
+    // Resolve is one menu item, and Remove copies prunes.
+    fireEvent.click(screen.getByRole("button", { name: "Actions for spark-lean-offload" }));
+    expect(screen.getByRole("menuitem", { name: "Resolve…" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /Keep|Discard/ })).toBeNull();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Actions for agent-browser" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Remove copies" }));
+    await waitFor(() => expect(syncCalls.some((c) => c.prune_removed)).toBe(true));
   });
 });

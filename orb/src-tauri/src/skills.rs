@@ -164,6 +164,21 @@ pub struct DiscoveredSkill {
     pub stale_harnesses: Vec<String>,
     #[serde(default)]
     pub lines: usize,
+    /// Orb installed it (marker present) but the Library no longer has it: a
+    /// pruning sync removes these copies.
+    #[serde(default)]
+    pub removed_from_library: bool,
+    /// A Library skill whose installed copy is the user's own and differs from
+    /// the Library (sync never overwrites it without `replace_unmanaged`).
+    #[serde(default)]
+    pub edited_copy: Option<EditedCopy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditedCopy {
+    pub harness: String,
+    pub path: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +219,10 @@ pub struct SyncSkillsRequest {
     pub library_skills: Vec<SyncSkillPayload>,
     #[serde(default)]
     pub prune_removed: bool,
+    /// Skills whose differing unmanaged copies the user chose to replace with
+    /// the Library version ("Use the Library version").
+    #[serde(default)]
+    pub replace_unmanaged: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -912,7 +931,7 @@ pub fn inspect_local_skills_in(
                 origin: primary.map(|p| p.label.clone()).unwrap_or_default(),
                 source_path: primary.and_then(|p| p.path.clone()),
                 harnesses: Vec::new(),
-                managed: catalog.desired.contains_key(name),
+                managed: false,
                 content_preview: Some(primary_content.chars().take(4000).collect()),
                 divergent: hashes.len() > 1,
                 desired: catalog.desired.contains_key(name),
@@ -923,6 +942,8 @@ pub fn inspect_local_skills_in(
                 stale_harnesses: Vec::new(),
                 lines: line_count(primary_content),
                 sources: copies.clone(),
+                removed_from_library: false,
+                edited_copy: None,
             },
         );
     }
@@ -963,6 +984,8 @@ pub fn inspect_local_skills_in(
                     scope: None,
                     stale_harnesses: Vec::new(),
                     lines: line_count(&content),
+                    removed_from_library: false,
+                    edited_copy: None,
                 });
             if item.description.is_none() && description.is_some() {
                 item.description = description;
@@ -970,6 +993,7 @@ pub fn inspect_local_skills_in(
             if !item.harnesses.iter().any(|h| h == id) {
                 item.harnesses.push((*id).to_string());
             }
+            item.managed |= managed;
             match desired_hash.get(skill_name.as_str()) {
                 Some(want) if *want == hash => {
                     matching.insert(skill_name.clone());
@@ -977,8 +1001,22 @@ pub fn inspect_local_skills_in(
                 Some(_) => {
                     outdated.push(skill_name.clone());
                     item.stale_harnesses.push((*id).to_string());
+                    // Orb's own copies are just behind; only the user's copy is an edit.
+                    if !managed && item.in_library && item.edited_copy.is_none() {
+                        item.edited_copy = Some(EditedCopy {
+                            harness: (*hname).to_string(),
+                            path: skill_path.display().to_string(),
+                            content: content.clone(),
+                        });
+                    }
                 }
-                None if managed => stale_managed.push(skill_name.clone()),
+                None if managed => {
+                    stale_managed.push(skill_name.clone());
+                    if catalog.library_known && !item.in_library && skill_name != IDENTITY_SKILL {
+                        item.removed_from_library = true;
+                        item.legacy_only = false;
+                    }
+                }
                 None => {}
             }
         }
@@ -1130,12 +1168,18 @@ pub fn sync_local_skills_in(
                 let existing_md = fs::read_to_string(dest.join("SKILL.md")).unwrap_or_default();
                 let same = content_hash(&existing_md) == content_hash(&skill.content);
                 if !is_managed_skill_dir(&dest) {
-                    // Adopt an identical unmanaged copy; otherwise it belongs to the user.
+                    // Adopt an identical unmanaged copy; otherwise it belongs to the user
+                    // unless they chose the Library version for it.
                     if same {
                         write_marker(&dest);
-                    } else {
-                        skipped_unmanaged.insert(format!("~/{global_rel}/{skill_name}"));
+                        continue;
                     }
+                    if !request.replace_unmanaged.iter().any(|n| n == skill_name) {
+                        skipped_unmanaged.insert(format!("~/{global_rel}/{skill_name}"));
+                        continue;
+                    }
+                    install_desired(&dest, skill)?;
+                    updated_this_harness = true;
                     continue;
                 }
                 if same && matches!(skill.body, DesiredBody::Dir(_)) {
@@ -1256,6 +1300,7 @@ mod tests {
         SyncSkillsRequest {
             library_skills: skills,
             prune_removed: prune,
+            replace_unmanaged: Vec::new(),
         }
     }
 
@@ -1587,5 +1632,51 @@ mod tests {
                 .join("development-identity/SKILL.md")
                 .is_file());
         }
+    }
+
+    #[test]
+    fn removed_from_library_is_reported_and_pruned_while_unmanaged_edits_stay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        // An Orb-installed copy of a skill the Library no longer has.
+        let gone = home.join(".claude/skills/gone");
+        write_skill(&gone, "---\nname: gone\n---\n# Gone\n");
+        fs::write(gone.join(ORB_MANAGED_MARKER), "managed-by-orb-skills\n").unwrap();
+        // The user's own edited copy of a Library skill.
+        write_skill(
+            &home.join(".claude/skills/kept"),
+            "---\nname: kept\n---\n# Mine\n",
+        );
+        let library = vec![lib(
+            "kept",
+            "---\nname: kept\nmetadata:\n  sandboxed:\n    audience: [local]\n---\n# Library\n",
+        )];
+
+        let report = inspect_local_skills_in(home, &library).unwrap();
+        let gone_row = report.skills.iter().find(|s| s.name == "gone").unwrap();
+        assert!(gone_row.removed_from_library && gone_row.managed && !gone_row.legacy_only);
+        let kept_row = report.skills.iter().find(|s| s.name == "kept").unwrap();
+        let edited = kept_row.edited_copy.as_ref().expect("edited copy");
+        assert!(edited.content.contains("# Mine"));
+
+        // A pruning sync removes the managed leftover and keeps the user's copy.
+        let res = sync_local_skills_in(home, request(library.clone(), true)).unwrap();
+        assert!(res.pruned.contains(&"~/.claude/skills/gone".to_string()));
+        assert!(!gone.exists());
+        assert!(
+            fs::read_to_string(home.join(".claude/skills/kept/SKILL.md"))
+                .unwrap()
+                .contains("# Mine")
+        );
+
+        // Choosing the Library version replaces it.
+        let mut req = request(library, false);
+        req.replace_unmanaged = vec!["kept".to_string()];
+        sync_local_skills_in(home, req).unwrap();
+        assert!(
+            fs::read_to_string(home.join(".claude/skills/kept/SKILL.md"))
+                .unwrap()
+                .contains("# Library")
+        );
     }
 }

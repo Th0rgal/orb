@@ -1004,8 +1004,11 @@ export function FilePanelProvider(p: {
               <Show when={tree()}>
                 <nav class="file-tree" aria-label="File explorer">
                   <For each={sources()}>
-                    {(root) => (
-                      <section class="file-root">
+                    {(root, index) => (
+                      <section class="file-root" classList={{ "file-root-session": !!root.group }}>
+                        <Show when={root.group && sources()[index() - 1]?.group !== root.group}>
+                          <p class="file-group-label">{root.group === "later" ? "Later sessions" : "Earlier sessions"}</p>
+                        </Show>
                         <button
                           class="file-source"
                           title={[root.label, root.machine, root.path]
@@ -1026,7 +1029,7 @@ export function FilePanelProvider(p: {
                             <Ic.ChevronRight size={12} />
                           )}
                           <span class="file-root-icon">{root.id==='controller'?<TreeIcon.Clock size={16}/>:root.id==='context'?<TreeIcon.FolderOpen size={16}/>:root.local?<Ic.LaptopIcon size={16}/>:<TreeIcon.Server size={16}/>}</span>
-                          <span class="file-root-text"><span class="file-source-label">{root.label.split(" · ")[0]}</span>
+                          <span class="file-root-text"><span class="file-source-label">{root.group ? root.label : root.label.split(" · ")[0]}</span>
                           </span>
                         </button>
                         <Show when={!root.available}>
@@ -1176,7 +1179,7 @@ export function FilePanelProvider(p: {
                           </div>}>
                             <Suspense fallback={<p class="file-muted">Loading PDF viewer…</p>}><PdfPreview name={selected()?.name ?? "PDF"} load={loadPreviewBytes} close={() => setShowPdf(false)} /></Suspense>
                           </Show>}>
-                            <ImagePreview name={selected()?.name ?? "Image"} load={loadPreviewBytes} close={() => setShowImage(false)} />
+                            <ImagePreview name={selected()?.name ?? "Image"} path={selected()?.path} load={loadPreviewBytes} close={() => setShowImage(false)} />
                           </Show>
                         }
                       >

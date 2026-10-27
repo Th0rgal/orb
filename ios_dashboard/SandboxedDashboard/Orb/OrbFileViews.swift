@@ -460,6 +460,7 @@ struct OrbFilesSheet: View {
     @State private var loading = true
     @State private var error: String?
     @State private var workspace = false
+    @State private var sessions: [OrbFileService.Session] = []
 
     var body: some View {
         NavigationStack {
@@ -487,6 +488,19 @@ struct OrbFilesSheet: View {
                         .accessibilityIdentifier("files.workspace")
                     } header: { Text("Workspace") } footer: { Text("Read-only view of the mission’s files, wherever it runs.") }
                 }
+                ForEach([false, true], id: \.self) { later in
+                    let group = sessions.filter { $0.later == later }
+                    if !group.isEmpty {
+                        Section(later ? "Later sessions" : "Earlier sessions") {
+                            ForEach(group) { session in
+                                NavigationLink {
+                                    OrbWorkspaceBrowser(scope: .init(missionID: scope.missionID, workspaceID: scope.workspaceID, source: session.id), path: "", title: session.label)
+                                } label: { Label(session.label, systemImage: "clock.arrow.circlepath").lineLimit(1).truncationMode(.middle) }
+                                .accessibilityIdentifier("files.session.\(session.id)")
+                            }
+                        }
+                    }
+                }
             }
             .scrollContentBackground(.hidden)
             .background(OrbStyle.background)
@@ -502,10 +516,12 @@ struct OrbFilesSheet: View {
     private func load() async {
         loading = true
         defer { loading = false }
-        async let hasWorkspace = OrbFileService.shared.hasWorkspace(scope)
+        async let roots = try? OrbFileService.shared.roots(scope)
         do { files = try await OrbFileService.shared.sharedFiles(scope); error = nil }
         catch { self.error = (error as? OrbFileError)?.errorDescription ?? error.localizedDescription }
-        workspace = await hasWorkspace
+        let found = await roots
+        workspace = found?.workspace ?? false
+        sessions = found?.sessions ?? []
     }
 
     private func row(_ file: OrbFileRef) -> some View {
@@ -524,6 +540,7 @@ struct OrbFilesSheet: View {
 struct OrbWorkspaceBrowser: View {
     let scope: OrbFileService.Scope
     let path: String
+    var title: String? = nil
     @State private var entries: [OrbWorkspaceEntry] = []
     @State private var loading = true
     @State private var error: String?
@@ -535,7 +552,7 @@ struct OrbWorkspaceBrowser: View {
             if !loading && error == nil && entries.isEmpty { Text("This folder is empty.").foregroundStyle(OrbStyle.textSecondary) }
             ForEach(entries) { entry in
                 if entry.isDirectory {
-                    NavigationLink { OrbWorkspaceBrowser(scope: scope, path: entry.path) } label: { Label(entry.name, systemImage: "folder") }
+                    NavigationLink { OrbWorkspaceBrowser(scope: scope, path: entry.path, title: nil) } label: { Label(entry.name, systemImage: "folder") }
                 } else {
                     let ref = OrbFileRef(type: "file", path: entry.path, label: entry.name, size: entry.size)
                     NavigationLink { OrbFileViewer(ref: ref, scope: scope) } label: {
@@ -551,7 +568,7 @@ struct OrbWorkspaceBrowser: View {
         }
         .scrollContentBackground(.hidden)
         .background(OrbStyle.background)
-        .navigationTitle(path.isEmpty ? "Workspace" : OrbFileRefs.fileName(path))
+        .navigationTitle(path.isEmpty ? (title ?? "Workspace") : OrbFileRefs.fileName(path))
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await load() }
         .task { await load() }

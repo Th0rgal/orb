@@ -74,8 +74,23 @@ object OrbApprovalQueue {
     )
 
     /** What "Approve all" covers: critical items only when ticked. */
-    fun batchApprovable(items: List<Map<String, Any?>>, includeCritical: Boolean): List<Map<String, Any?>> =
-        items.filter { includeCritical || !isCritical(it) }
+    /** Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs). */
+    const val MAX_BATCH = 20
+
+    /** What "Approve N" under the normal rows covers: the non-critical items only, at most [MAX_BATCH]. */
+    fun normalBatch(items: List<Map<String, Any?>>): List<Map<String, Any?>> =
+        items.filter { !isCritical(it) }.take(MAX_BATCH)
+
+    /** What "Approve all" covers: every item, critical first so the prompt names them before anything else; at most [MAX_BATCH]. */
+    fun allBatch(items: List<Map<String, Any?>>): List<Map<String, Any?>> =
+        items.sortedBy { riskOrder.indexOf(it["risk"]).let { n -> if (n < 0) 3 else n } }.take(MAX_BATCH)
+
+    /** The bottom button: plain "Approve all", or red with the critical count. */
+    fun approveAllLabel(items: List<Map<String, Any?>>): String {
+        val all = allBatch(items)
+        val critical = all.count { isCritical(it) }
+        return if (critical == 0) "Approve all" else "Approve all (${all.size}, incl. $critical critical)"
+    }
 
     /** The signed body: each item by Core's digest. A single item is its own confirmation. */
     fun batchBody(items: List<Map<String, Any?>>): Map<String, Any?> = mapOf(
@@ -95,6 +110,57 @@ object OrbApprovalQueue {
             "privilege" -> "/api/privilege-access/$id/deny"
             "mission_access" -> "/api/mission-access/$id/deny"
             else -> "/api/bitwarden/requests/$id/reject"
+        }
+    }
+
+    /** Risk of a kind's tier, as Core assigns it (approvals.json `risk`). */
+    fun riskOf(kind: String, tier: String, request: Map<String, Any?> = emptyMap()): String = when (kind) {
+        "privilege" -> when (tier) { "root_exec" -> "critical"; "service_deploy" -> "elevated"; else -> "routine" }
+        "mission_access" -> "elevated"
+        else -> when {
+            tier == "delete" || tier == "move" -> "critical"
+            tier == "write" || request["all_projects"] == true -> "elevated"
+            else -> "routine"
+        }
+    }
+
+    /** A per-kind request as a queue item, for a Core without the queue. No digest: approved through the kind's own signed route. */
+    fun legacyItem(kind: String, r: Map<String, Any?>): Map<String, Any?> {
+        val tier = when (kind) { "privilege" -> str(r, "scope"); "secret" -> str(r, "kind"); else -> "read_mission" }
+        val target = when (kind) {
+            "privilege" -> str(r, "target_host")
+            "mission_access" -> str(r, "target_mission_id")
+            else -> str(r, "key").ifEmpty { str(r, "project_id").ifEmpty { "*" } }
+        }
+        return mapOf(
+            "kind" to kind, "id" to r["id"],
+            "requester_mission_id" to str(r, "requester_mission_id").ifEmpty { str(r, "mission_id") },
+            "requester_title" to (r["requester_title"] ?: r["mission_title"]),
+            "tier" to tier, "target" to target, "risk" to riskOf(kind, tier, r),
+            "reason" to r["reason"], "created_at" to r["created_at"], "digest" to "",
+            "request" to r, "legacy" to true,
+        )
+    }
+
+    /** Pending items from the per-kind lists the earlier clients used; an empty list hides nothing else. */
+    fun legacyItems(
+        privilege: List<Map<String, Any?>>,
+        secrets: List<Map<String, Any?>>,
+        missions: List<Map<String, Any?>>,
+    ): List<Map<String, Any?>> = (
+        privilege.filter { it["state"] == "pending" }.map { legacyItem("privilege", it) } +
+            secrets.filter { it["status"] == "pending" }.map { legacyItem("secret", it) } +
+            missions.filter { it["state"] == "pending" }.map { legacyItem("mission_access", it) }
+        ).sortedByDescending { str(it, "created_at") }
+
+    /** The kind's own approve route and body, for a Core without the queue. */
+    fun legacyApprove(i: Map<String, Any?>, encode: (String) -> String): Pair<String, Map<String, Any?>> {
+        val id = encode(str(i, "id"))
+        val r = request(i)
+        return when (i["kind"]) {
+            "privilege" -> "/api/privilege-access/$id/approve" to OrbPrivilegeAccess.approveBody(r)
+            "mission_access" -> "/api/mission-access/$id/approve" to mapOf("ttl_hours" to (r["ttl_hours"] as? Number)?.toInt())
+            else -> "/api/bitwarden/requests/$id/approve" to emptyMap()
         }
     }
 }

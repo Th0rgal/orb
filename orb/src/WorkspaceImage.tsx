@@ -3,6 +3,7 @@ import { Show, createEffect, createSignal, onCleanup, useContext } from "solid-j
 import { FileReferenceContext } from "./fileReferenceContext";
 import { Lightbox } from "./Lightbox";
 import * as Ic from "./icons";
+import { createImageMenu } from "./imageActions";
 
 /** An image the agent saved in its workspace and referenced by path in a reply.
  * Bytes come through the scoped file resolver, never a webview URL. */
@@ -12,6 +13,7 @@ export function WorkspaceImage(p: { path: string; alt: string }) {
   const [loading, setLoading] = createSignal(false);
   const [attempt, setAttempt] = createSignal(0);
   const [open, setOpen] = createSignal(false);
+  const menu = createImageMenu(() => ({ src: url(), label: p.path, path: p.path }));
   createEffect(() => {
     const path = p.path;
     attempt();
@@ -32,10 +34,12 @@ export function WorkspaceImage(p: { path: string; alt: string }) {
         <Ic.FileIcon size={16} /><span>{p.alt}</span>
         <small>{loading() ? "Loading image…" : resolver?.loadImage ? "Image unavailable · Retry" : p.path}</small>
       </button>}>
-      {src => <button type="button" class="md-workspace-image-open" title={`${p.alt} — ${p.path}`} onClick={() => setOpen(true)}>
+      {src => <button type="button" class="md-workspace-image-open" title={`${p.alt} — ${p.path}`} onClick={() => setOpen(true)} onContextMenu={menu.onContextMenu}>
         <img class="md-image" src={src()} alt={p.alt} onError={() => setUrl(null)} />
       </button>}
     </Show>
-    <Show when={open()}><Lightbox items={[{ src: url(), label: p.alt }]} index={0} onClose={() => setOpen(false)} /></Show>
+    <Show when={url()}><button type="button" class="md-image-download" aria-label="Download image" title="Save image as…" onClick={menu.save}><Ic.DownloadIcon size={14} /></button></Show>
+    {menu.view()}
+    <Show when={open()}><Lightbox items={[{ src: url(), label: p.alt, path: p.path }]} index={0} onClose={() => setOpen(false)} /></Show>
   </span>;
 }

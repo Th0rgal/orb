@@ -2674,6 +2674,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id/default", post(set_default))
         .route("/:id/health", post(check_provider_health))
         .route("/:id/usage", get(get_provider_usage_cached))
+        .route("/:id/antigravity/recheck", post(recheck_antigravity))
         .route(
             "/:id/mistral-usage-session",
             put(set_mistral_usage_session).delete(clear_mistral_usage_session),
@@ -10075,13 +10076,13 @@ async fn get_provider_usage(
                 "account_email": account_email,
                 "status": if login.is_some() { "connected" } else { "needs_reauth" },
             });
-            if let Some(login) = login {
+            if let Some(login) = &login {
                 match super::antigravity_usage::read(&client, &login.oauth.access_token).await {
                     super::subscription_usage::Quota::Fields(mut fields) => {
                         if let Some(serde_json::Value::Array(windows)) =
                             fields.get_mut("antigravity_windows")
                         {
-                            super::antigravity_accounts::remember_gemini_weekly(
+                            super::antigravity_accounts::remember_gemini_windows(
                                 &login.file,
                                 windows,
                             );
@@ -10094,7 +10095,7 @@ async fn get_provider_usage(
                         if unverified {
                             info["status"] = serde_json::json!("needs_verification");
                             info["usage_note"] = serde_json::json!(format!(
-                                "Needs Google verification ({}). Sign in to Antigravity with this account and complete Google's verification; it is excluded from routing and machine sign-in until then.",
+                                "Excluded from routing and machine sign-in until {} is verified with Google.",
                                 login.identity
                             ));
                         }
@@ -10110,6 +10111,21 @@ async fn get_provider_usage(
                         ));
                     }
                 }
+            }
+            // Google accepts the login but refuses every request until the
+            // owner verifies it (a proxied 403 VALIDATION_REQUIRED).
+            if let Some(login) = login
+                .as_ref()
+                .filter(|l| super::antigravity_accounts::needs_verification(&l.file))
+            {
+                info["status"] = serde_json::json!("needs_verification");
+                if let Some(url) = super::antigravity_accounts::validation_url(&login.file) {
+                    info["verification_url"] = serde_json::json!(url);
+                }
+                info["usage_note"] = serde_json::json!(format!(
+                    "Excluded from routing and machine sign-in until {} is verified with Google.",
+                    login.identity
+                ));
             }
             info
         }
@@ -10297,6 +10313,30 @@ async fn get_provider_usage_cached(
     }
     let value = live_fetch_and_cache(state, id).await?;
     Ok(Json(value))
+}
+
+/// POST /api/ai/providers/:id/antigravity/recheck — "Check again" after the
+/// owner verified the account with Google: forget the refusals seen so far,
+/// re-check every login now, and return the fresh usage.
+async fn recheck_antigravity(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let uuid = uuid::Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid provider id".to_string()))?;
+    let provider = state
+        .ai_providers
+        .get(uuid)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Provider not found".to_string()))?;
+    let login = super::cli_proxy_accounts::account_for(&provider).ok_or((
+        StatusCode::CONFLICT,
+        "This account has no Antigravity login to check.".to_string(),
+    ))?;
+    super::antigravity_accounts::recheck(&login.file);
+    state.health_tracker.clear_cooldown(uuid).await;
+    super::antigravity_accounts::refresh_and_sync(&state).await;
+    Ok(Json(live_fetch_and_cache(state, id).await?))
 }
 
 /// GET /api/ai/providers/usage — bulk snapshot of every cached entry.

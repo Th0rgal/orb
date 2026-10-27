@@ -1233,6 +1233,17 @@ impl ProviderHealthTracker {
             .is_some_and(|key| self.limits.is_cooling(&key))
     }
 
+    /// The usage limit parking `account_id`'s quota pool for `model_id`.
+    pub fn pool_limit(
+        &self,
+        provider_id: &str,
+        account_id: Uuid,
+        model_id: &str,
+    ) -> Option<crate::account_limits::LimitCooldown> {
+        self.limits
+            .active(&pool_limit_key(provider_id, account_id, model_id)?)
+    }
+
     fn park_pool(
         &self,
         key: &str,
@@ -1497,6 +1508,49 @@ pub struct ChainEntry {
     pub provider_id: String,
     /// Model ID to use with this provider (e.g., "glm-5", "minimax-2.5").
     pub model_id: String,
+}
+
+/// The same model served by another provider, tried in order when every
+/// account of the requested provider is rate-limited or out of quota. An
+/// explicit table: two ids are interchangeable only when listed here.
+/// A `(provider, model)` pair.
+type ModelId = (&'static str, &'static str);
+
+const EQUIVALENT_MODELS: &[(ModelId, &[ModelId])] = &[
+    (
+        ("google", "gemini-4-argon"),
+        &[("antigravity", "gemini-4-argon-medium")],
+    ),
+    (
+        ("antigravity", "gemini-4-argon-low"),
+        &[("google", "gemini-4-argon")],
+    ),
+    (
+        ("antigravity", "gemini-4-argon-medium"),
+        &[("google", "gemini-4-argon")],
+    ),
+    (
+        ("antigravity", "gemini-4-argon-high"),
+        &[("google", "gemini-4-argon")],
+    ),
+];
+
+/// A direct `provider/model` request followed by its equivalents on other
+/// providers, so the waterfall fails over on a 429 instead of exhausting a
+/// single-entry chain. Account order, quota and cooldowns of each provider
+/// are applied later by [`ModelChainStore::resolve_entries`].
+pub fn with_equivalent_fallbacks(entry: ChainEntry) -> Vec<ChainEntry> {
+    let fallbacks = EQUIVALENT_MODELS
+        .iter()
+        .find(|((provider, model), _)| *provider == entry.provider_id && *model == entry.model_id)
+        .map(|(_, fallbacks)| *fallbacks)
+        .unwrap_or_default();
+    std::iter::once(entry)
+        .chain(fallbacks.iter().map(|(provider, model)| ChainEntry {
+            provider_id: (*provider).to_string(),
+            model_id: (*model).to_string(),
+        }))
+        .collect()
 }
 
 /// A named model chain (fallback sequence).
@@ -3025,6 +3079,30 @@ pub type SharedModelChainStore = Arc<ModelChainStore>;
 #[cfg(test)]
 mod tests {
 
+    #[test]
+    fn rate_limited_google_argon_fails_over_to_antigravity() {
+        let chain = |provider: &str, model: &str| {
+            with_equivalent_fallbacks(ChainEntry {
+                provider_id: provider.into(),
+                model_id: model.into(),
+            })
+            .into_iter()
+            .map(|e| format!("{}/{}", e.provider_id, e.model_id))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            chain("google", "gemini-4-argon"),
+            ["google/gemini-4-argon", "antigravity/gemini-4-argon-medium"]
+        );
+        assert_eq!(
+            chain("antigravity", "gemini-4-argon-high"),
+            ["antigravity/gemini-4-argon-high", "google/gemini-4-argon"]
+        );
+        // No fuzzy matching: an unlisted id keeps its single entry.
+        assert_eq!(chain("google", "gemini-3-pro"), ["google/gemini-3-pro"]);
+        assert_eq!(chain("openai", "gemini-4-argon"), ["openai/gemini-4-argon"]);
+    }
+
     #[tokio::test]
     async fn subscription_cooldown_classifies_empty_chain_as_retryable() {
         use super::*;
@@ -3782,6 +3860,61 @@ mod tests {
             .await
             .is_empty());
         assert!(health.is_healthy(second_id).await);
+
+        // `google/gemini-4-argon` on a Gemini CLI login whose quota is spent
+        // (prod, 2026-10-27: 429 on a single-entry chain, retried forever)
+        // fails over to the Antigravity pool instead of exhausting.
+        let mut google = AIProvider::new(ProviderType::Google, "gemini-cli".into());
+        google.api_key = Some("fixture-key".into());
+        let google_id = google.id;
+        let pool = login("first", 0);
+        let pool_id = pool.id;
+        let store = store_with(vec![google, pool]).await;
+        let health = ProviderHealthTracker::new();
+        let argon = with_equivalent_fallbacks(ChainEntry {
+            provider_id: "google".into(),
+            model_id: "gemini-4-argon".into(),
+        });
+        let resolved = chains.resolve_entries(&argon, &store, &[], &health).await;
+        assert_eq!(resolved[0].account_id, google_id);
+        let failover = resolved.last().unwrap();
+        assert_eq!(failover.account_id, pool_id);
+        assert_eq!(failover.model_id, "gemini-4-argon-medium");
+        health
+            .record_entry_failure(&resolved[0], CooldownReason::QuotaExhausted, None)
+            .await;
+        let after = ids(chains.resolve_entries(&argon, &store, &[], &health).await);
+        assert!(
+            !after.contains(&google_id) && after.contains(&pool_id),
+            "the 429-parked Google login is skipped, Antigravity answers: {after:?}"
+        );
+        // Antigravity's Gemini pool spent too: the limit is on the pool, and
+        // the proxy reads it there to answer with a usage limit.
+        let pool_entry = chains
+            .resolve_entries(&argon, &store, &[], &health)
+            .await
+            .into_iter()
+            .find(|e| e.account_id == pool_id)
+            .unwrap();
+        let reset = chrono::Utc::now() + chrono::Duration::hours(5);
+        health
+            .record_entry_usage_limit(
+                &pool_entry,
+                crate::account_limits::LimitCooldown::new(
+                    "antigravity",
+                    "usage limit",
+                    crate::account_limits::LimitReset {
+                        at: reset,
+                        announced: true,
+                    },
+                ),
+            )
+            .await;
+        assert!(health.blocking_limit(pool_id, None).is_none());
+        let limit = health
+            .pool_limit("antigravity", pool_id, "gemini-4-argon-medium")
+            .expect("pool limit");
+        assert_eq!(limit.until, reset);
     }
 
     #[tokio::test]

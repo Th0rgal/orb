@@ -197,6 +197,86 @@ fn usage_limit_from_429(
     ))
 }
 
+/// The limit that resets first when a usage limit keeps out every account
+/// that could serve the chain; `None` as soon as one account is not, since an
+/// account on a short cooldown comes back within the caller's retry budget.
+async fn chain_usage_limit(
+    state: &super::routes::AppState,
+    chain_entries: &[crate::provider_health::ChainEntry],
+    standard_accounts: &[crate::provider_health::StandardAccount],
+) -> Option<crate::account_limits::LimitCooldown> {
+    // The resolver's eligibility filters (unoffered model, verification,
+    // credentials) without its health filter: a tracker with no cooldowns.
+    let no_cooldowns = crate::provider_health::ProviderHealthTracker::new()
+        .with_limits(crate::account_limits::AccountCooldowns::in_memory());
+    let candidates = state
+        .chain_store
+        .resolve_entries_with_refresher(
+            chain_entries,
+            &state.ai_providers,
+            standard_accounts,
+            &no_cooldowns,
+            None,
+        )
+        .await;
+    let mut earliest: Option<crate::account_limits::LimitCooldown> = None;
+    for entry in &candidates {
+        let (account_id, subscription) = (entry.account_id, entry.subscription_key.as_ref());
+        // Antigravity parks one quota pool (Gemini, Claude & GPT) of the
+        // login, not the whole account.
+        let limit = state
+            .health_tracker
+            .blocking_limit(account_id, subscription)
+            .or_else(|| {
+                state
+                    .health_tracker
+                    .pool_limit(&entry.provider_id, account_id, &entry.model_id)
+            })?;
+        if earliest.as_ref().is_none_or(|e| limit.until < e.until) {
+            earliest = Some(limit);
+        }
+    }
+    // A healthy account the real resolver would pick next (an auth.json
+    // fallback once the store account is parked) means the chain still has
+    // somewhere to go.
+    if !state
+        .chain_store
+        .resolve_entries_with_refresher(
+            chain_entries,
+            &state.ai_providers,
+            standard_accounts,
+            &state.health_tracker,
+            None,
+        )
+        .await
+        .is_empty()
+    {
+        return None;
+    }
+    // Accounts this view cannot weigh (an auth.json fallback held back
+    // behind a store account, a duplicate credential, a refreshable token)
+    // are still waited for when they come back soon: any short cooldown on
+    // a configured account keeps the answer retryable.
+    let configured = state
+        .chain_store
+        .configured_account_ids(chain_entries, &state.ai_providers, standard_accounts)
+        .await;
+    if state
+        .health_tracker
+        .min_remaining_cooldown(&configured)
+        .await
+        .is_some_and(|left| left < SHORT_COOLDOWN_BEFORE_USAGE_LIMIT)
+    {
+        return None;
+    }
+    earliest
+}
+
+/// A cooldown shorter than this is a transient the caller retries through,
+/// never a usage limit that parks a mission until the quota resets.
+const SHORT_COOLDOWN_BEFORE_USAGE_LIMIT: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+
 /// Every account of the chain is parked on a usage limit: answer the way the
 /// provider does, so the harness reports the limit and its reset time instead
 /// of retrying a cooldown it cannot outlast.
@@ -207,7 +287,8 @@ fn usage_limit_response(
 ) -> Response {
     let now = chrono::Utc::now();
     let message = format!(
-        "You've hit your usage limit on every account configured for '{chain_id}' ({}). Try again at {}.",
+        "You've hit your usage limit on every account configured for '{chain_id}' ({} {}). Try again at {}.",
+        limit.provider,
         limit.limit,
         crate::account_limits::format_reset(limit.until, crate::account_limits::Zone::UTC),
     );
@@ -1993,29 +2074,13 @@ async fn native_protocol_proxy(
     };
 
     if entries.is_empty() {
+        if let Some(limit) = chain_usage_limit(&state, &chain_entries, &standard_accounts).await {
+            return usage_limit_response(protocol, &chain_id, &limit);
+        }
         let candidate_ids = state
             .chain_store
             .configured_account_ids(&chain_entries, &state.ai_providers, &standard_accounts)
             .await;
-        // Only when a usage limit keeps out every candidate: with one of
-        // them on a short cooldown the ordinary retry answer applies.
-        let mut candidates = Vec::with_capacity(candidate_ids.len());
-        for account_id in &candidate_ids {
-            let subscription = state
-                .ai_providers
-                .get(*account_id)
-                .await
-                .and_then(|account| {
-                    crate::provider_health::store_account_subscription_key(
-                        account.provider_type,
-                        &account,
-                    )
-                });
-            candidates.push((*account_id, subscription));
-        }
-        if let Some(limit) = state.health_tracker.usage_limit_blocking_all(&candidates) {
-            return usage_limit_response(protocol, &chain_id, &limit);
-        }
         let cooling = state
             .health_tracker
             .any_account_has_active_cooldown(&candidate_ids)
@@ -3108,11 +3173,12 @@ async fn chat_completions_routed(
         // Direct provider/model passthrough (single synthetic entry) — either a
         // built-in provider prefix, a bare Kimi/Google catalog id (OpenCode strips
         // `kimi/` or `google/`), or a custom provider's sanitized name.
-        let chain_entries = vec![direct.clone()];
+        // Equivalent models on other providers follow, so a 429 fails over.
+        let chain_entries = crate::provider_health::with_equivalent_fallbacks(direct);
         let entries = state
             .chain_store
             .resolve_entries(
-                std::slice::from_ref(&direct),
+                &chain_entries,
                 &state.ai_providers,
                 &standard_accounts,
                 &state.health_tracker,
@@ -3158,6 +3224,9 @@ async fn chat_completions_routed(
     if entries.is_empty() {
         if defer_on_rate_limit {
             return enqueue_deferred_request(&state, &headers, &chain_id, &body).await;
+        }
+        if let Some(limit) = chain_usage_limit(&state, &chain_entries, &standard_accounts).await {
+            return usage_limit_response(NativeProtocol::Responses, &chain_id, &limit);
         }
         let candidate_account_ids = state
             .chain_store
@@ -5319,6 +5388,12 @@ async fn chat_completions_routed(
     } else {
         if defer_on_rate_limit {
             return enqueue_deferred_request(&state, &headers, &chain_id, &body).await;
+        }
+        // Every account answered 429 and is now parked on its quota: say so,
+        // with the reset time, instead of a cooldown the caller would retry
+        // (and resume) until the quota comes back.
+        if let Some(limit) = chain_usage_limit(&state, &chain_entries, &standard_accounts).await {
+            return usage_limit_response(NativeProtocol::Responses, &chain_id, &limit);
         }
         cooldown_error_response(&chain_id)
     }

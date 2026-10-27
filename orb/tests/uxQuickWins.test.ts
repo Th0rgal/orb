@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dropsSandboxedMetadata } from "../src/SkillDetail";
+import { dropsSandboxedMetadata } from "../src/SkillPage";
 import { hermesRuntimeLine } from "../src/HermesSettings";
 import { latestChecklist } from "../src/workModel";
 import { buildTranscript } from "../src/transcriptModel";

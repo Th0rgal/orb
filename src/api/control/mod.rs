@@ -25,6 +25,9 @@ pub(crate) mod machine_transfer;
 mod rebalance;
 mod remote_failure;
 pub(crate) mod remote_grok;
+pub(crate) mod workspace_purge;
+#[cfg(target_os = "linux")]
+mod workspace_purge_fs;
 pub use rebalance::spawn_queued_job_rebalancer;
 #[cfg(test)]
 mod campaign_guard_tests;

@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
+import { privilegeSnapshot } from "./privilegeAccessFixture";
 
-test("Inbox surfaces Needs You and Ready for Review while keeping working agents quiet, with keyboard triage and inline reply", async ({
+for (const bunkerState of [0, 2]) {
+test(`Inbox surfaces Needs You and Ready for Review while keeping working agents quiet, with keyboard triage and inline reply (Bunker ${bunkerState})`, async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -95,6 +97,10 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
     const url = new URL(req.url());
     const path = url.pathname;
 
+    if (path === "/api/privilege-access") {
+      await route.fulfill({ json: privilegeSnapshot(bunkerState) });
+      return;
+    }
     if (path === "/api/projects") {
       await route.fulfill({
         json: {
@@ -371,22 +377,33 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await page.keyboard.press("Escape");
   await expect(doneRow.locator(".inbox-peek-drawer")).toBeHidden();
 
-  // Mark m-done as Done with 'e', then Undo with 'z'
+  // Mark m-done as Done with 'e'; exercise keyboard and toast-button Undo.
   await page.keyboard.press("e");
   await expect(doneRow).toBeHidden();
   await expect(page.locator('.inbox-row.focused .inbox-row-title-btn')).toBeFocused();
-  await expect(page.locator(".toast")).toContainText("Fix sidebar scroll thumb");
+  // A real fleet warning may coexist with Undo. Assert both independently;
+  // never dismiss the security warning to make a singleton toast selector pass.
+  const doneToast = page.locator(".toast").filter({ hasText: "Marked Fix sidebar scroll thumb done" });
+  await expect(doneToast).toHaveCount(1);
+  await expect(doneToast).toContainText("Undo");
+  await expect(page.getByTestId("bunker-mode-notice-card")).toHaveCount(bunkerState > 0 ? 1 : 0);
+  if (bunkerState > 0) await expect(page.getByTestId("bunker-mode-notice-card")).toContainText("Hard Lockdown");
   await expect.poll(() => statusUpdates.at(-1)).toEqual({
     id: "m-done",
     status: "acknowledged",
   });
 
-  await page.keyboard.press("z");
+  if (bunkerState > 0) {
+    await doneToast.getByRole("button", { name: "Undo" }).click();
+  } else {
+    await page.keyboard.press("z");
+  }
   await expect.poll(() => statusUpdates.at(-1)).toEqual({
     id: "m-done",
     status: "paused",
   });
   await expect(doneRow).toBeVisible();
+  if (bunkerState > 0) await expect(page.getByTestId("bunker-mode-notice-card")).toBeVisible();
 
   // The compact settings control keeps the current model in its accessible label.
   const modelPill = page.locator(".inbox-model-pill");
@@ -395,6 +412,7 @@ test("Inbox surfaces Needs You and Ready for Review while keeping working agents
   await expect(page.locator(".settings-page > .s-inner > h2")).toHaveText("Notifications");
   await expect(page.getByLabel("Inbox summary model")).toHaveValue("builtin/smart");
 });
+}
 
 test("Inbox Peek renders shared Transcript with inline images, attached context, WorkFold, and bottom-anchored scroll without reset on poll", async ({
   page,
