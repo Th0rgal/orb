@@ -443,6 +443,17 @@ fn resolve_consult_model(input: &str, options: &[String]) -> Result<String, Stri
     if wanted.is_empty() {
         return Err("model is required, e.g. openai/gpt-6-astra or fable-5.1".into());
     }
+    // Gemini 4 Argon is served by Google (one Gemini CLI login) and by the
+    // Antigravity pool (several Ultra logins with their own quotas): the bare
+    // alias goes to the pool first; the proxy fails over between the two.
+    if matches!(wanted.as_str(), "argon" | "gemini-4-argon" | "gemini-argon") {
+        if let Some(preferred) = ["antigravity/gemini-4-argon-medium", "google/gemini-4-argon"]
+            .iter()
+            .find_map(|id| options.iter().find(|o| o.as_str() == *id))
+        {
+            return Ok(preferred.clone());
+        }
+    }
     if let Some(exact) = options.iter().find(|o| normalize_model_token(o) == wanted) {
         return Ok(exact.clone());
     }
@@ -5978,6 +5989,36 @@ mod tests {
         assert!(!unknown.contains("fable"), "{unknown}");
         assert!(r("openai/gpt-9").unwrap_err().contains("Unknown model"));
         assert!(r(" ").is_err());
+    }
+
+    #[test]
+    fn consult_argon_alias_prefers_the_antigravity_pool() {
+        let options: Vec<String> = [
+            "google/gemini-4-argon",
+            "antigravity/gemini-4-argon-low",
+            "antigravity/gemini-4-argon-medium",
+            "antigravity/gemini-4-argon-high",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for alias in ["argon", "gemini-4-argon", "Gemini-4-Argon"] {
+            assert_eq!(
+                resolve_consult_model(alias, &options).unwrap(),
+                "antigravity/gemini-4-argon-medium"
+            );
+        }
+        // A full id is kept as given.
+        assert_eq!(
+            resolve_consult_model("google/gemini-4-argon", &options).unwrap(),
+            "google/gemini-4-argon"
+        );
+        // Without Antigravity, the alias still reaches Google.
+        let google_only = vec!["google/gemini-4-argon".to_string()];
+        assert_eq!(
+            resolve_consult_model("argon", &google_only).unwrap(),
+            "google/gemini-4-argon"
+        );
     }
 
     #[test]
