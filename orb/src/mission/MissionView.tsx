@@ -168,7 +168,7 @@ function MissionDock(p: {
       </div>
       <Show when={harnessName()}>
         <span class="under-sep" aria-hidden="true">·</span>
-        <div class="fork-anchor"><button class="under-harness fork-trigger" title="Fork with another harness or model" aria-label="Transfer to another agent" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
+        <div class="fork-anchor"><button class="under-harness fork-trigger" title="Transfer to another agent" aria-label="Transfer to another agent" onClick={() => setForkOpen(true)}>{harnessName()} <Ic.ChevronDown size={10} /></button>
         <Show when={forkOpen() && p.mission}>{m => <ForkMission mission={m()} choices={harnessChoices(catalogMachine())} onOpen={() => { if (catalogMachine() === "local") void refreshLocalAgents(false); else void refreshNodeAntigravityModels(catalogMachine()); }} destination={p.destination} onClose={() => setForkOpen(false)} onFork={forked => { setForkOpen(false); p.onFork?.(forked); }} />}</Show></div>
         <span class="under-sep" aria-hidden="true">·</span>
         <div class="under-model-wrap">

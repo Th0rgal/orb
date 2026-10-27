@@ -67,6 +67,7 @@ struct OrbCodexSpeedSection: View {
 /// "Fork conversation" menu.
 struct OrbForkSheet: View {
     let mission: OrbJSON
+    var transfer = false
     let onForked: (OrbJSON) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var backends: [OrbJSON] = []
@@ -78,6 +79,8 @@ struct OrbForkSheet: View {
     @State private var busy = false
     @State private var error = ""
     @State private var key = UUID().uuidString
+    @State private var created: OrbJSON?
+    @State private var submitted: OrbJSON?
     static let effortsByHarness: [String: [String]] = [
         "antigravity": ["low", "medium", "high"],
         "codex": ["low", "medium", "high", "xhigh", "max"],
@@ -98,25 +101,29 @@ struct OrbForkSheet: View {
         NavigationStack {
             Form {
                 if !error.isEmpty { OrbNotice(message: error) }
-                harnessSection
-                if backend == "codex" && !model.isEmpty { OrbCodexSpeedSection(model: model, tier: $speed) }
+                harnessSection.disabled(busy || submitted != nil)
+                if backend == "codex" && !model.isEmpty { OrbCodexSpeedSection(model: model, tier: $speed).disabled(busy || submitted != nil) }
                 Section {
                     Button { Task { await fork() } } label: {
-                        HStack { Text(busy ? "Forking…" : "Fork conversation"); if busy { Spacer(); ProgressView() } }
+                        HStack { Text(busy ? (transfer ? "Transferring…" : "Forking…") : (created != nil ? "Retry archiving" : transfer ? "Transfer conversation" : "Fork conversation")); if busy { Spacer(); ProgressView() } }
                     }
                     .disabled(busy || backend.isEmpty || model.isEmpty || unavailable(backend))
                     .accessibilityIdentifier("fork.submit")
+                    if let created {
+                        Button("Open transferred conversation") { dismiss(); onForked(created) }.disabled(busy)
+                    }
                 } footer: {
-                    Text("Starts a new conversation with this one's history in the same workspace. The original is not changed.")
+                    Text(transfer ? "Stops the current agent, continues with the selected agent and conversation history, then archives the original." : "Starts a new conversation with this one's history in the same workspace. The original is not changed.")
                 }
             }
-            .navigationTitle("Fork conversation").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } } }
+            .navigationTitle(transfer ? "Transfer to another agent" : "Fork conversation").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.disabled(busy) } }
             .task { await load() }
             .onChange(of: backend) { old, new in
                 if old != new && !old.isEmpty { speed = "standard"; effort = ""; model = models.first.map(modelValue) ?? "" }
             }
         }
+        .interactiveDismissDisabled(busy)
         .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
     }
 
@@ -160,19 +167,48 @@ struct OrbForkSheet: View {
         guard !busy else { return }
         busy = true; defer { busy = false }
         do {
-            if backend == "codex" { try await OrbCodexSpeed.require(model: model, tier: speed) }
+            if submitted == nil && backend == "codex" { try await OrbCodexSpeed.require(model: model, tier: speed) }
             var body: [String: OrbJSON] = ["backend": .string(backend), "model_override": .string(model), "model_effort": .string(effort), "idempotency_key": .string(key)]
             if backend == "codex" { body["service_tier"] = .string(speed) }
-            let forked = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(mission["id"].text))/fork", method: "POST", body: .object(body))
+            let base = "/api/control/missions/\(OrbCore.escape(mission["id"].text))"
+            let forked: OrbJSON
+            if let created { forked = created }
+            else {
+                if transfer { try await stopSource(base) }
+                if submitted == nil { submitted = .object(body) }
+                forked = try await OrbCore.shared.call(base + "/fork", method: "POST", body: submitted!)
+                created = forked
+            }
+            if transfer {
+                _ = try await OrbCore.shared.call(base + "/status", method: "POST", body: .object(["status": .string("acknowledged")]))
+            }
             OrbHaptics.success()
             OrbUsageTelemetry.shared.trackAction(.fork, surface: "fork_sheet")
             dismiss()
             onForked(forked)
         } catch let e as OrbHTTPError where [404, 405].contains(e.status) {
-            error = "This backend needs the conversation-fork update. The original mission has not been changed."
+            error = created != nil ? "The new agent is ready, but the original could not be archived." : transfer ? "Transfer is unavailable on this server. The original conversation is retained; it may have been stopped." : "This backend needs the conversation-fork update. The original mission has not been changed."
         } catch {
-            self.error = error.localizedDescription
+            self.error = created == nil ? error.localizedDescription : "The new agent is ready, but the original could not be archived. " + error.localizedDescription
         }
+    }
+
+    private func stopSource(_ base: String) async throws {
+        let api = OrbCore.shared
+        let source = try await api.call(base)
+        if Self.sourceStopped(source) { return }
+        _ = try await api.call(base + "/cancel", method: "POST")
+        for _ in 0..<20 {
+            if Self.sourceStopped(try await api.call(base)) { return }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw OrbHTTPError(status: 409, detail: "The original agent has not stopped yet. Wait and retry the transfer.")
+    }
+
+    static func sourceStopped(_ mission: OrbJSON) -> Bool {
+        ["awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled", "acknowledged"].contains(mission["status"].text)
+            && mission["execution"]["state"].text != "running"
+            && !["queued", "running"].contains(mission["remote_job"]["node_state"].text)
     }
 }
 

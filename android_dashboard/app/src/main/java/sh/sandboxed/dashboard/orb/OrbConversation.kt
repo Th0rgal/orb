@@ -303,7 +303,7 @@ object OrbTimelineBuilder {
 
         // Deduplicate consecutive identical/retry assistant messages (matching iOS history logic)
         val deduplicatedMessages = mutableListOf<OrbRow>()
-        for (msg in messages) {
+        for (msg in messages.flatMap { OrbForkContext.expand(it) }) {
             val role = (msg.str("role", "sender", "author") ?: "assistant").lowercase()
             val text = (msg.str("content", "text", "message") ?: "").trim()
             if ((role == "assistant" || role == "agent") && deduplicatedMessages.isNotEmpty()) {
@@ -360,6 +360,17 @@ object OrbTimelineBuilder {
             val alreadyInHistory = deduplicatedMessages.any {
                 val r = (it.str("role", "sender", "author") ?: "").lowercase()
                 (r == "user" || r == "operator" || r == "human") && (it.str("content", "text", "message")?.trim() == uText.trim())
+            }
+            if (OrbForkContext.parse(uText) != null) {
+                val carried = OrbForkContext.expand(OrbRow("event-context-$evIdx", mapOf("role" to "user", "content" to uText)))
+                for (entry in carried) {
+                    val content = entry.str("content") ?: continue
+                    val role = entry.str("role")
+                    if (deduplicatedMessages.any { it.str("role") == role && it.str("content") == content }) continue
+                    if (role == "user") turns.add(OrbTurn.User(entry.id, content, uTs))
+                    else turns.add(OrbTurn.Assistant(entry.id, content, uTs))
+                }
+                continue
             }
             if (!alreadyInHistory) {
                 if (isControllerWake(uText)) {
@@ -2484,6 +2495,9 @@ fun OrbConversationPage(
         }
     }
 
+    val transferKey = remember(missionId) { UUID.randomUUID().toString() }
+    var transferRequest by remember(missionId) { mutableStateOf<Map<String, Any?>?>(null) }
+    var transferredMission by remember(missionId) { mutableStateOf<OrbRow?>(null) }
     if (showAgentPicker) {
         OrbAgentPickerSheet(
             backends = backends,
@@ -2491,7 +2505,7 @@ fun OrbConversationPage(
             providers = providers,
             repositories = repositories,
             selectedBackend = selectedBackend,
-            onSelectBackend = { selectedBackend = it },
+            onSelectBackend = { if (it != selectedBackend) selectedModel = ""; selectedBackend = it },
             selectedModel = selectedModel,
             onSelectModel = { selectedModel = it },
             selectedWorkspaceId = selectedWorkspaceId,
@@ -2504,7 +2518,37 @@ fun OrbConversationPage(
             onSelectGitRef = { selectedGitRef = it },
             selectedConfigProfile = selectedConfigProfile,
             onSelectConfigProfile = { selectedConfigProfile = it },
-            onDismiss = { showAgentPicker = false }
+            existing = currentMission != null,
+            locked = isSending || transferRequest != null,
+            busy = isSending,
+            transferError = errorMessage,
+            onTransfer = if (currentMission != null && currentMission?.str("backend")?.startsWith("cloud_") != true) ({
+                if (!isSending && selectedBackend.isNotEmpty()) {
+                    isSending = true
+                    errorMessage = null
+                    scope.launch {
+                        try {
+                            val source = currentMission ?: throw OrbError("Conversation unavailable.")
+                            val base = "/api/control/missions/${core.encodeComponent(source.id)}"
+                            var next = transferredMission
+                            if (next == null) {
+                                OrbHarnessTransfer.stopSource(core, base)
+                                if (transferRequest == null) transferRequest = mapOf("backend" to selectedBackend, "model_override" to selectedModel, "idempotency_key" to transferKey)
+                                val value = OrbJSON.dict(core.request("$base/fork", method = "POST", body = transferRequest)) ?: throw OrbError("Transfer response unavailable. Retry to recover it.")
+                                next = OrbRow(value)
+                                transferredMission = next
+                            }
+                            core.request("$base/status", method = "POST", body = mapOf("status" to "acknowledged"))
+                            showAgentPicker = false
+                            currentMission = next
+                            core.refreshMissionsQuietly()
+                        } catch (e: Exception) {
+                            errorMessage = (if (transferredMission != null) "The new agent is ready, but the original could not be archived. " else "") + (e.message ?: "Transfer failed. Retry.")
+                        } finally { isSending = false }
+                    }
+                }
+            }) else null,
+            onDismiss = { if (!isSending) showAgentPicker = false }
         )
     }
 
@@ -3043,15 +3087,19 @@ fun OrbAgentPickerSheet(
     onSelectGitRef: (String) -> Unit,
     selectedConfigProfile: String,
     onSelectConfigProfile: (String) -> Unit,
+    existing: Boolean = false,
+    locked: Boolean = false,
+    busy: Boolean = false,
+    transferError: String? = null,
+    onTransfer: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !busy || it != androidx.compose.material3.SheetValue.Hidden })
     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
 
-    val backendOptions = remember(backends) {
+    val backendOptions = remember(backends, existing) {
         val fromServer = backends.mapNotNull { it.str("id", "name", "slug") }
-        (fromServer + listOf("claude", "codex", "opencode", "gemini", "hermes", "cursor_cloud", "grok_bot"))
-            .distinct()
+        if (existing) fromServer.distinct() else (fromServer + listOf("hermes", "cursor_cloud", "grok_bot")).distinct()
     }
 
     ModalBottomSheet(
@@ -3093,6 +3141,14 @@ fun OrbAgentPickerSheet(
                 )
             }
 
+            if (onTransfer != null) {
+                Text("Continues with the selected agent and history in the same workspace, then archives the original.", color = OrbStyle.textMuted)
+                androidx.compose.material3.Button(onClick = onTransfer, enabled = !busy && selectedBackend.isNotEmpty()) {
+                    Text(if (busy) "Transferring…" else if (locked) "Retry transfer" else "Transfer conversation")
+                }
+                if (!transferError.isNullOrEmpty()) Text(transferError, color = OrbStyle.textMuted)
+            }
+
             // Service Type (Harness vs Cloud)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
@@ -3113,7 +3169,7 @@ fun OrbAgentPickerSheet(
                                 .clip(CircleShape)
                                 .background(if (active) Color.White else OrbStyle.surface)
                                 .border(1.dp, if (active) Color.Transparent else OrbStyle.border, CircleShape)
-                                .orbPressClickable { onSelectBackend(b) }
+                                .orbPressClickable { if (!locked) onSelectBackend(b) }
                                 .padding(horizontal = 13.dp, vertical = 8.dp)
                         ) {
                             Text(
@@ -3130,7 +3186,7 @@ fun OrbAgentPickerSheet(
             }
 
             // Machine / Workspace
-            if (!isCloudService && workspaces.isNotEmpty()) {
+            if (!existing && !isCloudService && workspaces.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = "MACHINE / WORKSPACE",
@@ -3220,7 +3276,7 @@ fun OrbAgentPickerSheet(
                     }
                     BasicTextField(
                         value = selectedModel,
-                        onValueChange = onSelectModel,
+                        onValueChange = { if (!locked) onSelectModel(it) },
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp, fontFamily = FontFamily.Monospace),
                         cursorBrush = SolidColor(Color.White),
                         singleLine = true,

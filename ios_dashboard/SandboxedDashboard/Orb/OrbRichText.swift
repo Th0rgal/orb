@@ -628,6 +628,33 @@ struct OrbRichText: View {
 
 /// Decode Orb's persisted replacement envelope (`remoteContinuation.ts`) so replacement sessions
 /// unpack into individual historical turns instead of rendering a 40KB+ raw JSON blob.
+enum OrbForkContext {
+    struct Context {
+        let messages: [OrbRemoteContinuation.Entry]
+        let request: String?
+    }
+    static func parse(_ text: String) -> Context? {
+        let preambles = ["Continue the work from this conversation in a fresh native session.", "The user edited a message in this conversation and sent it again.", "This conversation's native session could not be resumed, so it continues in a fresh session."]
+        guard preambles.contains(where: text.hasPrefix),
+              let open = text.range(of: "\n<fork_context>\n"),
+              let close = text.range(of: "\n</fork_context>", range: open.upperBound..<text.endIndex) else { return nil }
+        let rest = String(text[close.upperBound...])
+        let marker = "\n\nCurrent request:\n"
+        guard rest.isEmpty || rest.hasPrefix(marker),
+              let data = String(text[open.upperBound..<close.lowerBound]).data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              value["source_mission_id"] is String,
+              let messages = value["messages"] as? [[String: Any]] else { return nil }
+        var entries: [OrbRemoteContinuation.Entry] = []
+        for message in messages {
+            guard let role = message["role"] as? String, ["user", "assistant", "context"].contains(role),
+                  let content = message["content"] as? String else { return nil }
+            entries.append(.init(role: role == "context" ? "assistant" : role, content: content))
+        }
+        return Context(messages: entries, request: rest.isEmpty ? nil : String(rest.dropFirst(marker.count)))
+    }
+}
+
 enum OrbRemoteContinuation {
     struct Entry: Equatable {
         let role: String
@@ -650,6 +677,13 @@ enum OrbRemoteContinuation {
 
     static func unpack(_ text: String, depth: Int = 0) -> [Entry]? {
         guard depth <= 50 else { return nil }
+        if let fork = OrbForkContext.parse(text) {
+            var entries = fork.messages.flatMap { entry in
+                entry.role == "user" ? (unpack(entry.content, depth: depth + 1) ?? [entry]) : [entry]
+            }
+            if let request = fork.request { entries.append(Entry(role: "user", content: request)) }
+            return entries
+        }
         let isRecovery = text.hasPrefix(recoveryHeader)
         var jsonStartIndex: String.Index?
         if isRecovery {
