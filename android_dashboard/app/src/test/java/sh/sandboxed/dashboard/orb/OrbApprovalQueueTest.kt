@@ -56,4 +56,41 @@ class OrbApprovalQueueTest {
         assertEquals("/api/bitwarden/requests/i2/reject", OrbApprovalQueue.denyPath(item(2)) { it })
         assertEquals("/api/mission-access/i7/deny", OrbApprovalQueue.denyPath(item(7)) { it })
     }
+
+    @Test fun riskMatchesCoreRiskTable() {
+        for (c in OrbJSON.dictList(spec["risk"])) {
+            assertEquals(c.toString(), c["risk"], OrbApprovalQueue.riskOf(c["kind"] as String, c["tier"] as String, mapOf("all_projects" to (c["all_projects"] == true))))
+        }
+    }
+
+    /** A Core without /api/approvals: the per-kind lists still produce cards, and an empty list hides nothing else. */
+    @Test fun legacyListsBuildTheSameItems() {
+        val privilege = listOf(
+            mapOf("id" to "p1", "state" to "pending", "scope" to "service_deploy", "target_host" to "agent-core", "requester_mission_id" to "m1",
+                "requester_title" to "Ship usage fix", "reason" to "deploy", "ttl_minutes" to 240.0, "session_scoped" to true, "created_at" to "2026-10-27T10:00:00Z"),
+            mapOf("id" to "p0", "state" to "approved", "scope" to "ops_read", "target_host" to "ashur", "created_at" to "2026-10-27T08:00:00Z"),
+        )
+        val missions = listOf(
+            mapOf("id" to "a1", "state" to "pending", "requester_mission_id" to "m2", "requester_title" to "Fleet health", "target_mission_id" to "t1",
+                "target_title" to "Disk cleanup", "reason" to "r", "ttl_hours" to 24.0, "created_at" to "2026-10-27T09:00:00Z"),
+        )
+        val items = OrbApprovalQueue.legacyItems(privilege, emptyList(), missions)
+        assertEquals(listOf("Service deploy on agent-core", "Read Disk cleanup"), items.map { OrbApprovalQueue.title(it) })
+        assertEquals(listOf("Ship usage fix", "Fleet health"), items.map { OrbApprovalQueue.requester(it) })
+        assertEquals(listOf("elevated", "elevated"), items.map { it["risk"] })
+        assertTrue(items.all { it["legacy"] == true })
+        assertEquals("Allows restart and deploy services, including production · for this session (max 4 h)", OrbApprovalQueue.detail(items[0]))
+        assertEquals("/api/privilege-access/p1/approve" to mapOf("ttl_minutes" to 240, "session_scoped" to true), OrbApprovalQueue.legacyApprove(items[0]) { it })
+        assertEquals("/api/mission-access/a1/approve" to mapOf("ttl_hours" to 24), OrbApprovalQueue.legacyApprove(items[1]) { it })
+        val secret = OrbApprovalQueue.legacyItem("secret", mapOf("id" to "s1", "status" to "pending", "kind" to "delete", "mission_id" to "m3", "key" to "OLD", "reason" to "x"))
+        assertEquals("critical", secret["risk"])
+        assertEquals("/api/bitwarden/requests/s1/approve", OrbApprovalQueue.legacyApprove(secret) { it }.first)
+    }
+
+    @Test fun criticalLegacyItemsAreNeverBatchedAndNewOnesResetTheTick() {
+        val root = OrbApprovalQueue.legacyItem("privilege", mapOf("id" to "p1", "state" to "pending", "scope" to "root_exec", "target_host" to "self", "requester_mission_id" to "m1"))
+        val read = OrbApprovalQueue.legacyItem("privilege", mapOf("id" to "p2", "state" to "pending", "scope" to "ops_read", "target_host" to "ashur", "requester_mission_id" to "m1"))
+        assertEquals(listOf("p2"), OrbApprovalQueue.batchApprovable(listOf(root, read), true).map { it["id"] })
+        assertTrue(OrbApprovalQueue.listKey(listOf(read)) != OrbApprovalQueue.listKey(listOf(read, root)))
+    }
 }

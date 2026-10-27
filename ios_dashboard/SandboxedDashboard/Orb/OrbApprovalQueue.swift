@@ -81,9 +81,17 @@ final class OrbApprovalQueue {
     /// Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs).
     static let maxBatch = 20
 
-    /// At most `maxBatch`; the rest stay for the next signature.
+    /// Critical items only when ticked, never a critical legacy item (an old
+    /// Core cannot check the confirmation, so those go one row at a time),
+    /// and at most `maxBatch`; the rest stay for the next signature.
     static func batchApprovable(_ items: [OrbJSON], includeCritical: Bool) -> [OrbJSON] {
-        Array(items.filter { includeCritical || !isCritical($0) }.prefix(maxBatch))
+        Array(items.filter { !isCritical($0) || (includeCritical && !$0["legacy"].flag) }.prefix(maxBatch))
+    }
+
+    /// What identifies the list on screen: a new, removed or changed item
+    /// (legacy items have no digest) must be ticked again.
+    static func listKey(_ items: [OrbJSON]) -> [String] {
+        items.map { "\($0["kind"].text):\($0["id"].text):\($0["digest"].text)" }
     }
 
     /// The signed body: each item by Core's digest. A single item is its own confirmation.
@@ -102,6 +110,19 @@ final class OrbApprovalQueue {
         return "Approve \(items.count) requests (\(summary(items).risks)): " + sorted.map(title).joined(separator: "; ")
     }
 
+    /// The kind's own approve route and body, for a Core without the queue.
+    static func legacyApprove(_ i: OrbJSON) -> (String, OrbJSON) {
+        let id = OrbCore.escape(i["id"].text), r = i["request"]
+        switch i["kind"].text {
+        case "privilege":
+            return ("/api/privilege-access/\(id)/approve", .object(["ttl_minutes": r["ttl_minutes"], "session_scoped": .bool(r["session_scoped"].flag)]))
+        case "mission_access":
+            return ("/api/mission-access/\(id)/approve", .object(["ttl_hours": r["ttl_hours"]]))
+        default:
+            return ("/api/bitwarden/requests/\(id)/approve", .object([:]))
+        }
+    }
+
     static func denyPath(_ i: OrbJSON) -> String {
         let id = OrbCore.escape(i["id"].text)
         switch i["kind"].text {
@@ -111,13 +132,64 @@ final class OrbApprovalQueue {
         }
     }
 
+    /// Risk of a kind's tier, as Core assigns it (approvals.json `risk`).
+    static func riskOf(kind: String, tier: String, request: OrbJSON = .null) -> String {
+        switch kind {
+        case "privilege": return tier == "root_exec" ? "critical" : tier == "service_deploy" ? "elevated" : "routine"
+        case "mission_access": return "elevated"
+        default:
+            if tier == "delete" || tier == "move" { return "critical" }
+            return tier == "write" || request["all_projects"].flag ? "elevated" : "routine"
+        }
+    }
+
+    /// A per-kind request as a queue item, for a Core without the queue. No
+    /// digest: approved through the kind's own signed route.
+    static func legacyItem(kind: String, _ r: OrbJSON) -> OrbJSON {
+        let tier = kind == "privilege" ? r["scope"].text : kind == "secret" ? r["kind"].text : "read_mission"
+        let target = kind == "privilege" ? r["target_host"].text
+            : kind == "mission_access" ? r["target_mission_id"].text
+            : [r["key"].text, r["project_id"].text, "*"].first { !$0.isEmpty } ?? "*"
+        let mission = r["requester_mission_id"].text.isEmpty ? r["mission_id"].text : r["requester_mission_id"].text
+        let title = r["requester_title"].text.isEmpty ? r["mission_title"] : r["requester_title"]
+        return .object([
+            "kind": .string(kind), "id": r["id"], "requester_mission_id": .string(mission), "requester_title": title,
+            "tier": .string(tier), "target": .string(target), "risk": .string(riskOf(kind: kind, tier: tier, request: r)),
+            "reason": r["reason"], "created_at": r["created_at"], "digest": .string(""), "request": r, "legacy": .bool(true),
+        ])
+    }
+
+    /// Pending items built from the per-kind lists the earlier clients used,
+    /// each list on its own so one failure never hides the others' requests.
+    static func legacyItems(privilege: OrbJSON?, secrets: OrbJSON?, missions: OrbJSON?) -> [OrbJSON] {
+        let p = (privilege?["requests"].items ?? []).filter { $0["state"].text == "pending" }.map { legacyItem(kind: "privilege", $0) }
+        let s = (secrets?["requests"].items ?? []).filter { $0["status"].text == "pending" }.map { legacyItem(kind: "secret", $0) }
+        let m = (missions?["requests"].items ?? []).filter { $0["state"].text == "pending" }.map { legacyItem(kind: "mission_access", $0) }
+        return (p + s + m).sorted { $0["created_at"].text > $1["created_at"].text }
+    }
+
     @discardableResult
     func refresh() async -> Bool {
         let current = OrbCore.shared.endpoint
         if current != endpoint { items = []; endpoint = current }
-        guard let snap = await Log.attempt(.network, "approval queue", { try await OrbCore.shared.call("/api/approvals/queue") }) else { return false }
+        let next: [OrbJSON]
+        do {
+            next = try await OrbCore.shared.call("/api/approvals/queue")["items"].items
+        } catch let error as OrbHTTPError where error.status == 404 || error.status == 405 {
+            // Core predates /api/approvals: read the per-kind lists instead.
+            async let privilege = Log.attempt(.network, "privilege access", { try await OrbCore.shared.call("/api/privilege-access") })
+            async let secrets = Log.attempt(.network, "secret requests", { try await OrbCore.shared.call("/api/bitwarden/broker") })
+            async let missions = Log.attempt(.network, "mission access", { try await OrbCore.shared.call("/api/mission-access") })
+            let (p, s, m) = await (privilege, secrets, missions)
+            if p == nil && s == nil && m == nil { return false }
+            next = Self.legacyItems(privilege: p, secrets: s, missions: m)
+        } catch {
+            // Keep what is on screen: a failed read never erases requests.
+            Log.error(.network, "approval queue", error)
+            return false
+        }
         guard current == OrbCore.shared.endpoint else { return true }
-        items = snap["items"].items
+        items = next
         return true
     }
 
@@ -133,7 +205,16 @@ final class OrbApprovalQueue {
         if !enrolled, let message = await OrbBiometric.authenticate(reason: reason) {
             throw NSError(domain: "orb.approvals", code: 1, userInfo: [NSLocalizedDescriptionKey: message.isEmpty ? "Cancelled" : message])
         }
-        _ = try await OrbApprovalKey.signedCall("/api/approvals/approve-all", method: "POST", body: Self.batchBody(items), summary: reason)
+        if items.contains(where: { $0["legacy"].flag }) {
+            // No batch route on this Core: each request through its kind's own
+            // signed route, with the lifetime it asked for.
+            for i in items {
+                let (path, body) = Self.legacyApprove(i)
+                _ = try await OrbApprovalKey.signedCall(path, method: "POST", body: body, summary: Self.signingReason([i]))
+            }
+        } else {
+            _ = try await OrbApprovalKey.signedCall("/api/approvals/approve-all", method: "POST", body: Self.batchBody(items), summary: reason)
+        }
         await refresh()
     }
 
@@ -214,7 +295,7 @@ struct OrbApprovalQueueSheet: View {
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
             .refreshable { await queue.refresh() }
             .task { await queue.refresh() }
-            .onChange(of: queue.items.map { $0["digest"].text }) { _, _ in includeCritical = false }
+            .onChange(of: OrbApprovalQueue.listKey(queue.items)) { _, _ in includeCritical = false }
             .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet() }
             .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet() }
             .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet() }

@@ -2245,7 +2245,7 @@ async fn delete_refuses_to_cascade_without_include_descendants() {
 }
 
 #[tokio::test]
-async fn deleted_workspace_cleanup_recovers_quarantined_directories_after_restart() {
+async fn deleted_workspace_cleanup_preserves_legacy_quarantine_without_authorization() {
     let temp = tempfile::tempdir().unwrap();
     let workspaces = Arc::new(workspace::WorkspaceStore::new(temp.path().to_path_buf()).await);
     let parent = workspace::workspaces_root_for(temp.path());
@@ -2261,18 +2261,16 @@ async fn deleted_workspace_cleanup_recovers_quarantined_directories_after_restar
         .unwrap();
     tokio::fs::create_dir_all(&unrelated).await.unwrap();
     start_deleted_workspace_cleanup(workspaces);
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while trash.exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        trash.join("artifact").exists(),
+        "a legacy name is not discard permission"
+    );
     assert!(unrelated.exists());
 }
 
 #[tokio::test]
-async fn cleanup_mission_workspace_dirs_for_delete_removes_worker_dirs() {
+async fn history_deletion_retains_worker_workspace_dirs() {
     let temp = tempfile::tempdir().expect("temp dir should be created");
     let workspaces = Arc::new(workspace::WorkspaceStore::new(temp.path().to_path_buf()).await);
     let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
@@ -2324,9 +2322,9 @@ async fn cleanup_mission_workspace_dirs_for_delete_removes_worker_dirs() {
         .await
         .expect("workspace cleanup should succeed");
 
-    assert_eq!(deleted_dirs.len(), 2);
-    assert!(!boss_dir.exists());
-    assert!(!worker_dir.exists());
+    assert!(deleted_dirs.is_empty());
+    assert!(boss_dir.exists());
+    assert!(worker_dir.exists());
     assert!(store.get_mission(boss.id).await.unwrap().is_some());
     assert!(store.get_mission(worker.id).await.unwrap().is_some());
 }
@@ -2417,7 +2415,10 @@ async fn delete_refuses_changed_persisted_filesystem_until_identity_is_restored(
     delete_mission_with_children(&store, mission.id, &[])
         .await
         .expect("database record should delete only after verified cleanup");
-    assert!(!mission_dir.exists());
+    assert!(
+        mission_dir.exists(),
+        "history deletion preserves source even after placement verifies"
+    );
     assert!(store.get_mission(mission.id).await.unwrap().is_none());
 }
 

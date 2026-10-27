@@ -42,7 +42,8 @@ const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Setti
 const LocalAgentsSettings=lazy(()=>import("./Settings").then(module=>({default:module.LocalAgentsSettings})));
 const SecuritySettings=lazy(()=>import("./SettingsShell").then(module=>({default:module.SecuritySettings})));
 import { SettingsShell } from "./SettingsShell";
-import { SETTINGS_PAGE_IDS, SETTINGS_SECTIONS, settingsAttention, settingsPageId, settingsSectionFor } from "./settingsNav";
+import { SETTINGS_PAGE_IDS, SETTINGS_SECTIONS, settingsAttention, settingsPageId, settingsSectionFor, skillPageName } from "./settingsNav";
+const SkillPage = lazy(() => import("./SkillPage").then(module => ({ default: module.SkillPage })));
 import { quotaStatus, usageWindows } from "./providerUsage";
 import { ProviderLogo } from "./ProviderLogo";
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
@@ -130,7 +131,7 @@ export default function App() {
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
   createEffect(()=>{connectionVersion();const stop=startLocalQueueWorker();onCleanup(stop);const stopDelegations=startClientDelegations(missions);onCleanup(stopDelegations);onCleanup(startLocalWakeups());});
-  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps):/.test(saved)) ? settingsPageId(saved) : null; })());
+  const [selected, setSelected] = createSignal<string | null>((() => { const saved = readString("orb.selectedConversation"); return saved && (PAGES.has(saved) || /^(m|pf|c|pc|ps|sk):/.test(saved)) ? settingsPageId(saved) : null; })());
   createEffect(() => { writeString("orb.selectedConversation", selected() ?? ""); });
   onMount(() => onCleanup(startUsageTelemetry()));
   // One page view per selected page; the previous page is the entry point.
@@ -1034,6 +1035,7 @@ export default function App() {
         </div>
         <div class="tb-title" data-tauri-drag-region>
           <Switch>
+            <Match when={skillPageName(selected())}>{(sk) => <span>Skills · {sk().name}</span>}</Match>
             <Match when={settingsSectionFor(selected())}>{(sec) => <span>Settings · {sec().label}</span>}</Match>
             <Match when={selected() === "machines"}>
               <span>Machines</span>
@@ -1324,6 +1326,9 @@ export default function App() {
               onCreateProject={isConnected() ? () => { setProjectCreationAnchor(undefined); setNewProjectDraft(true); } : undefined}
               onPending={seed => setCloudLaunchTitle(seed?.prompt.trim() || null)}
               onCreated={m => { setCloudLaunchTitle(null); setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }} />
+          </Match>
+          <Match when={skillPageName(selected())}>
+            {(sk) => <Show when={sk().name} keyed>{(name) => <SkillPage name={name} initialView={sk().history ? "history" : "edit"} onBack={() => open("skills-settings")} onOpenPage={open} />}</Show>}
           </Match>
           <Match when={settingsSectionFor(selected())}>
             <SettingsShell page={selected()!} onOpen={open}>

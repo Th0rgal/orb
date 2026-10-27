@@ -268,12 +268,24 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             meshVerified = meshSnap["formal_verified"] == true
         } catch (_: Throwable) {
         }
+        // A Core that predates /api/approvals answers 404: the per-kind lists
+        // (loaded here anyway) then build the same items. Any other failure
+        // keeps what is on screen.
+        var queueMissing = false
         try {
             val next = OrbJSON.dictList(dictOf(core.request("/api/approvals/queue"))["items"])
             // A different list (or a changed item) must be ticked again.
-            if (next.map { it["digest"] } != queue.map { it["digest"] }) includeCritical = false
+            if (OrbApprovalQueue.listKey(next) != OrbApprovalQueue.listKey(queue)) includeCritical = false
             queue = next
+        } catch (e: OrbError) {
+            queueMissing = e.status == 404 || e.status == 405
         } catch (_: Throwable) {
+        }
+        if (queueMissing) {
+            val secrets = runCatching { OrbJSON.dictList(dictOf(core.request("/api/bitwarden/broker"))["requests"]) }.getOrDefault(emptyList())
+            val next = OrbApprovalQueue.legacyItems(privilege, secrets, access)
+            if (OrbApprovalQueue.listKey(next) != OrbApprovalQueue.listKey(queue)) includeCritical = false
+            queue = next
         }
         try {
             val broker = dictOf(core.request("/api/bitwarden/broker"))
@@ -301,6 +313,21 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         while (true) {
             load()
             delay(10_000)
+        }
+    }
+
+    /** One signed approve-all, or, on a Core without the queue, each request through its kind's own route. */
+    suspend fun approveQueue(items: List<Map<String, Any?>>) {
+        if (items.any { it["legacy"] == true }) {
+            for (i in items) {
+                val (path, body) = OrbApprovalQueue.legacyApprove(i) { core.encodeComponent(it) }
+                OrbApprovalKey.signedRequest(core, activity, "POST", path, body, OrbApprovalQueue.signingReason(listOf(i)))
+            }
+        } else {
+            OrbApprovalKey.signedRequest(
+                core, activity, "POST", "/api/approvals/approve-all",
+                OrbApprovalQueue.batchBody(items), OrbApprovalQueue.signingReason(items)
+            )
         }
     }
 
@@ -372,10 +399,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             TextButton(enabled = !busy, onClick = {
                                 act {
-                                    OrbApprovalKey.signedRequest(
-                                        core, activity, "POST", "/api/approvals/approve-all",
-                                        OrbApprovalQueue.batchBody(listOf(i)), OrbApprovalQueue.signingReason(listOf(i))
-                                    )
+                                    approveQueue(listOf(i))
                                 }
                             }) { Text("Allow") }
                             TextButton(enabled = !busy, onClick = {
@@ -406,10 +430,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         }
                         TextButton(enabled = !busy && ready.isNotEmpty(), onClick = {
                             act {
-                                OrbApprovalKey.signedRequest(
-                                    core, activity, "POST", "/api/approvals/approve-all",
-                                    OrbApprovalQueue.batchBody(ready), OrbApprovalQueue.signingReason(ready)
-                                )
+                                approveQueue(ready)
                                 includeCritical = false
                             }
                         }) { Text(if (ready.size == queue.size) "Approve all" else "Approve ${ready.size}") }

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { privilegeSnapshot } from "./privilegeAccessFixture";
 
 async function setup(page: Page, selected?: string) {
   await page.addInitScript((sel: string | null) => {
@@ -9,7 +10,7 @@ async function setup(page: Page, selected?: string) {
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
     const json =
-      path === "/api/privilege-access" ? { requests: [], grants: [], bunker_state: 2, bunker_incidents: [] }
+      path === "/api/privilege-access" ? privilegeSnapshot(2)
       : path === "/api/ai/providers" ? [{ id: "claude", name: "Claude (work)", provider_type: "anthropic", enabled: true, status: { type: "connected" } }]
       : path === "/api/ai/providers/usage" ? { entries: { claude: { provider_type: "anthropic", unified_5h_utilization: 1, unified_7d_utilization: 0.4 } } }
       : path === "/api/projects" ? { projects: [] }

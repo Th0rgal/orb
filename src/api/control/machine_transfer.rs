@@ -949,6 +949,13 @@ pub async fn operate(
     Json(req): Json<Request>,
 ) -> Result<Json<Value>, Error> {
     let _workspace_mutation = workspace_mutation_lock(id).await;
+    {
+        let _admission = DISPATCH_ADMISSION.lock().await;
+        let _durable = dispatch_admission::durable_lock(&state.config)
+            .await
+            .map_err(conflict)?;
+        super::workspace_purge::revoke_owned_locked(&state, id, &user.id).map_err(conflict)?;
+    }
     let control = control_for_user(&state, &user).await;
     let m = mission(&control, id).await?;
     if let Request::Prepare {

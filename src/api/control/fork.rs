@@ -146,6 +146,15 @@ pub async fn fork_mission(
     Path(id): Path<Uuid>,
     Json(req): Json<ForkRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _workspace = super::machine_transfer::workspace_mutation_lock(id).await;
+    {
+        let _admission = super::DISPATCH_ADMISSION.lock().await;
+        let _durable = super::dispatch_admission::durable_lock(&state.config)
+            .await
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
+        super::workspace_purge::revoke_owned_locked(&state, id, &user.id)
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
+    }
     // Serialize side-session discovery and creation, including retries from
     // another Orb window whose local storage has no session pointer.
     let _side_creation = if req.side_question.is_some() {

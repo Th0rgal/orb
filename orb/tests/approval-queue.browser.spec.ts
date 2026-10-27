@@ -69,3 +69,15 @@ test('the card is centred on the conversation composer and as wide',async({page}
   }).toBe(true);
  }
 });
+test('a Core without the queue still shows a pending privilege request, approved through its own route',async({page})=>{
+ await page.goto('/tests/approval-queue.html');
+ await page.evaluate(()=>(window as any).loadFromLegacyCore());
+ const card=page.getByTestId('approval-queue-card');
+ await expect(card.locator('.toast-title strong')).toHaveText('Service deploy on agent-core');
+ await expect(card.locator('.toast-sub')).toHaveText('asked by Ship usage fix');
+ await expect.poll(()=>sent(page)).toContain('GET /api/approvals/queue');
+ await card.locator('.secret-bar').getByRole('button',{name:'Allow'}).click();
+ await expect.poll(()=>sent(page)).toContain('POST /api/privilege-access/p9/approve');
+ expect(await sent(page)).not.toContain('POST /api/approvals/approve-all');
+ expect(await body(page,'/p9/approve')).toEqual({ttl_minutes:240,session_scoped:true});
+});

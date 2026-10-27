@@ -3291,6 +3291,16 @@ pub(super) async fn control_actor_loop(
                                 let _ = respond.send(result);
                             }
                             ControlCommand::StartParallel { mission_id, content, respond } => {
+                                let _purge_file = match dispatch_admission::durable_lock(&config).await {
+                                    Ok(guard) => guard,
+                                    Err(error) => { let _ = respond.send(Err(error)); continue; }
+                                };
+                                if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                                    if let Err(error) = super::workspace_purge::revoke_store_locked(&state, &mission_store, mission_id).await {
+                                        let _ = respond.send(Err(error));
+                                        continue;
+                                    }
+                                }
                                 tracing::info!("StartParallel requested for mission {}", mission_id);
 
                                 // Count currently running parallel missions
