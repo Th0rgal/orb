@@ -1176,7 +1176,7 @@ export function FilePanelProvider(p: {
                           </div>}>
                             <Suspense fallback={<p class="file-muted">Loading PDF viewer…</p>}><PdfPreview name={selected()?.name ?? "PDF"} load={loadPreviewBytes} close={() => setShowPdf(false)} /></Suspense>
                           </Show>}>
-                            <ImagePreview name={selected()?.name ?? "Image"} load={loadPreviewBytes} close={() => setShowImage(false)} />
+                            <ImagePreview name={selected()?.name ?? "Image"} path={selected()?.path} load={loadPreviewBytes} close={() => setShowImage(false)} />
                           </Show>
                         }
                       >

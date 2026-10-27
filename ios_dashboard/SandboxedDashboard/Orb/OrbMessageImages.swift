@@ -146,6 +146,14 @@ struct OrbImageGallery: View {
             .toolbar {
                 if images.paths.count > 1 { ToolbarItem(placement: .principal) { Text("\(index + 1) / \(images.paths.count)").font(.subheadline).monospacedDigit() } }
                 ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() }.accessibilityLabel("Close preview") }
+                // Share sheet: Save Image (to Photos), Copy, AirDrop, Files.
+                if images.paths.indices.contains(index), let image = loaded[images.paths[index]] {
+                    let name = "Image #\(images.references[min(index, images.references.count - 1)])"
+                    ToolbarItem(placement: .topBarLeading) {
+                        ShareLink(item: Image(uiImage: image), preview: SharePreview(name, image: Image(uiImage: image)))
+                            .accessibilityLabel("Share image").accessibilityIdentifier("image.gallery.share")
+                    }
+                }
             }
             .focusable()
             .onKeyPress(.leftArrow) { index = max(0, index - 1); return .handled }
