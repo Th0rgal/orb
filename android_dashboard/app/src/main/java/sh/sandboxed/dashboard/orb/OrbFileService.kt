@@ -50,7 +50,11 @@ sealed class OrbFileError(message: String, val rank: Int) : Exception(message) {
 
 data class OrbWorkspaceEntry(val name: String, val path: String, val isDirectory: Boolean, val size: Long?)
 
-data class OrbFileScope(val missionId: String?, val workspaceId: String?)
+/** [source] names another session of the replacement chain (`earlier:<id>`); null is the mission's own workspace. */
+data class OrbFileScope(val missionId: String?, val workspaceId: String?, val source: String? = null)
+
+/** An earlier or later attempt of this mission on the same machine, browsable read-only. */
+data class OrbFileSession(val id: String, val label: String, val later: Boolean)
 
 /**
  * Fetches shared and workspace files for previews and the share sheet.
@@ -73,7 +77,7 @@ class OrbFileService(private val core: OrbCore, context: Context) {
     }
 
     private fun cacheKey(ref: OrbFileRef, scope: OrbFileScope): String {
-        val raw = listOf(runCatching { core.makeURL("/") }.getOrDefault(""), scope.missionId ?: "", ref.url ?: "", ref.path, ref.size?.toString() ?: "")
+        val raw = listOf(runCatching { core.makeURL("/") }.getOrDefault(""), scope.missionId ?: "", scope.source ?: "", ref.url ?: "", ref.path, ref.size?.toString() ?: "")
             .joinToString("\u001f")
         return MessageDigest.getInstance("SHA-256").digest(raw.toByteArray()).take(12).joinToString("") { "%02x".format(it) }
     }
@@ -113,7 +117,7 @@ class OrbFileService(private val core: OrbCore, context: Context) {
         }
         // 2. The mission workspace, wherever it runs.
         scope.missionId?.let { mission ->
-            try { workspaceDownload(ref, mission, partial, progress); return finish(partial, target) }
+            try { workspaceDownload(ref, mission, downloadSources(ref, scope), partial, progress); return finish(partial, target) }
             catch (e: Throwable) { coroutineContext.ensureActive(); remember(e); if (failure.rank >= OrbFileError.MachineOffline.rank) throw failure }
         }
         // 3. Core paths outside the workspace (context uploads).
@@ -189,11 +193,21 @@ class OrbFileService(private val core: OrbCore, context: Context) {
         }
     }
 
-    private suspend fun workspaceDownload(ref: OrbFileRef, mission: String, file: File, progress: (Float?) -> Unit) {
-        val base = mapOf("mission_id" to mission, "source" to "workspace")
-        val resolved = fileResources(base + mapOf("action" to "resolve", "paths" to listOf(ref.path)), ref.label)
-        val match = OrbJSON.dictList(OrbJSON.dictList(resolved["results"]).firstOrNull()?.get("matches")).firstOrNull()
-            ?: throw OrbFileError.NotFound(ref.label)
+    /** The workspace first; an absolute path cited from an earlier session resolves there (Core checks the chain). */
+    private fun downloadSources(ref: OrbFileRef, scope: OrbFileScope): List<String> {
+        scope.source?.let { return listOf(it) }
+        if (!ref.path.startsWith("/")) return listOf("workspace")
+        return listOf("workspace") + runCatching { rootsBlocking(scope).second }.getOrDefault(emptyList()).map { it.id }
+    }
+
+    private suspend fun workspaceDownload(ref: OrbFileRef, mission: String, sources: List<String>, file: File, progress: (Float?) -> Unit) {
+        var found: Pair<String, OrbDict>? = null
+        for (source in sources) {
+            val resolved = fileResources(mapOf("mission_id" to mission, "source" to source, "action" to "resolve", "paths" to listOf(ref.path)), ref.label)
+            OrbJSON.dictList(OrbJSON.dictList(resolved["results"]).firstOrNull()?.get("matches")).firstOrNull()?.let { found = source to it; break }
+        }
+        val (source, match) = found ?: throw OrbFileError.NotFound(ref.label)
+        val base = mapOf("mission_id" to mission, "source" to source)
         val path = match["path"] as? String ?: throw OrbFileError.NotFound(ref.label)
         var total = (match["size"] as? Number)?.toLong() ?: ref.size
         var offset = 0L
@@ -213,13 +227,17 @@ class OrbFileService(private val core: OrbCore, context: Context) {
         progress(1f)
     }
 
-    /** True when the mission has a browsable workspace (local, node, managed machine or transfer). */
-    suspend fun hasWorkspace(scope: OrbFileScope): Boolean = withContext(Dispatchers.IO) {
-        val mission = scope.missionId ?: return@withContext false
-        runCatching {
-            OrbJSON.dictList(fileResources(mapOf("mission_id" to mission, "action" to "roots"), "workspace")["sources"])
-                .any { it["id"] == "workspace" && it["available"] != false }
-        }.getOrDefault(false)
+    /** Whether the mission has a workspace, and the other sessions of its chain on the same machine. */
+    suspend fun roots(scope: OrbFileScope): Pair<Boolean, List<OrbFileSession>> = withContext(Dispatchers.IO) { rootsBlocking(scope) }
+
+    private fun rootsBlocking(scope: OrbFileScope): Pair<Boolean, List<OrbFileSession>> {
+        val mission = scope.missionId ?: return false to emptyList()
+        val sources = OrbJSON.dictList(fileResources(mapOf("mission_id" to mission, "action" to "roots"), "workspace")["sources"])
+            .filter { it["available"] != false }
+        return sources.any { it["id"] == "workspace" } to sources.filter { it["group"] is String }.map {
+            val id = it["id"] as? String ?: ""
+            OrbFileSession(id, it["label"] as? String ?: id, it["group"] == "later")
+        }
     }
 
     /** Read-only listing of one workspace directory ("" is the root). */
@@ -227,7 +245,7 @@ class OrbFileService(private val core: OrbCore, context: Context) {
         val mission = scope.missionId ?: return@withContext emptyList()
         val name = path.ifEmpty { "Workspace" }
         try {
-            OrbJSON.dictList(fileResources(mapOf("mission_id" to mission, "source" to "workspace", "action" to "list", "path" to path), name)["entries"])
+            OrbJSON.dictList(fileResources(mapOf("mission_id" to mission, "source" to (scope.source ?: "workspace"), "action" to "list", "path" to path), name)["entries"])
                 .map { OrbWorkspaceEntry(it["name"] as? String ?: "", it["path"] as? String ?: "", it["kind"] == "dir", (it["size"] as? Number)?.toLong()) }
         } catch (e: Throwable) { throw OrbFileError.from(e, name) }
     }

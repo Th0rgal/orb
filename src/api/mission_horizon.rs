@@ -55,6 +55,57 @@ pub fn superseded_by(mission: &Mission) -> Option<Uuid> {
         .next_back()
 }
 
+/// The replacement chain around `id`: earlier attempts (nearest first, found
+/// through their `superseded_by:` tag) and later ones (following this
+/// mission's own tag). Bounded and cycle-safe.
+pub async fn replacement_chain(
+    store: &dyn MissionStore,
+    id: Uuid,
+) -> Result<(Vec<Uuid>, Vec<Uuid>), String> {
+    const DEPTH: usize = 16;
+    let mut seen = std::collections::HashSet::from([id]);
+    let mut earlier = Vec::new();
+    let mut cursor = id;
+    while earlier.len() < DEPTH {
+        let filter = MissionFilter {
+            tag: Some(format!("{SUPERSEDED_BY_PREFIX}{cursor}")),
+            ..Default::default()
+        };
+        let Some(prior) = store
+            .list_missions_filtered(&filter, 4, 0)
+            .await?
+            .into_iter()
+            .filter(|m| superseded_by(m) == Some(cursor))
+            .max_by_key(|m| m.created_at.clone())
+        else {
+            break;
+        };
+        if !seen.insert(prior.id) {
+            break;
+        }
+        earlier.push(prior.id);
+        cursor = prior.id;
+    }
+    let mut later = Vec::new();
+    let mut next = store
+        .get_mission(id)
+        .await?
+        .as_ref()
+        .and_then(superseded_by);
+    while let Some(successor) = next.filter(|_| later.len() < DEPTH) {
+        if !seen.insert(successor) {
+            break;
+        }
+        later.push(successor);
+        next = store
+            .get_mission(successor)
+            .await?
+            .as_ref()
+            .and_then(superseded_by);
+    }
+    Ok((earlier, later))
+}
+
 /// Mark `prior` as replaced by `successor`: tag it (`superseded` +
 /// `superseded_by:<id>`), move its child missions under the successor and,
 /// when no run is live, acknowledge it so it leaves the attention horizon.
@@ -1079,5 +1130,45 @@ mod tests {
         let wake = wake_fields_for_mission(&mission, dir.path());
         assert_eq!(wake.source, "project");
         assert_eq!(wake.session.as_deref(), Some("20260814_094937_8c5097"));
+    }
+
+    #[tokio::test]
+    async fn the_replacement_chain_never_includes_an_unrelated_mission() {
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let first = seed(&store, "security", "ops", "t", MissionStatus::Failed, &[]).await;
+        let second = seed(
+            &store,
+            "security (fresh session)",
+            "ops",
+            "t",
+            MissionStatus::Failed,
+            &[],
+        )
+        .await;
+        let third = seed(
+            &store,
+            "security (fresh session) (fresh session)",
+            "ops",
+            "t",
+            MissionStatus::Active,
+            &[],
+        )
+        .await;
+        let unrelated = seed(&store, "elsewhere", "ops", "u", MissionStatus::Failed, &[]).await;
+        supersede_explicit(store.as_ref(), &second, first.id)
+            .await
+            .unwrap();
+        supersede_explicit(store.as_ref(), &third, second.id)
+            .await
+            .unwrap();
+        let (earlier, later) = replacement_chain(store.as_ref(), third.id).await.unwrap();
+        assert_eq!(earlier, vec![second.id, first.id]);
+        assert!(later.is_empty());
+        let (earlier, later) = replacement_chain(store.as_ref(), second.id).await.unwrap();
+        assert_eq!((earlier, later), (vec![first.id], vec![third.id]));
+        let (earlier, later) = replacement_chain(store.as_ref(), unrelated.id)
+            .await
+            .unwrap();
+        assert!(earlier.is_empty() && later.is_empty());
     }
 }
