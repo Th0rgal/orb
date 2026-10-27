@@ -163,6 +163,15 @@ mod tests {
             vec!["gpt-5.10", "gpt-6-sol", "gpt-6-astra", "grok-4.6"]
         );
         assert_eq!(
+            pick(&[
+                "gpt-5.6-terra",
+                "gpt-6-luna",
+                "gpt-6.1-terra",
+                "gpt-6.1-sol"
+            ]),
+            vec!["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"]
+        );
+        assert_eq!(
             pick(&["claude-opus-5-5", "claude-opus-6"]),
             vec!["claude-opus-6"]
         );

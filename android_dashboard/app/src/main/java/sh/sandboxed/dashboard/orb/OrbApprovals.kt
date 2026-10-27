@@ -26,7 +26,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -240,7 +239,6 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var meshEpoch by remember { mutableStateOf<Int?>(null) }
     var meshVerified by remember { mutableStateOf(false) }
     var queue by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
-    var includeCritical by remember { mutableStateOf(false) }
     var devices by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var mode by remember { mutableStateOf("") }
     var projects by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
@@ -274,8 +272,6 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         var queueMissing = false
         try {
             val next = OrbJSON.dictList(dictOf(core.request("/api/approvals/queue"))["items"])
-            // A different list (or a changed item) must be ticked again.
-            if (OrbApprovalQueue.listKey(next) != OrbApprovalQueue.listKey(queue)) includeCritical = false
             queue = next
         } catch (e: OrbError) {
             queueMissing = e.status == 404 || e.status == 405
@@ -284,7 +280,6 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         if (queueMissing) {
             val secrets = runCatching { OrbJSON.dictList(dictOf(core.request("/api/bitwarden/broker"))["requests"]) }.getOrDefault(emptyList())
             val next = OrbApprovalQueue.legacyItems(privilege, secrets, access)
-            if (OrbApprovalQueue.listKey(next) != OrbApprovalQueue.listKey(queue)) includeCritical = false
             queue = next
         }
         try {
@@ -384,57 +379,46 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             error?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 13.sp) }
 
             Card("Approvals") {
-                // Every pending request, of every kind: Allow / Deny each, or
-                // Approve all with one fingerprint (critical ones only when ticked).
+                // One list: normal requests, "Approve N" for them, then the
+                // critical ones in red, then "Approve all" (red when it
+                // includes critical ones).
                 if (queue.isEmpty()) Text("Nothing is waiting for your approval.", color = OrbStyle.textMuted, fontSize = 13.sp)
-                queue.forEach { i ->
-                    val critical = OrbApprovalQueue.isCritical(i)
-                    Column(Modifier.padding(vertical = 6.dp)) {
-                        Text(OrbApprovalQueue.title(i), color = if (critical) Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text("asked by ${OrbApprovalQueue.requester(i)}", color = OrbStyle.textMuted, fontSize = 12.sp)
-                        (i["reason"] as? String)?.takeIf { it.isNotBlank() }?.let { Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp) }
-                        OrbApprovalQueue.detail(i) { projects[it] ?: it.take(8) }.takeIf { it.isNotEmpty() }?.let {
-                            Text(it, color = OrbStyle.textMuted, fontSize = 12.sp)
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            TextButton(enabled = !busy, onClick = {
-                                act {
-                                    approveQueue(listOf(i))
-                                }
-                            }) { Text("Allow") }
-                            TextButton(enabled = !busy, onClick = {
-                                act {
-                                    OrbApprovalKey.signedRequest(
-                                        core, activity, "POST", OrbApprovalQueue.denyPath(i) { core.encodeComponent(it) },
-                                        null, "Decline: ${OrbApprovalQueue.title(i)}"
-                                    )
-                                }
-                            }) { Text("Deny", color = Color(0xFFFF6B6B)) }
-                        }
+                val normal = queue.filter { !OrbApprovalQueue.isCritical(it) }
+                val critical = queue.filter { OrbApprovalQueue.isCritical(it) }
+                @Composable
+                fun approveButton(items: List<Map<String, Any?>>, label: String, red: Boolean) = Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(enabled = !busy && items.isNotEmpty(), onClick = { act { approveQueue(items) } }) {
+                        Text(label, color = if (red) Color(0xFFFF6B6B) else Color.Unspecified, fontWeight = FontWeight.Medium)
                     }
                 }
-                if (queue.size > 1) {
-                    val summary = OrbApprovalQueue.summary(queue)
-                    val ready = OrbApprovalQueue.batchApprovable(queue, includeCritical)
-                    Column(Modifier.padding(vertical = 6.dp)) {
-                        Text(summary.risks, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                        Text("for ${summary.missions}", color = OrbStyle.textMuted, fontSize = 12.sp)
-                        if (summary.critical > 0) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(checked = includeCritical, onCheckedChange = { includeCritical = it })
-                                Text(
-                                    if (summary.critical == 1) "Include the critical request (root, secret delete or move)" else "Include ${summary.critical} critical requests (root, secret delete or move)",
-                                    color = Color(0xFFFF6B6B), fontSize = 12.sp
+                @Composable
+                fun row(i: Map<String, Any?>) = Column(Modifier.padding(vertical = 6.dp)) {
+                    Text(OrbApprovalQueue.title(i), color = if (OrbApprovalQueue.isCritical(i)) Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("asked by ${OrbApprovalQueue.requester(i)}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                    (i["reason"] as? String)?.takeIf { it.isNotBlank() }?.let { Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp) }
+                    OrbApprovalQueue.detail(i) { projects[it] ?: it.take(8) }.takeIf { it.isNotEmpty() }?.let {
+                        Text(it, color = OrbStyle.textMuted, fontSize = 12.sp)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(enabled = !busy, onClick = { act { approveQueue(listOf(i)) } }) { Text("Allow") }
+                        TextButton(enabled = !busy, onClick = {
+                            act {
+                                OrbApprovalKey.signedRequest(
+                                    core, activity, "POST", OrbApprovalQueue.denyPath(i) { core.encodeComponent(it) },
+                                    null, "Decline: ${OrbApprovalQueue.title(i)}"
                                 )
                             }
-                        }
-                        TextButton(enabled = !busy && ready.isNotEmpty(), onClick = {
-                            act {
-                                approveQueue(ready)
-                                includeCritical = false
-                            }
-                        }) { Text(if (ready.size == queue.size) "Approve all" else "Approve ${ready.size}") }
+                        }) { Text("Deny", color = Color(0xFFFF6B6B)) }
                     }
+                }
+                normal.forEach { row(it) }
+                if (normal.isNotEmpty() && critical.isNotEmpty()) {
+                    val normals = OrbApprovalQueue.normalBatch(queue)
+                    approveButton(normals, "Approve ${normals.size}", red = false)
+                }
+                critical.forEach { row(it) }
+                if (queue.size > 1) {
+                    approveButton(OrbApprovalQueue.allBatch(queue), OrbApprovalQueue.approveAllLabel(queue), red = critical.isNotEmpty())
                 }
             }
 

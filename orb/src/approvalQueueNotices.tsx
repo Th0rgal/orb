@@ -1,12 +1,12 @@
 import { For, Show, createSignal } from "solid-js";
 import {
   approveItems,
-  batchApprovable,
+  allBatch,
   denyItem,
   itemDetail,
   itemRequester,
   itemTitle,
-  queueSummary,
+  normalBatch,
   type ApprovalItem,
 } from "./approvalQueue";
 import { listBitwardenProjects } from "./bitwardenApi";
@@ -30,7 +30,6 @@ const BUNKER_KEY = "bunker-mode-active";
 const [pending, setPending] = createSignal<ApprovalItem[]>([]);
 /** Closed with the X, or being answered right now. */
 const [hidden, setHidden] = createSignal<ReadonlySet<string>>(new Set());
-const [includeCritical, setIncludeCritical] = createSignal(false);
 /** When the visible set last changed: a batch must not catch a request that just appeared. */
 const [changedAt, setChangedAt] = createSignal(0);
 const [bunkerLevel, setBunkerLevel] = createSignal(0);
@@ -67,7 +66,7 @@ export function syncApprovalQueue(items: ApprovalItem[], review: () => void) {
   setHidden((prev) => new Set([...prev].filter((k) => live.has(k))));
   // A changed item (new digest) counts as a change too.
   const keys = visible().map((i) => `${key(i)}:${i.digest}`).join(",");
-  if (keys !== lastKeys) { lastKeys = keys; setChangedAt(Date.now()); setIncludeCritical(false); }
+  if (keys !== lastKeys) { lastKeys = keys; setChangedAt(Date.now()); }
   if (!visible().length) return dismissToast(KEY);
   notify({ key: KEY, kind: "info", variant: "secret", title: "", content: () => <ApprovalQueueCard /> });
 }
@@ -156,9 +155,24 @@ function ApprovalQueueCard() {
   const now = useNow(250);
   const list = visible;
   const one = () => (list().length === 1 ? list()[0] : undefined);
-  const summary = () => queueSummary(list());
-  const ready = () => batchApprovable(list(), includeCritical());
+  // One list: normal rows first, then the critical ones (red).
+  const normal = () => list().filter((i) => i.risk !== "critical");
+  const critical = () => list().filter((i) => i.risk === "critical");
+  const normals = () => normalBatch(list());
+  const everything = () => allBatch(list());
+  const settled = () => now() - changedAt() >= SETTLE_MS;
+  // Approve exactly what was on screen when the button became active.
+  const approve = (items: () => ApprovalItem[]) => () => { if (Date.now() - changedAt() >= SETTLE_MS) act(items(), true); };
   const close = () => { hide(list(), true); dismissToast(KEY); };
+  const row = (i: ApprovalItem) =>
+    <div class="secret-row" classList={{ "approval-critical": i.risk === "critical" }} data-testid="approval-queue-row">
+      <div class="toast-body">
+        <strong class="secret-row-key">{itemTitle(i)}<Show when={detail(i)}><span class="approval-row-detail"> · {detail(i)}</span></Show></strong>
+        <span class="secret-row-reason" title={i.reason}>{itemRequester(i)}{i.reason ? `: ${i.reason}` : ""}</span>
+      </div>
+      <button type="button" class="toast-btn" onClick={() => act([i], false)}>Deny</button>
+      <button type="button" class="toast-btn primary secret-row-ok" title="Allow" aria-label="Allow" onClick={() => act([i], true)}><FingerprintIcon size={14} /></button>
+    </div>;
   return <div class="secret-card access-card" data-testid="approval-queue-card">
     <div class="secret-card-top">
       <span class="toast-glyph" aria-hidden="true"><FingerprintIcon /></span>
@@ -176,26 +190,15 @@ function ApprovalQueueCard() {
     </div>
     <Show when={!one()}>
       <div class="secret-rows">
-        <For each={list()}>{(i) =>
-          <div class="secret-row" classList={{ "approval-critical": i.risk === "critical" }} data-testid="approval-queue-row">
-            <div class="toast-body">
-              <strong class="secret-row-key">{itemTitle(i)}<Show when={detail(i)}><span class="approval-row-detail"> · {detail(i)}</span></Show></strong>
-              <span class="secret-row-reason" title={i.reason}>{itemRequester(i)}{i.reason ? `: ${i.reason}` : ""}</span>
-            </div>
-            <button type="button" class="toast-btn" onClick={() => act([i], false)}>Deny</button>
-            <button type="button" class="toast-btn primary secret-row-ok" title="Allow" aria-label="Allow" onClick={() => act([i], true)}><FingerprintIcon size={14} /></button>
-          </div>}
-        </For>
-      </div>
-      <div class="approval-batch" data-testid="approval-queue-summary">
-        <span class="access-scope">{summary().risks}</span>
-        <span class="access-scope" title={summary().missions}>for {summary().missions}</span>
-        <Show when={summary().critical}>
-          <label class="approval-critical-confirm">
-            <input type="checkbox" checked={includeCritical()} onChange={(e) => setIncludeCritical(e.currentTarget.checked)} />
-            Include {summary().critical === 1 ? "the critical request" : `${summary().critical} critical requests`} (root, secret delete or move)
-          </label>
+        <For each={normal()}>{row}</For>
+        <Show when={normal().length && critical().length}>
+          <div class="approval-normal-bar">
+            <button type="button" class="toast-btn primary" data-testid="approval-approve-normal" disabled={!settled()} onClick={approve(normals)}>
+              <FingerprintIcon size={14} />Approve {normals().length}
+            </button>
+          </div>
         </Show>
+        <For each={critical()}>{row}</For>
       </div>
     </Show>
     <div class="secret-bar">
@@ -204,15 +207,13 @@ function ApprovalQueueCard() {
       <Show when={one()} fallback={<button type="button" class="toast-btn" onClick={() => act(list(), false)}>Deny all</button>}>
         {(i) => <>
           <button type="button" class="toast-btn" onClick={() => act([i()], false)}>Deny</button>
-          <button type="button" class="toast-btn primary" onClick={() => act([i()], true)}><FingerprintIcon size={14} />Allow</button>
+          <button type="button" class="toast-btn primary" classList={{ danger: i().risk === "critical" }} onClick={() => act([i()], true)}><FingerprintIcon size={14} />Allow</button>
         </>}
       </Show>
-      <Show when={!one() && ready().length}>
-        <button type="button" class="toast-btn primary" disabled={now() - changedAt() < SETTLE_MS} onClick={() => {
-          // Approve exactly what was on screen when the button became active.
-          if (Date.now() - changedAt() >= SETTLE_MS) act(ready(), true);
-        }}>
-          <FingerprintIcon size={14} />{ready().length === list().length ? "Approve all" : `Approve ${ready().length}`}
+      <Show when={!one()}>
+        <button type="button" class="toast-btn primary" classList={{ danger: critical().length > 0 }} data-testid="approval-approve-all" disabled={!settled()} onClick={approve(everything)}>
+          <FingerprintIcon size={14} />
+          {critical().length ? `Approve all (${everything().length}, incl. ${everything().filter((i) => i.risk === "critical").length} critical)` : "Approve all"}
         </button>
       </Show>
     </div>

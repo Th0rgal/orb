@@ -143,6 +143,16 @@ Codex, xAI, and Anthropic OAuth accounts through this service.
 | Binary | `/usr/local/bin/cli-proxy-api` |
 | Config | `/etc/cli-proxy-api/config.yaml` |
 | Auth directory | `/var/lib/cli-proxy-api/auth` |
+| Model catalog | `/etc/cli-proxy-api/models.local.json` (`models.catalog` in the config) |
+
+The model catalog is maintained by hand and overrides the binary's built-in
+list. The sidecar refuses models it does not list (`unknown provider for
+model`), and Core keeps only the Codex models the sidecar's `/v1/models`
+returns, so a new OpenAI model missing from this file is hidden from every
+Codex picker. When a model ships, add it to each `codex-<plan>` section it is
+available on (copy the closest sibling entry), keep a backup of the file,
+restart `cli-proxy-api`, then check `/v1/models` and one real `/v1/responses`
+call for the new ID.
 
 The Sandboxed.sh environment must define `CLI_PROXY_API_BASE_URL`,
 `CLI_PROXY_API_KEY`, and `CLI_PROXY_AUTH_DIR`. The API key must match one of the
