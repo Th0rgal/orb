@@ -1,3 +1,4 @@
+import { privilegeSnapshot } from "./privilegeAccessFixture";
 import {test,expect} from '@playwright/test';
 import {eventPage} from './eventPageFixture';
 
@@ -8,6 +9,7 @@ test('editing grows below the text without moving a pinned conversation',async({
  await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
  await page.route('**/api/**',async route=>{
   const path=new URL(route.request().url()).pathname;
+    if (path === "/api/privilege-access") return route.fulfill({ json: privilegeSnapshot() });
   if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
   if(path.endsWith('/events'))return route.fulfill(eventPage(route,[{id:1,sequence:1,event_type:'user_message',timestamp:'2026-10-06T08:00:00Z',content:prompt,metadata:{id:'prompt'}}]));
   const json=path==='/api/projects'?{projects:[{slug:'test',title:'test'}]}
