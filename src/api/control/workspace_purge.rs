@@ -387,7 +387,7 @@ pub async fn operate(
 
 // Deliberately conservative: action arguments may refer to aliases, a project,
 // a new child, or an implicit issuer mission. Tool allowlists miss accepted work.
-fn require_no_accepted_actions(conn: &rusqlite::Connection) -> Result<(), String> {
+pub(crate) fn require_no_accepted_actions(conn: &rusqlite::Connection) -> Result<(), String> {
     let has_actions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_actions_v1')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
     if has_actions {
         let unsettled: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM mcp_actions_v1 WHERE state IN ('queued','dispatching','reconciliation_required'))", [], |row| row.get(0)).map_err(|e| e.to_string())?;

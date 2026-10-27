@@ -753,6 +753,25 @@ pub async fn delete_mission(
     let _durable = dispatch_admission::durable_lock(&state.config)
         .await
         .map_err(internal_error)?;
+    {
+        let conn = state.projects.connection.lock().map_err(internal_error)?;
+        workspace_purge::require_no_accepted_actions(&conn)
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
+    }
+    // Descendant creation is admission-serialized. Recompute after acquiring
+    // the fence and reject if the validated deletion set changed while waiting.
+    let final_child_ids = collect_child_mission_ids(&control.mission_store, mission_id).await?;
+    let initial_children: HashSet<Uuid> = ids_to_delete
+        .iter()
+        .copied()
+        .filter(|id| *id != mission_id)
+        .collect();
+    if final_child_ids.iter().copied().collect::<HashSet<_>>() != initial_children {
+        return Err((
+            StatusCode::CONFLICT,
+            "Mission descendants changed while deletion was waiting; retry".into(),
+        ));
+    }
     for id in &ids_to_delete {
         machine_transfer::guard(&control.mission_store, *id)
             .await
