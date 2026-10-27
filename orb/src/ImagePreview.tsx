@@ -73,16 +73,16 @@ export default function ImagePreview(p: { name: string; load?: (signal: AbortSig
     onCleanup(() => { observer.disconnect(); viewport.removeEventListener("wheel", wheel); });
     void (async () => {
       try {
-        if (p.src) img.src = p.src;
+        if (p.src) { img.src = p.src; setShown(p.src); }
         else {
           const bytes = await p.load!(abort.signal);
           if (abort.signal.aborted) return;
           url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: imageMime(p.name) }));
-          img.src = url;
+          img.src = url; setShown(url);
         }
         await img.decode();
         if (abort.signal.aborted) return;
-        setShown(img.src); setReady(true); fit();
+        setReady(true); fit();
       } catch (e) { if (!abort.signal.aborted) setError(e instanceof Error ? e.message : String(e)); }
     })();
   });
