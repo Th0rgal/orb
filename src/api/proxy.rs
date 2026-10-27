@@ -205,25 +205,43 @@ async fn chain_usage_limit(
     chain_entries: &[crate::provider_health::ChainEntry],
     standard_accounts: &[crate::provider_health::StandardAccount],
 ) -> Option<crate::account_limits::LimitCooldown> {
-    let candidate_ids = state
-        .chain_store
-        .configured_account_ids(chain_entries, &state.ai_providers, standard_accounts)
-        .await;
-    let mut candidates = Vec::with_capacity(candidate_ids.len());
-    for account_id in &candidate_ids {
-        let subscription = state
-            .ai_providers
-            .get(*account_id)
-            .await
-            .and_then(|account| {
-                crate::provider_health::store_account_subscription_key(
-                    account.provider_type,
-                    &account,
-                )
-            });
-        candidates.push((*account_id, subscription));
+    let mut earliest: Option<crate::account_limits::LimitCooldown> = None;
+    for entry in chain_entries {
+        let account_ids = state
+            .chain_store
+            .configured_account_ids(
+                std::slice::from_ref(entry),
+                &state.ai_providers,
+                standard_accounts,
+            )
+            .await;
+        for account_id in account_ids {
+            let subscription = state
+                .ai_providers
+                .get(account_id)
+                .await
+                .and_then(|account| {
+                    crate::provider_health::store_account_subscription_key(
+                        account.provider_type,
+                        &account,
+                    )
+                });
+            // Antigravity parks one quota pool (Gemini, Claude & GPT) of
+            // the login, not the whole account.
+            let limit = state
+                .health_tracker
+                .blocking_limit(account_id, subscription.as_ref())
+                .or_else(|| {
+                    state
+                        .health_tracker
+                        .pool_limit(&entry.provider_id, account_id, &entry.model_id)
+                })?;
+            if earliest.as_ref().is_none_or(|e| limit.until < e.until) {
+                earliest = Some(limit);
+            }
+        }
     }
-    state.health_tracker.usage_limit_blocking_all(&candidates)
+    earliest
 }
 
 /// Every account of the chain is parked on a usage limit: answer the way the

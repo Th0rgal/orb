@@ -1233,6 +1233,17 @@ impl ProviderHealthTracker {
             .is_some_and(|key| self.limits.is_cooling(&key))
     }
 
+    /// The usage limit parking `account_id`'s quota pool for `model_id`.
+    pub fn pool_limit(
+        &self,
+        provider_id: &str,
+        account_id: Uuid,
+        model_id: &str,
+    ) -> Option<crate::account_limits::LimitCooldown> {
+        self.limits
+            .active(&pool_limit_key(provider_id, account_id, model_id)?)
+    }
+
     fn park_pool(
         &self,
         key: &str,
@@ -3874,6 +3885,33 @@ mod tests {
             !after.contains(&google_id) && after.contains(&pool_id),
             "the 429-parked Google login is skipped, Antigravity answers: {after:?}"
         );
+        // Antigravity's Gemini pool spent too: the limit is on the pool, and
+        // the proxy reads it there to answer with a usage limit.
+        let pool_entry = chains
+            .resolve_entries(&argon, &store, &[], &health)
+            .await
+            .into_iter()
+            .find(|e| e.account_id == pool_id)
+            .unwrap();
+        let reset = chrono::Utc::now() + chrono::Duration::hours(5);
+        health
+            .record_entry_usage_limit(
+                &pool_entry,
+                crate::account_limits::LimitCooldown::new(
+                    "antigravity",
+                    "usage limit",
+                    crate::account_limits::LimitReset {
+                        at: reset,
+                        announced: true,
+                    },
+                ),
+            )
+            .await;
+        assert!(health.blocking_limit(pool_id, None).is_none());
+        let limit = health
+            .pool_limit("antigravity", pool_id, "gemini-4-argon-medium")
+            .expect("pool limit");
+        assert_eq!(limit.until, reset);
     }
 
     #[tokio::test]
