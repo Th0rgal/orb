@@ -128,8 +128,8 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
     let some ci := env.find? n | continue
     if ci.type.isAppOf ``Orb.Spec.MetaStepSpec then
       metaStepSpecs := metaStepSpecs + 1
-  if theorems == 0 || exports == 0 || metaStepSpecs < 2 then
-    errors := errors.push s!"audit found {theorems} theorems / {exports} exports / {metaStepSpecs} MetaStepSpecs; expected theorems > 0, exports > 0, metaStepSpecs >= 2"
+  if theorems == 0 || exports == 0 || metaStepSpecs < 6 then
+    errors := errors.push s!"audit found {theorems} theorems / {exports} exports / {metaStepSpecs} MetaStepSpecs; expected theorems > 0, exports > 0, metaStepSpecs >= 6"
   unless errors.isEmpty do
     throwError "Orb spec audit failed:\n{String.intercalate "\n" errors.toList}"
   logInfo m!"Orb spec audit OK: {kernel.size + spec.size} declarations, {theorems} theorems, {exports} exports, {metaStepSpecs} MetaStepSpec instances, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"

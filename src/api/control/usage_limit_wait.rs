@@ -667,7 +667,12 @@ pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'stat
     }
     if lower.contains("previous response was cut off because it exceeded the output token limit") {
         Some("Antigravity response truncated")
-    } else if failure.contains("Antigravity ended without a SUCCESS result") {
+    } else if failure.contains("Antigravity ended without a SUCCESS result")
+        // agy's own result line when the server ends the turn (seen on
+        // mission c467ce63 right after a background-task handoff). A Stop
+        // from the user never reaches here: replays need an active mission.
+        || failure.lines().any(|l| l.trim() == "CLI error: interrupted")
+    {
         Some("Antigravity interrupted turn")
     } else if lower.contains(crate::antigravity::IDLE_WAIT_INTERRUPTED_MARKER) {
         Some(IDLE_WAIT_INTERRUPTED)
@@ -2134,6 +2139,7 @@ mod tests {
             "RESOURCE_EXHAUSTED: too many requests",
             "read: no route to host",
             "The stream was interrupted. Please continue the task you were working on.",
+            "command exited with Some(1).\nCLI error: interrupted\n\ndiagnostics:\nerror: interrupted",
         ] {
             assert!(
                 antigravity_resumable_interruption(failure).is_some(),

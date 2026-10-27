@@ -34,7 +34,11 @@ it("diagnostics text lists versions, backend and recent log lines", async () => 
 it("Settings shows a Debug info panel with the recent log", async () => {
   log.warn("sidebar.load", "slow listing");
   const { container } = render(() => <Settings />);
-  const details = [...container.querySelectorAll("details")].find(d => d.textContent?.includes("Debug info"))!;
+  // Diagnostics live under the collapsed Advanced section of Account.
+  const advanced = container.querySelector<HTMLDetailsElement>("details.settings-advanced")!;
+  advanced.open = true;
+  fireEvent(advanced, new Event("toggle"));
+  const details = await waitFor(() => [...container.querySelectorAll("details")].find(d => d !== advanced && d.textContent?.includes("Debug info"))!);
   details.open = true;
   fireEvent(details, new Event("toggle"));
   await waitFor(() => expect(screen.getByLabelText("Recent log entries").textContent).toContain("[sidebar.load] slow listing"));

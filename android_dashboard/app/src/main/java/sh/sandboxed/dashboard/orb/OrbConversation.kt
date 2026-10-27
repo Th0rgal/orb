@@ -1129,7 +1129,15 @@ fun OrbConversationPage(
     }
     val allTurns = remember(baseTurns, hasStreamingText) { OrbTimelineBuilder.withLiveBubble(baseTurns, hasStreamingText) }
 
-    LaunchedEffect(allTurns) { latestTurns = allTurns }
+    LaunchedEffect(allTurns) {
+        latestTurns = allTurns
+        transcriptFollow.advanceLayoutEpoch()
+        transcriptFollow.verifyClientParity(
+            transcriptSeq = events.lastOrNull()?.int("sequence") ?: allTurns.size,
+            markdownBlocksCount = allTurns.size,
+            sendQueueDepth = if (inputText.isNotBlank()) 1 else 0
+        )
+    }
 
     var visibleTurnLimit by remember(missionId) { mutableIntStateOf(24) }
     val turns = remember(allTurns, visibleTurnLimit) {
@@ -1343,6 +1351,11 @@ fun OrbConversationPage(
         val layout = listState.layoutInfo
         val totalItems = layout.totalItemsCount
         val targetIdx = maxOf(0, (if (totalItems > 0) totalItems else turns.size) - 1)
+        val currentTopPx = listState.firstVisibleItemIndex * 64 + listState.firstVisibleItemScrollOffset
+        val targetTopPx = maxOf(currentTopPx + 1, (targetIdx + 1) * 64)
+        if (hasAnchoredInitial && !transcriptFollow.shouldCorrectInEpoch(targetTopPx, currentTopPx)) {
+            return
+        }
         listState.scrollToItem(targetIdx, scrollOffset = 0)
         val postLayout = listState.layoutInfo
         val lastInfo = postLayout.visibleItemsInfo.lastOrNull()

@@ -51,16 +51,61 @@ export interface PrivilegeCommandAudit {
   duration_ms?: number | null;
 }
 
+export interface BunkerIncident {
+  id: string;
+  at: string;
+  source: string;
+  peer_name?: string | null;
+  canary_kind?: string | null;
+  previous_bunker_state: number;
+  new_bunker_state: number;
+  epoch: number;
+  dry_run: boolean;
+  reason: string;
+  pid?: number | null;
+  uid?: number | null;
+  cgroup?: string | null;
+  cmdline?: string | null;
+  detail_sha256_hex?: string | null;
+  alert_delivered: boolean;
+  alert_channels: string[];
+  alert_error?: string | null;
+}
+
 export interface PrivilegeSnapshot {
   bunker_state: number;
   requests: PrivilegeRequest[];
   audit: PrivilegeAudit[];
   command_audit: PrivilegeCommandAudit[];
+  bunker_incidents?: BunkerIncident[];
 }
 
-export const emptyPrivilegeSnapshot = (): PrivilegeSnapshot => ({ bunker_state: 0, requests: [], audit: [], command_audit: [] });
+export interface MeshStatusSnapshot {
+  epoch: number;
+  bunker_state: number;
+  last_heartbeat_at: number;
+  formal_verified: boolean;
+}
+
+export const emptyPrivilegeSnapshot = (): PrivilegeSnapshot => ({
+  bunker_state: 0,
+  requests: [],
+  audit: [],
+  command_audit: [],
+  bunker_incidents: [],
+});
 
 export const getPrivilegeAccess = () => api<PrivilegeSnapshot>("/api/privilege-access");
+export const getMeshStatus = () => api<MeshStatusSnapshot>("/api/mesh/status");
+
+const BUNKER_LABELS: Record<number, string> = {
+  0: "Normal",
+  1: "Soft Quarantine",
+  2: "Hard Lockdown",
+  3: "Sovereign Dead-Man Tripped",
+};
+export const bunkerStateLabel = (state: number): string =>
+  BUNKER_LABELS[state] ?? `Locked (${state})`;
 
 const answered = <T,>(id: string, result: Promise<T>) =>
   result.then((value) => { window.dispatchEvent(new CustomEvent("orb:privilege-access-answered", { detail: { id } })); return value; });
@@ -107,6 +152,38 @@ export const denyPrivilegeAccess = (r: PrivilegeRequest) =>
 
 export const revokePrivilegeAccess = (id: string) =>
   answered(id, api<PrivilegeRequest>(`/api/privilege-access/${encodeURIComponent(id)}`, { method: "DELETE" }));
+
+export const triggerBunker = (
+  level: 1 | 2 = 2,
+  reason = "Operator manual Fleet Bunker lockdown",
+) =>
+  answered(
+    "bunker",
+    signedApi<{ status: string; bunker_state: number }>(
+      "POST",
+      "/api/privilege-access/bunker",
+      {
+        level,
+        reason,
+        canary_tripped: level >= 2,
+        auth_failure_burst: level === 1,
+      },
+      level >= 2
+        ? "enter Hard Bunker Lockdown across the fleet"
+        : "enter Soft Quarantine across the fleet",
+    ),
+  );
+
+export const unbunkerFleet = () =>
+  answered(
+    "unbunker",
+    signedApi<{ status: string; bunker_state: number }>(
+      "POST",
+      "/api/privilege-access/unbunker",
+      undefined,
+      "exit Fleet Bunker Mode",
+    ),
+  );
 
 /** Approved and not yet expired (Core still decides every command). */
 export const livePrivilegeGrant = (r: PrivilegeRequest, now = Date.now()) =>

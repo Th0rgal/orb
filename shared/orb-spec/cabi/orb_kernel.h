@@ -76,6 +76,14 @@ uint64_t orb_provider_pool_step(uint8_t, uint32_t, uint32_t, uint8_t, uint8_t, u
 uint64_t orb_route_argmin_step(uint8_t, uint32_t, uint64_t, uint32_t, uint64_t, uint8_t);
 uint64_t orb_mission_control_step(uint8_t, uint32_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 uint64_t orb_fork_home_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_privd_command_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_ssh_identity_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_agent_event_normalize_step(uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_transcript_reduce_step(uint64_t, uint64_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_cursor_page_step(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_sidebar_merge_step(uint32_t, uint32_t, uint64_t, uint64_t, uint8_t, uint8_t);
+uint64_t orb_scroll_epoch_step(uint32_t, uint32_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t);
+uint64_t orb_client_parity_step(uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t);
 uint8_t leansys_verify_slice_bounds(uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_wal_frame(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_cas_digest(uint64_t, uint64_t, uint8_t);

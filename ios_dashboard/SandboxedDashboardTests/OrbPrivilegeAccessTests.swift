@@ -71,4 +71,28 @@ final class OrbPrivilegeAccessTests: XCTestCase {
         if case .object(let o) = items[0] { XCTAssertEqual(o.count, 7, "only the fields Core checks") } else { XCTFail("item is not an object") }
         XCTAssertEqual(OrbPrivilegeAccessMonitor.batchBody([deploy])["confirm_root"], .bool(false))
     }
+
+    func testBunkerStateLabels() {
+        XCTAssertEqual(OrbPrivilegeAccessMonitor.bunkerLabel(0), "Normal")
+        XCTAssertEqual(OrbPrivilegeAccessMonitor.bunkerLabel(1), "Soft Quarantine")
+        XCTAssertEqual(OrbPrivilegeAccessMonitor.bunkerLabel(2), "Hard Lockdown")
+        XCTAssertEqual(OrbPrivilegeAccessMonitor.bunkerLabel(3), "Sovereign Dead-Man Tripped")
+    }
+
+    func testEscapePreservesUnreservedUUIDHyphens() {
+        let uuid = "1722a8ac-49c5-4193-9317-7498a0dceffd"
+        XCTAssertEqual(OrbCore.escape(uuid), uuid)
+        XCTAssertFalse(OrbCore.escape(uuid).contains("%"))
+    }
+
+    func testRemoteNodeIDResolvesJobNodeAndScopeUnit() throws {
+        let fromJob = try json(["remote_job": ["node_id": "nippur"]])
+        XCTAssertEqual(OrbContinuation.remoteNodeID(for: fromJob), "nippur")
+
+        let fromScope = try json(["execution": ["scope_unit": "remote-node:ashur:mission-1"]])
+        XCTAssertEqual(OrbContinuation.remoteNodeID(for: fromScope), "ashur")
+
+        let local = try json(["id": "m1"])
+        XCTAssertEqual(OrbContinuation.remoteNodeID(for: local), "core")
+    }
 }

@@ -5,7 +5,7 @@ vi.mock('../src/deviceApproval',()=>({signedApi:vi.fn(),ApprovalCancelled:class 
 import {api} from '../src/api';
 import {signedApi} from '../src/deviceApproval';
 import fixture from '../../shared/orb-spec/fixtures/privilege-access.json';
-import {approveAllPrivilegeAccess,batchApprovable,batchSummary,requestTitle,requesterLabel,approvePrivilegeAccess,denyPrivilegeAccess,lifetimeLabel,livePrivilegeGrant,revokePrivilegeAccess,scopeUnlocks,type PrivilegeRequest} from '../src/privilegeAccessApi';
+import {approveAllPrivilegeAccess,approvePrivilegeAccess,batchApprovable,batchSummary,bunkerStateLabel,denyPrivilegeAccess,lifetimeLabel,livePrivilegeGrant,requestTitle,requesterLabel,revokePrivilegeAccess,scopeUnlocks,triggerBunker,unbunkerFleet,type PrivilegeRequest} from '../src/privilegeAccessApi';
 import {PrivilegeAccessPanel} from '../src/PrivilegeAccessPanel';
 const now=Date.now();
 const iso=(ms:number)=>new Date(now+ms).toISOString();
@@ -84,5 +84,14 @@ describe('privilege access',()=>{
   expect(screen.getByTestId('privilege-access-grant').textContent).toContain('Root on its own node');
   fireEvent.click(screen.getByRole('button',{name:'Allow'}));
   await waitFor(()=>expect(vi.mocked(signedApi)).toHaveBeenCalled());
+ });
+ it('triggers and exits Bunker Mode through the signed (Touch ID) path',async()=>{
+  vi.mocked(signedApi).mockResolvedValue({status:'bunkered',bunker_state:2});
+  expect(bunkerStateLabel(0)).toBe('Normal');
+  expect(bunkerStateLabel(2)).toBe('Hard Lockdown');
+  await triggerBunker(2,'Canary manual test');
+  expect(vi.mocked(signedApi).mock.calls[0].slice(0,3)).toEqual(['POST','/api/privilege-access/bunker',{level:2,reason:'Canary manual test',canary_tripped:true,auth_failure_burst:false}]);
+  await unbunkerFleet();
+  expect(vi.mocked(signedApi).mock.calls[1].slice(0,3)).toEqual(['POST','/api/privilege-access/unbunker',undefined]);
  });
 });

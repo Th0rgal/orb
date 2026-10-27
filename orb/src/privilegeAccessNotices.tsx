@@ -6,11 +6,13 @@ import {
   approvePrivilegeAccess,
   batchApprovable,
   batchSummary,
+  bunkerStateLabel,
   denyPrivilegeAccess,
   lifetimeLabel,
   requesterLabel,
   requestTitle,
   scopeUnlocks,
+  unbunkerFleet,
   type PrivilegeRequest,
 } from "./privilegeAccessApi";
 import { FingerprintIcon } from "./secretRequestNotices";
@@ -25,8 +27,11 @@ import { dismissToast, notify } from "./toast";
  * unless the approver ticks "Include root".
  */
 const KEY = "privilege-access-requests";
+const BUNKER_KEY = "bunker-mode-active";
 const [pending, setPending] = createSignal<PrivilegeRequest[]>([]);
 const [hidden, setHidden] = createSignal<ReadonlySet<string>>(new Set());
+const [bunkerLevel, setBunkerLevel] = createSignal(0);
+const [bunkerDismissedForLevel, setBunkerDismissedForLevel] = createSignal(0);
 let openSettings = () => {};
 
 const visible = () => pending().filter((r) => !hidden().has(r.id));
@@ -43,15 +48,69 @@ const SETTLE_MS = 1500;
 let lastIds = "";
 const [includeRoot, setIncludeRoot] = createSignal(false);
 
-export function syncPrivilegeAccessNotices(list: PrivilegeRequest[], open: () => void) {
+export function syncPrivilegeAccessNotices(list: PrivilegeRequest[], open: () => void, bunkerState = 0) {
   openSettings = open;
   setPending(list);
+  setBunkerLevel(bunkerState);
+  if (bunkerState <= 0) {
+    setBunkerDismissedForLevel(0);
+    dismissToast(BUNKER_KEY);
+  } else if (bunkerDismissedForLevel() !== bunkerState) {
+    notify({ key: BUNKER_KEY, kind: "error", variant: "secret", title: "", content: () => <BunkerModeCard /> });
+  }
   const live = new Set(list.map((r) => r.id));
   setHidden((prev) => new Set([...prev].filter((id) => live.has(id))));
   const ids = visible().map((r) => r.id).join(",");
   if (ids !== lastIds) { lastIds = ids; setChangedAt(Date.now()); setIncludeRoot(false); }
   if (!visible().length) return dismissToast(KEY);
   notify({ key: KEY, kind: "info", variant: "secret", title: "", content: () => <PrivilegeAccessCard /> });
+}
+
+function BunkerModeCard() {
+  const close = () => {
+    setBunkerDismissedForLevel(bunkerLevel());
+    dismissToast(BUNKER_KEY);
+  };
+  const exitBunker = () => {
+    void (async () => {
+      try {
+        await unbunkerFleet();
+        setBunkerLevel(0);
+        setBunkerDismissedForLevel(0);
+        dismissToast(BUNKER_KEY);
+      } catch (e) {
+        if (e instanceof ApprovalCancelled) return;
+        notify({
+          kind: "error",
+          title: "Could not exit Bunker Mode",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    })();
+  };
+  return (
+    <div class="secret-card access-card" data-testid="bunker-mode-notice-card">
+      <div class="secret-card-top">
+        <span class="toast-glyph" aria-hidden="true"><FingerprintIcon /></span>
+        <div class="toast-body">
+          <span class="toast-title">
+            <strong>Fleet Bunker Mode: {bunkerStateLabel(bunkerLevel())}</strong>
+          </span>
+          <span class="toast-message">
+            New privileged requests are locked and active root/deploy grants are revoked.
+          </span>
+        </div>
+        <button type="button" class="icon-btn toast-icon-btn" aria-label="Dismiss" onClick={close}><CloseIcon size={13} /></button>
+      </div>
+      <div class="secret-bar">
+        <span class="secret-grace">Touch ID required</span>
+        <button type="button" class="toast-link" onClick={() => { close(); openSettings(); }}>Review</button>
+        <button type="button" class="toast-btn primary" onClick={exitBunker}>
+          <FingerprintIcon size={14} />Exit Bunker Mode
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function act(r: PrivilegeRequest, approve: boolean) {

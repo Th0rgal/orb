@@ -81,6 +81,13 @@ struct OrbConversation: View {
     var pendingKey: String { draftKey + ":pending" }
     var turns: [OrbJSON] { execution["turns"].items }
     var isCloud: Bool { execution != .null || !mission["cloud"]["provider"].text.isEmpty || (id == nil && selection.cloud) }
+    var isHermesCloud: Bool {
+        let provider = !execution["selection"]["provider"].text.isEmpty
+            ? execution["selection"]["provider"].text
+            : (!mission["cloud"]["provider"].text.isEmpty ? mission["cloud"]["provider"].text : selection.wire["provider"].text)
+        return provider == "hermes" || mission["backend"].text == "cloud_hermes"
+    }
+    var supportsAttachments: Bool { !isCloud || isHermesCloud }
     /// Core stores trimmed text, so a reply echoed back may differ from the
     /// draft only by surrounding whitespace.
     static func sameMessage(_ a: String, _ b: String) -> Bool {

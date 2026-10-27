@@ -1064,6 +1064,16 @@ pub(in crate::api) async fn create_mission_inner(
     if let Some(prompt) = req.prompt.as_deref() {
         crate::api::mission_payload::validate_user_content(prompt)
             .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        if let Some(attachments) = req.attachments.as_mut() {
+            attachments.retain(|item| {
+                !(item.kind == crate::api::mission_payload::AttachmentKind::File
+                    && item
+                        .path
+                        .as_deref()
+                        .map(|p| p.starts_with('/') && prompt.contains(&format!("[Uploaded: {p}]")))
+                        .unwrap_or(false))
+            });
+        }
     }
 
     if let Some(attachments) = req.attachments.as_ref().filter(|a| !a.is_empty()) {

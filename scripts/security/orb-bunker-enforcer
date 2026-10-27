@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Paloma / Orb Worker Bunker Enforcer (Wave 10)
+# Polls Core's public node-readable `/api/bunker/status?node=<hostname>` endpoint
+# (falling back to `:3001/api/mesh/status` or `:3000/api/mesh/status`) and applies
+# `Orb.Kernel.bunkerEnforcerStep` (`bunker_enforcer_converges_on_unbunker`):
+# - Quarantines node when `bunker_state >= 2`, `prune_compute_workers == true`,
+#   or `node_quarantined == true`.
+# - Releases quarantine and clears `/run/paloma-canary-tripped` when Core reports
+#   `bunker_state < 2`, `node_quarantined == false`, and `last_unbunker_at >= local_trip_at`.
+set -euo pipefail
+
+QUARANTINE_BIN="/usr/local/sbin/orb-canary-quarantine"
+MARKER="/run/paloma-canary-tripped"
+NODE_NAME="$(hostname -s)"
+TOKEN_FILE="/etc/lean-mesh/status-token"
+
+AUTH_ARGS=()
+if [[ -r "$TOKEN_FILE" ]]; then
+  TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+  if [[ -n "$TOKEN" ]]; then
+    AUTH_ARGS=(-H "Authorization: Bearer $TOKEN")
+  fi
+fi
+
+RESP=""
+for URL in \
+  "http://10.88.0.1:3000/api/bunker/status?node=${NODE_NAME}" \
+  "http://10.88.0.1:3001/api/bunker/status?node=${NODE_NAME}" \
+  "http://10.88.0.1:3001/api/mesh/status" \
+  "http://10.88.0.1:3000/api/mesh/status"; do
+  if RESP="$(curl -fsS -m 4 "${AUTH_ARGS[@]}" "$URL" 2>/dev/null)" && [[ -n "$RESP" ]]; then
+    break
+  fi
+  RESP=""
+done
+
+if [[ -z "$RESP" ]]; then
+  if [[ -f "$MARKER" ]]; then
+    "$QUARANTINE_BIN" apply
+  fi
+  exit 0
+fi
+
+BUNKER_STATE="$(echo "$RESP" | jq -r '.bunker_state // 0')"
+PRUNE_WORKERS="$(echo "$RESP" | jq -r '.bunker.prune_compute_workers // .prune_compute_workers // false')"
+NODE_QUARANTINED="$(echo "$RESP" | jq -r '.node_quarantined // false')"
+LAST_UNBUNKER_AT="$(echo "$RESP" | jq -r '.last_unbunker_at // .bunker.last_unbunker_at // 0')"
+
+if [[ "$BUNKER_STATE" -ge 2 ]] || [[ "$PRUNE_WORKERS" == "true" ]] || [[ "$NODE_QUARANTINED" == "true" ]]; then
+  "$QUARANTINE_BIN" apply
+  exit 0
+fi
+
+if [[ -f "$MARKER" ]]; then
+  TRIP_EPOCH="$(stat -c %Y "$MARKER" 2>/dev/null || echo 0)"
+  if [[ "$LAST_UNBUNKER_AT" -ge "$TRIP_EPOCH" ]] && [[ "$LAST_UNBUNKER_AT" -gt 0 ]]; then
+    rm -f "$MARKER"
+    "$QUARANTINE_BIN" release
+  else
+    "$QUARANTINE_BIN" apply
+  fi
+else
+  "$QUARANTINE_BIN" release
+fi

@@ -129,7 +129,7 @@ extension OrbConversation {
                 }
                 if !working { live.clear() }
                 selection.backend = value["backend"].text
-                selection.node = value["remote_node_id"].text
+                selection.node = OrbContinuation.remoteNodeID(for: value) == "core" ? value["remote_node_id"].text : OrbContinuation.remoteNodeID(for: value)
                 if selection.model.isEmpty { selection.model = value["model_override"].text; selection.serviceTier = OrbCodexSpeed.of(value) }
                 if let batch = await batchTask, (!batch.events.isEmpty || events.isEmpty) {
                     let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
@@ -270,7 +270,7 @@ extension OrbConversation {
         let savedMode = mode
         do {
             let mentionedContext = isCloud ? [] : OrbContextTagging.mentionedItems(in: text, items: contextItems)
-            guard !isCloud || attachments.isEmpty else { throw OrbHTTPError(status: 400, detail: "This cloud service does not support attachments. Remove the files before sending.") }
+            guard supportsAttachments || attachments.isEmpty else { throw OrbHTTPError(status: 400, detail: "This cloud service does not support attachments. Remove the files before sending.") }
             draftSaveTask?.cancel()
             OrbDisk.saveAsync(attachments, key: draftKey + ":files")
             let pending: OrbPending
@@ -279,7 +279,7 @@ extension OrbConversation {
                 optimisticPrompt = saved.body["content"].text.isEmpty ? saved.body["prompt"].text : saved.body["content"].text
                 rebuildHistory()
             } else {
-                var uploaded: [OrbJSON] = mentionedContext.map { OrbContextTagging.wireAttachment(for: $0) }
+                let uploaded: [OrbJSON] = mentionedContext.map { OrbContextTagging.wireAttachment(for: $0) }
                 // Core trims messages; send exactly what it will store so the
                 // optimistic bubble is recognised and replaced, not shown twice.
                 var prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -297,10 +297,12 @@ extension OrbConversation {
                         rebuildHistory()
                     }
                 }
+                let targetNode = id != nil
+                    ? (isCloud ? "core" : OrbContinuation.remoteNodeID(for: mission, fallback: selection.node))
+                    : (selection.cloud || selection.node.isEmpty ? "core" : selection.node)
                 for file in attachments {
-                    let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(selection.node.isEmpty ? "core" : selection.node), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
+                    let receipt = try await api.call("/api/uploads", method: "POST", body: .object(["node_id": .string(targetNode), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
                     guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
-                    uploaded.append(.object(["kind": .string("file"), "path": receipt["path"]]))
                     prompt += "\n[Uploaded: " + receipt["path"].text + "]"
                 }
                 if !queueing {

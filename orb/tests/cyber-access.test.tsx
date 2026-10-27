@@ -4,9 +4,11 @@ import {CyberPicker,MissionCyber,cyberCompatibility,draftCyber,setDraftCyber,req
 import {describeError} from '../src/ErrorNotice';
 vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0}));
 import {api} from '../src/api';
-afterEach(()=>{vi.mocked(api).mockReset();cleanup();setDraftCyber('standard');});
+afterEach(()=>{vi.mocked(api).mockReset();cleanup();setDraftCyber('automatic');});
 describe('cyber selection',()=>{
+ it('starts new launches on Automatic, like Core',()=>{expect(draftCyber()).toBe('automatic');});
  it('refuses unsupported remote selections before creating a mission without changing the requested mode',async()=>{
+  setDraftCyber('standard');
   vi.mocked(api).mockResolvedValue({version:2,route_supported:false,refusal:'unsupported_access_program: Choose Automatic explicitly.'});
   await expect(requireCyberSupport({model:'gpt-6.1-sol',mode:'standard',remote:true})).rejects.toThrow('Choose Automatic');
   expect(draftCyber()).toBe('standard');
@@ -78,8 +80,7 @@ describe('cyber selection',()=>{
   expect((screen.getByRole('menuitemradio',{name:/Daybreak/}) as HTMLButtonElement).disabled).toBe(false);
   expect(vi.mocked(api).mock.calls.some(([path])=>String(path).includes('remote=true')&&!String(path).includes('model='))).toBe(true);
  });
- it('starts Standard and never calls a pending selection active',()=>{
-  expect(draftCyber()).toBe('standard');
+ it('never calls a pending selection active',()=>{
   render(()=><CyberPicker value="daybreak" model="gpt-6.1-sol" onChange={()=>{}}/>);
   expect(screen.getByRole('button',{name:'Cyber program: Daybreak'}).title).toContain('requested');
   expect(screen.queryByText('active')).toBeNull();

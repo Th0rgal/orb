@@ -82,4 +82,22 @@ object OrbPrivilegeAccess {
         },
         "confirm_root" to (batchSummary(rs).root > 0),
     )
+
+    fun bunkerLabel(state: Int): String = when (state) {
+        0 -> "Normal"
+        1 -> "Soft Quarantine"
+        2 -> "Hard Lockdown"
+        3 -> "Sovereign Dead-Man Tripped"
+        else -> "Locked ($state)"
+    }
+
+    fun bunkerBody(
+        level: Int = 2,
+        reason: String = "Operator manual Fleet Bunker lockdown from Orb Android"
+    ): Map<String, Any?> = mapOf(
+        "level" to level,
+        "reason" to reason,
+        "canary_tripped" to (level >= 2),
+        "auth_failure_burst" to (level == 1)
+    )
 }

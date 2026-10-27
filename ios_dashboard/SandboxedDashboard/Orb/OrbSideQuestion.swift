@@ -42,7 +42,7 @@ struct OrbBtwSettingsView: View {
             }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
-        .navigationTitle("Side questions").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Quick questions (/btw)").navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -534,8 +534,8 @@ struct OrbSideQuestionSheet: View {
             // Like the desktop: files go to the shared working folder, named in the request.
             var content = text
             for file in files {
-                let node = parent["remote_node_id"].text
-                let receipt = try await OrbCore.shared.call("/api/uploads", method: "POST", body: .object(["node_id": .string(node.isEmpty ? "core" : node), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
+                let node = OrbContinuation.remoteNodeID(for: parent)
+                let receipt = try await OrbCore.shared.call("/api/uploads", method: "POST", body: .object(["node_id": .string(node), "name": .string(file.name), "data_base64": .string(file.data.base64EncodedString())]))
                 guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
                 content += "\nAttachment: " + receipt["path"].text
             }

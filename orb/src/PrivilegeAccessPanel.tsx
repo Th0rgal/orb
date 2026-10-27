@@ -6,8 +6,10 @@ import {
   approvePrivilegeAccess,
   batchApprovable,
   batchSummary,
+  bunkerStateLabel,
   denyPrivilegeAccess,
   emptyPrivilegeSnapshot,
+  getMeshStatus,
   getPrivilegeAccess,
   lifetimeLabel,
   livePrivilegeGrant,
@@ -15,6 +17,9 @@ import {
   requestTitle,
   revokePrivilegeAccess,
   scopeUnlocks,
+  triggerBunker,
+  unbunkerFleet,
+  type MeshStatusSnapshot,
   type PrivilegeSnapshot,
 } from "./privilegeAccessApi";
 import { pollWhileVisible } from "./poll";
@@ -38,12 +43,14 @@ const since = (raw?: string | null) => {
 /** Settings section: pending privileged requests, live grants (revoke), history and command audit. */
 export function PrivilegeAccessPanel(p: { onError: (message: string) => void; initial?: PrivilegeSnapshot }) {
   const [snap, setSnap] = createSignal<PrivilegeSnapshot>(p.initial ?? emptyPrivilegeSnapshot());
+  const [mesh, setMesh] = createSignal<MeshStatusSnapshot | null>(null);
   const [busy, setBusy] = createSignal<string | null>(null);
   const [showLog, setShowLog] = createSignal(false);
   const now = useNow(1000);
   const load = async () => {
     if (p.initial) return;
     try { setSnap(await getPrivilegeAccess()); } catch { /* the page reports connection errors */ }
+    try { setMesh(await getMeshStatus()); } catch { /* mesh status is optional */ }
   };
   onMount(() => {
     void load();
@@ -55,6 +62,8 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
   const ready = createMemo(() => batchApprovable(pending(), includeRoot()));
   const grants = createMemo(() => snap().requests.filter((r) => livePrivilegeGrant(r, now())));
   const history = createMemo(() => snap().requests.filter((r) => r.state !== "pending" && !livePrivilegeGrant(r, now())).slice(0, 20));
+  const incidents = createMemo(() => (snap().bunker_incidents ?? []).slice(0, 20));
+  const bunkerState = createMemo(() => Math.max(snap().bunker_state, mesh()?.bunker_state ?? 0));
 
   const run = async (id: string, job: () => Promise<unknown>) => {
     if (busy()) return;
@@ -77,7 +86,52 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
           Missions can ask for root, a service deploy or read-only ops on a host. A grant lasts at most the mission session, Core checks and logs every command, and you can revoke it at any time.
         </span>
       </div>
-      <Show when={snap().bunker_state > 0}>
+      <div class="s-card" data-testid="bunker-mode-card">
+        <div class="s-row">
+          <div class="s-row-text">
+            <div class="s-row-title">
+              Fleet posture: <strong>{bunkerStateLabel(bunkerState())}</strong>
+              <Show when={mesh()}>
+                {(m) => (
+                  <span class="s-row-desc">
+                    {" "}· lean-mesh epoch {m().epoch} · {m().formal_verified ? "Lean 4 verified" : "unverified"}
+                  </span>
+                )}
+              </Show>
+            </div>
+            <div class="s-row-desc">
+              {bunkerState() > 0
+                ? "Bunker Mode is on: new privileged requests are locked and active grants are revoked."
+                : "Normal operation. Canary tripwires and dead-man heartbeat switches are armed across all workers."}
+            </div>
+          </div>
+          <div class="s-row-ctrl">
+            <Show
+              when={bunkerState() > 0}
+              fallback={
+                <button
+                  class="s-btn"
+                  data-testid="bunker-trigger-btn"
+                  disabled={!!busy()}
+                  onClick={() => void run("bunker", () => triggerBunker(2))}
+                >
+                  <FingerprintIcon size={14} />Lock Down Fleet
+                </button>
+              }
+            >
+              <button
+                class="s-btn primary"
+                data-testid="bunker-exit-btn"
+                disabled={!!busy()}
+                onClick={() => void run("unbunker", () => unbunkerFleet())}
+              >
+                <FingerprintIcon size={14} />Exit Bunker Mode
+              </button>
+            </Show>
+          </div>
+        </div>
+      </div>
+      <Show when={bunkerState() > 0}>
         <div class="bw-empty-line" role="status">Bunker Mode is on: new privileged requests are locked.</div>
       </Show>
       <Show when={pending().length > 0} fallback={<div class="bw-empty-line">No mission is waiting for privileged access.</div>}>
@@ -134,12 +188,25 @@ export function PrivilegeAccessPanel(p: { onError: (message: string) => void; in
         <div class="s-row">
           <div class="s-row-text">
             <button type="button" class="bw-link-btn" onClick={() => setShowLog(!showLog())}>
-              <Show when={showLog()} fallback={<Ic.ChevronRight size={11} />}><Ic.ChevronDown size={11} /></Show> {showLog() ? "Hide" : "Show"} activity ({snap().command_audit.length} commands)
+              <Show when={showLog()} fallback={<Ic.ChevronRight size={11} />}><Ic.ChevronDown size={11} /></Show> {showLog() ? "Hide" : "Show"} activity ({snap().command_audit.length} commands{incidents().length > 0 ? ` · ${incidents().length} incidents` : ""})
             </button>
           </div>
         </div>
         <Show when={showLog()}>
           <div class="bw-log">
+            <For each={incidents()}>
+              {(inc) => (
+                <div class="bw-log-row" data-testid="bunker-incident-row">
+                  <span class={`bw-log-status ${inc.dry_run ? "read" : inc.new_bunker_state > 0 ? "denied" : "approved"}`}>
+                    {inc.dry_run ? "canary test" : bunkerStateLabel(inc.new_bunker_state)}
+                  </span>
+                  <span title={inc.reason}>
+                    {inc.peer_name ? `${inc.peer_name} · ` : ""}{inc.reason} (epoch {inc.epoch}{inc.alert_delivered ? " · alerted" : ""})
+                  </span>
+                  <span class="s-row-desc">{since(inc.at)}</span>
+                </div>
+              )}
+            </For>
             <For each={history()}>
               {(r) => (
                 <div class="bw-log-row">

@@ -12,6 +12,11 @@
       "description": "Newest Codex flagship (efforts low..ultra). Default. Fast tier: 2x speed, increased usage."
     },
     {
+      "id": "gpt-6.1-terra",
+      "name": "GPT-6.1 Terra",
+      "description": "GPT-6.1 model with lower cost than Sol (efforts low..ultra). Fast tier: 1.5x speed. Cyber: Standard only."
+    },
+    {
       "id": "gpt-6-astra",
       "name": "GPT-6 Astra",
       "description": "OpenAI's GPT-6 flagship in Codex (efforts low..ultra)."

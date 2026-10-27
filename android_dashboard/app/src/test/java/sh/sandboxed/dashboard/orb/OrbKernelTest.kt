@@ -172,4 +172,78 @@ class OrbKernelTest {
         assertTrue(OrbKernel.verifyIsaSelection(775L, 263L, 0, 4))
         assertFalse(OrbKernel.verifyIsaSelection(775L, 927L, 4, 4))
     }
+
+    @Test
+    fun wave9ScrollEpochAndCrossClientParityGatesMatchLeanSpec() {
+        // 1. First scroll correction in layout epoch 7 is admitted (action=1, applyCorrection=true, nextCorrectionsInEpoch=1)
+        val first = OrbKernel.scrollEpochStep(
+            layoutEpoch = 7,
+            lastCorrectedEpoch = 6,
+            correctionsInEpoch = 0,
+            isPinnedToBottom = true,
+            userIsDragging = false,
+            targetScrollTopPx = 3817,
+            currentScrollTopPx = 3600
+        )
+        assertEquals(1, first.action)
+        assertTrue(first.applyCorrection)
+        assertEquals(1, first.nextCorrectionsInEpoch)
+        assertEquals(3817, first.resolvedScrollTopPx)
+
+        // 2. Duplicate scroll correction in the same layout epoch 7 is suppressed (action=2, applyCorrection=false, nextCorrectionsInEpoch=1)
+        val second = OrbKernel.scrollEpochStep(
+            layoutEpoch = 7,
+            lastCorrectedEpoch = 7,
+            correctionsInEpoch = first.nextCorrectionsInEpoch,
+            isPinnedToBottom = true,
+            userIsDragging = false,
+            targetScrollTopPx = 3817,
+            currentScrollTopPx = 3700
+        )
+        assertEquals(2, second.action)
+        assertFalse(second.applyCorrection)
+        assertEquals(1, second.nextCorrectionsInEpoch)
+        assertEquals(3700, second.resolvedScrollTopPx)
+
+        // 3. User dragging suppresses programmatic scroll correction (action=0 KeepCurrentScroll, applyCorrection=false)
+        val dragging = OrbKernel.scrollEpochStep(
+            layoutEpoch = 8,
+            lastCorrectedEpoch = 7,
+            correctionsInEpoch = 0,
+            isPinnedToBottom = true,
+            userIsDragging = true,
+            targetScrollTopPx = 3817,
+            currentScrollTopPx = 3500
+        )
+        assertEquals(0, dragging.action)
+        assertFalse(dragging.applyCorrection)
+
+        // 4. Cross-client parity across Core (0), iOS (1), Android (2), and Desktop wasm32 (3)
+        val core = OrbKernel.clientParityStep(0, 1, 42, 7, 1, 1)
+        val ios = OrbKernel.clientParityStep(1, 1, 42, 7, 1, 1)
+        val android = OrbKernel.clientParityStep(2, 1, 42, 7, 1, 1)
+        val wasm = OrbKernel.clientParityStep(3, 1, 42, 7, 1, 1)
+        assertTrue(android.parityAdmitted)
+        assertTrue(android.singleScrollCorrectionOk)
+        assertEquals(core.digest32, ios.digest32)
+        assertEquals(ios.digest32, android.digest32)
+        assertEquals(android.digest32, wasm.digest32)
+
+        // Double scroll correction in epoch (scrollCorrectedInEpoch=2) clears singleScrollCorrectionOk, and invalid schema (99) clears parityAdmitted
+        val badScroll = OrbKernel.clientParityStep(2, 1, 42, 7, 1, 2)
+        assertTrue(badScroll.parityAdmitted)
+        assertFalse(badScroll.singleScrollCorrectionOk)
+        val badSchema = OrbKernel.clientParityStep(2, 99, 42, 7, 1, 1)
+        assertFalse(badSchema.parityAdmitted)
+
+        // OrbTranscriptFollow production wrapper delegates directly to OrbKernel JNI without fallback
+        val follow = OrbTranscriptFollow()
+        assertTrue(follow.shouldCorrectInEpoch(targetTopPx = 800, currentTopPx = 400))
+        assertFalse(follow.shouldCorrectInEpoch(targetTopPx = 900, currentTopPx = 800))
+        val digest = follow.verifyClientParity(transcriptSeq = 42, markdownBlocksCount = 7, sendQueueDepth = 1)
+        assertTrue(follow.parityAdmitted)
+        assertEquals(android.digest32, digest)
+        follow.advanceLayoutEpoch()
+        assertTrue(follow.shouldCorrectInEpoch(targetTopPx = 1000, currentTopPx = 800))
+    }
 }

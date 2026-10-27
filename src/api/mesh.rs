@@ -20,7 +20,6 @@
 //!   `verify_formal(0, 0, now)`.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -34,7 +33,8 @@ use axum::{
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use lean_mesh::{
-    check_endpoint_roam, select_relay_path, step_bunker_isolate, verify_frame_bounds,
+    canonical_canary_evidence_sha256_hex, check_endpoint_roam, select_relay_path,
+    step_bunker_isolate, verify_canary_trip_signature, verify_frame_bounds,
     verify_heartbeat_signature, verify_jit_lease, verify_render_auth_signature,
     verify_roam_signature, BunkerState as MeshBunkerState, BunkerTransition, MeshManifest,
     MeshProto, NodeClass, RelayPathKind, ReplayWindow64, RouteDecision, LEAN_MESH_DEFAULT_WG_PORT,
@@ -49,13 +49,26 @@ use uuid::Uuid;
 use super::approval_flow::ApprovalState;
 use super::auth::AuthUser;
 use super::routes::AppState;
-use crate::orb_spec::BunkerState as OrbBunkerState;
+use crate::orb_spec::{
+    bunker_enforcer_step, canary_tripwire_step, classify_actor_trust, classify_canary_class,
+    ActorTrust, BunkerEnforcerStepInput, BunkerEnforcerStepVerdict, BunkerState as OrbBunkerState,
+    CanaryClass, CanaryTripwireAction, CanaryTripwireStepInput, CanaryTripwireStepVerdict,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PeerRoamState {
     pub replay_window: ReplayWindow64,
     pub last_roam_seq: u64,
     pub last_roam_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeQuarantineRecord {
+    pub quarantined: bool,
+    pub quarantined_at: u64,
+    pub canary_kind: String,
+    pub event_seq: u64,
+    pub reason: String,
 }
 
 fn default_bunker_normal() -> MeshBunkerState {
@@ -70,6 +83,12 @@ pub struct PersistedMeshState {
     pub peer_roam: BTreeMap<String, PeerRoamState>,
     #[serde(default)]
     pub heartbeat_replay: BTreeMap<String, ReplayWindow64>,
+    #[serde(default)]
+    pub canary_replay: BTreeMap<String, ReplayWindow64>,
+    #[serde(default)]
+    pub quarantined_nodes: BTreeMap<String, NodeQuarantineRecord>,
+    #[serde(default)]
+    pub last_unbunker_at: u64,
     pub last_heartbeat_at: u64,
     pub is_sovereign_node: bool,
     #[serde(default = "default_bunker_normal")]
@@ -102,6 +121,9 @@ impl PersistedMeshState {
             },
             peer_roam: BTreeMap::new(),
             heartbeat_replay: BTreeMap::new(),
+            canary_replay: BTreeMap::new(),
+            quarantined_nodes: BTreeMap::new(),
+            last_unbunker_at: 0,
             last_heartbeat_at: now_epoch,
             is_sovereign_node: true,
             bunker_state: MeshBunkerState::HardLockdown,
@@ -352,6 +374,9 @@ impl MeshStore {
                                         manifest,
                                         peer_roam: BTreeMap::new(),
                                         heartbeat_replay: BTreeMap::new(),
+                                        canary_replay: BTreeMap::new(),
+                                        quarantined_nodes: BTreeMap::new(),
+                                        last_unbunker_at: 0,
                                         last_heartbeat_at: now,
                                         is_sovereign_node: true,
                                         bunker_state: MeshBunkerState::Normal,
@@ -559,6 +584,492 @@ pub fn process_heartbeat_step(
     Ok(transition)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanaryTripwireRequest {
+    pub peer_name: String,
+    pub canary_kind: String,
+    pub event_seq: u64,
+    pub timestamp: u64,
+    #[serde(default)]
+    pub dry_run: bool,
+    pub reason: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub cgroup: Option<String>,
+    #[serde(default)]
+    pub cmdline: Option<String>,
+    pub detail_sha256_hex: String,
+    pub signature_hex: String,
+}
+
+/// Returns `true` when `node` is currently in node-scoped quarantine in `state.quarantined_nodes`.
+pub fn is_node_quarantined(state: &PersistedMeshState, node: &str) -> bool {
+    state
+        .quarantined_nodes
+        .get(node.trim())
+        .map(|r| r.quarantined)
+        .unwrap_or(false)
+}
+
+/// Evaluates the formal `Orb.Kernel.canaryTripwireStep` blast-radius verdict for a
+/// verified `CanaryTripwireRequest`:
+/// - Ambient filesystem decoys (`env_honeytoken`, `vault_canary`) accessed by a whitelisted
+///   agent file-search walk (`rg`, `grep`, `find`, `fd`, `ls`, `git`, `stat`, `file`, `du`, `tree`)
+///   return `CanaryTripwireAction::IgnoreWhitelisted` (`canary_whitelisted_ambient_no_bunker`).
+/// - Ambient filesystem decoys (`env_honeytoken`, `vault_canary`) read by a single mission
+///   process (`uid == Some(999)` / `sandboxed-node` mission job) when no other node is already
+///   quarantined return `CanaryTripwireAction::QuarantineNodeOnly`
+///   (`canary_mission_ambient_node_only`) — quarantining ONLY the reporting node and keeping
+///   global fleet `bunker_state` at `Normal (0)`.
+/// - High-signal attacker bait (`btc_wallet_canary`, `ssh_exfil_canary`), active TCP socket
+///   probes (`mongo_socket_27017`), untrusted/non-mission UIDs, or correlated multi-node
+///   canary trips escalate to `CanaryTripwireAction::EscalateFleetLockdown`
+///   (`canary_high_signal_bait_always_locks_down`).
+pub fn evaluate_canary_blast_radius(
+    state: &PersistedMeshState,
+    req: &CanaryTripwireRequest,
+) -> CanaryTripwireStepVerdict {
+    let peer_name = req.peer_name.trim();
+    let kind_lower = req.canary_kind.trim().to_ascii_lowercase();
+    let other_node_already_quarantined = state
+        .quarantined_nodes
+        .iter()
+        .any(|(node, rec)| rec.quarantined && node != peer_name);
+
+    let canary_class = if other_node_already_quarantined || kind_lower.contains("mongo") {
+        CanaryClass::HighSignalBait
+    } else {
+        classify_canary_class(&req.canary_kind)
+    };
+
+    let actor_trust = if matches!(req.uid, Some(u) if u != 999) {
+        ActorTrust::UntrustedOrSystem
+    } else {
+        classify_actor_trust(req.uid, req.cgroup.as_deref(), req.cmdline.as_deref())
+    };
+
+    let current_fleet_bunker = match state.bunker_state {
+        MeshBunkerState::Normal => OrbBunkerState::Normal,
+        MeshBunkerState::SoftQuarantine => OrbBunkerState::SoftQuarantine,
+        MeshBunkerState::HardLockdown | MeshBunkerState::SovereignDeadManTripped => {
+            OrbBunkerState::HardLockdown
+        }
+    };
+
+    canary_tripwire_step(CanaryTripwireStepInput {
+        canary_class,
+        actor_trust,
+        is_dry_run: false,
+        current_fleet_bunker,
+    })
+}
+
+/// Pure server-side canary tripwire verification & mesh bunker escalation step.
+///
+/// Enforces:
+/// 1. `state` must not be in fail-closed `corrupted_state`.
+/// 2. `peer_name` must exist in the signed `MeshManifest`, not be revoked, and not be expired.
+/// 3. `detail_sha256_hex` must match `canonical_canary_evidence_sha256_hex(reason, pid, uid, cgroup, cmdline)`.
+/// 4. `timestamp` must be within `[-LEAN_MESH_SOVEREIGN_DEADMAN_SECS, +30s]` of `now_epoch`.
+/// 5. Ed25519 `signature_hex` over `("lean-mesh-canary-v1", peer_name, canary_kind, event_seq, timestamp, dry_run, detail_sha256_hex)`
+///    must verify against the peer's manifest-pinned `peer.sign_pubkey_hex`.
+/// 6. Only after all cryptographic checks succeed does `canary_replay` (`ReplayWindow64`)
+///    check and advance `event_seq` (preventing unauthenticated packets from shifting the window).
+/// 7. Evaluates `evaluate_canary_blast_radius` (`Orb.Kernel.canaryTripwireStep`):
+///    - `IgnoreWhitelisted`: neither node quarantine nor fleet bunker is triggered.
+///    - `QuarantineNodeOnly`: when `dry_run == false`, quarantines ONLY `peer_name` in
+///      `state.quarantined_nodes` while keeping global `state.bunker_state` at `Normal`.
+///    - `EscalateFleetLockdown`: transitions `state.bunker_state` via `step_bunker_isolate`
+///      with `canary_tripped = true, manual_trigger = 2` (`HardLockdown` or `SovereignDeadManTripped`),
+///      and when `dry_run == false`, persists both the node quarantine and global `state.bunker_state`.
+pub fn process_canary_tripwire_step(
+    state: &mut PersistedMeshState,
+    req: &CanaryTripwireRequest,
+    now_epoch: u64,
+) -> Result<(MeshBunkerState, BunkerTransition), (StatusCode, String)> {
+    if state.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mesh store is in fail-closed corrupted state".into(),
+        ));
+    }
+    let peer_name = req.peer_name.trim();
+    let canary_kind = req.canary_kind.trim();
+    let reason = req.reason.trim();
+    if peer_name.is_empty() || canary_kind.is_empty() || reason.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "peer_name, canary_kind, and reason must be non-empty".into(),
+        ));
+    }
+    let peer = state
+        .manifest
+        .find_peer(peer_name)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    if peer.revoked || now_epoch >= peer.expires_at {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "reporting peer is revoked or expired in manifest".into(),
+        ));
+    }
+    let peer_pubkey_hex = peer.sign_pubkey_hex.clone();
+
+    let expected_evidence_sha256 = canonical_canary_evidence_sha256_hex(
+        &req.reason,
+        req.pid,
+        req.uid,
+        req.cgroup.as_deref(),
+        req.cmdline.as_deref(),
+    );
+    if !expected_evidence_sha256.eq_ignore_ascii_case(req.detail_sha256_hex.trim()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "detail_sha256_hex does not match canonical forensic evidence digest".into(),
+        ));
+    }
+
+    let ts_fresh = req.timestamp <= now_epoch.saturating_add(30)
+        && now_epoch.saturating_sub(req.timestamp) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    if !ts_fresh {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "stale or future canary tripwire timestamp".into(),
+        ));
+    }
+
+    let sig_ok = verify_canary_trip_signature(
+        &peer_pubkey_hex,
+        peer_name,
+        canary_kind,
+        req.event_seq,
+        req.timestamp,
+        req.dry_run,
+        &expected_evidence_sha256,
+        req.signature_hex.trim(),
+    );
+    if !sig_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid Ed25519 canary tripwire signature".into(),
+        ));
+    }
+
+    let replay_ok = state
+        .canary_replay
+        .entry(peer_name.to_string())
+        .or_default()
+        .check_and_advance(req.event_seq);
+    if !replay_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "replayed or zero event_seq rejected by ReplayWindow64".into(),
+        ));
+    }
+
+    let blast = evaluate_canary_blast_radius(state, req);
+    let previous = state.bunker_state;
+    let hb_fresh = state.last_heartbeat_at <= now_epoch
+        && now_epoch.saturating_sub(state.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    let (canary_tripped_fleet, manual_trigger) = match blast.action {
+        CanaryTripwireAction::EscalateFleetLockdown => (true, 2),
+        CanaryTripwireAction::QuarantineNodeOnly | CanaryTripwireAction::IgnoreWhitelisted => {
+            (false, 0)
+        }
+    };
+    let transition = step_bunker_isolate(
+        previous,
+        state.is_sovereign_node,
+        canary_tripped_fleet,
+        false,
+        manual_trigger,
+        false,
+        hb_fresh,
+        now_epoch,
+        state.last_heartbeat_at,
+        LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    );
+    if !req.dry_run {
+        if blast.quarantine_reporting_node {
+            state.quarantined_nodes.insert(
+                peer_name.to_string(),
+                NodeQuarantineRecord {
+                    quarantined: true,
+                    quarantined_at: now_epoch,
+                    canary_kind: canary_kind.to_string(),
+                    event_seq: req.event_seq,
+                    reason: reason.to_string(),
+                },
+            );
+        }
+        state.bunker_state = transition.next_state;
+    }
+    Ok((previous, transition))
+}
+
+/// Returns `(effective_mesh_bunker_u8, manifest_epoch)` for cross-broker snapshots and incidents.
+pub async fn current_effective_bunker_and_epoch(app_state: &AppState) -> (u8, u64) {
+    let store = store(app_state);
+    let now = unix_now();
+    let guard = store.inner.lock().await;
+    let bunker = effective_mesh_bunker(app_state, &guard, now).await;
+    (bunker.next_state as u8, guard.manifest.epoch)
+}
+
+/// Pure helper computing `(node_quarantined, BunkerEnforcerStepVerdict)` for a fleet node
+/// via `Orb.Kernel.bunkerEnforcerStep` (`bunker_enforcer_converges_on_unbunker`).
+pub fn compute_node_enforcer_verdict(
+    state: &PersistedMeshState,
+    effective_bunker_u8: u8,
+    node: Option<&str>,
+    local_trip_epoch: Option<u64>,
+) -> (bool, BunkerEnforcerStepVerdict) {
+    let node_quarantined = node
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|n| is_node_quarantined(state, n))
+        .unwrap_or(false);
+    let trip_epoch = local_trip_epoch.unwrap_or(0);
+    let verdict = bunker_enforcer_step(BunkerEnforcerStepInput {
+        status_reachable: !state.corrupted_state,
+        fleet_bunker: effective_bunker_u8,
+        node_quarantined_by_core: node_quarantined,
+        has_local_trip_marker: trip_epoch > 0,
+        local_trip_epoch: trip_epoch,
+        last_unbunker_epoch: state.last_unbunker_at,
+    });
+    (node_quarantined, verdict)
+}
+
+/// Public read-only convergence snapshot polled by `orb-bunker-enforcer` on every fleet node
+/// (`ashur`, `babylon`, `nippur`, `old-agent`, `dgx-spark`, `thomas-md`, `polymath`, `maven-repo`, `watchtower`).
+pub async fn bunker_convergence_snapshot(
+    app_state: &AppState,
+    node: Option<&str>,
+    local_trip_epoch: Option<u64>,
+) -> Value {
+    let store = store(app_state);
+    let now = unix_now();
+    let guard = store.inner.lock().await;
+    let bunker = effective_mesh_bunker(app_state, &guard, now).await;
+    let effective_u8 = bunker.next_state as u8;
+    let (node_quarantined, enforcer) =
+        compute_node_enforcer_verdict(&guard, effective_u8, node, local_trip_epoch);
+
+    json!({
+        "bunker_state": effective_u8,
+        "bunker": {
+            "next_state": bunker.next_state,
+            "revoke_jit_grants": bunker.revoke_jit_grants,
+            "prune_non_admin_wg_peers": bunker.prune_non_admin_wg_peers,
+            "prune_compute_workers": bunker.prune_non_admin_wg_peers,
+            "lock_sovereign_vault": bunker.lock_sovereign_vault,
+            "last_unbunker_at": guard.last_unbunker_at,
+        },
+        "epoch": guard.manifest.epoch,
+        "last_unbunker_at": guard.last_unbunker_at,
+        "last_heartbeat_at": guard.last_heartbeat_at,
+        "quarantined_nodes": guard.quarantined_nodes,
+        "node": node.map(str::trim).filter(|s| !s.is_empty()),
+        "node_quarantined": node_quarantined,
+        "enforcer_action": if enforcer.apply_or_keep_quarantine { "quarantine" } else { "release" },
+        "clear_local_marker": enforcer.clear_local_marker,
+    })
+}
+
+/// Synchronizes `MeshStore.bunker_state` when an operator triggers or clears Bunker Mode
+/// via `PrivilegeBroker` (`POST /api/privilege-access/bunker` or `/unbunker`).
+///
+/// When `biometric_unbunker == true` (operator authenticated via enrolled device or breakglass SSH):
+/// - Clears all node-scoped quarantines (`candidate.quarantined_nodes.clear()`).
+/// - Records `candidate.last_unbunker_at = now` so node `orb-bunker-enforcer` daemons
+///   observe `last_unbunker_at >= local_trip_at` and release local nftables quarantine.
+/// - Resets the sovereign dead-man grace window (`candidate.last_heartbeat_at = now`) if
+///   `last_heartbeat_at` fell stale during Bunker Mode isolation, preventing a catch-22
+///   where `dgx-spark` is blocked from heartbeating until unbunkered.
+pub async fn sync_orb_bunker_transition(
+    app_state: &AppState,
+    canary_tripped: bool,
+    auth_failure_burst: bool,
+    manual_trigger: u8,
+    biometric_unbunker: bool,
+) -> Result<(MeshBunkerState, BunkerTransition, u64), String> {
+    let store = store(app_state);
+    let now = unix_now();
+    let mut guard = store.inner.lock().await;
+    if guard.corrupted_state {
+        return Err("mesh store is in fail-closed corrupted state".into());
+    }
+    let prev = guard.bunker_state;
+    let effective_last_hb = if biometric_unbunker {
+        now
+    } else {
+        guard.last_heartbeat_at
+    };
+    let hb_fresh = biometric_unbunker
+        || (effective_last_hb <= now
+            && now.saturating_sub(effective_last_hb) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS);
+    let transition = step_bunker_isolate(
+        prev,
+        guard.is_sovereign_node,
+        canary_tripped,
+        auth_failure_burst,
+        manual_trigger,
+        biometric_unbunker,
+        hb_fresh,
+        now,
+        effective_last_hb,
+        LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    );
+    let mut candidate = guard.clone();
+    candidate.bunker_state = transition.next_state;
+    if biometric_unbunker {
+        candidate.quarantined_nodes.clear();
+        candidate.last_unbunker_at = now;
+        candidate.last_heartbeat_at = effective_last_hb;
+    }
+    store.save(&candidate).await?;
+    *guard = candidate;
+    Ok((prev, transition, guard.manifest.epoch))
+}
+
+/// Validates all cryptographic, peer-status, freshness, and canonical-digest invariants
+/// for a `CanaryTripwireRequest` without mutating `canary_replay` or `bunker_state`,
+/// returning `(previous_mesh_bunker, simulated_transition, manifest_epoch, peer_sign_pubkey_hex, already_in_replay_window)`.
+pub async fn preview_canary_tripwire(
+    app_state: &AppState,
+    req: &CanaryTripwireRequest,
+) -> Result<(MeshBunkerState, BunkerTransition, u64, String, bool), (StatusCode, String)> {
+    let store = store(app_state);
+    let now = unix_now();
+    let guard = store.inner.lock().await;
+    if guard.corrupted_state {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mesh store is in fail-closed corrupted state".into(),
+        ));
+    }
+    let peer_name = req.peer_name.trim();
+    let canary_kind = req.canary_kind.trim();
+    let reason = req.reason.trim();
+    if peer_name.is_empty() || canary_kind.is_empty() || reason.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "peer_name, canary_kind, and reason must be non-empty".into(),
+        ));
+    }
+    let peer = guard
+        .manifest
+        .find_peer(peer_name)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    if peer.revoked || now >= peer.expires_at {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "reporting peer is revoked or expired in manifest".into(),
+        ));
+    }
+    let peer_pubkey_hex = peer.sign_pubkey_hex.clone();
+
+    let expected_evidence_sha256 = canonical_canary_evidence_sha256_hex(
+        &req.reason,
+        req.pid,
+        req.uid,
+        req.cgroup.as_deref(),
+        req.cmdline.as_deref(),
+    );
+    if !expected_evidence_sha256.eq_ignore_ascii_case(req.detail_sha256_hex.trim()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "detail_sha256_hex does not match canonical forensic evidence digest".into(),
+        ));
+    }
+
+    let ts_fresh = req.timestamp <= now.saturating_add(30)
+        && now.saturating_sub(req.timestamp) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    if !ts_fresh {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "stale or future canary tripwire timestamp".into(),
+        ));
+    }
+
+    let sig_ok = verify_canary_trip_signature(
+        &peer_pubkey_hex,
+        peer_name,
+        canary_kind,
+        req.event_seq,
+        req.timestamp,
+        req.dry_run,
+        &expected_evidence_sha256,
+        req.signature_hex.trim(),
+    );
+    if !sig_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid Ed25519 canary tripwire signature".into(),
+        ));
+    }
+
+    let mut test_window = guard
+        .canary_replay
+        .get(peer_name)
+        .cloned()
+        .unwrap_or_default();
+    let already_replayed = !test_window.check_and_advance(req.event_seq);
+
+    let blast = evaluate_canary_blast_radius(&guard, req);
+    let previous = guard.bunker_state;
+    let hb_fresh = guard.last_heartbeat_at <= now
+        && now.saturating_sub(guard.last_heartbeat_at) <= LEAN_MESH_SOVEREIGN_DEADMAN_SECS;
+    let (canary_tripped_fleet, manual_trigger) = match blast.action {
+        CanaryTripwireAction::EscalateFleetLockdown => (true, 2),
+        CanaryTripwireAction::QuarantineNodeOnly | CanaryTripwireAction::IgnoreWhitelisted => {
+            (false, 0)
+        }
+    };
+    let transition = step_bunker_isolate(
+        previous,
+        guard.is_sovereign_node,
+        canary_tripped_fleet,
+        false,
+        manual_trigger,
+        false,
+        hb_fresh,
+        now,
+        guard.last_heartbeat_at,
+        LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
+    );
+    Ok((
+        previous,
+        transition,
+        guard.manifest.epoch,
+        peer_pubkey_hex,
+        already_replayed,
+    ))
+}
+
+/// Verifies a signed `CanaryTripwireRequest` against `MeshStore` and durably persists
+/// the advanced replay window and (when `dry_run == false`) the escalated `MeshBunkerState`.
+pub async fn verify_and_apply_canary_tripwire(
+    app_state: &AppState,
+    req: &CanaryTripwireRequest,
+) -> Result<(MeshBunkerState, BunkerTransition, u64), (StatusCode, String)> {
+    let store = store(app_state);
+    let now = unix_now();
+    let mut guard = store.inner.lock().await;
+    let mut candidate = guard.clone();
+    let (prev, transition) = process_canary_tripwire_step(&mut candidate, req, now)?;
+    store
+        .save(&candidate)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let epoch = candidate.manifest.epoch;
+    *guard = candidate;
+    Ok((prev, transition, epoch))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct EvaluateRouteRequest {
     pub src_peer: String,
@@ -642,6 +1153,9 @@ async fn get_mesh_status(
         4096,
     );
 
+    let formal_verified =
+        !guard.corrupted_state && frame_gate_ok && guard.manifest.verify_formal(0, 0, now).is_ok();
+
     Json(json!({
         "interface": LEAN_MESH_INTERFACE_NAME,
         "default_wg_port": LEAN_MESH_DEFAULT_WG_PORT,
@@ -653,7 +1167,11 @@ async fn get_mesh_status(
         "peers_count": guard.manifest.peers.len(),
         "rules_count": guard.manifest.rules.len(),
         "bunker": bunker,
+        "bunker_state": bunker.next_state as u8,
+        "formal_verified": formal_verified,
         "persisted_bunker_state": guard.bunker_state,
+        "last_unbunker_at": guard.last_unbunker_at,
+        "quarantined_nodes": guard.quarantined_nodes,
         "last_heartbeat_at": guard.last_heartbeat_at,
         "sovereign_deadman_timeout_secs": LEAN_MESH_SOVEREIGN_DEADMAN_SECS,
         "corrupted_state": guard.corrupted_state,
@@ -1150,6 +1668,7 @@ async fn post_heartbeat(
     };
 
     let mut guard = store.inner.lock().await;
+    let prev_bunker = guard.bunker_state;
     match process_heartbeat_step(
         &mut guard,
         &req,
@@ -1164,11 +1683,26 @@ async fn post_heartbeat(
                     Json(json!({ "error": e })),
                 )
             })?;
+            let last_hb = guard.last_heartbeat_at;
+            drop(guard);
+            if transition.next_state != prev_bunker {
+                super::privilege_broker::record_and_alert_mesh_transition(
+                    &app_state,
+                    &req.peer_name,
+                    prev_bunker as u8,
+                    transition.next_state as u8,
+                    &format!(
+                        "Mesh heartbeat transition on {}: {:?} -> {:?}",
+                        req.peer_name, prev_bunker, transition.next_state
+                    ),
+                )
+                .await;
+            }
             Ok(Json(json!({
                 "admitted": true,
                 "peer": req.peer_name,
                 "heartbeat_seq": req.heartbeat_seq,
-                "last_heartbeat_at": guard.last_heartbeat_at,
+                "last_heartbeat_at": last_hb,
                 "bunker": transition,
             })))
         }
@@ -1176,12 +1710,29 @@ async fn post_heartbeat(
             if maybe_transition.is_some() && !guard.corrupted_state {
                 let _ = store.save(&guard).await;
             }
+            let last_hb = guard.last_heartbeat_at;
+            drop(guard);
+            if let Some(ref transition) = maybe_transition {
+                if transition.next_state > prev_bunker {
+                    super::privilege_broker::record_and_alert_mesh_transition(
+                        &app_state,
+                        &req.peer_name,
+                        prev_bunker as u8,
+                        transition.next_state as u8,
+                        &format!(
+                            "Sovereign dead-man or heartbeat failure on {} ({reason}): {:?} -> {:?}",
+                            req.peer_name, prev_bunker, transition.next_state
+                        ),
+                    )
+                    .await;
+                }
+            }
             Err((
                 status,
                 Json(json!({
                     "admitted": false,
                     "error": reason,
-                    "last_heartbeat_at": guard.last_heartbeat_at,
+                    "last_heartbeat_at": last_hb,
                     "bunker": maybe_transition,
                 })),
             ))
@@ -1203,7 +1754,9 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lean_mesh::{is_name_derived_peer_signing_pubkey, sign_heartbeat, sign_render_auth};
+    use lean_mesh::{
+        is_name_derived_peer_signing_pubkey, sign_canary_trip, sign_heartbeat, sign_render_auth,
+    };
     use sha2::{Digest, Sha256};
 
     fn enroll_test_peer_key(
@@ -1762,6 +2315,233 @@ mod tests {
         check_reopen_lockdown(&|ks_path, map| {
             map.insert("dgx-spark".into(), "ff".repeat(32));
             write_private_test_helper(ks_path, &serde_json::to_string(map).unwrap());
+        });
+    }
+
+    #[test]
+    fn canary_tripwire_verifies_ed25519_enforces_replay_and_respects_dry_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ms = MeshStore::open(tmp.path().to_path_buf());
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async {
+            let mut guard = ms.inner.lock().await;
+            let ashur_sk = enroll_test_peer_key(&mut guard, "ashur", 0x71);
+            let now = guard.manifest.issued_at + 10;
+
+            let reason = "CRITICAL: local port 27017 canary triggered on ashur";
+            let ev_hash = canonical_canary_evidence_sha256_hex(
+                reason,
+                Some(12345),
+                Some(998),
+                Some("/system.slice/sandboxed-node.service"),
+                Some("nc 127.0.0.1 27017"),
+            );
+
+            // 1. Dry-run canary trip verifies signature, advances replay window, and does NOT mutate bunker_state.
+            let dry_sig = sign_canary_trip(
+                &ashur_sk,
+                "ashur",
+                "mongo_socket_27017",
+                1,
+                now,
+                true,
+                &ev_hash,
+            );
+            let dry_req = CanaryTripwireRequest {
+                peer_name: "ashur".into(),
+                canary_kind: "mongo_socket_27017".into(),
+                event_seq: 1,
+                timestamp: now,
+                dry_run: true,
+                reason: reason.into(),
+                pid: Some(12345),
+                uid: Some(998),
+                cgroup: Some("/system.slice/sandboxed-node.service".into()),
+                cmdline: Some("nc 127.0.0.1 27017".into()),
+                detail_sha256_hex: ev_hash.clone(),
+                signature_hex: dry_sig.clone(),
+            };
+            let (prev, trans) = process_canary_tripwire_step(&mut guard, &dry_req, now).unwrap();
+            assert_eq!(prev, MeshBunkerState::Normal);
+            assert_eq!(trans.next_state, MeshBunkerState::HardLockdown);
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+
+            // 2. Replaying seq 1 must be rejected.
+            assert!(process_canary_tripwire_step(&mut guard, &dry_req, now).is_err());
+
+            // 3. Forged signature at seq 2 must be rejected and MUST NOT consume seq 2 in replay window.
+            let mut bad_req = dry_req.clone();
+            bad_req.event_seq = 2;
+            bad_req.dry_run = false;
+            assert!(process_canary_tripwire_step(&mut guard, &bad_req, now).is_err());
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+
+            // 4. Legitimate live canary trip at seq 2 escalates persisted `bunker_state` to `HardLockdown`.
+            let live_sig = sign_canary_trip(
+                &ashur_sk,
+                "ashur",
+                "mongo_socket_27017",
+                2,
+                now,
+                false,
+                &ev_hash,
+            );
+            let mut live_req = bad_req;
+            live_req.signature_hex = live_sig;
+            let (_, live_trans) = process_canary_tripwire_step(&mut guard, &live_req, now).unwrap();
+            assert_eq!(live_trans.next_state, MeshBunkerState::HardLockdown);
+            assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
+        });
+    }
+
+    #[test]
+    fn single_mission_env_honeytoken_quarantines_only_reporting_node_and_high_signal_bait_locks_down_fleet(
+    ) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ms = MeshStore::open(tmp.path().to_path_buf());
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        rt.block_on(async {
+            let mut guard = ms.inner.lock().await;
+            let nippur_sk = enroll_test_peer_key(&mut guard, "nippur", 0x81);
+            let ashur_sk = enroll_test_peer_key(&mut guard, "ashur", 0x82);
+            let now = guard.manifest.issued_at + 10;
+
+            // 1. Whitelisted agent file-search (`rg --hidden`) on `.env.production.canary`
+            //    is ignored: neither `nippur` nor the fleet enters Bunker Mode.
+            let walk_reason = "auditd watch hit on /opt/paloma-canary/.env.production.canary";
+            let walk_hash = canonical_canary_evidence_sha256_hex(
+                walk_reason,
+                Some(2001),
+                Some(999),
+                Some("/system.slice/sandboxed-node.service"),
+                Some("rg --hidden API_KEY /var/lib/sandboxed-node"),
+            );
+            let walk_sig = sign_canary_trip(
+                &nippur_sk,
+                "nippur",
+                "env_honeytoken",
+                1,
+                now,
+                false,
+                &walk_hash,
+            );
+            let walk_req = CanaryTripwireRequest {
+                peer_name: "nippur".into(),
+                canary_kind: "env_honeytoken".into(),
+                event_seq: 1,
+                timestamp: now,
+                dry_run: false,
+                reason: walk_reason.into(),
+                pid: Some(2001),
+                uid: Some(999),
+                cgroup: Some("/system.slice/sandboxed-node.service".into()),
+                cmdline: Some("rg --hidden API_KEY /var/lib/sandboxed-node".into()),
+                detail_sha256_hex: walk_hash,
+                signature_hex: walk_sig,
+            };
+            let (_, walk_trans) = process_canary_tripwire_step(&mut guard, &walk_req, now).unwrap();
+            assert_eq!(walk_trans.next_state, MeshBunkerState::Normal);
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+            assert!(!is_node_quarantined(&guard, "nippur"));
+
+            // 2. Single mission job reading `.env.production.canary` (`cat`) on `nippur`
+            //    quarantines ONLY `nippur` while keeping global fleet `bunker_state` at `Normal`.
+            let read_reason = "mission process read /opt/paloma-canary/.env.production.canary";
+            let read_hash = canonical_canary_evidence_sha256_hex(
+                read_reason,
+                Some(2002),
+                Some(999),
+                Some("/system.slice/sandboxed-node.service"),
+                Some("cat /opt/paloma-canary/.env.production.canary"),
+            );
+            let read_sig = sign_canary_trip(
+                &nippur_sk,
+                "nippur",
+                "env_honeytoken",
+                2,
+                now,
+                false,
+                &read_hash,
+            );
+            let read_req = CanaryTripwireRequest {
+                peer_name: "nippur".into(),
+                canary_kind: "env_honeytoken".into(),
+                event_seq: 2,
+                timestamp: now,
+                dry_run: false,
+                reason: read_reason.into(),
+                pid: Some(2002),
+                uid: Some(999),
+                cgroup: Some("/system.slice/sandboxed-node.service".into()),
+                cmdline: Some("cat /opt/paloma-canary/.env.production.canary".into()),
+                detail_sha256_hex: read_hash,
+                signature_hex: read_sig,
+            };
+            let (_, read_trans) = process_canary_tripwire_step(&mut guard, &read_req, now).unwrap();
+            assert_eq!(read_trans.next_state, MeshBunkerState::Normal);
+            assert_eq!(guard.bunker_state, MeshBunkerState::Normal);
+            assert!(is_node_quarantined(&guard, "nippur"));
+            assert!(!is_node_quarantined(&guard, "ashur"));
+            assert!(!is_node_quarantined(&guard, "babylon"));
+
+            // 3. High-signal attacker bait (`btc_wallet_canary` / fake Bitcoin private key)
+            //    accessed even by a whitelisted agent process (`rg`) immediately escalates
+            //    global fleet `bunker_state` to `HardLockdown`.
+            guard.quarantined_nodes.clear();
+            let btc_reason = "CRITICAL: fake Bitcoin private key bait accessed on ashur";
+            let btc_hash = canonical_canary_evidence_sha256_hex(
+                btc_reason,
+                Some(3001),
+                Some(999),
+                Some("/system.slice/sandboxed-node.service"),
+                Some("rg L5oV /opt/paloma-canary/btc-treasury-wallet.dat"),
+            );
+            let btc_sig = sign_canary_trip(
+                &ashur_sk,
+                "ashur",
+                "btc_wallet_canary",
+                1,
+                now,
+                false,
+                &btc_hash,
+            );
+            let btc_req = CanaryTripwireRequest {
+                peer_name: "ashur".into(),
+                canary_kind: "btc_wallet_canary".into(),
+                event_seq: 1,
+                timestamp: now,
+                dry_run: false,
+                reason: btc_reason.into(),
+                pid: Some(3001),
+                uid: Some(999),
+                cgroup: Some("/system.slice/sandboxed-node.service".into()),
+                cmdline: Some("rg L5oV /opt/paloma-canary/btc-treasury-wallet.dat".into()),
+                detail_sha256_hex: btc_hash,
+                signature_hex: btc_sig,
+            };
+            let (_, btc_trans) = process_canary_tripwire_step(&mut guard, &btc_req, now).unwrap();
+            assert_eq!(btc_trans.next_state, MeshBunkerState::HardLockdown);
+            assert_eq!(guard.bunker_state, MeshBunkerState::HardLockdown);
+            assert!(is_node_quarantined(&guard, "ashur"));
+
+            // 4. Node bunker enforcer convergence (`compute_node_enforcer_verdict`):
+            //    While `ashur` is quarantined / fleet is in `HardLockdown`, enforcer keeps quarantine;
+            //    once operator unbunkers (`last_unbunker_at >= trip_epoch`, `quarantined_nodes.clear()`,
+            //    `bunker_state == Normal`), enforcer converges to `ReleaseQuarantine` and clears local marker!
+            let (q_before, enf_before) =
+                compute_node_enforcer_verdict(&guard, 2, Some("ashur"), Some(now));
+            assert!(q_before);
+            assert!(enf_before.apply_or_keep_quarantine);
+            assert!(!enf_before.clear_local_marker);
+
+            guard.quarantined_nodes.clear();
+            guard.bunker_state = MeshBunkerState::Normal;
+            guard.last_unbunker_at = now + 5;
+            let (q_after, enf_after) =
+                compute_node_enforcer_verdict(&guard, 0, Some("ashur"), Some(now));
+            assert!(!q_after);
+            assert!(!enf_after.apply_or_keep_quarantine);
+            assert!(enf_after.clear_local_marker);
         });
     }
 
