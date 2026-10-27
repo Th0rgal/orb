@@ -97,4 +97,55 @@ object OrbApprovalQueue {
             else -> "/api/bitwarden/requests/$id/reject"
         }
     }
+
+    /** Risk of a kind's tier, as Core assigns it (approvals.json `risk`). */
+    fun riskOf(kind: String, tier: String, request: Map<String, Any?> = emptyMap()): String = when (kind) {
+        "privilege" -> when (tier) { "root_exec" -> "critical"; "service_deploy" -> "elevated"; else -> "routine" }
+        "mission_access" -> "elevated"
+        else -> when {
+            tier == "delete" || tier == "move" -> "critical"
+            tier == "write" || request["all_projects"] == true -> "elevated"
+            else -> "routine"
+        }
+    }
+
+    /** A per-kind request as a queue item, for a Core without the queue. No digest: approved through the kind's own signed route. */
+    fun legacyItem(kind: String, r: Map<String, Any?>): Map<String, Any?> {
+        val tier = when (kind) { "privilege" -> str(r, "scope"); "secret" -> str(r, "kind"); else -> "read_mission" }
+        val target = when (kind) {
+            "privilege" -> str(r, "target_host")
+            "mission_access" -> str(r, "target_mission_id")
+            else -> str(r, "key").ifEmpty { str(r, "project_id").ifEmpty { "*" } }
+        }
+        return mapOf(
+            "kind" to kind, "id" to r["id"],
+            "requester_mission_id" to str(r, "requester_mission_id").ifEmpty { str(r, "mission_id") },
+            "requester_title" to (r["requester_title"] ?: r["mission_title"]),
+            "tier" to tier, "target" to target, "risk" to riskOf(kind, tier, r),
+            "reason" to r["reason"], "created_at" to r["created_at"], "digest" to "",
+            "request" to r, "legacy" to true,
+        )
+    }
+
+    /** Pending items from the per-kind lists the earlier clients used; an empty list hides nothing else. */
+    fun legacyItems(
+        privilege: List<Map<String, Any?>>,
+        secrets: List<Map<String, Any?>>,
+        missions: List<Map<String, Any?>>,
+    ): List<Map<String, Any?>> = (
+        privilege.filter { it["state"] == "pending" }.map { legacyItem("privilege", it) } +
+            secrets.filter { it["status"] == "pending" }.map { legacyItem("secret", it) } +
+            missions.filter { it["state"] == "pending" }.map { legacyItem("mission_access", it) }
+        ).sortedByDescending { str(it, "created_at") }
+
+    /** The kind's own approve route and body, for a Core without the queue. */
+    fun legacyApprove(i: Map<String, Any?>, encode: (String) -> String): Pair<String, Map<String, Any?>> {
+        val id = encode(str(i, "id"))
+        val r = request(i)
+        return when (i["kind"]) {
+            "privilege" -> "/api/privilege-access/$id/approve" to OrbPrivilegeAccess.approveBody(r)
+            "mission_access" -> "/api/mission-access/$id/approve" to mapOf("ttl_hours" to (r["ttl_hours"] as? Number)?.toInt())
+            else -> "/api/bitwarden/requests/$id/approve" to emptyMap()
+        }
+    }
 }
