@@ -13612,3 +13612,85 @@ async fn workspace_purge_history_delete_does_not_rpc_into_locked_actor() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn workspace_purge_history_delete_retains_accepted_action_target() {
+    let h = Harness::new().await;
+    let mission = h.writer(MissionStatus::Acknowledged, None).await;
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS mcp_actions_v1(id TEXT,owner TEXT,scope TEXT,retry_key TEXT,fingerprint TEXT,principal TEXT,tool TEXT,arguments TEXT,state TEXT DEFAULT 'queued');").unwrap();
+        conn.execute("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments) VALUES('pending','test','test','retry','fingerprint','{}','resume_mission','{}')", []).unwrap();
+    }
+    let result = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await;
+    assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(mission.id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn workspace_purge_history_delete_rejects_descendants_created_while_waiting() {
+    let h = Harness::new().await;
+    let mission = h.writer(MissionStatus::Acknowledged, None).await;
+    let guard = DISPATCH_ADMISSION.lock().await;
+    let waiting = wait_for(mission.id, "delete_admission");
+    let state = h.state.clone();
+    let user = h.user.clone();
+    let deletion = tokio::spawn(async move {
+        delete_mission(
+            State(state),
+            Extension(user),
+            Path(mission.id),
+            Query(DeleteMissionQuery::default()),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    let child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("late child"),
+            Some(mission.workspace_id),
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(mission.id),
+            None,
+        )
+        .await
+        .unwrap();
+    drop(guard);
+    assert_eq!(deletion.await.unwrap().unwrap_err().0, StatusCode::CONFLICT);
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(mission.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(child.id)
+        .await
+        .unwrap()
+        .is_some());
+}

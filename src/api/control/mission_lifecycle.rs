@@ -749,6 +749,8 @@ pub async fn delete_mission(
     let mut ids_to_delete = HashSet::with_capacity(child_ids.len() + 1);
     ids_to_delete.insert(mission_id);
     ids_to_delete.extend(child_ids);
+    #[cfg(test)]
+    dispatch_admission_tests::notify_wait(mission_id, "delete_admission");
     let _admission = DISPATCH_ADMISSION.lock().await;
     let _durable = dispatch_admission::durable_lock(&state.config)
         .await
@@ -842,16 +844,22 @@ pub async fn delete_mission(
     }
     let running = Vec::new();
 
-    let deleted_workspace_dirs = cleanup_mission_workspace_dirs_for_delete(
+    let deleted_workspace_dirs = cleanup_mission_workspace_dirs_for_ids(
         &control.mission_store,
         &state.workspaces,
         mission_id,
+        final_child_ids.clone(),
         &running,
     )
     .await?;
 
-    let deleted_ids =
-        delete_mission_with_children(&control.mission_store, mission_id, &running).await?;
+    let deleted_ids = delete_mission_with_child_ids(
+        &control.mission_store,
+        mission_id,
+        final_child_ids,
+        &running,
+    )
+    .await?;
 
     for id in &deleted_ids {
         clear_mission_metadata_refresh_state(*id);
@@ -893,9 +901,20 @@ pub(super) async fn collect_child_mission_ids(
     Ok(child_ids)
 }
 
+#[cfg(test)]
 pub(super) async fn delete_mission_with_children(
     mission_store: &Arc<dyn MissionStore>,
     mission_id: Uuid,
+    running: &[super::super::mission_runner::RunningMissionInfo],
+) -> Result<Vec<Uuid>, (StatusCode, String)> {
+    let child_ids = collect_child_mission_ids(mission_store, mission_id).await?;
+    delete_mission_with_child_ids(mission_store, mission_id, child_ids, running).await
+}
+
+pub(super) async fn delete_mission_with_child_ids(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    child_ids: Vec<Uuid>,
     running: &[super::super::mission_runner::RunningMissionInfo],
 ) -> Result<Vec<Uuid>, (StatusCode, String)> {
     let Some(target) = mission_store
@@ -919,7 +938,6 @@ pub(super) async fn delete_mission_with_children(
         ));
     }
 
-    let child_ids = collect_child_mission_ids(mission_store, mission_id).await?;
     let mut ids_to_delete = Vec::with_capacity(child_ids.len() + 1);
     ids_to_delete.push(mission_id);
     ids_to_delete.extend(child_ids.iter().copied());
@@ -960,10 +978,29 @@ pub(super) async fn delete_mission_with_children(
 #[cfg(test)]
 pub(crate) fn start_deleted_workspace_cleanup(_workspaces: workspace::SharedWorkspaceStore) {}
 
+#[cfg(test)]
 pub(super) async fn cleanup_mission_workspace_dirs_for_delete(
     mission_store: &Arc<dyn MissionStore>,
     workspaces: &workspace::SharedWorkspaceStore,
     mission_id: Uuid,
+    running: &[super::super::mission_runner::RunningMissionInfo],
+) -> Result<Vec<String>, (StatusCode, String)> {
+    let child_ids = collect_child_mission_ids(mission_store, mission_id).await?;
+    cleanup_mission_workspace_dirs_for_ids(
+        mission_store,
+        workspaces,
+        mission_id,
+        child_ids,
+        running,
+    )
+    .await
+}
+
+pub(super) async fn cleanup_mission_workspace_dirs_for_ids(
+    mission_store: &Arc<dyn MissionStore>,
+    workspaces: &workspace::SharedWorkspaceStore,
+    mission_id: Uuid,
+    child_ids: Vec<Uuid>,
     running: &[super::super::mission_runner::RunningMissionInfo],
 ) -> Result<Vec<String>, (StatusCode, String)> {
     let Some(root_mission) = mission_store
@@ -974,7 +1011,6 @@ pub(super) async fn cleanup_mission_workspace_dirs_for_delete(
         return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
     };
 
-    let child_ids = collect_child_mission_ids(mission_store, mission_id).await?;
     let mut ids_to_delete = Vec::with_capacity(child_ids.len() + 1);
     ids_to_delete.push(mission_id);
     ids_to_delete.extend(child_ids.iter().copied());
