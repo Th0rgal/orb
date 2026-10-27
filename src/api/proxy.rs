@@ -236,6 +236,23 @@ async fn chain_usage_limit(
             earliest = Some(limit);
         }
     }
+    // A healthy account the real resolver would pick next (an auth.json
+    // fallback once the store account is parked) means the chain still has
+    // somewhere to go.
+    if !state
+        .chain_store
+        .resolve_entries_with_refresher(
+            chain_entries,
+            &state.ai_providers,
+            standard_accounts,
+            &state.health_tracker,
+            None,
+        )
+        .await
+        .is_empty()
+    {
+        return None;
+    }
     // Accounts this view cannot weigh (an auth.json fallback held back
     // behind a store account, a duplicate credential, a refreshable token)
     // are still waited for when they come back soon: any short cooldown on
