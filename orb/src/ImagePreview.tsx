@@ -1,16 +1,19 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 
 import { imageMime } from "./imageTypes";
+import { createImageMenu } from "./imageActions";
 
 /** Decode once; only the image's compositor transform changes during gestures. */
 /** `src` shows an already-available URL (the lightbox); `load` fetches bytes (the Files pane). */
-export default function ImagePreview(p: { name: string; load?: (signal: AbortSignal) => Promise<Uint8Array>; src?: string; close?: () => void }) {
+export default function ImagePreview(p: { name: string; load?: (signal: AbortSignal) => Promise<Uint8Array>; src?: string; path?: string; close?: () => void }) {
   const [ready, setReady] = createSignal(false), [error, setError] = createSignal("");
   const [percent, setPercent] = createSignal(100);
   let root!: HTMLElement, viewport!: HTMLDivElement, img!: HTMLImageElement;
   let url: string | undefined, frame = 0, scale = 1, x = 0, y = 0, width = 0, height = 0, fitting = true;
   let drag: { id: number; x: number; y: number } | undefined;
   const abort = new AbortController();
+  const [shown, setShown] = createSignal<string | null>(null);
+  const menu = createImageMenu(() => ({ src: shown(), label: p.name, path: p.path }));
   const paint = () => {
     if (frame) return;
     frame = requestAnimationFrame(() => {
@@ -79,7 +82,7 @@ export default function ImagePreview(p: { name: string; load?: (signal: AbortSig
         }
         await img.decode();
         if (abort.signal.aborted) return;
-        setReady(true); fit();
+        setShown(img.src); setReady(true); fit();
       } catch (e) { if (!abort.signal.aborted) setError(e instanceof Error ? e.message : String(e)); }
     })();
   });
@@ -98,12 +101,13 @@ export default function ImagePreview(p: { name: string; load?: (signal: AbortSig
     else if (e.key === "-") zoom(scale / 1.25);
     else { x += e.key === "ArrowLeft" ? 40 : e.key === "ArrowRight" ? -40 : 0; y += e.key === "ArrowUp" ? 40 : e.key === "ArrowDown" ? -40 : 0; constrain(); paint(); }
   }}>
-    <div class="image-viewport" ref={viewport} aria-busy={!ready() && !error()} onDblClick={() => fitting ? zoom(1) : fit()}
+    <div class="image-viewport" ref={viewport} aria-busy={!ready() && !error()} onDblClick={() => fitting ? zoom(1) : fit()} onContextMenu={menu.onContextMenu}
       onPointerDown={e => { if (e.button !== 0 || !ready()) return; e.preventDefault(); root.focus({ preventScroll: true }); viewport.setPointerCapture(e.pointerId); drag = { id: e.pointerId, x: e.clientX, y: e.clientY }; viewport.classList.add("is-dragging"); }}
       onPointerMove={e => { if (!drag || drag.id !== e.pointerId) return; x += e.clientX - drag.x; y += e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY; constrain(); paint(); }}
       onPointerUp={e => { if (viewport.hasPointerCapture(e.pointerId)) viewport.releasePointerCapture(e.pointerId); endDrag(); }} onPointerCancel={endDrag} onLostPointerCapture={endDrag}>
       <img ref={img} alt={p.name} draggable={false} style={{ visibility: ready() ? "visible" : "hidden" }} />
     </div>
+    {menu.view()}
     <Show when={!ready() && !error()}><p class="file-muted image-status">Loading image…</p></Show>
     <Show when={error()}><p class="file-muted image-status" role="alert">Couldn’t display this image. {error()}</p></Show>
     <div class="pdf-toolbar image-toolbar" role="toolbar" aria-label="Image controls">

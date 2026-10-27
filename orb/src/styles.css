@@ -4242,3 +4242,11 @@ select.orb-select-native:disabled { cursor: default; }
   .skill-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .skill-body .skills-files-tree { border-right: 0; border-bottom: 1px solid var(--stroke-soft); max-height: 140px; }
 }
+/* Image save/copy: header download, hover download on transcript images, brief result note. */
+.dlg-head .dlg-action { margin-left: auto; }
+.dlg-head .dlg-action + .dlg-close { margin-left: -8px; }
+.md-workspace-image { position: relative; width: fit-content; max-width: 100%; }
+.md-image-download { position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--bg-elev) 88%, transparent); color: var(--fg-2); border: 1px solid var(--stroke); opacity: 0; transition: opacity .12s; }
+.md-workspace-image:hover .md-image-download, .md-image-download:focus-visible { opacity: 1; }
+.md-image-download:hover { color: var(--fg); }
+.image-action-status { position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%); padding: 6px 12px; border-radius: var(--radius-md); background: var(--bg-elev); color: var(--fg); border: 1px solid var(--stroke); font-size: 12px; z-index: 10000; pointer-events: none; }

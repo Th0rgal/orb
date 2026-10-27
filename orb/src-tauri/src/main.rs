@@ -74,6 +74,37 @@ fn paloma_ssh_pubkey() -> Result<String, String> {
     std::fs::read_to_string(format!("{home}/.ssh/paloma.pub")).map_err(|e| e.to_string())
 }
 
+/// Save bytes the webview already holds (an image in the viewer) where the user
+/// picks in the native Save dialog. The webview suggests only a bare file name;
+/// it can never choose the destination. Returns the saved path, or None when cancelled.
+#[tauri::command]
+async fn save_file_as(name: String, data_base64: String) -> Result<Option<String>, String> {
+    use base64::Engine as _;
+    let name = std::path::Path::new(&name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("image")
+        .to_string();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64)
+        .map_err(|e| e.to_string())?;
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Save image")
+        .set_file_name(&name)
+        .save_file()
+        .await
+    else {
+        return Ok(None);
+    };
+    let path = file.path().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&path, bytes).map(|_| path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|path| Some(path.to_string_lossy().into_owned()))
+        .map_err(|e| e.to_string())
+}
+
 /// Show a file the webview saved to ~/Downloads, or the folder when the browser
 /// renamed it (e.g. "name (1).jar"). Only bare file names are accepted.
 #[tauri::command]
@@ -255,6 +286,7 @@ fn main() {
             machine_metrics::local_machine_metrics,
             open_url,
             reveal_download,
+            save_file_as,
             set_window_theme,
             voice::voice_capability,
             voice::voice_prewarm,
