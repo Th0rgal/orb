@@ -66,6 +66,22 @@ it("refuses to proceed when stop times out, including a live remote job on a fai
     await result;
   } finally { vi.useRealTimers(); }
 });
+it("keeps the transfer open while shutdown is in flight", async () => {
+  let finish!: (mission: api.Mission) => void;
+  vi.spyOn(api, "getMission").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const fork = vi.spyOn(api, "forkMission").mockRejectedValue(new Error("Offline"));
+  const closed = vi.fn();
+  const ui = render(() => <ForkMission mission={mission} choices={choices} destination="Core" onClose={closed} onFork={() => {}} />);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Grok Build" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /Grok 4.6/ }));
+  fireEvent.keyDown(screen.getByRole("menu", { name: "Transfer to another agent" }), { key: "Tab" });
+  fireEvent.keyDown(screen.getByRole("menu", { name: "Transfer to another agent" }), { key: "ArrowLeft" });
+  expect(closed).not.toHaveBeenCalled();
+  expect(fork).not.toHaveBeenCalled();
+  finish({ ...mission, status: "failed" });
+  await waitFor(() => expect(fork).toHaveBeenCalledOnce());
+  ui.unmount();
+});
 it("reports an old backend without falling back to destructive model switching", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 404 }));
   await expect(api.forkMission("source", { backend: "codex", model_override: "gpt-6-astra", model_effort: "", idempotency_key: "key" })).rejects.toThrow("backend needs the conversation-fork update");

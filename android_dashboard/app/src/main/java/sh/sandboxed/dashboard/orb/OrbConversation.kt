@@ -3094,7 +3094,7 @@ fun OrbAgentPickerSheet(
     onTransfer: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !busy || it != androidx.compose.material3.SheetValue.Hidden })
     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
 
     val backendOptions = remember(backends, existing) {

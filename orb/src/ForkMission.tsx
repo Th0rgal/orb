@@ -61,7 +61,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
     if(id!==backend())setSpeed('standard');
     setBackend(id); setEffortAnchor(undefined); setModelAnchor(anchor);
   };
-  return <Menu label="Transfer to another agent" class="fork-harnesses" anchor={p.anchor} placement={p.anchor ? "right-start" : "top-start"} busy={busy()} onClose={p.onClose}>
+  return <Menu label="Transfer to another agent" class="fork-harnesses" anchor={p.anchor} placement={p.anchor ? "right-start" : "top-start"} busy={busy()} onClose={() => { if (!busy()) p.onClose(); }}>
     <Show when={!p.anchor}><div class="menu-group">Transfer to another agent</div></Show>
     <For each={p.choices}>{choice => <button type="button" class="menu-item" role="menuitem" data-backend={choice.backend.id} aria-haspopup="menu" aria-expanded={!!modelAnchor() && backend() === choice.backend.id} disabled={busy() || !!submitted() || unavailable(choice.backend.id)}
       title={unavailable(choice.backend.id) ? "Not supported on this remote workspace" : choice.backend.name}
@@ -69,7 +69,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
       onKeyDown={e => {if(e.key === "ArrowRight"){e.preventDefault();e.stopPropagation();openModels(choice.backend.id,e.currentTarget);}}}>
       {choice.backend.name}<span class="menu-chevron" aria-hidden="true">›</span>
     </button>}</For>
-    <Show when={modelAnchor()}>{anchor => <Menu label="Choose a model" class="fork-models" anchor={anchor()} placement="right-start" busy={busy()} onClose={() => setModelAnchor(undefined)}>
+    <Show when={modelAnchor()}>{anchor => <Menu label="Choose a model" class="fork-models" anchor={anchor()} placement="right-start" busy={busy()} onClose={() => { if (!busy()) setModelAnchor(undefined); }}>
       <For each={choices()}>{choice => {
         const choose = (anchor: HTMLButtonElement) => {if (busy() || submitted()) return; setModel(choice.value); if (supportedEfforts(backend()).length) setEffortAnchor(anchor); else void fork();};
         return <button type="button" class="menu-item" role="menuitem" data-model={choice.value} disabled={busy() || !!submitted()} aria-haspopup={supportedEfforts(backend()).length ? "menu" : undefined}
@@ -80,7 +80,7 @@ export function ForkMission(p: { mission: Mission; choices: HarnessChoice[]; des
         </button>;
       }}</For>
       <Show when={!choices().length}><div class="menu-group">No models available</div></Show>
-      <Show when={effortAnchor()}>{anchor => <Menu label="Choose effort" class="fork-effort-menu" anchor={anchor()} placement="right-start" busy={busy()} onClose={() => setEffortAnchor(undefined)}>
+      <Show when={effortAnchor()}>{anchor => <Menu label="Choose effort" class="fork-effort-menu" anchor={anchor()} placement="right-start" busy={busy()} onClose={() => { if (!busy()) setEffortAnchor(undefined); }}>
         <Show when={backend()==="codex"}><CodexSpeedPicker model={model()} value={speed()} local={!!localBinding(p.mission.id)} disabled={busy() || !!submitted()} onChange={setSpeed}/></Show>
         <For each={["", ...supportedEfforts(backend())]}>{effort => <button type="button" role="menuitem" class="menu-item" disabled={busy()} onClick={() => void fork(effort)}>{effortLabel(effort || undefined,backend(),model())}</button>}</For>
         <Show when={error()}><ErrorNotice error={error()}/></Show>
