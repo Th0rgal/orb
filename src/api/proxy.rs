@@ -197,48 +197,44 @@ fn usage_limit_from_429(
     ))
 }
 
-/// The limit that resets first when a usage limit keeps out every configured
-/// account of the chain; `None` as soon as one account is not, since an
+/// The limit that resets first when a usage limit keeps out every account
+/// that could serve the chain; `None` as soon as one account is not, since an
 /// account on a short cooldown comes back within the caller's retry budget.
 async fn chain_usage_limit(
     state: &super::routes::AppState,
     chain_entries: &[crate::provider_health::ChainEntry],
     standard_accounts: &[crate::provider_health::StandardAccount],
 ) -> Option<crate::account_limits::LimitCooldown> {
+    // The resolver's eligibility filters (unoffered model, verification,
+    // credentials) without its health filter: a tracker with no cooldowns.
+    let no_cooldowns = crate::provider_health::ProviderHealthTracker::new()
+        .with_limits(crate::account_limits::AccountCooldowns::in_memory());
+    let candidates = state
+        .chain_store
+        .resolve_entries_with_refresher(
+            chain_entries,
+            &state.ai_providers,
+            standard_accounts,
+            &no_cooldowns,
+            None,
+        )
+        .await;
     let mut earliest: Option<crate::account_limits::LimitCooldown> = None;
-    for entry in chain_entries {
-        let account_ids = state
-            .chain_store
-            .configured_account_ids(
-                std::slice::from_ref(entry),
-                &state.ai_providers,
-                standard_accounts,
-            )
-            .await;
-        for account_id in account_ids {
-            let subscription = state
-                .ai_providers
-                .get(account_id)
-                .await
-                .and_then(|account| {
-                    crate::provider_health::store_account_subscription_key(
-                        account.provider_type,
-                        &account,
-                    )
-                });
-            // Antigravity parks one quota pool (Gemini, Claude & GPT) of
-            // the login, not the whole account.
-            let limit = state
-                .health_tracker
-                .blocking_limit(account_id, subscription.as_ref())
-                .or_else(|| {
-                    state
-                        .health_tracker
-                        .pool_limit(&entry.provider_id, account_id, &entry.model_id)
-                })?;
-            if earliest.as_ref().is_none_or(|e| limit.until < e.until) {
-                earliest = Some(limit);
-            }
+    for entry in &candidates {
+        // Antigravity parks one quota pool (Gemini, Claude & GPT) of the
+        // login, not the whole account.
+        let limit = state
+            .health_tracker
+            .blocking_limit(entry.account_id, entry.subscription_key.as_ref())
+            .or_else(|| {
+                state.health_tracker.pool_limit(
+                    &entry.provider_id,
+                    entry.account_id,
+                    &entry.model_id,
+                )
+            })?;
+        if earliest.as_ref().is_none_or(|e| limit.until < e.until) {
+            earliest = Some(limit);
         }
     }
     earliest
