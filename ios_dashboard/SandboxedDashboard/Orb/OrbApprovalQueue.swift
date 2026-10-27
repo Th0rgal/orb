@@ -78,10 +78,14 @@ final class OrbApprovalQueue {
     }
 
     /// What "Approve all" covers: critical items only when ticked.
-    /// Critical items only when ticked, and never a critical legacy item: an
-    /// old Core cannot check the confirmation, so those go one row at a time.
+    /// Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs).
+    static let maxBatch = 20
+
+    /// Critical items only when ticked, never a critical legacy item (an old
+    /// Core cannot check the confirmation, so those go one row at a time),
+    /// and at most `maxBatch`; the rest stay for the next signature.
     static func batchApprovable(_ items: [OrbJSON], includeCritical: Bool) -> [OrbJSON] {
-        items.filter { !isCritical($0) || (includeCritical && !$0["legacy"].flag) }
+        Array(items.filter { !isCritical($0) || (includeCritical && !$0["legacy"].flag) }.prefix(maxBatch))
     }
 
     /// What identifies the list on screen: a new, removed or changed item

@@ -59,6 +59,12 @@ final class OrbApprovalQueueTests: XCTestCase {
         )
     }
 
+    func testNeverAsksCoreForMoreThanOneSignatureCanApprove() throws {
+        let labels = try XCTUnwrap(try OrbSpec.json("fixtures/approvals.json")["labels"] as? [[String: Any]])
+        let many = try (0..<(OrbApprovalQueue.maxBatch + 5)).map { try item(labels[2], $0) }
+        XCTAssertEqual(OrbApprovalQueue.batchApprovable(many, includeCritical: true).count, OrbApprovalQueue.maxBatch)
+    }
+
     func testDeniesThroughEachKindsRoute() throws {
         let labels = try XCTUnwrap(try OrbSpec.json("fixtures/approvals.json")["labels"] as? [[String: Any]])
         XCTAssertEqual(OrbApprovalQueue.denyPath(try item(labels[0], 0)), "/api/privilege-access/i0/deny")

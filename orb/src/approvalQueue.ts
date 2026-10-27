@@ -151,13 +151,17 @@ export function signingReason(items: ApprovalItem[]): string {
 }
 
 /** What "Approve all" covers: critical items only when the approver ticked them. */
+/** Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs). */
+export const MAX_BATCH = 20;
+
 /**
  * What "Approve all" covers: critical items only when the approver ticked
- * them, and never a critical legacy item. An old Core cannot check the
- * confirmation, so those are approved one row at a time.
+ * them, never a critical legacy item (an old Core cannot check the
+ * confirmation, so those are approved one row at a time), and at most
+ * MAX_BATCH (the rest stay for the next signature).
  */
 export const batchApprovable = (items: ApprovalItem[], includeCritical: boolean) =>
-  items.filter((i) => i.risk !== "critical" || (includeCritical && !i.legacy));
+  items.filter((i) => i.risk !== "critical" || (includeCritical && !i.legacy)).slice(0, MAX_BATCH);
 
 const answeredEvent: Record<ApprovalKind, string> = {
   secret: "orb:secret-request-answered",
