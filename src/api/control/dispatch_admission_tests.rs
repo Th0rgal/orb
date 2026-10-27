@@ -9304,11 +9304,12 @@ async fn unified_mcp_remote_workspace_job_keeps_identity_across_retry_logs_and_c
     .unwrap()
     .0;
     assert_eq!(settled.status, DurableJobStatus::Cancelled);
-    assert!(
-        !durable_jobs::has_unsettled_mission_jobs(&h.state, &h.user, mission.id)
-            .await
-            .unwrap()
-    );
+    // Presentation cancellation remains observable, but Core must not infer
+    // node-local filesystem reclamation authority from that receipt alone.
+    let retained = durable_jobs::has_unsettled_mission_jobs(&h.state, &h.user, mission.id)
+        .await
+        .unwrap_err();
+    assert!(retained.contains("node-local observation"), "{retained}");
     assert_eq!(
         h.control
             .mission_store
@@ -13603,7 +13604,7 @@ async fn workspace_purge_history_delete_does_not_rpc_into_locked_actor() {
     )
     .await
     .expect("history deletion deadlocked admission against the actor");
-    result.unwrap();
+    let _ = result.unwrap();
     assert!(h
         .control
         .mission_store
