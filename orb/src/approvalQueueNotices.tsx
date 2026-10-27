@@ -72,8 +72,10 @@ export function syncApprovalQueue(items: ApprovalItem[], review: () => void) {
   notify({ key: KEY, kind: "info", variant: "secret", title: "", content: () => <ApprovalQueueCard /> });
 }
 
-export function syncBunkerNotice(bunkerState: number, open: () => void) {
+export function syncBunkerNotice(state: number, open: () => void) {
   openBunkerSettings = open;
+  // A missing or malformed state (older Core, failed parse) is not a lockdown.
+  const bunkerState = Number.isInteger(state) && state > 0 ? state : 0;
   setBunkerLevel(bunkerState);
   if (bunkerState <= 0) {
     setBunkerDismissedForLevel(0);
