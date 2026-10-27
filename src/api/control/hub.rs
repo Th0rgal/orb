@@ -624,6 +624,22 @@ impl ControlHub {
         &self,
         projects: &[String],
     ) -> Result<Vec<Uuid>, String> {
+        let state = self
+            .admission_state
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or("Project history deletion requires lifecycle state")?;
+        let _admission = dispatch_admission::DISPATCH_ADMISSION.lock().await;
+        let _durable = dispatch_admission::durable_lock(&state.config).await?;
+        {
+            let conn = state
+                .projects
+                .connection
+                .lock()
+                .map_err(|e| e.to_string())?;
+            workspace_purge::require_no_accepted_actions(&conn)?;
+        }
+        let ownership = execution_ownership::snapshot(self).await?;
         const PAGE_SIZE: usize = 200;
         let inventory = self.mission_store_inventory().await?;
         let mut stores: Vec<Arc<dyn MissionStore>> = inventory.live;
@@ -682,6 +698,29 @@ impl ControlHub {
                 }
             }
             for mission in &matched {
+                workspace_purge::require_history_deletable_locked(&state, mission.id)?;
+                if ownership.holds_track(mission.id) != Some(false) {
+                    return Err(
+                        "Project mission has unresolved execution or queue ownership".into(),
+                    );
+                }
+                if crate::api::durable_jobs::has_unsettled_workspace_jobs(
+                    &state,
+                    mission.workspace_id,
+                    &workspace::mission_workspace_dir_for_workspace(
+                        &self
+                            .workspaces
+                            .get(mission.workspace_id)
+                            .await
+                            .ok_or("Workspace unavailable")?,
+                        mission.id,
+                    ),
+                )
+                .await?
+                {
+                    return Err("Project mission has running or uncertain workspace jobs".into());
+                }
+
                 if !mission.status.is_terminal() && mission.status != MissionStatus::Acknowledged {
                     return Err(format!(
                         "Cannot delete project data while mission {} is {}. Finish or cancel it first.",
@@ -726,15 +765,22 @@ impl ControlHub {
                 if store.get_mission(mission_id).await?.is_none() {
                     continue;
                 }
-                cleanup_mission_workspace_dirs_for_delete(
+                let child_ids = collect_child_mission_ids(&store, mission_id)
+                    .await
+                    .map_err(|(_, e)| e)?;
+                if child_ids.iter().any(|id| !selected.contains(id)) {
+                    return Err("Project descendants changed during deletion; retry".into());
+                }
+                cleanup_mission_workspace_dirs_for_ids(
                     &store,
                     &self.workspaces,
                     mission_id,
+                    child_ids.clone(),
                     &[],
                 )
                 .await
                 .map_err(|(_, error)| error)?;
-                let removed = delete_mission_with_children(&store, mission_id, &[])
+                let removed = delete_mission_with_child_ids(&store, mission_id, child_ids, &[])
                     .await
                     .map_err(|(_, error)| error)?;
                 for id in removed {
