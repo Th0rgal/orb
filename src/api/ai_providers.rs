@@ -10081,7 +10081,7 @@ async fn get_provider_usage(
                         if let Some(serde_json::Value::Array(windows)) =
                             fields.get_mut("antigravity_windows")
                         {
-                            super::antigravity_accounts::remember_gemini_weekly(
+                            super::antigravity_accounts::remember_gemini_windows(
                                 &login.file,
                                 windows,
                             );
