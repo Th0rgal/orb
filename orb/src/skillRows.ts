@@ -23,6 +23,10 @@ export interface SkillRow {
   content?: string;
   lint: SkillLint[];
   projectFile?: { slug: string; path: string };
+  /** Orb-installed copies of a skill the Library no longer has. */
+  removed?: boolean;
+  /** This Mac's own differing copy of a Library skill. */
+  editedCopy?: { harness: string; path: string; content: string } | null;
 }
 
 export interface ProjectContextSkill {
@@ -64,6 +68,7 @@ export function buildSkillRows(input: {
       inLibrary: true,
       legacyOnly: false,
       divergent: !!local?.divergent,
+      editedCopy: local?.edited_copy ?? null,
       desired: local?.desired ?? false,
       harnessCount: 0,
       staleCount: local?.stale_harnesses?.length ?? 0,
@@ -87,7 +92,8 @@ export function buildSkillRows(input: {
         sourceKinds: [],
         sources: skill.sources ?? [],
         inLibrary: false,
-        legacyOnly: !!skill.legacy_only,
+        legacyOnly: !!skill.legacy_only && !skill.removed_from_library,
+        removed: !!skill.removed_from_library,
         divergent: !!skill.divergent,
         desired: !!skill.desired,
         harnessCount: 0,
@@ -150,16 +156,20 @@ export function filterSkillRows(rows: SkillRow[], f: { query: string; audience: 
 }
 
 /** The one badge a row shows, only when something is unusual; healthy rows show none. */
-export type SkillBadge = "edited" | "old-folder" | "always";
-export const SKILL_BADGE_LABEL: Record<SkillBadge, string> = { edited: "Edited on this Mac", "old-folder": "Only in an old folder", always: "Always loaded" };
-export function skillBadge(row: Pick<SkillRow, "divergent" | "legacyOnly" | "scope">): SkillBadge | null {
-  if (row.divergent) return "edited";
+export type SkillBadge = "removed" | "edited" | "old-folder" | "always";
+export const SKILL_BADGE_LABEL: Record<SkillBadge, string> = { removed: "Removed from Library", edited: "Edited on this Mac", "old-folder": "Only in an old folder", always: "Always loaded" };
+export function skillBadge(row: Pick<SkillRow, "inLibrary" | "legacyOnly" | "scope" | "removed" | "editedCopy">): SkillBadge | null {
+  if (row.removed) return "removed";
+  // Only a Library skill whose installed copy really differs; legacy copies don't count.
+  if (row.inLibrary && row.editedCopy) return "edited";
   if (row.legacyOnly) return "old-folder";
   if (row.scope === "global") return "always";
   return null;
 }
-/** "Needs attention": a row a person has to act on (Always loaded is informational). */
-export function needsAttention(row: Pick<SkillRow, "divergent" | "legacyOnly" | "scope" | "lint">): boolean {
+/** "Needs attention": a row a person has to act on. Old copies live in their own section. */
+export function needsAttention(row: Pick<SkillRow, "inLibrary" | "legacyOnly" | "scope" | "removed" | "editedCopy" | "lint">): boolean {
   const badge = skillBadge(row);
-  return badge === "edited" || badge === "old-folder" || row.lint.length > 0;
+  return badge === "removed" || badge === "edited" || (badge !== "old-folder" && row.lint.length > 0);
 }
+/** Rows for the main list vs the collapsed "Old copies" section. */
+export const isOldCopy = (row: Pick<SkillRow, "inLibrary" | "legacyOnly" | "scope" | "removed" | "editedCopy">) => skillBadge(row) === "old-folder";

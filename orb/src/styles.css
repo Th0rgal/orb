@@ -3262,9 +3262,7 @@ select.orb-select-native:disabled { cursor: default; }
   min-width: 170px; width: 190px; height: 26px; font-size: 12px;
 }
 
-.skills-catalog-card {
-  max-height: 460px; overflow-y: auto; overscroll-behavior: contain;
-}
+.skills-catalog-card { overflow: hidden; }
 .skills-item {
   border-bottom: 1px solid var(--stroke-soft);
 }
@@ -4217,3 +4215,8 @@ select.orb-select-native:disabled { cursor: default; }
 .secret-row.approval-critical .secret-row-key, .toast-title strong.approval-critical { color: var(--danger); }
 .approval-critical-confirm { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--danger); }
 .approval-row-detail { font: 11px var(--sans, inherit); color: var(--fg-3); font-weight: 400; }
+.skills-oldcopies { margin-top: 16px; }
+.skills-oldcopies .skills-catalog-card { margin-top: 8px; }
+.skills-oldcopies .skills-item-head { cursor: default; }
+.skills-oldcopy-actions { white-space: nowrap; font-size: 12.5px; }
+.skills-badge.removed { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--fg); }

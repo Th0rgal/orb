@@ -220,7 +220,8 @@ describe("SkillsSettings", () => {
     expect(syncCalls).toHaveLength(0);
     releaseBody();
     await waitFor(() => expect(syncCalls).toHaveLength(1));
-    expect(syncCalls[0]).toMatchObject({ prune_removed: false });
+    // Auto-sync also prunes: only copies carrying Orb's marker are ever removed.
+    expect(syncCalls[0]).toMatchObject({ prune_removed: true });
   });
 
   it("loads Core Library skills and project skills when connected", async () => {
@@ -408,5 +409,47 @@ describe("SkillsSettings", () => {
     // Retry only commits: the file is already gone, so the 404 is fine.
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(screen.queryByText("agent-browser")).toBeNull();
+  });
+
+  it("separates removed skills, real local edits and old copies", async () => {
+    setConnection("https://agent-backend.thomas.md", "test-jwt");
+    const report = sampleLocalReport(true);
+    report.skills = [
+      { name: "agent-browser", origin: "User global", harnesses: ["claudecode"], managed: true, removed_from_library: true, legacy_only: false, divergent: true, sources: [{ id: "agent-skills-repo", label: "Agent Skills Repo", path: "/Users/thomas/work/skills/skills/agent-browser", legacy: true, hash: "a", lines: 3, content: "---\nname: agent-browser\n---\n" }] },
+      { name: "spark-lean-offload", origin: "Library", harnesses: ["claudecode"], managed: false, in_library: true, edited_copy: { harness: "Claude Code", path: "/Users/thomas/.claude/skills/spark-lean-offload", content: "# mine" } },
+      { name: "backblaze-b2-backups", origin: "Agent Skills Repo", harnesses: [], managed: false, legacy_only: true, sources: [{ id: "agent-skills-repo", label: "Agent Skills Repo", path: "/Users/thomas/work/skills/skills/backblaze-b2-backups", legacy: true, hash: "b", lines: 3, content: "---\nname: backblaze-b2-backups\n---\n" }] },
+    ];
+    const syncCalls: any[] = [];
+    (window as unknown as { __TAURI__: { core: { invoke: (cmd: string, args?: any) => Promise<unknown> } } }).__TAURI__ = {
+      core: { invoke: async (cmd: string, args?: any) => {
+        if (cmd === "local_skills_status") return report;
+        if (cmd === "local_skills_sync") { syncCalls.push(args.request); return { synced_skills: 1, harnesses_updated: 1, skipped_unmanaged: [], pruned: ["~/.claude/skills/agent-browser"], report }; }
+        return null;
+      } },
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      if (url.endsWith("/api/library/skill")) return ok([{ name: "spark-lean-offload", path: "skill/spark-lean-offload" }]);
+      if (url.endsWith("/api/library/skill/spark-lean-offload")) return ok({ name: "spark-lean-offload", path: "skill/spark-lean-offload", content: "---\nname: spark-lean-offload\n---\n# Library\n", files: [], references: [] });
+      return ok({});
+    });
+    const { container } = render(() => <SkillsSettings />);
+    const removed = await waitFor(() => { const el = container.querySelector('.skills-catalog-card [data-skill="agent-browser"]'); expect(el?.textContent).toContain("Removed"); return el!; });
+    expect(removed.textContent).toContain("Removed from Library");
+    expect(container.querySelector('[data-skill="spark-lean-offload"]')!.textContent).toContain("Edited on this Mac");
+    // Old copies are not in the main list nor in "Needs attention".
+    const main = container.querySelectorAll(".skills-catalog-card")[0];
+    expect(main.querySelector('[data-skill="backblaze-b2-backups"]')).toBeNull();
+    expect(container.querySelector(".skills-oldcopies")!.textContent).toContain("Old copies (1)");
+    expect(screen.getByRole("button", { name: /Needs attention/ }).textContent).toContain("2");
+    // Resolve is one menu item, and Remove copies prunes.
+    fireEvent.click(screen.getByRole("button", { name: "Actions for spark-lean-offload" }));
+    expect(screen.getByRole("menuitem", { name: "Resolve…" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /Keep|Discard/ })).toBeNull();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Actions for agent-browser" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Remove copies" }));
+    await waitFor(() => expect(syncCalls.some((c) => c.prune_removed)).toBe(true));
   });
 });

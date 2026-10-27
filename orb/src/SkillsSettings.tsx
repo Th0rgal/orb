@@ -3,7 +3,9 @@ import { swallow } from "./log";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import * as Ic from "./icons";
 import { Select } from "./Select";
-import { ConfirmDialog, Field, NameDialog } from "./Dialog";
+import { ConfirmDialog, Dialog, DialogButton, Field, NameDialog } from "./Dialog";
+import { ErrorNotice } from "./ErrorNotice";
+import { readJson, writeJson } from "./storage";
 import { PopupMenu, type MenuEntry } from "./Menu";
 import {
   connectionVersion,
@@ -31,10 +33,10 @@ import {
 } from "./localAgents";
 import { refreshSoftware, softwareMachines } from "./softwareInventory";
 import { effectiveAudience, newSkillTemplate, normalizeSkillName, parseSkillMeta, setSandboxedMeta } from "./skillModel";
-import { SKILL_BADGE_LABEL, buildSkillRows, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
+import { SKILL_BADGE_LABEL, buildSkillRows, isOldCopy, needsAttention, skillBadge, type ProjectContextSkill, type SkillRow } from "./skillRows";
 import { commitAndPush, deleteLibrarySkill, fetchLibrarySkill, getLibraryStatus, getProjectSkills, putLibrarySkill, putProjectSkills, putSkillFile, readSkillFile, repoLabel, syncLibrary, type LibraryStatus } from "./skillsApi";
 import { orbRelativeTimeString } from "./orbKernel";
-import { SkillDetail, dropsSandboxedMetadata } from "./SkillDetail";
+import { SkillDetail, dropsSandboxedMetadata, middleTruncate } from "./SkillDetail";
 import { SkillDeliveryPreview } from "./SkillDelivery";
 
 export interface HarnessCatalogRow {
@@ -174,6 +176,15 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   // Rows being deleted are hidden at once and come back if the delete fails.
   const [deleting, setDeleting] = createSignal<ReadonlySet<string>>(new Set());
   const [rowMenu, setRowMenu] = createSignal<{ row: SkillRow; x: number; y: number } | null>(null);
+  const [resolving, setResolving] = createSignal<SkillRow | null>(null);
+  const [resolveBusy, setResolveBusy] = createSignal(false);
+  const [resolveError, setResolveError] = createSignal<string | null>(null);
+  const resolve = async (row: SkillRow, keep: boolean) => {
+    setResolveBusy(true); setResolveError(null);
+    try { if (keep) await keepLocal(row); else await syncNow(false, undefined, [row.name]); setResolving(null); }
+    catch (e) { setResolveError(errorText(e)); }
+    finally { setResolveBusy(false); }
+  };
   const [openView, setOpenView] = createSignal<"edit" | "history">("edit");
   const [confirmRowDelete, setConfirmRowDelete] = createSignal<string | null>(null);
   const [rowDeleteBusy, setRowDeleteBusy] = createSignal(false);
@@ -456,7 +467,11 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     return q ? rows().filter((row) => row.name.toLowerCase().includes(q) || row.description.toLowerCase().includes(q)) : rows();
   });
   const attentionCount = createMemo(() => searched().filter(needsAttention).length);
-  const filteredRows = createMemo(() => (attentionOnly() ? searched().filter(needsAttention) : searched()).filter((row) => !deleting().has(row.name)));
+  // Old copies (legacy folders only) get their own collapsed section at the bottom.
+  const [hiddenOld, setHiddenOld] = createSignal<string[]>(readJson<string[]>("orb.skills.hiddenOldCopies", [], Array.isArray));
+  const hideOld = (name: string) => { const next = [...new Set([...hiddenOld(), name])]; setHiddenOld(next); writeJson("orb.skills.hiddenOldCopies", next); };
+  const oldCopies = createMemo(() => searched().filter((row) => isOldCopy(row) && !hiddenOld().includes(row.name)));
+  const filteredRows = createMemo(() => (attentionOnly() ? searched().filter(needsAttention) : searched()).filter((row) => !isOldCopy(row) && !deleting().has(row.name)));
   const saveProjects = async (name: string, next: string[]) => {
     const current = projectSelections();
     const changed = projects().filter((proj) => (current[proj.slug] ?? []).includes(name) !== next.includes(proj.slug));
@@ -471,7 +486,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
   const openRow = createMemo(() => rows().find((r) => r.name === openSkill() && !r.name.startsWith("project:")) ?? null);
 
   /** Sync local harnesses from the Library snapshot. Pruning removes Orb-managed leftovers only. */
-  const syncNow = async (prune: boolean, label?: string) => {
+  const syncNow = async (prune: boolean, label?: string, replaceUnmanaged: string[] = []) => {
     setSyncing(true);
     setSyncNotice(null);
     setSyncError(null);
@@ -484,7 +499,7 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
         const extra = await Promise.all(refs.map(async (rel) => ({ rel, content: await readSkillFile(pl.name, rel).catch(() => "") })));
         return { ...pl, files: [...(pl.files ?? []), ...extra] };
       }));
-      const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: prune && libraryLoaded() });
+      const result = await localSkillsSync({ librarySkills: payloads, pruneRemoved: prune && libraryLoaded(), replaceUnmanaged });
       setLocalReport(result.report);
       rememberKnownSkillNames(result.report.skills.map((s) => s.name));
       cachedReport = result.report;
@@ -512,15 +527,17 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
     }
   };
 
-  // Out-of-date harnesses are brought in line automatically once drift is known.
+  // Out-of-date harnesses are brought in line automatically once drift is known, and
+  // Orb's own copies of skills the Library dropped are pruned: they carry Orb's marker.
   let autoSynced = false;
+  const removedCount = createMemo(() => rows().filter((row) => row.removed).length);
   createEffect(() => {
-    if (!autoSynced && libraryLoaded() && driftCount() > 0 && !syncing()) { autoSynced = true; void syncNow(false); }
+    if (!autoSynced && libraryLoaded() && (driftCount() > 0 || removedCount() > 0) && !syncing()) { autoSynced = true; void syncNow(true); }
   });
 
   /** Keep this Mac's edit: it becomes the Library version. */
   const keepLocal = async (row: SkillRow) => {
-    const local = row.sources.find((src) => src.id !== "library" && src.content);
+    const local = row.editedCopy;
     if (!local?.content) throw new Error("This copy has no readable SKILL.md.");
     // A local copy without metadata.sandboxed must not silently drop who uses the skill.
     const lib = libraryFull()[row.name]?.content;
@@ -596,12 +613,16 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       ...(row.inLibrary ? [{ kind: "item" as const, label: "History", icon: Ic.ReopenIcon, onClick: () => { setOpenView("history"); openRowDetail(row); } }] : []),
       ...(badge === "edited" && isConnected() ? [
         { kind: "sep" as const },
-        { kind: "item" as const, label: "Keep this Mac’s version", onClick: act(() => keepLocal(row)) },
-        { kind: "item" as const, label: "Discard this Mac’s edit", onClick: act(() => syncNow(false)) },
+        { kind: "item" as const, label: "Resolve…", onClick: () => setResolving(row) },
+      ] : []),
+      ...(badge === "removed" ? [
+        { kind: "sep" as const },
+        { kind: "item" as const, label: "Remove copies", icon: Ic.TrashIcon, onClick: act(() => syncNow(true, `Removed Orb’s copies of ${row.name}.`)) },
       ] : []),
       ...(badge === "old-folder" && local && isConnected() ? [
         { kind: "sep" as const },
         { kind: "item" as const, label: "Import to the Library", onClick: act(() => importSkill(row.name, local, local.files?.map((f) => f.rel) ?? [])) },
+        { kind: "item" as const, label: "Hide", onClick: () => hideOld(row.name) },
       ] : []),
       ...(row.inLibrary && isConnected() ? [
         { kind: "sep" as const },
@@ -732,8 +753,34 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
           </div>
         </section>
 
+        <Show when={oldCopies().length}>
+          <details class="settings-advanced skills-oldcopies">
+            <summary>Old copies ({oldCopies().length}) <Ic.ChevronDown size={14} /></summary>
+            <p class="skills-sub-note">Skills found only in old folders such as ~/work/skills/skills. They aren’t synced; import the ones you want in the Library.</p>
+            <div class="s-card skills-catalog-card">
+              <For each={oldCopies()}>{(row) => {
+                const src = () => row.sources.find((x) => x.content);
+                return (
+                  <div class="skills-item" data-skill={row.name}>
+                    <div class="skills-item-head" title={src()?.path ?? undefined}>
+                      <Ic.FileIcon size={14} />
+                      <span class="skills-item-name">{row.name}</span>
+                      <span class="skills-item-desc">{src()?.label ?? ""}</span>
+                      <span class="skills-oldcopy-actions">
+                        <Show when={isConnected() && src()}>{(s) => <button type="button" class="link-btn" onClick={() => { setSyncError(null); void importSkill(row.name, s(), s().files?.map((f) => f.rel) ?? []).catch((e) => setSyncError(errorText(e))); }}>Import</button>}</Show>
+                        <span class="dim"> · </span>
+                        <button type="button" class="link-btn" onClick={() => hideOld(row.name)}>Hide</button>
+                      </span>
+                    </div>
+                  </div>
+                );
+              }}</For>
+            </div>
+          </details>
+        </Show>
+
         <details class="settings-advanced skills-advanced" onToggle={(e) => { if (e.currentTarget.open) setAdvancedOpen(true); }}>
-          <summary>Harnesses, delivery and preflight <Ic.ChevronDown size={14} /></summary>
+          <summary>Advanced <Ic.ChevronDown size={14} /></summary>
           <Show when={advancedOpen()}>
         <Show when={isConnected()}>
           <SkillDeliveryPreview projects={projects()} librarySkills={librarySkills().map((s) => s.name)} />
@@ -885,6 +932,17 @@ export function SkillsSettings(p: { onOpenPage?: (id: string) => void } = {}) {
       </div>
 
       <Show when={rowMenu()}>{(m) => <PopupMenu x={m().x} y={m().y} items={menuFor(m().row)} onClose={() => setRowMenu(null)} />}</Show>
+      <Show when={resolving()}>{(row) =>
+        <Dialog size="compact" title={`Resolve ${row().name}`} busy={resolveBusy()} onClose={() => setResolving(null)}
+          description={`Your copy in ${row().editedCopy?.harness ?? "a harness"} differs from the Library.`}
+          footer={<>
+            <DialogButton disabled={resolveBusy()} onClick={() => void resolve(row(), false)}>Use the Library version</DialogButton>
+            <DialogButton variant="primary" disabled={resolveBusy()} onClick={() => void resolve(row(), true)}>Keep this Mac’s version</DialogButton>
+          </>}>
+          <p class="skills-sub-note" title={row().editedCopy?.path}>{row().editedCopy ? middleTruncate(row().editedCopy!.path, 56) : ""}</p>
+          <Show when={resolveError()}>{(e) => <ErrorNotice error={e()} />}</Show>
+        </Dialog>
+      }</Show>
       <Show when={confirmRowDelete()}>{(name) =>
         <ConfirmDialog title={`Delete ${name()}?`} description="It leaves the Library and every agent on this Mac." destructive
           action={rowDeleteError() ? "Retry" : "Delete"} busy={rowDeleteBusy()} error={rowDeleteError()}
