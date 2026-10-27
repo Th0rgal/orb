@@ -5,7 +5,7 @@ export interface ForkContext {
   /** An edited message: the visible request, sent after the collapsed history. */
   request?: string;
 }
-const PREAMBLES = ["Continue the work from this conversation in a fresh native session.", "The user edited a message in this conversation and sent it again."];
+const PREAMBLES = ["This conversation's native session could not be resumed, so it continues in a fresh session.", "Continue the work from this conversation in a fresh native session.", "The user edited a message in this conversation and sent it again."];
 const OPEN = "\n<fork_context>\n";
 const CLOSE = "\n</fork_context>";
 const REQUEST = `${CLOSE}\n\nCurrent request:\n`;

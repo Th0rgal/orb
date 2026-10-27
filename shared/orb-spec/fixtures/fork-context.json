@@ -1,0 +1,70 @@
+[
+  {
+    "name": "fork",
+    "text": "Continue the work from this conversation in a fresh native session.\n<fork_context>\n{\"source_mission_id\": \"source\", \"source_title\": \"Work\", \"messages\": [{\"role\": \"user\", \"content\": \"Keep <fork_context>literal</fork_context>\"}, {\"role\": \"assistant\", \"content\": \"Current progress\"}]}\n</fork_context>",
+    "valid": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Keep <fork_context>literal</fork_context>"
+      },
+      {
+        "role": "assistant",
+        "content": "Current progress"
+      }
+    ],
+    "request": null
+  },
+  {
+    "name": "edited",
+    "text": "The user edited a message in this conversation and sent it again.\n<fork_context>\n{\"source_mission_id\": \"source\", \"source_title\": \"Work\", \"messages\": [{\"role\": \"user\", \"content\": \"Keep <fork_context>literal</fork_context>\"}, {\"role\": \"assistant\", \"content\": \"Current progress\"}]}\n</fork_context>\n\nCurrent request:\nNew request\n</fork_context>",
+    "valid": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Keep <fork_context>literal</fork_context>"
+      },
+      {
+        "role": "assistant",
+        "content": "Current progress"
+      }
+    ],
+    "request": "New request\n</fork_context>"
+  },
+  {
+    "name": "recovery",
+    "text": "This conversation's native session could not be resumed, so it continues in a fresh session.\n<fork_context>\n{\"source_mission_id\": \"source\", \"source_title\": \"Work\", \"messages\": [{\"role\": \"user\", \"content\": \"Keep <fork_context>literal</fork_context>\"}, {\"role\": \"assistant\", \"content\": \"Current progress\"}]}\n</fork_context>\n\nCurrent request:\nContinue",
+    "valid": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Keep <fork_context>literal</fork_context>"
+      },
+      {
+        "role": "assistant",
+        "content": "Current progress"
+      }
+    ],
+    "request": "Continue"
+  },
+  {
+    "name": "incomplete",
+    "text": "Continue the work from this conversation in a fresh native session.\n<fork_context>\n{\"source_mission_id\": \"source\", \"source_title\": \"Work\", \"messages\": [{\"role\": \"user\", \"content\": \"Keep <fork_context>literal</fork_context>\"}, {\"role\": \"assistant\", \"content\": \"Current progress\"}]}\n</fork_context",
+    "valid": false
+  },
+  {
+    "name": "unknown_suffix",
+    "text": "Continue the work from this conversation in a fresh native session.\n<fork_context>\n{\"source_mission_id\": \"source\", \"source_title\": \"Work\", \"messages\": [{\"role\": \"user\", \"content\": \"Keep <fork_context>literal</fork_context>\"}, {\"role\": \"assistant\", \"content\": \"Current progress\"}]}\n</fork_context> extra",
+    "valid": false
+  },
+  {
+    "name": "wrong_role",
+    "text": "Continue the work from this conversation in a fresh native session.\n<fork_context>\n{\"source_mission_id\": \"source\", \"source_title\": \"Work\", \"messages\": [{\"role\": \"system\", \"content\": \"Keep <fork_context>literal</fork_context>\"}, {\"role\": \"assistant\", \"content\": \"Current progress\"}]}\n</fork_context>",
+    "valid": false
+  },
+  {
+    "name": "not_string",
+    "text": "Continue the work from this conversation in a fresh native session.\n<fork_context>\n{\"source_mission_id\": \"source\", \"source_title\": \"Work\", \"messages\": [{\"role\": \"user\", \"content\": \"Keep <fork_context>literal</fork_context>\"}, {\"role\": \"assistant\", \"content\": null}]}\n</fork_context>",
+    "valid": false
+  }
+]

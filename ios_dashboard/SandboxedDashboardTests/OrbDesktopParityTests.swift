@@ -162,6 +162,36 @@ final class OrbDesktopParityTests: XCTestCase {
         XCTAssertEqual(sections.ready.first?.badge, "Completed")
     }
 
+    func testForkContextSharedFixtures() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("shared/orb-spec/fixtures/fork-context.json"))
+        let fixtures = try JSONDecoder().decode([OrbJSON].self, from: data)
+        for fixture in fixtures {
+            let parsed = OrbForkContext.parse(fixture["text"].text)
+            if !fixture["valid"].flag { XCTAssertNil(parsed, fixture["name"].text); continue }
+            XCTAssertEqual(parsed?.messages, fixture["messages"].items.map { .init(role: $0["role"].text, content: $0["content"].text) }, fixture["name"].text)
+            XCTAssertEqual(parsed?.request, fixture["request"] == .null ? nil : fixture["request"].text)
+        }
+    }
+
+    func testTransferredHistorySurvivesEventFirstThenHistoryArrival() {
+        let envelope = "Continue the work from this conversation in a fresh native session.\n<fork_context>\n{\"source_mission_id\":\"source\",\"messages\":[{\"role\":\"user\",\"content\":\"Objective\"},{\"role\":\"assistant\",\"content\":\"Progress\"}]}\n</fork_context>"
+        let event = StoredEvent(id: 1, missionId: "next", sequence: 1, eventType: "user_message", timestamp: "", eventId: nil, toolCallId: nil, toolName: nil, content: envelope, metadata: [:])
+        let first = OrbTranscriptModel.computeHistory(isCloud: false, turns: [], mission: .null, events: [event], optimisticPrompt: nil)
+        let mission: OrbJSON = .object(["history": .array([.object(["role": .string("user"), "content": .string(envelope)])])])
+        let later = OrbTranscriptModel.computeHistory(isCloud: false, turns: [], mission: mission, events: [event], optimisticPrompt: nil)
+        XCTAssertEqual(first.map { $0.2 }, ["Objective", "Progress"])
+        XCTAssertEqual(later.map { $0.2 }, first.map { $0.2 })
+    }
+
+    @MainActor func testTransferWaitsForRemoteAndClientExecution() {
+        let stopped: OrbJSON = .object(["status": .string("failed")])
+        XCTAssertTrue(OrbForkSheet.sourceStopped(stopped))
+        XCTAssertFalse(OrbForkSheet.sourceStopped(.object(["status": .string("failed"), "remote_job": .object(["node_state": .string("running")])])))
+        XCTAssertFalse(OrbForkSheet.sourceStopped(.object(["status": .string("interrupted"), "execution": .object(["state": .string("running")])])))
+        XCTAssertFalse(OrbForkSheet.sourceStopped(.object(["status": .string("pending")])))
+    }
+
     func testRemoteContinuationUnpacksReplacementEnvelopeAndFiltersRunningNoise() {
         let uuid = "11111111-2222-3333-4444-555555555555"
         let envelope = """

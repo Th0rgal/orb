@@ -1,6 +1,7 @@
+import fixtures from "../../shared/orb-spec/fixtures/fork-context.json";
 import { render, fireEvent, waitFor, screen } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
-import { ForkMission } from "../src/ForkMission";
+import { ForkMission, stopSource } from "../src/ForkMission";
 import { forkContext } from "../src/forkContext";
 import * as api from "../src/api";
 
@@ -10,19 +11,60 @@ const choices = [
   { backend: { id: "codex", name: "Codex" }, models: [{ value: "gpt-6-astra", label: "GPT-6 Astra" }] },
 ] as api.HarnessChoice[];
 afterEach(() => vi.restoreAllMocks());
-it("forks into a new mission without changing or stopping the running source", async () => {
-  const fork = vi.spyOn(api, "forkMission").mockResolvedValue({ ...mission, id: "fork", backend: "codex" });
-  const update = vi.spyOn(api, "updateMissionSettings");
-  const stop = vi.spyOn(api, "cancelMission");
+it("stops the source before transferring and archives only after the new agent exists", async () => {
+  const calls: string[] = [];
+  let stopped = false;
+  vi.spyOn(api, "getMission").mockImplementation(async () => ({ ...mission, status: stopped ? "interrupted" : "active" }));
+  vi.spyOn(api, "cancelMission").mockImplementation(async () => { calls.push("stop"); stopped = true; });
+  const fork = vi.spyOn(api, "forkMission").mockImplementation(async () => { calls.push("fork"); return { ...mission, id: "fork", backend: "codex" }; });
+  vi.spyOn(api, "archiveMission").mockImplementation(async () => { calls.push("archive"); });
   const opened = vi.fn();
-  const ui = render(() => <ForkMission mission={mission} choices={choices} destination="DGX Spark" onClose={() => {}} onFork={opened} />);
+  render(() => <ForkMission mission={mission} choices={choices} destination="DGX Spark" onClose={() => {}} onFork={opened} />);
   fireEvent.click(screen.getByRole("menuitem", { name: "Codex" }));
   fireEvent.click(screen.getByRole("menuitem", { name: /GPT-6 Astra/ }));
   expect(fork).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("menuitem", { name: "Default" }));
   await waitFor(() => expect(opened).toHaveBeenCalledWith(expect.objectContaining({ id: "fork" })));
-  expect(fork).toHaveBeenCalledWith("source", expect.objectContaining({ backend: "codex", model_override: "gpt-6-astra" }));
-  expect(update).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled();
+  expect(calls).toEqual(["stop", "fork", "archive"]);
+});
+it("retries an archive failure without launching or stopping another agent", async () => {
+  vi.spyOn(api, "getMission").mockResolvedValue({ ...mission, status: "failed" });
+  const stop = vi.spyOn(api, "cancelMission");
+  const fork = vi.spyOn(api, "forkMission").mockResolvedValue({ ...mission, id: "fork" });
+  const archive = vi.spyOn(api, "archiveMission").mockRejectedValueOnce(new Error("Archive offline")).mockResolvedValue(undefined);
+  const opened = vi.fn();
+  render(() => <ForkMission mission={mission} choices={choices} destination="Core" onClose={() => {}} onFork={opened} />);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Grok Build" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /Grok 4.6/ }));
+  await waitFor(() => expect(archive).toHaveBeenCalledOnce());
+  expect(opened).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("menuitem", { name: "Retry archiving" }));
+  await waitFor(() => expect(opened).toHaveBeenCalledOnce());
+  expect(fork).toHaveBeenCalledOnce();
+  expect(stop).not.toHaveBeenCalled();
+});
+it("keeps the exact request identity after an uncertain launch response", async () => {
+  vi.spyOn(api, "getMission").mockResolvedValue({ ...mission, status: "failed" });
+  vi.spyOn(api, "archiveMission").mockResolvedValue(undefined);
+  const fork = vi.spyOn(api, "forkMission").mockRejectedValueOnce(new Error("Response lost")).mockResolvedValue({ ...mission, id: "fork" });
+  const opened = vi.fn();
+  render(() => <ForkMission mission={mission} choices={choices} destination="Core" onClose={() => {}} onFork={opened} />);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Grok Build" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /Grok 4.6/ }));
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: "Retry transfer" })).toBeTruthy());
+  fireEvent.click(screen.getByRole("menuitem", { name: "Retry transfer" }));
+  await waitFor(() => expect(opened).toHaveBeenCalledOnce());
+  expect(fork.mock.calls[1]).toEqual(fork.mock.calls[0]);
+});
+it("refuses to proceed when stop times out, including a live remote job on a failed mission", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.spyOn(api, "getMission").mockResolvedValue({ ...mission, status: "failed", remote_job: { node_state: "running" } } as api.Mission);
+    vi.spyOn(api, "cancelMission").mockResolvedValue(undefined);
+    const result = expect(stopSource("source")).rejects.toThrow("has not stopped");
+    await vi.runAllTimersAsync();
+    await result;
+  } finally { vi.useRealTimers(); }
 });
 it("reports an old backend without falling back to destructive model switching", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 404 }));
@@ -49,4 +91,13 @@ it("dismisses a positioned sidebar fork when clicking outside its portal", () =>
   fireEvent.pointerDown(document.body);
   expect(closed).toHaveBeenCalledOnce();
   ui.unmount();
+});
+
+for (const fixture of fixtures) it(`fork context fixture: ${fixture.name}`, () => {
+  const parsed = forkContext(fixture.text);
+  if (!fixture.valid) expect(parsed).toBeNull();
+  else {
+    expect(parsed?.messages).toEqual(fixture.messages);
+    expect(parsed?.request ?? null).toEqual(fixture.request);
+  }
 });

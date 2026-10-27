@@ -65,6 +65,8 @@ struct OrbConversation: View {
     @State var contextBrowseFolder = ""
     @State var dismissedAtToken: String?
     @State var forking = false
+    @State var transferring = false
+    @State var transferRequested = false
     @State var cloning = false
     @State var forkedMission: String?
     @State var sideQuestion: OrbSideQuestionRequest?
@@ -211,7 +213,12 @@ struct OrbConversation: View {
                 .sheet(item: $fileRef) { OrbFileViewerSheet(ref: $0, scope: fileScope).orbTrackPage("file_viewer", surface: .sheet, entryPoint: "mission") }
                 .sheet(isPresented: $showFiles) { OrbFilesSheet(scope: fileScope).orbTrackPage("files", surface: .sheet, entryPoint: "mission") }
                 .sheet(item: $preview) { OrbPreviewSheet(file: $0).orbTrackPage("attachment_preview", surface: .sheet) }
-                .sheet(isPresented: $showSelection) { OrbAgentPicker(selection: $selection, existing: id != nil).orbTrackPage("agent_picker", surface: .sheet) }
+                .sheet(isPresented: $showSelection, onDismiss: {
+                    if transferRequested { transferRequested = false; transferring = true }
+                }) {
+                    OrbAgentPicker(selection: $selection, existing: id != nil, onTransfer: id != nil && !isCloud ? { transferRequested = true } : nil).orbTrackPage("agent_picker", surface: .sheet)
+                }
+                .sheet(isPresented: $transferring) { OrbForkSheet(mission: mission, transfer: true) { forkedMission = $0["id"].text }.orbTrackPage("transfer", surface: .sheet) }
                 .sheet(isPresented: $showContext) { NavigationStack { OrbDocuments(project: effectiveProjectSlug, path: "").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { showContext = false } } } } }
                 .alert("Rename conversation", isPresented: $rename) { TextField("Title", text: $title); Button("Save") { Task { await mutate(["title": .string(title)]) } }; Button("Cancel", role: .cancel) {} }
                 .sheet(isPresented: $moving) { moveConversationSheet.orbTrackPage("move", surface: .sheet) }

@@ -114,6 +114,7 @@ struct OrbSelection {
 struct OrbAgentPicker: View {
     @Binding var selection: OrbSelection
     let existing: Bool
+    var onTransfer: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var accounts: [OrbJSON] = []
     @State private var models: [OrbJSON] = []
@@ -145,7 +146,14 @@ struct OrbAgentPicker: View {
                         TextField("Git reference (required)", text: $selection.gitRef).accessibilityIdentifier("picker.git-ref").textInputAutocapitalization(.never).autocorrectionDisabled()
                     }
                 } else {
-                    Picker("Harness", selection: $selection.backend) { Text("Choose harness").tag(""); ForEach(backends.indices, id: \.self) { Text(backends[$0]["name"].text.isEmpty ? backends[$0]["id"].text : backends[$0]["name"].text).tag(backends[$0]["id"].text) } }.disabled(existing).accessibilityIdentifier("picker.harness")
+                    if existing {
+                        LabeledContent("Harness", value: OrbStyle.serviceName(selection.backend))
+                        if let onTransfer {
+                            Button("Transfer to another agent") { onTransfer(); dismiss() }.accessibilityIdentifier("picker.transfer")
+                        }
+                    } else {
+                        Picker("Harness", selection: $selection.backend) { Text("Choose harness").tag(""); ForEach(backends.indices, id: \.self) { Text(backends[$0]["name"].text.isEmpty ? backends[$0]["id"].text : backends[$0]["name"].text).tag(backends[$0]["id"].text) } }.accessibilityIdentifier("picker.harness")
+                    }
                     if !existing { Picker("Machine", selection: $selection.node) { Text("Core").tag("core"); ForEach(nodes.indices, id: \.self) { Text(nodes[$0]["name"].text.isEmpty ? nodes[$0]["id"].text : nodes[$0]["name"].text).tag(nodes[$0]["id"].text) } } }
                 }
                 if selection.provider != "grok_bot" { Picker("Model", selection: $selection.model) {
