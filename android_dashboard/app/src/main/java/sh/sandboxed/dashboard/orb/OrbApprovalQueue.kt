@@ -74,8 +74,12 @@ object OrbApprovalQueue {
     )
 
     /** What "Approve all" covers: critical items only when ticked. */
+    /** Critical items only when ticked, and never a critical legacy item: an old Core cannot check the confirmation, so those go one row at a time. */
     fun batchApprovable(items: List<Map<String, Any?>>, includeCritical: Boolean): List<Map<String, Any?>> =
-        items.filter { includeCritical || !isCritical(it) }
+        items.filter { !isCritical(it) || (includeCritical && it["legacy"] != true) }
+
+    /** What identifies the list on screen: a new, removed or changed item (legacy items have no digest) must be ticked again. */
+    fun listKey(items: List<Map<String, Any?>>): List<String> = items.map { "${it["kind"]}:${it["id"]}:${it["digest"]}" }
 
     /** The signed body: each item by Core's digest. A single item is its own confirmation. */
     fun batchBody(items: List<Map<String, Any?>>): Map<String, Any?> = mapOf(

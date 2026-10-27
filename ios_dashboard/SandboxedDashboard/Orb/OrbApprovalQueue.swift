@@ -78,8 +78,16 @@ final class OrbApprovalQueue {
     }
 
     /// What "Approve all" covers: critical items only when ticked.
+    /// Critical items only when ticked, and never a critical legacy item: an
+    /// old Core cannot check the confirmation, so those go one row at a time.
     static func batchApprovable(_ items: [OrbJSON], includeCritical: Bool) -> [OrbJSON] {
-        items.filter { includeCritical || !isCritical($0) }
+        items.filter { !isCritical($0) || (includeCritical && !$0["legacy"].flag) }
+    }
+
+    /// What identifies the list on screen: a new, removed or changed item
+    /// (legacy items have no digest) must be ticked again.
+    static func listKey(_ items: [OrbJSON]) -> [String] {
+        items.map { "\($0["kind"].text):\($0["id"].text):\($0["digest"].text)" }
     }
 
     /// The signed body: each item by Core's digest. A single item is its own confirmation.
@@ -283,7 +291,7 @@ struct OrbApprovalQueueSheet: View {
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
             .refreshable { await queue.refresh() }
             .task { await queue.refresh() }
-            .onChange(of: queue.items.map { $0["digest"].text }) { _, _ in includeCritical = false }
+            .onChange(of: OrbApprovalQueue.listKey(queue.items)) { _, _ in includeCritical = false }
             .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet() }
             .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet() }
             .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet() }

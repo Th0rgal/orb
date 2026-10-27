@@ -100,4 +100,11 @@ final class OrbApprovalQueueTests: XCTestCase {
         XCTAssertEqual(secret["risk"].text, "critical")
         XCTAssertEqual(OrbApprovalQueue.legacyApprove(secret).0, "/api/bitwarden/requests/s1/approve")
     }
+
+    func testCriticalLegacyItemsAreNeverBatchedAndNewOnesResetTheTick() throws {
+        let root = OrbApprovalQueue.legacyItem(kind: "privilege", try json(["id": "p1", "state": "pending", "scope": "root_exec", "target_host": "self", "requester_mission_id": "m1"]))
+        let read = OrbApprovalQueue.legacyItem(kind: "privilege", try json(["id": "p2", "state": "pending", "scope": "ops_read", "target_host": "ashur", "requester_mission_id": "m1"]))
+        XCTAssertEqual(OrbApprovalQueue.batchApprovable([root, read], includeCritical: true).map { $0["id"].text }, ["p2"])
+        XCTAssertNotEqual(OrbApprovalQueue.listKey([read]), OrbApprovalQueue.listKey([read, root]), "a new legacy item changes the list")
+    }
 }

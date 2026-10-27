@@ -81,4 +81,11 @@ class OrbApprovalQueueTest {
         assertEquals("critical", secret["risk"])
         assertEquals("/api/bitwarden/requests/s1/approve", OrbApprovalQueue.legacyApprove(secret) { it }.first)
     }
+
+    @Test fun criticalLegacyItemsAreNeverBatchedAndNewOnesResetTheTick() {
+        val root = OrbApprovalQueue.legacyItem("privilege", mapOf("id" to "p1", "state" to "pending", "scope" to "root_exec", "target_host" to "self", "requester_mission_id" to "m1"))
+        val read = OrbApprovalQueue.legacyItem("privilege", mapOf("id" to "p2", "state" to "pending", "scope" to "ops_read", "target_host" to "ashur", "requester_mission_id" to "m1"))
+        assertEquals(listOf("p2"), OrbApprovalQueue.batchApprovable(listOf(root, read), true).map { it["id"] })
+        assertTrue(OrbApprovalQueue.listKey(listOf(read)) != OrbApprovalQueue.listKey(listOf(read, root)))
+    }
 }

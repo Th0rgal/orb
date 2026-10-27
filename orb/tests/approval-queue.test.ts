@@ -57,6 +57,12 @@ describe('approval queue',()=>{
   ]);
   expect(itemDetail(items[0])).toBe('Allows restart and deploy services, including production · for this session (max 4 h)');
  });
+ it('never batch-approves a critical legacy item, even when ticked',()=>{
+  const root=legacyItem('privilege',{id:'p1',state:'pending',scope:'root_exec',target_host:'self',requester_mission_id:'m1',reason:'x',ttl_minutes:60,session_scoped:true,created_at:''} as any);
+  const read=legacyItem('privilege',{id:'p2',state:'pending',scope:'ops_read',target_host:'ashur',requester_mission_id:'m1',reason:'x',ttl_minutes:60,session_scoped:true,created_at:''} as any);
+  expect(batchApprovable([root,read],true).map(i=>i.id)).toEqual(['p2']);
+  expect(batchApprovable([{...root,legacy:false,digest:'d'},read],true).map(i=>i.id)).toEqual(['p1','p2']);
+ });
  it('only a missing queue falls back; other errors keep what the client shows',async()=>{
   vi.mocked(api).mockRejectedValue(new (ApiError as any)(503,'Service Unavailable'));
   await expect(getApprovalQueue()).rejects.toThrow('503');

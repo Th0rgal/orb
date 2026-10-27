@@ -275,7 +275,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         try {
             val next = OrbJSON.dictList(dictOf(core.request("/api/approvals/queue"))["items"])
             // A different list (or a changed item) must be ticked again.
-            if (next.map { it["digest"] } != queue.map { it["digest"] }) includeCritical = false
+            if (OrbApprovalQueue.listKey(next) != OrbApprovalQueue.listKey(queue)) includeCritical = false
             queue = next
         } catch (e: OrbError) {
             queueMissing = e.status == 404 || e.status == 405
@@ -283,7 +283,9 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         }
         if (queueMissing) {
             val secrets = runCatching { OrbJSON.dictList(dictOf(core.request("/api/bitwarden/broker"))["requests"]) }.getOrDefault(emptyList())
-            queue = OrbApprovalQueue.legacyItems(privilege, secrets, access)
+            val next = OrbApprovalQueue.legacyItems(privilege, secrets, access)
+            if (OrbApprovalQueue.listKey(next) != OrbApprovalQueue.listKey(queue)) includeCritical = false
+            queue = next
         }
         try {
             val broker = dictOf(core.request("/api/bitwarden/broker"))

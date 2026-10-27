@@ -151,8 +151,13 @@ export function signingReason(items: ApprovalItem[]): string {
 }
 
 /** What "Approve all" covers: critical items only when the approver ticked them. */
+/**
+ * What "Approve all" covers: critical items only when the approver ticked
+ * them, and never a critical legacy item. An old Core cannot check the
+ * confirmation, so those are approved one row at a time.
+ */
 export const batchApprovable = (items: ApprovalItem[], includeCritical: boolean) =>
-  items.filter((i) => includeCritical || i.risk !== "critical");
+  items.filter((i) => i.risk !== "critical" || (includeCritical && !i.legacy));
 
 const answeredEvent: Record<ApprovalKind, string> = {
   secret: "orb:secret-request-answered",
