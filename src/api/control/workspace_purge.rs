@@ -175,7 +175,7 @@ fn original_mode(path: &FsPath) -> Result<u32, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        Ok(std::fs::metadata(path).map_err(|e| e.to_string())?.mode() & 0o777)
+        Ok(std::fs::metadata(path).map_err(|e| e.to_string())?.mode() & 0o7777)
     }
     #[cfg(not(unix))]
     {

@@ -90,7 +90,7 @@ pub(super) fn restore_mode(
     if identity(&directory)? != expected {
         return Err("Restored directory changed".into());
     }
-    set_mode(&directory, mode & 0o777)?;
+    set_mode(&directory, mode & 0o7777)?;
     directory.sync_all().map_err(|e| e.to_string())
 }
 
@@ -227,7 +227,7 @@ pub(super) fn remove(
         return Err("Quarantine identity changed".into());
     }
     let meta = directory.metadata().map_err(|e| e.to_string())?;
-    if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o777 != 0o700 {
+    if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o7777 != 0o700 {
         return Err("Quarantine must be private before removal".into());
     }
     let parent_meta = parent.metadata().map_err(|e| e.to_string())?;
