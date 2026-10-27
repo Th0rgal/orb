@@ -155,13 +155,18 @@ export function signingReason(items: ApprovalItem[]): string {
 export const MAX_BATCH = 20;
 
 /**
- * What "Approve all" covers: critical items only when the approver ticked
- * them, never a critical legacy item (an old Core cannot check the
- * confirmation, so those are approved one row at a time), and at most
- * MAX_BATCH (the rest stay for the next signature).
+ * What "Approve N" under the normal rows covers: the non-critical items only,
+ * at most MAX_BATCH (the rest stay for the next signature).
  */
-export const batchApprovable = (items: ApprovalItem[], includeCritical: boolean) =>
-  items.filter((i) => i.risk !== "critical" || (includeCritical && !i.legacy)).slice(0, MAX_BATCH);
+export const normalBatch = (items: ApprovalItem[]) => items.filter((i) => i.risk !== "critical").slice(0, MAX_BATCH);
+
+/**
+ * What the footer's "Approve all" covers: every item, critical ones included,
+ * critical first so the device prompt names them before anything else. The
+ * button names the critical count and is a separate, explicit signature.
+ */
+export const allBatch = (items: ApprovalItem[]) =>
+  [...items].sort((a, b) => RISK_ORDER.indexOf(a.risk) - RISK_ORDER.indexOf(b.risk)).slice(0, MAX_BATCH);
 
 const answeredEvent: Record<ApprovalKind, string> = {
   secret: "orb:secret-request-answered",
