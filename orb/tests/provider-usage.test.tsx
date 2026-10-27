@@ -2,7 +2,7 @@ import { render, waitFor } from "@solidjs/testing-library";
 import { afterEach, expect, it, vi } from "vitest";
 import { Providers } from "../src/Providers";
 import { clearConnection, setConnection, type AIProvider, type ProviderUsage } from "../src/api";
-import { effectiveProviderStatus, usageWindows } from "../src/providerUsage";
+import { effectiveProviderStatus, usageWindows, verificationUrl } from "../src/providerUsage";
 const account = (id: string) => ({ id, provider_type: "openai", name: id, enabled: true, uses_oauth: true, credential_owner: "sandboxed_sh", status: { type: "connected" } }) as AIProvider;
 const usage = (used: number) => ({ provider_type: "openai", codex_primary_used_percent: used, codex_primary_window_minutes: 10080, codex_secondary_used_percent: 0, codex_secondary_window_minutes: 0 }) as ProviderUsage;
 afterEach(() => { clearConnection(); vi.unstubAllGlobals(); });
@@ -97,4 +97,26 @@ it("shows router circuit-breaker state instead of Connected", async () => {
   const { container } = render(() => <Providers />);
   await waitFor(() => expect(container.textContent).toContain("Out of credit"));
   expect(container.textContent).not.toContain("Connected");
+});
+it("an account Google wants verified asks for verification, not re-authentication", async () => {
+  const google = { ...account("new"), provider_type: "antigravity", account_email: "new@gmail.com" } as AIProvider;
+  const refused = { provider_type: "antigravity", status: "needs_verification", verification_url: "https://accounts.google.com/signin/continue?sarp=1" } as ProviderUsage;
+  // Google's 403 also trips the router breaker; verifying is still the fix.
+  expect(effectiveProviderStatus(google, refused, { account_state: "auth_failed" } as never)).toBe("needs_verification");
+  expect(verificationUrl(refused, "new@gmail.com")).toBe("https://accounts.google.com/signin/continue?sarp=1");
+  expect(verificationUrl({ provider_type: "antigravity" }, "new@gmail.com")).toBe("https://accounts.google.com/AccountChooser?continue=https%3A%2F%2Fantigravity.google%2F&Email=new%40gmail.com");
+  setConnection("http://core.test", "test-token");
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => new Response(JSON.stringify(
+    url.endsWith("/providers") ? [google]
+    : url.endsWith("/model-routing/health") ? [{ account_id: "new", account_state: "auth_failed" }]
+    : url.endsWith("/new/antigravity/recheck") && init?.method === "POST" ? { provider_type: "antigravity", status: "connected" }
+    : url.endsWith("/providers/usage") ? { entries: { new: refused } } : {})));
+  vi.stubGlobal("fetch", fetch);
+  const ui = render(() => <Providers />);
+  await waitFor(() => expect(ui.container.textContent).toContain("Google requires you to verify this account."));
+  expect(ui.container.textContent).not.toContain("Auth failed");
+  expect(ui.getByRole("button", { name: "Verify account ↗" })).toBeTruthy();
+  ui.getByRole("button", { name: "Check again" }).click();
+  await waitFor(() => expect(ui.container.textContent).not.toContain("Google requires you to verify this account."));
+  expect(fetch.mock.calls.some(([url]) => String(url).endsWith("/new/antigravity/recheck"))).toBe(true);
 });
