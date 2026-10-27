@@ -1119,7 +1119,8 @@ impl PrivilegeBroker {
         }
         let before: Vec<PrivilegeRequest> =
             idxs.iter().map(|&i| data.requests[i].clone()).collect();
-        let audit_len = data.audit.len();
+        // The whole log, not its length: at the cap `log()` also drops the oldest entries.
+        let audit_before = data.audit.clone();
         let mut out = Vec::with_capacity(idxs.len());
         let mut tokens = Vec::with_capacity(idxs.len());
         for &idx in &idxs {
@@ -1140,7 +1141,7 @@ impl PrivilegeBroker {
             for (&idx, r) in idxs.iter().zip(before) {
                 data.requests[idx] = r;
             }
-            data.audit.truncate(audit_len);
+            data.audit = audit_before;
             return Err(e);
         }
         drop(data);
@@ -3688,6 +3689,44 @@ mod tests {
             }
         }
         true
+    }
+
+    #[tokio::test]
+    async fn failed_batch_commit_restores_the_full_audit_log_at_the_cap() {
+        let broker = temp_broker();
+        let a = broker
+            .request(deploy_request(Uuid::new_v4(), PrivilegeScope::OpsRead))
+            .await
+            .unwrap();
+        // A full log: one more entry would drop the oldest one.
+        let before = {
+            let mut data = broker.data.lock().await;
+            let entry = data.audit.last().cloned().unwrap();
+            while data.audit.len() < AUDIT_LIMIT {
+                let n = data.audit.len();
+                data.audit.push(PrivilegeAuditEntry {
+                    detail: Some(format!("filler {n}")),
+                    ..entry.clone()
+                });
+            }
+            data.audit
+                .iter()
+                .map(|e| e.detail.clone())
+                .collect::<Vec<_>>()
+        };
+        // The save cannot write its temporary file, so the commit fails.
+        std::fs::create_dir_all(broker.path.with_extension("json.tmp")).unwrap();
+        assert!(broker
+            .approve_batch("thomas", &[seen(&a)], false)
+            .await
+            .is_err());
+        let data = broker.data.lock().await;
+        let after: Vec<_> = data.audit.iter().map(|e| e.detail.clone()).collect();
+        assert_eq!(after, before, "the oldest entries are back, nothing added");
+        assert!(data
+            .requests
+            .iter()
+            .any(|r| r.id == a.id && r.state.is_pending()));
     }
 
     #[tokio::test]

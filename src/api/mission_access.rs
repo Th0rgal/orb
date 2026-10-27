@@ -427,7 +427,8 @@ impl MissionAccess {
             idxs.extend(idx);
         }
         let before: Vec<AccessRequest> = idxs.iter().map(|&i| data.requests[i].clone()).collect();
-        let audit_len = data.audit.len();
+        // The whole log, not its length: at the cap `log()` also drops the oldest entries.
+        let audit_before = data.audit.clone();
         let mut out = Vec::with_capacity(idxs.len());
         for &idx in &idxs {
             let r = &mut data.requests[idx];
@@ -441,7 +442,7 @@ impl MissionAccess {
             for (&idx, r) in idxs.iter().zip(before) {
                 data.requests[idx] = r;
             }
-            data.audit.truncate(audit_len);
+            data.audit = audit_before;
             return Err(e);
         }
         drop(data);

@@ -3,7 +3,7 @@ vi.mock('../src/api',()=>({api:vi.fn(),connectionVersion:()=>0}));
 vi.mock('../src/deviceApproval',()=>({signedApi:vi.fn(),ApprovalCancelled:class extends Error{}}));
 import {signedApi} from '../src/deviceApproval';
 import fixture from '../../shared/orb-spec/fixtures/approvals.json';
-import {approveItems,batchApprovable,denyItem,itemDetail,itemRequester,itemTitle,queueSummary,signingReason,type ApprovalItem} from '../src/approvalQueue';
+import {MAX_BATCH,approveItems,batchApprovable,denyItem,itemDetail,itemRequester,itemTitle,queueSummary,signingReason,type ApprovalItem} from '../src/approvalQueue';
 const item=(c:any,n=0):ApprovalItem=>({id:`i${n}`,reason:'',created_at:'',digest:`d${n}`,...c.item});
 afterEach(()=>vi.mocked(signedApi).mockReset());
 describe('approval queue',()=>{
@@ -30,6 +30,10 @@ describe('approval queue',()=>{
   await approveItems([root]);
   expect((vi.mocked(signedApi).mock.calls[1][2] as any).confirm_critical).toBe(true);
   expect(vi.mocked(signedApi).mock.calls[1][3]).toBe('Root on its own node for Mission 9a8b7c6d');
+ });
+ it('never asks Core for more than one signature can approve',()=>{
+  const many=Array.from({length:MAX_BATCH+5},(_,n)=>item(fixture.labels[2],n));
+  expect(batchApprovable(many,true).length).toBe(MAX_BATCH);
  });
  it('the device prompt names every item, critical first',()=>{
   const items=[0,9,2].map(k=>item(fixture.labels[k],k));

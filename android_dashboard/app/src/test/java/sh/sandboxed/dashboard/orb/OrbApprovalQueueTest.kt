@@ -46,6 +46,11 @@ class OrbApprovalQueueTest {
         )
     }
 
+    @Test fun neverAsksCoreForMoreThanOneSignatureCanApprove() {
+        val many = (0 until OrbApprovalQueue.MAX_BATCH + 5).map { item(2) + ("id" to "i$it") }
+        assertEquals(OrbApprovalQueue.MAX_BATCH, OrbApprovalQueue.batchApprovable(many, true).size)
+    }
+
     @Test fun deniesThroughEachKindsRoute() {
         assertEquals("/api/privilege-access/i0/deny", OrbApprovalQueue.denyPath(item(0)) { it })
         assertEquals("/api/bitwarden/requests/i2/reject", OrbApprovalQueue.denyPath(item(2)) { it })

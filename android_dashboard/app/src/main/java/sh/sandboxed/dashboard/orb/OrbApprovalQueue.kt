@@ -74,8 +74,12 @@ object OrbApprovalQueue {
     )
 
     /** What "Approve all" covers: critical items only when ticked. */
+    /** Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs). */
+    const val MAX_BATCH = 20
+
+    /** At most [MAX_BATCH]; the rest stay for the next signature. */
     fun batchApprovable(items: List<Map<String, Any?>>, includeCritical: Boolean): List<Map<String, Any?>> =
-        items.filter { includeCritical || !isCritical(it) }
+        items.filter { includeCritical || !isCritical(it) }.take(MAX_BATCH)
 
     /** The signed body: each item by Core's digest. A single item is its own confirmation. */
     fun batchBody(items: List<Map<String, Any?>>): Map<String, Any?> = mapOf(

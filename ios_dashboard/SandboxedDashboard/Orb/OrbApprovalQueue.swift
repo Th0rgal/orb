@@ -78,8 +78,12 @@ final class OrbApprovalQueue {
     }
 
     /// What "Approve all" covers: critical items only when ticked.
+    /// Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs).
+    static let maxBatch = 20
+
+    /// At most `maxBatch`; the rest stay for the next signature.
     static func batchApprovable(_ items: [OrbJSON], includeCritical: Bool) -> [OrbJSON] {
-        items.filter { includeCritical || !isCritical($0) }
+        Array(items.filter { includeCritical || !isCritical($0) }.prefix(maxBatch))
     }
 
     /// The signed body: each item by Core's digest. A single item is its own confirmation.
