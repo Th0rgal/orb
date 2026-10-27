@@ -209,6 +209,20 @@ mod tests {
         assert!(!failure.summary.contains("html"));
     }
     #[test]
+    fn exhausted_429_chain_is_a_usage_limit_not_an_interrupted_connection() {
+        // What OpenCode prints when every account of `google/gemini-4-argon`
+        // (and its Antigravity equivalent) answered 429 and is parked.
+        let failure = classify(
+            r#"{"name":"APIError","data":{"isRetryable":true,"statusCode":429,"message":"You've hit your usage limit on every account configured for 'google/gemini-4-argon' (google usage limit). Try again at Oct 28, 2026 05:00 UTC.","responseHeaders":{"Retry-After":"30"}}}"#,
+        );
+        assert_eq!(failure.kind, FailureKind::Quota);
+        // A plain cooldown 429 stays a transient.
+        let failure = classify(
+            r#"{"name":"APIError","data":{"isRetryable":true,"statusCode":429,"message":"All providers in chain 'x' are currently in cooldown or unconfigured"}}"#,
+        );
+        assert_eq!(failure.kind, FailureKind::Transport);
+    }
+    #[test]
     fn hard_failures_and_unattributed_cancellation_are_not_transport_retries() {
         for (text, expected) in [
             (

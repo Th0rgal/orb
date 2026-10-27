@@ -5,7 +5,7 @@ import { ErrorToast } from "./toast";
 import {CloudProviders} from './CloudProviders';
 import {ProviderUsageChip, ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
-import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows } from "./providerUsage";
+import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows, verificationUrl } from "./providerUsage";
 import { PopupMenu } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
@@ -18,6 +18,7 @@ import {
   getAllProviderUsage,
   getProviderUsage,
   setMistralUsageSession,
+  recheckAntigravity,
   clearMistralUsageSession,
   getSubscriptionLogin,
   startProviderOAuth,
@@ -957,7 +958,7 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
   const quota = () => p.usage ? quotaStatus(usageWindows(p.usage)) : null;
   // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
   const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
-  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Needs Google verification", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
+  const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
   const expandable = () => !!p.rank || status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
@@ -965,6 +966,15 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
   const [menu, setMenu] = createSignal<{x:number;y:number} | null>(null);
   const [dropping, setDropping] = createSignal(false);
   const needsAuth = () => ["needs_reauth", "needs_auth"].includes(status());
+  const [checking, setChecking] = createSignal(false);
+  const [checkError, setCheckError] = createSignal<string | null>(null);
+  const verify = () => void openExternalUrl(verificationUrl(p.usage, email())).catch(e => setCheckError(String(e)));
+  const checkAgain = async () => {
+    setChecking(true); setCheckError(null);
+    try { p.onUsage?.(await recheckAntigravity(a.id)); }
+    catch (e) { setCheckError(e instanceof Error ? e.message : String(e)); }
+    finally { setChecking(false); }
+  };
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
   const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
     : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "API key" : "Model routing")
@@ -1002,7 +1012,7 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
       <Show when={true}><button class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={!!menu()} onClick={e => { const r=e.currentTarget.getBoundingClientRect(); setMenu({x:r.right-170,y:r.bottom+4}); }}><span aria-hidden="true">···</span></button></Show>
       </div>
       <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={[
-        ...(p.onEditKey ? [{kind:"item" as const,label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : canReconnect() ? [{kind:"item" as const,label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}] : []),
+        ...(status() === "needs_verification" ? [{kind:"item" as const,label:"Verify account",onClick:verify},{kind:"item" as const,label:"Check again",onClick:() => void checkAgain()}] : p.onEditKey ? [{kind:"item" as const,label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : canReconnect() ? [{kind:"item" as const,label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}] : []),
         ...(p.rank && p.rank.index > 0 ? [{kind:"item" as const,label:"Try earlier",onClick:()=>p.rank!.move(p.rank!.index - 1)}] : []),
         ...(p.rank && p.rank.index < p.rank.count - 1 ? [{kind:"item" as const,label:"Try later",onClick:()=>p.rank!.move(p.rank!.index + 1)}] : []),
         {kind:"item" as const,label:a.enabled===false?"Enable":"Disable",onClick:()=>p.onToggle(a.enabled===false)},
@@ -1018,6 +1028,14 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
           </Show>
           <Show when={hasProviderUsageDetails(p.usage)}>
             <UsageDetail usage={p.usage!} sharedOrg={!!p.usage?.organization_id && !!p.sharedOrgs?.has(p.usage.organization_id)} headerEmail={a.account_email ?? (p.usage?.account_email && a.name.includes(p.usage.account_email) ? p.usage.account_email : undefined)} planInHeader />
+          </Show>
+          <Show when={status() === "needs_verification"}>
+            <p class="s-row-desc inline-error">Google requires you to verify this account.</p>
+            <div class="p-acc-actions">
+              <button class="s-btn" onClick={verify}>Verify account ↗</button>
+              <button class="s-btn quiet" disabled={checking()} onClick={() => void checkAgain()}>{checking() ? "Checking…" : "Check again"}</button>
+            </div>
+            <Show when={checkError()}><p class="s-row-desc inline-error">{checkError()}</p></Show>
           </Show>
           <Show when={status() === "out_of_credit" || status() === "auth_failed"}>
             <p class="s-row-desc inline-error">{status() === "out_of_credit"

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Paloma / Orb Canary Auditd Watcher (Wave 10)
 # Enforces `Orb.Kernel.canaryTripwireStep` (`lean/Orb/Kernel.lean`):
+# Every hit is forwarded to Core, which decides with `classify_actor_trust`
+# (`crates/orb-spec`). The local classification only travels as metadata
+# (`actor=` in the reason). Trust comes from kernel-attested facts alone: the
+# audit record's numeric uid, an exact cgroup v2 path, and the audit `exe`,
+# which replaces the attacker-controlled argv[0]. Argument text never grants
+# trust, and an unknown uid is untrusted.
 # 1. Ambient decoys (`env_honeytoken`, `vault_canary`, `mongo_27017`):
-#    - Whitelisted agent file-search / directory-walk processes (`rg`, `ripgrep`, `grep`,
-#      `find`, `fd`, `fdfind`, `ls`, `stat`, `file`, `du`, `tree`, `git`) running inside a
-#      managed Paloma agent cgroup (`sandboxed-node`, `opencode`, `antigravity`, `claude`, `codex`)
-#      are logged as `WHITELISTED_AGENT_WALK` and ignored (no node quarantine, no fleet bunker).
+#    - Search / directory-walk tools (`rg`, `grep`, `find`, `fd`, `ls`, `git`, ...) run by
+#      the agent uid in `orb-node.service` or a `missions.slice` scope are classified
+#      `whitelisted_agent_walk` (Core: no node quarantine, no fleet bunker).
 #    - Other mission processes (`actor_trust = MissionProcess`) trigger node-local quarantine
 #      and report to Core (`QuarantineNodeOnly` — quarantines ONLY this node, not the whole fleet).
 # 2. High-signal attacker bait (`btc_wallet_canary` / `btc-treasury-wallet.dat`, `ssh_exfil_canary`):
@@ -21,33 +26,32 @@ chmod 700 /var/lib/lean-mesh
 
 LAST_TS="$(cat "$STATE_FILE" 2>/dev/null || echo 0)"
 
-is_whitelisted_agent_walk() {
-  local uid="$1" cgroup="$2" cmdline="$3"
-  local cg_lower="${cgroup,,}"
-  local cmd_lower="${cmdline,,}"
+AGENT_UID=999
+UNKNOWN_UID=4294967295
 
-  # Must originate from a managed Paloma agent/mission execution context
-  if [[ "$uid" != "999" ]] && \
-     [[ "$cg_lower" != *"sandboxed-node"* ]] && \
-     [[ "$cg_lower" != *"sandboxed_node"* ]] && \
-     [[ "$cg_lower" != *"opencode"* ]] && \
-     [[ "$cg_lower" != *"antigravity"* ]] && \
-     [[ "$cmd_lower" != *"/var/lib/sandboxed-node/"* ]] && \
-     [[ "$cmd_lower" != *"fast_9024_scanner"* ]]; then
-    return 1
+# Mirrors `is_agent_cgroup` in crates/orb-spec: exact paths only.
+is_agent_cgroup() {
+  case "$1" in
+    /system.slice/orb-node.service|/system.slice/sandboxed-node.service) return 0 ;;
+    /missions.slice/?*.scope)
+      [[ "${1#/missions.slice/}" != */* ]]
+      return
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Mirrors `classify_actor_trust` in crates/orb-spec (metadata only; Core decides).
+classify_actor() {
+  local uid="$1" cgroup="$2" exe="$3"
+  if [[ "$uid" != "$AGENT_UID" ]] || { [[ -n "$cgroup" ]] && ! is_agent_cgroup "$cgroup"; }; then
+    echo untrusted_or_system
+    return
   fi
-
-  local first_tok="${cmdline%% *}"
-  local exe_name="${first_tok##*/}"
-  exe_name="${exe_name,,}"
-
-  case "$exe_name" in
-    rg|ripgrep|grep|egrep|fgrep|find|fd|fdfind|ls|stat|file|du|tree|git)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
+  local exe_name="${exe##*/}"
+  case "${exe_name,,}" in
+    rg|ripgrep|grep|egrep|fgrep|find|fd|fdfind|ls|stat|file|du|tree|git) echo whitelisted_agent_walk ;;
+    *) echo mission_process ;;
   esac
 }
 
@@ -71,37 +75,45 @@ while true; do
     "paloma_canary_ssh:ssh_exfil_canary"; do
     KEY="${KEY_PAIR%%:*}"
     KIND="${KEY_PAIR##*:}"
-    LINE="$(ausearch -k "$KEY" -i 2>/dev/null | grep -E 'type=SYSCALL' | tail -n 1 || true)"
+    # Raw (not `-i`) records keep the numeric uid the kernel attested.
+    LINE="$(ausearch -k "$KEY" 2>/dev/null | grep -E 'type=SYSCALL' | tail -n 1 || true)"
     if [[ -n "$LINE" ]]; then
       EVENT_ID="$(echo "$LINE" | grep -oE 'audit\([^)]+\)' | head -n 1 || true)"
       if [[ -n "$EVENT_ID" && "$EVENT_ID" != "$LAST_TS" ]]; then
-        PID="$(echo "$LINE" | grep -oE ' pid=[0-9]+' | head -n 1 | cut -d= -f2 || echo 0)"
-        UID_VAL="$(echo "$LINE" | grep -oE ' uid=[^ ]+' | head -n 1 | cut -d= -f2 || echo 0)"
-        COMM="$(echo "$LINE" | grep -oE ' comm=[^ ]+' | head -n 1 | cut -d= -f2 || echo unknown)"
-        EXE="$(echo "$LINE" | grep -oE ' exe=[^ ]+' | head -n 1 | cut -d= -f2 || echo unknown)"
+        PID="$(echo "$LINE" | grep -oE ' pid=[0-9]+' | head -n 1 | cut -d= -f2 || true)"
+        PID="${PID:-0}"
+        UID_NUM="$(echo "$LINE" | grep -oE ' uid=[0-9]+( |$)' | head -n 1 | cut -d= -f2 | tr -d ' ' || true)"
+        # An unknown uid is never the agent uid.
+        UID_NUM="${UID_NUM:-$UNKNOWN_UID}"
+        COMM="$(echo "$LINE" | grep -oE ' comm="[^"]*"' | head -n 1 | cut -d'"' -f2 || true)"
+        COMM="${COMM:-unknown}"
+        EXE="$(echo "$LINE" | grep -oE ' exe="[^"]*"' | head -n 1 | cut -d'"' -f2 || true)"
+        EXE="${EXE:-unknown}"
 
-        # Convert non-numeric UID (from `ausearch -i`) to numeric UID if needed
-        if ! [[ "$UID_VAL" =~ ^[0-9]+$ ]]; then
-          UID_NUM="$(id -u "$UID_VAL" 2>/dev/null || echo 999)"
-        else
-          UID_NUM="$UID_VAL"
+        # Exact cgroup v2 path; empty when the process already exited.
+        CGROUP="$(sed -n 's/^0:://p' "/proc/$PID/cgroup" 2>/dev/null | head -n 1 || true)"
+        # argv[0] is attacker-controlled: replace it with the audit `exe`.
+        ARGS=()
+        if [[ -r "/proc/$PID/cmdline" ]]; then
+          mapfile -d '' -t ARGS < "/proc/$PID/cmdline" 2>/dev/null || ARGS=()
         fi
-
-        CGROUP="$(tr '\0' ';' < "/proc/$PID/cgroup" 2>/dev/null | head -c 200 || echo auditd)"
-        CMDLINE="$(tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null | head -c 240 || echo "$COMM ($EXE)")"
-        if [[ -z "${CMDLINE// /}" ]]; then
-          CMDLINE="$COMM ($EXE)"
+        CMDLINE="$EXE"
+        if [[ ${#ARGS[@]} -gt 1 ]]; then
+          CMDLINE+="$(printf ' %s' "${ARGS[@]:1}")"
         fi
+        CMDLINE="${CMDLINE:0:240}"
 
         echo "$EVENT_ID" > "$STATE_FILE"
         LAST_TS="$EVENT_ID"
 
-        if ! is_high_signal_bait "$KIND" && is_whitelisted_agent_walk "$UID_NUM" "$CGROUP" "$CMDLINE"; then
-          logger -t orb-canary-auditd-watch "WHITELISTED_AGENT_WALK ignored: kind=$KIND event=$EVENT_ID pid=$PID uid=$UID_NUM comm=$COMM"
-          continue
+        if is_high_signal_bait "$KIND"; then
+          ACTOR=high_signal_bait
+        else
+          ACTOR="$(classify_actor "$UID_NUM" "$CGROUP" "$EXE")"
         fi
+        logger -t orb-canary-auditd-watch "canary hit forwarded to Core: kind=$KIND actor=$ACTOR event=$EVENT_ID pid=$PID uid=$UID_NUM comm=$COMM"
 
-        "$TRIPWIRE" "$KIND" "auditd key=$KEY event=$EVENT_ID comm=$COMM exe=$EXE" "$PID" "$UID_NUM" "$CGROUP" "$CMDLINE" || true
+        "$TRIPWIRE" "$KIND" "auditd key=$KEY event=$EVENT_ID actor=$ACTOR comm=$COMM exe=$EXE" "$PID" "$UID_NUM" "$CGROUP" "$CMDLINE" || true
       fi
     fi
   done

@@ -27,8 +27,8 @@ class OrbApprovalQueueTest {
             val got = OrbApprovalQueue.summary(items)
             assertEquals(s["risks"], got.risks)
             assertEquals(s["missions"], got.missions)
-            assertEquals((s["without_critical"] as Number).toInt(), OrbApprovalQueue.batchApprovable(items, false).size)
-            assertEquals(items.size, OrbApprovalQueue.batchApprovable(items, true).size)
+            assertEquals((s["without_critical"] as Number).toInt(), OrbApprovalQueue.normalBatch(items).size)
+            assertEquals(items.size, OrbApprovalQueue.allBatch(items).size)
         }
     }
 
@@ -44,6 +44,12 @@ class OrbApprovalQueueTest {
             "Approve 3 requests (1 critical · 1 elevated · 1 routine): Move OLD_TOKEN; Service deploy on agent-core; Read OPENAI_API_KEY",
             OrbApprovalQueue.signingReason(listOf(item(0), item(9), item(2)))
         )
+    }
+
+    @Test fun neverAsksCoreForMoreThanOneSignatureCanApprove() {
+        val many = (0 until OrbApprovalQueue.MAX_BATCH + 5).map { item(2) + ("id" to "i$it") }
+        assertEquals(OrbApprovalQueue.MAX_BATCH, OrbApprovalQueue.allBatch(many).size)
+        assertEquals(OrbApprovalQueue.MAX_BATCH, OrbApprovalQueue.normalBatch(many).size)
     }
 
     @Test fun deniesThroughEachKindsRoute() {
@@ -82,10 +88,13 @@ class OrbApprovalQueueTest {
         assertEquals("/api/bitwarden/requests/s1/approve", OrbApprovalQueue.legacyApprove(secret) { it }.first)
     }
 
-    @Test fun criticalLegacyItemsAreNeverBatchedAndNewOnesResetTheTick() {
+    /** "Approve N" covers the normal items only; "Approve all" covers everything, critical first, and says how many are critical. */
+    @Test fun twoButtonsNormalOnlyAndAllWithCriticalFirst() {
         val root = OrbApprovalQueue.legacyItem("privilege", mapOf("id" to "p1", "state" to "pending", "scope" to "root_exec", "target_host" to "self", "requester_mission_id" to "m1"))
         val read = OrbApprovalQueue.legacyItem("privilege", mapOf("id" to "p2", "state" to "pending", "scope" to "ops_read", "target_host" to "ashur", "requester_mission_id" to "m1"))
-        assertEquals(listOf("p2"), OrbApprovalQueue.batchApprovable(listOf(root, read), true).map { it["id"] })
-        assertTrue(OrbApprovalQueue.listKey(listOf(read)) != OrbApprovalQueue.listKey(listOf(read, root)))
+        assertEquals(listOf("p2"), OrbApprovalQueue.normalBatch(listOf(read, root)).map { it["id"] })
+        assertEquals(listOf("p1", "p2"), OrbApprovalQueue.allBatch(listOf(read, root)).map { it["id"] })
+        assertEquals("Approve all (2, incl. 1 critical)", OrbApprovalQueue.approveAllLabel(listOf(read, root)))
+        assertEquals("Approve all", OrbApprovalQueue.approveAllLabel(listOf(read)))
     }
 }

@@ -38,8 +38,8 @@ final class OrbApprovalQueueTests: XCTestCase {
             let got = OrbApprovalQueue.summary(items)
             XCTAssertEqual(got.risks, s["risks"] as? String)
             XCTAssertEqual(got.missions, s["missions"] as? String)
-            XCTAssertEqual(OrbApprovalQueue.batchApprovable(items, includeCritical: false).count, s["without_critical"] as? Int)
-            XCTAssertEqual(OrbApprovalQueue.batchApprovable(items, includeCritical: true).count, items.count)
+            XCTAssertEqual(OrbApprovalQueue.normalBatch(items).count, s["without_critical"] as? Int)
+            XCTAssertEqual(OrbApprovalQueue.allBatch(items).count, items.count)
         }
     }
 
@@ -57,6 +57,13 @@ final class OrbApprovalQueueTests: XCTestCase {
             OrbApprovalQueue.signingReason([deploy, try item(labels[9], 9), read]),
             "Approve 3 requests (1 critical · 1 elevated · 1 routine): Move OLD_TOKEN; Service deploy on agent-core; Read OPENAI_API_KEY"
         )
+    }
+
+    func testNeverAsksCoreForMoreThanOneSignatureCanApprove() throws {
+        let labels = try XCTUnwrap(try OrbSpec.json("fixtures/approvals.json")["labels"] as? [[String: Any]])
+        let many = try (0..<(OrbApprovalQueue.maxBatch + 5)).map { try item(labels[2], $0) }
+        XCTAssertEqual(OrbApprovalQueue.allBatch(many).count, OrbApprovalQueue.maxBatch)
+        XCTAssertEqual(OrbApprovalQueue.normalBatch(many).count, OrbApprovalQueue.maxBatch)
     }
 
     func testDeniesThroughEachKindsRoute() throws {
@@ -101,10 +108,14 @@ final class OrbApprovalQueueTests: XCTestCase {
         XCTAssertEqual(OrbApprovalQueue.legacyApprove(secret).0, "/api/bitwarden/requests/s1/approve")
     }
 
-    func testCriticalLegacyItemsAreNeverBatchedAndNewOnesResetTheTick() throws {
+    /// "Approve N" covers the normal items only; "Approve all" covers
+    /// everything, critical first, and says how many are critical.
+    func testTwoButtonsNormalOnlyAndAllWithCriticalFirst() throws {
         let root = OrbApprovalQueue.legacyItem(kind: "privilege", try json(["id": "p1", "state": "pending", "scope": "root_exec", "target_host": "self", "requester_mission_id": "m1"]))
         let read = OrbApprovalQueue.legacyItem(kind: "privilege", try json(["id": "p2", "state": "pending", "scope": "ops_read", "target_host": "ashur", "requester_mission_id": "m1"]))
-        XCTAssertEqual(OrbApprovalQueue.batchApprovable([root, read], includeCritical: true).map { $0["id"].text }, ["p2"])
-        XCTAssertNotEqual(OrbApprovalQueue.listKey([read]), OrbApprovalQueue.listKey([read, root]), "a new legacy item changes the list")
+        XCTAssertEqual(OrbApprovalQueue.normalBatch([read, root]).map { $0["id"].text }, ["p2"])
+        XCTAssertEqual(OrbApprovalQueue.allBatch([read, root]).map { $0["id"].text }, ["p1", "p2"])
+        XCTAssertEqual(OrbApprovalQueue.approveAllLabel([read, root]), "Approve all (2, incl. 1 critical)")
+        XCTAssertEqual(OrbApprovalQueue.approveAllLabel([read]), "Approve all")
     }
 }

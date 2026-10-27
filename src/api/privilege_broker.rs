@@ -1119,7 +1119,8 @@ impl PrivilegeBroker {
         }
         let before: Vec<PrivilegeRequest> =
             idxs.iter().map(|&i| data.requests[i].clone()).collect();
-        let audit_len = data.audit.len();
+        // The whole log, not its length: at the cap `log()` also drops the oldest entries.
+        let audit_before = data.audit.clone();
         let mut out = Vec::with_capacity(idxs.len());
         let mut tokens = Vec::with_capacity(idxs.len());
         for &idx in &idxs {
@@ -1140,7 +1141,7 @@ impl PrivilegeBroker {
             for (&idx, r) in idxs.iter().zip(before) {
                 data.requests[idx] = r;
             }
-            data.audit.truncate(audit_len);
+            data.audit = audit_before;
             return Err(e);
         }
         drop(data);
@@ -1785,10 +1786,29 @@ async fn agent_view(broker: &PrivilegeBroker, r: &PrivilegeRequest) -> Value {
     })
 }
 
-/// Maps a canonical Paloma fleet host name to its `lean-mesh` (or public fleet) SSH destination (`None` for local execution on `agent-core` / `self`).
+/// The concrete machine `execute_privileged_command` runs on. `"self"` is
+/// the requesting mission's own placement node, never Core: a mission placed
+/// on Core uses `orb-sudo` locally, and only a grant naming `agent-core`
+/// runs inside the control plane.
+fn resolve_privileged_exec_host(
+    target_host: &str,
+    placement_node: Option<&str>,
+) -> Result<String, String> {
+    if target_host != "self" {
+        return Ok(target_host.to_string());
+    }
+    match placement_node {
+        Some(node) if !matches!(node, "unknown" | "agent-core" | "self") => {
+            normalize_target_host(node)
+        }
+        _ => Err("target_host \"self\" is this mission's own node, which is not a remote node; use `ORB_JIT_LEASE=<lease_token> orb-sudo` locally, or request a grant naming the host explicitly".into()),
+    }
+}
+
+/// Maps a canonical Paloma fleet host name to its `lean-mesh` (or public fleet) SSH destination (`None` for local execution on `agent-core`).
 pub fn resolve_fleet_ssh_target(target_host: &str) -> Result<Option<&'static str>, String> {
     match target_host.trim() {
-        "self" | "agent-core" => Ok(None),
+        "agent-core" => Ok(None),
         "dgx-spark" | "spark" | "spark-de79" => Ok(Some("root@10.88.0.2")),
         "thomas-md" | "thomas.md" => Ok(Some("root@10.88.0.3")),
         "polymath" => Ok(Some("ubuntu@10.88.0.4")),
@@ -1953,7 +1973,29 @@ pub async fn handle_tool(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("dgx-spark");
-            let ssh_dest = resolve_fleet_ssh_target(target_host)?;
+            let target_host = normalize_target_host(target_host)?;
+            let target_host = target_host.as_str();
+            let placement_node = if target_host == "self" {
+                let missions = state
+                    .control
+                    .get_or_spawn(&AuthUser {
+                        id: p.sub.clone(),
+                        username: p.username.clone(),
+                    })
+                    .await
+                    .mission_store;
+                crate::api::control::remote_grok::placement(
+                    &state.config.working_dir,
+                    &missions,
+                    own,
+                )
+                .await?
+                .map(|placement| placement.node_id)
+            } else {
+                None
+            };
+            let exec_host = resolve_privileged_exec_host(target_host, placement_node.as_deref())?;
+            let ssh_dest = resolve_fleet_ssh_target(&exec_host)?;
             let cwd = args
                 .get("cwd")
                 .and_then(Value::as_str)
@@ -2014,7 +2056,7 @@ pub async fn handle_tool(
             // 1. Pre-exec formal verification & audit log via `verify_and_log_command` (`orb_privd_command_step`).
             let pre_verified = broker
                 .verify_and_log_command(VerifyLeaseRequest {
-                    executing_host: None,
+                    executing_host: Some(exec_host.clone()),
                     mission_id: own,
                     lease_token: lease_token.clone(),
                     target_host: target_host.to_string(),
@@ -2028,7 +2070,7 @@ pub async fn handle_tool(
                 })
                 .await?;
 
-            // 2. Execute confined argv on the target host (local on `agent-core`/`self`, or via Core's SSH tunnel to `dgx-spark`/fleet host).
+            // 2. Execute confined argv on the target host (local only for an explicit `agent-core` grant, otherwise via Core's SSH tunnel to `dgx-spark`/fleet host).
             let t0 = std::time::Instant::now();
             let output_res = if let Some(dest) = ssh_dest {
                 let mut remote_cmd = String::new();
@@ -2088,7 +2130,7 @@ pub async fn handle_tool(
             // 3. Post-exec audit record with exit_code, duration_ms, and stdout_sha256.
             let post_verified = broker
                 .verify_and_log_command(VerifyLeaseRequest {
-                    executing_host: None,
+                    executing_host: Some(exec_host.clone()),
                     mission_id: own,
                     lease_token,
                     target_host: target_host.to_string(),
@@ -2199,7 +2241,7 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
                 "properties": {
                     "target_host": {
                         "type": "string",
-                        "description": "Target fleet machine matching the approved grant (e.g. \"dgx-spark\", \"thomas-md\", \"agent-core\", \"ashur\", \"babylon\", \"nippur\", \"old-agent\", \"self\")."
+                        "description": "Target fleet machine matching the approved grant (e.g. \"dgx-spark\", \"thomas-md\", \"agent-core\", \"ashur\", \"babylon\", \"nippur\", \"old-agent\", \"self\"). \"self\" is this mission's own remote node; it never runs inside Core."
                     },
                     "argv": {
                         "type": "array",
@@ -3030,6 +3072,28 @@ mod tests {
         assert!(lease_runs_on("self", "anything") && lease_runs_on("all", "x"));
     }
 
+    /// Replay: a `self` grant from a mission placed on nippur must execute
+    /// on nippur, never inside Core (agent-core) through the local branch.
+    #[test]
+    fn self_grant_resolves_to_placement_node_never_core() {
+        let host = resolve_privileged_exec_host("self", Some("nippur")).unwrap();
+        assert_eq!(host, "nippur");
+        assert_eq!(
+            resolve_fleet_ssh_target(&host).unwrap(),
+            Some("ubuntu@10.88.0.13")
+        );
+        for placement in [None, Some("unknown"), Some("agent-core"), Some("self")] {
+            assert!(resolve_privileged_exec_host("self", placement).is_err());
+        }
+        assert!(resolve_fleet_ssh_target("self").is_err());
+        // Only a grant naming agent-core runs inside Core.
+        assert_eq!(
+            resolve_privileged_exec_host("agent-core", Some("nippur")).unwrap(),
+            "agent-core"
+        );
+        assert_eq!(resolve_fleet_ssh_target("agent-core").unwrap(), None);
+    }
+
     #[tokio::test]
     async fn grant_lifecycle_audit_log_session_reap_and_bunker_lockdown() {
         let broker = temp_broker();
@@ -3688,6 +3752,44 @@ mod tests {
             }
         }
         true
+    }
+
+    #[tokio::test]
+    async fn failed_batch_commit_restores_the_full_audit_log_at_the_cap() {
+        let broker = temp_broker();
+        let a = broker
+            .request(deploy_request(Uuid::new_v4(), PrivilegeScope::OpsRead))
+            .await
+            .unwrap();
+        // A full log: one more entry would drop the oldest one.
+        let before = {
+            let mut data = broker.data.lock().await;
+            let entry = data.audit.last().cloned().unwrap();
+            while data.audit.len() < AUDIT_LIMIT {
+                let n = data.audit.len();
+                data.audit.push(PrivilegeAuditEntry {
+                    detail: Some(format!("filler {n}")),
+                    ..entry.clone()
+                });
+            }
+            data.audit
+                .iter()
+                .map(|e| e.detail.clone())
+                .collect::<Vec<_>>()
+        };
+        // The save cannot write its temporary file, so the commit fails.
+        std::fs::create_dir_all(broker.path.with_extension("json.tmp")).unwrap();
+        assert!(broker
+            .approve_batch("thomas", &[seen(&a)], false)
+            .await
+            .is_err());
+        let data = broker.data.lock().await;
+        let after: Vec<_> = data.audit.iter().map(|e| e.detail.clone()).collect();
+        assert_eq!(after, before, "the oldest entries are back, nothing added");
+        assert!(data
+            .requests
+            .iter()
+            .any(|r| r.id == a.id && r.state.is_pending()));
     }
 
     #[tokio::test]

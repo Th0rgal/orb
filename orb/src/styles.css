@@ -4216,10 +4216,11 @@ select.orb-select-native:disabled { cursor: default; }
   .skills-catalog-card .skills-item-desc { display: none; }
 }
 
-.approval-batch { padding: 6px 14px 0; }
-.bw-requests + .approval-batch { padding: 6px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .secret-row.approval-critical .secret-row-key, .toast-title strong.approval-critical { color: var(--danger); }
-.approval-critical-confirm { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--danger); }
+/* "Approve N" for the normal rows, right under them. */
+.approval-normal-bar { display: flex; justify-content: flex-end; padding: 4px 8px 6px; border-top: 1px solid var(--overlay-border); }
+/* Approving critical requests (root, secret delete or move) is red. */
+.toast-btn.primary.danger { background: var(--danger); color: #fff; }
 .approval-row-detail { font: 11px var(--sans, inherit); color: var(--fg-3); font-weight: 400; }
 .skills-oldcopies { margin-top: 16px; }
 .skills-oldcopies .skills-catalog-card { margin-top: 8px; }

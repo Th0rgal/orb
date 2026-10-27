@@ -74,12 +74,23 @@ object OrbApprovalQueue {
     )
 
     /** What "Approve all" covers: critical items only when ticked. */
-    /** Critical items only when ticked, and never a critical legacy item: an old Core cannot check the confirmation, so those go one row at a time. */
-    fun batchApprovable(items: List<Map<String, Any?>>, includeCritical: Boolean): List<Map<String, Any?>> =
-        items.filter { !isCritical(it) || (includeCritical && it["legacy"] != true) }
+    /** Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs). */
+    const val MAX_BATCH = 20
 
-    /** What identifies the list on screen: a new, removed or changed item (legacy items have no digest) must be ticked again. */
-    fun listKey(items: List<Map<String, Any?>>): List<String> = items.map { "${it["kind"]}:${it["id"]}:${it["digest"]}" }
+    /** What "Approve N" under the normal rows covers: the non-critical items only, at most [MAX_BATCH]. */
+    fun normalBatch(items: List<Map<String, Any?>>): List<Map<String, Any?>> =
+        items.filter { !isCritical(it) }.take(MAX_BATCH)
+
+    /** What "Approve all" covers: every item, critical first so the prompt names them before anything else; at most [MAX_BATCH]. */
+    fun allBatch(items: List<Map<String, Any?>>): List<Map<String, Any?>> =
+        items.sortedBy { riskOrder.indexOf(it["risk"]).let { n -> if (n < 0) 3 else n } }.take(MAX_BATCH)
+
+    /** The bottom button: plain "Approve all", or red with the critical count. */
+    fun approveAllLabel(items: List<Map<String, Any?>>): String {
+        val all = allBatch(items)
+        val critical = all.count { isCritical(it) }
+        return if (critical == 0) "Approve all" else "Approve all (${all.size}, incl. $critical critical)"
+    }
 
     /** The signed body: each item by Core's digest. A single item is its own confirmation. */
     fun batchBody(items: List<Map<String, Any?>>): Map<String, Any?> = mapOf(

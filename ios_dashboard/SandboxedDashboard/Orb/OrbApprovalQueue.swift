@@ -78,16 +78,27 @@ final class OrbApprovalQueue {
     }
 
     /// What "Approve all" covers: critical items only when ticked.
-    /// Critical items only when ticked, and never a critical legacy item: an
-    /// old Core cannot check the confirmation, so those go one row at a time.
-    static func batchApprovable(_ items: [OrbJSON], includeCritical: Bool) -> [OrbJSON] {
-        items.filter { !isCritical($0) || (includeCritical && !$0["legacy"].flag) }
+    /// Core's per-signature limit (`MAX_BATCH` in src/api/approval_queue.rs).
+    static let maxBatch = 20
+
+    /// What "Approve N" under the normal rows covers: the non-critical items
+    /// only, at most `maxBatch`; the rest stay for the next signature.
+    static func normalBatch(_ items: [OrbJSON]) -> [OrbJSON] {
+        Array(items.filter { !isCritical($0) }.prefix(maxBatch))
     }
 
-    /// What identifies the list on screen: a new, removed or changed item
-    /// (legacy items have no digest) must be ticked again.
-    static func listKey(_ items: [OrbJSON]) -> [String] {
-        items.map { "\($0["kind"].text):\($0["id"].text):\($0["digest"].text)" }
+    /// What "Approve all" covers: every item, critical ones first so the
+    /// device prompt names them before anything else; at most `maxBatch`.
+    static func allBatch(_ items: [OrbJSON]) -> [OrbJSON] {
+        let rank = { (i: OrbJSON) in riskOrder.firstIndex(of: i["risk"].text) ?? riskOrder.count }
+        let sorted = items.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+        return Array(sorted.prefix(maxBatch))
+    }
+
+    /// The bottom button: plain "Approve all", or red with the critical count.
+    static func approveAllLabel(_ items: [OrbJSON]) -> String {
+        let all = allBatch(items), critical = all.filter(isCritical).count
+        return critical == 0 ? "Approve all" : "Approve all (\(all.count), incl. \(critical) critical)"
     }
 
     /// The signed body: each item by Core's digest. A single item is its own confirmation.
@@ -260,7 +271,6 @@ struct OrbApprovalQueueSheet: View {
     /// Bitwarden project names for secret rows.
     @State private var secrets = OrbSecretRequestMonitor.shared
     @State private var acting = false
-    @State private var includeCritical = false
     @State private var error = ""
     @State private var secretSheet = false
     @State private var privilegeSheet = false
@@ -273,10 +283,22 @@ struct OrbApprovalQueueSheet: View {
                 if queue.items.isEmpty {
                     Section { Text("Nothing is waiting for your approval.").foregroundStyle(.secondary) }
                 } else {
+                    // One list: normal rows, "Approve N" for them, then the
+                    // critical ones in red, then "Approve all".
+                    let normal = queue.items.filter { !OrbApprovalQueue.isCritical($0) }
+                    let critical = queue.items.filter(OrbApprovalQueue.isCritical)
                     Section {
-                        ForEach(queue.items, id: \.selfID) { row($0) }
+                        ForEach(normal, id: \.selfID) { row($0) }
+                        if !normal.isEmpty && !critical.isEmpty {
+                            approveButton(OrbApprovalQueue.normalBatch(queue.items), label: "Approve \(OrbApprovalQueue.normalBatch(queue.items).count)", critical: false)
+                                .accessibilityIdentifier("approvals.approve-normal")
+                        }
+                        ForEach(critical, id: \.selfID) { row($0) }
+                        if queue.items.count > 1 {
+                            approveButton(OrbApprovalQueue.allBatch(queue.items), label: OrbApprovalQueue.approveAllLabel(queue.items), critical: !critical.isEmpty)
+                                .accessibilityIdentifier("approvals.approve-all")
+                        }
                     }
-                    if queue.items.count > 1 { approveAllSection }
                 }
                 Section {
                     Button("Secret requests: scope and lifetime") { secretSheet = true }
@@ -291,7 +313,6 @@ struct OrbApprovalQueueSheet: View {
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
             .refreshable { await queue.refresh() }
             .task { await queue.refresh() }
-            .onChange(of: OrbApprovalQueue.listKey(queue.items)) { _, _ in includeCritical = false }
             .sheet(isPresented: $secretSheet) { OrbSecretRequestsSheet() }
             .sheet(isPresented: $privilegeSheet) { OrbPrivilegeAccessSheet() }
             .sheet(isPresented: $accessSheet) { OrbMissionAccessSheet() }
@@ -299,32 +320,19 @@ struct OrbApprovalQueueSheet: View {
         .presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
     }
 
-    private var approveAllSection: some View {
-        let s = OrbApprovalQueue.summary(queue.items)
-        let ready = OrbApprovalQueue.batchApprovable(queue.items, includeCritical: includeCritical)
-        return Section {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(s.risks).font(.caption.weight(.medium))
-                Text("for \(s.missions)").font(.caption).foregroundStyle(.secondary)
-                if s.critical > 0 {
-                    Toggle(isOn: $includeCritical) {
-                        Text(s.critical == 1 ? "Include the critical request (root, secret delete or move)" : "Include \(s.critical) critical requests (root, secret delete or move)")
-                            .font(.caption).foregroundStyle(OrbStyle.error)
-                    }
-                    .accessibilityIdentifier("approvals.include-critical")
-                }
-                Button {
-                    run { try await queue.approve(ready) }
-                } label: {
-                    Label(ready.count == queue.items.count ? "Approve all" : "Approve \(ready.count)",
-                          systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
-                        .foregroundStyle(.black)
-                }
-                .buttonStyle(.borderedProminent).tint(OrbStyle.success).controlSize(.small)
-                .disabled(acting || ready.isEmpty)
-                .accessibilityIdentifier("approvals.approve-all")
+    /// One signed batch for exactly these items. Red when it includes
+    /// critical requests; the device prompt names them first.
+    private func approveButton(_ items: [OrbJSON], label: String, critical: Bool) -> some View {
+        HStack {
+            Spacer()
+            Button {
+                run { try await queue.approve(items) }
+            } label: {
+                Label(label, systemImage: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                    .foregroundStyle(critical ? Color.white : Color.black)
             }
-            .padding(.vertical, 4)
+            .buttonStyle(.borderedProminent).tint(critical ? OrbStyle.error : OrbStyle.success).controlSize(.small)
+            .disabled(acting || items.isEmpty)
         }
     }
 

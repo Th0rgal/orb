@@ -92,6 +92,11 @@ final class OrbSettingsTests: XCTestCase {
         XCTAssertEqual(windows[2].1, 0.3, accuracy: 0.0001)
         XCTAssertTrue(OrbProviderQuota.windows(.null).isEmpty)
     }
+    func testUnverifiedAntigravityAccountOpensGoogleVerification() {
+        let refused: OrbJSON = .object(["status": .string("needs_verification"), "verification_url": .string("https://accounts.google.com/signin/continue?sarp=1")])
+        XCTAssertEqual(OrbProvidersSettings.verificationURL(refused, email: "new@gmail.com").absoluteString, "https://accounts.google.com/signin/continue?sarp=1")
+        XCTAssertEqual(OrbProvidersSettings.verificationURL(.null, email: "new@gmail.com").absoluteString, "https://accounts.google.com/AccountChooser?continue=https://antigravity.google/&Email=new@gmail.com")
+    }
     func testOAuthUsesCredentialOwner() {
         let proxy: OrbJSON = .object(["id": .string("account"), "name": .string("OpenAI"), "provider_type": .string("openai"), "uses_oauth": .bool(true), "credential_owner": .string("cli_proxy")])
         XCTAssertTrue(OrbProvidersSettings.loginSpec(proxy)?.proxy == true)
