@@ -219,35 +219,14 @@ async fn chain_usage_limit(
             None,
         )
         .await;
-    // The resolver tries an auth.json account only when no store account of
-    // its provider is routable; once the store account is parked it becomes
-    // the fallback, so it counts as a candidate here.
-    let standard_fallbacks = chain_entries.iter().flat_map(|entry| {
-        let provider_type = ProviderType::from_id(&entry.provider_id);
-        standard_accounts
-            .iter()
-            .filter(move |sa| {
-                Some(sa.provider_type) == provider_type && (sa.api_key.is_some() || sa.has_oauth)
-            })
-            .map(move |sa| (sa.account_id, None, entry))
-    });
     let mut earliest: Option<crate::account_limits::LimitCooldown> = None;
-    for (account_id, subscription, entry) in candidates
-        .iter()
-        .map(|e| {
-            let entry = crate::provider_health::ChainEntry {
-                provider_id: e.provider_id.clone(),
-                model_id: e.model_id.clone(),
-            };
-            (e.account_id, e.subscription_key.clone(), entry)
-        })
-        .chain(standard_fallbacks.map(|(id, sub, entry)| (id, sub, entry.clone())))
-    {
+    for entry in &candidates {
+        let (account_id, subscription) = (entry.account_id, entry.subscription_key.as_ref());
         // Antigravity parks one quota pool (Gemini, Claude & GPT) of the
         // login, not the whole account.
         let limit = state
             .health_tracker
-            .blocking_limit(account_id, subscription.as_ref())
+            .blocking_limit(account_id, subscription)
             .or_else(|| {
                 state
                     .health_tracker
@@ -257,8 +236,29 @@ async fn chain_usage_limit(
             earliest = Some(limit);
         }
     }
+    // Accounts this view cannot weigh (an auth.json fallback held back
+    // behind a store account, a duplicate credential, a refreshable token)
+    // are still waited for when they come back soon: any short cooldown on
+    // a configured account keeps the answer retryable.
+    let configured = state
+        .chain_store
+        .configured_account_ids(chain_entries, &state.ai_providers, standard_accounts)
+        .await;
+    if state
+        .health_tracker
+        .min_remaining_cooldown(&configured)
+        .await
+        .is_some_and(|left| left < SHORT_COOLDOWN_BEFORE_USAGE_LIMIT)
+    {
+        return None;
+    }
     earliest
 }
+
+/// A cooldown shorter than this is a transient the caller retries through,
+/// never a usage limit that parks a mission until the quota resets.
+const SHORT_COOLDOWN_BEFORE_USAGE_LIMIT: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
 
 /// Every account of the chain is parked on a usage limit: answer the way the
 /// provider does, so the harness reports the limit and its reset time instead

@@ -1513,7 +1513,10 @@ pub struct ChainEntry {
 /// The same model served by another provider, tried in order when every
 /// account of the requested provider is rate-limited or out of quota. An
 /// explicit table: two ids are interchangeable only when listed here.
-const EQUIVALENT_MODELS: &[((&str, &str), &[(&str, &str)])] = &[
+/// A `(provider, model)` pair.
+type ModelId = (&'static str, &'static str);
+
+const EQUIVALENT_MODELS: &[(ModelId, &[ModelId])] = &[
     (
         ("google", "gemini-4-argon"),
         &[("antigravity", "gemini-4-argon-medium")],
