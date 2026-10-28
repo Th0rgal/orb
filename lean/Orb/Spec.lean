@@ -1991,7 +1991,8 @@ def missionControlMetaGate : MetaGateSpec MissionControlCheck MissionControlChec
       cases hr : (m.isResume == 1) <;>
       cases hsv : (m.sessionCreated == 1 && m.lineageVerified == 1 && m.rolloutExists == 1) <;>
       cases hfb : (m.hasFallbackPrompt == 1) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all;
+        try (exfalso; revert h; decide))
   complete m h := by
     unfold missionControlStep MissionControlCheck.Admissible at *
     rw [pack32_lo]
@@ -2167,7 +2168,8 @@ def forkHomeMetaGate : MetaGateSpec ForkHomeCheck
     cases hf : (f.isForkOrSide == 0) <;>
       cases hv : (f.sourceExists == 1 && f.sourceIsSymlink == 0 && f.sameWorkspace == 1 && f.sameNode == 1) <;>
       cases hx : (f.hasCommittedTransfer == 1) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all;
+        try (exfalso; revert h; decide))
   complete f h := by
     unfold forkHomeStep
     rw [pack32_lo]
@@ -2213,9 +2215,9 @@ theorem fork_preserves_job_home_and_source_cwd
     rw [pack32_hi]
     cases hs : (srcEx == 1) <;> simp_all
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Wave 9 Phase 5: Security-Critical System Primitives (`orb-privd`, `development_identity`, Codex Driver)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 set_option linter.unusedSimpArgs false
 
@@ -2277,9 +2279,11 @@ def privdCommandMetaGate : MetaGateSpec PrivdCommandCheck
 
 /-- Corollary 62 (`GrammarConfinement`, `PathConfinement`, `EnvironmentConfinement`, `NoPrivilegeEscalation` — `orb_privd_command_step`):
     1. Under ALL inputs (admitted or rejected), `scrubEnvBit` (`512`) and `auditRequiredBit` (`1024`) are ALWAYS set (`1536`).
-    2. Shell metacharacters / flag bypass (`hasShellMetacharOrFlagBypass == 1`), path traversal / symlinks (`hasPathTraversalOrSymlink == 1`),
+    2. Shell metacharacters / flag bypass (`hasShellMetacharOrFlagBypass == 1`), path traversal / symlinks
+       (`hasPathTraversalOrSymlink == 1`),
        and unsafe env vars (`hasUnsafeEnvVar == 1`) always reject (`allowExecBit = 0`, exit code `126`).
-    3. `OpsRead` (`grantScope = 0`) never escalates to `ServiceDeployUnit` (`commandClass = 2`) or `RootExecCommand` (`commandClass = 4`). -/
+    3. `OpsRead` (`grantScope = 0`) never escalates to `ServiceDeployUnit` (`commandClass = 2`) or
+       `RootExecCommand` (`commandClass = 4`). -/
 theorem privd_rejects_metacharacters_traversal_unsafe_env_and_escalation
     (lv gs cc um metaByp pathTrav unsafeEnv forceCmd : UInt8) :
     ((privdCommandStep lv gs cc um metaByp pathTrav unsafeEnv forceCmd &&& 0xFFFFFFFF) &&& 1536) = 1536 ∧
@@ -2302,9 +2306,16 @@ theorem privd_rejects_metacharacters_traversal_unsafe_env_and_escalation
   · unfold privdCommandStep
     cases hlv : (lv == 1) <;> (simp [hlv]; try decide)
   · unfold privdCommandStep
-    cases hlv : (lv == 1) <;> cases hm : (metaByp == 0) <;> (simp [hlv, hm]; try decide)
+    cases hlv : (lv == 1) <;>
+      cases hm : (metaByp == 0) <;>
+      (simp [hlv, hm];
+        try decide)
   · unfold privdCommandStep
-    cases hlv : (lv == 1) <;> cases hm : (metaByp == 0) <;> cases hp : (pathTrav == 0) <;> (simp [hlv, hm, hp]; try decide)
+    cases hlv : (lv == 1) <;>
+      cases hm : (metaByp == 0) <;>
+      cases hp : (pathTrav == 0) <;>
+      (simp [hlv, hm, hp];
+        try decide)
 
 def effectivePrivdLease (leaseActive : UInt8) (e : PrivdCommandCheck) : PrivdCommandCheck :=
   { e with leaseValid := if leaseActive == 1 && e.leaseValid == 1 then 1 else 0 }
@@ -2391,7 +2402,8 @@ def sshIdentityMetaGate : MetaGateSpec SshIdentityCheck
         s.codexGoalBudgetExhausted == 0) <;>
       cases hw : (s.isWorkerOrContainerTarget == 1) <;>
       cases hk : (s.bundleHasControlPlaneKey == 1) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all;
+        try (exfalso; revert h; decide))
   complete s h := by
     unfold SshIdentityCheck.Admissible at h
     unfold sshIdentityStep
@@ -2442,14 +2454,21 @@ theorem ssh_identity_never_leaks_control_plane_secrets_and_enforces_codex_gate
     simp
   · unfold sshIdentityStep
     rw [pack32_hi]
-    cases hs : (sym == 0) <;> cases hp : (pubOk == 1) <;> cases hpj : (pjOk == 1) <;> simp_all
+    cases hs : (sym == 0) <;>
+      cases hp : (pubOk == 1) <;>
+      cases hpj : (pjOk == 1) <;>
+      simp_all
   · unfold sshIdentityStep
     rw [pack32_hi]
-    cases hs : (sym == 0) <;> cases hp : (pubOk == 1) <;> cases hpj : (pjOk == 1) <;> cases hc : (cyberOk == 1) <;> simp_all
+    cases hs : (sym == 0) <;>
+      cases hp : (pubOk == 1) <;>
+      cases hpj : (pjOk == 1) <;>
+      cases hc : (cyberOk == 1) <;>
+      simp_all
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Wave 9 Phase 3: Multi-Harness Agent Event Normalizer & Unified Transcript Reducer
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 structure AgentEventNormalizeCheck where
   harnessKind          : UInt8
@@ -2487,11 +2506,17 @@ def agentEventNormalizeMetaGate : MetaGateSpec AgentEventNormalizeCheck
     unfold agentEventNormalizeStep at h
     rw [pack32_lo] at h
     cases hb : decide (a.payloadBytes ≤ a.maxPayloadBytes)
-    · simp_all; exfalso; revert h; decide
+    · simp_all;
+      exfalso;
+      revert h;
+      decide
     · cases hv : (decide (a.harnessKind ≤ 5) &&
         (a.sessionMatchesExp == 1 || a.rawEventKind == 0 || a.rawEventKind == 1 || a.rawEventKind == 7) &&
         (a.isDuplicateTurnTool == 0))
-      · simp_all; exfalso; revert h; decide
+      · simp_all;
+        exfalso;
+        revert h;
+        decide
       · cases hr0 : (a.rawEventKind == 0)
         · cases hr1 : (a.rawEventKind == 1)
           · cases hr2 : (a.rawEventKind == 2)
@@ -2499,12 +2524,20 @@ def agentEventNormalizeMetaGate : MetaGateSpec AgentEventNormalizeCheck
               · cases hr4 : (a.rawEventKind == 4)
                 · cases hr5 : (a.rawEventKind == 5)
                   · cases hr6 : (a.rawEventKind == 6)
-                    · cases hr7 : (a.rawEventKind == 7) <;> (simp_all; try (exfalso; revert h; decide))
+                    · cases hr7 : (a.rawEventKind == 7) <;>
+                      (simp_all;
+                        try (exfalso; revert h; decide))
                     · simp_all
                   · simp_all
-                · cases hc : (a.isCompleted == 1) <;> (simp_all; try (exfalso; revert h; decide))
-              · cases ht : (a.hasNonEmptyText == 1) <;> (simp_all; try (exfalso; revert h; decide))
-            · cases ht : (a.hasNonEmptyText == 1) <;> (simp_all; try (exfalso; revert h; decide))
+                · cases hc : (a.isCompleted == 1) <;>
+                  (simp_all;
+                    try (exfalso; revert h; decide))
+              · cases ht : (a.hasNonEmptyText == 1) <;>
+                (simp_all;
+                  try (exfalso; revert h; decide))
+            · cases ht : (a.hasNonEmptyText == 1) <;>
+              (simp_all;
+                try (exfalso; revert h; decide))
           · simp_all
         · simp_all
   complete a h := by
@@ -2605,7 +2638,8 @@ def transcriptReduceMetaGate : MetaGateSpec TranscriptReduceCheck
                    t.normalizedAction == 9 || t.normalizedAction == 10) <;>
       cases ha2 : (t.normalizedAction == 2 || t.normalizedAction == 3 || t.normalizedAction == 8) <;>
       cases ht : (t.thinkingOpen == 1) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all;
+        try (exfalso; revert h; decide))
   complete t h := by
     unfold TranscriptReduceCheck.Admissible at h
     unfold transcriptReduceStep
@@ -2691,9 +2725,9 @@ def transcriptReduceMetaStepSpec : MetaStepSpec UInt64 TranscriptReduceCheck UIn
   }
   sameStep := ⟨rfl, rfl⟩
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Wave 9 Phase 4: Storage Invariants — Pagination Cursors & Sidebar Merge
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 structure CursorPageCheck where
   sinceSeq          : UInt64
@@ -2723,7 +2757,8 @@ def cursorPageMetaGate : MetaGateSpec CursorPageCheck
       cases has : (c.hasSinceCursor == 0 || decide (c.itemSeq > c.sinceSeq)) <;>
       cases hbb : (c.hasBeforeCursor == 0 || decide (c.itemSeq < c.beforeSeq)) <;>
       cases hp : (c.isPartialResponse == 1) <;>
-      (simp_all; try (exfalso; revert h; decide))
+      (simp_all;
+        try (exfalso; revert h; decide))
   complete c h := by
     unfold CursorPageCheck.Admissible at h
     unfold cursorPageStep
@@ -2897,9 +2932,9 @@ theorem sidebar_missions_unique_and_idempotent
     rw [pack32_hi]
     cases hsup : (sup == 1) <;> (simp only [hsame, hsup]; decide)
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Wave 9 Phase 6: Clients (iOS, Android & Desktop `wasm32`) Scroll Epoch & Parity
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 structure ScrollEpochCheck where
   layoutEpoch         : UInt32
@@ -2959,15 +2994,21 @@ theorem scroll_correction_at_most_once_per_epoch
   refine ⟨?_, ?_, ?_⟩
   · unfold scrollEpochStep
     rw [pack32_lo]
-    cases hp : (pin == 1) <;> cases hd : (drag == 0) <;> cases hdel : (targetPx != currentPx) <;>
+    cases hp : (pin == 1) <;>
+      cases hd : (drag == 0) <;>
+      cases hdel : (targetPx != currentPx) <;>
       (simp_all; try decide)
   · unfold scrollEpochStep
     rw [pack32_lo]
-    cases hp : (pin == 1) <;> cases hd : (drag == 0) <;> cases hdel : (targetPx != currentPx) <;>
+    cases hp : (pin == 1) <;>
+      cases hd : (drag == 0) <;>
+      cases hdel : (targetPx != currentPx) <;>
       (simp_all; try decide)
   · unfold scrollEpochStep
     rw [pack32_hi]
-    cases hp : (pin == 1) <;> cases hd : (drag == 0) <;> cases hdel : (targetPx != currentPx) <;>
+    cases hp : (pin == 1) <;>
+      cases hd : (drag == 0) <;>
+      cases hdel : (targetPx != currentPx) <;>
       simp_all
 
 def effectiveScrollState (lastEpoch : UInt32) (e : ScrollEpochCheck) : ScrollEpochCheck :=
@@ -3079,10 +3120,10 @@ theorem client_projection_bitwise_parity_across_ios_android_wasm
   have h3 : decide ((3 : UInt8) ≤ 3) = true := by decide
   simp only [h0, h1, h2, h3, and_self]
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Wave 10: Fleet Security — Canary Blast-Radius Isolation, Process Whitelist,
 --          High-Signal Attacker Bait, Enforcer Convergence & Biometric/Mesh Gates
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 structure CanaryTripwireCheck where
   canaryClass        : UInt8
@@ -3257,10 +3298,10 @@ theorem mesh_service_route_rejects_retired_tailnet
     meshServiceRouteStep overlay 1 auth loopback = 512 := by
   rfl
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Wave 11: SOC 2 Type I Compliance Proofs — 3-Key SSH & macOS Remote Login,
 --          Off-Host B2 Audit Log Shipper, and OS Lifecycle / Boundary Scope
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 /-- Corollary 76 (`ScopedAuthority` — `soc2SshHostKeyPolicyStep`, SOC 2 CC6.1/CC6.6 3-Key & Key-Only SSH):
     Any host that retains the shared legacy `paloma` key (`hasSharedLegacyKey = 1`), retains a provisioning

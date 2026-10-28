@@ -17,7 +17,7 @@ concurrency:
 jobs:
   kernel-abi:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -103,3 +103,57 @@ jobs:
           PY
       - name: Android JNI libraries rebuild with the NDK and match sources / ABI
         run: scripts/build_android_kernel_so.sh --check
+
+      - name: Read reviewed turbo-lean source revision
+        id: turbo-pin
+        run: |
+          revision=$(cat lean/turbo-lean-revision)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: Th0rgal/turbo-lean
+          ref: ${{ steps.turbo-pin.outputs.revision }}
+          path: .tools/turbo-lean
+          persist-credentials: false
+      - name: Build reviewed turbo-lean and record binary provenance
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          set -euo pipefail
+          source_dir="$PWD/.tools/turbo-lean"
+          expected=$(cat lean/turbo-lean-revision)
+          test "$(git -C "$source_dir" rev-parse HEAD)" = "$expected"
+          test -z "$(git -C "$source_dir" status --porcelain)"
+          test "$(cat "$source_dir/lean/lean-toolchain")" = "$(cat lean/lean-toolchain)"
+          (cd "$source_dir/lean" && lake build LeanSys LeanNative.Spec)
+          cargo build --locked -j 1 --manifest-path "$source_dir/Cargo.toml" -p turbo-lean
+          git -C "$source_dir" diff --exit-code
+          mkdir -p audit-results
+          python3 - <<'PYCODE'
+          import hashlib, json, pathlib, subprocess
+          binary = pathlib.Path(".tools/turbo-lean/target/debug/turbo-lean")
+          receipt = {
+              "repository": "https://github.com/Th0rgal/turbo-lean",
+              "revision": pathlib.Path("lean/turbo-lean-revision").read_text().strip(),
+              "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+              "version": subprocess.check_output([str(binary), "--version"], text=True).strip(),
+          }
+          pathlib.Path("audit-results/turbo-lean-provenance.json").write_text(json.dumps(receipt, indent=2) + "\n")
+          print(json.dumps(receipt, indent=2))
+          PYCODE
+      - name: Fresh turbo-lean tightness and horizontal-packing gate
+        env:
+          TURBO_LEAN_NO_AUDIT_CACHE: "1"
+          SANDBOXED_TELEMETRY_BATCH_ONLY: "1"
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v scripts/test_spec_audit.py
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Spec.lean > audit-results/spec-audit.json
+          python3 scripts/check_spec_audit.py audit-results/spec-audit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-spec-audit
+          path: audit-results/
+          if-no-files-found: ignore
