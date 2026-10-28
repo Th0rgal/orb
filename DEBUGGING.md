@@ -273,6 +273,39 @@ Thomas's or Ben's server.
 
 ## Deploying Updates
 
+### Production: one command over SSH (standard operator deploy)
+
+```bash
+ssh agent-core '/usr/local/bin/sandboxed-sh-prod deploy --service sandboxed-sh-prod.service --ref origin/master'
+```
+
+This runs the **same deploy routine** as `POST /api/system/deploy`
+(`run_deploy` in `src/api/system.rs`), printing its progress: fetch and check
+out the ref in the source checkout, `cargo build` (debug) of `sandboxed-sh`,
+`sandboxed-mcp` and `palomactl`, `.pre-deploy-<sha>` backups, install (rolled
+back if an install fails), recycle stale companions, then a guarded restart
+(stop, wait for the port, SIGTERM/SIGKILL a lingering holder, start). The
+restarted service must answer `/api/health` within `DEPLOY_HEALTH_TIMEOUT_SECS`
+(default 120); otherwise the previous binaries are restored and the service is
+restarted again. The command waits for that and exits non-zero on failure or
+rollback. The outcome is also written to `/var/lib/sandboxed-sh/last_deploy_result`.
+
+- Run it as root on the host. SSH access is already full trust, so no Touch ID
+  grant is involved. It reads port, working dir and repo path from the
+  service's own environment.
+- The same refusals as the API apply: the binary must serve the unit passed in
+  `--service` (`sandboxed-sh-dev deploy --service sandboxed-sh-prod.service` is
+  refused), missions mid-turn, a deploy in the last 5 minutes. `--force`
+  overrides the last two; record and resume interrupted missions afterwards.
+- Other flags: `--repo <path>`, `--skip-build`, `--help`.
+- **This is also the sanctioned fallback** when the Orb approval UI, the
+  privilege broker or the API itself is down: the CLI does not need a
+  running service.
+- Missions deploy through the API with a `service_deploy` grant (see below).
+- Do not copy over the live production binary or run a bare
+  `systemctl restart` for a deploy: the CLI exists so that every deploy gets
+  backups, the port guard and the health-checked rollback.
+
 **Always use debug builds** (`cargo build`) instead of release (`cargo build --release`).
 Debug builds compile in ~1 minute vs ~5+ minutes for release. The performance
 difference is negligible for this I/O-bound service.
@@ -327,9 +360,10 @@ cargo build
 scp target/debug/sandboxed_sh agent-core:/usr/local/bin/sandboxed-sh-dev
 ssh agent-core "systemctl restart sandboxed-sh-dev"
 
-# After testing, deploy production through POST /api/system/deploy with
-# target_environment=prod and expected_service=sandboxed-sh-prod.service.
-# Never copy over the live production binary or run an unguarded raw restart.
+# After testing, deploy production with the operator command above
+# (`sandboxed-sh-prod deploy --service sandboxed-sh-prod.service`), or from a
+# mission through POST /api/system/deploy with a grant. Never copy over the
+# live production binary.
 
 # Deploy to Ben
 scp target/debug/sandboxed_sh ben-backend:/usr/local/bin/sandboxed-sh
@@ -356,9 +390,11 @@ internal `/api/system/deploy` endpoint with safety rails.
 session-scoped `service_deploy` grant. A mission calls
 `request_privileged_access(target_host="agent-core", scope="service_deploy",
 session_scoped=true, reason=...)`, Thomas approves it once with Touch ID in Orb,
-and the grant covers that session's deploy/verify loop. Calls without a mission
-id (operator scripts, curl) get `403`. To deploy from outside a mission, start a
-short mission that requests the grant and deploys. Before a `force=true`
+and the grant covers that session's deploy/verify loop. API calls without a
+mission id (operator scripts, curl) get `403`. Operators deploy from outside a
+mission with `ssh agent-core '/usr/local/bin/sandboxed-sh-prod deploy --service
+sandboxed-sh-prod.service'` (see "Deploying Updates"), not through a throwaway
+mission. Before a `force=true`
 deploy, record the active/pending mission ids and resume the interrupted ones
 afterwards; check with `get_mission_health`, not the status alone.
 
@@ -389,9 +425,13 @@ Safety rails:
   accept that your own turn will be SIGTERM'd.
 - **Debounce** — refuses if another deploy fired in the last 5 minutes.
   Override with `force=true`.
-- **Atomic install** via versioned symlink swap + a detached
-  `setsid`/`nohup` restart so the response flushes before the service
+- **Atomic install** via versioned symlink swap + a guarded restart in a
+  transient `systemd-run` unit so the response flushes before the service
   dies.
+- **Health-checked restart** — the restarted service must answer
+  `/api/health` within `DEPLOY_HEALTH_TIMEOUT_SECS` (default 120) or the
+  previous binaries are restored automatically. The outcome is written to
+  `/var/lib/sandboxed-sh/last_deploy_result`.
 
 From inside an agent that has the orchestrator MCP, the call shape is:
 
