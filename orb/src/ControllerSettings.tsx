@@ -8,7 +8,7 @@ import * as Ic from "./icons";
 import { getApiUrl, updateController, type ControllerPatch, type ControllerView } from "./api";
 import { ignoredCronFields, scheduleExpression } from "./cronSchema";
 import { SchedulePicker } from "./SchedulePicker";
-import { knownSkillNames } from "./SkillsSettings";
+import { knownSkillNames } from "./skillsApi";
 
 
 export type CronDraft = {

@@ -1,3 +1,5 @@
+import { knownSkillNames, rememberKnownSkillNames } from "./skillsApi";
+export { knownSkillNames };
 import { HARNESS_IDS } from "./harnesses";
 import { swallow } from "./log";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
@@ -119,28 +121,6 @@ const HARNESS_ORDER = [
 ] as const;
 
 
-let cachedSkillNames: string[] = [
-  "controllers-policy",
-  "project-manager",
-  "sandboxed-sh-missions",
-  "development-identity",
-  "paloma-backends",
-  "paloma-ssh-servers",
-];
-
-/** Reactive list of known skill names for autocomplete in ControllerSettings. */
-export function knownSkillNames(): string[] {
-  return cachedSkillNames;
-}
-
-export function rememberKnownSkillNames(names: Iterable<string>) {
-  const merged = new Set(cachedSkillNames);
-  for (const name of names) {
-    const trimmed = name.trim();
-    if (trimmed) merged.add(trimmed);
-  }
-  cachedSkillNames = [...merged].sort();
-}
 
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));

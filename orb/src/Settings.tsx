@@ -10,25 +10,13 @@ import { clearConnection, connectionVersion, getApiUrl, getJwt, isConnected, log
 import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride, tauriInvoke } from "./localAgents";
 import { nativeInvoke } from "./native";
 import { DebugInfoPanel } from "./DebugInfo";
+import { Toggle } from "./Toggle";
+export { Toggle };
 import { getThemePref, setThemePref, type ThemePref } from "./theme";
 
 const THEME_LABELS: Record<ThemePref, string> = { auto: "Auto", light: "Light", dark: "Dark" };
 const THEME_PREFS: Record<string, ThemePref> = { Auto: "auto", Light: "light", Dark: "dark" };
 
-export function Toggle(p: { on: boolean; onClick?: () => void }) {
-  const [on, setOn] = createSignal(p.on);
-  return (
-    <button
-      class={`toggle ${on() ? "on" : ""}`}
-      role="switch"
-      aria-checked={on()}
-      onClick={() => {
-        setOn(!on());
-        p.onClick?.();
-      }}
-    />
-  );
-}
 
 
 function Row(p: { title: string; desc?: string; children?: JSX.Element }) {

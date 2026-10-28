@@ -1,6 +1,8 @@
 import {render,screen,cleanup} from '@solidjs/testing-library';
 import {afterEach,expect,it} from 'vitest';
-import {MdView,parseMarkdown} from '../src/Markdown';
+import {MdView,parseMarkdown,loadKatex} from '../src/Markdown';
+import {beforeAll} from 'vitest';
+beforeAll(()=>loadKatex());
 afterEach(cleanup);
 it('renders Grok single-line display math without leftover dollar signs',()=>{
  const {container}=render(()=><MdView text={'Formula\n$$x^2$$\n\n\\[y^2\\]'}/>);

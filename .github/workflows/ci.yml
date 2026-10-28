@@ -198,6 +198,7 @@ jobs:
           cache-dependency-path: orb/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - run: pnpm check:bundle
       - run: pnpm test
 
   orb-browser:

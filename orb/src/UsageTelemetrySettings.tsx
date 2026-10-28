@@ -1,6 +1,6 @@
 import { Show, createResource, createSignal } from "solid-js";
 import { ErrorNotice } from "./ErrorNotice";
-import { Toggle } from "./Settings";
+import { Toggle } from "./Toggle";
 import { getUsageTelemetryStatus, updateUsageTelemetryConfig, type UsageTelemetryConfig, type UsageTelemetryStatus } from "./usageTelemetry";
 
 /** Settings → Account → Usage telemetry. Off by default; the hub token is

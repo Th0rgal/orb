@@ -129,3 +129,26 @@ export async function getSkillHistory(name: string): Promise<SkillVersion[]> {
   catch (e) { if (isNotFound(e)) throw new UnsupportedEndpoint("history"); throw e; }
 }
 export const getSkillAt = (name: string, rev: string) => apiText(`${skillPath(name)}/history/${enc(rev)}`);
+
+let cachedSkillNames: string[] = [
+  "controllers-policy",
+  "project-manager",
+  "sandboxed-sh-missions",
+  "development-identity",
+  "paloma-backends",
+  "paloma-ssh-servers",
+];
+
+/** Reactive list of known skill names for autocomplete in ControllerSettings. */
+export function knownSkillNames(): string[] {
+  return cachedSkillNames;
+}
+
+export function rememberKnownSkillNames(names: Iterable<string>) {
+  const merged = new Set(cachedSkillNames);
+  for (const name of names) {
+    const trimmed = name.trim();
+    if (trimmed) merged.add(trimmed);
+  }
+  cachedSkillNames = [...merged].sort();
+}

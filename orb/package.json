@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
     "test": "vitest run",
+    "check:bundle": "node scripts/check-bundle.mjs",
     "test:browser": "playwright test"
   },
   "dependencies": {
