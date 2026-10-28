@@ -2303,3 +2303,55 @@ async fn raw_operations_enforce_owner_replay_and_do_not_leak_payloads_to_audit()
     assert!(ledger.contains("raw_operation_finished"));
     m.destroy(&raw.id, "test").await.unwrap();
 }
+
+#[tokio::test]
+async fn raw_snapshot_modes_and_budget_visibility_are_owner_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let raw = m
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            image: Some("clean".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(m.budget().await.active, 1);
+    assert_eq!(m.visible_budget("t1").await.active, 1);
+    assert_eq!(m.visible_budget("t2").await.active, 0);
+    let mut snapshot = snap("raw-source", "p", 0, "ready");
+    snapshot.provisioning_mode = ProvisioningMode::Raw;
+    m.snapshots.lock().await.push(snapshot);
+    let request = SpawnRequest {
+        from_snapshot: Some("raw-source".into()),
+        snapshot_project: Some("p".into()),
+        owner_user_id: Some("t1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        m.resolve_source(&request).await.unwrap().3,
+        ProvisioningMode::Raw
+    );
+    assert_eq!(
+        m.resolve_source(&SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Worker),
+            ..request.clone()
+        })
+        .await
+        .unwrap_err()
+        .error,
+        "mode_mismatch"
+    );
+    assert_eq!(
+        m.resolve_source(&SpawnRequest {
+            owner_user_id: Some("t2".into()),
+            ..request
+        })
+        .await
+        .unwrap_err()
+        .error,
+        "snapshot_not_found"
+    );
+    m.destroy(&raw.id, "test").await.unwrap();
+}
