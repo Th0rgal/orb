@@ -20,12 +20,38 @@ class Harness(unittest.TestCase):
         self.reference = {0: 19, 1: 37}
 
     def test_missing_extra_duplicate_and_invalid_rows_reject(self):
-        for text in ("0:19\n0:37", "-1:19", "0:-1", f"0:{2**64}", "garbage"):
+        for text in ("0:19\n0:37", "-1:19", "0:-1", f"0:{2**64}", "garbage", "0:+19", " 0:19", "0:19 ", "-0:19"):
             with self.assertRaises(ValueError):
                 conformance.parse_rows(text)
         for rows in ({0: 19}, {0: 19, 1: 37, 2: 5}, {0: 19, 1: True}):
             with self.assertRaises(ValueError):
                 conformance.compare_rows(self.reference, rows, self.cases)
+
+    def test_partial_comparisons_have_receipts_without_claiming_engine_completion(self):
+        values, partial = {"stock_lean": self.reference}, {"lnir": {0: 18}}
+        report = {"engines": {}, "blockers": []}
+        self.assertEqual(conformance.summarize(report, values, partial, self.cases), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipts.jsonl"
+            conformance.write_case_receipts(path, self.cases, values, partial, "provenance")
+            receipts = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(len(receipts), 3)
+        lnir = next(r for r in receipts if r["payload"]["engine"] == "lnir")
+        self.assertEqual(lnir["payload"]["case"]["id"], 0)
+        self.assertEqual(lnir["payload"]["result_u64"], "18")
+        self.assertFalse(lnir["payload"]["engine_complete"])
+        self.assertEqual(lnir["sha256"], conformance.canonical_hash(lnir["payload"]))
+        self.assertIn("lnir", report["missing_engines"])
+
+    def test_provenance_binds_repository_identity_and_environment(self):
+        report = {"sources": {}, "harness_sha256": "harness", "tools": {}, "artifacts": {},
+                  "heads": {"lean_sys": "original"}, "repositories": {"lean_sys": {"head": "original", "dirty": ""}},
+                  "environment": {"LEAN_PATH": "original"}}
+        baseline = conformance.canonical_hash(conformance.build_provenance(report, "commands"))
+        for field in ("heads", "repositories", "environment"):
+            changed = copy.deepcopy(report)
+            changed[field] = {"changed": True}
+            self.assertNotEqual(baseline, conformance.canonical_hash(conformance.build_provenance(changed, "commands")))
 
     def test_mutated_values_and_swapped_case_identity_are_detected(self):
         for rows in ({0: 18, 1: 37}, {0: 37, 1: 19}):

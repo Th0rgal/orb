@@ -43,12 +43,16 @@ def parse_rows(text):
     for line_number, line in enumerate(text.splitlines(), 1):
         try:
             a, b = line.split(":")
+            if not re.fullmatch(r"[0-9]+", a):
+                raise ValueError("execution identity must be unsigned decimal")
             key = int(a)
             if key in seen:
                 ambiguous.add(key)
                 result.pop(key, None)
                 raise ValueError("duplicate execution identity")
             seen.add(key)
+            if not re.fullmatch(r"[0-9]+", b):
+                raise ValueError("execution value must be unsigned decimal")
             value = int(b)
             if key < 0 or not 0 <= value < 2**64:
                 raise ValueError("invalid execution row")
@@ -74,10 +78,25 @@ def compare_rows(reference, actual, cases):
     return [c["id"] for c in cases if reference[c["id"]] != actual[c["id"]]]
 
 
-def case_receipt(case, engine, result, provenance):
-    payload = {"schema": "orb.conformance.case.v1", "case": case, "engine": engine,
-               "result_u64": str(result), "provenance": provenance}
+def case_receipt(case, engine, result, provenance, complete=True):
+    payload = {"schema": "orb.conformance.case.v2", "case": case, "engine": engine,
+               "result_u64": str(result), "provenance": provenance, "engine_complete": complete}
     return {"payload": payload, "sha256": canonical_hash(payload)}
+
+
+def write_case_receipts(path, cases, values, partial_values, provenance):
+    with path.open("w") as receipts:
+        for name, rows in {**partial_values, **values}.items():
+            for case in cases:
+                if case["id"] in rows:
+                    receipt = case_receipt(case, name, rows[case["id"]], provenance, name in values)
+                    receipts.write(json.dumps(receipt, sort_keys=True) + "\n")
+
+
+def build_provenance(report, commands_sha256):
+    return {**{k: report[k] for k in ("sources", "harness_sha256", "tools", "artifacts",
+                                    "heads", "repositories", "environment")},
+            "commands_sha256": commands_sha256}
 
 
 def record_engine(report, values, partial_values, name, action, cases):
@@ -289,6 +308,7 @@ def main(argv=None):
     for name, expected in (("orb", settings.expected_orb_head), ("turbo", settings.expected_turbo_head)):
         if not re.fullmatch(r"[0-9a-f]{40}", expected) or report["repositories"][name]["head"] != expected:
             raise ValueError(f"unexpected {name} revision")
+    report["heads"] = {name: state["head"] for name, state in report["repositories"].items()}
     report["environment"] = {"LEAN_PATH": ENV["LEAN_PATH"], "LC_ALL": "C", "LANG": "C",
                              "platform": platform.platform(), "machine": platform.machine()}
     report["harness_sha256"] = digest(__file__)
@@ -440,10 +460,9 @@ for (const c of cases) {
             except Exception as error:
                 errors.append({"case": c, "error": str(error)})
         (OUT / "lnir-errors.json").write_text(json.dumps(errors, indent=2) + "\n")
+        (OUT / "lnir-observations.json").write_text(json.dumps(result, sort_keys=True) + "\n")
         if errors:
-            partial_values["lnir"] = result
-            # Keep partial rows for comparisons, never count them as completion.
-            return result
+            raise RowFailure([f"{len(errors)} LNIR requests failed; see lnir-errors.json and commands.json"], result)
         return result
 
     for name, action in [("stock_lean", stock), ("stock_extracted_c", stock_c),
@@ -480,14 +499,10 @@ for (const c of cases) {
     (OUT / "values.json").write_text(json.dumps({"complete": values, "partial": partial_values}, sort_keys=True) + "\n")
     report["artifacts"] = {str(p.relative_to(OUT)): digest(p) for p in OUT.rglob("*")
                            if p.is_file() and p.name not in ("report.json", "commands.json")}
-    provenance = {"sources": report["sources"], "harness_sha256": report["harness_sha256"],
-                  "tools": report["tools"], "artifacts": report["artifacts"], "commands_sha256": digest(OUT / "commands.json")}
+    provenance = build_provenance(report, digest(OUT / "commands.json"))
     (OUT / "provenance.json").write_text(json.dumps(provenance, sort_keys=True) + "\n")
     report["provenance_sha256"] = canonical_hash(provenance)
-    with (OUT / "case-receipts.jsonl").open("w") as receipts:
-        for name, rows in values.items():
-            for c in cases:
-                receipts.write(json.dumps(case_receipt(c, name, rows[c["id"]], report["provenance_sha256"]), sort_keys=True) + "\n")
+    write_case_receipts(OUT / "case-receipts.jsonl", cases, values, partial_values, report["provenance_sha256"])
     report["case_receipts_sha256"] = digest(OUT / "case-receipts.jsonl")
     report["case_receipts_signed"] = False
     (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")

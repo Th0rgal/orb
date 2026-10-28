@@ -87,3 +87,22 @@ checks in turbo-lean PR264 remain blockers; this harness does not waive them.
 P2 bootstrap/deduplication is still open. Physical iPhone13 mini and Pixel8 remain
 `BLOCKED_PHYSICAL_DEVICE`. No merge or production deployment follows from these
 local observations.
+
+
+The exact `c02351a5` full run terminated with exit **2 / INCOMPLETE**:
+five complete scalar paths (896 rows each), 16 agreeing partial LNIR observations,
+880 failed LNIR requests, 3,600 comparisons and zero observed mismatches. Native
+and WASM low-bit mutants were detected on exactly cases 96–103. These paths share
+implementations: Rust FFI and WASM both exercise the vendored C; this is not five
+independent implementations. The mandatory NTT binding and broader P1 gates
+remain open.
+
+Follow-up evidence repairs include partial observations in schema-v2 case
+receipts with `engine_complete: false`. Missing cases receive no synthetic rows.
+The provenance hash also binds all three repository identities (including
+LeanSys), clean-state observations and environment metadata. Command outputs
+require unsigned decimal tokens, matching the LNIR value contract; decimal
+leading zeros are not an additional canonical-format requirement. LNIR failures
+retain their count and point to the raw error/command files. Hashes remain
+unsigned consistency checks, not execution attestations. These reporting repairs
+do not turn prior-run receipts into a fresh engine execution at the repair head.
