@@ -158,7 +158,7 @@ fn remove(path: &Path, receipt: &Receipt) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         let parent = path.parent().ok_or("scratch parent missing")?;
-        crate::workspace_purge_fs::require_unambiguous_mount(parent)?;
+        crate::workspace_purge_fs::require_no_nested_mounts(parent)?;
         // Recheck and restore privacy before descriptor-relative removal. A
         // missing child is the crash-after-unlink case; remove repeats fsync.
         match std::fs::symlink_metadata(path) {
@@ -239,18 +239,25 @@ mod tests {
     async fn scratch_cancelled_future_never_becomes_reclaimable() {
         let temp = tempfile::tempdir().unwrap();
         let store = JobStore::open(temp.path()).await.unwrap();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            run(
-                &store,
-                temp.path(),
-                Uuid::new_v4(),
-                None,
-                std::future::pending::<anyhow::Result<()>>(),
-            ),
-        )
-        .await;
-        assert!(result.is_err());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn({
+            let store = store.clone();
+            let root = temp.path().to_path_buf();
+            async move {
+                run(&store, &root, Uuid::new_v4(), None, async {
+                    started.send(()).unwrap();
+                    std::future::pending::<anyhow::Result<()>>().await
+                })
+                .await
+            }
+        });
+        // Wait until the receipt exists and the execution really started.
+        tokio::time::timeout(std::time::Duration::from_secs(10), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
         let retired = store
             .with_conn(|conn| {
                 conn.query_row("SELECT COUNT(retired_at) FROM node_scratch", [], |row| {

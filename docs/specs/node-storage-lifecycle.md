@@ -31,7 +31,9 @@ scratch without an expiry. A terminal job row alone is never enough.
 
 After a fixed 72-hour recovery period, the existing node GC cadence consumes retired
 receipts. It reuses Core's descriptor-relative removal, refuses symlink/root/inode
-replacement and mount traversal, and checks private ownership. Unsupported platforms
+replacement and mount traversal, and checks private ownership. Unlike whole-workspace
+purge, execution-private scratch permits unrelated views of the backing filesystem
+created by systemd ReadWritePaths; mounts inside scratch are still refused. Unsupported platforms
 retain scratch. A crash during removal retries the same identity; a crash after
 removal retries parent fsync before deleting the receipt. There is no broad /tmp scan
 or mtime-based deletion. The managed-execution trust boundary and same-uid writer
