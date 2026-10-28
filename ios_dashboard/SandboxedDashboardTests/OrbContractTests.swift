@@ -2,6 +2,20 @@ import XCTest
 @testable import sandboxed_sh
 
 final class OrbContractTests: XCTestCase {
+    @MainActor func testPresentationKeepsAnswerAndExcludesQueuedPromptsAndTools() {
+        for type in ["assistant_message", "assistant_message_canonical"] {
+            let value: OrbJSON = .object(["events": .array([
+                .object(["event_type": .string(type), "content": .string("Final answer")]),
+                .object(["event_type": .string("user_message"), "content": .string("Next"), "metadata": .object(["queued": .bool(true)])]),
+                .object(["event_type": .string("tool_result"), "content": .string("Large output")])
+            ])])
+            let history = OrbPresentation.history(value)
+            XCTAssertEqual(history.count, 1)
+            XCTAssertEqual(history.first?["content"].text, "Final answer")
+            XCTAssertEqual(history.first?["role"].text, "assistant")
+        }
+    }
+
     func testInboxAccountSurvivesTokenRenewalAndSeparatesUsers() {
         func token(_ subject: String, _ expiry: Int) -> String {
             let data = Data("{\"sub\":\"\(subject)\",\"exp\":\(expiry)}".utf8)
@@ -92,6 +106,58 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbReadCache.read(key), .string("loaded"))
         _ = try await OrbReadCache.load(key, fetch: fetch)
         XCTAssertEqual(requests, 2)
+    }
+    @MainActor func testListSummaryCannotMaskDiskConversationAfterMemoryTrim() async throws {
+        let key = "mission:" + UUID().uuidString
+        defer { OrbDisk.remove(key) }
+        let full: OrbJSON = .object(["history": .array([
+            .object(["role": .string("assistant"), "content": .string("Saved answer")])
+        ])])
+        try OrbDisk.save(full, key: key)
+        OrbReadCache.trimMemory()
+        OrbReadCache.seedMemory(key, value: .object(["history": .array([])]))
+        let reopened = await OrbReadCache.readAsync(key)
+        XCTAssertEqual(reopened, full, "Reopening must show saved history before any network request")
+        OrbReadCache.seed(key, value: .object(["history": .array([])]))
+        XCTAssertEqual(OrbReadCache.read(key), full)
+        XCTAssertEqual(OrbDisk.read(key, as: OrbJSON.self), full)
+    }
+
+    @MainActor func testAsyncCacheReadKeepsFreshNetworkValue() async throws {
+        let key = "test-cache:" + UUID().uuidString
+        defer { OrbDisk.remove(key) }
+        try OrbDisk.save(OrbJSON.string("old"), key: key)
+        _ = try await OrbReadCache.load(key, force: true) { .string("fresh") }
+        let reopened = await OrbReadCache.readAsync(key)
+        XCTAssertEqual(reopened, .string("fresh"))
+    }
+
+    @MainActor func testLargeHistoryRestoreKeepsMainActorAvailable() async throws {
+        let key = "mission:" + UUID().uuidString
+        defer { OrbDisk.remove(key) }
+        let history: OrbJSON = .object(["history": .array((0..<200).map { index in
+            .object(["role": .string("assistant"), "content": .string("\(index):" + String(repeating: "a", count: 16_384))])
+        })])
+        try OrbDisk.save(history, key: key)
+        let start = ContinuousClock.now
+        let baseline = OrbDisk.read(key, as: OrbJSON.self)
+        let synchronousTime = start.duration(to: .now)
+        XCTAssertEqual(baseline, history)
+
+        var mainActorTicks = 0
+        let heartbeat = Task { @MainActor in
+            while !Task.isCancelled {
+                mainActorTicks += 1
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+        let asyncStart = ContinuousClock.now
+        let restored = await OrbReadCache.readAsync(key)
+        let asynchronousTime = asyncStart.duration(to: .now)
+        heartbeat.cancel()
+        XCTAssertEqual(restored, history)
+        XCTAssertGreaterThan(mainActorTicks, 0, "Disk restoration must yield the main actor")
+        print("CACHE_RESTORE 200x16KiB synchronous-main=\(synchronousTime) async-wall=\(asynchronousTime) main-actor-ticks=\(mainActorTicks)")
     }
     /// A send invalidates the conversation while a streamed event's refresh is loading it.
     /// Both the owner and a joined waiter get the answer (no CancellationError, which showed

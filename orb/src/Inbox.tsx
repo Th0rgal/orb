@@ -214,42 +214,14 @@ function MissionFileScope(p: {
   const resolver: ReferenceResolver = {
     async loadImage(path) {
       scopeKey();
-      const g = generation;
-      const c = client;
-      const preview = c.imagePreview(path);
-      if (preview) return preview;
-      const mime = imageMime(path);
-      if (!mime) return null;
-      const limit = imageByteLimit(mime);
-      cache.delete(path);
-      const refs = await resolver.resolve(path);
-      if (g !== generation) return null;
-      if (!refs.length) {
-        rootPromise = undefined;
-        const url = await c.loadUploadedImage(path);
-        if (g !== generation) {
-          if (url) URL.revokeObjectURL(url);
-          return null;
-        }
-        return url;
-      }
-      const ref = refs[0];
-      const chunks: Uint8Array[] = [];
-      let offset = 0;
-      while (true) {
-        const part = await c.call(ref.source, {
-          action: "download",
-          path: ref.path,
-          offset,
-        });
-        if (g !== generation) return null;
-        if (!part.bytes?.length || !part.size || part.size > limit) return null;
-        chunks.push(new Uint8Array(part.bytes));
-        offset += part.bytes.length;
-        if (offset >= part.size) break;
-        if (offset > limit) return null;
-      }
-      return URL.createObjectURL(new Blob(chunks as BlobPart[], { type: mime }));
+      const g = generation, c = client;
+      const result = await c.loadImage(path, async () => {
+        cache.delete(path);
+        const refs = await resolver.resolve(path);
+        if (!refs.length) rootPromise = undefined;
+        return refs;
+      });
+      return g === generation ? result : null;
     },
     resolve(raw) {
       const parsed = parseFileTarget(raw);

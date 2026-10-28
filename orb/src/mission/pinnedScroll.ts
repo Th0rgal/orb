@@ -120,6 +120,16 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
       const el = scroller;
       if (!el || el.dataset.panelResizing) return;
       const top = el.scrollTop, gap = gapOf(el);
+      // A collapsing narration can clamp scrollTop before ResizeObserver runs.
+      // This is layout, even inside the recent wheel-intent window. Preserve
+      // the old anchor until restore has reserved the lost height; remembering
+      // the clamped viewport here would silently choose a different message.
+      const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+      const clamped = !!content && content.offsetHeight < lastColHeight && lastTop > maxTop + 0.5 && Math.abs(top - maxTop) < 1;
+      if (!pinned() && content && content.offsetHeight !== lastColHeight && (!intent() || clamped || Math.abs(top - lastTop) < 0.5)) {
+        restore();
+        return;
+      }
       if (intent()) {
         // Sub-pixel jitter is not a move up.
         const next = userScroll({ pinned: pinned(), top: lastTop }, el.scrollHeight, el.clientHeight, top > lastTop - 0.5 ? Math.max(top, lastTop) : top);

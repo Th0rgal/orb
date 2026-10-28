@@ -1,3 +1,5 @@
+import { streamMission } from "./stream";
+import { refreshPresentationPreview, recordPresentationActivity } from "./missionCache";
 import { lookupMissionById } from "./missionLookup";
 import { movedMission, withMovedMissions } from "./moves";
 import { MissionLookupContext } from "./orchestrationModel";
@@ -257,13 +259,17 @@ export default function App() {
   };
   const [completedMissions, setCompletedMissions] = createSignal<Mission[]>([]);
   const listMisses: Misses = new Map();
+  let missionRefreshRevision = 0, missionAppliedRevision = 0;
   const refreshMissions = async () => {
+    const revision = ++missionRefreshRevision, connection = connectionVersion();
     try {
       const prev = missions().filter(m => !isMissionDeleting(m.id));
       const [rawFresh, rawCompleted] = await Promise.all([
         listMissions(200),
         listCompletedMissions(100),
       ]);
+      if (revision < missionAppliedRevision || connection !== connectionVersion()) return;
+      missionAppliedRevision = revision;
       const partial = isPartialList(rawFresh);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
       // No answer keeps the completed list on screen; it never empties it.
@@ -798,6 +804,40 @@ export default function App() {
     onCleanup(() => {
       window.removeEventListener("orb:open-page", onOpenPage);
       window.removeEventListener("orb:debug-cron", onDebugCron);
+    });
+    // One foreground compact stream. Hints invalidate authoritative reads;
+    // they never overwrite mission status or transcript revisions directly.
+    let stopPresentation: (() => void) | undefined;
+    let presentationTimer: ReturnType<typeof setTimeout> | undefined;
+    const changed = new Set<string>();
+    let needsList = false;
+    const flushPresentation = () => {
+      presentationTimer = undefined;
+      const ids = [...changed].slice(0, 12); changed.clear();
+      for (const id of ids) void refreshPresentationPreview(id).catch(swallow("presentation.refresh"));
+      if (needsList) { needsList = false; void refreshMissions(); }
+    };
+    const connectPresentation = () => {
+      stopPresentation?.(); stopPresentation = undefined;
+      changed.clear(); needsList = false; clearTimeout(presentationTimer); presentationTimer = undefined;
+      if (document.hidden || !isConnected()) return;
+      stopPresentation = streamMission(null, event => {
+        if (event.type !== "mission_presentation") return;
+        const id = event.data.mission_id;
+        if (event.data.kind === "mission_activity") {
+          if (typeof id === "string") recordPresentationActivity(id, event.data.label);
+          return;
+        }
+        if (typeof id === "string" && changed.size < 12) changed.add(id);
+        if (event.data.kind !== "mission_activity") needsList = true;
+        presentationTimer ??= setTimeout(flushPresentation, 1000);
+      }, () => { void refreshMissions(); }, undefined, "presentation");
+    };
+    createEffect(() => { connectionVersion(); connectPresentation(); });
+    document.addEventListener("visibilitychange", connectPresentation);
+    onCleanup(() => {
+      stopPresentation?.(); clearTimeout(presentationTimer);
+      document.removeEventListener("visibilitychange", connectPresentation);
     });
     const stopMissions = pollWhileVisible(() => (isConnected() ? refreshMissions() : undefined), 5000, "app.missions");
     const stopFleet = pollWhileVisible(() => (isConnected() ? refreshFleet() : undefined), 15000, "app.fleet");
