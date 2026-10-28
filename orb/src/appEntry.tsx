@@ -7,7 +7,9 @@ import { startDiagnostics } from "./diagnostics";
 
 export async function mountApp(root: HTMLElement): Promise<void> {
   startDiagnostics();
-  await restoreDesktopConnection().catch(() => {});
+  await restoreDesktopConnection().catch(() => {
+    console.warn("Orb could not restore the saved desktop connection");
+  });
   root.replaceChildren();
   render(() => <><App /><FindBar /><Toaster /></>, root);
 }

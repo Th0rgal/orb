@@ -17,3 +17,15 @@ it("does not load the app until the kernel resolves, and retries failure once", 
   expect(initialize).toHaveBeenCalledTimes(2);
   expect(root.textContent).toBe("Opened");
 });
+
+it("offers Reload after a mount failure without recreating partial stores", async () => {
+  const root = document.createElement("div");
+  const initialize = vi.fn(async () => {});
+  const mount = vi.fn(async () => { throw new Error("mount"); });
+  startApp(root, initialize, mount);
+  await vi.waitFor(() => expect(root.querySelector("button")?.textContent).toBe("Reload"));
+  expect(root.textContent).toContain("could not open");
+  expect(root.textContent).not.toContain("Retry");
+  expect(initialize).toHaveBeenCalledTimes(1);
+  expect(mount).toHaveBeenCalledTimes(1);
+});

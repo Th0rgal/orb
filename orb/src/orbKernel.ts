@@ -6,7 +6,9 @@ export type TranscriptPatchState = { len: number; seq: number };
 const b8 = (value: boolean) => value ? 1 : 0;
 const enum8 = (value: number) => Number.isInteger(value) && value >= 0 && value <= 255 ? value : 255;
 const sat8 = (value: number) => Math.max(0, Math.min(255, Number.isFinite(value) ? Math.round(value) : 255));
+const sat32 = (value: number) => Number.isFinite(value) ? Math.max(0, Math.min(0xffff_ffff, Math.floor(value))) : 0;
 function seconds(value: number): bigint {
+  if (!Number.isFinite(value)) throw new RangeError("Time must be finite");
   const whole = Math.max(0, Math.floor(value));
   if (!Number.isSafeInteger(whole)) throw new RangeError("Time is outside the exact integer range");
   return BigInt(whole);
@@ -34,8 +36,10 @@ export function orbUsageLimitBadge(status: string, claim: string, hasUtilization
   hasReset: boolean, resetRemSecs: number): { tone: "warning" | "error"; label: string } | null {
   const statusKind = !status || status === "allowed" || status === "ok" ? 0 : status === "allowed_warning" ? 1 : status === "rejected" ? 2 : 3;
   const claimKind = ["", "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"].indexOf(claim);
+  const resetPresent = hasReset && Number.isFinite(resetRemSecs) && Number.isSafeInteger(Math.floor(resetRemSecs));
   const raw = kernel.orb_usage_limit_status(statusKind, Math.max(0, claimKind),
-    b8(hasUtilization && Number.isFinite(utilizationPct) && utilizationPct >= 0), sat8(utilizationPct), b8(hasReset), seconds(resetRemSecs));
+    b8(hasUtilization && Number.isFinite(utilizationPct) && utilizationPct >= 0 && utilizationPct <= 100), sat8(utilizationPct),
+    b8(resetPresent), seconds(resetPresent ? resetRemSecs : 0));
   const tone = byte(raw, 0n);
   if (tone === 0) return null;
   if (tone === 1) {
@@ -51,7 +55,7 @@ export function orbUsageLimitBadge(status: string, claim: string, hasUtilization
 }
 
 export function orbTranscriptPatchStep(state: TranscriptPatchState, eventKind: number, deltaLen: number): TranscriptPatchState {
-  const raw = kernel.orb_transcript_patch_step(state.len, state.seq, enum8(eventKind), deltaLen);
+  const raw = kernel.orb_transcript_patch_step(state.len, state.seq, enum8(eventKind), sat32(deltaLen));
   return { len: Number(raw & 0xffff_ffffn), seq: Number(raw >> 32n) };
 }
 

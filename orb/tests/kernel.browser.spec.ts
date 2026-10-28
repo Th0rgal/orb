@@ -19,6 +19,9 @@ test("kernel failure prevents App import, then retry opens the real application"
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect.poll(() => requests.some(url => url.includes("/src/App.tsx"))).toBe(true);
   expect(attempts).toBe(2);
+  await expect(page.getByRole("main")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Inbox", exact: true })).toBeVisible();
+  await expect(page.getByText("Orb could not open. Please reload.", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Starting Orb…", { exact: true })).toHaveCount(0);
 });
 
@@ -27,6 +30,7 @@ test("generated browser adapters execute shared Lean projection fixtures", async
   const appRequested = page.waitForResponse(response => response.url().includes("/src/appEntry.tsx"));
   await page.goto("/");
   await appRequested;
+  await expect(page.getByRole("main")).toBeVisible();
   // Keep the same exported presentation adapters used by application callers.
   const observed = await page.evaluate(async cases => {
     // Vite serves this source module; it shares the initialized runtime instance.

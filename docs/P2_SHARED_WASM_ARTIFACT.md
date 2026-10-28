@@ -58,6 +58,11 @@ bindings. The seven handwritten decision implementations are removed. Host time
 inputs are finite, safe integer seconds after flooring and clamping negatives;
 the raw UInt64 interface accepts the full 64-bit range. The host usage adapter
 rounds/clamps percentage values to UInt8; invalid utilization is marked absent.
+An absent, non-finite or unsafe optional reset value is encoded as absent with
+zero payload. Transcript states require UInt32 fields; host delta lengths are
+floored and saturated to UInt32 (non-finite lengths encode zero) before the call.
+Invalid event enums encode the kernel's unknown value. These are input contracts,
+not separate patch or admission implementations.
 
 `index.tsx` imports only the kernel, startup view and theme before initialization.
 App, API connection and stores are behind `import('./appEntry')`, invoked after

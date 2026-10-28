@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { leansysGfmPipeRowAdmitted, leansysRichTagAdmitted, orbTranscriptPatchStep, orbUsageLimitBadge } from "../src/orbKernel";
+import { leansysGfmPipeRowAdmitted, leansysRichTagAdmitted, orbRelativeTimeString, orbTranscriptPatchStep, orbUsageLimitBadge } from "../src/orbKernel";
 import { normalizeLoosePipeTables } from "../src/pipeTables";
 import { RICH_TAG, parseRichTag, richTagSpan } from "../src/richTags";
 
@@ -35,8 +35,18 @@ describe("orb kernel gates mirror lean-sys", () => {
   });
 
   it("hides the percentage when utilization exceeds 100", () => {
+    expect(orbUsageLimitBadge("allowed_warning", "five_hour", true, 100.1, false, NaN)).toEqual({ tone: "warning", label: "Approaching limit · 5h" });
     expect(orbUsageLimitBadge("allowed_warning", "five_hour", true, 150, false, 0)).toEqual({ tone: "warning", label: "Approaching limit · 5h" });
     expect(orbUsageLimitBadge("allowed_warning", "five_hour", true, 100, false, 0)).toEqual({ tone: "warning", label: "Approaching limit · 5h 100%" });
+  });
+
+  it("encodes absent or unrepresentable optional reset values without throwing", () => {
+    for (const reset of [NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(orbUsageLimitBadge("rejected", "five_hour", false, 0, false, reset)).toEqual({ tone: "error", label: "Limit reached" });
+      expect(orbUsageLimitBadge("allowed", "five_hour", false, 0, false, reset)).toBeNull();
+    }
+    expect(() => orbRelativeTimeString(-Infinity)).toThrow("finite");
+    expect(orbRelativeTimeString(-1)).toBe("now");
   });
 
   it("saturates a wrapping delta instead of wrapping", () => {
@@ -50,6 +60,9 @@ describe("orb kernel gates mirror lean-sys", () => {
     expect(orbTranscriptPatchStep(state, -1, 100)).toEqual(state);
     expect(orbTranscriptPatchStep(state, 0.5, 100)).toEqual(state);
     expect(orbTranscriptPatchStep(state, 2, 100)).toEqual({ len: 0, seq: 10 });
+    expect(orbTranscriptPatchStep(state, -1, NaN)).toEqual(state);
+    expect(orbTranscriptPatchStep(state, 1, -1)).toEqual({ len: 42, seq: 10 });
+    expect(orbTranscriptPatchStep(state, 0, 2 ** 32)).toEqual({ len: 0xffff_ffff, seq: 10 });
     expect(orbTranscriptPatchStep(state, 1, 0)).toEqual({ len: 42, seq: 10 });
   });
 });
