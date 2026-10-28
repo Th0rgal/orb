@@ -153,9 +153,9 @@ def main(argv=None):
     ap.add_argument("--expected-orb-head", required=True)
     ap.add_argument("--expected-turbo-head", required=True)
     ap.add_argument("--out", required=True, type=Path, help="new evidence directory; never overwrite a prior run")
-    args = ap.parse_args(argv)
-    TURBO, SYS, TOOLS = (p.resolve() for p in (args.turbo_root, args.lean_sys_root, args.lean_bin_dir))
-    OUT = args.out.resolve()
+    settings = ap.parse_args(argv)
+    TURBO, SYS, TOOLS = (p.resolve() for p in (settings.turbo_root, settings.lean_sys_root, settings.lean_bin_dir))
+    OUT = settings.out.resolve()
     OUT.mkdir(parents=True, exist_ok=False)
     ENV = dict(os.environ, LEAN_PATH=str(OUT), LC_ALL="C", LANG="C")
     COMMANDS.clear()
@@ -214,7 +214,7 @@ def main(argv=None):
         if dirty:
             (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
             raise ValueError(f"dirty {name} inputs; commit/preserve them explicitly before conformance")
-    for name, expected in (("orb", args.expected_orb_head), ("turbo", args.expected_turbo_head)):
+    for name, expected in (("orb", settings.expected_orb_head), ("turbo", settings.expected_turbo_head)):
         if not re.fullmatch(r"[0-9a-f]{40}", expected) or report["repositories"][name]["head"] != expected:
             raise ValueError(f"unexpected {name} revision")
     report["environment"] = {"LEAN_PATH": ENV["LEAN_PATH"], "LC_ALL": "C", "LANG": "C",
