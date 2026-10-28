@@ -34,6 +34,9 @@ export { buildTranscript, applyStreamEvent } from "./transcriptModel";
 export type { StreamItem } from "./transcriptModel";
 
 const DisclosureState=createContext<Map<string,boolean>>();
+type ToolCallLoader=(callId:string)=>Promise<{args?:unknown;result?:unknown}>;
+/** Loads the whole call of a tool row Core shortened (`truncated`). */
+const ToolCallLoaderContext=createContext<ToolCallLoader>();
 function disclosure(key:string,initial=false){
  const state=useContext(DisclosureState);
  const [open,setOpen]=createSignal(state?.get(key)??initial);
@@ -335,8 +338,18 @@ export function UserTurn(p: { text: string; images?: DraftImage[]; source?: stri
   );
 }
 
-function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
-  const [open, setOpen] = disclosure(`tool:${p.item.key}`,false);
+function ToolRow(props: { item: Extract<StreamItem, { kind: "tool" }> }) {
+  const [open, setOpen] = disclosure(`tool:${props.item.key}`,false);
+  // A shortened row shows its excerpt at once and its whole call when loaded.
+  const loadToolCall = useContext(ToolCallLoaderContext);
+  const [full, setFull] = createSignal<{args?:unknown;result?:unknown}>();
+  const [fullError, setFullError] = createSignal("");
+  createEffect(() => {
+    if (!open() || !props.item.truncated || !props.item.done || full() || !loadToolCall) return;
+    setFullError("");
+    loadToolCall(props.item.callId).then(setFull, () => setFullError("The full output couldn’t load. Showing an excerpt."));
+  });
+  const p = { get item() { const f = full(); return f ? { ...props.item, args: f.args ?? props.item.args, result: f.result ?? props.item.result } : props.item; } };
   const [copied, setCopied] = createSignal(false);
   const anchored=anchoredDisclosure();
   let toggle!:HTMLButtonElement;
@@ -390,6 +403,7 @@ function ToolRow(p: { item: Extract<StreamItem, { kind: "tool" }> }) {
             <button type="button" class="icon-btn st-tool-copy" aria-label={copied() ? "Copied" : "Copy tool output"} title={copied() ? "Copied" : "Copy"} onClick={(e) => { e.stopPropagation(); copyDetail(); }}>
               <Show when={copied()} fallback={<Ic.CopyIcon size={12} />}><Ic.CheckIcon size={12} /></Show>
             </button>
+            <Show when={fullError()}><div class="st-tool-note" role="status">{fullError()}</div></Show>
             <Show when={isCommand() && commandText()} fallback={<pre class="st-tool-detail">{detail() || "(no details)"}</pre>}>
               <pre class="st-tool-detail st-tool-bash"><span class="st-bash-cmd">$ {commandText()}</span><Show when={outputOnly()}>{"\n\n"}{outputOnly()}</Show><Show when={p.item.unresolved}>{"\n\n"}This turn ended without a recorded result for this action.</Show></pre>
             </Show>
@@ -638,7 +652,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
   );
 }
 
-export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void }) {
+export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; loadToolCall?: ToolCallLoader }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -683,7 +697,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
   const turnTip = useTooltip<TurnTiming>(TURN_TIP_ID, t => <><div class="row-tip-title">{turnDate(t.completedAt)}</div><Show when={t.workedMs !== undefined}><div class="row-tip-meta">Worked for {workedFor(t.workedMs!)}</div></Show></>, { placement: "top-end", width: 200, class: "turn-tip" });
   return (
     <TurnTipContext.Provider value={turnTip}><FollowUpsContext.Provider value={followUps}>
-      <DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
+      <ToolCallLoaderContext.Provider value={p.loadToolCall}><DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
         {(item) => {
           switch (item.kind) {
             case "work":
@@ -719,7 +733,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
               </ErrorNotice>;
           }
         }}
-      </For>}</VirtualTurns></DisclosureState.Provider>
+      </For>}</VirtualTurns></DisclosureState.Provider></ToolCallLoaderContext.Provider>
       <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} label={p.workingLabel} /></Show>
       <Show when={checklist()?.tasks.length}>
         <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={p.working === false} outcome={turnOutcomeAfter(p.items, checklist()!.key)} />
