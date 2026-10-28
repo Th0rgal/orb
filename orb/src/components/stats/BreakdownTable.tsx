@@ -27,13 +27,17 @@ export function BreakdownTable<T>(p: {
   collapse?: (row: T) => boolean;
   collapsedLabel?: string;
   skeletonRows?: number;
+  /** Show at most this many rows behind a "Show all N" button. */
+  limit?: number;
   empty?: JSX.Element;
 }) {
   const [open, setOpen] = createSignal<string | null>(null);
   const [showAll, setShowAll] = createSignal(false);
+  const [unlimited, setUnlimited] = createSignal(false);
   const cols = () => p.columns.map(c => c.width).join(" ");
   const narrow = () => p.columns.filter(c => !c.hideNarrow).map(c => c.narrowWidth ?? c.width).join(" ");
   const visible = () => (p.rows ?? []).filter(r => showAll() || !p.collapse?.(r));
+  const shown = () => (unlimited() || p.limit == null ? visible() : visible().slice(0, p.limit));
   const folded = () => (p.rows ?? []).filter(r => p.collapse?.(r)).length;
   const cells = (r: T) => <For each={p.columns}>{c =>
     <span role="cell" data-align={c.align ?? "start"} data-narrow={c.hideNarrow ? "hide" : undefined}>{c.cell(r)}</span>
@@ -47,7 +51,7 @@ export function BreakdownTable<T>(p: {
         <span data-narrow={c.hideNarrow ? "hide" : undefined}><span class="st-sk" style={{ width: i() === 0 ? "60%" : "100%" }} /></span>
       }</For></div>}</For>}>
       <Show when={p.rows!.length} fallback={<div class="st-tr" role="row"><span role="cell" class="routing-muted">{p.empty ?? "No data."}</span></div>}>
-        <For each={visible()}>{r => {
+        <For each={shown()}>{r => {
           const key = p.rowKey(r);
           return <Show when={p.detail} fallback={<div class="st-tr" role="row">{cells(r)}</div>}>
             <div class="st-tr st-row" role="row" tabIndex={0} aria-expanded={open() === key}
@@ -56,6 +60,11 @@ export function BreakdownTable<T>(p: {
             <Show when={open() === key}><div class="st-detail" role="row"><div role="cell">{p.detail!(r)}</div></div></Show>
           </Show>;
         }}</For>
+        <Show when={p.limit != null && visible().length > p.limit}>
+          <button class="st-more" onClick={() => setUnlimited(v => !v)} aria-expanded={unlimited()}>
+            {unlimited() ? `Show top ${p.limit}` : `Show all ${visible().length}`}
+          </button>
+        </Show>
         <Show when={folded() > 0}>
           <button class="st-more" onClick={() => setShowAll(v => !v)} aria-expanded={showAll()}>
             {showAll() ? `Hide ${p.collapsedLabel ?? "rows"}` : `${folded()} ${p.collapsedLabel ?? "more"} · show`}

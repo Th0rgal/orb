@@ -8,8 +8,12 @@ for (const theme of ["dark", "light"] as const) for (const width of [1100, 390])
     await page.goto(`/tests/reliability-viz.html?theme=${theme}`);
     const table = page.getByRole("table", { name: "Reliability by provider" });
     const rows = table.locator(".st-row");
-    await expect(rows.first()).toContainText("minimax · MiniMax-M3");
-    await expect(rows.nth(1)).toContainText("openai · gpt-6-astra");
+    await expect(rows.first().locator("strong")).toHaveAttribute("title", "minimax · MiniMax-M3");
+    await expect(rows.nth(1).locator("strong")).toHaveAttribute("title", "openai · gpt-6-astra");
+    await expect(rows.first().locator(".provider-logo")).toBeVisible();
+    // Model and provider names are readable, not clipped to a few letters.
+    if (width >= 1100) for (const el of await table.locator(".st-cell-name > *").all())
+      expect(await el.evaluate(n => n.scrollWidth <= n.clientWidth)).toBe(true);
     await expect(rows.nth(1)).toContainText("Personal");
     // Quota exhaustion is amber waiting, not a red failure.
     const quota = rows.filter({ hasText: "gemini-4-argon-high" });
@@ -25,6 +29,16 @@ for (const theme of ["dark", "light"] as const) for (const width of [1100, 390])
     if (out) await page.screenshot({ path: `${out}/reliability-${theme}-${width}-expanded.png`, fullPage: true });
   });
 }
+
+test("caps the ranked rows at 10 behind Show all", async ({ page }) => {
+  await page.goto(`/tests/reliability-viz.html?many=1`);
+  const table = page.getByRole("table", { name: "Reliability by provider" });
+  await expect(table.locator(".st-row")).toHaveCount(10);
+  await table.getByRole("button", { name: /^Show all \d+$/ }).click();
+  await expect(table.locator(".st-row")).toHaveCount(12);
+  await table.getByRole("button", { name: "Show top 10" }).click();
+  await expect(table.locator(".st-row")).toHaveCount(10);
+});
 
 test("loading renders skeletons of the final size, without a layout jump", async ({ page }) => {
   await page.goto(`/tests/reliability-viz.html?loading=1`);

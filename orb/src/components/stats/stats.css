@@ -65,6 +65,7 @@
 .st-detail { padding: 8px 12px 12px; border-bottom: 1px solid var(--stroke-soft); background: var(--bg-hover); color: var(--fg-2); font-size: 12px; }
 .st-more { display: flex; width: 100%; justify-content: center; gap: 6px; padding: 8px 12px; border: 0; background: transparent; color: var(--fg-3); font: 12px var(--sans); cursor: pointer; }
 .st-more:hover { color: var(--fg); }
+.st-cell-provider { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .st-cell-name { display: flex; flex-direction: column; min-width: 0; }
 .st-cell-name strong { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
 .st-cell-name span { color: var(--fg-3); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
