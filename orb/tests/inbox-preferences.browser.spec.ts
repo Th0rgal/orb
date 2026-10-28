@@ -155,3 +155,34 @@ for (const theme of ["light", "dark"]) test(`AI summaries picker keeps the last 
   await page.getByRole("listbox").getByRole("option", { name: "team/summary", exact: true }).click();
   await expect(picker).toHaveValue("team/summary");
 });
+
+for (const theme of ["light", "dark"]) test(`Custom summary drafts require explicit discard: ${theme}`, async ({ page }) => {
+  await openInbox(page, theme);
+  await page.locator(".inbox-model-pill").click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const picker = page.getByLabel("AI summaries", { exact: true });
+  await expect(picker.locator('option[value="team/summary"]')).toHaveCount(1);
+  for (const dismissal of ["Cancel", "Escape", "Close", "backdrop"]) {
+    await picker.focus();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("End");
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Custom model or chain", exact: true });
+    const input = dialog.getByLabel("Model or chain ID");
+    await input.fill("team/draft");
+    const dismiss = async () => {
+      if (dismissal === "Escape") await page.keyboard.press("Escape");
+      else if (dismissal === "backdrop") await page.mouse.click(5, 5);
+      else await dialog.getByRole("button", { name: dismissal, exact: true }).click();
+    };
+    await dismiss();
+    const confirmation = page.getByRole("dialog", { name: "Discard unsaved changes?", exact: true });
+    await expect(confirmation).toBeVisible();
+    await confirmation.getByRole("button", { name: "Keep editing" }).click();
+    await expect(input).toHaveValue("team/draft");
+    await dismiss();
+    await confirmation.getByRole("button", { name: "Discard changes" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(picker).toHaveValue("");
+  }
+});

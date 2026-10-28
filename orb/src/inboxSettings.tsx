@@ -5,7 +5,7 @@ import { For, Show, createMemo, createSignal, onMount } from "solid-js";
 import { isConnected } from "./api";
 import { listChains, routingCatalog, type ModelChain, type RoutingCatalog } from "./routingApi";
 import { Select } from "./Select";
-import { Dialog } from "./Dialog";
+import { NameDialog } from "./Dialog";
 import { sideQuestionKey } from "./sideQuestionStorage";
 
 export type InboxConfig = {
@@ -76,6 +76,7 @@ export function inboxSummaryChoice(model: string, choice: string) {
 export function InboxSettings() {
   const config = createMemo(inboxConfig);
   const [custom, setCustom] = createSignal<string>();
+  const [customError, setCustomError] = createSignal("");
   const [message, setMessage] = createSignal("");
   const [chains, setChains] = createSignal<ModelChain[]>([]);
   const [catalog, setCatalog] = createSignal<RoutingCatalog | null>(null);
@@ -169,6 +170,7 @@ export function InboxSettings() {
               <Select aria-label="AI summaries" value={config().aiSummary ? config().model : ""} onChange={e => {
                 const choice = e.currentTarget.value;
                 if (choice === "__custom__") {
+                  setCustomError("");
                   setCustom(config().model);
                   e.currentTarget.value = config().aiSummary ? config().model : "";
                 } else save({ ...config(), ...inboxSummaryChoice(config().model, choice) });
@@ -181,16 +183,14 @@ export function InboxSettings() {
           </div><div class="s-row"><span role="status" class="s-row-desc">{message()}</span></div></div>
         </section>
         <Show when={custom() !== undefined}>
-          <Dialog title="Custom model or chain" size="compact" onClose={() => setCustom(undefined)} footer={<>
-            <button class="s-btn" onClick={() => setCustom(undefined)}>Cancel</button>
-            <button class="s-btn primary" disabled={!custom()?.trim()} onClick={() => {
+          <NameDialog title="Custom model or chain" label="Model or chain ID"
+            value={custom() ?? ""} onInput={setCustom} placeholder="provider/model or chain ID"
+            action="Use model" error={customError()} onClose={() => setCustom(undefined)}
+            onAction={() => {
               const next = { ...config(), ...inboxSummaryChoice(config().model, custom()!) };
               if (saveInboxConfig(next)) { setCustom(undefined); setMessage("Saved. Inbox will use this configuration."); }
-              else setMessage("Could not save Inbox settings.");
-            }}>Use model</button>
-          </>}>
-            <input aria-label="Model or chain ID" value={custom() ?? ""} onInput={e => setCustom(e.currentTarget.value)} placeholder="provider/model or chain ID" />
-          </Dialog>
+              else setCustomError("Could not save Inbox settings. Try again.");
+            }} />
         </Show>
       </div>
     </div>

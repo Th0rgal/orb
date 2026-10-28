@@ -10,7 +10,8 @@ controls generation and `model` remembers the selected model/chain. Off writes
 `aiSummary=false` and preserves `model`. Selecting a model writes that model and
 `aiSummary=true`. No new preference or server migration is needed. Custom IDs
 are trimmed and applied only on confirmation; Cancel and blank drafts do not
-change preferences. Include-autonomous and notification preferences are unchanged.
+change preferences. Desktop close requests (Cancel, Escape, X and backdrop) ask
+for confirmation before discarding an edited custom ID; Keep editing preserves it. Include-autonomous and notification preferences are unchanged.
 
 `shared/orb-spec/fixtures/inbox-summary-choice.json` replays selection, Off,
 repeated Off and re-enabling on all three platforms. Desktop also tests actual

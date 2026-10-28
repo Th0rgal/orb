@@ -114,6 +114,8 @@ describe("AI summaries picker", () => {
     fireEvent.change(screen.getByLabelText("AI summaries"), { target: { value: "__custom__" } });
     fireEvent.input(screen.getByLabelText("Model or chain ID"), { target: { value: "custom/new" } });
     fireEvent.click(screen.getByText("Cancel"));
+    expect(screen.getByText("Discard unsaved changes?")).toBeTruthy();
+    fireEvent.click(screen.getByText("Discard changes"));
     expect(inboxConfig().aiSummary).toBe(false);
     expect(inboxConfig().model).toBe("builtin/fast");
   });
