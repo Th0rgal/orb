@@ -50,6 +50,28 @@ fn spawn_streaming_command(cmd: &mut Command) -> anyhow::Result<Child> {
     })
 }
 
+/// Give the native MCP launch wrapper time to forward termination to its
+/// owned harness group and reap it. SIGKILL of only the wrapper leaves the
+/// harness running without a lease. Scope cleanup remains the backstop for
+/// descendants that create their own session (for example `script`).
+pub(crate) async fn terminate_streaming_child(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // The unreaped Child owns this PID, so it cannot have been reused.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        // launch.rs gives the harness five seconds; allow it to reap and exit.
+        if tokio::time::timeout(std::time::Duration::from_secs(6), child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    let _ = child.kill().await;
+}
+
 const CONTAINER_KEEPALIVE_ENV_KEY: &str = "SANDBOXED_SH_CONTAINER_KEEPALIVE";
 const CONTAINER_KEEPALIVE_ENV_VALUE: &str = "1";
 const ALLOW_TRANSIENT_CONTAINER_NSENTER_ENV: &str =
@@ -683,6 +705,48 @@ fn persistent_nspawn_command(scope_args: Option<&[String]>) -> Command {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streaming_termination_lets_wrapper_reap_separate_harness_group() {
+        use std::os::unix::process::CommandExt;
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("harness.pid");
+        // Match sandboxed-mcp launch: the harness has a separate process
+        // group, and the wrapper owns forwarding SIGTERM and reaping it.
+        let script = "set -m; sleep 60 & child=$!; echo $child > \"$1\"; \
+            trap 'kill -TERM -- -$child; wait $child; exit 0' TERM; wait $child";
+        let mut command = tokio::process::Command::new("bash");
+        command.args(["-c", script, "wrapper"]).arg(&pid_file);
+        command.as_std_mut().process_group(0);
+        command.kill_on_drop(true);
+        let mut wrapper = command.spawn().unwrap();
+        let pid: i32 = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+                {
+                    break pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("harness started");
+        super::terminate_streaming_child(&mut wrapper).await;
+        assert!(
+            wrapper.wait().await.unwrap().success(),
+            "wrapper did not finish graceful cleanup"
+        );
+        let alive = unsafe { libc::kill(pid, 0) == 0 };
+        if alive {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(!alive, "harness survived its wrapper");
+    }
+
     use super::spawn_streaming_command;
     #[cfg(target_os = "linux")]
     use super::ConfirmedNoLaunch;

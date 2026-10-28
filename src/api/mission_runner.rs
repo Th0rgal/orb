@@ -12846,6 +12846,38 @@ mod tests {
     }
 
     #[test]
+    fn opencode_tool_steps_do_not_complete_long_running_turns() {
+        let mut state = OpencodeSseState::default();
+        let mission_id = Uuid::new_v4();
+        // Replay the incident: useful tool-only work crossed the old 40-step
+        // cutoff without an assistant text or a terminal provider event.
+        for step in 0..100 {
+            for kind in ["step_start", "step_finish"] {
+                let frame = json!({"type": kind, "sessionID": "ses_regression",
+                    "part": {"reason": "tool-calls", "tokens": {"input": 10, "output": 1}}});
+                let parsed = parse_opencode_sse_event(
+                    &frame.to_string(),
+                    None,
+                    None,
+                    &mut state,
+                    mission_id,
+                )
+                .unwrap();
+                assert!(
+                    !parsed.message_complete,
+                    "premature completion at step {step}"
+                );
+            }
+        }
+        let terminal = json!({"type": "step_finish", "part": {"reason": "stop"}});
+        assert!(
+            parse_opencode_sse_event(&terminal.to_string(), None, None, &mut state, mission_id,)
+                .unwrap()
+                .message_complete
+        );
+    }
+
+    #[test]
     fn parse_opencode_sse_event_response_incomplete_is_not_terminal() {
         let mut state = OpencodeSseState::default();
         let mission_id = Uuid::new_v4();

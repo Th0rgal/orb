@@ -18,6 +18,43 @@ use crate::opencode::{extract_reasoning, extract_text};
 use crate::workspace::Workspace;
 use crate::workspace_exec::WorkspaceExec;
 
+/// Stop the exact launch scope before releasing the runner. A PTY helper
+/// such as `script` creates a new session, so killing a parent/group alone
+/// cannot guarantee that its writer is gone. Never select scopes by name
+/// prefix or sweep all generations of a mission here.
+async fn terminate_opencode_child(child: &mut tokio::process::Child, _mission_id: Uuid) {
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = child.id() {
+        // Child is still unreaped: PID ownership cannot have been reused.
+        if let Ok(cgroups) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) {
+            if let Some(unit) = owned_opencode_scope(&cgroups, _mission_id) {
+                let stopped = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    crate::api::scope_reaper::stop_unit(unit, "OpenCode runner teardown"),
+                )
+                .await;
+                if matches!(stopped, Ok(true))
+                    && tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                        .await
+                        .is_ok()
+                {
+                    return;
+                }
+            }
+        }
+    }
+    crate::workspace_exec::terminate_streaming_child(child).await;
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn owned_opencode_scope(cgroups: &str, mission_id: Uuid) -> Option<&str> {
+    cgroups
+        .lines()
+        .filter_map(|line| line.splitn(3, ':').nth(2))
+        .filter_map(|path| path.rsplit('/').next())
+        .find(|unit| crate::workspace_exec::exec_unit_belongs_to_mission(unit, mission_id))
+}
+
 /// Default inactivity threshold when neither heartbeats, proxy streaming, nor
 /// a live tool/child are observed. Thinking models routinely spend 2–5 minutes
 /// inside a reasoning segment with zero harness output, so 120s produced false
@@ -829,7 +866,6 @@ pub async fn run_opencode_turn(
     let mut final_result = String::new();
     let mut had_error = false;
     let mut final_result_from_nonzero_exit = false;
-    let mut tool_call_step_count: u32 = 0;
     let session_id_capture: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stderr_text_buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let stderr_recent_lines: Arc<Mutex<VecDeque<String>>> =
@@ -1117,7 +1153,7 @@ pub async fn run_opencode_turn(
         tokio::select! {
             _ = cancel.cancelled() => {
                 tracing::info!(mission_id = %mission_id, "OpenCode execution cancelled, killing process");
-                let _ = child.kill().await;
+                terminate_opencode_child(&mut child, mission_id).await;
                 // Await background tasks so in-flight mutex writes complete
                 // before we return.  Use the same teardown discipline as the
                 // normal exit path to avoid data races on shared state.
@@ -1200,7 +1236,7 @@ pub async fn run_opencode_turn(
                             mission_id: Some(mission_id),
                             resumable: true,
                         });
-                        let _ = child.kill().await;
+                        terminate_opencode_child(&mut child, mission_id).await;
                         break;
                     }
                 }
@@ -1224,7 +1260,8 @@ pub async fn run_opencode_turn(
                             mission_id = %mission_id,
                             "OpenCode completion observed; terminating lingering CLI process"
                         );
-                        let _ = child.kill().await;
+                        // A successful turn may intentionally leave background work.
+                        crate::workspace_exec::terminate_streaming_child(&mut child).await;
                         break;
                     }
                 }
@@ -1262,7 +1299,7 @@ pub async fn run_opencode_turn(
                                 mission_id = %mission_id,
                                 "Session idle for 10s after meaningful work; treating as completion"
                             );
-                            let _ = child.kill().await;
+                            crate::workspace_exec::terminate_streaming_child(&mut child).await;
                             break;
                         }
                     }
@@ -1283,7 +1320,7 @@ pub async fn run_opencode_turn(
                             mission_id = %mission_id,
                             "Rate-limit retry loop detected with no SSE activity; terminating CLI process early"
                         );
-                        let _ = child.kill().await;
+                        terminate_opencode_child(&mut child, mission_id).await;
                         break;
                     }
                 }
@@ -1335,7 +1372,7 @@ pub async fn run_opencode_turn(
                                 opencode_text_idle_timeout_secs
                             ));
                             killed_by_idle_timeout = true;
-                            let _ = child.kill().await;
+                            terminate_opencode_child(&mut child, mission_id).await;
                             break;
                         }
                     }
@@ -1414,7 +1451,7 @@ pub async fn run_opencode_turn(
                             inactivity_elapsed.as_secs()
                         ));
                         killed_by_idle_timeout = true;
-                        let _ = child.kill().await;
+                        terminate_opencode_child(&mut child, mission_id).await;
                         break;
                     }
                 }
@@ -1554,37 +1591,6 @@ pub async fn run_opencode_turn(
                                         }
                                     }
                                 }
-                            } else if event_type == "step_finish" {
-                                let reason = json
-                                    .get("part")
-                                    .and_then(|p| p.get("reason"))
-                                    .and_then(|r| r.as_str())
-                                    .unwrap_or("");
-                                tracing::info!(
-                                    mission_id = %mission_id,
-                                    reason = %reason,
-                                    tool_call_steps = tool_call_step_count,
-                                    "OpenCode JSON step_finish event"
-                                );
-                                // Match the shared SSE parser: an empty reason
-                                // also marks the final step (some providers omit
-                                // it); otherwise completion waits on idle
-                                // timeouts or process exit.
-                                if reason == "stop" || reason.is_empty() {
-                                    let _ = sse_complete_tx.send(true);
-                                } else {
-                                    // Track consecutive tool-call steps to detect runaway loops
-                                    tool_call_step_count += 1;
-                                    const MAX_TOOL_CALL_STEPS: u32 = 40;
-                                    if tool_call_step_count >= MAX_TOOL_CALL_STEPS {
-                                        tracing::warn!(
-                                            mission_id = %mission_id,
-                                            steps = tool_call_step_count,
-                                            "OpenCode tool-call step limit reached, forcing completion"
-                                        );
-                                        let _ = sse_complete_tx.send(true);
-                                    }
-                                }
                             } else if event_type == "step_start" {
                                 // Extract session ID from step_start
                                 if let Some(sid) =
@@ -1646,10 +1652,9 @@ pub async fn run_opencode_turn(
                             }
 
                             // Route through SSE event parser for thinking/tool events.
-                            // Skip events already handled inline to avoid double processing
-                            // (e.g. step_finish would set message_complete in the SSE parser
-                            // even for tool-call steps, conflicting with the inline handler).
-                            let skip_sse = matches!(event_type, "step_finish" | "step_start" | "text");
+                            // Use the same completion rules for stdout and SSE. Tool-call
+                            // steps are progress, never completion, regardless of their count.
+                            let skip_sse = matches!(event_type, "step_start" | "text");
                             let current_session = session_id_capture.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             if !skip_sse {
                             if let Some(parsed) = parse_opencode_sse_event(
@@ -1842,7 +1847,7 @@ pub async fn run_opencode_turn(
                     mission_id = %mission_id,
                     "OpenCode CLI wait timed out; forcing shutdown"
                 );
-                let _ = child.kill().await;
+                terminate_opencode_child(&mut child, mission_id).await;
                 had_error = true;
                 if final_result.is_empty() {
                     final_result = "OpenCode CLI did not exit after completion".to_string();
@@ -2389,6 +2394,24 @@ mod path_tests {
         opencode_inactivity_should_kill, opencode_model_argument, opencode_path,
     };
     use std::time::Duration;
+
+    #[test]
+    fn teardown_scope_requires_exact_mission_ownership() {
+        let mission = uuid::Uuid::parse_str("86d91cc3-671c-472d-91d4-0fc17e446ad4").unwrap();
+        let unit = "sandboxed-exec-host-m86d91cc3671c472d91d40fc17e446ad4-7629f2a4.scope";
+        let cgroup = format!("0::/missions.slice/{unit}");
+        assert_eq!(super::owned_opencode_scope(&cgroup, mission), Some(unit));
+        assert!(super::owned_opencode_scope(&cgroup, uuid::Uuid::new_v4()).is_none());
+        assert!(
+            super::owned_opencode_scope("0::/system.slice/sandboxed-sh-prod.service", mission)
+                .is_none()
+        );
+        assert!(super::owned_opencode_scope(
+            "0::/missions.slice/sandboxed-exec-host-m86d91cc3-7629f2a4.scope",
+            mission
+        )
+        .is_none());
+    }
 
     #[test]
     fn host_proxy_probe_covers_google_and_other_proxy_adapters() {

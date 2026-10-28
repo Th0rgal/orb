@@ -157,11 +157,17 @@ pub(crate) fn schedule_mission_scope_teardown(
     });
 }
 
-/// Statuses after which a host mission is not expected to continue.
+/// Statuses whose runner must be gone before any future continuation.
+/// A failed/interrupted turn can be resumed, but its old writer cannot survive.
+/// Intentionally parked background work keeps its scope between turns.
 fn status_ends_host_scope(status: &MissionStatus) -> bool {
     matches!(
         status,
-        MissionStatus::Completed | MissionStatus::Acknowledged | MissionStatus::NotFeasible
+        MissionStatus::Completed
+            | MissionStatus::Acknowledged
+            | MissionStatus::NotFeasible
+            | MissionStatus::Failed
+            | MissionStatus::Interrupted
     )
 }
 
@@ -492,6 +498,28 @@ async fn run_once(state: &Arc<AppState>) -> ReaperReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_host_runs_release_scopes_but_parked_work_survives() {
+        for status in [MissionStatus::Failed, MissionStatus::Interrupted] {
+            assert!(status_triggers_teardown(&status));
+            assert!(status_ends_host_scope(&status));
+            assert!(!status_keeps_scopes(&status));
+        }
+        for status in [
+            MissionStatus::AwaitingUser,
+            MissionStatus::Paused,
+            MissionStatus::WaitingBackground,
+            MissionStatus::Active,
+            MissionStatus::Pending,
+        ] {
+            assert!(!status_ends_host_scope(&status));
+        }
+        // A resumed generation observed during teardown grace wins over the
+        // previous failure; the delayed cleanup must leave its scopes alone.
+        assert!(status_keeps_scopes(&MissionStatus::Active));
+        assert!(status_keeps_scopes(&MissionStatus::WaitingBackground));
+    }
 
     #[test]
     fn legacy_scopes_fail_closed_when_mission_index_is_incomplete() {
