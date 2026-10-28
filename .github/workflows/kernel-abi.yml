@@ -76,6 +76,15 @@ jobs:
         run: python3 scripts/gen_orb_kernel_unboxed.py --check
       - name: Generated bindings are up to date
         run: python3 scripts/gen_kernel_bindings.py --check
+      - name: Scalar shared WASM validates its complete ABI and has no imports
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v scripts/test_wasm_abi.py
+          mkdir -p audit-results
+          python3 scripts/build_orb_kernel_wasm.py \
+            --lean-bin-dir "$(lean --print-prefix)/bin" \
+            --out /tmp/orb_kernel.wasm \
+            --receipt audit-results/wasm-build.json
       - name: Kernel call-site lint
         run: python3 scripts/lint_kernel_calls.py
       - name: Manifest / generator / lint regression tests
