@@ -3,15 +3,17 @@ import XCTest
 
 final class OrbContractTests: XCTestCase {
     @MainActor func testPresentationKeepsAnswerAndExcludesQueuedPromptsAndTools() {
-        let value: OrbJSON = .object(["events": .array([
-            .object(["event_type": .string("assistant_message"), "content": .string("Final answer")]),
-            .object(["event_type": .string("user_message"), "content": .string("Next"), "metadata": .object(["queued": .bool(true)])]),
-            .object(["event_type": .string("tool_result"), "content": .string("Large output")])
-        ])])
-        let history = OrbPresentation.history(value)
-        XCTAssertEqual(history.count, 1)
-        XCTAssertEqual(history.first?["content"].text, "Final answer")
-        XCTAssertEqual(history.first?["role"].text, "assistant")
+        for type in ["assistant_message", "assistant_message_canonical"] {
+            let value: OrbJSON = .object(["events": .array([
+                .object(["event_type": .string(type), "content": .string("Final answer")]),
+                .object(["event_type": .string("user_message"), "content": .string("Next"), "metadata": .object(["queued": .bool(true)])]),
+                .object(["event_type": .string("tool_result"), "content": .string("Large output")])
+            ])])
+            let history = OrbPresentation.history(value)
+            XCTAssertEqual(history.count, 1)
+            XCTAssertEqual(history.first?["content"].text, "Final answer")
+            XCTAssertEqual(history.first?["role"].text, "assistant")
+        }
     }
 
     func testInboxAccountSurvivesTokenRenewalAndSeparatesUsers() {

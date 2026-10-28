@@ -620,7 +620,7 @@ enum OrbReadCache {
         snapshot["events"].items.compactMap { event in
             let type = event["event_type"].text
             if case .bool(true) = event["metadata"]["queued"] { return nil }
-            guard type == "assistant_message" || type == "user_message" else { return nil }
+            guard type == "assistant_message" || type == "assistant_message_canonical" || type == "user_message" else { return nil }
             return .object(["role": .string(type == "user_message" ? "user" : "assistant"), "content": event["content"]])
         }
     }

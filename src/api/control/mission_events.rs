@@ -1071,7 +1071,7 @@ pub async fn get_mission_snapshot(
             .get_events_before(
                 mission_id,
                 revision.saturating_add(1),
-                Some(&["assistant_message"]),
+                Some(&["assistant_message", "assistant_message_canonical"]),
                 Some(1),
             )
             .await
@@ -1084,6 +1084,7 @@ pub async fn get_mission_snapshot(
                 Some(&[
                     "user_message",
                     "assistant_message",
+                    "assistant_message_canonical",
                     "mission_activity",
                     "phase",
                     "mission_status_changed",

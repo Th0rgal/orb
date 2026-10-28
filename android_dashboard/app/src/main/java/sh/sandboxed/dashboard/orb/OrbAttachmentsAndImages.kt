@@ -624,6 +624,7 @@ fun OrbImageGallery(
         initialPage = startIndex.coerceIn(0, maxOf(0, images.lastIndex)),
         pageCount = { images.size }
     )
+    val displayed = remember(images, workspaceId, OrbDisk.currentScope()) { androidx.compose.runtime.mutableStateMapOf<Int, Bitmap>() }
     val currentTitle = images.getOrNull(pagerState.currentPage)?.filename ?: ""
 
     Box(
@@ -637,14 +638,16 @@ fun OrbImageGallery(
         ) { page ->
             val ref = images[page]
             val cacheKey = OrbRemoteImageLoader.key(ref, workspaceId)
-            var bitmap by remember(cacheKey) { mutableStateOf(OrbRemoteImageLoader.cached(cacheKey)) }
+            val bitmap = displayed[page] ?: OrbRemoteImageLoader.cached(cacheKey)
+            androidx.compose.runtime.DisposableEffect(displayed, page) {
+                onDispose { displayed.remove(page) }
+            }
             var scale by remember { mutableFloatStateOf(1f) }
             var offset by remember { mutableStateOf(Offset.Zero) }
 
             LaunchedEffect(cacheKey) {
-                if (bitmap == null) {
-                    bitmap = OrbRemoteImageLoader.load(ref, workspaceId, core)
-                }
+                val loaded = bitmap ?: OrbRemoteImageLoader.load(ref, workspaceId, core)
+                if (loaded != null) displayed[page] = loaded
             }
 
             Box(
@@ -706,7 +709,7 @@ fun OrbImageGallery(
                         .clip(CircleShape)
                         .background(Color.White.copy(alpha = 0.14f))
                         .orbPressClickable {
-                            val bmp = OrbRemoteImageLoader.cached(OrbRemoteImageLoader.key(ref, workspaceId)) ?: return@orbPressClickable
+                            val bmp = displayed[pagerState.currentPage] ?: return@orbPressClickable
                             scope.launch {
                                 val png = withContext(Dispatchers.Default) {
                                     java.io.ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()

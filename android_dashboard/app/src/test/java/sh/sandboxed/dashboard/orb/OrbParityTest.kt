@@ -5,6 +5,18 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class OrbParityTest {
+    @Test fun presentationKeepsBothAnswerFormsAndExcludesQueuedPrompts() {
+        for (type in listOf("assistant_message", "assistant_message_canonical")) {
+            val rows = OrbPresentation.history(mapOf("events" to listOf(
+                mapOf("event_type" to type, "content" to "Final answer", "sequence" to 1),
+                mapOf("event_type" to "user_message", "content" to "Next", "metadata" to mapOf("queued" to true)),
+                mapOf("event_type" to "tool_result", "content" to "Large output")
+            )))
+            assertEquals(1, rows.size)
+            assertEquals("Final answer", rows.first().str("content"))
+        }
+    }
+
     @Test
     fun messageImagesStripOwnLineMarkers() {
         val parsed = OrbMessageImages.parse("Here is the chart:\n[Image #1] [Uploaded: /tmp/chart.png]\nDone.")

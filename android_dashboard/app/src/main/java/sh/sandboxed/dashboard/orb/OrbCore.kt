@@ -1393,15 +1393,18 @@ object OrbPresentation {
         if (id == null) pending.addAll(recent) else if (id in recent) pending.add(id)
     }
     @Synchronized private fun batch(): List<String> = pending.take(3).also { pending.removeAll(it.toSet()) }
+    fun history(snapshot: Map<String, Any?>): List<OrbRow> {
+        return OrbJSON.dictList(snapshot["events"]).mapNotNull { event ->
+            val type = OrbJSON.str(event, "event_type")
+            if ((OrbJSON.dict(event["metadata"])?.get("queued") as? Boolean) == true || (type != "assistant_message" && type != "assistant_message_canonical" && type != "user_message")) null
+            else OrbRow("presentation:${event["sequence"] ?: event["id"]}", mapOf("role" to if (type == "user_message") "user" else "assistant", "content" to event["content"]))
+        }
+    }
     suspend fun load(id: String, core: OrbCore): List<OrbRow> {
         val account = OrbDisk.currentScope()
         val snapshot = core.fetchDict("/api/control/missions/${core.encodeComponent(id)}/snapshot?profile=presentation")
         if (account != OrbDisk.currentScope() || OrbJSON.str(snapshot, "profile") != "presentation") return emptyList()
-        val rows = OrbJSON.dictList(snapshot["events"]).mapNotNull { event ->
-            val type = OrbJSON.str(event, "event_type")
-            if ((OrbJSON.dict(event["metadata"])?.get("queued") as? Boolean) == true || (type != "assistant_message" && type != "user_message")) null
-            else OrbRow("presentation:${event["sequence"] ?: event["id"]}", mapOf("role" to if (type == "user_message") "user" else "assistant", "content" to event["content"]))
-        }
+        val rows = history(snapshot)
         synchronized(this) {
             if (account != OrbDisk.currentScope()) return emptyList()
             val key = "$account|$id"
@@ -1415,6 +1418,7 @@ object OrbPresentation {
         return rows
     }
     suspend fun monitor(core: OrbCore) {
+        if (!core.isConfigured) return
         while (kotlinx.coroutines.currentCoroutineContext().isActive) {
             ensureScope()
             val account = OrbDisk.currentScope()
