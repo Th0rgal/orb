@@ -445,8 +445,29 @@ async fn codex_continuity_unresolved_tool_stays_fenced_across_outer_restart() {
         .err()
         .unwrap();
     assert!(error.to_string().contains("unresolved_tools"));
-    assert_eq!(f.requests("initialize").len(), count);
+    // Read-only resume may discover a late terminal receipt, but no new
+    // command/turn may start while this outcome remains unknown.
+    assert_eq!(f.requests("initialize").len(), count + 1);
     assert_eq!(f.requests("turn/start").len(), 1);
+}
+
+#[tokio::test]
+async fn codex_continuity_reconciles_late_failed_tool_receipt_before_next_turn() {
+    let f = Fixture::new();
+    f.run("late-tool-receipt", "launch background verification")
+        .await;
+    let journal_path = f.config.path.with_extension("tools.json");
+    let journal = ToolCallJournal::at(journal_path);
+    assert_eq!(journal.pending().await.unwrap().len(), 1);
+    assert_eq!(f.requests("turn/start").len(), 1);
+    f.run("normal", "inspect the failed verification and continue")
+        .await;
+    assert!(journal.pending().await.unwrap().is_empty());
+    assert_eq!(f.state()["starts"], 1, "must reuse the bound native thread");
+    assert_eq!(f.requests("turn/start").len(), 2);
+    assert_eq!(f.state()["turns"][0]["items"][0]["status"], "failed");
+    assert_eq!(f.state()["turns"][0]["items"][0]["exitCode"], -1);
+    f.assert_processes_stopped();
 }
 
 #[tokio::test]

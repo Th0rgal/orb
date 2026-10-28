@@ -16,8 +16,15 @@ pub struct PendingToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum Entry {
-    Started { descriptor: PendingToolCall },
-    Completed { descriptor: PendingToolCall },
+    Started {
+        descriptor: PendingToolCall,
+    },
+    Completed {
+        descriptor: PendingToolCall,
+        /// A terminal native receipt means settled, including a failed command.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<serde_json::Value>,
+    },
 }
 
 pub struct ToolCallJournal {
@@ -101,9 +108,10 @@ impl ToolCallJournal {
         let _guard = lock().lock().await;
         let mut entries = self.load_entries().await?;
         entries.retain(|entry| match entry {
-            Entry::Started { descriptor: old } | Entry::Completed { descriptor: old } => {
-                old.id != descriptor.id
-            }
+            Entry::Started { descriptor: old }
+            | Entry::Completed {
+                descriptor: old, ..
+            } => old.id != descriptor.id,
         });
         entries.push(Entry::Started { descriptor });
         self.store(&entries).await
@@ -117,11 +125,50 @@ impl ToolCallJournal {
                 if descriptor.id == id {
                     *entry = Entry::Completed {
                         descriptor: descriptor.clone(),
+                        receipt: None,
                     };
                     self.store(&entries).await?;
                     break;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Reconcile only terminal tool receipts from an identity-checked native
+    /// thread snapshot. A completed turn alone says nothing about a background
+    /// command; an absent or still-running item remains fenced.
+    pub async fn reconcile_native_receipts(
+        &self,
+        turns: &[serde_json::Value],
+    ) -> anyhow::Result<()> {
+        let _guard = lock().lock().await;
+        let mut entries = self.load_entries().await?;
+        let mut changed = false;
+        for entry in &mut entries {
+            let Entry::Started { descriptor } = entry else {
+                continue;
+            };
+            let receipt = turns
+                .iter()
+                .filter_map(|turn| turn.get("items").and_then(|items| items.as_array()))
+                .flatten()
+                .find(|item| {
+                    item["id"].as_str() == Some(descriptor.id.as_str())
+                        && item["type"].as_str().is_some()
+                        && item["type"] == descriptor.start_payload["type"]
+                        && matches!(item["status"].as_str(), Some("completed" | "failed"))
+                });
+            if let Some(receipt) = receipt {
+                *entry = Entry::Completed {
+                    descriptor: descriptor.clone(),
+                    receipt: Some(receipt.clone()),
+                };
+                changed = true;
+            }
+        }
+        if changed {
+            self.store(&entries).await?;
         }
         Ok(())
     }
@@ -151,6 +198,39 @@ impl ToolCallJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_receipt_reconciliation_requires_exact_terminal_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = ToolCallJournal::at(dir.path().join("tools.json"));
+        journal.started(PendingToolCall {
+            id: "background-tool".into(), name: "bash".into(),
+            start_payload: serde_json::json!({"id":"background-tool", "type":"commandExecution", "status":"inProgress"}),
+        }).await.unwrap();
+        for item in [
+            serde_json::json!({"id":"background-tool", "type":"commandExecution", "status":"inProgress"}),
+            serde_json::json!({"id":"other-tool", "type":"commandExecution", "status":"completed"}),
+            serde_json::json!({"id":"background-tool", "type":"mcpToolCall", "status":"completed"}),
+            serde_json::json!({"id":"background-tool", "type":"commandExecution"}),
+        ] {
+            journal
+                .reconcile_native_receipts(&[
+                    serde_json::json!({"status":"completed","items":[item]}),
+                ])
+                .await
+                .unwrap();
+            assert_eq!(journal.pending().await.unwrap().len(), 1);
+        }
+        let receipt = serde_json::json!({"id":"background-tool", "type":"commandExecution", "status":"failed", "exitCode":-1});
+        let turns = [serde_json::json!({"status":"completed","items":[receipt.clone()]})];
+        journal.reconcile_native_receipts(&turns).await.unwrap();
+        journal.reconcile_native_receipts(&turns).await.unwrap();
+        assert!(journal.pending().await.unwrap().is_empty());
+        let entries = journal.load_entries().await.unwrap();
+        assert!(
+            matches!(&entries[0], Entry::Completed { receipt: Some(saved), .. } if saved == &receipt)
+        );
+    }
 
     #[tokio::test]
     async fn lifecycle_is_atomic_idempotent_and_clearable() {

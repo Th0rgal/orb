@@ -316,15 +316,6 @@ async fn send_message_streaming_app_server(
         Some(config) => Some(continuity::Lease::acquire(config).await?),
         None => None,
     };
-    if let Some(lease) = &native_lease {
-        if !ToolCallJournal::at(lease.journal_path())
-            .pending()
-            .await?
-            .is_empty()
-        {
-            return Err(anyhow::anyhow!("codex_continuity_unresolved_tools: previous tool outcome needs reconciliation; no command was replayed"));
-        }
-    }
     let session_arc = AppServerSession::spawn(app_cfg, &session.directory, workspace_exec).await?;
     let session_arc = Arc::new(session_arc);
 
@@ -413,6 +404,15 @@ async fn send_message_streaming_app_server(
                 return Err(anyhow::anyhow!("codex_continuity_identity: native thread id/cwd does not match binding"));
             }
             lease.bind(&thread.id)?;
+            // A background command can settle during app-server shutdown, after
+            // this driver stopped receiving item/completed. Resume the exact
+            // bound native thread to reconcile receipts before admitting input;
+            // never replay a command or discard an unknown outcome.
+            let journal = ToolCallJournal::at(lease.journal_path());
+            journal.reconcile_native_receipts(&thread.turns).await?;
+            if !journal.pending().await?.is_empty() {
+                return Err(anyhow::anyhow!("codex_continuity_unresolved_tools: previous tool outcome needs reconciliation; no command was replayed"));
+            }
         }
         let plan_model = plan_model.unwrap_or_default();
         cyber_program = cfg
