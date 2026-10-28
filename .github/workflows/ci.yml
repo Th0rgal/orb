@@ -231,6 +231,9 @@ jobs:
       # Downloads only on a cache miss; always installs the apt deps.
       - run: pnpm exec playwright install --with-deps chromium webkit
       - run: pnpm test:browser --shard=${{ matrix.shard }}/2
+      - name: Shared kernel startup and browser adapters
+        if: matrix.shard == 1
+        run: pnpm exec playwright test --config=playwright.kernel.config.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:

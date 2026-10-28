@@ -57,5 +57,5 @@ export default defineConfig({
   ] },
   // Polling also detects edits made by agent processes without macOS file events.
   server: { port: 1430, strictPort: true, watch: { usePolling: true, interval: 500, ignored: ["**/src-tauri/**", "**/target/**", "**/dist/**"] } },
-  build: { target: "safari15" },
+  build: { target: "safari15", manifest: true },
 });

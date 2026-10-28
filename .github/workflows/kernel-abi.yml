@@ -83,7 +83,7 @@ jobs:
           mkdir -p audit-results
           python3 scripts/build_orb_kernel_wasm.py \
             --lean-bin-dir "$(lean --print-prefix)/bin" \
-            --out /tmp/orb_kernel.wasm \
+            --check --out orb/src/assets/orb_kernel.wasm \
             --receipt audit-results/wasm-build.json
       - name: Kernel call-site lint
         run: python3 scripts/lint_kernel_calls.py

@@ -23,6 +23,12 @@ for (const file of [...seen]) {
   const code = fs.readFileSync(path.join(assets, file), "utf8");
   for (const m of code.matchAll(/import\(["']\.\/([^"']+\.js)["']\)/g)) visit(m[1]);
 }
+// App starts automatically after WASM, so its new import boundary is not a
+// lazy feature. Keep counting its complete static graph against the same budget.
+const manifest = JSON.parse(fs.readFileSync(path.join(dist, ".vite/manifest.json"), "utf8"));
+const app = manifest["src/appEntry.tsx"];
+if (!app) throw new Error("Missing eager App entry in Vite manifest");
+visit(path.basename(app.file));
 let bytes = 0;
 const offenders = [];
 for (const file of seen) {

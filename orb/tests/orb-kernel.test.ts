@@ -47,6 +47,8 @@ describe("orb kernel gates mirror lean-sys", () => {
   it("leaves the state unchanged on an unknown event kind", () => {
     const state = { len: 42, seq: 9 };
     expect(orbTranscriptPatchStep(state, 3, 100)).toEqual(state);
+    expect(orbTranscriptPatchStep(state, -1, 100)).toEqual(state);
+    expect(orbTranscriptPatchStep(state, 0.5, 100)).toEqual(state);
     expect(orbTranscriptPatchStep(state, 2, 100)).toEqual({ len: 0, seq: 10 });
     expect(orbTranscriptPatchStep(state, 1, 0)).toEqual({ len: 42, seq: 10 });
   });
