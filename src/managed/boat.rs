@@ -62,6 +62,20 @@ impl BoatProvider {
         idempotency_key: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<Value, String> {
+        self.call_bounded(method, path, body, idempotency_key, timeout, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_bounded(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        idempotency_key: Option<&str>,
+        timeout: Option<Duration>,
+        max_bytes: Option<usize>,
+    ) -> Result<Value, String> {
         let mut req = self
             .http
             .request(method.clone(), format!("{}{}", self.base, path))
@@ -75,12 +89,29 @@ impl BoatProvider {
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let resp = req
+        let mut resp = req
             .send()
             .await
             .map_err(|e| format!("boat {method} {path}: {}", e.without_url()))?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = if let Some(limit) = max_bytes {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|_| "boat: response read failed")?
+            {
+                if chunk.len() > limit.saturating_sub(bytes.len()) {
+                    return Err(
+                        "boat: raw operation response exceeded limit; outcome uncertain".into(),
+                    );
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            String::from_utf8(bytes).map_err(|_| "boat: invalid response encoding")?
+        } else {
+            resp.text().await.unwrap_or_default()
+        };
         if !status.is_success() {
             let code = serde_json::from_str::<Value>(&text)
                 .ok()
@@ -101,6 +132,26 @@ impl BoatProvider {
         }
         serde_json::from_str(&text).map_err(|e| format!("boat {path}: bad JSON: {e}"))
     }
+}
+
+/// Boat `from` names a saved snapshot/share; omitting it selects the provider
+/// base image. `provider-default` is an explicit Core allowlist sentinel.
+fn spawn_body(spec: &SpawnSpec) -> Value {
+    let mut body = json!({
+        "type": spec.size,
+        "ttlSeconds": spec.ttl_seconds,
+        // The account's base environment carries GitHub and agent
+        // credentials; managed nodes must never receive them.
+        "noEnv": true,
+    });
+    if let Some(image) = spec
+        .image
+        .as_deref()
+        .filter(|i| !i.is_empty() && *i != "provider-default")
+    {
+        body["from"] = json!(image);
+    }
+    body
 }
 
 fn machine_from(v: &Value) -> Option<ProviderMachine> {
@@ -146,16 +197,7 @@ impl ManagedProvider for BoatProvider {
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
-        let mut body = json!({
-            "type": spec.size,
-            "ttlSeconds": spec.ttl_seconds,
-            // The account's base environment carries GitHub and agent
-            // credentials; managed nodes must never receive them.
-            "noEnv": true,
-        });
-        if let Some(image) = spec.image.as_deref().filter(|i| !i.is_empty()) {
-            body["from"] = json!(image);
-        }
+        let body = spawn_body(spec);
         let v = self
             .call(
                 reqwest::Method::POST,
@@ -405,6 +447,41 @@ impl ManagedProvider for BoatProvider {
         .await
     }
 
+    async fn raw_exec(
+        &self,
+        provider_id: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
+        self.call_bounded(
+            reqwest::Method::POST,
+            &format!("/sandboxes/{provider_id}/commands"),
+            Some(json!({"command": command, "timeoutSeconds": timeout_secs})),
+            None,
+            Some(Duration::from_secs(timeout_secs + 5)),
+            Some(512 * 1024),
+        )
+        .await
+    }
+
+    async fn raw_write_file(
+        &self,
+        provider_id: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        self.call_bounded(
+            reqwest::Method::PUT,
+            &format!("/sandboxes/{provider_id}/files"),
+            Some(json!({"path": path, "content": content})),
+            None,
+            Some(Duration::from_secs(30)),
+            Some(512 * 1024),
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn usage(&self, provider_id: &str) -> Result<ProviderUsage, String> {
         let v = self
             .call(
@@ -420,5 +497,33 @@ impl ManagedProvider for BoatProvider {
             seconds: v.get("seconds").and_then(Value::as_u64).unwrap_or(0),
             running: v.get("running").and_then(Value::as_bool).unwrap_or(false),
         })
+    }
+}
+
+#[cfg(test)]
+mod raw_image_tests {
+    use super::*;
+    fn spec(image: &str) -> SpawnSpec {
+        SpawnSpec {
+            size: "small".into(),
+            ttl_seconds: 600,
+            image: Some(image.into()),
+            name: "test".into(),
+            idempotency_key: "test".into(),
+        }
+    }
+    #[test]
+    fn provider_default_omits_snapshot_but_never_injects_account_environment() {
+        let body = spawn_body(&spec("provider-default"));
+        assert!(body.get("from").is_none());
+        assert_eq!(body["noEnv"], true);
+        assert_eq!(body["ttlSeconds"], 600);
+        assert_eq!(body["type"], "small");
+    }
+    #[test]
+    fn named_images_still_use_from_without_account_environment() {
+        let body = spawn_body(&spec("orb-node-base"));
+        assert_eq!(body["from"], "orb-node-base");
+        assert_eq!(body["noEnv"], true);
     }
 }

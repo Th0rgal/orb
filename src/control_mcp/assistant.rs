@@ -254,6 +254,8 @@ struct DownloadSharedFileParams {
 #[derive(Debug, Deserialize)]
 struct SpawnManagedParams {
     #[serde(default)]
+    provisioning_mode: Option<crate::managed::ProvisioningMode>,
+    #[serde(default)]
     size: Option<String>,
     #[serde(default)]
     cpu: Option<u32>,
@@ -1664,7 +1666,8 @@ impl AssistantMcp {
                         "cpu": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Minimum vCPUs needed (alternative to size)."},
                         "ram_gb": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Minimum RAM in GB needed (alternative to size)."},
                         "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Initial lifetime; auto-extended while busy (within budget). Default 60."},
-                        "image": {"type": "string", "description": "Image (named snapshot). Default orb-node-base."},
+                        "image": {"type": "string", "description": "Image (named snapshot). Worker default orb-node-base; raw requires an explicit operator-allowlisted clean image."},
+                        "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM: no guest writes or Orb node; same ownership, budgets and TTL. Source forks/snapshots inherit mode."},
                         "from_snapshot": {"type": "string", "description": "Start from one of your project's snapshots (list_managed_snapshots) with repos, toolchains and caches ready."},
                         "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
                     }
@@ -2839,6 +2842,9 @@ impl AssistantMcp {
             let spawned = self
                 .spawn_managed_machine_with(
                     SpawnManagedParams {
+                        // Mission placement requires an enrolled worker. Never inherit
+                        // raw mode from a snapshot and rent an unusable machine.
+                        provisioning_mode: Some(crate::managed::ProvisioningMode::Worker),
                         size: size.filter(|s| !s.is_empty()),
                         cpu: None,
                         ram_gb: None,
@@ -3482,6 +3488,7 @@ impl AssistantMcp {
                     "image": params.image,
                     "reason": params.reason,
                     "from_snapshot": params.from_snapshot,
+                    "provisioning_mode": params.provisioning_mode,
                     "owner_mission_id": owner_mission_id,
                     "sub_budget_usd": sub_budget_usd,
                     "reuse_idle": reuse_idle,
@@ -3493,11 +3500,11 @@ impl AssistantMcp {
             "machine": machine,
             "node_id": machine["node_id"],
             "name": machine["name"],
-            "next": format!(
+            "next": if machine["provisioning_mode"] == "raw" { "Raw VM ready; no Orb node is installed. Use the owner-scoped /api/managed-machines/:id/operations REST endpoint with an idempotency key, then destroy_managed_machine when done.".to_string() } else { format!(
                 "start_mission(remote_node_id=\"{name}\", backend=..., prompt=...) runs a subagent on it (its node id {node} also works); destroy_managed_machine(machine_id=\"{name}\") when done",
                 name = machine["name"].as_str().unwrap_or_default(),
                 node = machine["node_id"].as_str().unwrap_or_default(),
-            ),
+            ) },
         }))
     }
 

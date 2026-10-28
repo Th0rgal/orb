@@ -13,6 +13,7 @@ fn settings() -> ManagedSettings {
         max_size: "xlarge".into(),
         image: "orb-node-base".into(),
         allowed_images: vec!["orb-node-base".into()],
+        raw_allowed_images: vec!["clean".into()],
         core_url: Some("https://core.example".into()),
         idle_minutes: 30,
         owner_grace_minutes: 0,
@@ -39,6 +40,7 @@ struct FakeProvider {
     destroyed: std::sync::Mutex<Vec<String>>,
     listed: std::sync::Mutex<Vec<ProviderMachine>>,
     execs: std::sync::Mutex<Vec<String>>,
+    writes: AtomicUsize,
     forks: std::sync::Mutex<Vec<String>>,
     stopped: std::sync::Mutex<Vec<String>>,
     saved: std::sync::Mutex<Vec<(String, String)>>,
@@ -77,6 +79,7 @@ impl ManagedProvider for FakeProvider {
         Ok(())
     }
     async fn write_file(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn exec(&self, _: &str, command: &str, _: u64) -> Result<Value, String> {
@@ -85,6 +88,22 @@ impl ManagedProvider for FakeProvider {
             return Ok(serde_json::json!({"exitCode": 1}));
         }
         Ok(Value::Null)
+    }
+    async fn raw_exec(
+        &self,
+        provider_id: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
+        self.exec(provider_id, command, timeout_secs).await
+    }
+    async fn raw_write_file(
+        &self,
+        provider_id: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        self.write_file(provider_id, path, content).await
     }
     async fn stop(&self, provider_id: &str) -> Result<(), String> {
         self.stopped.lock().unwrap().push(provider_id.into());
@@ -485,6 +504,7 @@ async fn spawn_rejects_unlisted_image() {
 #[test]
 fn managed_nodes_are_excluded_from_static_lookup() {
     let machine = ManagedMachine {
+        provisioning_mode: ProvisioningMode::Worker,
         name: "small-z".into(),
         antigravity_projected: false,
         id: "mmtrust01".into(),
@@ -872,6 +892,7 @@ fn spend_machine(
 ) -> ManagedMachine {
     let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
     ManagedMachine {
+        provisioning_mode: ProvisioningMode::Worker,
         name: String::new(),
         antigravity_projected: false,
         id: id.into(),
@@ -1713,6 +1734,7 @@ use super::snapshots as snaps;
 
 fn snap(name: &str, project: &str, days_old: i64, status: &str) -> snaps::ManagedSnapshot {
     snaps::ManagedSnapshot {
+        provisioning_mode: ProvisioningMode::Worker,
         name: name.into(),
         label: name.into(),
         project: Some(project.into()),
@@ -2087,4 +2109,272 @@ async fn secrets_must_be_wiped_before_any_disk_copy() {
         .snapshot_machine(&ok.id, "warm", Some("p"), None, Some("t1"))
         .await
         .is_ok());
+}
+
+#[tokio::test]
+async fn raw_lifecycle_never_touches_guest_and_preserves_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.core_url = None;
+    let (m, fake) = manager(dir.path(), s.clone());
+    let raw = m
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            image: Some("clean".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(raw.state, MachineState::Online);
+    assert!(node_config(&raw.node_id).is_none());
+    assert!(!m.antigravity_allowed(&raw.node_id).await);
+    assert_eq!(
+        m.enroll(&raw.id, "anything").await.unwrap_err().error,
+        "enrollment_denied"
+    );
+    let snapshot = m
+        .snapshot_machine(&raw.id, "raw-save", Some("p"), None, Some("t1"))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.provisioning_mode, ProvisioningMode::Raw);
+    m.stop_inner(&raw.id, "test", false).await.unwrap();
+    let resumed = m.resume(&raw.id, Some(30)).await.unwrap();
+    assert_eq!(resumed.provisioning_mode, ProvisioningMode::Raw);
+    for _ in 0..100 {
+        if m.get(&raw.id).await.unwrap().state == MachineState::Online {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    m.destroy(&raw.id, "test").await.unwrap();
+    assert!(fake.execs.lock().unwrap().is_empty());
+    assert_eq!(fake.writes.load(Ordering::SeqCst), 0);
+    let reload = ManagedManager::new(s, None, dir.path(), 3999);
+    reload.load().await;
+    assert_eq!(
+        reload.get(&raw.id).await.unwrap().provisioning_mode,
+        ProvisioningMode::Raw
+    );
+}
+
+#[tokio::test]
+async fn raw_requires_explicit_clean_image_and_cannot_convert_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    for (image, error) in [
+        (None, "image_required"),
+        (Some("orb-node-base"), "image_not_allowed"),
+    ] {
+        let e = m
+            .spawn(SpawnRequest {
+                provisioning_mode: Some(ProvisioningMode::Raw),
+                image: image.map(str::to_owned),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.error, error);
+    }
+    assert_eq!(fake.created.load(Ordering::SeqCst), 0);
+    let raw = m
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            image: Some("clean".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let req = SpawnRequest {
+        fork_of: Some(raw.id.clone()),
+        owner_user_id: Some("t1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        m.resolve_source(&req).await.unwrap().3,
+        ProvisioningMode::Raw
+    );
+    let e = m
+        .resolve_source(&SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Worker),
+            ..req
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "mode_mismatch");
+    m.destroy(&raw.id, "test").await.unwrap();
+}
+
+#[test]
+fn legacy_mode_defaults_to_worker_and_invalid_mode_is_rejected() {
+    let request: SpawnRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(
+        request.provisioning_mode.unwrap_or_default(),
+        ProvisioningMode::Worker
+    );
+    assert!(serde_json::from_value::<SpawnRequest>(
+        serde_json::json!({"provisioning_mode":"unsafe"})
+    )
+    .is_err());
+    let mut snapshot = serde_json::to_value(snap("legacy", "p", 0, "ready")).unwrap();
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("provisioning_mode");
+    assert_eq!(
+        serde_json::from_value::<snaps::ManagedSnapshot>(snapshot)
+            .unwrap()
+            .provisioning_mode,
+        ProvisioningMode::Worker
+    );
+}
+
+#[tokio::test]
+async fn raw_operations_enforce_owner_replay_and_do_not_leak_payloads_to_audit() {
+    use super::raw_operations::{Operation, OperationRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let raw = m
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            image: Some("clean".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let request = OperationRequest {
+        idempotency_key: "exec-1".into(),
+        operation: Operation::Exec {
+            command: "printf unique-sensitive-content".into(),
+            timeout_secs: 10,
+        },
+    };
+    assert_eq!(
+        m.raw_operation(&raw.id, "t2", request.clone())
+            .await
+            .unwrap_err()
+            .error,
+        "not_found"
+    );
+    assert!(fake.execs.lock().unwrap().is_empty());
+    assert_eq!(
+        m.raw_operation(&raw.id, "t1", request.clone())
+            .await
+            .unwrap()
+            .status,
+        "completed"
+    );
+    let loaded = ManagedManager::new(settings(), Some(fake.clone()), dir.path(), 3999);
+    loaded.load().await;
+    assert_eq!(
+        loaded
+            .raw_operation(&raw.id, "t1", request.clone())
+            .await
+            .unwrap()
+            .status,
+        "completed"
+    );
+    assert_eq!(fake.execs.lock().unwrap().len(), 1);
+    let changed = OperationRequest {
+        operation: Operation::ReadFile {
+            path: "/tmp/a".into(),
+        },
+        ..request.clone()
+    };
+    assert_eq!(
+        m.raw_operation(&raw.id, "t1", changed)
+            .await
+            .unwrap_err()
+            .error,
+        "idempotency_conflict"
+    );
+    m.stop_inner(&raw.id, "test", false).await.unwrap();
+    assert_eq!(
+        m.raw_operation(&raw.id, "t1", request)
+            .await
+            .unwrap()
+            .status,
+        "completed"
+    );
+    let ledger = std::fs::read_to_string(m.ledger_path()).unwrap();
+    assert!(!ledger.contains("unique-sensitive-content"));
+    assert!(ledger.contains("raw_operation_finished"));
+    m.destroy(&raw.id, "test").await.unwrap();
+}
+
+#[tokio::test]
+async fn raw_snapshot_modes_and_budget_visibility_are_owner_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let raw = m
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            image: Some("clean".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(m.budget().await.active, 1);
+    assert_eq!(m.visible_budget("t1").await.active, 1);
+    assert_eq!(m.visible_budget("t2").await.active, 0);
+    let mut snapshot = snap("raw-source", "p", 0, "ready");
+    snapshot.provisioning_mode = ProvisioningMode::Raw;
+    m.snapshots.lock().await.push(snapshot);
+    let request = SpawnRequest {
+        from_snapshot: Some("raw-source".into()),
+        snapshot_project: Some("p".into()),
+        owner_user_id: Some("t1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        m.resolve_source(&request).await.unwrap().3,
+        ProvisioningMode::Raw
+    );
+    assert_eq!(
+        m.resolve_source(&SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Worker),
+            ..request.clone()
+        })
+        .await
+        .unwrap_err()
+        .error,
+        "mode_mismatch"
+    );
+    assert_eq!(
+        m.resolve_source(&SpawnRequest {
+            owner_user_id: Some("t2".into()),
+            ..request
+        })
+        .await
+        .unwrap_err()
+        .error,
+        "snapshot_not_found"
+    );
+    m.destroy(&raw.id, "test").await.unwrap();
+}
+
+#[tokio::test]
+async fn worker_only_spawn_rejects_raw_snapshot_before_renting() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, provider) = manager(dir.path(), settings());
+    let mut snapshot = snap("raw-source", "project", 0, "ready");
+    snapshot.provisioning_mode = ProvisioningMode::Raw;
+    manager.snapshots.lock().await.push(snapshot);
+    let error = manager
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Worker),
+            from_snapshot: Some("raw-source".into()),
+            snapshot_project: Some("project".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.error, "mode_mismatch");
+    assert_eq!(provider.created.load(Ordering::SeqCst), 0);
+    assert!(provider.forks.lock().unwrap().is_empty());
+    assert!(manager.machines_snapshot().await.is_empty());
 }

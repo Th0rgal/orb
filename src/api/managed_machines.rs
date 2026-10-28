@@ -57,6 +57,10 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
             axum::routing::delete(delete_snapshot),
         )
         .route("/api/managed-machines/:id", get(get_one).delete(destroy))
+        .route(
+            "/api/managed-machines/:id/operations",
+            post(raw_operation).layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
         .route("/api/managed-machines/:id/stop", post(stop))
         .route("/api/managed-machines/:id/resume", post(resume))
         .route("/api/managed-machines/:id/fork", post(fork))
@@ -84,13 +88,28 @@ struct ListQuery {
     history_hours: Option<i64>,
 }
 
-async fn list(Query(q): Query<ListQuery>) -> Response {
+async fn list(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Query(q): Query<ListQuery>,
+) -> Response {
     match manager() {
-        Ok(m) => Json(
-            m.list(q.history_hours.unwrap_or(24).clamp(0, 24 * 30))
-                .await,
-        )
-        .into_response(),
+        Ok(m) => {
+            let mut view = m
+                .list(q.history_hours.unwrap_or(24).clamp(0, 24 * 30))
+                .await;
+            view.machines.retain(|machine| {
+                machine.provisioning_mode.is_worker()
+                    || machine.owner_user_id.as_deref() == Some(user.id.as_str())
+            });
+            view.budget = m.visible_budget(&user.id).await;
+            let visible = visible_machines(&m, &user.id).await;
+            view.daily_spend = crate::managed::daily_spend(
+                &visible,
+                crate::managed::SPEND_DAYS,
+                chrono::Utc::now(),
+            );
+            Json(view).into_response()
+        }
         Err(r) => r,
     }
 }
@@ -102,21 +121,30 @@ struct SpendQuery {
 
 /// Daily spend aggregates (UTC days, oldest first) with per-mission and
 /// per-size breakdowns.
-async fn spend(Query(q): Query<SpendQuery>) -> Response {
+async fn spend(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Query(q): Query<SpendQuery>,
+) -> Response {
     match manager() {
         Ok(m) => Json(json!({
-            "days": m.daily_spend(q.days.unwrap_or(crate::managed::SPEND_DAYS)).await
+            "days": crate::managed::daily_spend(&visible_machines(&m, &user.id).await, q.days.unwrap_or(crate::managed::SPEND_DAYS), chrono::Utc::now())
         }))
         .into_response(),
         Err(r) => r,
     }
 }
 
-async fn get_one(Path(id): Path<String>) -> Response {
+async fn get_one(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     match m.get(&id).await {
         Some(machine) => Json(machine).into_response(),
         None => err(ManagedError {
@@ -174,7 +202,11 @@ async fn spawn_for(
         Ok(m) => m,
         Err(r) => return r,
     };
-    if req.reuse_idle == Some(true) && req.from_snapshot.is_none() && req.fork_of.is_none() {
+    if req.provisioning_mode.unwrap_or_default().is_worker()
+        && req.reuse_idle == Some(true)
+        && req.from_snapshot.is_none()
+        && req.fork_of.is_none()
+    {
         if let (Some(parent), Ok((spec, _))) = (charged, ManagedManager::plan(&m.settings, &req)) {
             if let Some(machine) = reuse_idle_sibling(&m, &store, &req, parent, spec.size).await {
                 let mut body = serde_json::to_value(&machine).unwrap_or_default();
@@ -235,12 +267,15 @@ async fn reuse_idle_sibling(
 
 /// What the lifecycle reaper would do now for each live machine, and
 /// whether it is in dry-run. Read-only.
-async fn reap_plan() -> Response {
+async fn reap_plan(axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>) -> Response {
     match manager() {
         Ok(m) => Json(json!({
             "dry_run": m.runtime_settings().reaper_dry_run,
             "policy": m.settings.policy(),
-            "machines": m.reap_plan().await,
+            "machines": ({
+                let visible: std::collections::HashSet<_> = visible_machines(&m, &user.id).await.into_iter().map(|m| m.id).collect();
+                m.reap_plan().await.into_iter().filter(|entry| visible.contains(&entry.machine_id)).collect::<Vec<_>>()
+            }),
         }))
         .into_response(),
         Err(r) => r,
@@ -267,6 +302,9 @@ async fn set_owner(
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     let exists = match state.control.loaded_mission_store(&user.id).await {
         Some(store) => matches!(store.get_mission(body.owner_mission_id).await, Ok(Some(_))),
         None => false,
@@ -283,7 +321,7 @@ async fn set_owner(
             &id,
             &body.owner_mission_id.to_string(),
             None,
-            Some(&user.id),
+            Some(user.id.as_str()),
         )
         .await
     {
@@ -297,11 +335,18 @@ struct ExtendBody {
     ttl_minutes: u64,
 }
 
-async fn extend(Path(id): Path<String>, Json(body): Json<ExtendBody>) -> Response {
+async fn extend(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    Json(body): Json<ExtendBody>,
+) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     match m.extend(&id, body.ttl_minutes).await {
         Ok(machine) => Json(machine).into_response(),
         Err(e) => err(e),
@@ -330,11 +375,18 @@ fn client_destroy_reason(raw: Option<&str>) -> String {
     }
 }
 
-async fn destroy(Path(id): Path<String>, Query(q): Query<DestroyQuery>) -> Response {
+async fn destroy(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    Query(q): Query<DestroyQuery>,
+) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     match m
         .destroy(&id, &client_destroy_reason(q.reason.as_deref()))
         .await
@@ -379,18 +431,89 @@ async fn put_settings(Json(body): Json<serde_json::Value>) -> Response {
     }
 }
 
-async fn reconcile() -> Response {
+async fn reconcile(axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
     match m.reconcile_once().await {
-        Ok(report) => Json(report).into_response(),
+        Ok(mut report) => {
+            let machines = m.machines_snapshot().await;
+            let hidden = machines.iter().filter(|machine| {
+                !machine.provisioning_mode.is_worker()
+                    && machine.owner_user_id.as_deref() != Some(user.id.as_str())
+            });
+            let hidden_ids: std::collections::HashSet<_> =
+                hidden.clone().map(|m| m.id.as_str()).collect();
+            let hidden_provider_ids: std::collections::HashSet<_> =
+                hidden.filter_map(|m| m.provider_id.as_deref()).collect();
+            redact_reconcile(&mut report, &hidden_ids, &hidden_provider_ids);
+            Json(report).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error":"provider_error","message":e})),
         )
             .into_response(),
+    }
+}
+
+/// Reconciliation is still a global admin action; its receipt must not
+/// disclose another tenant's raw machine or provider identifiers.
+fn redact_reconcile(
+    report: &mut serde_json::Value,
+    hidden_ids: &std::collections::HashSet<&str>,
+    hidden_provider_ids: &std::collections::HashSet<&str>,
+) {
+    for key in ["closed_rows", "vanished_rows"] {
+        if let Some(rows) = report
+            .get_mut(key)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            rows.retain(|row| row.as_str().is_none_or(|id| !hidden_ids.contains(id)));
+        }
+    }
+    if let Some(rows) = report
+        .get_mut("orphans_stopped")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        rows.retain(|row| {
+            row.as_str()
+                .is_none_or(|id| !hidden_provider_ids.contains(id))
+        });
+    }
+    if let Some(rows) = report
+        .get_mut("orphans_pending")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        rows.retain(|row| {
+            row.get("provider_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|id| !hidden_provider_ids.contains(id))
+        });
+    }
+}
+
+#[cfg(test)]
+mod reconcile_visibility_tests {
+    use super::*;
+    #[test]
+    fn hides_raw_registry_and_provider_ids_but_keeps_worker_receipts() {
+        let mut report = json!({"closed_rows": ["raw", "worker"], "vanished_rows": ["raw"],
+            "orphans_stopped": ["provider-raw", "provider-worker"],
+            "orphans_pending": [{"provider_id":"provider-raw"}, {"provider_id":"provider-worker"}]});
+        redact_reconcile(
+            &mut report,
+            &std::collections::HashSet::from(["raw"]),
+            &std::collections::HashSet::from(["provider-raw"]),
+        );
+        assert_eq!(report["closed_rows"], json!(["worker"]));
+        assert_eq!(report["vanished_rows"], json!([]));
+        assert_eq!(report["orphans_stopped"], json!(["provider-worker"]));
+        assert_eq!(
+            report["orphans_pending"],
+            json!([{"provider_id":"provider-worker"}])
+        );
     }
 }
 
@@ -629,7 +752,7 @@ async fn list_snapshots(
     };
     Json(json!({
         "project": project,
-        "snapshots": m.list_snapshots(Some(&user.id), project.as_deref()).await,
+        "snapshots": m.list_snapshots(Some(user.id.as_str()), project.as_deref()).await,
         "included_free": crate::managed::snapshots::INCLUDED_SNAPSHOTS,
         "usd_per_month_beyond": crate::managed::snapshots::SNAPSHOT_USD_PER_MONTH,
     }))
@@ -651,7 +774,7 @@ async fn delete_snapshot(
         Err(r) => return r,
     };
     match m
-        .delete_snapshot(&name, Some(&user.id), project.as_deref())
+        .delete_snapshot(&name, Some(user.id.as_str()), project.as_deref())
         .await
     {
         Ok(()) => Json(json!({"deleted": name})).into_response(),
@@ -676,6 +799,9 @@ async fn snapshot(
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     let scope = MissionScope {
         owner_mission_id: body.owner_mission_id,
         project: body.project.clone(),
@@ -692,7 +818,7 @@ async fn snapshot(
             &body.name,
             project.as_deref(),
             owner.as_deref(),
-            Some(&user.id),
+            Some(user.id.as_str()),
         )
         .await
     {
@@ -703,6 +829,7 @@ async fn snapshot(
 
 #[derive(Deserialize, Default)]
 struct ForkBody {
+    provisioning_mode: Option<crate::managed::ProvisioningMode>,
     size: Option<String>,
     ttl_minutes: Option<u64>,
     reason: Option<String>,
@@ -722,12 +849,16 @@ async fn fork(
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     // A fork keeps the source's size unless one is asked for.
     let size = match body.size {
         Some(s) => Some(s),
         None => m.get(&id).await.map(|src| src.size),
     };
     let req = SpawnRequest {
+        provisioning_mode: body.provisioning_mode,
         size,
         ttl_minutes: body.ttl_minutes,
         reason: body.reason.or_else(|| Some(format!("fork of {id}"))),
@@ -740,15 +871,46 @@ async fn fork(
     spawn_for(&state, &user, req).await
 }
 
+async fn visible_machines(m: &ManagedManager, tenant: &str) -> Vec<crate::managed::ManagedMachine> {
+    m.machines_snapshot()
+        .await
+        .into_iter()
+        .filter(|machine| {
+            machine.provisioning_mode.is_worker()
+                || machine.owner_user_id.as_deref() == Some(tenant)
+        })
+        .collect()
+}
+
+async fn raw_owner_check(
+    m: &ManagedManager,
+    id: &str,
+    user: &crate::api::auth::AuthUser,
+) -> Result<(), Response> {
+    if let Some(machine) = m.get(id).await {
+        if !machine.provisioning_mode.is_worker()
+            && machine.owner_user_id.as_deref() != Some(user.id.as_str())
+        {
+            return Err(err(ManagedError {
+                error: "not_found",
+                status: 404,
+                message: "Unknown managed machine".into(),
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// Only the machine's own tenant may stop/resume it.
 async fn tenant_machine(
     m: &ManagedManager,
     id: &str,
     user: &crate::api::auth::AuthUser,
 ) -> Result<crate::managed::ManagedMachine, Response> {
+    raw_owner_check(m, id, user).await?;
     match m.get(id).await {
         Some(x)
-            if x.owner_user_id.is_none()
+            if (x.provisioning_mode.is_worker() && x.owner_user_id.is_none())
                 || x.owner_user_id.as_deref() == Some(user.id.as_str()) =>
         {
             Ok(x)
@@ -807,6 +969,21 @@ async fn resume(
         .await
     {
         Ok(x) => (StatusCode::ACCEPTED, Json(x)).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn raw_operation(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::managed::raw_operations::OperationRequest>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    match m.raw_operation(&id, &user.id, request).await {
+        Ok(receipt) => Json(receipt).into_response(),
         Err(e) => err(e),
     }
 }

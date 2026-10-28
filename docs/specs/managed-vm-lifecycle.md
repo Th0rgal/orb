@@ -188,3 +188,97 @@ live VM.
   corollaries for invariants 2-4.
 - `vmClaimAdmit (sameTenant, ownerNone, ownerIsRequester)`: admits iff
   `sameTenant && (ownerNone || ownerIsRequester)` (invariant 6).
+
+## Raw managed machines
+
+`provisioning_mode` is `worker` (default for legacy machines and requests) or
+`raw`. Both modes use the same tenant ownership, admission budgets, size caps,
+provider TTL, stop/resume, reconciliation and reaper. `Online` means provider
+ready for raw machines; it does not imply an Orb node heartbeat.
+
+A fresh raw request must explicitly name an operator-approved clean image in
+`SANDBOXED_MANAGED_RAW_IMAGES` (empty by default). Operators must exclude images
+containing Orb node services or credentials; Core cannot inspect an image to
+prove it is clean. Worker image allowlists do not authorize raw images.
+
+For Boat, explicitly allow and request `provider-default` to select the provider
+base image: set `SANDBOXED_MANAGED_RAW_IMAGES=provider-default` and send
+`{"provisioning_mode":"raw","image":"provider-default"}`. The adapter omits
+Boat's `from` field and always sends `noEnv: true`. Other allowed image values
+are saved snapshot/share references, not arbitrary OS image names. See Boat's `POST /sandboxes` (`CreateSandboxRequest`) API reference.
+This option skips Core provisioning; the contents of the provider base image
+remain controlled by Boat.
+
+
+Raw provisioning performs no guest writes, commands, installation, enrollment,
+credential projection or cleanup. Raw machines never register node aliases or
+enter automatic worker reuse. Their activity is not observed by a node agent,
+so normal idle/owner/TTL policy still applies without busy auto-extension.
+
+Forks and named snapshots inherit source mode when omitted; an explicit mode
+mismatch is rejected before provisioning. Snapshot mode is persisted, and legacy
+snapshots default to worker. Resume retains the same machine mode. Worker-only auto-managed mission placement
+explicitly requests worker mode, rejecting raw snapshots before any provider
+rental. Raw snapshot
+and stop paths do not delete user files; Core has delivered no guest secrets.
+
+Provider command/file endpoints are not exposed by this change: safely exposing
+them requires a durable per-tenant operation journal with idempotency keys,
+bounded inputs/time/output, redacted audit metadata and crash reconciliation.
+
+### Raw operation receipts
+
+`POST /api/managed-machines/:id/operations` accepts `idempotency_key` and one
+`operation` (`exec`, `write_file`, or `read_file`). Only the authenticated owner
+of a raw machine may call it. Commands and UTF-8 file writes are at most 64 KiB;
+paths are absolute, at most 4096 bytes, without NUL; exec timeout is 1–120 seconds.
+Receipts contain at most 64 KiB of serialized provider output (with explicit
+truncation); Boat HTTP response collection is capped at 512 KiB before JSON allocation;
+oversize responses are recorded as uncertain and are never replayed as commands.
+
+The journal identity hashes tenant, immutable machine id, and idempotency key;
+the request digest includes operation arguments. Before any provider call, Core
+creates a private pending record with exclusive creation, fsyncs it and its
+parent directory. A different request using that key is rejected. A matching
+pending record returns `operation_uncertain`, including after a restart; Core
+never automatically reexecutes it. A completed matching receipt is replayed.
+Timeout and provider transport failures are persisted as uncertain outcomes,
+not evidence that a guest command did not run. Final private receipts are fsynced
+and atomically renamed. A failed final persistence leaves the pending fence.
+
+Audit events contain operation kind and request digest, never command, path,
+file content or output. Receipt files are mode 0600 in a mode 0700 directory;
+they are retained as idempotency fences and may contain sensitive output.
+Operation admission refreshes `last_busy_at`; it does not disable TTL or owner
+reaping. Explicit lifecycle requests can stop a concurrently executing operation.
+
+Receipt identity follows the immutable managed-machine ID across stop/resume and
+provider incarnations: reusing the same key intentionally replays its earlier
+receipt. Use a new key for a new operation after resume. Tenant-scoped display
+budgets omit other tenants' raw machines, while admission uses global totals.
+
+Global reconciliation and settings retain the existing administrator-wide policy.
+Reconciliation still operates on the whole provider registry; its response omits
+known raw machine/provider identifiers belonging to other tenants. Aggregate
+provider inventory counts remain operational administrator information.
+
+
+Journal admission is bounded across processes by a private `fs2` advisory lock.
+The synced pending fence is created while holding it; the lock is released
+before provider I/O. Fixed advisory operation slots allow at most 16 active
+provider calls globally, four per tenant, and one per machine. Admission never
+waits for a busy lock/slot: it returns HTTP 429. All journal scans, locks, fsyncs,
+and receipt reads/writes run through `spawn_blocking` rather than Tokio workers.
+
+Permanent receipt caps are 4096 globally, 512 per tenant, and 256 per machine.
+Each reserves a maximum 132 KiB of serialized storage (528 MiB global), with
+at most 16 additional atomic-write temporaries (about 2.1 MiB). Visible
+temporary files are also counted conservatively by subsequent admission scans. New
+admissions are additionally limited over a rolling minute to 240 globally, 60
+per tenant, and 10 per machine. Recent file modification times conservatively
+count completions as well as admissions. Existing receipts replay at any cap.
+Legacy unscoped receipt files count against every scope, so upgrades fail closed
+rather than forgetting an idempotency fence. Incomplete or malformed journal
+entries fail closed with HTTP 503. No receipt is garbage-collected: pending and
+uncertain fences are never deleted, and exhausted capacity requires an explicit
+operator retention design rather than automatic reexecution of old keys.

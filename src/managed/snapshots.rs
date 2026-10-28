@@ -27,7 +27,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     allocate_name, budget, register_alias, unregister_node, write_atomic, MachineState,
-    ManagedError, ManagedMachine, ManagedManager, Owner, OwnerState, SpawnRequest,
+    ManagedError, ManagedMachine, ManagedManager, Owner, OwnerState, ProvisioningMode,
+    SpawnRequest,
 };
 
 /// Boat bills named snapshots beyond this many, at `SNAPSHOT_USD_PER_MONTH`.
@@ -40,6 +41,8 @@ pub const SECRETS_WIPE: &str =
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedSnapshot {
+    #[serde(default)]
+    pub provisioning_mode: ProvisioningMode,
     /// Provider name (unique): `orb-snap-<project>-<label>-<suffix>`.
     pub name: String,
     /// The name the agent chose.
@@ -203,7 +206,15 @@ impl ManagedManager {
     pub(super) async fn resolve_source(
         &self,
         req: &SpawnRequest,
-    ) -> Result<(String, Option<String>, Option<(String, String)>), ManagedError> {
+    ) -> Result<
+        (
+            String,
+            Option<String>,
+            Option<(String, String)>,
+            ProvisioningMode,
+        ),
+        ManagedError,
+    > {
         if let Some(of) = req.fork_of.as_deref() {
             let src = self
                 .get(of)
@@ -223,7 +234,9 @@ impl ManagedManager {
                     "This machine holds a projected sign-in and cannot be copied",
                 ));
             }
-            if src.owner_user_id.is_some() && src.owner_user_id != req.owner_user_id {
+            if (src.owner_user_id.is_some() || !src.provisioning_mode.is_worker())
+                && src.owner_user_id != req.owner_user_id
+            {
                 return Err(ManagedError::new(
                     "forbidden",
                     403,
@@ -233,7 +246,8 @@ impl ManagedManager {
             let pid = src.provider_id.clone().ok_or_else(|| {
                 ManagedError::new("not_forkable", 409, "Machine has no provider sandbox yet")
             })?;
-            return Ok((src.image.clone(), None, Some((src.id.clone(), pid))));
+            let mode = ProvisioningMode::inherit(req.provisioning_mode, src.provisioning_mode)?;
+            return Ok((src.image.clone(), None, Some((src.id.clone(), pid)), mode));
         }
         if let Some(name) = req
             .from_snapshot
@@ -265,17 +279,44 @@ impl ManagedManager {
                     format!("Snapshot '{}' is {}", snap.label, snap.status),
                 ));
             }
+            let mode = ProvisioningMode::inherit(req.provisioning_mode, snap.provisioning_mode)?;
             snap.last_used_at = Some(Utc::now());
             let provider_name = snap.name.clone();
             drop(snaps);
             self.persist_snapshots().await;
-            return Ok((provider_name.clone(), Some(provider_name), None));
+            return Ok((provider_name.clone(), Some(provider_name), None, mode));
         }
-        Ok((
-            Self::resolve_image(&self.settings, req.image.as_deref())?,
-            None,
-            None,
-        ))
+        let mode = req.provisioning_mode.unwrap_or_default();
+        let image = if mode.is_worker() {
+            Self::resolve_image(&self.settings, req.image.as_deref())?
+        } else {
+            let image = req
+                .image
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    ManagedError::new(
+                        "image_required",
+                        400,
+                        "Raw mode requires an explicit clean image",
+                    )
+                })?;
+            if !self
+                .settings
+                .raw_allowed_images
+                .iter()
+                .any(|allowed| allowed == image)
+            {
+                return Err(ManagedError::new(
+                    "image_not_allowed",
+                    403,
+                    "Raw image is not in SANDBOXED_MANAGED_RAW_IMAGES",
+                ));
+            }
+            image.to_owned()
+        };
+        Ok((image, None, None, mode))
     }
 
     /// Save a named snapshot of a machine for `project`. Returns at once
@@ -310,7 +351,9 @@ impl ManagedManager {
                 "This machine holds a projected sign-in and cannot be saved",
             ));
         }
-        if m.owner_user_id.is_some() && m.owner_user_id.as_deref() != tenant {
+        if (m.owner_user_id.is_some() || !m.provisioning_mode.is_worker())
+            && m.owner_user_id.as_deref() != tenant
+        {
             return Err(ManagedError::new(
                 "forbidden",
                 403,
@@ -335,7 +378,8 @@ impl ManagedManager {
         // Secrets delivered to missions must never be frozen into the
         // image: a running VM is wiped now (failure aborts), a stopped one
         // only qualifies if its wipe succeeded when it stopped.
-        match m.state {
+        if m.provisioning_mode.is_worker() {
+            match m.state {
             MachineState::Online => self.wipe_secrets(provider.as_ref(), &pid).await?,
             _ if !m.secrets_wiped => {
                 return Err(ManagedError::new(
@@ -346,12 +390,14 @@ impl ManagedManager {
             }
             _ => {}
         }
+        }
         let name = snapshot_name(project, &label, &super::random_id()[..4]);
         provider
             .save_snapshot(&pid, &name)
             .await
             .map_err(|e| ManagedError::new("provider_error", 502, e))?;
         let snap = ManagedSnapshot {
+            provisioning_mode: m.provisioning_mode,
             name: name.clone(),
             label,
             project: project.map(str::to_string),
@@ -518,9 +564,11 @@ impl ManagedManager {
         self.relay.close(&m.id).await;
         let mut secrets_wiped = false;
         if let (Some(provider), Some(pid)) = (&self.provider, &m.provider_id) {
-            self.wipe_projection(provider.as_ref(), pid, &m).await;
-            // The kept disk must not hold delivered secrets.
-            secrets_wiped = self.wipe_secrets(provider.as_ref(), pid).await.is_ok();
+            if m.provisioning_mode.is_worker() {
+                self.wipe_projection(provider.as_ref(), pid, &m).await;
+                // The kept disk must not hold delivered secrets.
+                secrets_wiped = self.wipe_secrets(provider.as_ref(), pid).await.is_ok();
+            }
             provider
                 .stop(pid)
                 .await
@@ -559,14 +607,11 @@ impl ManagedManager {
             .provider
             .clone()
             .ok_or_else(|| ManagedError::new("disabled", 503, "No managed-machine provider"))?;
-        let core_url =
-            self.settings.core_url.clone().ok_or_else(|| {
-                ManagedError::new("disabled", 503, "SANDBOXED_PUBLIC_URL is not set")
-            })?;
         let m = self
             .get(id)
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        let core_url = self.core_url_for(m.provisioning_mode)?;
         if m.state != MachineState::Stopped {
             return Err(ManagedError::new(
                 "not_stopped",
