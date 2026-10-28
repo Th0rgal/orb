@@ -1,13 +1,13 @@
-# Installing Sandboxed.sh — Native (Bare Metal)
+# Installing Core — Native (Bare Metal)
 
-This guide covers installing Sandboxed.sh directly on a **dedicated Ubuntu 24.04
+This guide covers installing Core directly on a **dedicated Ubuntu 24.04
 server** with systemd. This gives you the best performance and native
 systemd-nspawn container isolation.
 
 > **Looking for the easier path?** See the [Docker installation guide](install-docker.md)
 > — one command gets you running on any OS.
 
-Sandboxed.sh is the orchestrator/UI backend. **It does not run model inference**;
+Core is the orchestrator/UI backend. **It does not run model inference**;
 it executes OpenCode, Claude Code, Codex, Antigravity (`agy`), and Grok **inside each
 workspace** (host/container), so bash commands and file operations are scoped correctly. A
 standalone OpenCode server is **optional** and only required if you want
@@ -54,7 +54,7 @@ centralized OpenCode services (provider/auth management, health checks, etc.).
 - Ubuntu 24.04 LTS, root SSH access
 - A dedicated server (not shared hosting)
 - You want:
-  - Sandboxed.sh bound to: `0.0.0.0:3000`
+  - Core bound to: `0.0.0.0:3000`
   - (Optional) OpenCode server bound to localhost: `127.0.0.1:4096`
 - You have a Git repo for your **Library** (skills/tools/agents/rules/MCP
   configs)
@@ -168,7 +168,7 @@ installation.
 OpenCode is distributed as a binary, but:
 
 - OpenCode plugins are installed internally via Bun
-- Sandboxed.sh’s default Playwright MCP runner prefers `bunx`
+- Core’s default Playwright MCP runner prefers `bunx`
 
 Install Bun:
 
@@ -187,7 +187,7 @@ bunx --version
 
 ## 3) Install OpenCode (optional server backend)
 
-OpenCode server is optional for mission execution. Sandboxed.sh runs OpenCode
+OpenCode server is optional for mission execution. Core runs OpenCode
 per-workspace via the CLI. Install the server if you want centralized
 provider/auth management, health checks, or a shared OpenCode service.
 
@@ -248,7 +248,7 @@ Test:
 curl -fsSL http://127.0.0.1:4096/global/health | jq .
 ```
 
-Note: Sandboxed.sh will also keep OpenCode's global config updated (MCP + tool
+Note: Core will also keep OpenCode's global config updated (MCP + tool
 allowlist) in: `~/.config/opencode/opencode.json`.
 
 ### 3.2.1 Strong workspace skill isolation (recommended)
@@ -273,7 +273,7 @@ Environment=XDG_DATA_HOME=/var/lib/opencode/.local/share
 Environment=XDG_CACHE_HOME=/var/lib/opencode/.cache
 ```
 
-3. Point Sandboxed.sh at the same OpenCode config dir (see section 6):
+3. Point Core at the same OpenCode config dir (see section 6):
 
 ```
 OPENCODE_CONFIG_DIR=/var/lib/opencode/.config/opencode
@@ -361,7 +361,7 @@ does not remove the official model from the global xAI API catalog.
 
 ---
 
-## 4) Install Sandboxed.sh (Rust backend)
+## 4) Install Core (Rust backend)
 
 ### 4.1 Install Rust toolchain
 
@@ -430,7 +430,7 @@ install -m 0755 target/debug/desktop-mcp /usr/local/bin/desktop-mcp
 
 ## 5) Bootstrap the Library (config repo)
 
-Sandboxed.sh expects a git-backed **Library** repo. At runtime it will:
+Core expects a git-backed **Library** repo. At runtime it will:
 
 - clone it into `LIBRARY_PATH` (default: `{WORKING_DIR}/.sandboxed-sh/library`)
 - ensure the `origin` remote matches `LIBRARY_REMOTE`
@@ -456,11 +456,11 @@ git remote set-url origin git@github.com:<your-org>/<your-library-repo>.git
 git push -u origin HEAD:main
 ```
 
-### 5.2 Configure Sandboxed.sh to use it
+### 5.2 Configure Core to use it
 
 **Option A: Via Dashboard Settings (recommended)**
 
-After starting Sandboxed.sh, go to **Settings** in the dashboard and set the
+After starting Core, go to **Settings** in the dashboard and set the
 Library Remote URL. This is the preferred method as it persists the setting to
 disk and allows runtime updates without restart.
 
@@ -484,7 +484,7 @@ dashboard and when deployed to workspaces.
 - A single encryption key protects all encrypted values in the library.
 - The key is stored at `{WORKING_DIR}/.sandboxed-sh/private_key` (typically
   `/root/.sandboxed-sh/private_key`).
-- On first save of any encrypted value, Sandboxed.sh **auto-generates** the key if
+- On first save of any encrypted value, Core **auto-generates** the key if
   none exists.
 - The key can also be set manually via the `PRIVATE_KEY` environment variable
   (hex-encoded, 32 bytes / 64 hex chars).
@@ -523,7 +523,7 @@ PRIVATE_KEY=<64-hex-char-key-from-source-server>
 
 ---
 
-## 6) Configure Sandboxed.sh (env file)
+## 6) Configure Core (env file)
 
 Create `/etc/sandboxed_sh/sandboxed_sh.env`:
 
@@ -539,7 +539,7 @@ cat > /etc/sandboxed_sh/sandboxed_sh.env <<'EOF'
 # OpenCode backend (optional; if set, must match opencode.service)
 OPENCODE_BASE_URL=http://127.0.0.1:4096
 OPENCODE_PERMISSIVE=true
-# Optional: keep Sandboxed.sh writing OpenCode global config into the isolated home
+# Optional: keep Core writing OpenCode global config into the isolated home
 # (recommended if you enabled strong workspace skill isolation in section 3.2.1).
 # OPENCODE_CONFIG_DIR=/var/lib/opencode/.config/opencode
 
@@ -547,7 +547,7 @@ OPENCODE_PERMISSIVE=true
 HOST=0.0.0.0
 PORT=3000
 
-# Default filesystem root for Sandboxed.sh (agent still has full system access)
+# Default filesystem root for Core (agent still has full system access)
 WORKING_DIR=/root
 LIBRARY_PATH=/root/.sandboxed-sh/library
 # Library remote (optional, can also be set via dashboard Settings page)
@@ -563,7 +563,7 @@ JWT_TTL_DAYS=30
 # No SSH configuration required.
 
 # Default model (provider/model). If omitted or not in provider/model format,
-# Sandboxed.sh won’t force a model and OpenCode will use its own defaults.
+# Core won’t force a model and OpenCode will use its own defaults.
 
 # Desktop tools (optional)
 DESKTOP_ENABLED=true
@@ -573,13 +573,13 @@ EOF
 
 ---
 
-## 7) Create `systemd` unit for Sandboxed.sh
+## 7) Create `systemd` unit for Core
 
 Create `/etc/systemd/system/sandboxed_sh.service`:
 
 ```ini
 [Unit]
-Description=sandboxed.sh (cloud orchestrator)
+Description=Core (cloud orchestrator)
 After=network-online.target
 Wants=network-online.target
 
@@ -605,6 +605,10 @@ WantedBy=multi-user.target
 ---
 
 ## 8) Optional: Tailscale exit-node workspaces (residential IP)
+
+This optional workspace recipe is separate from the deployed fleet network,
+which uses [Lean-Mesh](LEAN_MESH.md). Do not enable Tailscale on fleet hosts
+as a substitute for Lean-Mesh.
 
 If you want a **workspace** to egress via a residential IP, the recommended
 pattern is:
@@ -724,9 +728,9 @@ Or follow `docs/DESKTOP_SETUP.md`.
 
 ## 9) Updating
 
-### 9.1 Update Sandboxed.sh via Dashboard (recommended)
+### 9.1 Update Core via Dashboard (recommended)
 
-The Settings page shows available updates for Sandboxed.sh, OpenCode, and Grok.
+The Settings page shows available updates for Core, OpenCode, and Grok.
 When a new version is available:
 
 1. Go to **Settings → System Components**
@@ -746,7 +750,7 @@ When a new version is available:
 - The server needs SSH access to pull from GitHub (deploy key configured in
   section 0.5.3)
 
-### 9.2 Update Sandboxed.sh manually (CLI)
+### 9.2 Update Core manually (CLI)
 
 ```bash
 cd /opt/sandboxed_sh/vaduz-v1
@@ -791,7 +795,7 @@ curl -fsSL http://127.0.0.1:4096/global/health | jq .
 
 ## 10) Production Security (TLS + Reverse Proxy)
 
-For production deployments, **always** put Sandboxed.sh behind a reverse proxy
+For production deployments, **always** put Core behind a reverse proxy
 with TLS. The backend serves HTTP only and should never be exposed directly to
 the internet.
 
@@ -870,7 +874,7 @@ certbot --nginx -d agent.yourdomain.com
 Block direct access to port 3000 from the internet:
 
 ```bash
-# Allow only localhost to reach Sandboxed.sh directly
+# Allow only localhost to reach Core directly
 iptables -A INPUT -p tcp --dport 3000 -s 127.0.0.1 -j ACCEPT
 iptables -A INPUT -p tcp --dport 3000 -j DROP
 ```
@@ -879,7 +883,7 @@ iptables -A INPUT -p tcp --dport 3000 -j DROP
 
 ## 11) Authentication Modes
 
-Sandboxed.sh supports three authentication modes:
+Core supports three authentication modes:
 
 | Mode              | Environment Variables              | Use Case                      |
 | ----------------- | ---------------------------------- | ----------------------------- |
@@ -967,7 +971,7 @@ To change later: **Menu (⋮) → Settings**
 
 ## 13) OAuth Provider Setup
 
-Sandboxed.sh uses OAuth for AI provider authentication. The following providers
+Core uses OAuth for AI provider authentication. The following providers
 are pre-configured:
 
 | Provider          | OAuth Client      | Setup Required                        |

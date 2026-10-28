@@ -1,11 +1,11 @@
 import { isRecord, readJson } from "./storage";
 import { swallow } from "./log";
 import { writeInboxState } from "./inboxState";
-import { For, createMemo, createSignal, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onMount } from "solid-js";
 import { isConnected } from "./api";
 import { listChains, routingCatalog, type ModelChain, type RoutingCatalog } from "./routingApi";
-import { RoutingPicker } from "./RoutingPicker";
-import { Toggle } from "./Toggle";
+import { Select } from "./Select";
+import { NameDialog } from "./Dialog";
 import { sideQuestionKey } from "./sideQuestionStorage";
 
 export type InboxConfig = {
@@ -67,8 +67,16 @@ const PRESET_MODELS: Array<{ id: string; name: string; detail: string }> = [
   },
 ];
 
+/** Empty selection means Off and never overwrites the remembered model. */
+export function inboxSummaryChoice(model: string, choice: string) {
+  const selected = choice.trim();
+  return { aiSummary: selected.length > 0, model: selected || model };
+}
+
 export function InboxSettings() {
-  const [config, setConfig] = createSignal<InboxConfig>(inboxConfig());
+  const config = createMemo(inboxConfig);
+  const [custom, setCustom] = createSignal<string>();
+  const [customError, setCustomError] = createSignal("");
   const [message, setMessage] = createSignal("");
   const [chains, setChains] = createSignal<ModelChain[]>([]);
   const [catalog, setCatalog] = createSignal<RoutingCatalog | null>(null);
@@ -106,6 +114,7 @@ export function InboxSettings() {
         }
       }
     }
+    push(config().model, config().model);
     return out;
   });
 
@@ -142,7 +151,6 @@ export function InboxSettings() {
                   onClick={() => {
                     const next = { ...config(), includeAutonomous: !config().includeAutonomous };
                     if (saveInboxConfig(next)) {
-                      setConfig(next);
                       setMessage("Saved. Inbox will use this configuration.");
                     } else setMessage("Could not save Inbox settings.");
                   }}
@@ -152,85 +160,38 @@ export function InboxSettings() {
           </div>
         </section>
         <section class="s-sec">
-          <h3>AI Overview &amp; Turn Digest</h3>
-          <div class="s-card">
-            <div class="s-row">
-              <div class="s-row-text">
-                <div class="s-row-title">AI task &amp; outcome summary</div>
-                <div class="s-row-desc">
-                  Summarize your latest request to the agent and whether its work succeeded, failed, or is waiting on you.
-                </div>
-              </div>
-              <div class="s-row-ctrl">
-                <Toggle
-                  on={config().aiSummary}
-                  onClick={() => {
-                    const next = { ...config(), aiSummary: !config().aiSummary };
-                    setConfig(next);
-                    save(next);
-                  }}
-                />
-              </div>
+          <h3>Inbox</h3>
+          <div class="s-card"><div class="s-row">
+            <div class="s-row-text">
+              <div class="s-row-title">AI summaries</div>
+              <div class="s-row-desc">Choose a model or routing chain for Inbox digests. Off keeps your last choice.</div>
             </div>
-
-            <div class="s-row">
-              <div class="s-row-text">
-                <div class="s-row-title">Summary model</div>
-                <div class="s-row-desc">
-                  Routing chain or provider/model used to generate the 2-line Inbox digest (defaults to <code>builtin/smart</code>).
-                </div>
-              </div>
-              <div class="s-row-ctrl inbox-settings-model-ctrl">
-                <RoutingPicker
-                  label="Inbox summary model"
-                  value={config().model}
-                  options={modelOptions()}
-                  onInput={(value) => setConfig({ ...config(), model: value })}
-                />
-              </div>
+            <div class="s-row-ctrl inbox-settings-model-ctrl">
+              <Select aria-label="AI summaries" value={config().aiSummary ? config().model : ""} onChange={e => {
+                const choice = e.currentTarget.value;
+                if (choice === "__custom__") {
+                  setCustomError("");
+                  setCustom(config().model);
+                  e.currentTarget.value = config().aiSummary ? config().model : "";
+                } else save({ ...config(), ...inboxSummaryChoice(config().model, choice) });
+              }}>
+                <option value="">Off</option>
+                <For each={modelOptions()}>{option => <option value={option.id}>{option.name}</option>}</For>
+                <option value="__custom__">Custom model or chain…</option>
+              </Select>
             </div>
-
-            <div class="s-row">
-              <div class="s-row-text">
-                <div class="s-row-title">Quick presets</div>
-                <div class="s-row-desc">
-                  Choose a built-in routing chain or enter any <code>provider/model</code> above.
-                </div>
-              </div>
-              <div class="s-row-ctrl" style={{ display: "flex", gap: "6px" }}>
-                <For each={PRESET_MODELS}>
-                  {(preset) => (
-                    <button
-                      type="button"
-                      class={`s-btn sm ${config().model === preset.id ? "primary" : ""}`}
-                      onClick={() => {
-                        const next = { ...config(), model: preset.id };
-                        setConfig(next);
-                        save(next);
-                      }}
-                    >
-                      {preset.name}
-                    </button>
-                  )}
-                </For>
-              </div>
-            </div>
-
-            <div class="s-row">
-              <span role="status" class="s-row-desc">
-                {message()}
-              </span>
-              <button
-                type="button"
-                class="s-btn"
-                disabled={!config().model.trim()}
-                onClick={() => save(config())}
-              >
-                Save
-              </button>
-            </div>
-          </div>
+          </div><div class="s-row"><span role="status" class="s-row-desc">{message()}</span></div></div>
         </section>
+        <Show when={custom() !== undefined}>
+          <NameDialog title="Custom model or chain" label="Model or chain ID"
+            value={custom() ?? ""} onInput={setCustom} placeholder="provider/model or chain ID"
+            action="Use model" error={customError()} onClose={() => setCustom(undefined)}
+            onAction={() => {
+              const next = { ...config(), ...inboxSummaryChoice(config().model, custom()!) };
+              if (saveInboxConfig(next)) { setCustom(undefined); setMessage("Saved. Inbox will use this configuration."); }
+              else setCustomError("Could not save Inbox settings. Try again.");
+            }} />
+        </Show>
       </div>
     </div>
   );

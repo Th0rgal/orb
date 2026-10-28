@@ -1,6 +1,6 @@
-# Installing the sandboxed.sh Backend for Orb with Docker
+# Installing the Core Backend for Orb with Docker
 
-Docker is the easiest way to run the `sandboxed.sh` backend (`sandboxed.sh` is the former name of **Orb**, and is now the backend to the Orb clients). One command gets you a complete environment with the Rust backend, Next.js dashboard, and the primary AI harness CLIs pre-installed.
+Docker is the easiest way to run the Core backend. One command gets you a complete environment with the Rust backend, Next.js dashboard, and the primary AI harness CLIs pre-installed.
 
 ## Prerequisites
 

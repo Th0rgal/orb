@@ -1,6 +1,6 @@
 # Google Antigravity
 
-Sandboxed.sh and Orb run Google's native `agy` CLI with backend ID
+Core and Orb run Google's native `agy` CLI with backend ID
 `antigravity`. It replaces the retired Gemini CLI harness and does not route
 through an API-key proxy. Historical Gemini CLI session IDs cannot be resumed
 with Antigravity. Install the official CLI from

@@ -22,12 +22,12 @@ export const metadata: Metadata = {
     template: "%s | Orb",
   },
   description:
-    "All your AI providers, machines, and agent harnesses in one place. Connect subscriptions, APIs, and your own hardware to your machines and orchestrate Claude Code, Codex, Antigravity (agy), OpenCode, Grok, Hermes, and Cursor Cloud on macOS and iOS. Formerly sandboxed.sh (now the backend to the Orb clients).",
+    "All your AI providers, machines, and agent harnesses in one place. Connect subscriptions, APIs, and your own hardware to your machines and orchestrate Claude Code, Codex, Antigravity (agy), OpenCode, Grok, Hermes, and Cursor Cloud on macOS and iOS. Orb clients connect through Core.",
   applicationName: "Orb",
   generator: "Next.js",
   keywords: [
     "orb",
-    "sandboxed.sh",
+    "Core",
     "ai agent",
     "claude code",
     "codex",
@@ -49,7 +49,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Orb",
     description:
-      "All your AI providers, machines, and agent harnesses in one place. Formerly sandboxed.sh (now the backend to the Orb clients).",
+      "All your AI providers, machines, and agent harnesses in one place. Orb clients connect through Core.",
     creator: "@music_music_yo",
     images: ["/og-image.png"],
   },
@@ -60,7 +60,7 @@ export const metadata: Metadata = {
     siteName: "Orb",
     title: "Orb",
     description:
-      "All your AI providers, machines, and agent harnesses in one place. Formerly sandboxed.sh (now the backend to the Orb clients).",
+      "All your AI providers, machines, and agent harnesses in one place. Orb clients connect through Core.",
     images: [
       {
         url: "/og-image.png",

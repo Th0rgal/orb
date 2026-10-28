@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "name": "plain",
+      "source": "Hello world",
+      "web": false
+    },
+    {
+      "name": "inline math",
+      "source": "Inline $x^2$ only",
+      "web": true
+    },
+    {
+      "name": "parenthesized math",
+      "source": "Inline \\(x^2\\) only",
+      "web": true
+    },
+    {
+      "name": "bracketed math",
+      "source": "\\[x^2\\]",
+      "web": true
+    },
+    {
+      "name": "display math",
+      "source": "$$x^2$$",
+      "web": true
+    },
+    {
+      "name": "currency",
+      "source": "Costs $15 and $20",
+      "web": false
+    },
+    {
+      "name": "inline code",
+      "source": "`$x^2$` and `\\(x\\)`",
+      "web": false
+    },
+    {
+      "name": "fenced code",
+      "source": "```text\n$x^2$\n```",
+      "web": false
+    },
+    {
+      "name": "native table",
+      "source": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+      "web": false
+    },
+    {
+      "name": "image",
+      "source": "![chart](plot.png)",
+      "web": true
+    }
+  ]
+}

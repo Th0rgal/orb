@@ -69,7 +69,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <List className="h-5 w-5" />
         </button>
         <BrainLogo size={24} />
-        <span className="text-sm font-medium text-white">Sandboxed.sh</span>
+        <span className="text-sm font-medium text-white">Core</span>
       </div>
 
       {/* Backdrop behind the open drawer (mobile only). */}

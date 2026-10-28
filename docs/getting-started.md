@@ -1,8 +1,8 @@
-# Getting Started with Orb & sandboxed.sh
+# Getting Started with Orb & Core
 
-This guide walks you through connecting **Orb** (macOS and iOS) to your **sandboxed.sh** backend, configuring your local harnesses and subscription providers, and launching your first coding agent.
+This guide walks you through connecting **Orb** (macOS and iOS) to your **Core** backend, configuring your local harnesses and subscription providers, and launching your first coding agent.
 
-> **Upcoming rename to Orb:** `sandboxed.sh` (formerly Open Agent) is transitioning to the name **Orb**, hosted at **[`orb.thomas.md`](https://orb.thomas.md)**. Existing server binary names (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`) and API paths remain compatible.
+> Core retains the existing server binary names (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`) and API paths for compatibility.
 
 ![Orb on macOS](../screenshots/orb-desktop.webp)
 

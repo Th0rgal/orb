@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import type { Mission } from "../src/api";
 import { buildInboxSections, classifyInboxMission, countUnreadInboxMissions, listUnreadInboxCandidates } from "../src/inboxModel";
-import { inboxConfig, InboxSettings, saveInboxConfig } from "../src/inboxSettings";
+import { applySharedInboxPreferences, inboxConfig, InboxSettings, saveInboxConfig } from "../src/inboxSettings";
 import { sideQuestionKey } from "../src/sideQuestionStorage";
 import type { StreamItem } from "../src/transcriptModel";
 
@@ -82,5 +82,41 @@ describe("Inbox scope settings", () => {
     render(() => <InboxSettings />);
     fireEvent.click(screen.getByRole("switch", { name: "Include autonomous agents" }));
     expect(inboxConfig().includeAutonomous).toBe(false);
+  });
+});
+
+describe("AI summaries picker", () => {
+  it("remembers a selected model across Off, remount and re-enable", () => {
+    saveInboxConfig({ aiSummary: true, model: "team/summary", includeAutonomous: true }, false);
+    const view = render(() => <InboxSettings />);
+    const picker = screen.getByLabelText("AI summaries");
+    fireEvent.change(picker, { target: { value: "" } });
+    expect(inboxConfig()).toEqual({ aiSummary: false, model: "team/summary", includeAutonomous: true });
+    view.unmount();
+    render(() => <InboxSettings />);
+    const restored = screen.getByLabelText("AI summaries") as HTMLSelectElement;
+    expect(restored.value).toBe("");
+    fireEvent.change(restored, { target: { value: "team/summary" } });
+    expect(inboxConfig()).toEqual({ aiSummary: true, model: "team/summary", includeAutonomous: true });
+  });
+  it("reflects shared preferences while mounted without overwriting them on Off", async () => {
+    saveInboxConfig({ aiSummary: true, model: "builtin/smart" }, false);
+    render(() => <InboxSettings />);
+    applySharedInboxPreferences({ aiSummary: true, model: "team/remote", includeAutonomous: true });
+    const picker = screen.getByLabelText("AI summaries") as HTMLSelectElement;
+    await waitFor(() => expect(picker.value).toBe("team/remote"));
+    fireEvent.change(picker, { target: { value: "" } });
+    expect(inboxConfig()).toEqual({ aiSummary: false, model: "team/remote", includeAutonomous: true });
+  });
+  it("cancels custom edits without enabling summaries or replacing the saved model", () => {
+    saveInboxConfig({ aiSummary: false, model: "builtin/fast" }, false);
+    render(() => <InboxSettings />);
+    fireEvent.change(screen.getByLabelText("AI summaries"), { target: { value: "__custom__" } });
+    fireEvent.input(screen.getByLabelText("Model or chain ID"), { target: { value: "custom/new" } });
+    fireEvent.click(screen.getByText("Cancel"));
+    expect(screen.getByText("Discard unsaved changes?")).toBeTruthy();
+    fireEvent.click(screen.getByText("Discard changes"));
+    expect(inboxConfig().aiSummary).toBe(false);
+    expect(inboxConfig().model).toBe("builtin/fast");
   });
 });

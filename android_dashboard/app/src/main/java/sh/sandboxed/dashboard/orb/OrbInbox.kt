@@ -202,7 +202,6 @@ object OrbInboxSettings {
     val modelPresets: List<OrbInboxModelPreset> = listOf(
         OrbInboxModelPreset("builtin/smart", "Smart Router (builtin/smart)", "Default router for crisp 2-3 sentence AI Overviews"),
         OrbInboxModelPreset("builtin/fast", "Fast Router (builtin/fast)", "Lowest latency router"),
-        OrbInboxModelPreset("builtin/reasoning", "Reasoning Router (builtin/reasoning)", "Deeper technical synthesis")
     )
 
     private var prefs: SharedPreferences? = null

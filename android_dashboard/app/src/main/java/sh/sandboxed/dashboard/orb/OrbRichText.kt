@@ -888,7 +888,7 @@ private fun cleanText(raw: String): String {
     return OrbPipeTables.normalize(lines.joinToString("\n").trim())
 }
 
-private fun needsWebRenderer(text: String): Boolean {
+internal fun needsWebRenderer(text: String): Boolean {
     return containsLatexOrEmbeddedMediaOutsideCode(text)
 }
 

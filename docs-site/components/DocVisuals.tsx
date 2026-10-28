@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 export function ArchitectureDiagram() {
   return (
-    <div className="orb-arch" role="region" aria-label="Orb and sandboxed.sh architecture">
+    <div className="orb-arch" role="region" aria-label="Orb and Core architecture">
       {/* Tier 1: Unified Clients & Coordinator */}
       <div className="orb-arch-tier">
         <div className="orb-arch-tier-header">

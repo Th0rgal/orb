@@ -198,7 +198,7 @@ const LEGACY_CONTROL_DRAFT_KEY = "control-draft";
 const MISSION_DRAFT_CACHE_KEY = "control-mission-drafts-v1";
 const MAX_MISSION_DRAFT_CACHE_BYTES = 64 * 1024;
 const MAX_MISSION_DRAFT_CACHE_ENTRIES = 50;
-const DEFAULT_DOCUMENT_TITLE = "Sandboxed.sh";
+const DEFAULT_DOCUMENT_TITLE = "Core";
 const MAX_DOCUMENT_MISSION_TITLE_LENGTH = 80;
 const CONTROL_MISSION_SCOPED_EVENT_TYPES = new Set([
   "user_message",

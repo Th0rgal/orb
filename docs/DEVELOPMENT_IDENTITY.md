@@ -88,7 +88,7 @@ values, while preserving unrelated Git command policies.
 `run` also installs discovery links for the common operational skill and a
 secret-free `.paloma/development-identity.json` receipt. Existing project or
 user-owned skills are preserved. General project skill selection remains owned
-by sandboxed.sh's Library/project-skills preparation, not this credential tool.
+by Core's Library/project-skills preparation, not this credential tool.
 
 Core also discovers ready container workspaces through its authenticated API.
 It stages the filtered bundle using no-follow directory handles and owner-only

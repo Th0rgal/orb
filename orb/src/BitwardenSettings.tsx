@@ -532,7 +532,7 @@ export function BitwardenSettings(p: { initialProjectSlug?: string } = {}) {
                   <div class="s-row-text">
                     <div class="s-row-title">Not connected to Core</div>
                     <div class="s-row-desc">
-                      Connect to the sandboxed.sh backend on the Account page to manage Bitwarden secrets.
+                      Connect to the Core backend on the Account page to manage Bitwarden secrets.
                     </div>
                   </div>
                 </div>

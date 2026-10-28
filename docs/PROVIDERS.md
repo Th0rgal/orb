@@ -1,6 +1,6 @@
 # AI Provider Configuration Guide
 
-This guide explains how to configure and use alternative AI providers with Sandboxed.sh.
+This guide explains how to configure and use alternative AI providers with Core.
 
 ## Supported Providers
 

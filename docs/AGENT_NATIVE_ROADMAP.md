@@ -179,7 +179,7 @@ successful accepted receipt.
 
 ## Non-goals and constraints
 
-- Do not move prioritization into sandboxed.sh; deterministic derivation there
+- Do not move prioritization into Core; deterministic derivation there
   supports, but does not replace, Hermes judgment.
 - Do not create a universal event-sourced rewrite before the projections and
   receipts prove their value. Existing stores can be adapted incrementally.

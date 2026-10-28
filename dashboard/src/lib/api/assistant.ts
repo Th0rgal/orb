@@ -170,7 +170,7 @@ export async function searchAssistantGatewayMemory(
 export async function sendAssistantGatewayTestMessage(
   gatewayId: string,
   chatId: number,
-  text = "✅ Test message from the sandboxed.sh dashboard."
+  text = "✅ Test message from the Core dashboard."
 ): Promise<void> {
   await apiPost(
     "/api/control/telegram/send",

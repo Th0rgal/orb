@@ -181,7 +181,10 @@ final class OrbContractTests: XCTestCase {
             .object(["id": .string("sepolia"), "status": .string("offline"), "cordoned": .bool(false), "active_jobs": .number(0), "mem_available_bytes": .number(128 * gib)])
         ]
         let sorted = OrbSelection.sortedComputeNodes(nodes)
-        XCTAssertEqual(sorted.map { $0["id"].text }, ["babylon", "ashur", "nippur", "dgx-spark-admin", "sepolia"])
+        // Offline and manual-only nodes are both ineligible. Within that
+        // group the same load/RAM ordering applies; neither may be auto-picked.
+        XCTAssertEqual(sorted.map { $0["id"].text }, ["babylon", "ashur", "nippur", "sepolia", "dgx-spark-admin"])
+        XCTAssertNil(OrbSelection.firstAvailableNodeID(Array(nodes.suffix(2))))
         XCTAssertEqual(OrbSelection.firstAvailableNodeID(nodes), "babylon")
     }
 

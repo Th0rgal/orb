@@ -196,7 +196,7 @@ export function HermesSettings() {
                   <div class="s-card">
                     <div class="s-row">
                       <div class="s-row-text">
-                        <div class="s-row-title">Route through sandboxed.sh router</div>
+                        <div class="s-row-title">Route through Core router</div>
                         <div class="s-row-desc">
                           Use Core’s unified LLM proxy so Hermes can run builtin chains (like builtin/private) and all configured provider models.
                         </div>
@@ -205,7 +205,7 @@ export function HermesSettings() {
                         <button
                           class={`toggle ${useRouter() ? "on" : ""}`}
                           role="switch"
-                          aria-label="Route through sandboxed.sh router"
+                          aria-label="Route through Core router"
                           aria-checked={useRouter()}
                           onClick={() => setUseRouter(!useRouter())}
                         />

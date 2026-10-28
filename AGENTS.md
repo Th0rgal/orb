@@ -1,4 +1,4 @@
-# sandboxed.sh — guide for coding agents
+# Core — guide for coding agents
 
 Read this file before changing the repository. For runtime incidents on a
 deployed instance, read [DEBUGGING.md](DEBUGGING.md) first: debug on the
@@ -92,7 +92,7 @@ ships to testers:
 | Path | What it is |
 | --- | --- |
 | `src/`, `crates/orb-spec/` | Rust backend (`sandboxed-sh` API server, `sandboxed-node` remote runner, MCP binaries in `src/bin/`, `crates/orb-spec` standalone leaf crate & `src/orb_spec.rs` typed C-ABI bindings) |
-| `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` | Formal Lean 4 (`v4.35.0`) orchestration, proxy, mission lifecycle & cross-client projection kernel (`0 import Lean`, `0 sorryAx`, <!-- inventory:orb_spec_summary -->76/76 tight specs, 40 C-ABI exports<!-- /inventory:orb_spec_summary --> + 21 `leansys_*` exports from `lean-sys`, compiled via `shared/orb-spec/cabi/orb_kernel_unboxed.c` into `liborb_spec_cabi.a` with zero `lean`/`lake`/`elan` build-time invocation and zero hand-written C fallback) |
+| `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` | Formal Lean 4 (`v4.35.0`) orchestration, proxy, mission lifecycle & cross-client projection kernel (`0 import Lean`, `0 sorryAx`, exports recorded in `shared/orb-spec/kernel_abi.json`, including `lean-sys`, compiled via `shared/orb-spec/cabi/orb_kernel_unboxed.c` into `liborb_spec_cabi.a` with zero `lean`/`lake`/`elan` build-time invocation and zero hand-written C fallback) |
 | `orb/` | Orb desktop client: SolidJS + Vite in `orb/src`, Tauri v2 shell in `orb/src-tauri` |
 | `ios_dashboard/` | iOS app (SwiftUI, generated with XcodeGen from `project.yml`); the Orb UI lives in `SandboxedDashboard/Orb` |
 | `dashboard/` | Next.js web dashboard (admin console, served by the Docker image) |
@@ -132,7 +132,7 @@ for the check and shut them down afterwards.
 
 ## Execution architecture
 
-This document describes how Sandboxed.sh executes missions after the per-workspace
+This document describes how Core executes missions after the per-workspace
 harness refactor. The core change: **agent harnesses run inside
 the target workspace**, so native bash and file effects are scoped to the correct
 environment. The host proxy bash tools are no longer required for normal
@@ -172,18 +172,18 @@ missions.
 ## High-level flow
 
 1. User creates a mission with a workspace + agent (backend).
-2. Sandboxed.sh prepares a **per-mission workspace directory** and syncs Library
+2. Core prepares a **per-mission workspace directory** and syncs Library
    content (skills/tools/rules).
-3. Sandboxed.sh writes **per-workspace config files** (`opencode.json`,
+3. Core writes **per-workspace config files** (`opencode.json`,
    `.opencode/opencode.json`, `.claude/settings.local.json`, `CLAUDE.md`).
 4. The mission runner launches the chosen harness **inside the workspace** using
    a workspace-aware execution layer (host or container).
-5. The harness streams JSON events; Sandboxed.sh converts these into a unified
+5. The harness streams JSON events; Core converts these into a unified
    event stream for the UI.
 
 ## Execution model (per-workspace)
 
-Sandboxed.sh uses a workspace execution layer to spawn processes in the correct
+Core uses a workspace execution layer to spawn processes in the correct
 execution context:
 
 - **Host workspace**: process runs directly on the host with the mission working
@@ -276,7 +276,7 @@ Files written per mission workspace:
 
 ## Observability
 
-Sandboxed.sh streams structured tool events and text deltas from the harnesses.
+Core streams structured tool events and text deltas from the harnesses.
 The UI receives:
 
 - tool calls/results
@@ -391,19 +391,19 @@ Orb follows the **"Lean Decides, Rust Does"** boundary across the control plane,
 
 1. **Two-Layer Non-Tautological Specification Architecture (`lean/Orb/Spec.lean`)**:
    - **Layer 0 (`MetaGateSpec`)**: Enforces 4-part non-vacuous tightness (`sound`, `complete`, `posWitness`, `negWitness`) for every boolean admission gate.
-   - **Layer I (5 Universal Algebraic Meta-Specs)**:
+   - **Layer I (Universal Algebraic Meta-Specs)** — representative families below; `lean/audit/AuditSpec.lean` checks the complete set:
      1. **`StickyFence` (Irreversible / Monotone Boundary)**: Once a stream or message crosses a commitment boundary (`first_byte_committed`, `durable_run_started`), failover and silent dequeue are permanently disabled (`orb_proxy_step`, `orb_queue_step`, `orb_verify_remote_outbox`, `orb_verify_job_transition`, `orb_admission_step`, `orb_job_ledger_step`).
      2. **`ClockDiscipline` (Independent Monotone Timers & Boot Epochs)**: Heartbeat frames reset only the idle timer and never extend the semantic progress deadline (`orb_stream_deadlines`), provider cooldowns partition transient network faults from account/subscription poison with exponential backoff (`orb_breaker_step`, `orb_account_cooldown_secs`), wake-up arming precedes no-progress stops (`orb_mission_step`), boot-scoped reconciliation fences stale sweeps (`orb_reconcile_step`), and `/proc/<pid>/stat` start-tick verification prevents PID-reuse kills (`orb_proc_liveness_step`).
      3. **`ScopedAuthority` (Capability & Lease Isolation)**: Exclusive writer leases (`orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`), constant-time token rotation (`orb_verify_token_rotation`), and zero-oracle cross-mission access control (`orb_access_step`).
      4. **`ConservedResource` (Bounded Capacity & TTL)**: Parallel DAG task-board slot admission (`orb_verify_board_slots`, `orb_verify_board_retry`), workspace bundle and log sliding-window budgets (`orb_verify_bundle_budget`, `orb_verify_log_window` + `lean_sys_cabi::leansys_verify_log_window`), managed VM admission/reaper bounds (`orb_vm_step`), half-up nanodollar token cost rounding (`orb_cost_cents_step`), and bounded stream repetition detection (`orb_stream_loop_step`).
      5. **`ProjectionStability` (Cross-Client UI Determinism)**: Pure steppers for transcript narration folding (`orb_workfold_step`), task card turn-end state (`orb_taskcard_step`), turn summary & task status settling (`orb_turn_summary_step`), sidebar hierarchy/archive visibility (`orb_sidebar_visibility`), Anthropic unified rate-limit status (`orb_usage_limit_status`), compact relative time (`orb_relative_time_bucket`), incremental SSE transcript patching (`orb_transcript_patch_step` with saturating `satAdd32`; theorem `transcript_patch_step_monotone_absorbing`: deltas never shrink the buffer, `turn_boundary` resets it, unknown event kinds leave the packed state unchanged), and deterministic PR merge-readiness priority (`orb_pr_gate_step`), backed by shared cross-client fixtures in `shared/orb-spec/fixtures/projection-invariants.json`.
-   - **Layer II (Mathlib4-Style Corollaries)**: Every concrete theorem in `lean/Orb/Spec.lean` is a 1–3 line corollary (`decide`, `omega`, `split <;> simp_all`, `simpa`) of a Layer-I Meta-Spec — never a copy-pasted boolean formula.
-2. **40 Unboxed Scalar C-ABI Exports + 21 `leansys_*` Exports (`lean/Orb/Kernel.lean`, `crates/orb-spec` & `src/orb_spec.rs`)**:
-   - **Orchestration, Leases & Bounds (12)**: `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`, `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`, `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word` (linked in `liborb_spec_cabi.a` alongside the 21 `leansys_*` C-ABI gates and scanners from `lean-sys` exposed via `orb_spec::lean_sys_cabi`).
-   - **Proxy, Mission Lifecycle, VM, Admission, Cost, Liveness & Cross-Client Projections (28)**: `orb_proxy_step` (`src/api/proxy.rs`), `orb_stream_deadlines` (`src/api/proxy.rs`), `orb_breaker_step` (`src/provider_health.rs`), `orb_mission_step` (`src/api/control/host_goal.rs`), `orb_reconcile_step` (`src/api/reconcile.rs`), `orb_queue_step` (`src/api/control/control_queue.rs`), `orb_vm_step` (`src/managed/mod.rs`), `orb_access_step` (`src/api/mission_access.rs`), `orb_workfold_step`, `orb_taskcard_step`, `orb_sidebar_visibility`, `orb_admission_step` (`src/api/control/dispatch_admission.rs`, `src/api/control/disk_admission.rs`), `orb_account_cooldown_secs` (`src/provider_health.rs`), `orb_cost_cents_step` (`src/cost.rs`), `orb_stream_loop_step` (`src/api/runners/stream_guard.rs`), `orb_job_ledger_step` (`src/remote_node/job_ledger.rs`), `orb_proc_liveness_step` (`src/node/runner.rs`), `orb_pr_gate_step` (`src/bin/palomactl.rs`), `orb_turn_summary_step`, `orb_usage_limit_status`, `orb_relative_time_bucket`, `orb_transcript_patch_step`, `orb_attribution_step` (`src/api/usage_attribution.rs`, usage caller attribution, `ScopedAuthority` + `ProjectionStability`), `orb_model_match_step`, `orb_auth_refresh_step`, `orb_privilege_step` + `orb_bunker_step` (`src/api/privilege_broker.rs`, biometric session-scoped privilege grants and Bunker Mode), `orb_deploy_gate_step` (`src/api/system.rs`, production deploy gate).
+   - **Layer II (Mathlib4-Style Corollaries)**: Concrete proofs in `lean/Orb/Spec.lean` reuse the Layer-I Meta-Specs. Check the audit for tightness and avoid duplicating implementation formulas as specifications.
+2. **Unboxed Scalar C-ABI Exports (`lean/Orb/Kernel.lean`, `crates/orb-spec` & `src/orb_spec.rs`)**:
+   - **Orchestration, Leases & Bounds (12)**: `orb_verify_writer_reuse`, `orb_verify_lease_mode`, `orb_verify_track_hold`, `orb_verify_repo_disjoint`, `orb_verify_remote_outbox`, `orb_verify_board_slots`, `orb_verify_board_retry`, `orb_verify_job_transition`, `orb_verify_bundle_budget`, `orb_verify_token_rotation`, `orb_verify_log_window`, `orb_mix64_word` (linked in `liborb_spec_cabi.a` alongside the `leansys_*` C-ABI gates and scanners from `lean-sys` exposed via `orb_spec::lean_sys_cabi`).
+   - **Proxy, Mission Lifecycle, VM, Admission, Cost, Liveness & Cross-Client Projections (examples)**: `orb_proxy_step` (`src/api/proxy.rs`), `orb_stream_deadlines` (`src/api/proxy.rs`), `orb_breaker_step` (`src/provider_health.rs`), `orb_mission_step` (`src/api/control/host_goal.rs`), `orb_reconcile_step` (`src/api/reconcile.rs`), `orb_queue_step` (`src/api/control/control_queue.rs`), `orb_vm_step` (`src/managed/mod.rs`), `orb_access_step` (`src/api/mission_access.rs`), `orb_workfold_step`, `orb_taskcard_step`, `orb_sidebar_visibility`, `orb_admission_step` (`src/api/control/dispatch_admission.rs`, `src/api/control/disk_admission.rs`), `orb_account_cooldown_secs` (`src/provider_health.rs`), `orb_cost_cents_step` (`src/cost.rs`), `orb_stream_loop_step` (`src/api/runners/stream_guard.rs`), `orb_job_ledger_step` (`src/remote_node/job_ledger.rs`), `orb_proc_liveness_step` (`src/node/runner.rs`), `orb_pr_gate_step` (`src/bin/palomactl.rs`), `orb_turn_summary_step`, `orb_usage_limit_status`, `orb_relative_time_bucket`, `orb_transcript_patch_step`, `orb_attribution_step` (`src/api/usage_attribution.rs`, usage caller attribution, `ScopedAuthority` + `ProjectionStability`), `orb_model_match_step`, `orb_auth_refresh_step`, `orb_privilege_step` + `orb_bunker_step` (`src/api/privilege_broker.rs`, biometric session-scoped privilege grants and Bunker Mode), `orb_deploy_gate_step` (`src/api/system.rs`, production deploy gate).
 3. **Fail-Closed Build & Zero-Trust Audit Gate (`crates/orb-spec/build.rs`, `turbo-lean`, `lean-native` & `lean-sys`)**:
-   - `crates/orb-spec/build.rs` compiles the verified unboxed C-ABI artifact `shared/orb-spec/cabi/orb_kernel_unboxed.c` directly with `cc -O3 -fPIC` into `liborb_spec_cabi.a` (zero `lean`, `lake`, or `elan` invocation during `cargo build` or Docker image builds), and verifies via `nm` that all <!-- inventory:orb_cabi_exports -->40<!-- /inventory:orb_cabi_exports --> `orb_*` exports and all 21 `leansys_*` exports are defined (`T`) with `0` undefined runtime symbols. Setting `ORB_VERIFY_LEAN=1` additionally triggers source verification via `turbo-lean build --project-dir lean` (native Rust module DAG builder) or direct `lean` invocation.
-   - When modifying `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean`, or `crates/orb-spec/src/lib.rs`, regenerate the unboxed C artifact via `python3 scripts/gen_orb_kernel_unboxed.py` (which uses `turbo-lean build --project-dir lean` and `lean-sys` at `v4.35.0`), check ABI bindings via `python3 scripts/gen_kernel_bindings.py --check`, and verify `turbo-lean --json audit-spec lean/Orb/Spec.lean` reports `vacuous_specs == 0`, `trivial_specs == 0`, and `horizontal_packing_warnings == []` (<!-- inventory:orb_tight_specs -->76/76 tight specs<!-- /inventory:orb_tight_specs -->).
+   - `crates/orb-spec/build.rs` compiles the verified unboxed C-ABI artifact `shared/orb-spec/cabi/orb_kernel_unboxed.c` directly with `cc -O3 -fPIC` into `liborb_spec_cabi.a` (zero `lean`, `lake`, or `elan` invocation during `cargo build` or Docker image builds), and verifies via `nm` that all `orb_*` and `leansys_*` exports recorded in `shared/orb-spec/kernel_abi.json` are defined (`T`) with `0` undefined runtime symbols. Setting `ORB_VERIFY_LEAN=1` additionally triggers source verification via `turbo-lean build --project-dir lean` (native Rust module DAG builder) or direct `lean` invocation.
+   - When modifying `lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean`, or `crates/orb-spec/src/lib.rs`, regenerate the unboxed C artifact via `python3 scripts/gen_orb_kernel_unboxed.py` (which uses `turbo-lean build --project-dir lean` and `lean-sys` at `v4.35.0`), check ABI bindings via `python3 scripts/gen_kernel_bindings.py --check`, and verify `turbo-lean --json audit-spec lean/Orb/Spec.lean` reports `vacuous_specs == 0`, `trivial_specs == 0`, and `horizontal_packing_warnings == []`; use the audit output as the current spec inventory.
    - Conversation scrolling in Orb Desktop follows `lean/Orb/Scroll.lean` (follow the bottom when pinned, keep the top-of-viewport anchor otherwise, only the reader's scrolling changes pinning, idempotent anchor correction). It is not part of the C-ABI: `orb/src/mission/scrollPolicy.ts` mirrors it and is checked against `shared/orb-spec/fixtures/scroll-policy.json`, generated from the Lean definitions by `python3 scripts/gen_scroll_fixtures.py` (`--check` in CI). `pinnedScroll.ts` is the only owner of a conversation's scroll position; other layout code calls `scrollKeeper(el)` instead of moving `scrollTop`.
    - Streaming replies follow `lean/Orb/Stream.lean`: deltas are coalesced to one render per frame without loss, and the Markdown block parser re-parses only the open tail after the committed prefix (the last blank line outside every code fence; proved stable under appends and resumable). Not part of the C-ABI: iOS mirrors it in `OrbStreamText.swift`, checked against `shared/orb-spec/fixtures/stream-commit.json` (`python3 scripts/gen_stream_fixtures.py`, `--check` in CI). Cost specs (§3-4) bound the work: bytes re-parsed per stream = committed length + tails (`incCost_eq`, linear), the parse cache is a text-keyed LRU that evicts only its oldest entry (`OrbTextCache`), at most one render per frame; their counters are checked on iOS and Android against `stream-cost.json` (`python3 scripts/gen_stream_cost_fixtures.py`).
 

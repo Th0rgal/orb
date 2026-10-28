@@ -179,7 +179,7 @@ Minimal systemd unit:
 
 ```ini
 [Unit]
-Description=sandboxed.sh remote runner node
+Description=Core remote runner node
 After=network-online.target docker.service
 Wants=network-online.target
 

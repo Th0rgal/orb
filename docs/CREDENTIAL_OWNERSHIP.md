@@ -11,9 +11,9 @@ the user logs in again. This can cause recurring "login expired" states for Clau
 
 - With server-only `CLI_PROXY_MANAGEMENT_KEY` configured and ownership set to
   `cli-proxy`, **CLIProxyAPI owns Anthropic, OpenAI, xAI, Kimi, Antigravity and Muse Code subscriptions**,
-  including missing/expired logins. sandboxed.sh never resumes token renewal
+  including missing/expired logins. Core never resumes token renewal
   when a proxy login fails: the user reconnects through the UI instead.
-- `CLI_PROXY_AUTH_DIR` is the authoritative account store. sandboxed.sh projects
+- `CLI_PROXY_AUTH_DIR` is the authoritative account store. Core projects
   read-only quota snapshots and binds accounts by filename/email, preserving
   account UUIDs, labels, priorities, backend settings and independent API keys.
 - Without management integration, the previous ownership detection remains:
@@ -25,7 +25,7 @@ the user logs in again. This can cause recurring "login expired" states for Clau
   (its ACP transport accepts nothing else). Treat that as a second login on
   the same account, never a copy of the proxy's token.
 
-Switch: `SANDBOXED_OAUTH_OWNER=cli-proxy` (default) or `legacy` (sandboxed.sh
+Switch: `SANDBOXED_OAUTH_OWNER=cli-proxy` (default) or `legacy` (Core
 refreshes its own copies, pre-refactor behaviour). `CLAUDE_CODE_DISABLE_CLI_PROXY=1`
 also forces legacy.
 
@@ -51,7 +51,7 @@ do not pin a native mission to one OAuth account. CLIProxyAPI can select differe
 accounts for successive requests in the same mission. Account attribution must
 use the response `X-CPA-TRACE-ID` auth index, rather than a model's self-report or
 global counters while other missions are active. Native pool selection does not
-establish enforcement of sandboxed.sh's per-backend account priorities.
+establish enforcement of Core's per-backend account priorities.
 
 ## UI login and reconnect
 
@@ -76,7 +76,7 @@ read it. Management access requires a loopback proxy endpoint; never distribute
 this key in desktop/mobile builds or workspace configuration.
 
 Enable strict ownership before importing usable, non-rejected credentials; never
-replace an existing proxy login with an older sandboxed.sh snapshot. Codex needs
+replace an existing proxy login with an older Core snapshot. Codex needs
 its account/ID-token metadata and Kimi needs its device metadata, so reconnect
 through the UI when those are unavailable. Rejected refresh tokens require new
 browser consent. Verify login, inference and automatic renewal after deploying.
@@ -90,7 +90,7 @@ generation again before upload and never replaces a live proxy login. Pass `--co
 for each matching native `auth.json`, and `--kimi-device-file` for the existing
 `sandboxed-sh/kimi_device_id`. Imported metadata preserves the original row UUID,
 including identityless Kimi accounts. Enable strict ownership before applying
-the import, so sandboxed.sh has stopped renewing the source token generation.
+the import, so Core has stopped renewing the source token generation.
 
 ## Antigravity subscriptions and native agents
 

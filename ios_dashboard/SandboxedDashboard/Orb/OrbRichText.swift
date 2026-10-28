@@ -137,7 +137,7 @@ struct OrbNativeMarkdownView: View {
     }
 
     private static func containsLatexOrEmbeddedMediaOutsideCode(_ source: String) -> Bool {
-        guard source.contains("$$") || source.contains("![") || source.contains("<img") else {
+        guard source.contains("$") || source.contains("\\(") || source.contains("\\[") || source.contains("![") || source.contains("<img") else {
             return false
         }
         var inFence = false
@@ -155,7 +155,22 @@ struct OrbNativeMarkdownView: View {
                 if ch == "`" { inTick.toggle(); continue }
                 if !inTick { clean.append(ch) }
             }
-            if clean.contains("$$") || clean.contains("![") || clean.contains("<img ") { return true }
+            if clean.contains("$$") || clean.contains("\\(") || clean.contains("\\[") { return true }
+            if clean.contains("![") || clean.contains("<img ") { return true }
+            let parts = clean.split(separator: "$", omittingEmptySubsequences: false)
+            if parts.count < 3 { continue }
+            var idx = 1
+            while idx < parts.count - 1 {
+                let candidate = parts[idx]
+                if !candidate.isEmpty,
+                   candidate.count <= 120,
+                   candidate.first?.isWhitespace == false,
+                   candidate.last?.isWhitespace == false,
+                   (candidate.contains("\\") || candidate.contains("^") || candidate.contains("_") || candidate.contains("{") || candidate.contains("}")) {
+                    return true
+                }
+                idx += 2
+            }
         }
         return false
     }

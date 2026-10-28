@@ -1,6 +1,6 @@
 # Hermes orchestration
 
-How Hermes and sandboxed.sh work together to run autonomous projects for days
+How Hermes and Core work together to run autonomous projects for days
 without a human in the loop.
 
 [`HERMES_ASSISTANT_MIGRATION.md`](HERMES_ASSISTANT_MIGRATION.md) describes the
@@ -24,11 +24,11 @@ loop; it is not a second architecture.
 and decides what to do next. Its state lives in `state.db`. The operator
 does not pilot by talking in the bound session.
 
-**sandboxed.sh owns the execution and the record.** It runs missions in isolated
+**Core owns the execution and the record.** It runs missions in isolated
 workspaces, stores their metadata, and answers questions about what happened.
 
 Neither side duplicates the other's job. Hermes never stores mission state.
-sandboxed.sh never decides what to work on.
+Core never decides what to work on.
 
 ---
 
@@ -37,7 +37,7 @@ sandboxed.sh never decides what to work on.
 | object | lives in | what it is |
 |---|---|---|
 | **session** | Hermes `state.db` | a durable conversation, e.g. `20260804_103847_86ca5c` |
-| **mission** | sandboxed.sh | one unit of work, in a workspace, with an agent and a model |
+| **mission** | Core | one unit of work, in a workspace, with an agent and a model |
 | **controller** | Hermes cron | a job that drives one project, one agent turn per tick |
 | **route** | sandboxed `project_bindings` (replica: Hermes `project_session_routes`) | v1 delivery plumbing for the tick copy — not the operator surface |
 
@@ -58,7 +58,7 @@ completion.
 ## The cycle
 
 ```
-  cron ──fires──▶ controller ──dispatches──▶ missions (sandboxed.sh)
+  cron ──fires──▶ controller ──dispatches──▶ missions (Core)
                       │                            │
                       │                            │ origin_session_id
                       ▼                            ▼
@@ -71,7 +71,7 @@ completion.
 2. The controller reads live state: PRs, CI, missions in flight.
 3. It decides, then dispatches missions through the `sandboxed_assistant` MCP
    server.
-4. sandboxed.sh returns an action receipt and arranges a wake condition.
+4. Core returns an action receipt and arranges a wake condition.
 5. Mission completion is a mission row. The next controller tick (or an
    additive wake of the cron job) reconciles the receipt against external
    evidence and the track's acceptance criteria. The bound session may still
@@ -138,7 +138,7 @@ Coldcard `acfb03d2` (2026-08-13) finished `Codex CLI not found` in a
 throwaway session; the dedicated conversation stayed silent until Thomas
 asked.
 
-sandboxed.sh completes the picture: when a mission is created from a bound
+Core completes the picture: when a mission is created from a bound
 conversation without a `project`, the server fills it in from the binding. An
 explicit value always wins, including a deliberate blank. An unbound session
 yields nothing — a wrong tag is worse than a missing one, because a wrong tag is
@@ -326,7 +326,7 @@ without evidence is missing data to report — never an invitation to guess.
 
 ## Known limitations
 
-**The project↔conversation link is replicated.** sandboxed.sh owns the operator
+**The project↔conversation link is replicated.** Core owns the operator
 bind and Hermes keeps a routing replica. Write-through and repair handle the
 common path, but replication authority, lag, and repair are not yet surfaced as
 first-class situation data. Continuation migration must remain covered by an

@@ -83,7 +83,7 @@ export async function GET(
     try {
       const docs = await listDocs();
       return NextResponse.json({
-        description: "Orb (sandboxed.sh) Documentation Index",
+        description: "Orb and Core Documentation Index",
         docs: docs.map((doc) => ({
           path: doc,
           url: `/api/docs/${doc}`,
@@ -100,7 +100,7 @@ export async function GET(
     try {
       const docs = await listDocs();
       const contents: string[] = [
-        "# Orb (sandboxed.sh) - Complete Documentation",
+        "# Orb and Core - Complete Documentation",
         "",
         "> This file contains all documentation concatenated for AI agent consumption.",
         "",

@@ -14,7 +14,7 @@ are defined in [`test-helpers.sh`](test-helpers.sh).
 ## Scope
 
 Validate the native Android dashboard at `android_dashboard/` against a running
-Sandboxed.sh backend:
+Core backend:
 
 - First-run server configuration and auth gate.
 - Bottom-tab navigation: Control, Missions, Terminal, Files, More.
@@ -41,7 +41,7 @@ local or staging backend.
 - One running Android Emulator, API 33 or newer required; API 35 or newer preferred.
 - `adb` on `PATH`.
 - Java 17.
-- A reachable Sandboxed.sh backend.
+- A reachable Core backend.
 
 ## Environment
 

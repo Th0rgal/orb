@@ -410,7 +410,7 @@ test(`Inbox surfaces Needs You and Ready for Review while keeping working agents
   await expect(modelPill).toHaveAttribute("aria-label", "Inbox settings (AI · builtin/smart)");
   await modelPill.click();
   await expect(page.locator(".settings-page > .s-inner > h2")).toHaveText("Notifications");
-  await expect(page.getByLabel("Inbox summary model")).toHaveValue("builtin/smart");
+  await expect(page.getByLabel("AI summaries", { exact: true })).toHaveValue("builtin/smart");
 });
 }
 

@@ -121,8 +121,7 @@ export function OrbHero() {
           Connect your subscriptions, API keys, and local hardware to your machines, and
           orchestrate <strong>Claude Code</strong>, <strong>Codex</strong>,{" "}
           <strong>Antigravity</strong>, <strong>OpenCode</strong>, and{" "}
-          <strong>Grok</strong> from macOS and iOS. Formerly <code>sandboxed.sh</code>,
-          which is now the backend to the Orb clients.
+          <strong>Grok</strong> from macOS and iOS, connected through Core.
         </p>
         <div className="orb-hero-actions">
           <Link href="/getting-started" className="orb-btn orb-btn-primary">

@@ -1,6 +1,6 @@
 # Storage lifecycle policy
 
-Sandboxed.sh treats cleanup as an approval workflow, not an automatic disk
+Core treats cleanup as an approval workflow, not an automatic disk
 reclamation mechanism. The inventory is dry-run-only: it never deletes
 workspaces, mission directories, Lean/build caches, worktrees, images, or
 credentials. `--apply` is intentionally rejected.

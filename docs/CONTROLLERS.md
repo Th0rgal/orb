@@ -249,7 +249,7 @@ leur déléguer :
    responsabilité (dispatch sans humain dans la boucle) est trop large pour être
    armée sans supervision dédiée. Le laisser éteint sauf décision explicite.
 
-Note : depuis que la garde native de sandboxed.sh applique le plafond
+Note : depuis que la garde native de Core applique le plafond
 `parallel_missions` du grant en dur au `create_mission` (429 `parallel_missions_cap`),
 le signal `OVER_SUBSCRIPTION` du watcher est surtout *redondant* pour la
 sur-souscription — le watcher n'ajoute plus que la vision quota/backlog. La

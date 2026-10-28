@@ -41,3 +41,19 @@ class OrbUsageSettingsTest {
         assertEquals(listOf("Pricey", "Cheap"), usageTopMissions(s).map { it.name })
     }
 }
+
+class OrbInboxSummaryChoiceTest {
+    @Test fun selectionMatchesSharedFixture() {
+        val spec = OrbSpec.dict("fixtures/inbox-summary-choice.json")
+        for (c in OrbJSON.dictList(spec["cases"])) {
+            var model = c["initial"] as String
+            val expected = OrbJSON.dictList(c["expected"])
+            (c["choices"] as List<*>).forEachIndexed { index, choice ->
+                val result = OrbInboxSummaryChoice.apply(model, choice as String)
+                assertEquals(expected[index]["aiSummary"], result.aiSummary)
+                assertEquals(expected[index]["model"], result.model)
+                model = result.model
+            }
+        }
+    }
+}

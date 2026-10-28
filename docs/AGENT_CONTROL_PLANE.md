@@ -16,7 +16,7 @@ intent -> observe -> decide -> act -> receive receipt -> reconcile -> learn
 ```
 
 Every Paloma component exists to make one edge of this loop reliable. Hermes
-holds the scheduler and the coordinator's working judgment; sandboxed.sh owns
+holds the scheduler and the coordinator's working judgment; Core owns
 canonical structured project intent, authority, execution, observations, and
 receipts. The operator surface is Orb (cron page + steers, mission rows). The
 bound conversation is an implementation route, not something to open. Hermes
@@ -427,7 +427,7 @@ than replaying old transcripts.
 | Component | Owns | Must not own |
 |---|---|---|
 | Hermes | conversation, judgment, controller scheduling, operator interaction | mission truth, fleet truth, duplicated project execution state |
-| sandboxed.sh | project intent store, attempts, leases, observations, receipts, projections, isolated execution | autonomous prioritization or unreviewed judgment |
+| Core | project intent store, attempts, leases, observations, receipts, projections, isolated execution | autonomous prioritization or unreviewed judgment |
 | mission harness | bounded work in one workspace | project authority, canonical status, final verification |
 | Library/skills | versioned policies and reusable procedures | volatile project state or secrets |
 | dashboard/mobile/CLI | projections and explicit commands | independent business logic or shadow state |

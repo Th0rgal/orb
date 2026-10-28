@@ -1,6 +1,6 @@
 # Inference protocols and reasoning continuity
 
-Sandboxed.sh exposes several inference protocols because no single wire format
+Core exposes several inference protocols because no single wire format
 preserves every provider's reasoning state faithfully.
 
 The routing rule is:
