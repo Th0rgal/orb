@@ -1448,7 +1448,25 @@ impl ManagedManager {
     }
 
     pub async fn budget(&self) -> BudgetView {
-        let machines = self.machines.lock().await;
+        self.budget_view(&self.machines.lock().await)
+    }
+
+    /// Display scope only; admission always uses the full global budget.
+    pub async fn visible_budget(&self, tenant: &str) -> BudgetView {
+        let machines: Vec<_> = self
+            .machines
+            .lock()
+            .await
+            .iter()
+            .filter(|m| {
+                m.provisioning_mode.is_worker() || m.owner_user_id.as_deref() == Some(tenant)
+            })
+            .cloned()
+            .collect();
+        self.budget_view(&machines)
+    }
+
+    fn budget_view(&self, machines: &[ManagedMachine]) -> BudgetView {
         let now = Utc::now();
         let today = start_of_today();
         let spent = machines

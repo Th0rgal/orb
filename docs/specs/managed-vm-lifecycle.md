@@ -240,3 +240,8 @@ file content or output. Receipt files are mode 0600 in a mode 0700 directory;
 they are retained as idempotency fences and may contain sensitive output.
 Operation admission refreshes `last_busy_at`; it does not disable TTL or owner
 reaping. Explicit lifecycle requests can stop a concurrently executing operation.
+
+Receipt identity follows the immutable managed-machine ID across stop/resume and
+provider incarnations: reusing the same key intentionally replays its earlier
+receipt. Use a new key for a new operation after resume. Tenant-scoped display
+budgets omit other tenants' raw machines, while admission uses global totals.

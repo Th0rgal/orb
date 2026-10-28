@@ -101,6 +101,7 @@ async fn list(
                 machine.provisioning_mode.is_worker()
                     || machine.owner_user_id.as_deref() == Some(user.id.as_str())
             });
+            view.budget = m.visible_budget(&user.id).await;
             let visible = visible_machines(&m, &user.id).await;
             view.daily_spend = crate::managed::daily_spend(
                 &visible,
@@ -727,6 +728,9 @@ async fn snapshot(
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     let scope = MissionScope {
         owner_mission_id: body.owner_mission_id,
         project: body.project.clone(),
