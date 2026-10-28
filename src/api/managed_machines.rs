@@ -101,6 +101,12 @@ async fn list(
                 machine.provisioning_mode.is_worker()
                     || machine.owner_user_id.as_deref() == Some(user.id.as_str())
             });
+            let visible = visible_machines(&m, &user.id).await;
+            view.daily_spend = crate::managed::daily_spend(
+                &visible,
+                crate::managed::SPEND_DAYS,
+                chrono::Utc::now(),
+            );
             Json(view).into_response()
         }
         Err(r) => r,
@@ -114,10 +120,13 @@ struct SpendQuery {
 
 /// Daily spend aggregates (UTC days, oldest first) with per-mission and
 /// per-size breakdowns.
-async fn spend(Query(q): Query<SpendQuery>) -> Response {
+async fn spend(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Query(q): Query<SpendQuery>,
+) -> Response {
     match manager() {
         Ok(m) => Json(json!({
-            "days": m.daily_spend(q.days.unwrap_or(crate::managed::SPEND_DAYS)).await
+            "days": crate::managed::daily_spend(&visible_machines(&m, &user.id).await, q.days.unwrap_or(crate::managed::SPEND_DAYS), chrono::Utc::now())
         }))
         .into_response(),
         Err(r) => r,
@@ -257,12 +266,15 @@ async fn reuse_idle_sibling(
 
 /// What the lifecycle reaper would do now for each live machine, and
 /// whether it is in dry-run. Read-only.
-async fn reap_plan() -> Response {
+async fn reap_plan(axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>) -> Response {
     match manager() {
         Ok(m) => Json(json!({
             "dry_run": m.runtime_settings().reaper_dry_run,
             "policy": m.settings.policy(),
-            "machines": m.reap_plan().await,
+            "machines": ({
+                let visible: std::collections::HashSet<_> = visible_machines(&m, &user.id).await.into_iter().map(|m| m.id).collect();
+                m.reap_plan().await.into_iter().filter(|entry| visible.contains(&entry.machine_id)).collect::<Vec<_>>()
+            }),
         }))
         .into_response(),
         Err(r) => r,
@@ -782,6 +794,17 @@ async fn fork(
         ..Default::default()
     };
     spawn_for(&state, &user, req).await
+}
+
+async fn visible_machines(m: &ManagedManager, tenant: &str) -> Vec<crate::managed::ManagedMachine> {
+    m.machines_snapshot()
+        .await
+        .into_iter()
+        .filter(|machine| {
+            machine.provisioning_mode.is_worker()
+                || machine.owner_user_id.as_deref() == Some(tenant)
+        })
+        .collect()
 }
 
 async fn raw_owner_check(
