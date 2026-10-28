@@ -31,6 +31,38 @@ class Harness(unittest.TestCase):
         for rows in ({0: 18, 1: 37}, {0: 37, 1: 19}):
             self.assertTrue(conformance.compare_rows(self.reference, rows, self.cases))
 
+    def test_bad_output_preserves_unambiguous_mismatches_through_final_aggregation(self):
+        for text, mismatch in (("0:18\ngarbage\n1:37", 0), ("0:18\n1:37\n2:5", 0),
+                               ("0:18\n1:37\n1:9", 0), ("0:18\n0:19\n1:36", 1)):
+            for command_failed in (False, True):
+                with self.subTest(text=text, command_failed=command_failed):
+                    report, values, partial = {"engines": {}, "blockers": []}, {"stock_lean": self.reference}, {}
+                    def action():
+                        if command_failed:
+                            raise conformance.CommandFailure("fixture command failed", text)
+                        return conformance.parse_rows(text)
+                    conformance.record_engine(report, values, partial, "fixture", action, self.cases)
+                    code = conformance.summarize(report, values, partial, self.cases)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(report["status"], "FAIL")
+                    self.assertEqual(report["engines"]["fixture"]["status"], "BLOCKED")
+                    self.assertNotIn("fixture", values)
+                    self.assertEqual([m["case"]["id"] for m in report["mismatches"]], [mismatch])
+                    if "0:19" in text:
+                        self.assertNotIn(0, partial["fixture"])
+                    if "1:9" in text:
+                        self.assertNotIn(1, partial["fixture"])
+
+    def test_bad_executed_mutant_results_force_failure_report_and_exit(self):
+        for text in ("0:18", "0:18\n1:36\n2:5", "0:18\n0:18\n1:36", "0:18\ngarbage\n1:36"):
+            report = {"engines": {}, "blockers": [], "mutation_checks": {}}
+            failed = conformance.record_mutant(report["mutation_checks"], "fixture", self.reference, self.reference,
+                lambda: conformance.parse_rows(text), self.cases, "fixture")
+            code = conformance.summarize(report, {"stock_lean": self.reference}, {}, self.cases, failed)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["status"], "FAIL")
+            self.assertEqual(report["mutation_checks"]["fixture"]["status"], "FAIL")
+
     def test_receipt_hash_binds_input_result_engine_and_provenance(self):
         receipt = conformance.case_receipt(self.cases[0], "fixture-engine", 19, "provenance-hash")
         for key, value in (("engine", "different"), ("result_u64", "18"),

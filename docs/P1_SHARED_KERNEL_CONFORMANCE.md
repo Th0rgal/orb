@@ -52,6 +52,12 @@ input/case and validates a strict decimal UInt64 result, avoiding positional
 identity within repeated-declaration batches and unbounded command lines.
 Missing tools, unsuccessful commands, bad row identities and incomplete engines
 remain visible. A mismatch or mutation-qualification failure exits 1.
+Malformed output retains independently valid expected-ID observations for
+comparison, including rows after a malformed line. All occurrences of a duplicate
+identity are excluded as ambiguous, with the engine explicitly blocked. Extra IDs
+cannot discard valid observations. Once a built mutant is invoked, malformed,
+missing or duplicate results, crashes and timeouts fail qualification (exit 1);
+unavailable build/reference prerequisites remain incomplete (exit 2).
 Otherwise the harness exits 2 (`INCOMPLETE`),
 even when all scalar observations agree: existing production host adapters,
 loop/alias/reference-counting cases, per-family mutation qualification and target

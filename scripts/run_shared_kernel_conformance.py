@@ -32,21 +32,39 @@ def canonical_hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+class RowFailure(ValueError):
+    def __init__(self, errors, rows):
+        super().__init__("; ".join(errors))
+        self.rows = rows
+
+
 def parse_rows(text):
-    result = {}
-    for line in text.splitlines():
-        a, b = line.split(":")
-        key, value = int(a), int(b)
-        if key in result or key < 0 or not 0 <= value < 2**64:
-            raise ValueError("duplicate/invalid execution row")
-        result[key] = value
+    result, seen, ambiguous, errors = {}, set(), set(), []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        try:
+            a, b = line.split(":")
+            key = int(a)
+            if key in seen:
+                ambiguous.add(key)
+                result.pop(key, None)
+                raise ValueError("duplicate execution identity")
+            seen.add(key)
+            value = int(b)
+            if key < 0 or not 0 <= value < 2**64:
+                raise ValueError("invalid execution row")
+            if key not in ambiguous:
+                result[key] = value
+        except ValueError as error:
+            errors.append(f"line {line_number}: {error}")
+    if errors:
+        raise RowFailure(errors, result)
     return result
 
 
 def validate_rows(rows, cases):
     if set(rows) != {c["id"] for c in cases}:
         raise ValueError("missing/extra execution rows")
-    if any(type(v) is not int or not 0 <= v < 2**64 for v in rows.values()):
+    if any(type(k) is not int or type(v) is not int or not 0 <= v < 2**64 for k, v in rows.items()):
         raise ValueError("invalid execution result")
 
 
@@ -60,6 +78,46 @@ def case_receipt(case, engine, result, provenance):
     payload = {"schema": "orb.conformance.case.v1", "case": case, "engine": engine,
                "result_u64": str(result), "provenance": provenance}
     return {"payload": payload, "sha256": canonical_hash(payload)}
+
+
+def record_engine(report, values, partial_values, name, action, cases):
+    result = {}
+    try:
+        result = action()
+        validate_rows(result, cases)
+        values[name] = result
+        report["engines"][name] = {"status": "EXECUTED", "rows": len(result)}
+    except Exception as error:
+        if isinstance(error, CommandFailure):
+            try:
+                result = parse_rows(error.stdout)
+            except RowFailure as failure:
+                result = failure.rows
+        elif isinstance(error, RowFailure):
+            result = error.rows
+        expected = {c["id"] for c in cases}
+        observed = {k: v for k, v in result.items() if type(k) is int and k in expected
+                    and type(v) is int and 0 <= v < 2**64} if isinstance(result, dict) else {}
+        partial_values[name] = observed
+        report["engines"][name] = {"status": "BLOCKED", "reason": str(error), "observed_rows": len(observed)}
+
+
+def summarize(report, values, partial_values, cases, qualification_failed=False):
+    report["mismatches"] = []
+    if "stock_lean" in values:
+        for name, rows in {**partial_values, **values}.items():
+            for case in cases:
+                key = case["id"]
+                if key in rows and rows[key] != values["stock_lean"][key]:
+                    report["mismatches"].append({"case": case, "engine": name,
+                        "stock": str(values["stock_lean"][key]), "actual": str(rows[key])})
+    else:
+        report["blockers"].append("Stock Lean oracle unavailable; comparisons unqualified")
+    report["missing_engines"] = [name for name in REQUIRED_ENGINES if name not in values]
+    report["comparisons"] = sum(len(rows) for name, rows in {**partial_values, **values}.items()
+                                if name != "stock_lean") if "stock_lean" in values else 0
+    report["status"] = "FAIL" if report["mismatches"] or qualification_failed else "INCOMPLETE"
+    return 1 if report["status"] == "FAIL" else 2
 
 
 def digest(path):
@@ -125,12 +183,26 @@ class QualificationFailure(ValueError):
 
 def qualify_mutant(reference, baseline, mutant, cases, target):
     expected = {c["id"] for c in cases if c["symbol"] == target}
-    if not expected or compare_rows(reference, baseline, cases):
-        raise QualificationFailure("mutation baseline is missing or disagrees with stock")
-    actual = set(compare_rows(baseline, mutant, cases))
+    try:
+        if not expected or compare_rows(reference, baseline, cases):
+            raise QualificationFailure("mutation baseline is missing or disagrees with stock")
+        actual = set(compare_rows(baseline, mutant, cases))
+    except ValueError as error:
+        raise QualificationFailure(str(error)) from error
     if actual != expected or any(mutant[i] != baseline[i] ^ 1 for i in expected):
         raise QualificationFailure("mutation effect escaped or differs from its intended case set/bit flip")
     return sorted(actual)
+
+
+def record_mutant(checks, name, reference, baseline, action, cases, target):
+    """Called only after build/reference prerequisites; any bad result fails qualification."""
+    try:
+        killed = qualify_mutant(reference, baseline, action(), cases, target)
+        checks[name] = {"status": "KILLED", "case_ids": killed}
+        return False
+    except Exception as error:
+        checks[name] = {"status": "FAIL", "reason": str(error)}
+        return True
 
 
 def export_map(path, namespace):
@@ -235,21 +307,7 @@ def main(argv=None):
     values, partial_values = {}, {}
 
     def engine(name, action):
-        result = {}
-        try:
-            result = action()
-            validate_rows(result, cases)
-            values[name] = result
-            report["engines"][name] = {"status": "EXECUTED", "rows": len(result)}
-        except Exception as e:
-            if isinstance(e, CommandFailure):
-                try:
-                    result = parse_rows(e.stdout)
-                except (ValueError, TypeError):
-                    result = {}
-            if isinstance(result, dict) and set(result) <= {c["id"] for c in cases}:
-                partial_values[name] = result
-            report["engines"][name] = {"status": "BLOCKED", "reason": str(e), "observed_rows": len(result)}
+        record_engine(report, values, partial_values, name, action, cases)
         (OUT / "values.json").write_text(json.dumps({"complete": values, "partial": partial_values}, sort_keys=True) + "\n")
         (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
 
@@ -391,18 +449,6 @@ for (const c of cases) {
     for name, action in [("stock_lean", stock), ("stock_extracted_c", stock_c),
                          ("vendored_native_c", native), ("rust_abi", rust_abi), ("wasm", wasm), ("lnir", lnir)]:
         engine(name, action)
-    report["mismatches"] = []
-    if "stock_lean" in values:
-        for name, rows in {**partial_values, **values}.items():
-            for c in cases:
-                if c["id"] in rows and rows[c["id"]] != values["stock_lean"][c["id"]]:
-                    report["mismatches"].append({"case": c, "engine": name,
-                        "stock": str(values['stock_lean'][c['id']]), "actual": str(rows[c['id']])})
-    else:
-        report["blockers"].append("Stock Lean oracle unavailable; comparisons unqualified")
-    report["missing_engines"] = [name for name in REQUIRED_ENGINES if name not in values]
-    report["comparisons"] = sum(len(rows) for name, rows in {**partial_values, **values}.items()
-                                if name != "stock_lean") if "stock_lean" in values else 0
     report["mutation_checks"] = {}
     qualification_failed = False
     try:
@@ -417,21 +463,20 @@ for (const c of cases) {
         source = ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
         run(["cc", "-O2", "-fPIC", "-Dorb_mix64_word=original_mix", "-c", source, "-o", OUT / "mutant.o"])
         run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC", OUT / "mutant.o", shim, "-o", OUT / "mutant.so"])
-        if "stock_lean" not in values:
-            raise RuntimeError("no executed stock reference for mutation qualification")
-        mutant_rows = native_library(OUT / "mutant.so")
-        killed = qualify_mutant(values["stock_lean"], values["vendored_native_c"], mutant_rows, cases, target["name"])
-        report["mutation_checks"]["native_scalar"] = {"status": "KILLED", "case_ids": killed}
+        if any(name not in values for name in ("stock_lean", "vendored_native_c", "wasm")):
+            raise RuntimeError("no complete stock/native/WASM baseline for mutation qualification")
+        qualification_failed |= record_mutant(report["mutation_checks"], "native_scalar", values["stock_lean"],
+            values["vendored_native_c"], lambda: native_library(OUT / "mutant.so"), cases, target["name"])
         for src, obj, flags in [(source, "mutant.wasm.o", ["-Dorb_mix64_word=original_mix"]), (shim, "shim.wasm.o", [])]:
             run([TOOLS / "clang", "--target=wasm32", "-O2", "-ffreestanding", "-isystem", TOOLS.parent / "include/clang",
                  *flags, "-c", src, "-o", OUT / obj])
         run([TOOLS / "ld.lld", "-flavor", "wasm", "--no-entry", "--export-all", OUT / "mutant.wasm.o", OUT / "shim.wasm.o", "-o", OUT / "mutant.wasm"])
-        rows = parse_rows(run(["node", OUT / "run-wasm.cjs", OUT / "mutant.wasm", ORB / "shared/orb-spec/kernel_abi.json", OUT / "js-cases.json"]))
-        killed = qualify_mutant(values["stock_lean"], values["wasm"], rows, cases, target["name"])
-        report["mutation_checks"]["wasm_scalar"] = {"status": "KILLED", "case_ids": killed}
+        qualification_failed |= record_mutant(report["mutation_checks"], "wasm_scalar", values["stock_lean"], values["wasm"],
+            lambda: parse_rows(run(["node", OUT / "run-wasm.cjs", OUT / "mutant.wasm", ORB / "shared/orb-spec/kernel_abi.json", OUT / "js-cases.json"])), cases, target["name"])
     except Exception as e:
         report["mutation_checks"]["failure"] = str(e)
-        qualification_failed = isinstance(e, QualificationFailure)
+        qualification_failed |= isinstance(e, QualificationFailure)
+    exit_code = summarize(report, values, partial_values, cases, qualification_failed)
     (OUT / "values.json").write_text(json.dumps({"complete": values, "partial": partial_values}, sort_keys=True) + "\n")
     report["artifacts"] = {str(p.relative_to(OUT)): digest(p) for p in OUT.rglob("*")
                            if p.is_file() and p.name not in ("report.json", "commands.json")}
@@ -445,12 +490,10 @@ for (const c of cases) {
                 receipts.write(json.dumps(case_receipt(c, name, rows[c["id"]], report["provenance_sha256"]), sort_keys=True) + "\n")
     report["case_receipts_sha256"] = digest(OUT / "case-receipts.jsonl")
     report["case_receipts_signed"] = False
-    if report["mismatches"] or qualification_failed:
-        report["status"] = "FAIL"
     (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({k: report[k] for k in ("status", "public_exports", "cases", "engines", "blockers")}, indent=2))
     print("comparisons:", report["comparisons"], "observed mismatches:", len(report["mismatches"]))
-    return 1 if report["status"] == "FAIL" else 2  # Unqualified coverage never yields acceptance.
+    return exit_code  # Unqualified coverage never yields acceptance.
 
 
 if __name__ == "__main__":
