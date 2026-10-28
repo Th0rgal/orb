@@ -75,7 +75,7 @@ for line in sys.stdin:
                 # before goal/get and the subsequent explicit activation.
                 notify('thread/goal/updated', {'threadId': state['id'], 'goal': state['goal']})
         active = mode in ('active', 'active-no-id')
-        turns = [{'id': 'active-turn', 'status': 'inProgress'}] if mode == 'active' else []
+        turns = [{'id': 'active-turn', 'status': 'inProgress'}] if mode == 'active' else state.get('turns', [])
         if method == 'thread/resume' and mode == 'goal-snapshot':
             turns = [{'id': 'active-turn', 'status': 'completed', 'items': [{'id': 'snapshot-answer', 'type': 'agentMessage', 'text': 'Retained checkpoint receipt'}]}]
         result = {'thread': {'id': state['id'], 'cwd': '/wrong' if mode == 'cwd-mismatch' else state['cwd'],
@@ -116,6 +116,15 @@ for line in sys.stdin:
             state['goal']['tokensUsed'] = 7
             save()
             os._exit(0)
+        if mode == 'late-tool-receipt':
+            item = {'id': 'background-tool', 'type': 'commandExecution',
+                    'command': 'synthetic-do-once', 'processId': '20810', 'status': 'inProgress'}
+            notify('item/started', {'threadId': state['id'], 'turnId': 'active-turn', 'item': item})
+            # The native command settles after the consumer's terminal turn.
+            # Its receipt is only visible on the next thread/resume snapshot.
+            item = dict(item, status='failed', exitCode=-1, aggregatedOutput='')
+            state['turns'] = [{'id': 'active-turn', 'status': 'completed', 'items': [item]}]
+            save()
         if mode == 'crash-tool':
             notify('item/started', {'threadId': state['id'], 'turnId': 'active-turn',
                                     'item': {'id': 'unknown-tool', 'type': 'commandExecution', 'command': 'synthetic-do-once'}})

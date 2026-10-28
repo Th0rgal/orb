@@ -96,6 +96,11 @@ impl JobStore {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT);",
             )?;
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS node_scratch (
+                id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT,
+                parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL,
+                retired_at TEXT
+            );")?;
             let _ = conn.execute("ALTER TABLE jobs ADD COLUMN artifacts_json TEXT", []);
             let _ = conn.execute("ALTER TABLE jobs ADD COLUMN cancellation_json TEXT", []);
             Ok(Self { conn: Arc::new(Mutex::new(conn)) })
@@ -103,7 +108,7 @@ impl JobStore {
         .await?
     }
 
-    async fn with_conn<T, F>(&self, f: F) -> anyhow::Result<T>
+    pub(super) async fn with_conn<T, F>(&self, f: F) -> anyhow::Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,

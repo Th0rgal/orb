@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Periodic disk GC for lean-build checkouts and lake cache slots
     // (SANDBOXED_NODE_MIN_FREE_GB, default 10).
-    sandboxed_sh::node::spawn_cache_gc(work_root.clone());
+    sandboxed_sh::node::spawn_cache_gc(work_root.clone(), jobs.clone());
     sandboxed_sh::node::resource_history::start();
 
     let state = Arc::new(NodeState {
@@ -501,6 +501,7 @@ async fn execute(
         &state.node_id,
         &signing_secret,
         state.work_root.clone(),
+        &state.jobs,
         request,
     )
     .await;

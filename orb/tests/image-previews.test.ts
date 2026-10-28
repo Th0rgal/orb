@@ -1,5 +1,5 @@
 import {expect,it,vi,afterEach} from "vitest";
-import {rememberImagePreview,imagePreview,imagePreviewScope} from "../src/imagePreviews";
+import {rememberImagePreview,imagePreview,imagePreviewScope,loadImagePreview} from "../src/imagePreviews";
 import {createFileClient} from "../src/fileResources";
 import {setApiUrl,connectionVersion,bumpConnectionVersion,type Mission} from "../src/api";
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
@@ -55,4 +55,20 @@ it('cancels a streamed image that exceeds the preview limit',async()=>{
  vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(body));
  expect(await createFileClient({mission}).loadUploadedImage('/context/a.png')).toBeNull();
  expect(cancel).toHaveBeenCalledOnce();
+});
+
+it('shares concurrent image reads and reopens without downloading again',async()=>{
+ const load=vi.fn(async()=>new Blob(['image'],{type:'image/png'}));
+ const [a,b]=await Promise.all([loadImagePreview('reuse','/a.png',load),loadImagePreview('reuse','/a.png',load)]);
+ expect(a).toBe(b); expect(a).toMatch(/^data:image/);
+ expect(await loadImagePreview('reuse','/a.png',load)).toBe(a);
+ expect(load).toHaveBeenCalledTimes(1);
+ await loadImagePreview('other-account','/a.png',load);
+ expect(load).toHaveBeenCalledTimes(2);
+});
+it('does not retain failed image reads',async()=>{
+ const load=vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(new Blob(['ok']));
+ expect(await loadImagePreview('retry','/a.png',load)).toBeNull();
+ expect(await loadImagePreview('retry','/a.png',load)).toMatch(/^data:/);
+ expect(load).toHaveBeenCalledTimes(2);
 });

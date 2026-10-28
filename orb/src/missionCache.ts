@@ -1,10 +1,10 @@
 import { createSignal } from "solid-js";
 import { connectionVersion, listQueuedMessages } from "./api";
 import { applyStreamEvent, buildTranscript, type StreamItem } from "./transcriptModel";
-import { getMissionEventPage, storedToStream, type StreamEvent } from "./stream";
+import { getMissionEventPage, getMissionEventPreview, storedToStream, type StreamEvent } from "./stream";
 import { cacheDelete, cachePeek, cachePut } from "./pageCache";
 
-export type TranscriptSnap = { items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
+export type TranscriptSnap = { activity?: string; items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; detailsPending?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
 
 const key = (id: string) => `c:${connectionVersion()}:m:${id}:tx`;
 const heightKey = (id: string) => `c:${connectionVersion()}:m:${id}:h`;
@@ -21,10 +21,14 @@ function bumpTranscriptVersion() {
   }, 16);
 }
 
+const recentlyOpened = new Map<string, string>();
 const active=new Map<string,{refs:number;snapshot?:TranscriptSnap}>();
 function saveSnapshot(scope:string,snapshot:TranscriptSnap){const entry=active.get(scope);if(entry)entry.snapshot=snapshot;else cachePut(scope,snapshot);bumpTranscriptVersion();}
 export function retainTranscript(id:string):()=>void{
- const scope=key(id);let entry=active.get(scope);
+ const scope=key(id);
+ recentlyOpened.delete(scope); recentlyOpened.set(scope,id);
+ while(recentlyOpened.size>12) recentlyOpened.delete(recentlyOpened.keys().next().value!);
+ let entry=active.get(scope);
  if(entry)entry.refs++;else{entry={refs:1,snapshot:cachePeek<TranscriptSnap>(scope)};cacheDelete(scope);active.set(scope,entry);}
  return()=>{if(--entry.refs===0){active.delete(scope);if(entry.snapshot)cachePut(scope,entry.snapshot);}};
 }
@@ -35,7 +39,7 @@ export function peekTranscript(id: string): TranscriptSnap | undefined {
 /** Full event-log snapshot, safe to paint on first open. Live SSE patches are not. */
 export function peekReadyTranscript(id: string): TranscriptSnap | undefined {
   const snap = peekTranscript(id);
-  return snap?.fromLog ? snap : undefined;
+  return snap?.fromLog && !snap.detailsPending ? snap : undefined;
 }
 
 export function peekTranscriptHeight(id: string): number | undefined {
@@ -59,8 +63,6 @@ export function putTranscriptHeight(id: string, height: number) {
 }
 
 function mergeStreamBySequence(older: StreamEvent[], newer: StreamEvent[]): StreamEvent[] {
-  if (!older.length) return newer;
-  if (!newer.length) return older;
   const seen = new Set<string>();
   const idOf = (ev: StreamEvent) => ev.sequence !== undefined ? `seq:${ev.sequence}:${ev.type}` : ev.storedId !== undefined ? `id:${ev.storedId}:${ev.type}` : ev.eventId ? `ev:${ev.eventId}:${ev.type}` : undefined;
   const merged: StreamEvent[] = [];
@@ -86,6 +88,17 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
     return [];
   });
   const previous=peekReadyTranscript(id);
+  // Publish persisted messages before requesting activity. A preview is readable,
+  // but has no raw cursor and must never count as a complete replay.
+  let preview:StreamEvent[]=[];
+  if(!previous){
+   const page=await getMissionEventPreview(id).catch(()=>null);
+   check();
+   if(page?.events.length){
+    preview=spineAnswers(page.events.map(storedToStream).filter((e):e is StreamEvent=>e!==null));
+    saveSnapshot(key(id),{activity:page.activity,items:buildTranscript(preview),stream:preview,fromLog:true,detailsPending:true});
+   }
+  }
   let stream:StreamEvent[]=[...(previous?.stream??[])];
   let cursor=previous?.cursor, before=previous?.before, hasOlder=previous?.hasOlder;
   let resets=0;
@@ -115,6 +128,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
    if(page.nextCursor!==undefined){if(page.nextCursor<=cursor)throw Error('Event cursor did not advance.');cursor=page.nextCursor;}
    if(!page.hasMore)break;
   }
+  stream=mergeStreamBySequence(preview,stream);
   const queued = await queuedPromise;
   check();
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
@@ -201,4 +215,27 @@ export function spineAnswers(spine: StreamEvent[]): StreamEvent[] {
     keep.push(event);
   }
   return keep.reverse();
+}
+
+/** Refresh only a bounded recent set; never download tool histories offscreen. */
+const presentationLoads = new Set<string>();
+export async function refreshPresentationPreview(id: string) {
+ const scope=key(id);
+ if(!recentlyOpened.has(scope) || active.has(scope) || jobs.has(scope) || presentationLoads.has(scope)) return;
+ presentationLoads.add(scope);
+ try {
+ const page=await getMissionEventPreview(id);
+ if(scope!==key(id) || active.has(scope) || jobs.has(scope)) return;
+ const prior=peekTranscript(id);
+ const incoming=spineAnswers(page.events.map(storedToStream).filter((e):e is StreamEvent=>e!==null));
+ const stream=mergeStreamBySequence(prior?.stream??[],incoming);
+ saveSnapshot(scope,{...prior,activity:page.activity,stream,items:buildTranscript(stream),fromLog:true,detailsPending:prior?.detailsPending ?? !prior?.fromLog});
+ } finally { presentationLoads.delete(scope); }
+}
+
+export function recordPresentationActivity(id: string, label: unknown) {
+ if(typeof label!=="string" || !label) return;
+ const scope=key(id), prior=peekTranscript(id);
+ if(!recentlyOpened.has(scope) || !prior || active.has(scope)) return;
+ saveSnapshot(scope,{...prior,activity:label.slice(0,160)});
 }

@@ -72,3 +72,13 @@ it("a transcript the cache cannot hold is prefetched once, not at every refresh"
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(fetchMock.mock.calls.length).toBe(after);
 });
+
+it("sequence-merges raw backfill after a newer offscreen preview", async () => {
+  const {refreshTranscript}=await import("../src/missionCache");
+  const event=(sequence:number)=>({type:"assistant_message" as const,sequence,eventId:`e${sequence}`,data:{content:`Answer ${sequence}`}});
+  putTranscript("preview-replay",{items:[],stream:[event(10),event(30),event(40)],fromLog:true,cursor:10});
+  vi.stubGlobal("fetch",vi.fn(async (url:string)=>new Response(JSON.stringify(url.includes('/queue')?[]:[20,30,40].map(sequence=>({id:sequence,event_id:`e${sequence}`,sequence,event_type:"assistant_message",content:`Answer ${sequence}`,timestamp:""}))),{headers:{"X-Orb-Events-Protocol":"1","X-Has-More":"false","X-Next-Cursor":"40","X-Page-Max-Sequence":"40"}})));
+  const snap=await refreshTranscript("preview-replay");
+  expect(snap.stream.map(event=>event.sequence)).toEqual([10,20,30,40]);
+  expect(snap.items.some(item=>"text" in item && item.text.includes("Answer 20"))).toBe(true);
+});

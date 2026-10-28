@@ -77,7 +77,7 @@ class OrbFileService(private val core: OrbCore, context: Context) {
     }
 
     private fun cacheKey(ref: OrbFileRef, scope: OrbFileScope): String {
-        val raw = listOf(runCatching { core.makeURL("/") }.getOrDefault(""), scope.missionId ?: "", scope.source ?: "", ref.url ?: "", ref.path, ref.size?.toString() ?: "")
+        val raw = listOf(runCatching { core.makeURL("/") }.getOrDefault(""), core.token ?: "", scope.workspaceId ?: "", scope.missionId ?: "", scope.source ?: "", ref.url ?: "", ref.path, ref.size?.toString() ?: "")
             .joinToString("\u001f")
         return MessageDigest.getInstance("SHA-256").digest(raw.toByteArray()).take(12).joinToString("") { "%02x".format(it) }
     }
@@ -95,8 +95,14 @@ class OrbFileService(private val core: OrbCore, context: Context) {
         val key = cacheKey(ref, scope)
         val lock = synchronized(locks) { locks.getOrPut(key) { Mutex() } }
         return lock.withLock {
+            if (key != cacheKey(ref, scope)) throw OrbFileError.Unauthorized
             cached(ref, scope)?.let { progress(1f); return@withLock it }
-            withContext(Dispatchers.IO) { download(ref, scope, progress) }
+            val file = withContext(Dispatchers.IO) { download(ref, scope, progress) }
+            if (key != cacheKey(ref, scope)) {
+                file.delete()
+                throw OrbFileError.Unauthorized
+            }
+            file
         }
     }
 

@@ -32,6 +32,13 @@ export function TranscriptSkeleton() {
   );
 }
 
+export function ActivitySkeleton() {
+  return <div role="status" aria-label="Loading conversation activity" aria-busy="true">
+    <span class="muted">Loading earlier messages and activity…</span>
+    <div class="sk-lines" aria-hidden="true"><i style={{ width: "36%" }} /><i style={{ width: "58%" }} /></div>
+  </div>;
+}
+
 export function FileSkeleton() {
   return (
     <div class="sk-transcript" aria-hidden="true">
