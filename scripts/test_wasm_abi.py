@@ -56,6 +56,15 @@ class WasmAbi(unittest.TestCase):
             self.assertEqual(artifact.read_bytes(), b"previous artifact")
             self.assertEqual(json.loads(receipt.read_text())["status"], "INCOMPLETE")
 
+    def test_artifact_and_receipt_cannot_alias(self):
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp) / "kernel.wasm"
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name("build_orb_kernel_wasm.py")),
+                                     "--lean-bin-dir", temp, "--out", str(artifact),
+                                     "--receipt", str(artifact)], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(artifact.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

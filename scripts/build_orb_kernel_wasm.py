@@ -114,6 +114,8 @@ def main():
     parser.add_argument("--receipt", required=True, type=Path, help="new raw receipt path")
     parser.add_argument("--check", action="store_true", help="compare the rebuilt bytes without publishing")
     args = parser.parse_args()
+    if args.out.resolve() == args.receipt.resolve() or args.out.suffix != ".wasm":
+        parser.error("output must be a .wasm artifact distinct from the receipt")
     tools = args.lean_bin_dir.resolve()
     source = ROOT / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
     manifest_path = ROOT / "shared/orb-spec/kernel_abi.json"
@@ -123,7 +125,12 @@ def main():
     # Reserve the receipt before compiling; never overwrite a previous attempt.
     with args.receipt.open("x") as record:
         def run(argv):
-            result = subprocess.run(list(map(str, argv)), capture_output=True, text=True, timeout=120)
+            argv = list(map(str, argv))
+            try:
+                result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                receipt["commands"].append({"argv": argv, "exit_code": None, "error": str(error)})
+                raise
             receipt["commands"].append({"argv": result.args, "exit_code": result.returncode,
                                         "stdout": result.stdout, "stderr": result.stderr})
             if result.returncode:
