@@ -29,7 +29,7 @@ use super::mission_store::Mission;
 use super::routes::AppState;
 use crate::util::{
     current_sandboxed_service_binary_path, current_service_companion_binary_path, home_dir,
-    service_binary_path_for_unit, service_companion_binary_path,
+    service_companion_binary_path,
 };
 use crate::workspace::{Workspace, WorkspaceStatus, WorkspaceType};
 
@@ -3590,6 +3590,12 @@ pub async fn deploy_sandboxed_sh(
         skip_build: req.skip_build,
         listen_port: state.config.port,
         health_url: deploy_health_url(&state.config.host, state.config.port),
+        install_path: current_sandboxed_service_binary_path().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Cannot resolve service entrypoint".to_string(),
+            )
+        })?,
         service_name: actual_service,
         wait_for_restart: false,
     };
@@ -3873,6 +3879,7 @@ pub(crate) struct DeployPlan {
     pub git_ref: Option<String>,
     pub skip_build: bool,
     pub service_name: String,
+    pub install_path: std::path::PathBuf,
     pub listen_port: u16,
     /// URL the guarded restart polls after `systemctl start`; a service that
     /// does not answer it in time is rolled back to the previous binaries.
@@ -3995,13 +4002,7 @@ pub(crate) async fn run_deploy(plan: DeployPlan, tx: DeployTx) -> bool {
         }
     }
 
-    let resolved_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            return deploy_fail(&tx, format!("Failed to detect current binary path: {}", e));
-        }
-    };
-    let current_exe = service_binary_path_for_unit(&resolved_exe, &service_name);
+    let current_exe = plan.install_path.clone();
     // The cargo bin name is always `sandboxed-sh` regardless of how we
     // rename it on install (e.g. `sandboxed-sh-prod` or `sandboxed-sh-dev`).
     // Same for MCP binaries.
@@ -6064,6 +6065,36 @@ async fn systemctl_show(service: &str, property: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Read systemd's executable path, not argv[0] or the deploy process's build directory.
+/// Refuse ambiguous/multiple commands rather than guessing an installation target.
+fn deploy_entrypoint(exec_start: &str) -> Result<std::path::PathBuf, String> {
+    if exec_start.matches("path=").count() != 1 {
+        return Err("Expected exactly one ExecStart executable".into());
+    }
+    let path = exec_start
+        .split_once("path=")
+        .unwrap()
+        .1
+        .split_once(" ;")
+        .ok_or("Malformed ExecStart executable")?
+        .0
+        .trim();
+    let result = std::path::PathBuf::from(path);
+    if !result.is_absolute()
+        || path.chars().any(|c| c.is_whitespace() || c.is_control())
+        || result
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        || !result
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_orb_or_sandboxed_unit_prefix)
+    {
+        return Err("ExecStart must directly execute an absolute Core binary path".into());
+    }
+    Ok(result)
+}
+
 /// The unit's configured `EnvironmentFile=` and `Environment=` pairs (later
 /// entries win, as in systemd). Never the live process environment, which
 /// the service itself could change. Callers keep only allowlisted keys.
@@ -6130,6 +6161,17 @@ pub async fn run_deploy_cli(args: &[String]) -> i32 {
         }
     };
 
+    let install_path = match systemctl_show(&args.service, "ExecStart")
+        .await
+        .ok_or_else(|| "Cannot read service ExecStart".to_string())
+        .and_then(|value| deploy_entrypoint(&value))
+    {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return 1;
+        }
+    };
     let unit_env = unit_environment(&args.service).await;
     let working_directory = systemctl_show(&args.service, "WorkingDirectory").await;
     let service_env = match service_deploy_env(&unit_env, working_directory.as_deref()) {
@@ -6144,6 +6186,8 @@ pub async fn run_deploy_cli(args: &[String]) -> i32 {
     // `expected_service` guard: `sandboxed-sh-dev deploy --service
     // sandboxed-sh-prod.service` would install dev-suffixed companions.
     let actual_service = match current_sandboxed_service_name() {
+        // A freshly built generic binary can bootstrap either explicitly selected unit.
+        Ok(service) if service == "sandboxed-sh.service" => args.service.clone(),
         Ok(service) => service,
         Err(error) => {
             eprintln!("error: {error}");
@@ -6180,6 +6224,7 @@ pub async fn run_deploy_cli(args: &[String]) -> i32 {
         git_ref: args.git_ref.clone(),
         skip_build: args.skip_build,
         service_name: args.service.clone(),
+        install_path,
         listen_port: service_env.port,
         health_url: deploy_health_url(&service_env.host, service_env.port),
         wait_for_restart: true,
@@ -7018,6 +7063,25 @@ mod tests {
 
     fn cli_args(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn deploy_cli_uses_unit_entrypoint_not_build_directory() {
+        assert_eq!(super::deploy_entrypoint("{ path=/usr/local/bin/sandboxed-sh-prod ; argv[]=/usr/local/bin/sandboxed-sh-prod ; }").unwrap(), std::path::Path::new("/usr/local/bin/sandboxed-sh-prod"));
+        for invalid in [
+            "",
+            "{ path=/bin/sh ; argv[]=sh wrapper ; }",
+            "{ path=relative/orb-core ; }",
+            "{ path=/opt/../bin/orb-core ; }",
+            "{ path=/bin/orb-core ; } { path=/bin/orb-dev ; }",
+        ] {
+            assert!(super::deploy_entrypoint(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(
+            super::deploy_entrypoint("{ path=/opt/core/bin/orb-core ; argv[]=orb-core ; }")
+                .unwrap(),
+            std::path::Path::new("/opt/core/bin/orb-core")
+        );
     }
 
     #[test]
