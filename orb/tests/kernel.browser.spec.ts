@@ -4,8 +4,9 @@ import { readFileSync } from "node:fs";
 test("kernel failure prevents App import, then retry opens the real application", async ({ page }) => {
   let attempts = 0;
   const requests: string[] = [];
+  const isApp = (url: string) => url.includes("/src/appEntry.tsx") || url.includes("/src/App.tsx") || /\/assets\/appEntry-[^/]+\.js/.test(url);
   page.on("request", request => requests.push(request.url()));
-  await page.route("**/assets/orb_kernel.wasm*", async route => {
+  await page.route("**/*orb_kernel*.wasm*", async route => {
     // Vite also serves a JS URL module at ?import&url. Fail the binary fetch,
     // after that module has loaded, so this exercises kernel Retry itself.
     if (route.request().resourceType() !== "fetch") return route.continue();
@@ -15,9 +16,9 @@ test("kernel failure prevents App import, then retry opens the real application"
   });
   await page.goto("/");
   await expect(page.getByRole("alert")).toContainText("could not start");
-  expect(requests.some(url => url.includes("/src/appEntry.tsx") || url.includes("/src/App.tsx"))).toBe(false);
+  expect(requests.some(isApp)).toBe(false);
   await page.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect.poll(() => requests.some(url => url.includes("/src/App.tsx"))).toBe(true);
+  await expect.poll(() => requests.some(isApp)).toBe(true);
   expect(attempts).toBe(2);
   await expect(page.getByRole("main")).toBeVisible();
   await expect(page.getByRole("button", { name: "Inbox", exact: true })).toBeVisible();

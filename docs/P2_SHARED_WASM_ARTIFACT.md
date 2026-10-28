@@ -82,10 +82,17 @@ cd orb
 pnpm install --frozen-lockfile
 pnpm exec vitest run
 pnpm build
+node --test scripts/check-bundle.test.mjs
+pnpm check:bundle
 pnpm exec playwright install chromium
 pnpm exec playwright test --config=playwright.kernel.config.ts
+ORB_KERNEL_PREVIEW=1 pnpm exec playwright test --config=playwright.kernel.config.ts --grep 'kernel failure prevents App import'
 ```
 
+The preview command checks startup/retry through the real production bundle;
+the fixture adapter test uses the development server's source module imports.
+Both modes require visible application-owned UI after retry. Bundle-layout tests
+retain synthetic shared-chunk keys and reject budget/static-lazy dependency drift.
 Those bounded checks do not establish full P1 multi-engine host conformance,
 WebKit/Tauri execution, performance targets or P2 phase acceptance. Native
 iOS/Android clients retain their existing C ABI path and shared fixtures; this

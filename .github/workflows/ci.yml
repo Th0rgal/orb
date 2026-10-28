@@ -198,6 +198,7 @@ jobs:
           cache-dependency-path: orb/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - run: node --test scripts/check-bundle.test.mjs
       - run: pnpm check:bundle
       - run: pnpm test
 
@@ -234,6 +235,11 @@ jobs:
       - name: Shared kernel startup and browser adapters
         if: matrix.shard == 1
         run: pnpm exec playwright test --config=playwright.kernel.config.ts
+      - name: Shared kernel production startup and retry
+        if: matrix.shard == 1
+        run: |
+          pnpm build
+          ORB_KERNEL_PREVIEW=1 pnpm exec playwright test --config=playwright.kernel.config.ts --grep 'kernel failure prevents App import'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
