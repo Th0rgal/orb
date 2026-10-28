@@ -887,9 +887,9 @@ pub(super) async fn finalize_remote_mission(
     }
     // A job that failed on a usage limit is waiting for its replay:
     // resumable, not failed.
-    let waiting = !success && status_reason == usage_limit_wait::USAGE_LIMIT_WAIT_REASON;
+    let waiting = !success && usage_limit_wait::is_remote_wait_reason(status_reason);
     let status = if waiting {
-        MissionStatus::Interrupted
+        usage_limit_wait::remote_wait_status(status_reason)
     } else if status_reason == "native_goal_stopped" {
         MissionStatus::Blocked
     } else if status_reason == usage_limit_wait::IDLE_WAIT_EXHAUSTED_REASON {
@@ -930,7 +930,9 @@ pub(super) async fn finalize_remote_mission(
         execution,
         mission_id,
         status,
-        summary: Some(if waiting {
+        summary: Some(if waiting && status == MissionStatus::Active {
+            format!("Remote node '{node_id}' is continuing after the agent's background task")
+        } else if waiting {
             format!("Remote node '{node_id}' paused; automatic recovery is scheduled")
         } else {
             format!("Remote node '{node_id}' finished")
