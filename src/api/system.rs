@@ -5993,16 +5993,63 @@ pub(crate) fn parse_environment_file(content: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `/proc/<pid>/environ` content (NUL-separated `KEY=VALUE`).
-pub(crate) fn parse_proc_environ(content: &[u8]) -> Vec<(String, String)> {
-    content
-        .split(|byte| *byte == 0)
-        .filter_map(|entry| {
-            let entry = String::from_utf8_lossy(entry);
-            let (key, value) = entry.split_once('=')?;
-            (!key.is_empty()).then(|| (key.to_string(), value.to_string()))
+/// The only unit environment keys the deploy CLI reads. Everything else in
+/// the unit (loader, shell, git, cargo or rustc control variables, PATH...)
+/// is ignored, so the unit's configuration cannot steer the commands the
+/// CLI runs as root.
+const DEPLOY_CLI_ENV_KEYS: &[&str] = &[
+    "WORKING_DIR",
+    "HOST",
+    "PORT",
+    "SANDBOXED_SH_REPO_PATH",
+    "SANDBOXED_REPO_PATH",
+];
+
+/// Service settings the deploy CLI needs, read from the unit's environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceDeployEnv {
+    pub working_dir: std::path::PathBuf,
+    pub host: String,
+    pub port: u16,
+    pub repo_path_override: Option<String>,
+}
+
+/// Build [`ServiceDeployEnv`] from the unit's `KEY=VALUE` pairs, using only
+/// [`DEPLOY_CLI_ENV_KEYS`]. Defaults match `Config::from_env`; the working dir
+/// falls back to the unit's `WorkingDirectory=`.
+pub(crate) fn service_deploy_env(
+    pairs: &[(String, String)],
+    unit_working_directory: Option<&str>,
+) -> Result<ServiceDeployEnv, String> {
+    let get = |key: &str| {
+        debug_assert!(DEPLOY_CLI_ENV_KEYS.contains(&key));
+        pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let port = match get("PORT") {
+        Some(port) => port
+            .parse::<u16>()
+            .map_err(|e| format!("invalid PORT {port:?} in the unit: {e}"))?,
+        None => 3000,
+    };
+    let working_dir = get("WORKING_DIR")
+        .or_else(|| {
+            unit_working_directory
+                .map(str::trim)
+                .filter(|dir| dir.starts_with('/'))
+                .map(str::to_string)
         })
-        .collect()
+        .unwrap_or_else(|| "/root".to_string());
+    Ok(ServiceDeployEnv {
+        working_dir: working_dir.into(),
+        host: get("HOST").unwrap_or_else(|| "0.0.0.0".to_string()),
+        port,
+        repo_path_override: get("SANDBOXED_SH_REPO_PATH").or_else(|| get("SANDBOXED_REPO_PATH")),
+    })
 }
 
 async fn systemctl_show(service: &str, property: &str) -> Option<String> {
@@ -6017,19 +6064,10 @@ async fn systemctl_show(service: &str, property: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// The environment the service runs with: its live process environment when
-/// it runs, otherwise the unit's `Environment=` and `EnvironmentFile=`. The
-/// CLI adopts it so port, working dir and repo path match the service.
-async fn service_environment(service: &str) -> Vec<(String, String)> {
-    if let Some(pid) = systemctl_show(service, "MainPID")
-        .await
-        .and_then(|pid| pid.parse::<u32>().ok())
-        .filter(|pid| *pid > 0)
-    {
-        if let Ok(content) = tokio::fs::read(format!("/proc/{pid}/environ")).await {
-            return parse_proc_environ(&content);
-        }
-    }
+/// The unit's configured `EnvironmentFile=` and `Environment=` pairs (later
+/// entries win, as in systemd). Never the live process environment, which
+/// the service itself could change. Callers keep only allowlisted keys.
+async fn unit_environment(service: &str) -> Vec<(String, String)> {
     let mut env = Vec::new();
     if let Some(files) = systemctl_show(service, "EnvironmentFiles").await {
         for line in files.lines() {
@@ -6092,21 +6130,12 @@ pub async fn run_deploy_cli(args: &[String]) -> i32 {
         }
     };
 
-    for (key, value) in service_environment(&args.service).await {
-        if !matches!(
-            key.as_str(),
-            "NOTIFY_SOCKET" | "LISTEN_FDS" | "LISTEN_PID" | "LISTEN_FDNAMES" | "INVOCATION_ID"
-        ) {
-            std::env::set_var(key, value);
-        }
-    }
-    let config = match crate::config::Config::from_env() {
-        Ok(config) => config,
+    let unit_env = unit_environment(&args.service).await;
+    let working_directory = systemctl_show(&args.service, "WorkingDirectory").await;
+    let service_env = match service_deploy_env(&unit_env, working_directory.as_deref()) {
+        Ok(env) => env,
         Err(error) => {
-            eprintln!(
-                "error: could not load the configuration of {}: {error}",
-                args.service
-            );
+            eprintln!("error: {error}");
             return 1;
         }
     };
@@ -6122,7 +6151,7 @@ pub async fn run_deploy_cli(args: &[String]) -> i32 {
         }
     };
     let marker = deploy_marker_path();
-    let live_writers = count_live_writers_on_disk(&config.working_dir).await;
+    let live_writers = count_live_writers_on_disk(&service_env.working_dir).await;
     if let Some(refusal) = evaluate_deploy_request(
         Some(&actual_service),
         Some(&args.service),
@@ -6138,12 +6167,12 @@ pub async fn run_deploy_cli(args: &[String]) -> i32 {
         eprintln!("warning: {error}");
     }
 
-    let settings = crate::settings::SettingsStore::new(&config.working_dir).await;
+    let settings = crate::settings::SettingsStore::new(&service_env.working_dir).await;
     let repo_path = match args.repo_path.clone() {
         Some(path) => path,
         None => select_repo_path(
             settings.get_sandboxed_repo_path().await,
-            repo_path_from_env(),
+            service_env.repo_path_override.clone(),
         ),
     };
     let plan = DeployPlan {
@@ -6151,8 +6180,8 @@ pub async fn run_deploy_cli(args: &[String]) -> i32 {
         git_ref: args.git_ref.clone(),
         skip_build: args.skip_build,
         service_name: args.service.clone(),
-        listen_port: config.port,
-        health_url: deploy_health_url(&config.host, config.port),
+        listen_port: service_env.port,
+        health_url: deploy_health_url(&service_env.host, service_env.port),
         wait_for_restart: true,
     };
 
@@ -6982,9 +7011,9 @@ mod tests {
 
     use super::{
         deploy_health_url, deploy_rollback_shell, guarded_restart_script_with_health,
-        guarded_restart_steps, parse_deploy_cli_args, parse_environment_file, parse_proc_environ,
-        parse_restart_result, restart_outcome_event, DeployEvent, RestartHealthCheck,
-        RestartOutcome,
+        guarded_restart_steps, parse_deploy_cli_args, parse_environment_file, parse_restart_result,
+        restart_outcome_event, service_deploy_env, DeployEvent, RestartHealthCheck, RestartOutcome,
+        ServiceDeployEnv, DEPLOY_CLI_ENV_KEYS,
     };
 
     fn cli_args(args: &[&str]) -> Vec<String> {
@@ -7071,14 +7100,44 @@ mod tests {
                 ("X".to_string(), "a b".to_string()),
             ]
         );
-        let proc = parse_proc_environ(b"PORT=3100\0A=b=c\0\0");
-        assert_eq!(
-            proc,
-            vec![
-                ("PORT".to_string(), "3100".to_string()),
-                ("A".to_string(), "b=c".to_string()),
-            ]
+    }
+
+    #[test]
+    fn deploy_cli_adopts_only_allowlisted_unit_keys() {
+        let pairs = parse_environment_file(
+            "LD_PRELOAD=/tmp/evil.so\nGIT_DIR=/tmp/evil\nBASH_ENV=/tmp/x\nPATH=/tmp\n\
+             CARGO_HOME=/tmp\nRUSTC_WRAPPER=/tmp/x\nPORT=3100\nHOST=127.0.0.1\n\
+             SANDBOXED_SH_REPO_PATH=/opt/sandboxed-sh\n",
         );
+        let env = service_deploy_env(&pairs, Some("/var/lib/orb")).unwrap();
+        assert_eq!(
+            env,
+            ServiceDeployEnv {
+                working_dir: "/var/lib/orb".into(),
+                host: "127.0.0.1".to_string(),
+                port: 3100,
+                repo_path_override: Some("/opt/sandboxed-sh".to_string()),
+            }
+        );
+        for denied in [
+            "LD_PRELOAD",
+            "GIT_DIR",
+            "BASH_ENV",
+            "PATH",
+            "CARGO_HOME",
+            "RUSTC_WRAPPER",
+        ] {
+            assert!(
+                !DEPLOY_CLI_ENV_KEYS.contains(&denied),
+                "{denied} must never be adopted"
+            );
+        }
+        assert_eq!(service_deploy_env(&[], None).unwrap().port, 3000);
+        assert_eq!(
+            service_deploy_env(&[], None).unwrap().working_dir,
+            std::path::PathBuf::from("/root")
+        );
+        assert!(service_deploy_env(&[("PORT".into(), "x".into())], None).is_err());
     }
 
     #[test]

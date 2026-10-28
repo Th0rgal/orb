@@ -291,8 +291,10 @@ restarted again. The command waits for that and exits non-zero on failure or
 rollback. The outcome is also written to `/var/lib/sandboxed-sh/last_deploy_result`.
 
 - Run it as root on the host. SSH access is already full trust, so no Touch ID
-  grant is involved. It reads port, working dir and repo path from the
-  service's own environment.
+  grant is involved. It reads only `PORT`, `HOST`, `WORKING_DIR` and the repo
+  path from the unit's `EnvironmentFile=` / `Environment=`. It never reads the
+  live process environment and never adopts loader, shell, git or cargo
+  variables.
 - The same refusals as the API apply: the binary must serve the unit passed in
   `--service` (`sandboxed-sh-dev deploy --service sandboxed-sh-prod.service` is
   refused), missions mid-turn, a deploy in the last 5 minutes. `--force`
