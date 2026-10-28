@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, onMount } from "solid-js";
 import { connectionVersion, getRemoteNodes, listNodeAntigravityModels } from "./api";
 import { isManagedNode } from "./machines/nodes";
 import { getManagedSettings, managedError, putManagedSettings } from "./managedMachineModel";
@@ -21,7 +21,7 @@ export function availabilitySummary(ready: string[], managed: boolean | null, ch
 type Machine = { id: string; label: string; phase: "loading" | "ready" | "error" };
 
 /** Native runs use this Google sign-in on every machine; checking one also hands it the login. */
-export function AntigravityProvider(p: { lead?: JSX.Element } = {}) {
+export function AntigravityProvider() {
   const [machines, setMachines] = createSignal<Machine[]>([{ id: "core", label: "Core", phase: "loading" }]);
   const [models, setModels] = createSignal<[string, string][]>([]);
   const [showModels, setShowModels] = createSignal(false);
@@ -76,9 +76,8 @@ export function AntigravityProvider(p: { lead?: JSX.Element } = {}) {
   const failed = () => machines().filter(m => m.phase === "error");
   const checking = () => machines().some(m => m.phase === "loading");
   return <section class="p-native" aria-label="Antigravity execution">
-      {/* One header row: account order, where native runs can use this sign-in, refresh. */}
+      {/* Execution availability and settings follow the account quota details. */}
       <div class="p-native-controls">
-        {p.lead}
         <span class="s-row-desc p-native-where" role="status" tabIndex={0}
           title={`${availabilityLine(ready().map(m => m.label), managed(), checking())}. Native runs use this Google sign-in on every machine.`}>
           {availabilitySummary(ready().map(m => m.label), managed(), checking())}

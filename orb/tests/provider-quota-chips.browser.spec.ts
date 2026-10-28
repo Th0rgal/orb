@@ -24,7 +24,8 @@ test(`Antigravity quota chips never clip: ${theme} ${size}`, async ({ page }, in
   await page.goto('/');
   await page.getByRole('button', { name: 'Providers', exact: true }).click();
   const row = page.getByRole('button', { name: /Google Antigravity/ });
-  await expect(row).toContainText('Gemini quota exhausted');
+  await expect(row.locator('.p-st')).toHaveText('Limit reached');
+  await expect(row.locator('.p-st')).toHaveAttribute('title', 'Gemini quota exhausted');
   await expect(row).not.toContainText(/^Quota exhausted/);
   await row.click();
   await page.setViewportSize({ width, height: 700 });
