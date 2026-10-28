@@ -106,3 +106,25 @@ leading zeros are not an additional canonical-format requirement. LNIR failures
 retain their count and point to the raw error/command files. Hashes remain
 unsigned consistency checks, not execution attestations. These reporting repairs
 do not turn prior-run receipts into a fresh engine execution at the repair head.
+
+A subsequent fresh run at Orb `10252589` / Turbo `854184b7` terminated with
+**exit 2 / INCOMPLETE**. Thirteen harness tests passed. Five scalar paths
+completed 896 cases each; LNIR produced 333 agreeing partial observations and
+563 failed requests: 432 UInt8 equality, 91 UInt8 less-or-equal, 16 UInt8
+less-than and 24 local-helper calls. There were 3,917 comparisons, zero observed
+mismatches and 4,813 case receipts, including 333 partial records. Both mutants
+were killed on exactly cases 96–103. This is fresh evidence for those exact
+heads, separate from the earlier reporting-only replay.
+
+Full-receipt review exposed a reporter boundary: failed compile/link commands
+could print valid-looking rows and have them admitted as partial execution.
+Commands now default to the prerequisite role; only explicitly marked case
+execution can contribute failed-command stdout as observations. An actual
+nonzero subprocess regression verifies rejection for prerequisites and retention
+of a real execution mismatch. Engines inherit an explicit path/home/temp
+environment allowlist; credentials and injection variables are excluded. The
+effective environment and Python binary identity are recorded in provenance.
+These follow-up repairs do not rerun or retroactively relabel the prior run.
+Clean source heads plus tool digests do not alone establish binary-to-source
+build lineage; build receipts and the trusted build/toolchain remain separate
+assumptions, not a compiler-correctness proof.

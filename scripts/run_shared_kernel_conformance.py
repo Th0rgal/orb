@@ -107,7 +107,7 @@ def record_engine(report, values, partial_values, name, action, cases):
         values[name] = result
         report["engines"][name] = {"status": "EXECUTED", "rows": len(result)}
     except Exception as error:
-        if isinstance(error, CommandFailure):
+        if isinstance(error, CommandFailure) and error.role == "execution":
             try:
                 result = parse_rows(error.stdout)
             except RowFailure as failure:
@@ -143,17 +143,28 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def conformance_environment(out, inherited):
+    # Toolchain/home/temp paths only; credentials and runtime injection variables
+    # are neither inherited by engines nor copied into provenance.
+    allowed = ("PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT")
+    return {**{k: inherited[k] for k in allowed if k in inherited},
+            "LEAN_PATH": str(out), "LC_ALL": "C", "LANG": "C"}
+
+
 class CommandFailure(RuntimeError):
-    def __init__(self, message, stdout=""):
+    def __init__(self, message, stdout="", role="prerequisite"):
         super().__init__(message)
         self.stdout = stdout
+        self.role = role
 
 
-def run(argv, cwd=None, env=None, timeout=240, context=None, ready=None):
+def run(argv, cwd=None, env=None, timeout=240, context=None, ready=None, role="prerequisite"):
+    if role not in ("prerequisite", "execution"):
+        raise ValueError("unknown command evidence role")
     argv = list(map(str, argv))
     argv[0] = EXECUTABLES.get(argv[0], argv[0])
     record = {"argv": argv, "cwd": str(cwd or OUT), "exit_code": None,
-              "stdout": "", "stderr": "", "context": context}
+              "stdout": "", "stderr": "", "context": context, "role": role}
     try:
         with subprocess.Popen(argv, cwd=cwd or OUT, env=env or ENV, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True) as process:
@@ -177,13 +188,13 @@ def run(argv, cwd=None, env=None, timeout=240, context=None, ready=None):
     except BaseException as error:
         record["error"] = type(error).__name__ + ": " + str(error)
         if isinstance(error, (OSError, subprocess.TimeoutExpired)):
-            raise CommandFailure(record["error"], record["stdout"]) from error
+            raise CommandFailure(record["error"], record["stdout"], role) from error
         raise
     finally:
         COMMANDS.append(record)
         (OUT / "commands.json").write_text(json.dumps(COMMANDS, indent=2) + "\n")
     if record["exit_code"]:
-        raise CommandFailure(f"command {len(COMMANDS)} failed (exit {record['exit_code']}); see commands.json", record["stdout"])
+        raise CommandFailure(f"command {len(COMMANDS)} failed (exit {record['exit_code']}); see commands.json", record["stdout"], role)
     return record["stdout"]
 
 
@@ -248,7 +259,7 @@ def main(argv=None):
     TURBO, SYS, TOOLS = (p.resolve() for p in (settings.turbo_root, settings.lean_sys_root, settings.lean_bin_dir))
     OUT = settings.out.resolve()
     OUT.mkdir(parents=True, exist_ok=False)
-    ENV = dict(os.environ, LEAN_PATH=str(OUT), LC_ALL="C", LANG="C")
+    ENV = conformance_environment(OUT, os.environ)
     COMMANDS.clear()
     EXECUTABLES.clear()
     for name in ("cc", "node", "rustc", "ar", "git"):
@@ -309,13 +320,13 @@ def main(argv=None):
         if not re.fullmatch(r"[0-9a-f]{40}", expected) or report["repositories"][name]["head"] != expected:
             raise ValueError(f"unexpected {name} revision")
     report["heads"] = {name: state["head"] for name, state in report["repositories"].items()}
-    report["environment"] = {"LEAN_PATH": ENV["LEAN_PATH"], "LC_ALL": "C", "LANG": "C",
+    report["environment"] = {**ENV,
                              "platform": platform.platform(), "machine": platform.machine()}
     report["harness_sha256"] = digest(__file__)
     report["tools"] = {}
     for name, path in [(n, TOOLS / n) for n in ("lean", "leanc", "clang", "ld.lld")] + [
         (n, TURBO / "lean/.lake/build/bin" / n) for n in ("lean-native", "lean-native-core")
-    ] + [(n, Path(shutil.which(n) or n)) for n in ("cc", "node", "rustc", "ar")]:
+    ] + [("python", Path(sys.executable))] + [(n, Path(shutil.which(n) or n)) for n in ("cc", "node", "rustc", "ar")]:
         path = Path(EXECUTABLES.get(name, str(path))).resolve()
         report["tools"][name] = {"path": str(path), "sha256": digest(path) if path.is_file() else None}
         if path.is_file():
@@ -362,12 +373,12 @@ def main(argv=None):
       IO.println s!"{fields[0]!}:{(dispatch fields[1]! xs).toNat}"
 '''
         (OUT / "Oracle.lean").write_text("import Wrappers\n" + "\n".join(dispatch) + runner)
-        return parse_rows(run([TOOLS / "lean", "--run", "Oracle.lean", OUT / "cases.txt"]))
+        return parse_rows(run([TOOLS / "lean", "--run", "Oracle.lean", OUT / "cases.txt"], role="execution"))
 
     def stock_c():
         run([TOOLS / "lean", "Oracle.lean", "-c", "Oracle.c"])
         run([TOOLS / "leanc", "-O2", "Oracle.c", "Wrappers.c", "Orb.Kernel.c", "LeanSys.Spec.c", "-o", "stock-c"])
-        return parse_rows(run([OUT / "stock-c", OUT / "cases.txt"]))
+        return parse_rows(run([OUT / "stock-c", OUT / "cases.txt"], role="execution"))
 
     def native_library(path):
         script = OUT / "native-runner.py"
@@ -387,7 +398,7 @@ for c in json.loads(Path(sys.argv[3]).read_text()):
     value=getattr(lib,c["symbol"])(*c["args"])
     print(str(c["id"])+":"+str(value),flush=True)
 ''')
-        return parse_rows(run([sys.executable, script, path, ORB / "shared/orb-spec/kernel_abi.json", OUT / "cases.json"]))
+        return parse_rows(run([sys.executable, script, path, ORB / "shared/orb-spec/kernel_abi.json", OUT / "cases.json"], role="execution"))
 
     def native():
         source = ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
@@ -412,7 +423,7 @@ for c in json.loads(Path(sys.argv[3]).read_text()):
         run(["cc", "-O2", "-c", ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c", "-o", OUT / "kernel.native.o"])
         run(["rustc", "--edition=2024", OUT / "rust-abi.rs", "-C", "linker=" + EXECUTABLES["cc"],
              "-C", "link-arg=" + str(OUT / "kernel.native.o"), "-o", OUT / "rust-abi"])
-        return parse_rows(run([OUT / "rust-abi", OUT / "cases.txt"]))
+        return parse_rows(run([OUT / "rust-abi", OUT / "cases.txt"], role="execution"))
 
     def wasm():
         run([TOOLS / "clang", "--target=wasm32", "-O2", "-nostdlib", "-ffreestanding",
@@ -440,7 +451,7 @@ for (const c of cases) {
         (OUT / "js-cases.json").write_text(json.dumps(js_cases))
         (OUT / "run-wasm.cjs").write_text(script)
         return parse_rows(run(["node", OUT / "run-wasm.cjs", OUT / "kernel.wasm",
-                               ORB / "shared/orb-spec/kernel_abi.json", OUT / "js-cases.json"]))
+                               ORB / "shared/orb-spec/kernel_abi.json", OUT / "js-cases.json"], role="execution"))
 
     def lnir():
         run([TURBO / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", OUT / "Wrappers.lean", "-o", OUT / "module.lnir"])
@@ -452,7 +463,7 @@ for (const c of cases) {
             context = {"case_id": c["id"], "input_sha256": canonical_hash(c)}
             try:
                 raw = run([TURBO / "lean/.lake/build/bin/lean-native-core", "eval-lnir", "--lnir", OUT / "module.lnir",
-                           "--args", binding, "--batch-json"], context=context)
+                           "--args", binding, "--batch-json"], context=context, role="execution")
                 rows = json.loads(raw)
                 if len(rows) != 1:
                     raise ValueError("LNIR request must return exactly one row")

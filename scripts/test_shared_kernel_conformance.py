@@ -57,6 +57,35 @@ class Harness(unittest.TestCase):
         for rows in ({0: 18, 1: 37}, {0: 37, 1: 19}):
             self.assertTrue(conformance.compare_rows(self.reference, rows, self.cases))
 
+    def test_failed_prerequisite_stdout_is_never_execution_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            conformance.OUT, conformance.ENV = Path(directory), dict(os.environ)
+            report, values, partial = {"engines": {}, "blockers": []}, {"stock_lean": self.reference}, {}
+            def action():
+                return conformance.parse_rows(conformance.run([sys.executable, "-c",
+                    "print('0:18');print('1:37');raise SystemExit(7)"]))
+            conformance.record_engine(report, values, partial, "fixture", action, self.cases)
+            self.assertEqual(partial["fixture"], {})
+            self.assertEqual(conformance.summarize(report, values, partial, self.cases), 2)
+            self.assertEqual(report["comparisons"], 0)
+            self.assertEqual(report["mismatches"], [])
+            # The same nonzero process is evidence only when the caller marks
+            # it as case execution. Its valid mismatch must still force FAIL.
+            def execute():
+                return conformance.parse_rows(conformance.run([sys.executable, "-c",
+                    "print('0:18');print('1:37');raise SystemExit(7)"], role="execution"))
+            conformance.record_engine(report, values, partial, "fixture", execute, self.cases)
+            self.assertEqual(partial["fixture"], {0: 18, 1: 37})
+            self.assertEqual(conformance.summarize(report, values, partial, self.cases), 1)
+            self.assertEqual(conformance.COMMANDS[-1]["role"], "execution")
+
+    def test_engine_environment_is_allowlisted(self):
+        env = conformance.conformance_environment(Path("evidence"), {
+            "PATH": "/toolchain/bin", "HOME": "/home/fixture", "RUSTUP_HOME": "/rustup",
+            "OPENAI_API_KEY": "fixture-secret", "LD_PRELOAD": "inject.so", "LEAN_PATH": "untrusted"})
+        self.assertEqual(env, {"PATH": "/toolchain/bin", "HOME": "/home/fixture", "RUSTUP_HOME": "/rustup",
+                               "LEAN_PATH": "evidence", "LC_ALL": "C", "LANG": "C"})
+
     def test_bad_output_preserves_unambiguous_mismatches_through_final_aggregation(self):
         for text, mismatch in (("0:18\ngarbage\n1:37", 0), ("0:18\n1:37\n2:5", 0),
                                ("0:18\n1:37\n1:9", 0), ("0:18\n0:19\n1:36", 1)):
@@ -65,7 +94,7 @@ class Harness(unittest.TestCase):
                     report, values, partial = {"engines": {}, "blockers": []}, {"stock_lean": self.reference}, {}
                     def action():
                         if command_failed:
-                            raise conformance.CommandFailure("fixture command failed", text)
+                            raise conformance.CommandFailure("fixture command failed", text, role="execution")
                         return conformance.parse_rows(text)
                     conformance.record_engine(report, values, partial, "fixture", action, self.cases)
                     code = conformance.summarize(report, values, partial, self.cases)
