@@ -4261,3 +4261,8 @@ select.orb-select-native:disabled { cursor: default; }
 .bw-grant-row { padding-left: 12px; }
 .bw-grant-scope { flex: 0 1 auto; margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bw-grant-row .bw-link-btn:disabled, .bw-grant-head .bw-link-btn:disabled { opacity: 0.5; }
+
+/* Execution settings follow account usage and read as secondary controls. */
+.p-acc-body > .p-native { margin-top:12px;padding-top:10px;color:var(--fg-3); }
+.p-acc-body > .p-native .p-native-managed { color:var(--fg-3);font-size:11px; }
+.p-acc-body > .p-native :is(.p-native-models-toggle,.p-native-where,.s-btn) { font-size:11px; }

@@ -27,11 +27,14 @@
 /* Compact quota rows: one row per pool, windows side by side. */
 .provider-usage-row { display:flex;align-items:center;flex-wrap:wrap;gap:4px 16px;min-height:22px;font-size:12px;color:var(--fg-2); }
 .provider-usage-row .provider-usage-group-title { flex:none;min-width:92px;padding:0;font-size:12px; }
-.provider-usage-chip { display:inline-flex;align-items:center;gap:6px;white-space:nowrap; }
-.provider-usage-chip .p-bar { width:56px;height:4px;flex:none;display:inline-block; }
+.provider-usage-chip { flex:1 1 220px;min-width:0;display:inline-flex;align-items:center;gap:6px;white-space:nowrap; }
+.provider-usage-chip .p-bar { min-width:32px;height:4px;flex:1;display:inline-block; }
 .provider-usage-chip .p-bar-fill { display:block;background:var(--blue); }
 .provider-usage-chip-pct { font-variant-numeric:tabular-nums;min-width:28px; }
 .provider-usage-chip.warning .provider-usage-chip-pct { color:var(--warning);font-weight:600; }
 .provider-usage-chip.exhausted .provider-usage-chip-pct { color:var(--danger);font-weight:600; }
 .provider-usage-chip-reset { color:var(--fg-3);font-size:11px; }
-.provider-usage-chip + .provider-usage-chip::before { content:"·";color:var(--fg-3);margin-right:10px; }
+.provider-usage-unavailable { color:var(--fg-3);gap:10px; }
+@media (max-width:600px) {
+  .provider-usage-row .provider-usage-group-title { flex-basis:100%; }
+}

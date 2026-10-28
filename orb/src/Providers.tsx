@@ -856,6 +856,13 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
           <div class="provider-usage-row" classList={{ "provider-usage-group": !!g.name }}>
             <Show when={g.name}><span class="provider-usage-group-title">{g.name}</span></Show>
             <For each={g.windows}>{w => <Chip label={w.label} usedPct={w.used * 100} reset={w.reset ? `reset ${fmtResetEpoch(w.reset)}` : undefined} />}</For>
+            <Show when={type() === "antigravity" && g.name === "Gemini"}>
+              <For each={["5h", "Weekly"].filter(label => !g.windows.some(w => w.label === label || w.label.startsWith(`${label} (`)))}>{label =>
+                <span class="provider-usage-chip provider-usage-unavailable" title="This quota window is not included in the current Core usage response. It is not necessarily unused or unlimited.">
+                  <span class="provider-usage-chip-label">{label}</span><span>Not reported</span>
+                </span>
+              }</For>
+            </Show>
           </div>}</For>
         <Show when={u().zai_mcp_percentage != null}>
           <DetailBar label="MCP" usedPct={u().zai_mcp_percentage ?? 0} reset={u().zai_mcp_reset ? `reset ${fmtResetEpoch(u().zai_mcp_reset!)}` : undefined} />
@@ -1020,9 +1027,7 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
       ]} />}</Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
-          <Show when={a.provider_type === "antigravity"} fallback={<Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>}>
-            <AntigravityProvider lead={p.rank ? <RankControls rank={p.rank} name={email() ?? a.name} title={title()} /> : undefined} />
-          </Show>
+          <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>
           <Show when={mistralSubscription()}>
             <MistralUsageConnect a={a} usage={p.usage} onUsage={p.onUsage} />
           </Show>
@@ -1051,6 +1056,7 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
               </button>
             </div>
           </Show>
+          <Show when={a.provider_type === "antigravity"}><AntigravityProvider /></Show>
         </div>
       </Show>
     </div>
