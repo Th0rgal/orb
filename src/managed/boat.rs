@@ -134,6 +134,26 @@ impl BoatProvider {
     }
 }
 
+/// Boat `from` names a saved snapshot/share; omitting it selects the provider
+/// base image. `provider-default` is an explicit Core allowlist sentinel.
+fn spawn_body(spec: &SpawnSpec) -> Value {
+    let mut body = json!({
+        "type": spec.size,
+        "ttlSeconds": spec.ttl_seconds,
+        // The account's base environment carries GitHub and agent
+        // credentials; managed nodes must never receive them.
+        "noEnv": true,
+    });
+    if let Some(image) = spec
+        .image
+        .as_deref()
+        .filter(|i| !i.is_empty() && *i != "provider-default")
+    {
+        body["from"] = json!(image);
+    }
+    body
+}
+
 fn machine_from(v: &Value) -> Option<ProviderMachine> {
     let sb = v.get("sandbox").unwrap_or(v);
     Some(ProviderMachine {
@@ -177,16 +197,7 @@ impl ManagedProvider for BoatProvider {
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
-        let mut body = json!({
-            "type": spec.size,
-            "ttlSeconds": spec.ttl_seconds,
-            // The account's base environment carries GitHub and agent
-            // credentials; managed nodes must never receive them.
-            "noEnv": true,
-        });
-        if let Some(image) = spec.image.as_deref().filter(|i| !i.is_empty()) {
-            body["from"] = json!(image);
-        }
+        let body = spawn_body(spec);
         let v = self
             .call(
                 reqwest::Method::POST,
@@ -486,5 +497,33 @@ impl ManagedProvider for BoatProvider {
             seconds: v.get("seconds").and_then(Value::as_u64).unwrap_or(0),
             running: v.get("running").and_then(Value::as_bool).unwrap_or(false),
         })
+    }
+}
+
+#[cfg(test)]
+mod raw_image_tests {
+    use super::*;
+    fn spec(image: &str) -> SpawnSpec {
+        SpawnSpec {
+            size: "small".into(),
+            ttl_seconds: 600,
+            image: Some(image.into()),
+            name: "test".into(),
+            idempotency_key: "test".into(),
+        }
+    }
+    #[test]
+    fn provider_default_omits_snapshot_but_never_injects_account_environment() {
+        let body = spawn_body(&spec("provider-default"));
+        assert!(body.get("from").is_none());
+        assert_eq!(body["noEnv"], true);
+        assert_eq!(body["ttlSeconds"], 600);
+        assert_eq!(body["type"], "small");
+    }
+    #[test]
+    fn named_images_still_use_from_without_account_environment() {
+        let body = spawn_body(&spec("orb-node-base"));
+        assert_eq!(body["from"], "orb-node-base");
+        assert_eq!(body["noEnv"], true);
     }
 }

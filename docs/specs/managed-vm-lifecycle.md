@@ -201,6 +201,15 @@ A fresh raw request must explicitly name an operator-approved clean image in
 containing Orb node services or credentials; Core cannot inspect an image to
 prove it is clean. Worker image allowlists do not authorize raw images.
 
+For Boat, explicitly allow and request `provider-default` to select the provider
+base image: set `SANDBOXED_MANAGED_RAW_IMAGES=provider-default` and send
+`{"provisioning_mode":"raw","image":"provider-default"}`. The adapter omits
+Boat's `from` field and always sends `noEnv: true`. Other allowed image values
+are saved snapshot/share references, not arbitrary OS image names. See Boat's `POST /sandboxes` (`CreateSandboxRequest`) API reference.
+This option skips Core provisioning; the contents of the provider base image
+remain controlled by Boat.
+
+
 Raw provisioning performs no guest writes, commands, installation, enrollment,
 credential projection or cleanup. Raw machines never register node aliases or
 enter automatic worker reuse. Their activity is not observed by a node agent,
