@@ -1218,6 +1218,9 @@ async fn run_supervised_command(
     let mut cmd = cmd;
     super::scratch::configure(&mut cmd);
     let (mut cmd, systemd_scope) = contain_command(cmd, environment, log_path, limit_secs)?;
+    if systemd_scope.is_none() {
+        super::scratch::retain_uncontained();
+    }
     cmd.stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
@@ -2272,7 +2275,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(retired, 1);
+        // Test executables use process groups (no scope trampoline). Their
+        // success cannot authorize cleanup of potentially escaped descendants.
+        assert_eq!(retired, 0);
         assert_eq!(runner.active_count(), 0);
         assert_eq!(runner.queued_count(), 0);
     }

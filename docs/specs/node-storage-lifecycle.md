@@ -26,7 +26,10 @@ identity is observed without following symlinks. No source directory is enrolled
 The receipt is marked retired only after the execution future returns successfully
 through the supervisor's confirmed process-group/scope cleanup. Failed exit codes,
 timeouts and cancellation are successful *supervision*, not necessarily successful
-jobs. Dropped futures, shutdown/restart, failed reads or uncertain cleanup retain
+jobs. Every supervised command must also have used systemd scope containment;
+process-group-only fallback cannot rule out escaped setsid() descendants. One
+fallback command permanently prevents retirement for the entire execution.
+Dropped futures, shutdown/restart, failed reads or uncertain cleanup retain
 scratch without an expiry. A terminal job row alone is never enough.
 
 After a fixed 72-hour recovery period, the existing node GC cadence consumes retired

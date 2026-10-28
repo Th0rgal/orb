@@ -301,8 +301,9 @@ Node env vars for lean-build jobs:
   filesystem capacity). Admission continues to use the floor. These cache
   slots do not include mission sources, toolchains, CI or legacy /tmp trees.
   New jobs and synchronous leases receive execution-private TMPDIR/TMP/TEMP;
-  after confirmed process cleanup, their scratch is retained for 72 hours and
-  reclaimed on the same cadence. See [worker storage lifecycle](specs/node-storage-lifecycle.md).
+  after confirmed scope cleanup, their scratch is retained for 72 hours and
+  reclaimed on the same cadence. Process-group-only fallback executions remain
+  retained because escaped descendants cannot be ruled out. See [worker storage lifecycle](specs/node-storage-lifecycle.md).
 - `SANDBOXED_NODE_MAX_SOURCE_BUNDLE_BYTES` — maximum decoded size of a local
   source bundle (default 1 MiB/256 files for overlays and 32 MiB/4096 files
   for complete snapshots). An explicit positive byte override applies to both

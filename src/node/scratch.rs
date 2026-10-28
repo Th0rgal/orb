@@ -1,5 +1,6 @@
 //! Execution-private temporary files. Only a persisted retirement receipt, written
 //! after confirmed process cleanup, authorizes reclamation. Job status is not proof.
+use std::cell::Cell;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
@@ -11,17 +12,28 @@ use super::JobStore;
 
 const RETENTION_HOURS: i64 = 72;
 
+struct Execution {
+    directory: PathBuf,
+    descendants_contained: Cell<bool>,
+}
+
 tokio::task_local! {
-    static DIRECTORY: PathBuf;
+    static EXECUTION: Execution;
+}
+
+/// Process groups cannot contain setsid() descendants. Once any supervised
+/// command uses that fallback, this execution's scratch must remain retained.
+pub(crate) fn retain_uncontained() {
+    let _ = EXECUTION.try_with(|execution| execution.descendants_contained.set(false));
 }
 
 /// Apply after payload environment: temporary storage is owned by the runner.
 pub(crate) fn configure(command: &mut tokio::process::Command) {
-    let _ = DIRECTORY.try_with(|path| {
+    let _ = EXECUTION.try_with(|execution| {
         command
-            .env("TMPDIR", path)
-            .env("TMP", path)
-            .env("TEMP", path);
+            .env("TMPDIR", &execution.directory)
+            .env("TMP", &execution.directory)
+            .env("TEMP", &execution.directory);
     });
 }
 
@@ -104,8 +116,20 @@ pub(crate) async fn run<T>(
     execution: impl Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
     let (receipt, path) = prepare(store, work_root, mission_id, job_id).await?;
-    let result = DIRECTORY.scope(path, execution).await;
-    if result.is_ok() {
+    let context = Execution {
+        directory: path,
+        descendants_contained: Cell::new(true),
+    };
+    let (result, descendants_contained) = EXECUTION
+        .scope(context, async {
+            let result = execution.await;
+            (
+                result,
+                EXECUTION.with(|execution| execution.descendants_contained.get()),
+            )
+        })
+        .await;
+    if result.is_ok() && descendants_contained {
         if let Err(error) = retire(store, receipt.id, Utc::now()).await {
             tracing::warn!(scratch_id = %receipt.id, %error, "scratch retirement failed; retaining files");
         }
@@ -267,6 +291,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retired, 0);
+    }
+
+    #[tokio::test]
+    async fn scratch_uncontained_execution_is_never_retired() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JobStore::open(temp.path()).await.unwrap();
+        run(&store, temp.path(), Uuid::new_v4(), None, async {
+            retain_uncontained();
+            // Later successful commands cannot reverse this retention fence.
+            let mut command = tokio::process::Command::new("true");
+            configure(&mut command);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let retired = store
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(retired_at) FROM node_scratch", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(retired, 0);
+        sweep_at(
+            &store,
+            temp.path(),
+            Utc::now() + chrono::Duration::hours(100),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_dir(temp.path().join(".scratch"))
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
