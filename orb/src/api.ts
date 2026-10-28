@@ -105,6 +105,12 @@ class InvalidApiResponseError extends Error {
  * timeout as the same "AbortError: Fetch is aborted" as an explicit abort, so
  * every abort is logged with its reason (`noteAbort`). */
 export const REQUEST_TIMEOUT_MS = 30_000;
+/** Core did not answer before the deadline. Still an abort for `isAbortError`
+ * and `isTransientNetworkError`, so polls retry and keep what they show. */
+export class RequestTimeoutError extends Error {
+  override name = "TimeoutError";
+  constructor() { super("The server is taking too long to answer. Please retry; nothing was lost."); }
+}
 export type AbortReason = "timeout" | "caller-timeout" | "caller-abort";
 export function isAbortError(error: unknown): boolean {
   const name = (error as { name?: unknown } | null)?.name;
@@ -175,7 +181,12 @@ async function sendRequest<T>(path: string, init?: RequestInit, text = false): P
   try {
     res = await fetch(`${getApiUrl()}${path}`, { ...init, headers, signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   } catch (error) {
-    if (isAbortError(error)) noteAbort(`${init?.method?.toUpperCase() ?? "GET"} ${path}`, abortReason(init?.signal), performance.now() - started);
+    if (!isAbortError(error)) throw error;
+    const reason = abortReason(init?.signal);
+    noteAbort(`${init?.method?.toUpperCase() ?? "GET"} ${path}`, reason, performance.now() - started);
+    // WebKit reports any timeout as "AbortError: Fetch is aborted". A
+    // deadline gets plain words; a caller's own abort stays an AbortError.
+    if (reason !== "caller-abort") throw new RequestTimeoutError();
     throw error;
   }
   if (res.status === 401) {
@@ -415,7 +426,7 @@ function catalogStorageKey(path: string, token = getJwt()): string {
 async function cachedCatalog<T>(path:string, valid?: (value: unknown) => boolean, force = false):Promise<T>{
  const version=connectionVersion(),token=getJwt();
  const key=catalogStorageKey(path,token);
- try{const value=await api<T>(path,force?{method:"GET",signal:AbortSignal.timeout(8000)}:{signal:AbortSignal.timeout(3000)});if(valid && !valid(value))throw new Error("Couldn’t load projects. The server returned an invalid response.");if(version===connectionVersion())try{localStorage.setItem(key,JSON.stringify(value));}catch{}return value;}
+ try{const value=await api<T>(path,force?{method:"GET"}:undefined);if(valid && !valid(value))throw new Error("Couldn’t load projects. The server returned an invalid response.");if(version===connectionVersion())try{localStorage.setItem(key,JSON.stringify(value));}catch{}return value;}
  catch(error){
   if(version!==connectionVersion()||getJwt()!==token||error instanceof ApiError)throw error;
   const stored=localStorage.getItem(key);if(stored){try{const value=JSON.parse(stored);if(!valid || valid(value))return value as T;}catch{}}
@@ -912,12 +923,12 @@ export const ANCESTOR_TTL_MS = 60_000;
 async function fetchAncestor(id: string): Promise<Mission | null> {
   const cached = ancestorCache.get(id);
   if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return cached.row;
-  try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`, {signal:AbortSignal.timeout(5000)}); ancestorCache.set(id, {row, at: Date.now()}); return row; }
+  try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`); ancestorCache.set(id, {row, at: Date.now()}); return row; }
   catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached?.row ?? null; }
 }
 // The sidebar's parent resolver: null only when Core says the parent is gone.
 configureParentResolver(async id => {
-  try { return await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`, {signal:AbortSignal.timeout(10_000)}); }
+  try { return await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`);  }
   catch (error) { if (error instanceof ApiError && error.status === 404) return null; throw error; }
 });
 /** Pages are ordered by recent activity: add parents that fell off the page. */
@@ -993,18 +1004,17 @@ export async function deleteProjectFile(slug: string, path: string): Promise<voi
 export async function listMissions(limit = 200): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
   const local = (await origins.localOrigins()).filter(m=>!isBtwMission(m));
-  try { const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?limit=${limit}`, {signal:AbortSignal.timeout(3000)})); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`,{signal:AbortSignal.timeout(3000)}))],observedAt); const pending=local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
+  try { const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?limit=${limit}`)); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`))],observedAt); const pending=local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
   catch(error){if(local.length)return partialList(local);throw error;}
 }
 
-export async function listCompletedMissions(limit = 100): Promise<Mission[]> {
+/** `null` when Core did not answer: the caller keeps the list it shows. */
+export async function listCompletedMissions(limit = 100): Promise<Mission[] | null> {
   try {
-    const remote = await api<Mission[]>(`/api/control/missions?status=completed&limit=${limit}`, {
-      signal: AbortSignal.timeout(3000),
-    });
+    const remote = await api<Mission[]>(`/api/control/missions?status=completed&limit=${limit}`);
     return remote.filter((row) => !isBtwMission(row));
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -1017,7 +1027,7 @@ export async function getMission(id: string, options: { coreOnly?: boolean; fres
     const path = `/api/control/missions/${id}`;
     const read = async () => {
       // `fresh`: never join a read that started before the caller's newer event.
-      const value = await api<Mission>(path, local ? { signal: AbortSignal.timeout(3000) } : options.fresh ? {} : undefined);
+      const value = await api<Mission>(path, options.fresh ? {} : undefined);
       if (!value || typeof value !== "object" || value.id !== id) throw new InvalidApiResponseError(`GET ${path}`);
       return value;
     };
