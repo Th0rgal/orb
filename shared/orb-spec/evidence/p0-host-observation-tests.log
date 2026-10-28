@@ -1,5 +1,5 @@
    Compiling sandboxed_sh v1.3.0 (/srv/sandboxed-storage/host-missions/workspaces/mission-86d91cc3/worktrees/orb-p0)
-    Finished `test` profile [unoptimized] target(s) in 1m 41s
+    Finished `test` profile [unoptimized] target(s) in 1m 30s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 14 tests
@@ -18,5 +18,5 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3545 filtered out; finished in 0.39s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3545 filtered out; finished in 0.36s
 

@@ -1202,7 +1202,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-            "sha256": "e77c04ea3d2e5aab1e9b8f52081e2188c9b513a7c08d360c7bea00c341a38e2c"
+            "sha256": "27694360938e2d3359ed6278b42090d949100f3d85e1f81da35c922dc4eda1e4"
           },
           {
             "path": "src/api/control/fork.rs",
@@ -1210,7 +1210,7 @@
           },
           {
             "path": "src/api/control/remote_jobs.rs",
-            "sha256": "8c4c203c59350dd20bdb0af5835da44d46f1e302c842bae66316fd05bb8dccdd"
+            "sha256": "2b3a20d6f733d39fb5684facb18a4c28022d3127b2269b4fc5e4dfdbb753b89f"
           }
         ],
         "execution": {
@@ -1289,7 +1289,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-            "sha256": "e77c04ea3d2e5aab1e9b8f52081e2188c9b513a7c08d360c7bea00c341a38e2c"
+            "sha256": "27694360938e2d3359ed6278b42090d949100f3d85e1f81da35c922dc4eda1e4"
           },
           {
             "path": "src/api/control/fork.rs",

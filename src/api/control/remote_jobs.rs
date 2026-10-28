@@ -349,22 +349,12 @@ pub(super) async fn submit_leased_remote_job(
         .get_active_mission_run(mission.id)
         .await?;
     let stored_mission = control.mission_store.get_mission(mission.id).await?;
-    let effective_status = stored_mission
-        .as_ref()
-        .map(|m| m.status)
-        .unwrap_or(mission.status);
     let stored_sid = stored_mission
         .as_ref()
         .and_then(|m| m.session_id.as_deref())
         .or(mission.session_id.as_deref());
-    let host_admits_submission = mission.status != MissionStatus::Acknowledged
-        && effective_status != MissionStatus::Acknowledged
-        && crate::api::mission_horizon::superseded_by(mission).is_none()
-        && !mission
-            .project
-            .tags
-            .iter()
-            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
+    let host_admits_submission = !mission_is_archived(mission)
+        && !mission_is_archived(stored_mission.as_ref().unwrap_or(mission))
         && active_run
             .as_ref()
             .is_some_and(|run| run.owner_actor_id == expected_owner)
