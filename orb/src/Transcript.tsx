@@ -18,7 +18,7 @@ import { remoteLog } from "./remoteLog";
 import { ErrorNotice } from "./ErrorNotice";
 import { forkContext } from "./forkContext";
 import { backgroundWake, type BackgroundWake } from "./backgroundWake";
-import { For, Show, createSignal, createEffect, createMemo, createContext, useContext, onCleanup } from "solid-js";
+import { For, Show, batch, createSignal, createEffect, createMemo, createContext, useContext, onCleanup } from "solid-js";
 import * as Ic from "./icons";
 import { markdownText, MdView } from "./Markdown";
 import { createStore, reconcile } from "solid-js/store";
@@ -666,7 +666,14 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
     return rows.map(row=>{const old=cached.get(row.key);return old&&old.items.length===row.items.length&&old.items.every((item,index)=>item===row.items[index])?old:row;});
   },[]);
   const [turnStore,setTurns]=createStore<Array<{key:string;items:Grouped[]}>>([]);
-  createEffect(()=>setTurns(reconcile(turns(),{key:'key'})));
+  // A delta changes the last turn only: reconcile the turns that changed, not
+  // the whole transcript store. A removed or reordered turn reconciles all.
+  let shownTurns:Array<{key:string;items:Grouped[]}>=[];
+  createEffect(()=>{
+    const next=turns(),prev=shownTurns;shownTurns=next;
+    if(next.length<prev.length||prev.some((row,i)=>row!==next[i]&&row.key!==next[i].key)){setTurns(reconcile(next,{key:'key'}));return;}
+    batch(()=>{for(let i=0;i<next.length;i++)if(next[i]!==prev[i])setTurns(i,reconcile(next[i],{key:'key'}));});
+  });
   const searchText=(turn:{items:Grouped[]})=>turn.items.map(item=>item.kind==='work'?item.items.map(t=>t.kind==='think'?t.text:t.kind==='text'?markdownText(t.text):`${t.name} ${resultText(t.args)} ${resultText(t.result)}`).join('\n'):item.kind==='tool'?`${item.name} ${resultText(item.result)}`:item.kind==='text'?markdownText(item.text):item.text).join('\n');
   // Rough height of a turn before it is first measured, from its text: rows
   // paged in above the reader start close to their real size, so the scroll

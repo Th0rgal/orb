@@ -11,7 +11,9 @@ export function toolName(name: string): string {
   return name.replace(/^functions\./, "").toLowerCase();
 }
 export function toolArgs(value: unknown): Record<string, unknown> | null {
-  if (typeof value === "string") { try { value = JSON.parse(value); } catch { return null; } }
+  // Only an object is returned: plain-text output (most tool results) skips
+  // JSON.parse and the exception it would throw.
+  if (typeof value === "string") { if (!/^\s*\{/.test(value)) return null; try { value = JSON.parse(value); } catch { return null; } }
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
@@ -122,7 +124,17 @@ function lineDiff(oldStr: string, newStr: string) {
   return { additions: Math.max(0, newLines.length - common), deletions: Math.max(0, oldLines.length - common) };
 }
 
+// Per tool row, keyed by its args and result: the Changes summary and work
+// folds recount every tool on each streamed delta.
+const diffCache = new WeakMap<object, { args: unknown; result: unknown; stats: DiffStats | null }>();
 export function computeDiffStats(tool: Tool): DiffStats | null {
+  const hit = diffCache.get(tool);
+  if (hit && hit.args === tool.args && hit.result === tool.result) return hit.stats;
+  const stats = diffStats(tool);
+  diffCache.set(tool, { args: tool.args, result: tool.result, stats });
+  return stats;
+}
+function diffStats(tool: Tool): DiffStats | null {
   const args = toolArgs(tool.args);
   const res = toolArgs(tool.result);
   const meta = (args?.__metadata && typeof args.__metadata === "object" ? args.__metadata : res?.metadata && typeof res.metadata === "object" ? res.metadata : null) as Record<string, unknown> | null;
