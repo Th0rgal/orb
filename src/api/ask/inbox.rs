@@ -369,14 +369,52 @@ async fn recorded_snapshot(
     Ok((mission, text, evidence))
 }
 
+pub const DEFAULT_SUMMARY_MODEL: &str = "builtin/smart";
+
+/// The model to summarize with, or `None` when the user turned AI summaries off.
+/// Core owns this choice: a stale or older client cannot spend LLM calls the user disabled.
+/// An explicit request model overrides the stored one (clients key their caches by it).
+pub(crate) fn summary_model(state: &Value, requested: Option<String>) -> Option<String> {
+    let prefs = &state["preferences"];
+    if prefs["aiSummary"].as_bool() == Some(false) {
+        return None;
+    }
+    let stored = prefs["model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    Some(
+        requested
+            .filter(|m| !m.trim().is_empty())
+            .or(stored.map(String::from))
+            .unwrap_or_else(|| DEFAULT_SUMMARY_MODEL.into()),
+    )
+}
+
+/// `204 No Content` when summaries are off: no snapshot is read and no LLM is called.
 pub async fn generate(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(req): Json<Request>,
-) -> Result<Json<Summary>, Error> {
+) -> Result<axum::response::Response, Error> {
+    use axum::response::IntoResponse;
+    let store = ask_store(&state.config).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not open summary cache".into(),
+        )
+    })?;
+    let inbox_state = store.inbox_state(&user.id.to_string()).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not load Inbox state".into(),
+        )
+    })?;
+    let Some(model) = summary_model(&inbox_state, req.model) else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
     let control = crate::api::control::control_for_user(&state, &user).await;
-    let model = req.model.unwrap_or_else(|| "builtin/smart".into());
     let model = model.trim();
     if model.is_empty() || model.len() > 240 {
         return Err((StatusCode::BAD_REQUEST, "Invalid summary model".into()));
@@ -392,12 +430,6 @@ pub async fn generate(
         ));
     }
     let source_revision = revision(&mission, &text);
-    let store = ask_store(&state.config).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not open summary cache".into(),
-        )
-    })?;
     if let Some(value) = store
         .inbox_digest(&key, &source_revision)
         .await
@@ -408,8 +440,8 @@ pub async fn generate(
             )
         })?
     {
-        if let Ok(summary) = serde_json::from_str(&value) {
-            return Ok(Json(summary));
+        if let Ok(summary) = serde_json::from_str::<Summary>(&value) {
+            return Ok(Json(summary).into_response());
         }
     }
     // While a mission streams, every event changes its revision. Reuse a summary generated
@@ -423,7 +455,7 @@ pub async fn generate(
             .and_then(|v| serde_json::from_str::<Summary>(&v).ok())
         {
             if recently_generated(&summary.generated_at, chrono::Utc::now()) {
-                return Ok(Json(summary));
+                return Ok(Json(summary).into_response());
             }
         }
     }
@@ -488,7 +520,7 @@ pub async fn generate(
                 "Could not save summary cache".into(),
             )
         })?;
-    Ok(Json(summary))
+    Ok(Json(summary).into_response())
 }
 
 // Presentation preferences and read receipts are per-user, separate from execution state.
@@ -790,6 +822,46 @@ mod tests {
         assert_eq!(s.sources[0].event_sequence, Some(17));
         assert_eq!(s.suggestions.len(), 1);
         assert!(s.decision.is_empty());
+    }
+    #[tokio::test]
+    async fn disabled_summaries_resolve_no_model_so_no_proxy_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::store::AskStore::open(dir.path().join("ask.db"))
+            .await
+            .unwrap();
+        // No stored preferences: the historical default chain.
+        let state = store.inbox_state("alice").await.unwrap();
+        assert_eq!(
+            summary_model(&state, None).as_deref(),
+            Some("builtin/smart")
+        );
+        store
+            .save_inbox_state(
+                "alice",
+                "preferences",
+                &json!({"aiSummary":true,"includeAutonomous":false,"model":"builtin/fast"}),
+            )
+            .await
+            .unwrap();
+        let state = store.inbox_state("alice").await.unwrap();
+        assert_eq!(summary_model(&state, None).as_deref(), Some("builtin/fast"));
+        assert_eq!(
+            summary_model(&state, Some("zai/glm-5".into())).as_deref(),
+            Some("zai/glm-5")
+        );
+        store
+            .save_inbox_state(
+                "alice",
+                "preferences",
+                &json!({"aiSummary":false,"includeAutonomous":false,"model":"builtin/fast"}),
+            )
+            .await
+            .unwrap();
+        let state = store.inbox_state("alice").await.unwrap();
+        // Off wins even over an explicit model from a stale client: `generate` returns 204
+        // before resolving a provider config, so nothing reaches the proxy.
+        assert_eq!(summary_model(&state, Some("builtin/smart".into())), None);
+        assert_eq!(summary_model(&state, None), None);
     }
     #[tokio::test]
     async fn older_offline_replay_cannot_overwrite_newer_shared_mutations() {

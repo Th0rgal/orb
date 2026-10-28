@@ -234,13 +234,13 @@ object OrbInboxSettings {
         }
     }
 
-    fun update(newAiSummary: Boolean = aiSummary, newModel: String = model, newIncludeAutonomous: Boolean = includeAutonomous) {
+    fun update(newAiSummary: Boolean = aiSummary, newModel: String = model, newIncludeAutonomous: Boolean = includeAutonomous, sync: Boolean = true) {
         val cleanModel = newModel.trim().ifEmpty { DEFAULT_MODEL }
         aiSummary = newAiSummary
         includeAutonomous = newIncludeAutonomous
         model = cleanModel
         revision += 1
-        OrbSharedInboxState.writePreferences()
+        if (sync) OrbSharedInboxState.writePreferences()
         prefs?.edit()
             ?.putBoolean(KEY_AI_SUMMARY, newAiSummary)
             ?.putBoolean("include_autonomous", newIncludeAutonomous)
@@ -328,6 +328,12 @@ object OrbInboxDigestStore {
                     if (core.baseURL != endpoint || inboxAccountScope(core.baseURL, core.token) != account) return@enqueue
                     val answer = fetchShared(core, mission.id, model)
                     if (core.baseURL != endpoint || inboxAccountScope(core.baseURL, core.token) != account) return@enqueue
+                    // Core owns the toggle: 204 means summaries are off for this account, so adopt it
+                    // (no label, no retry) instead of showing "Summary unavailable".
+                    if (answer == null) {
+                        OrbInboxSettings.update(newAiSummary = false, sync = false)
+                        return@enqueue
+                    }
                     val parsed = parseDigest(answer, updated, model)
                     if (parsed != null) {
                         failedAtMs.remove(key)
@@ -387,12 +393,13 @@ object OrbInboxDigestStore {
         return when { inFlight.contains(key) -> "Generating summary…"; failedAtMs.containsKey(key) -> "Summary unavailable"; else -> null }
     }
 
-    private suspend fun fetchShared(core: OrbCore, missionId: String, model: String): String = withContext(Dispatchers.IO) {
+    private suspend fun fetchShared(core: OrbCore, missionId: String, model: String): String? = withContext(Dispatchers.IO) {
         val request = Request.Builder().url(core.makeURL("/api/control/missions/${core.encodeComponent(missionId)}/inbox-digest"))
             .post(OrbJSON.stringify(mapOf("model" to model)).toRequestBody("application/json; charset=utf-8".toMediaType()))
             .header("Authorization", "Bearer ${core.token ?: ""}").build()
         core.httpClient.newBuilder().callTimeout(100, java.util.concurrent.TimeUnit.SECONDS).readTimeout(100, java.util.concurrent.TimeUnit.SECONDS).build().newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw java.io.IOException("Inbox summary HTTP ${response.code}")
+            if (response.code == 204) return@use null
             response.body?.string() ?: throw java.io.IOException("Empty Inbox summary")
         }
     }
