@@ -29,12 +29,12 @@ async fn terminate_opencode_child(child: &mut tokio::process::Child, _mission_id
         if let Ok(cgroups) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) {
             if let Some(unit) = owned_opencode_scope(&cgroups, _mission_id) {
                 let stopped = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
+                    std::time::Duration::from_secs(10),
                     crate::api::scope_reaper::stop_unit(unit, "OpenCode runner teardown"),
                 )
                 .await;
                 if matches!(stopped, Ok(true))
-                    && tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                    && tokio::time::timeout(std::time::Duration::from_secs(3), child.wait())
                         .await
                         .is_ok()
                 {

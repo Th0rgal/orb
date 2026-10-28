@@ -69,7 +69,13 @@ pub(crate) async fn terminate_streaming_child(child: &mut Child) {
             return;
         }
     }
-    let _ = child.kill().await;
+    let _ = child.start_kill();
+    if tokio::time::timeout(std::time::Duration::from_secs(3), child.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(pid = ?child.id(), "Streaming child did not exit after SIGKILL; scope cleanup required");
+    }
 }
 
 const CONTAINER_KEEPALIVE_ENV_KEY: &str = "SANDBOXED_SH_CONTAINER_KEEPALIVE";
@@ -713,8 +719,9 @@ mod tests {
         let pid_file = temp.path().join("harness.pid");
         // Match sandboxed-mcp launch: the harness has a separate process
         // group, and the wrapper owns forwarding SIGTERM and reaping it.
-        let script = "set -m; sleep 60 & child=$!; echo $child > \"$1\"; \
-            trap 'kill -TERM -- -$child; wait $child; exit 0' TERM; wait $child";
+        let script = "set -m; sleep 60 & child=$!; \
+            trap 'kill -TERM -- -$child; wait $child; exit 0' TERM; \
+            echo $child > \"$1\"; wait $child";
         let mut command = tokio::process::Command::new("bash");
         command.args(["-c", script, "wrapper"]).arg(&pid_file);
         command.as_std_mut().process_group(0);
