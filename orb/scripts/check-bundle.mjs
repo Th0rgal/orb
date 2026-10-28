@@ -28,6 +28,18 @@ if (apps.length !== 1) throw new Error("Missing or ambiguous eager App entry in 
 visit(apps[0]);
 let bytes = 0;
 const offenders = [], files = new Set([...seen].map(key => manifest[key].file));
+// HTML transforms can inject scripts outside Vite's manifest. Reject anything
+// outside the counted graph rather than silently exempting its bytes/imports.
+const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");
+const baseURL = new URL("https://orb-bundle.invalid/");
+for (const tag of html.matchAll(/<script\b[^>]*>/gi)) {
+  const src = /\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag[0]);
+  if (!src) continue;
+  const value = src[1] ?? src[2] ?? src[3];
+  const url = new URL(value, baseURL);
+  const file = decodeURIComponent(url.pathname).replace(/^\//, "");
+  if (url.origin !== baseURL.origin || !files.has(file)) throw new Error(`Unaccounted startup script: ${value}`);
+}
 for (const file of files) {
   const code = fs.readFileSync(path.join(dist, file), "utf8");
   bytes += Buffer.byteLength(code);
