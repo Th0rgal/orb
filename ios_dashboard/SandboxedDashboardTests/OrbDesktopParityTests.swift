@@ -174,6 +174,20 @@ final class OrbDesktopParityTests: XCTestCase {
         }
     }
 
+    func testConversationHistorySharedFixtures() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("shared/orb-spec/fixtures/conversation-history.json"))
+        for fixture in try JSONDecoder().decode([OrbJSON].self, from: data) {
+            let events = fixture["events"].items.map { row in
+                StoredEvent(id: Int64(row["sequence"].doubleValue ?? 0), missionId: "test", sequence: Int64(row["sequence"].doubleValue ?? 0), eventType: row["event_type"].text, timestamp: "", eventId: nil, toolCallId: nil, toolName: nil, content: row["content"].text, metadata: ["queued": AnyCodable(row["metadata"]["queued"].flag), "success": AnyCodable(row["metadata"]["success"] != .bool(false))])
+            }
+            let history = OrbConversationHistory.merge(fixture["history"].items, events: events)
+            XCTAssertEqual(history.map { $0["content"].text }, fixture["expected"].items.map(\.text), fixture["name"].text)
+            let displayed = OrbTranscriptModel.computeHistory(isCloud: false, turns: [], mission: .object(["history": fixture["history"]]), events: events, optimisticPrompt: nil)
+            XCTAssertEqual(displayed.map { $0.2 }, fixture["expected"].items.map(\.text), fixture["name"].text)
+        }
+    }
+
     func testTransferredHistorySurvivesEventFirstThenHistoryArrival() {
         let envelope = "Continue the work from this conversation in a fresh native session.\n<fork_context>\n{\"source_mission_id\":\"source\",\"messages\":[{\"role\":\"user\",\"content\":\"Objective\"},{\"role\":\"assistant\",\"content\":\"Progress\"}]}\n</fork_context>"
         let event = StoredEvent(id: 1, missionId: "next", sequence: 1, eventType: "user_message", timestamp: "", eventId: nil, toolCallId: nil, toolName: nil, content: envelope, metadata: [:])

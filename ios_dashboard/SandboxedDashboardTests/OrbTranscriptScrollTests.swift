@@ -147,15 +147,15 @@ final class OrbTranscriptModelTests: XCTestCase {
         StoredEvent(id: seq, missionId: "m", sequence: seq, eventType: "user_message", timestamp: "", eventId: nil, toolCallId: nil, toolName: nil, content: text, metadata: [:])
     }
 
-    func testEventUserMessagesAreAddedOnceAndHistoryReportsGrowth() {
+    func testDistinctEventSequencesSurviveAndHistoryReportsGrowth() {
         let mission: OrbJSON = .object(["history": .array([
             .object(["role": .string("user"), "content": .string("first")]),
             .object(["role": .string("assistant"), "content": .string("reply")]),
         ])])
         let model = OrbTranscriptModel()
         model.events = [userEvent(1, "first "), userEvent(2, "second"), userEvent(3, " second")]
-        XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: nil), 3)
-        XCTAssertEqual(model.history.map(\.2), ["first", "reply", "second"], "trimmed duplicates are not repeated")
+        XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: nil), 4)
+        XCTAssertEqual(model.history.map(\.2), ["first", "reply", "second", " second"], "distinct delivered sequences are not deduplicated by text")
         XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: "third"), 1)
         XCTAssertEqual(model.history.last?.2, "third")
         XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: "third"), 0)

@@ -83,7 +83,7 @@ final class OrbTranscriptModel {
             }
         } else {
             var expandedRaw: [(String, String, String)] = []
-            for (offset, element) in mission["history"].items.enumerated() {
+            for (offset, element) in OrbConversationHistory.merge(mission["history"].items, events: events).enumerated() {
                 let role = element["role"].text
                 let content = element["content"].text
                 guard !content.isEmpty else { continue }
@@ -113,24 +113,7 @@ final class OrbTranscriptModel {
                 deduplicated.append(item)
             }
             rows = deduplicated
-            // Linear: one set of trimmed user texts instead of re-scanning every row per event.
-            var userTexts = Set(rows.lazy.filter { $0.1 == "user" }.map { $0.2.trimmingCharacters(in: .whitespacesAndNewlines) })
-            for event in events where event.eventType == "user_message" {
-                let text = event.content
-                guard !text.isEmpty else { continue }
-                if let unpacked = OrbRemoteContinuation.unpack(text) {
-                    // The event can arrive before mission.history. Keep the carried
-                    // turns visible in either order without exposing the envelope.
-                    for (index, entry) in unpacked.enumerated() where !rows.contains(where: { $0.1 == entry.role && $0.2 == entry.content }) {
-                        rows.append(("event-context-\(event.sequence)-\(index)", entry.role, entry.content))
-                        if entry.role == "user" { userTexts.insert(entry.content.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                    }
-                    continue
-                }
-                if userTexts.insert(text.trimmingCharacters(in: .whitespacesAndNewlines)).inserted {
-                    rows.append(("event-user-\(event.sequence)", "user", text))
-                }
-            }
+
         }
         if let opt = optimisticPrompt, !rows.contains(where: { $0.1 == "user" && OrbConversation.sameMessage($0.2, opt) }) {
             rows.append(("optimistic-user", "user", opt))
