@@ -283,6 +283,7 @@ pub async fn run_lease_command(
     node_id: &str,
     token_secret: &str,
     work_root: PathBuf,
+    store: &crate::node::JobStore,
     request: LeaseRequest,
 ) -> Result<ExecuteResponse, RemoteNodeError> {
     let claims = validate_lease_token(
@@ -306,9 +307,15 @@ pub async fn run_lease_command(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(crate::node::runner::DEFAULT_MAX_JOB_SECS)
         .max(1);
-    let (exit_code, stdout, stderr) = crate::node::runner::run_captured_command(
-        raw_command(&request.command, &mission_dir, None),
-        max_secs,
+    let (exit_code, stdout, stderr) = crate::node::scratch::run(
+        store,
+        &work_root,
+        request.mission_id,
+        None,
+        crate::node::runner::run_captured_command(
+            raw_command(&request.command, &mission_dir, None),
+            max_secs,
+        ),
     )
     .await
     .map_err(|e| RemoteNodeError::Request(e.to_string()))?;
@@ -418,6 +425,7 @@ mod tests {
             "babylon",
             "node-secret",
             work_root.path().to_path_buf(),
+            &crate::node::JobStore::open(work_root.path()).await.unwrap(),
             request,
         )
         .await
@@ -441,16 +449,25 @@ mod tests {
             "babylon",
             "node-secret",
             work_root.path().to_path_buf(),
+            &crate::node::JobStore::open(work_root.path()).await.unwrap(),
             LeaseRequest {
                 mission_id,
                 node_id: "babylon".into(),
                 lease_token: token,
-                command: "printf out; printf err >&2; exit 7".into(),
+                command: "printf scratch > \"$TMPDIR/probe\"; printf out; printf err >&2; exit 7"
+                    .into(),
             },
         )
         .await
         .unwrap();
         assert!(result.accepted);
+        let scratch = std::fs::read_dir(work_root.path().join(".scratch"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(scratch.join("probe")).unwrap(), b"scratch");
         assert_eq!(result.exit_code, Some(7));
         assert_eq!(result.stdout, "out");
         assert_eq!(result.stderr, "err");

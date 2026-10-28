@@ -113,3 +113,6 @@ pub mod local_origin;
 pub mod agent_software;
 
 pub mod control_mcp;
+
+#[cfg(target_os = "linux")]
+pub(crate) mod workspace_purge_fs;

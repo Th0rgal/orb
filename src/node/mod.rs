@@ -22,3 +22,5 @@ pub use runner::{
 };
 
 pub mod project_context;
+
+pub mod scratch;

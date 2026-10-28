@@ -974,6 +974,21 @@ impl JobRunner {
         job: &QueuedJob,
         token: &CancellationToken,
     ) -> anyhow::Result<(JobState, Option<i32>, Option<String>, Option<String>)> {
+        super::scratch::run(
+            &self.store,
+            &self.work_root,
+            job.mission_id,
+            Some(job.id),
+            self.execute_with_scratch(job, token),
+        )
+        .await
+    }
+
+    async fn execute_with_scratch(
+        &self,
+        job: &QueuedJob,
+        token: &CancellationToken,
+    ) -> anyhow::Result<(JobState, Option<i32>, Option<String>, Option<String>)> {
         let _software_execution =
             crate::agent_software::begin(&job.id.to_string(), "node-job", None)
                 .map_err(anyhow::Error::msg)?;
@@ -1200,7 +1215,12 @@ async fn run_supervised_command(
     stdout: Stdio,
     stderr: Stdio,
 ) -> anyhow::Result<RunOutcome> {
+    let mut cmd = cmd;
+    super::scratch::configure(&mut cmd);
     let (mut cmd, systemd_scope) = contain_command(cmd, environment, log_path, limit_secs)?;
+    if systemd_scope.is_none() {
+        super::scratch::retain_uncontained();
+    }
     cmd.stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
@@ -2222,7 +2242,7 @@ mod tests {
                     side_question: false,
                     companion_of: None,
                     long_running: false,
-                    command: "echo hello-from-job && pwd".to_string(),
+                    command: "echo hello-from-job && pwd && printf scratch > \"$TMPDIR/probe\" && test \"$TMPDIR\" = \"$TMP\" && test \"$TMPDIR\" = \"$TEMP\"".to_string(),
                     timeout_secs: Some(30),
                     env: None,
                     managed_auth: Vec::new(),
@@ -2238,6 +2258,26 @@ mod tests {
         assert!(tail.contains("hello-from-job"));
         // The command ran inside the per-mission directory.
         assert!(tail.contains(&mission_id.to_string()));
+        let scratch = std::fs::read_dir(dir.path().join(".scratch"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(scratch.join("probe")).unwrap(), b"scratch");
+        let retired = store
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM node_scratch WHERE job_id=?1 AND retired_at IS NOT NULL",
+                    [job_id.to_string()],
+                    |row| row.get::<_, u32>(0),
+                )
+            })
+            .await
+            .unwrap();
+        // Test executables use process groups (no scope trampoline). Their
+        // success cannot authorize cleanup of potentially escaped descendants.
+        assert_eq!(retired, 0);
         assert_eq!(runner.active_count(), 0);
         assert_eq!(runner.queued_count(), 0);
     }

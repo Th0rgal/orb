@@ -33,7 +33,7 @@ fn open_parent(path: &Path, expected: &str) -> Result<File, String> {
 thread_local! { static FAIL_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 #[cfg(test)]
-pub(super) fn fail_next_parent_sync() {
+pub(crate) fn fail_next_parent_sync() {
     FAIL_PARENT_SYNC.set(true);
 }
 
@@ -45,13 +45,13 @@ fn sync_parent_file(parent: &File) -> Result<(), String> {
     parent.sync_all().map_err(|e| e.to_string())
 }
 
-pub(super) fn sync_parent(path: &Path, expected: &str) -> Result<(), String> {
+pub(crate) fn sync_parent(path: &Path, expected: &str) -> Result<(), String> {
     sync_parent_file(&open_parent(path, expected)?)
 }
 
 /// Keep quarantine inaccessible through ordinary paths to other Unix users.
 /// Same-uid/privileged writers must participate in lifecycle admission.
-pub(super) fn secure_directory(
+pub(crate) fn secure_directory(
     path: &Path,
     parent_identity: &str,
     expected: &str,
@@ -79,7 +79,7 @@ fn set_mode(directory: &File, mode: u32) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn restore_mode(
+pub(crate) fn restore_mode(
     path: &Path,
     parent_identity: &str,
     expected: &str,
@@ -126,7 +126,7 @@ fn open_child(parent: &File, name: &CString) -> Result<File, std::io::Error> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-pub(super) fn rename(
+pub(crate) fn rename(
     source: &Path,
     destination: &Path,
     parent_identity: &str,
@@ -209,7 +209,7 @@ fn clear_directory(directory: &File, device: u64) -> Result<(), String> {
     directory.sync_all().map_err(|e| e.to_string())
 }
 
-pub(super) fn remove(
+pub(crate) fn remove(
     path: &Path,
     parent_identity: &str,
     directory_identity: &str,
@@ -250,10 +250,31 @@ pub(super) fn remove(
 
 /// Multiple views of a device (bind mounts/subvolumes), and mounts nested in
 /// the target, cannot establish physical disjointness from pathnames alone.
-pub(super) fn require_unambiguous_mount(path: &Path) -> Result<(), String> {
+pub(crate) fn require_unambiguous_mount(path: &Path) -> Result<(), String> {
+    check_mounts(path, true)
+}
+
+/// Execution-private scratch is never shared workspace source. systemd's
+/// ReadWritePaths creates additional views of its backing filesystem; those
+/// unrelated views do not invalidate its persisted retirement/inode receipt.
+/// Nested mounts remain forbidden, also enforced at traversal by openat2.
+pub(crate) fn require_no_nested_mounts(path: &Path) -> Result<(), String> {
+    check_mounts(path, false)
+}
+
+fn check_mounts(path: &Path, unique_view: bool) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let device = format!("{}:{}", libc::major(meta.dev()), libc::minor(meta.dev()));
     let mounts = std::fs::read_to_string("/proc/self/mountinfo").map_err(|e| e.to_string())?;
+    check_mount_inventory(path, &device, &mounts, unique_view)
+}
+
+fn check_mount_inventory(
+    path: &Path,
+    device: &str,
+    mounts: &str,
+    unique_view: bool,
+) -> Result<(), String> {
     let mut views = 0;
     for line in mounts.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();
@@ -273,7 +294,7 @@ pub(super) fn require_unambiguous_mount(path: &Path) -> Result<(), String> {
             return Err("Workspace includes a mount point".into());
         }
     }
-    if views != 1 {
+    if views == 0 || (unique_view && views != 1) {
         return Err("Multiple or unavailable filesystem views; retain shared workspace".into());
     }
     Ok(())
@@ -282,6 +303,21 @@ pub(super) fn require_unambiguous_mount(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_scratch_allows_systemd_bind_views_but_never_nested_mounts() {
+        let scratch = Path::new("/var/lib/sandboxed-node/.scratch");
+        let mounts = "1 0 8:1 / / ro - ext4 /dev/root ro\n2 1 8:1 /var/lib/sandboxed-node /var/lib/sandboxed-node rw - ext4 /dev/root rw\n";
+        assert!(check_mount_inventory(scratch, "8:1", mounts, false).is_ok());
+        assert!(check_mount_inventory(scratch, "8:1", mounts, true).is_err());
+        for device in ["8:1", "0:9"] {
+            let nested = format!("{mounts}3 2 {device} / /var/lib/sandboxed-node/.scratch/id/nested rw - tmpfs tmpfs rw\n");
+            assert!(check_mount_inventory(scratch, "8:1", &nested, false).is_err());
+        }
+        assert!(check_mount_inventory(scratch, "8:1", "malformed", false).is_err());
+        assert!(check_mount_inventory(scratch, "8:2", mounts, false).is_err());
+    }
+
     #[test]
     fn workspace_purge_anchored_clear_does_not_traverse_replacement_directory() {
         let temp = tempfile::tempdir().unwrap();
