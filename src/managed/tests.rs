@@ -2355,3 +2355,26 @@ async fn raw_snapshot_modes_and_budget_visibility_are_owner_scoped() {
     );
     m.destroy(&raw.id, "test").await.unwrap();
 }
+
+#[tokio::test]
+async fn worker_only_spawn_rejects_raw_snapshot_before_renting() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, provider) = manager(dir.path(), settings());
+    let mut snapshot = snap("raw-source", "project", 0, "ready");
+    snapshot.provisioning_mode = ProvisioningMode::Raw;
+    manager.snapshots.lock().await.push(snapshot);
+    let error = manager
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Worker),
+            from_snapshot: Some("raw-source".into()),
+            snapshot_project: Some("project".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.error, "mode_mismatch");
+    assert_eq!(provider.created.load(Ordering::SeqCst), 0);
+    assert!(provider.forks.lock().unwrap().is_empty());
+    assert!(manager.machines_snapshot().await.is_empty());
+}

@@ -2842,7 +2842,9 @@ impl AssistantMcp {
             let spawned = self
                 .spawn_managed_machine_with(
                     SpawnManagedParams {
-                        provisioning_mode: None,
+                        // Mission placement requires an enrolled worker. Never inherit
+                        // raw mode from a snapshot and rent an unusable machine.
+                        provisioning_mode: Some(crate::managed::ProvisioningMode::Worker),
                         size: size.filter(|s| !s.is_empty()),
                         cpu: None,
                         ram_gb: None,

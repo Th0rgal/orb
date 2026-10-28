@@ -217,7 +217,9 @@ so normal idle/owner/TTL policy still applies without busy auto-extension.
 
 Forks and named snapshots inherit source mode when omitted; an explicit mode
 mismatch is rejected before provisioning. Snapshot mode is persisted, and legacy
-snapshots default to worker. Resume retains the same machine mode. Raw snapshot
+snapshots default to worker. Resume retains the same machine mode. Worker-only auto-managed mission placement
+explicitly requests worker mode, rejecting raw snapshots before any provider
+rental. Raw snapshot
 and stop paths do not delete user files; Core has delivered no guest secrets.
 
 Provider command/file endpoints are not exposed by this change: safely exposing
