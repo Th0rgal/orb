@@ -361,16 +361,19 @@ impl ManagedManager {
             machine: sha256_hex(&machine.id),
         };
         let legacy = dir.join(format!("{}.json", sha256_hex(&identity)));
-        let path = if legacy.exists() {
-            legacy
-        } else {
-            dir.join(format!(
-                "{}_{}_{}.json",
-                scope.tenant,
-                scope.machine,
-                sha256_hex(&identity)
-            ))
-        };
+        let scoped = dir.join(format!(
+            "{}_{}_{}.json",
+            scope.tenant,
+            scope.machine,
+            sha256_hex(&identity)
+        ));
+        let (path, exists) = tokio::task::spawn_blocking(move || {
+            let path = if legacy.exists() { legacy } else { scoped };
+            let exists = path.exists();
+            (path, exists)
+        })
+        .await
+        .map_err(journal_error)?;
         let hash = sha256_hex(&serde_json::to_string(&request.operation).map_err(journal_error)?);
         let mut receipt = OperationReceipt {
             request_hash: hash.clone(),
@@ -381,7 +384,7 @@ impl ManagedManager {
             truncated: false,
         };
         // Replay is allowed after stop/destroy; new work still requires Online.
-        if path.exists() {
+        if exists {
             return tokio::task::spawn_blocking(move || replay(&path, &receipt))
                 .await
                 .map_err(journal_error)?;
