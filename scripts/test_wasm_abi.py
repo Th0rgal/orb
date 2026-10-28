@@ -5,9 +5,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_orb_kernel_wasm import verify_abi
+import build_orb_kernel_wasm as builder
+from build_orb_kernel_wasm import verify_abi, stage_artifact
 
 MANIFEST = {"functions": [{"name": "fixture", "params": [{"type": "uint64_t"}], "ret": "uint64_t"}]}
 
@@ -54,7 +56,7 @@ class WasmAbi(unittest.TestCase):
                                      "--receipt", str(receipt)], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(artifact.read_bytes(), b"previous artifact")
-            self.assertEqual(json.loads(receipt.read_text())["status"], "INCOMPLETE")
+            self.assertEqual(json.loads(receipt.read_text())["status"], "FAILED")
 
     def test_artifact_and_receipt_cannot_alias(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -64,6 +66,71 @@ class WasmAbi(unittest.TestCase):
                                      "--receipt", str(artifact)], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(artifact.exists())
+
+    def test_full_engine_rejects_invalid_body_before_publication(self):
+        # ABI metadata is valid; an i32 body cannot return the declared i64.
+        malformed = module().replace(b"\x20\0\x0b", b"\x41\0\x0b")
+        self.assertEqual(verify_abi(malformed, MANIFEST)["function_exports"], 1)
+        with tempfile.TemporaryDirectory() as temp:
+            binary, output = Path(temp) / "new.wasm", Path(temp) / "existing.wasm"
+            binary.write_bytes(malformed)
+            output.write_bytes(b"previous")
+            def real_node(argv):
+                subprocess.run(list(map(str, argv)), capture_output=True, check=True)
+            with self.assertRaises(subprocess.CalledProcessError):
+                stage_artifact(binary, output, MANIFEST, False, real_node)
+            self.assertEqual(output.read_bytes(), b"previous")
+
+    def test_check_mismatch_and_rename_failure_preserve_previous_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary, output = Path(temp) / "new.wasm", Path(temp) / "existing.wasm"
+            binary.write_bytes(module())
+            output.write_bytes(b"previous")
+            def real_node(argv):
+                subprocess.run(list(map(str, argv)), capture_output=True, check=True)
+            with self.assertRaisesRegex(ValueError, "differ"):
+                stage_artifact(binary, output, MANIFEST, True, real_node)
+            with patch.object(builder.os, "replace", side_effect=OSError("injected rename failure")):
+                with self.assertRaises(OSError):
+                    stage_artifact(binary, output, MANIFEST, False, real_node)
+            self.assertEqual(output.read_bytes(), b"previous")
+
+    def test_bad_input_and_existing_receipt_are_preserved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt, output = root / "receipt.json", root / "old.wasm"
+            output.write_bytes(b"previous")
+            argv = ["builder", "--lean-bin-dir", temp, "--out", str(output), "--receipt", str(receipt)]
+            with patch.object(builder, "load_manifest", side_effect=ValueError("injected malformed manifest")), patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(ValueError, "malformed manifest"):
+                    builder.main()
+            self.assertEqual(json.loads(receipt.read_text())["status"], "FAILED")
+            before = receipt.read_bytes()
+            with patch.object(sys, "argv", argv):
+                with self.assertRaises(FileExistsError):
+                    builder.main()
+            self.assertEqual(receipt.read_bytes(), before)
+            self.assertEqual(output.read_bytes(), b"previous")
+
+    def test_instantiation_trap_prevents_publication(self):
+        def section(kind, data):
+            return bytes([kind, len(data)]) + data
+        data = b"\0asm\1\0\0\0"
+        data += section(1, b"\2\x60\1\x7e\1\x7e\x60\0\0")
+        data += section(3, b"\2\0\1")
+        data += section(7, b"\1\7fixture\0\0")
+        data += section(8, b"\1")
+        data += section(10, b"\2\4\0\x20\0\x0b\3\0\0\x0b")
+        self.assertEqual(verify_abi(data, MANIFEST)["function_exports"], 1)
+        with tempfile.TemporaryDirectory() as temp:
+            binary, output = Path(temp) / "trap.wasm", Path(temp) / "old.wasm"
+            binary.write_bytes(data)
+            output.write_bytes(b"previous")
+            def real_node(argv):
+                subprocess.run(list(map(str, argv)), capture_output=True, check=True)
+            with self.assertRaises(subprocess.CalledProcessError):
+                stage_artifact(binary, output, MANIFEST, False, real_node)
+            self.assertEqual(output.read_bytes(), b"previous")
 
 
 if __name__ == "__main__":

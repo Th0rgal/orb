@@ -107,6 +107,22 @@ def verify_abi(data, manifest):
     return {"function_exports": len(signatures), "imports": 0}
 
 
+def stage_artifact(binary, output, manifest, check, run):
+    """Full-engine validation precedes either comparison or single-file rename."""
+    data = binary.read_bytes()
+    summary = verify_abi(data, manifest)
+    run(["node", "-e", "const fs=require('fs');const m=new WebAssembly.Module(fs.readFileSync(process.argv[1]));"
+         "if(WebAssembly.Module.imports(m).length)throw Error('imports');new WebAssembly.Instance(m);", binary])
+    if check:
+        if output.read_bytes() != data:
+            raise ValueError("existing WASM bytes differ from the rebuilt artifact")
+    else:
+        os.replace(binary, output)
+    return {"abi": summary, "artifact_sha256": hashlib.sha256(data).hexdigest(),
+            "publication_occurred": not check, "comparison_matched": check,
+            "artifact_outcome": "MATCHED_EXISTING" if check else "PUBLISHED"}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lean-bin-dir", required=True, type=Path)
@@ -119,10 +135,11 @@ def main():
     tools = args.lean_bin_dir.resolve()
     source = ROOT / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
     manifest_path = ROOT / "shared/orb-spec/kernel_abi.json"
-    manifest = load_manifest(manifest_path)
-    receipt = {"status": "INCOMPLETE", "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-               "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(), "commands": []}
-    # Reserve the receipt before compiling; never overwrite a previous attempt.
+    receipt = {"status": "STARTED", "mode": "CHECK" if args.check else "PUBLISH",
+               "output_path": str(args.out.resolve()), "commands": [],
+               "publication_occurred": False, "comparison_matched": False}
+    # Basic invalid paths / unavailable receipt creation cannot themselves be
+    # recorded here. All input loading and execution happens after reservation.
     with args.receipt.open("x") as record:
         def run(argv):
             argv = list(map(str, argv))
@@ -135,8 +152,15 @@ def main():
                                         "stdout": result.stdout, "stderr": result.stderr})
             if result.returncode:
                 raise ValueError(f"command failed: {result.args[0]} (exit {result.returncode})")
+            return result.stdout
 
         try:
+            receipt["builder_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+            receipt["binding_loader_sha256"] = hashlib.sha256(Path(__file__).with_name("gen_kernel_bindings.py").read_bytes()).hexdigest()
+            receipt["source_revision"] = run(["git", "-C", ROOT, "rev-parse", "HEAD"]).strip()
+            manifest = load_manifest(manifest_path)
+            receipt["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+            receipt["manifest_sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
             receipt["tools"] = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
                                 for path in (tools / "clang", tools / "ld.lld", Path(shutil.which("node") or "node"))}
             args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -146,26 +170,18 @@ def main():
                      "-O2", "-ffreestanding", "-isystem", tools.parent / "include/clang", "-c", source, "-o", obj])
                 run([tools / "ld.lld", "-flavor", "wasm", "--no-entry", "--strip-all",
                      *["--export=" + f["name"] for f in manifest["functions"]], obj, "-o", binary])
-                data = binary.read_bytes()
-                receipt["abi"] = verify_abi(data, manifest)
-                run(["node", "-e", "const fs=require('fs');const m=new WebAssembly.Module(fs.readFileSync(process.argv[1]));"
-                     "if(WebAssembly.Module.imports(m).length)throw Error('imports');new WebAssembly.Instance(m);", binary])
-                receipt["artifact_sha256"] = hashlib.sha256(data).hexdigest()
-                if args.check:
-                    if args.out.read_bytes() != data:
-                        raise ValueError("checked-in WASM bytes differ from the rebuilt artifact")
-                else:
-                    os.replace(binary, args.out)
-                receipt["status"] = "ARTIFACT_VALIDATED_LOCAL"
-                receipt["limitations"] = ["Not a compiler correctness proof", "No native/mobile qualification",
-                                           "P2 frontend adapters/bootstrap and phase acceptance remain open"]
+                receipt.update(stage_artifact(binary, args.out, manifest, args.check, run))
+            receipt["status"] = "SUCCEEDED_LOCAL"
+            receipt["limitations"] = ["Not a compiler correctness proof", "No native/mobile qualification",
+                                       "P2 frontend adapters/bootstrap and phase acceptance remain open"]
         except Exception as error:
+            receipt["status"] = "FAILED"
             receipt["error"] = str(error)
             raise
         finally:
             json.dump(receipt, record, indent=2)
             record.write("\n")
-    print(json.dumps({k: receipt[k] for k in ("status", "abi", "artifact_sha256")}))
+    print(json.dumps({k: receipt[k] for k in ("status", "mode", "abi", "artifact_sha256", "artifact_outcome")}))
 
 
 if __name__ == "__main__":
