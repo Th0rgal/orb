@@ -70,6 +70,15 @@ pub async fn cancel_mission(
     machine_transfer::guard(&control.mission_store, mission_id)
         .await
         .map_err(internal_error)?;
+    // A job on a provably destroyed managed VM can never confirm its own
+    // cancellation: settle it as lost so cancel actually releases the mission.
+    super::remote_jobs::release_jobs_on_gone_nodes(
+        &state.config.working_dir,
+        control.mission_store.as_ref(),
+        mission_id,
+    )
+    .await
+    .map_err(internal_error)?;
     // Disarm before cancelling: Stop must end the goal loop even when no turn
     // is running (between two goal iterations), and the trailing `paused`
     // status of the cancelled turn no longer re-arms it.

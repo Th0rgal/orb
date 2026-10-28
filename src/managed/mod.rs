@@ -696,6 +696,44 @@ pub fn node_token(token_env: &str) -> Option<String> {
     TOKENS.read().ok()?.get(token_env).cloned()
 }
 
+/// Pure verdict behind [`ManagedManager::node_provably_gone`].
+pub fn node_gone_verdict(record: Option<MachineState>, registry_authoritative: bool) -> bool {
+    match record {
+        Some(state) => matches!(state, MachineState::Destroyed | MachineState::Failed),
+        None => registry_authoritative,
+    }
+}
+
+#[cfg(test)]
+static TEST_MANAGER: std::sync::Mutex<Option<Arc<ManagedManager>>> = std::sync::Mutex::new(None);
+
+/// Install a registry for [`node_provably_gone`] in tests.
+#[cfg(test)]
+pub fn set_test_manager(manager: Option<Arc<ManagedManager>>) {
+    *TEST_MANAGER.lock().unwrap_or_else(|e| e.into_inner()) = manager;
+}
+
+/// Whether `node_id` names a managed VM whose registry record proves no node
+/// process can still run there. Static nodes and an unavailable registry are
+/// never proof.
+pub async fn node_provably_gone(node_id: &str) -> bool {
+    if !is_managed_node(node_id) {
+        return false;
+    }
+    #[cfg(test)]
+    let manager = TEST_MANAGER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .or_else(global);
+    #[cfg(not(test))]
+    let manager = global();
+    match manager {
+        Some(manager) => manager.node_provably_gone(node_id).await,
+        None => false,
+    }
+}
+
 pub fn is_managed_node(node_id: &str) -> bool {
     node_id.starts_with(NODE_PREFIX)
 }
@@ -764,6 +802,9 @@ pub struct ManagedManager {
     runtime: std::sync::RwLock<RuntimeSettings>,
     /// Reconciler memory (not persisted; a restart restarts the graces).
     reconcile_state: Mutex<ReconcileState>,
+    /// The persisted registry was read and parsed, so a node id missing
+    /// from it was never (or is no longer) a machine of this Core.
+    registry_authoritative: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -1029,6 +1070,7 @@ impl ManagedManager {
             owner_probe: std::sync::RwLock::new(None),
             runtime: std::sync::RwLock::new(RuntimeSettings::default()),
             reconcile_state: Mutex::new(ReconcileState::default()),
+            registry_authoritative: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1192,10 +1234,12 @@ impl ManagedManager {
 
     /// Load the registry and re-register the nodes of live machines.
     pub async fn load(&self) {
-        let machines: Persisted = std::fs::read(self.machines_path())
+        let parsed: Option<Persisted> = std::fs::read(self.machines_path())
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        self.registry_authoritative
+            .store(parsed.is_some(), std::sync::atomic::Ordering::SeqCst);
+        let machines = parsed.unwrap_or_default();
         let secrets: HashMap<String, MachineSecrets> = std::fs::read(self.secrets_path())
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -1320,6 +1364,23 @@ impl ManagedManager {
                     || (m.state.is_live() && !m.name.is_empty() && m.name == id)
             })
             .cloned()
+    }
+
+    /// Whether the managed VM behind `node_id` provably cannot run a process
+    /// any more: its record is `Destroyed`/`Failed` (set only after the
+    /// provider confirmed the destroy, or it vanished from the provider), or
+    /// the successfully loaded registry has no record of it at all. A
+    /// `Stopped` VM keeps its disk and can resume, so it is not proof.
+    pub async fn node_provably_gone(&self, node_id: &str) -> bool {
+        let Some(id) = node_id.strip_prefix(NODE_PREFIX) else {
+            return false;
+        };
+        let machines = self.machines.lock().await;
+        node_gone_verdict(
+            machines.iter().find(|m| m.id == id).map(|m| m.state),
+            self.registry_authoritative
+                .load(std::sync::atomic::Ordering::SeqCst),
+        )
     }
 
     pub async fn budget(&self) -> BudgetView {
