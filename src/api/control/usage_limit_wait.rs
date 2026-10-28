@@ -20,6 +20,37 @@ use crate::api::mission_store::{Mission, MissionStore};
 /// `terminal_reason` of a mission waiting for a usage limit to reset.
 pub(crate) const USAGE_LIMIT_WAIT_REASON: &str = "usage_limit_wait";
 
+/// Antigravity ended its turn while its own background task was still running.
+pub(crate) const BACKGROUND_HANDOFF: &str = "Antigravity background task handoff";
+
+/// `terminal_reason` of a mission whose Antigravity turn handed off to a
+/// background task. The replay follows within a minute, so the mission stays
+/// `Active` instead of looking stopped.
+pub(crate) const BACKGROUND_HANDOFF_REASON: &str = "background_task_handoff";
+
+/// The `terminal_reason` of a remote mission waiting for the replay of `limit`.
+pub(crate) fn remote_wait_reason(limit: &str) -> &'static str {
+    if limit == BACKGROUND_HANDOFF {
+        BACKGROUND_HANDOFF_REASON
+    } else {
+        USAGE_LIMIT_WAIT_REASON
+    }
+}
+
+/// True for a reason given by [`remote_wait_reason`].
+pub(crate) fn is_remote_wait_reason(reason: &str) -> bool {
+    reason == USAGE_LIMIT_WAIT_REASON || reason == BACKGROUND_HANDOFF_REASON
+}
+
+/// The status a remote mission shows while it waits with `reason`.
+pub(crate) fn remote_wait_status(reason: &str) -> MissionStatus {
+    if reason == BACKGROUND_HANDOFF_REASON {
+        MissionStatus::Active
+    } else {
+        MissionStatus::Interrupted
+    }
+}
+
 /// Opens every automatic resume prompt, so a second wait in a row reuses the
 /// prompt instead of wrapping it again.
 const RESUME_PROMPT_MARKER: &str = "[Automatic resume after a usage limit]";
@@ -480,7 +511,12 @@ pub(crate) async fn remote_recoveries(
 
 pub(crate) fn attach_recovery(value: &mut serde_json::Value, wait: Option<&RemoteWait>) {
     // A stale ledger entry must never advertise a retry after Stop or Resume.
-    if value["status"] != "interrupted" || value["terminal_reason"] != USAGE_LIMIT_WAIT_REASON {
+    let waiting = match value["terminal_reason"].as_str() {
+        Some(USAGE_LIMIT_WAIT_REASON) => value["status"] == "interrupted",
+        Some(BACKGROUND_HANDOFF_REASON) => value["status"] == "active",
+        _ => false,
+    };
+    if !waiting {
         return;
     }
     let Some(wait) = wait.filter(|wait| wait.resume_at.is_some()) else {
@@ -488,7 +524,7 @@ pub(crate) fn attach_recovery(value: &mut serde_json::Value, wait: Option<&Remot
     };
     let kind = if wait.limit == "Antigravity response truncated" {
         "output_limit"
-    } else if wait.limit == "Antigravity background task handoff" {
+    } else if wait.limit == BACKGROUND_HANDOFF {
         "background"
     } else if is_transient_wait(&wait.limit) {
         "transient"
@@ -677,7 +713,7 @@ pub(crate) fn antigravity_resumable_interruption(failure: &str) -> Option<&'stat
     } else if lower.contains(crate::antigravity::IDLE_WAIT_INTERRUPTED_MARKER) {
         Some(IDLE_WAIT_INTERRUPTED)
     } else if failure.contains("Antigravity ended its headless turn while background task(s)") {
-        Some("Antigravity background task handoff")
+        Some(BACKGROUND_HANDOFF)
     } else if crate::antigravity::is_transient_error(failure) {
         Some("Antigravity transient upstream error")
     } else {
@@ -1065,8 +1101,9 @@ pub(crate) fn fresh_session_fallback_prompt(mission: &Mission, max_history_chars
 
 /// True for a remote mission waiting for its replay.
 pub(crate) fn is_waiting_remote(mission: &Mission) -> bool {
-    mission.status == MissionStatus::Interrupted
-        && mission.terminal_reason.as_deref() == Some(USAGE_LIMIT_WAIT_REASON)
+    mission.terminal_reason.as_deref().is_some_and(|reason| {
+        is_remote_wait_reason(reason) && mission.status == remote_wait_status(reason)
+    })
 }
 
 /// What to do after a replay could not be started.
@@ -2112,6 +2149,70 @@ mod tests {
             .is_none());
         }
         assert!(remote_wait(dir.path(), mission.id).await.is_none());
+    }
+
+    /// A background-task handoff (mission 2e3bf791, 2026-10-28) is replayed
+    /// within a minute: the mission stays Active, still counts as waiting for
+    /// its replay, and still advertises the recovery. Quota waits keep the
+    /// Interrupted status.
+    #[tokio::test]
+    async fn background_handoff_waits_while_active() {
+        let failure = "Antigravity ended its headless turn while background task(s) were running";
+        assert_eq!(
+            antigravity_resumable_interruption(failure),
+            Some(BACKGROUND_HANDOFF)
+        );
+        assert_eq!(
+            remote_wait_reason(BACKGROUND_HANDOFF),
+            BACKGROUND_HANDOFF_REASON
+        );
+        assert_eq!(
+            remote_wait_reason("Antigravity response truncated"),
+            USAGE_LIMIT_WAIT_REASON
+        );
+        assert_eq!(
+            remote_wait_status(BACKGROUND_HANDOFF_REASON),
+            MissionStatus::Active
+        );
+        assert_eq!(
+            remote_wait_status(USAGE_LIMIT_WAIT_REASON),
+            MissionStatus::Interrupted
+        );
+        assert!(!is_remote_wait_reason("remote_node_job"));
+
+        let (_dir, store) = sqlite_store().await;
+        let mission = active_mission(&store, "antigravity").await;
+        for (status, reason, waiting) in [
+            (MissionStatus::Active, BACKGROUND_HANDOFF_REASON, true),
+            (MissionStatus::Interrupted, USAGE_LIMIT_WAIT_REASON, true),
+            // Stopped by the operator during the handoff: no replay.
+            (MissionStatus::Interrupted, BACKGROUND_HANDOFF_REASON, false),
+            (MissionStatus::Active, USAGE_LIMIT_WAIT_REASON, false),
+        ] {
+            store
+                .update_mission_status_with_reason(mission.id, status, Some(reason))
+                .await
+                .unwrap();
+            let current = store.get_mission(mission.id).await.unwrap().unwrap();
+            assert_eq!(is_waiting_remote(&current), waiting, "{status:?} {reason}");
+        }
+
+        let wait = RemoteWait {
+            resume_at: Some(Utc::now()),
+            limit: BACKGROUND_HANDOFF.into(),
+            replays: 0,
+            retries: 0,
+            failed_job_id: None,
+            fallbacks: 0,
+        };
+        let mut value =
+            serde_json::json!({"status":"active","terminal_reason":BACKGROUND_HANDOFF_REASON});
+        attach_recovery(&mut value, Some(&wait));
+        assert_eq!(value["recovery"]["kind"], "background");
+        let mut stopped =
+            serde_json::json!({"status":"interrupted","terminal_reason":BACKGROUND_HANDOFF_REASON});
+        attach_recovery(&mut stopped, Some(&wait));
+        assert!(stopped.get("recovery").is_none());
     }
 
     #[test]

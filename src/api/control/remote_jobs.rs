@@ -2250,7 +2250,7 @@ pub(super) async fn poll_remote_job(
                                 "remote job failed on a usage limit; mission waits for its replay"
                             );
                             content = usage_limit_wait::annotate_remote_output(&content, &wait);
-                            status_reason = usage_limit_wait::USAGE_LIMIT_WAIT_REASON;
+                            status_reason = usage_limit_wait::remote_wait_reason(&wait.limit);
                         } else if !success
                             && usage_limit_wait::idle_wait_resumes_exhausted(
                                 ledger_dir, mission_id, failure,
@@ -2263,7 +2263,7 @@ pub(super) async fn poll_remote_job(
                     }
                     // A terminal node receipt proves admission, even if its ACK
                     // was lost. Quota waits remain running until their replay ends.
-                    let settled = (status_reason != usage_limit_wait::USAGE_LIMIT_WAIT_REASON)
+                    let settled = (!usage_limit_wait::is_remote_wait_reason(status_reason))
                         .then_some(success);
                     if let Err(error) = owner
                         .mission_store
