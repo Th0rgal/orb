@@ -95,6 +95,9 @@ fn open_private(path: &Path, create_new: bool) -> std::io::Result<std::fs::File>
 }
 fn write_synced(file: &mut std::fs::File, value: &OperationReceipt) -> Result<(), ManagedError> {
     let bytes = serde_json::to_vec(value).map_err(journal_error)?;
+    if bytes.len() > MAX_RECEIPT_BYTES {
+        return Err(journal_error("oversized receipt"));
+    }
     file.write_all(&bytes).map_err(journal_error)?;
     file.sync_all().map_err(journal_error)
 }
@@ -104,16 +107,22 @@ fn sync_dir(dir: &Path) -> Result<(), ManagedError> {
         .map_err(journal_error)
 }
 fn prepare_dir(dir: &Path) -> Result<(), ManagedError> {
-    fs::create_dir_all(dir).map_err(journal_error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(journal_error)?;
+    match fs::create_dir(dir) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+                    .map_err(journal_error)?;
+            }
+            if let Some(parent) = dir.parent() {
+                sync_dir(parent)?;
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        Err(e) => Err(journal_error(e)),
     }
-    if let Some(parent) = dir.parent() {
-        sync_dir(parent)?;
-    }
-    Ok(())
 }
 /// None means this caller owns the newly persisted dispatch fence.
 fn begin(
@@ -127,24 +136,175 @@ fn begin(
             sync_dir(dir)?;
             Ok(None)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let bytes = fs::read(path).map_err(journal_error)?;
-            // Partial records from a concurrent writer or crash fail closed.
-            let prior: OperationReceipt = serde_json::from_slice(&bytes).map_err(journal_error)?;
-            if prior.request_hash != pending.request_hash {
-                return Err(ManagedError::new(
-                    "idempotency_conflict",
-                    409,
-                    "Idempotency key was used for another operation",
-                ));
-            }
-            if prior.status == "pending" {
-                return Err(ManagedError::new("operation_uncertain", 409, "Operation is pending or its outcome is unknown; it will not be automatically repeated"));
-            }
-            Ok(Some(prior))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(Some(replay(path, pending)?)),
         Err(e) => Err(journal_error(e)),
     }
+}
+// Reserve up to 132 KiB per receipt: JSON may escape the bounded output again.
+const MAX_RECEIPT_BYTES: usize = 2 * MAX_CONTENT + 4096;
+#[derive(Clone, Copy)]
+struct JournalCaps {
+    global: usize,
+    tenant: usize,
+    machine: usize,
+    per_minute: usize,
+}
+const JOURNAL_CAPS: JournalCaps = JournalCaps {
+    global: 4096,
+    tenant: 512,
+    machine: 256,
+    per_minute: 60,
+};
+#[derive(Serialize, Deserialize)]
+struct Scope {
+    tenant: String,
+    machine: String,
+}
+fn capacity() -> ManagedError {
+    ManagedError::new(
+        "operation_capacity",
+        429,
+        "Raw operation capacity reached; existing receipt replay remains available",
+    )
+}
+fn lock_file(path: &Path) -> Result<std::fs::File, ManagedError> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path).map_err(journal_error)
+}
+fn replay(path: &Path, pending: &OperationReceipt) -> Result<OperationReceipt, ManagedError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(journal_error)?
+        .take((MAX_RECEIPT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(journal_error)?;
+    if bytes.len() > MAX_RECEIPT_BYTES {
+        return Err(journal_error("oversized receipt"));
+    }
+    let prior: OperationReceipt = serde_json::from_slice(&bytes).map_err(journal_error)?;
+    if prior.request_hash != pending.request_hash {
+        return Err(ManagedError::new(
+            "idempotency_conflict",
+            409,
+            "Idempotency key was used for another operation",
+        ));
+    }
+    if prior.status == "pending" {
+        return Err(ManagedError::new(
+            "operation_uncertain",
+            409,
+            "Operation is pending or its outcome is unknown; it will not be automatically repeated",
+        ));
+    }
+    if !matches!(prior.status.as_str(), "completed" | "uncertain") {
+        return Err(journal_error("invalid receipt"));
+    }
+    Ok(prior)
+}
+/// Count/create is serialized across processes; the returned OS lease spans I/O.
+fn admit(
+    path: &Path,
+    pending: &OperationReceipt,
+    scope: &Scope,
+    caps: JournalCaps,
+) -> Result<(Option<OperationReceipt>, Option<std::fs::File>), ManagedError> {
+    use fs2::FileExt;
+    use std::io::{Read, Seek, SeekFrom};
+    let dir = path.parent().ok_or_else(|| journal_error("parent"))?;
+    prepare_dir(dir)?;
+    if path.exists() {
+        return Ok((Some(replay(path, pending)?), None));
+    }
+    let admission = lock_file(&dir.join(".admission.lock"))?;
+    admission.try_lock_exclusive().map_err(|_| capacity())?;
+    if path.exists() {
+        return Ok((Some(replay(path, pending)?), None));
+    }
+    let mut global = 0;
+    let mut tenant = 0;
+    let mut machine = 0;
+    let mut recent = 0;
+    let mut machine_recent = 0;
+    let mut global_recent = 0;
+    for entry in fs::read_dir(dir).map_err(journal_error)? {
+        let entry = entry.map_err(journal_error)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        // Temp artifacts and legacy unscoped receipts consume conservative capacity.
+        let parts: Vec<_> = name.split('_').collect();
+        global += 1;
+        let mine = parts.len() != 3 || parts[0] == scope.tenant;
+        let same_machine = parts.len() != 3 || (mine && parts[1] == scope.machine);
+        tenant += usize::from(mine);
+        machine += usize::from(same_machine);
+        let meta = entry.metadata().map_err(journal_error)?;
+        if !meta.is_file() || meta.len() > MAX_RECEIPT_BYTES as u64 {
+            return Err(journal_error("unexpected journal entry"));
+        }
+        if meta
+            .modified()
+            .map_err(journal_error)?
+            .elapsed()
+            .map_or(true, |age| age < Duration::from_secs(60))
+        {
+            global_recent += 1;
+            recent += usize::from(mine);
+            machine_recent += usize::from(same_machine);
+        }
+    }
+    if global >= caps.global
+        || tenant >= caps.tenant
+        || machine >= caps.machine
+        || recent >= caps.per_minute
+        || machine_recent >= 10
+        || global_recent >= 240
+    {
+        return Err(capacity());
+    }
+    // Fixed 16 slot files bound active provider requests without creating a file
+    // per tenant/machine. Admission lock makes lease metadata reads race-free.
+    let mut slot = None;
+    let mut tenant_active = 0;
+    let mut machine_active = 0;
+    for index in 0..16 {
+        let file = lock_file(&dir.join(format!(".slot-{index}")))?;
+        if file.try_lock_exclusive().is_ok() {
+            if slot.is_none() {
+                slot = Some(file);
+            }
+        } else {
+            let mut bytes = Vec::new();
+            file.take(1024)
+                .read_to_end(&mut bytes)
+                .map_err(journal_error)?;
+            let active: Scope = serde_json::from_slice(&bytes).map_err(journal_error)?;
+            if active.tenant == scope.tenant {
+                tenant_active += 1;
+            }
+            if active.tenant == scope.tenant && active.machine == scope.machine {
+                machine_active += 1;
+            }
+        }
+    }
+    if tenant_active >= 4 || machine_active >= 1 {
+        return Err(capacity());
+    }
+    let mut slot = slot.ok_or_else(capacity)?;
+    slot.set_len(0).map_err(journal_error)?;
+    slot.seek(SeekFrom::Start(0)).map_err(journal_error)?;
+    slot.write_all(&serde_json::to_vec(scope).map_err(journal_error)?)
+        .map_err(journal_error)?;
+    let prior = begin(path, pending)?;
+    Ok((prior, Some(slot)))
 }
 fn finish(path: &Path, receipt: &OperationReceipt) -> Result<(), ManagedError> {
     let temp = path.with_extension(format!("{}.tmp", super::random_id()));
@@ -194,10 +354,23 @@ impl ManagedManager {
         }
         request.operation.validate()?;
         let dir = self.dir.join("raw_operations");
-        prepare_dir(&dir)?;
         let identity = serde_json::to_string(&(tenant, &machine.id, &request.idempotency_key))
             .map_err(journal_error)?;
-        let path = dir.join(format!("{}.json", sha256_hex(&identity)));
+        let scope = Scope {
+            tenant: sha256_hex(tenant),
+            machine: sha256_hex(&machine.id),
+        };
+        let legacy = dir.join(format!("{}.json", sha256_hex(&identity)));
+        let path = if legacy.exists() {
+            legacy
+        } else {
+            dir.join(format!(
+                "{}_{}_{}.json",
+                scope.tenant,
+                scope.machine,
+                sha256_hex(&identity)
+            ))
+        };
         let hash = sha256_hex(&serde_json::to_string(&request.operation).map_err(journal_error)?);
         let mut receipt = OperationReceipt {
             request_hash: hash.clone(),
@@ -209,7 +382,9 @@ impl ManagedManager {
         };
         // Replay is allowed after stop/destroy; new work still requires Online.
         if path.exists() {
-            return begin(&path, &receipt)?.ok_or_else(|| journal_error("missing replay"));
+            return tokio::task::spawn_blocking(move || replay(&path, &receipt))
+                .await
+                .map_err(journal_error)?;
         }
         if machine.state != MachineState::Online {
             return Err(ManagedError::new(
@@ -225,7 +400,14 @@ impl ManagedManager {
         let pid = machine.provider_id.as_deref().ok_or_else(|| {
             ManagedError::new("not_running", 409, "Machine has no provider sandbox")
         })?;
-        if let Some(prior) = begin(&path, &receipt)? {
+        let pending = receipt.clone();
+        let journal_path = path.clone();
+        let (prior, lease) = tokio::task::spawn_blocking(move || {
+            admit(&journal_path, &pending, &scope, JOURNAL_CAPS)
+        })
+        .await
+        .map_err(journal_error)??;
+        if let Some(prior) = prior {
             return Ok(prior);
         }
         self.update(&machine.id, |m| m.last_busy_at = Some(Utc::now()))
@@ -272,7 +454,13 @@ impl ManagedManager {
             }
         }
         receipt.finished_at = Some(Utc::now());
-        finish(&path, &receipt)?;
+        let final_receipt = receipt.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lease = lease; // Release only after the final receipt is durable.
+            finish(&path, &final_receipt)
+        })
+        .await
+        .map_err(journal_error)??;
         self.ledger_with("raw_operation_finished", &machine, json!({"operation_kind": request.operation.kind(), "request_hash": hash, "outcome": receipt.status}));
         Ok(receipt)
     }
@@ -357,5 +545,151 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+    fn scoped_path(dir: &Path, scope: &Scope, key: &str) -> std::path::PathBuf {
+        dir.join(format!("{}_{}_{}.json", scope.tenant, scope.machine, key))
+    }
+    fn small_caps() -> JournalCaps {
+        JournalCaps {
+            global: 2,
+            tenant: 2,
+            machine: 1,
+            per_minute: 60,
+        }
+    }
+    #[test]
+    fn journal_caps_survive_restart_and_allow_replay_at_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            tenant: "t".into(),
+            machine: "m".into(),
+        };
+        let path = scoped_path(dir.path(), &scope, "first");
+        let mut receipt = pending("request");
+        let (prior, lease) = admit(&path, &receipt, &scope, small_caps()).unwrap();
+        assert!(prior.is_none());
+        receipt.status = "completed".into();
+        finish(&path, &receipt).unwrap();
+        drop(lease);
+        // No in-memory counter is involved; reopening the same directory is enough.
+        assert_eq!(
+            admit(
+                &scoped_path(dir.path(), &scope, "second"),
+                &pending("new"),
+                &scope,
+                small_caps()
+            )
+            .unwrap_err()
+            .error,
+            "operation_capacity"
+        );
+        assert_eq!(
+            admit(&path, &pending("request"), &scope, small_caps())
+                .unwrap()
+                .0
+                .unwrap()
+                .status,
+            "completed"
+        );
+        let other = Scope {
+            tenant: "other".into(),
+            machine: "other".into(),
+        };
+        let other_path = scoped_path(dir.path(), &other, "second");
+        let (_, lease) = admit(&other_path, &pending("other"), &other, small_caps()).unwrap();
+        drop(lease);
+        let third = Scope {
+            tenant: "third".into(),
+            machine: "third".into(),
+        };
+        assert_eq!(
+            admit(
+                &scoped_path(dir.path(), &third, "third"),
+                &pending("third"),
+                &third,
+                small_caps()
+            )
+            .unwrap_err()
+            .error,
+            "operation_capacity"
+        );
+    }
+    #[test]
+    fn active_machine_lease_refuses_new_keys_but_replays_completed_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = Scope {
+            tenant: "t".into(),
+            machine: "m".into(),
+        };
+        let caps = JournalCaps {
+            global: 100,
+            tenant: 100,
+            machine: 100,
+            per_minute: 60,
+        };
+        let path = scoped_path(dir.path(), &scope, "first");
+        let mut receipt = pending("one");
+        let (_, lease) = admit(&path, &receipt, &scope, caps).unwrap();
+        assert_eq!(
+            admit(
+                &scoped_path(dir.path(), &scope, "second"),
+                &pending("two"),
+                &scope,
+                caps
+            )
+            .unwrap_err()
+            .error,
+            "operation_capacity"
+        );
+        receipt.status = "completed".into();
+        finish(&path, &receipt).unwrap();
+        assert!(admit(&path, &pending("one"), &scope, caps)
+            .unwrap()
+            .0
+            .is_some());
+        drop(lease);
+        assert!(admit(
+            &scoped_path(dir.path(), &scope, "second"),
+            &pending("two"),
+            &scope,
+            caps
+        )
+        .is_ok());
+    }
+    #[test]
+    fn concurrent_admission_cannot_exceed_global_receipt_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let caps = JournalCaps {
+            global: 1,
+            tenant: 10,
+            machine: 10,
+            per_minute: 60,
+        };
+        let admitted = std::thread::scope(|threads| {
+            let joins: Vec<_> = (0..8)
+                .map(|i| {
+                    let root = dir.path();
+                    threads.spawn(move || {
+                        let scope = Scope {
+                            tenant: format!("t{i}"),
+                            machine: format!("m{i}"),
+                        };
+                        admit(
+                            &scoped_path(root, &scope, "key"),
+                            &pending("request"),
+                            &scope,
+                            caps,
+                        )
+                        .is_ok()
+                    })
+                })
+                .collect();
+            joins
+                .into_iter()
+                .map(|j| j.join().unwrap())
+                .filter(|accepted| *accepted)
+                .count()
+        });
+        assert_eq!(admitted, 1);
     }
 }

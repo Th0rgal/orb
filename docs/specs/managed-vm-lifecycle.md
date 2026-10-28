@@ -261,3 +261,24 @@ Global reconciliation and settings retain the existing administrator-wide policy
 Reconciliation still operates on the whole provider registry; its response omits
 known raw machine/provider identifiers belonging to other tenants. Aggregate
 provider inventory counts remain operational administrator information.
+
+
+Journal admission is bounded across processes by a private `fs2` advisory lock.
+The synced pending fence is created while holding it; the lock is released
+before provider I/O. Fixed advisory operation slots allow at most 16 active
+provider calls globally, four per tenant, and one per machine. Admission never
+waits for a busy lock/slot: it returns HTTP 429. All journal scans, locks, fsyncs,
+and receipt reads/writes run through `spawn_blocking` rather than Tokio workers.
+
+Permanent receipt caps are 4096 globally, 512 per tenant, and 256 per machine.
+Each reserves a maximum 132 KiB of serialized storage (528 MiB global), with
+at most 16 additional atomic-write temporaries (about 2.1 MiB). Visible
+temporary files are also counted conservatively by subsequent admission scans. New
+admissions are additionally limited over a rolling minute to 240 globally, 60
+per tenant, and 10 per machine. Recent file modification times conservatively
+count completions as well as admissions. Existing receipts replay at any cap.
+Legacy unscoped receipt files count against every scope, so upgrades fail closed
+rather than forgetting an idempotency fence. Incomplete or malformed journal
+entries fail closed with HTTP 503. No receipt is garbage-collected: pending and
+uncertain fences are never deleted, and exhausted capacity requires an explicit
+operator retention design rather than automatic reexecution of old keys.
