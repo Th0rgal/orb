@@ -123,9 +123,12 @@ class Harness(unittest.TestCase):
             source.write_text('#include <stdlib.h>\nvoid crash(void){abort();}\nvoid hang(void){for(;;){}}\n')
             subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC", source, "-o", library], check=True, capture_output=True)
             for name in ("crash", "hang"):
+                ready = root / ("ready-" + name)
                 with self.assertRaises(conformance.CommandFailure):
-                    conformance.run([sys.executable, "-c", "import ctypes,resource;resource.setrlimit(resource.RLIMIT_CORE,(0,0));"
-                                     f"ctypes.CDLL({str(library)!r}).{name}()"], timeout=0.2)
+                    conformance.run([sys.executable, "-c", "import ctypes,resource;from pathlib import Path;"
+                                     "resource.setrlimit(resource.RLIMIT_CORE,(0,0));"
+                                     f"lib=ctypes.CDLL({str(library)!r});Path({str(ready)!r}).touch();lib.{name}()"],
+                                    timeout=5 if name == "crash" else 0.2, ready=ready)
             records = json.loads((root / "commands.json").read_text())
             self.assertEqual(records[-2]["exit_code"], -6)
             self.assertEqual(records[-1]["exit_code"], -9)
