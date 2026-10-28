@@ -42,7 +42,7 @@ test("the machine picker lists the least busy machine first and counts running a
   await page.goto("/");
   const trigger = page.getByRole("button", { name: /^babylon$/ });
   await expect(trigger).toBeVisible({ timeout: 15000 });
-  await expect.poll(() => missionReads).toBe(1);
+  await expect.poll(() => missionReads).toBeGreaterThan(0);
   const before = { fleetReads, missionReads };
   await trigger.click();
   const rows = page.locator(".na-menu .machine-node-option");

@@ -103,3 +103,45 @@ with tempfile.TemporaryDirectory() as temp:
     assert items["mission-bbbbbbbb"]["action"] == "keep"
     assert items["mission-bbbbbbbb"]["reason"] == "mission_attribution_incomplete"
 print("storage inventory regression test passed")
+
+# Remote-node history attributes full UUID directories, without turning terminal
+# jobs or failed reads into permission to delete source. No payloads are read.
+with tempfile.TemporaryDirectory() as temp:
+    root = Path(temp)
+    node = root / "node"; node.mkdir()
+    mid = "12345678-1234-1234-1234-123456789abc"
+    mission = node / mid; mission.mkdir()
+    lake = mission / ".lake"; lake.mkdir()
+    (lake / "artifact").write_bytes(b"x" * 1024)
+    outside = root / "outside"; outside.mkdir()
+    (outside / "secret").write_bytes(b"x" * 4096)
+    (node / "external").symlink_to(outside, target_is_directory=True)
+    conn = sqlite3.connect(node / "jobs.db")
+    conn.execute("CREATE TABLE jobs (mission_id TEXT, state TEXT, finished_at TEXT)")
+    conn.executemany("INSERT INTO jobs VALUES (?, ?, ?)", [
+        (mid, "succeeded", "2020-01-01T00:00:00Z"),
+        (mid, "running", None),
+    ])
+    conn.commit(); conn.close()
+    command = [sys.executable, str(SCRIPT), "--node-work-dir", str(node)]
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    items = {Path(row["path"]).name: row for row in rows if row["record_type"] == "storage_item"}
+    assert "external" not in items
+    for name in [mid, ".lake"]:
+        assert items[name]["action"] == "keep"
+        assert items[name]["mission_id"] == mid
+        assert items[name]["node_job_states"] == {"running": 1, "succeeded": 1}
+        assert items[name]["reason"] == "node_job_history_is_not_discard_authorization"
+        assert items[name]["size_bytes"] == 1024
+        assert items[name]["allocated_bytes"] >= 0
+        assert items[name]["reclaimable_bytes"] is None
+    (node / "jobs.db").unlink()
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert any(row.get("action") == "index_error" for row in rows)
+    assert all(row["action"] == "keep" for row in rows if row["record_type"] == "storage_item")
+    assert not (node / "jobs.db").exists()
+    assert subprocess.run(command + ["--apply"], capture_output=True).returncode != 0
+    assert (lake / "artifact").exists()
+print("node storage attribution regression test passed")

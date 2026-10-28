@@ -369,6 +369,10 @@ object OrbRemoteImageLoader {
         override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
     }
     private val loadGate = kotlinx.coroutines.sync.Semaphore(MAX_CONCURRENT_LOADS)
+    private val imageLocks = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+
+    fun key(ref: OrbImageAttachmentRef, workspaceId: String?): String =
+        "${OrbDisk.currentScope()}|${workspaceId ?: ""}|${ref.path}|${ref.url ?: ""}|${System.currentTimeMillis() / 300_000}"
 
     fun cached(key: String): Bitmap? = cache.get(key)
 
@@ -377,11 +381,17 @@ object OrbRemoteImageLoader {
         workspaceId: String?,
         core: OrbCore
     ): Bitmap? = withContext(Dispatchers.IO) {
-        val cacheKey = "${ref.path}|${ref.url ?: ""}"
+        val cacheKey = OrbRemoteImageLoader.key(ref, workspaceId)
         cache.get(cacheKey)?.let { return@withContext it }
 
+        val account = OrbDisk.currentScope()
+        val imageLock = imageLocks.computeIfAbsent(cacheKey) { kotlinx.coroutines.sync.Mutex() }
+        imageLock.lock()
+        try {
         loadGate.acquire()
         try {
+            if (account != OrbDisk.currentScope()) return@withContext null
+            cache.get(cacheKey)?.let { return@withContext it }
             // Inline data URIs from replies are decoded locally, never sent to the server.
             val inline = ref.url ?: ref.path
             if (inline.startsWith("data:image/", ignoreCase = true)) {
@@ -399,7 +409,7 @@ object OrbRemoteImageLoader {
             for (endpoint in candidateEndpoints(ref, workspaceId, core)) {
                 val bytes = fetchBytes(endpoint, core) ?: continue
                 val bmp = decodeBounded(bytes)
-                if (bmp != null) {
+                if (bmp != null && account == OrbDisk.currentScope()) {
                     cache.put(cacheKey, bmp)
                     return@withContext bmp
                 }
@@ -407,6 +417,10 @@ object OrbRemoteImageLoader {
             null
         } finally {
             loadGate.release()
+        }
+        } finally {
+            imageLock.unlock()
+            imageLocks.remove(cacheKey, imageLock)
         }
     }
 
@@ -537,7 +551,7 @@ private fun OrbImageThumb(
     core: OrbCore,
     onTap: () -> Unit
 ) {
-    val cacheKey = "${ref.path}|${ref.url ?: ""}"
+    val cacheKey = OrbRemoteImageLoader.key(ref, workspaceId)
     var bitmap by remember(cacheKey) { mutableStateOf(OrbRemoteImageLoader.cached(cacheKey)) }
     var failed by remember(cacheKey) { mutableStateOf(false) }
 
@@ -610,6 +624,7 @@ fun OrbImageGallery(
         initialPage = startIndex.coerceIn(0, maxOf(0, images.lastIndex)),
         pageCount = { images.size }
     )
+    val displayed = remember(images, workspaceId, OrbDisk.currentScope()) { androidx.compose.runtime.mutableStateMapOf<Int, Bitmap>() }
     val currentTitle = images.getOrNull(pagerState.currentPage)?.filename ?: ""
 
     Box(
@@ -622,15 +637,17 @@ fun OrbImageGallery(
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val ref = images[page]
-            val cacheKey = "${ref.path}|${ref.url ?: ""}"
-            var bitmap by remember(cacheKey) { mutableStateOf(OrbRemoteImageLoader.cached(cacheKey)) }
+            val cacheKey = OrbRemoteImageLoader.key(ref, workspaceId)
+            val bitmap = displayed[page] ?: OrbRemoteImageLoader.cached(cacheKey)
+            androidx.compose.runtime.DisposableEffect(displayed, page) {
+                onDispose { displayed.remove(page) }
+            }
             var scale by remember { mutableFloatStateOf(1f) }
             var offset by remember { mutableStateOf(Offset.Zero) }
 
             LaunchedEffect(cacheKey) {
-                if (bitmap == null) {
-                    bitmap = OrbRemoteImageLoader.load(ref, workspaceId, core)
-                }
+                val loaded = bitmap ?: OrbRemoteImageLoader.load(ref, workspaceId, core)
+                if (loaded != null) displayed[page] = loaded
             }
 
             Box(
@@ -692,7 +709,7 @@ fun OrbImageGallery(
                         .clip(CircleShape)
                         .background(Color.White.copy(alpha = 0.14f))
                         .orbPressClickable {
-                            val bmp = OrbRemoteImageLoader.cached("${ref.path}|${ref.url ?: ""}") ?: return@orbPressClickable
+                            val bmp = displayed[pagerState.currentPage] ?: return@orbPressClickable
                             scope.launch {
                                 val png = withContext(Dispatchers.Default) {
                                     java.io.ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()

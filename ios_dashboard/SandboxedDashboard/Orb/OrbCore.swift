@@ -387,19 +387,27 @@ enum OrbReadCache {
         }
         return nil
     }
+    /// Navigation must not decode a long transcript or project roster on the main actor.
+    static func readAsync(_ name: String) async -> OrbJSON? {
+        let scope = key(name)
+        if let cached = values[scope]?.value { return cached }
+        let disk = await OrbDisk.readAsync(name, as: OrbJSON.self)
+        guard scope == key(name), !Task.isCancelled else { return nil }
+        // A network response may have arrived while disk decoding was in flight.
+        if let cached = values[scope]?.value { return cached }
+        if let disk { values[scope] = Entry(value: disk, date: .distantPast) }
+        return disk
+    }
     static func seedMemory(_ name: String, value: OrbJSON) {
         let scope = key(name)
-        if name.hasPrefix("mission:"),
-           value["history"].items.isEmpty,
-           let existing = values[scope]?.value,
-           !existing["history"].items.isEmpty {
-            return
-        }
+        // List rows do not own conversation history. In particular, after memory
+        // trimming they must not mask the full conversation still saved on disk.
+        if name.hasPrefix("mission:"), value["history"].items.isEmpty { return }
         if values.count >= 256, let oldest = values.min(by: { $0.value.date < $1.value.date })?.key { values[oldest] = nil }
-        let isSummaryOnly = name.hasPrefix("mission:") && value["history"].items.isEmpty
-        values[scope] = Entry(value: value, date: isSummaryOnly ? .distantPast : Date())
+        values[scope] = Entry(value: value, date: Date())
     }
     static func seed(_ name: String, value: OrbJSON) {
+        if name.hasPrefix("mission:"), value["history"].items.isEmpty { return }
         seedMemory(name, value: value)
         OrbDisk.saveAsync(value, key: name)
     }
@@ -440,6 +448,17 @@ enum OrbReadCache {
             return disk
         }
         return []
+    }
+    static func readEventsAsync(_ missionID: String) async -> [StoredEvent] {
+        let cacheName = "events:\(missionID)"
+        let scope = key(cacheName)
+        if let cached = eventValues[scope] { return cached }
+        let disk = await OrbDisk.readAsync(cacheName, as: [StoredEvent].self)
+        guard scope == key(cacheName), !Task.isCancelled else { return [] }
+        if let cached = eventValues[scope] { return cached }
+        let events = (disk ?? []).map(\.compacted)
+        if !events.isEmpty { eventValues[scope] = events }
+        return events
     }
     static func saveEvents(_ missionID: String, events: [StoredEvent]) {
         let cacheName = "events:\(missionID)"
@@ -574,6 +593,82 @@ enum OrbReadCache {
         }
         for t in tasks {
             await t.value
+        }
+    }
+}
+
+/// Small snapshots stay separate from full history and its paging cursor.
+@MainActor enum OrbPresentation {
+    private static var recent: [String] = []
+    private static var pending: Set<String> = []
+    private static var listChanged = false
+    private static var labels: [String: String] = [:]
+    static func activity(_ id: String?) -> String? { id.flatMap { labels[scope + ":" + $0] } }
+    private static var scope: String { OrbCore.shared.endpoint + ":" + (OrbCore.shared.authToken ?? "") }
+    private static var rememberedScope = ""
+    private static func ensureScope() {
+        guard rememberedScope != scope else { return }
+        rememberedScope = scope
+        recent.removeAll(); pending.removeAll(); labels.removeAll(); listChanged = false
+    }
+    static func remember(_ id: String) {
+        ensureScope()
+        recent.removeAll { $0 == id }; recent.append(id)
+        if recent.count > 12 { recent.removeFirst() }
+    }
+    static func history(_ snapshot: OrbJSON) -> [OrbJSON] {
+        snapshot["events"].items.compactMap { event in
+            let type = event["event_type"].text
+            if case .bool(true) = event["metadata"]["queued"] { return nil }
+            guard type == "assistant_message" || type == "assistant_message_canonical" || type == "user_message" else { return nil }
+            return .object(["role": .string(type == "user_message" ? "user" : "assistant"), "content": event["content"]])
+        }
+    }
+    static func load(_ id: String) async -> OrbJSON? {
+        let account = scope
+        guard let value = try? await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))/snapshot?profile=presentation"),
+              value["profile"].text == "presentation", account == scope, !Task.isCancelled else { return nil }
+        let previous = await OrbReadCache.readAsync("presentation:\(id)")
+        guard account == scope, !Task.isCancelled else { return nil }
+        if let previous, case .number(let old) = previous["revision"], case .number(let new) = value["revision"], old >= new { return previous }
+        if labels.count >= 48 { labels.removeAll() }
+        labels[scope + ":" + id] = value["activity"].text
+        OrbReadCache.seed("presentation:\(id)", value: value)
+        return value
+    }
+    static func monitor() async {
+        while !Task.isCancelled {
+            ensureScope()
+            let account = scope
+            let stream = OrbCore.shared.streamControl(missionId: nil, kinds: ["presentation"], preferWebSocket: false) { type, data in
+                if type == "status" || type == "stream_lagged" { pending.formUnion(recent) }
+                guard type == "mission_presentation", let id = data["mission_id"] as? String else { return }
+                if (data["kind"] as? String) == "mission_activity" {
+                    if recent.contains(id), let label = data["label"] as? String {
+                        if labels.count >= 48 { labels.removeAll() }
+                        labels[scope + ":" + id] = String(label.prefix(160))
+                    }
+                    return
+                }
+                labels[scope + ":" + id] = nil
+                listChanged = true
+                if recent.contains(id) { pending.insert(id) }
+            }
+            // Reconcile after a real reconnect, not on a polling timer.
+            var closed = false
+            let completion = Task { await stream.value; closed = true }
+            pending.formUnion(recent)
+            while !Task.isCancelled && account == scope && !closed {
+                if listChanged {
+                    listChanged = false
+                    NotificationCenter.default.post(name: Notification.Name("OrbPresentationChanged"), object: nil)
+                }
+                let ids = Array(pending.prefix(3)); pending.subtract(ids)
+                for id in ids { _ = await load(id) }
+                try? await Task.sleep(for: .seconds(1))
+            }
+            stream.cancel(); completion.cancel()
+            if !Task.isCancelled { try? await Task.sleep(for: .seconds(2)) }
         }
     }
 }

@@ -10,7 +10,7 @@ pub struct StreamQuery {
     /// `stream_lagged` events the dashboard relies on). Cuts cross-mission
     /// noise to zero for a focused tab. Omit the param to receive every
     /// event the user can see (used by the mission list / debug overlay).
-    #[serde(default)]
+    #[serde(default, alias = "mission_id")]
     pub mission: Option<Uuid>,
     /// Optional comma-separated event-kind filter, e.g. `kinds=fido`. A kind
     /// matches an event whose SSE name equals it or starts with `<kind>_`
@@ -19,6 +19,28 @@ pub struct StreamQuery {
     /// FIDO monitor skip every mission event.
     #[serde(default)]
     pub kinds: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+/// Bounded offscreen hints never contain prompts, tool arguments or results.
+fn presentation_hint(event: &AgentEvent) -> Option<serde_json::Value> {
+    let mission_id = event.mission_id()?;
+    let label = match event {
+        AgentEvent::MissionActivity { label, .. } => {
+            Some(label.chars().take(160).collect::<String>())
+        }
+        AgentEvent::MissionStatusChanged { .. }
+        | AgentEvent::AssistantMessage { .. }
+        | AgentEvent::Error { .. }
+        | AgentEvent::UserMessage { .. }
+        | AgentEvent::MissionTitleChanged { .. }
+        | AgentEvent::MissionMetadataUpdated { .. } => None,
+        _ => return None,
+    };
+    Some(
+        serde_json::json!({ "mission_id": mission_id, "kind": event.event_name(), "label": label }),
+    )
 }
 
 /// Parse `StreamQuery::kinds` into a filter; `None` means "every event".
@@ -576,8 +598,15 @@ pub async fn stream(
     axum::extract::Query(query): axum::extract::Query<StreamQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
+    let presentation = query.profile.as_deref() == Some("presentation");
     let mission_filter = query.mission;
-    let kinds_filter = parse_stream_kinds(query.kinds.as_deref());
+    // Clients also send kinds=mission_presentation: older servers then send
+    // no mission payloads instead of silently falling back to a full stream.
+    let kinds_filter = if presentation {
+        None
+    } else {
+        parse_stream_kinds(query.kinds.as_deref())
+    };
     // P3-#20: when a mission filter is set, subscribe to that mission's
     // dedicated channel — the fan-out task in spawn_control_session
     // mirrors events from the global tx into per-mission txs. Avoids
@@ -654,6 +683,7 @@ pub async fn stream(
         let mut shutdown_check_interval = tokio::time::interval(std::time::Duration::from_secs(1));
         shutdown_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut text_op_buffers: HashMap<Uuid, String> = HashMap::new();
+        let mut activity_sent: HashMap<Uuid, std::time::Instant> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -691,6 +721,20 @@ pub async fn stream(
                             // Per-mission channel only carries events that
                             // already match the filter (the fan-out task
                             // is the gate); no further filtering needed.
+                            if presentation {
+                                if let AgentEvent::MissionActivity { mission_id: Some(id), .. } = &ev {
+                                    if activity_sent.get(id).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) { continue; }
+                                    if activity_sent.len() >= 512 { activity_sent.clear(); }
+                                    activity_sent.insert(*id, std::time::Instant::now());
+                                }
+                                if let Some(hint) = presentation_hint(&ev) {
+                                    if let Ok(payload) = serde_json::to_string(&hint) {
+                                        metrics.record_sse_chunk(payload.len());
+                                        yield Ok(Event::default().event("mission_presentation").data(payload));
+                                    }
+                                }
+                                continue;
+                            }
                             match &ev {
                                 AgentEvent::Thinking { .. } => {
                                     tracing::trace!(
@@ -772,6 +816,20 @@ pub async fn stream(
                                 if !is_status && mission_id != Some(filter) {
                                     continue;
                                 }
+                            }
+                            if presentation {
+                                if let AgentEvent::MissionActivity { mission_id: Some(id), .. } = &ev {
+                                    if activity_sent.get(id).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) { continue; }
+                                    if activity_sent.len() >= 512 { activity_sent.clear(); }
+                                    activity_sent.insert(*id, std::time::Instant::now());
+                                }
+                                if let Some(hint) = presentation_hint(&ev) {
+                                    if let Ok(payload) = serde_json::to_string(&hint) {
+                                        metrics.record_sse_chunk(payload.len());
+                                        yield Ok(Event::default().event("mission_presentation").data(payload));
+                                    }
+                                }
+                                continue;
                             }
                             match &ev {
                                 AgentEvent::Thinking { .. } => {
@@ -874,4 +932,40 @@ pub async fn stream(
             .interval(std::time::Duration::from_secs(15))
             .text("keepalive"),
     ))
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    #[test]
+    fn legacy_android_filter_is_not_silently_ignored() {
+        let id = Uuid::new_v4();
+        let query: StreamQuery =
+            serde_json::from_value(serde_json::json!({"mission_id":id})).unwrap();
+        assert_eq!(query.mission, Some(id));
+    }
+    #[test]
+    fn offscreen_hints_exclude_heavy_payloads_and_bound_labels() {
+        let id = Some(Uuid::new_v4());
+        assert!(presentation_hint(&AgentEvent::TextDelta {
+            content: "private text".into(),
+            mission_id: id
+        })
+        .is_none());
+        assert!(presentation_hint(&AgentEvent::ToolResult {
+            tool_call_id: "a".into(),
+            name: "read".into(),
+            result: serde_json::json!({"output":"private output"}),
+            mission_id: id
+        })
+        .is_none());
+        let hint = presentation_hint(&AgentEvent::MissionActivity {
+            label: "x".repeat(10000),
+            tool_name: "read".into(),
+            mission_id: id,
+        })
+        .unwrap();
+        assert_eq!(hint["label"].as_str().unwrap().len(), 160);
+        assert!(hint.to_string().len() < 512);
+    }
 }

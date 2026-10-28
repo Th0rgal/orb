@@ -109,7 +109,7 @@ final class OrbFileService {
     }
 
     private func cacheKey(_ ref: OrbFileRef, _ scope: Scope) -> String {
-        let raw = [core.endpoint, scope.missionID ?? "", scope.source ?? "", ref.url ?? "", ref.path, ref.size.map(String.init) ?? ""].joined(separator: "\u{1f}")
+        let raw = [core.endpoint, core.authToken ?? "", scope.workspaceID ?? "", scope.missionID ?? "", scope.source ?? "", ref.url ?? "", ref.path, ref.size.map(String.init) ?? ""].joined(separator: "\u{1f}")
         return SHA256.hash(data: Data(raw.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -129,11 +129,20 @@ final class OrbFileService {
     func fetch(_ ref: OrbFileRef, scope: Scope, progress: @escaping @MainActor (Double?) -> Void = { _ in }) async throws -> URL {
         if let url = cached(ref, scope: scope) { progress(1); return url }
         let key = cacheKey(ref, scope)
-        if let task = inflight[key] { return try await task.value }
+        if let task = inflight[key] {
+            let url = try await task.value
+            guard key == cacheKey(ref, scope) else { throw OrbFileError.unauthorized }
+            return url
+        }
         let task = Task { @MainActor in try await self.download(ref, scope: scope, progress: progress) }
         inflight[key] = task
         defer { inflight[key] = nil }
-        return try await task.value
+        let url = try await task.value
+        guard key == cacheKey(ref, scope) else {
+            try? FileManager.default.removeItem(at: url)
+            throw OrbFileError.unauthorized
+        }
+        return url
     }
 
     private func download(_ ref: OrbFileRef, scope: Scope, progress: @escaping @MainActor (Double?) -> Void) async throws -> URL {

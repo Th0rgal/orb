@@ -7,6 +7,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 /** OrbReadCache has no TTL: entries live until replaced, cleared, or the account scope changes. */
 class OrbReadCacheTest {
@@ -62,5 +63,32 @@ class OrbReadCacheTest {
         OrbDisk.write(key, mapOf("v" to 1))
         OrbDisk.clearCurrentScope()
         assertNull(OrbDisk.read(key))
+    }
+
+    @Test
+    fun navigationReadsDiskOnlyAsynchronously() = runBlocking {
+        val rows = listOf(mapOf("id" to "old-answer", "content" to "Saved answer"))
+        OrbDisk.write(key, rows)
+        assertTrue(OrbReadCache.readMemoryRows(key).isEmpty())
+        assertEquals("old-answer", OrbReadCache.loadRowsAsync(key).single().id)
+        assertEquals("old-answer", OrbReadCache.readMemoryRows(key).single().id)
+    }
+
+    @Test
+    fun globalSubsetCannotReplaceCompleteProjectCacheAfterMemoryClear() {
+        val projectKey = "project_missions_$key"
+        val complete = (1..100).map { mapOf("id" to "mission-$it") }
+        OrbDisk.write(projectKey, complete)
+        OrbReadCache.clearMemory()
+        OrbReadCache.seedProjectRows(key, listOf(OrbRow(mapOf("id" to "mission-100", "status" to "completed"))), fresh = true)
+        assertEquals(100, OrbReadCache.loadRows(projectKey).size)
+        assertEquals("mission-1", OrbReadCache.loadRows(projectKey).first().id)
+        assertEquals("completed", OrbReadCache.loadRows(projectKey).last().str("status"))
+    }
+
+    @Test
+    fun globalSubsetSeedsProjectWhenNoFullCacheExists() {
+        OrbReadCache.seedProjectRows(key, listOf(OrbRow(mapOf("id" to "recent"))))
+        assertEquals("recent", OrbReadCache.readMemoryRows("project_missions_$key").single().id)
     }
 }

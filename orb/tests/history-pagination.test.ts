@@ -1,6 +1,6 @@
 import {beforeEach, expect, it, vi} from 'vitest';
 vi.mock('../src/api',()=>({connectionVersion:()=>0,listQueuedMessages:vi.fn(async()=>[])}));
-vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEventPage:vi.fn()}));
+vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEventPreview:vi.fn(async()=>null),getMissionEventPage:vi.fn()}));
 import {getMissionEventPage, type StoredEvent} from '../src/stream';
 import {loadTranscript,loadOlderTranscript,putTranscript,refreshTranscript,prefetchTranscript,forgetPrefetchPauses} from '../src/missionCache';
 import {applyStreamEvent} from '../src/transcriptModel';

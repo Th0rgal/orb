@@ -135,7 +135,8 @@ struct OrbConversation: View {
             }
         }
         if handoffActive { return "Sending…" }
-        return live.hasText ? "Writing…" : "Working…"
+        if let label = OrbPresentation.activity(id), !label.isEmpty { return label }
+        return live.hasText ? "Writing…" : (mission["presentation_activity"].text.isEmpty ? "Working…" : mission["presentation_activity"].text)
     }
 
     /// Same wording as the desktop: the step, then how long the turn has been running.
@@ -249,9 +250,10 @@ struct OrbConversation: View {
                         }
                     }
                     if let id {
-                        mission = OrbReadCache.read("mission:\(id)") ?? .null
-                        execution = OrbReadCache.read("cloud:\(id)") ?? .null
-                        let cachedEvents = OrbReadCache.readEvents(id)
+                        mission = await OrbReadCache.readAsync("mission:\(id)") ?? .null
+                        execution = await OrbReadCache.readAsync("cloud:\(id)") ?? .null
+                        let cachedEvents = await OrbReadCache.readEventsAsync(id)
+                        guard !Task.isCancelled, id == self.id else { return }
                         if !cachedEvents.isEmpty {
                             events = cachedEvents
                             rebuildWorkModel()
@@ -264,6 +266,20 @@ struct OrbConversation: View {
                             selection.node = mission["remote_node_id"].text
                             selection.model = mission["model_override"].text
                             selection.serviceTier = OrbCodexSpeed.of(mission)
+                        }
+                        OrbPresentation.remember(id)
+                        if mission["history"].items.isEmpty {
+                            let cached = await OrbReadCache.readAsync("presentation:\(id)")
+                            var preview = cached
+                            if preview == nil { preview = await OrbPresentation.load(id) }
+                            if let preview, id == self.id, !Task.isCancelled {
+                                var fields: [String: OrbJSON] = [:]
+                                if case .object(let existing) = mission { fields = existing }
+                                fields["history"] = .array(OrbPresentation.history(preview))
+                                fields["presentation_activity"] = preview["activity"]
+                                mission = .object(fields)
+                                rebuildHistory()
+                            }
                         }
                         if mission != .null { loading = false }
                         let ts = mission["last_output_at"].text.isEmpty ? mission["updated_at"].text : mission["last_output_at"].text
