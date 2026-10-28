@@ -27,7 +27,7 @@ class OrbConversationHistoryTest {
         for (raw in OrbJSON.parse(file.readText()) as List<*>) {
             val fixture = OrbJSON.dict(raw)!!
             fun rows(key: String) = (fixture[key] as List<*>).mapIndexed { index, row -> OrbRow("$index", OrbJSON.dict(row)!!) }
-            assertEquals(fixture["name"].toString(), fixture["expected"], OrbConversationHistory.merge(rows("history"), rows("events")).map { it.str("content") })
+            assertEquals(fixture["name"].toString(), fixture["expected"], OrbConversationHistory.visible(OrbConversationHistory.merge(rows("history"), rows("events"))).map { it.str("content") })
             val displayed = OrbTimelineBuilder.build(rows("history"), rows("events"), "", false, null).mapNotNull { turn -> when (turn) {
                 is OrbTurn.User -> turn.text
                 is OrbTurn.Assistant -> turn.text

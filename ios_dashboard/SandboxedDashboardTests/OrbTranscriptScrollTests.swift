@@ -153,7 +153,7 @@ final class OrbTranscriptModelTests: XCTestCase {
             .object(["role": .string("assistant"), "content": .string("reply")]),
         ])])
         let model = OrbTranscriptModel()
-        model.events = [userEvent(1, "first "), userEvent(2, "second"), userEvent(3, " second")]
+        model.events = [userEvent(1, "first "), StoredEvent(id: 2, missionId: "m", sequence: 2, eventType: "assistant_message", timestamp: "", eventId: nil, toolCallId: nil, toolName: nil, content: "reply", metadata: [:]), userEvent(3, "second"), userEvent(4, " second")]
         XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: nil), 4)
         XCTAssertEqual(model.history.map(\.2), ["first", "reply", "second", " second"], "distinct delivered sequences are not deduplicated by text")
         XCTAssertEqual(model.rebuildHistory(isCloud: false, turns: [], mission: mission, optimisticPrompt: "third"), 1)

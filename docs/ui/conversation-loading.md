@@ -76,3 +76,9 @@ prompts, canonical answers, queued messages, and out-of-order event delivery.
 Android continuation caches can contain several missions. Both conversation and
 raw-event cursors are calculated only from rows belonging to the requested mission;
 an ancestor sequence of 1000 cannot skip a continuation at sequence 20.
+
+Canonical bubble IDs and revisions survive in the stored conversation. Rendering
+replaces stale bubble revisions and suppresses the ordinary terminal receipt when
+it repeats the native bubbles, matching desktop. Storage retains that receipt so
+the incremental cursor still advances. Legacy overlap must reach the final stored
+row; matching an earlier repeated prompt is not sufficient.

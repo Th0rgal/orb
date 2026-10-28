@@ -83,7 +83,7 @@ final class OrbTranscriptModel {
             }
         } else {
             var expandedRaw: [(String, String, String)] = []
-            for (offset, element) in OrbConversationHistory.merge(mission["history"].items, events: events).enumerated() {
+            for (offset, element) in OrbConversationHistory.visible(OrbConversationHistory.merge(mission["history"].items, events: events)).enumerated() {
                 let role = element["role"].text
                 let content = element["content"].text
                 guard !content.isEmpty else { continue }
@@ -95,13 +95,13 @@ final class OrbTranscriptModel {
                         expandedRaw.append(("cont-\(offset)-\(subIdx)", sub.role, sub.content))
                     }
                 } else {
-                    expandedRaw.append((String(offset), role, content))
+                    expandedRaw.append((element["sequence"].doubleValue.map { "seq-\($0)" } ?? String(offset), role, content))
                 }
             }
             var deduplicated: [(String, String, String)] = []
             for item in expandedRaw {
                 let (itemID, role, content) = item
-                if role == "assistant", let last = deduplicated.last, last.1 == "assistant" {
+                if role == "assistant", !itemID.hasPrefix("seq-"), let last = deduplicated.last, last.1 == "assistant" {
                     let prevTrimmed = last.2.trimmingCharacters(in: .whitespacesAndNewlines)
                     let currTrimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
                     let sharedPrefixLen = min(160, min(prevTrimmed.count, currTrimmed.count))

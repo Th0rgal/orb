@@ -297,10 +297,10 @@ object OrbTimelineBuilder {
 
         // Deduplicate consecutive identical/retry assistant messages (matching iOS history logic)
         val deduplicatedMessages = mutableListOf<OrbRow>()
-        for (msg in OrbConversationHistory.merge(messages, events).flatMap { OrbForkContext.expand(it) }) {
+        for (msg in OrbConversationHistory.visible(OrbConversationHistory.merge(messages, events)).flatMap { OrbForkContext.expand(it) }) {
             val role = (msg.str("role", "sender", "author") ?: "assistant").lowercase()
             val text = (msg.str("content", "text", "message") ?: "").trim()
-            if ((role == "assistant" || role == "agent") && deduplicatedMessages.isNotEmpty()) {
+            if (msg.int("sequence") == null && (role == "assistant" || role == "agent") && deduplicatedMessages.isNotEmpty()) {
                 val prev = deduplicatedMessages.last()
                 val prevRole = (prev.str("role", "sender", "author") ?: "assistant").lowercase()
                 val prevText = (prev.str("content", "text", "message") ?: "").trim()
