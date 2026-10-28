@@ -120,23 +120,23 @@ pub(crate) fn schedule_mission_scope_teardown(
         return;
     }
     tokio::spawn(async move {
-        let reason = format!("mission status {status:?}");
         tokio::time::sleep(teardown_grace()).await;
-        match mission_store.get_mission(mission_id).await {
-            Ok(Some(m)) if status_keeps_scopes(&m.status) => {
-                tracing::debug!(
-                    %mission_id,
-                    status = ?m.status,
-                    "scope teardown skipped: status changed during grace"
-                );
+        // The triggering status is only a reason to schedule a recheck. A
+        // resumed turn may already be parked again by the time grace ends.
+        // Both global and host-specific policy must use this current status.
+        let status = match mission_store.get_mission(mission_id).await {
+            Ok(Some(m)) => m.status,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%mission_id, %error, "scope teardown skipped: cannot recheck mission");
                 return;
             }
-            _ => {}
-        }
-        // A host mission's scope also holds what the agent left running on
-        // purpose between turns (a detached run, a build daemon). It ends
-        // with the mission, not with each turn.
-        let keep_host = !status_ends_host_scope(&status);
+        };
+        let Some(keep_host) = scope_teardown_policy(&status) else {
+            tracing::debug!(%mission_id, ?status, "scope teardown skipped: status changed during grace");
+            return;
+        };
+        let reason = format!("mission status {status:?}");
         if !keep_host {
             let reaped = super::privilege_broker::reap_if_initialized(mission_id, &reason).await;
             if reaped > 0 {
@@ -155,6 +155,17 @@ pub(crate) fn schedule_mission_scope_teardown(
             stop_unit(&unit, &reason).await;
         }
     });
+}
+
+/// None preserves every scope; Some(true) preserves host background work.
+/// Evaluate once from the status re-read after the teardown grace, never from
+/// the event that originally scheduled it.
+fn scope_teardown_policy(current: &MissionStatus) -> Option<bool> {
+    if status_keeps_scopes(current) {
+        None
+    } else {
+        Some(!status_ends_host_scope(current))
+    }
 }
 
 /// Statuses whose runner must be gone before any future continuation.
@@ -519,6 +530,26 @@ mod tests {
         // previous failure; the delayed cleanup must leave its scopes alone.
         assert!(status_keeps_scopes(&MissionStatus::Active));
         assert!(status_keeps_scopes(&MissionStatus::WaitingBackground));
+    }
+
+    #[test]
+    fn failed_then_parked_during_grace_preserves_host_scope() {
+        assert!(status_triggers_teardown(&MissionStatus::Failed));
+        assert_eq!(scope_teardown_policy(&MissionStatus::Failed), Some(false));
+        // The failed run resumes and parks before its delayed teardown runs.
+        // Either configured preservation policy must keep the host scope.
+        for current in [MissionStatus::AwaitingUser, MissionStatus::Paused] {
+            assert_ne!(scope_teardown_policy(&current), Some(false));
+        }
+        assert_eq!(scope_teardown_policy(&MissionStatus::Active), None);
+        assert_eq!(
+            scope_teardown_policy(&MissionStatus::WaitingBackground),
+            None
+        );
+        assert_eq!(
+            scope_teardown_policy(&MissionStatus::Completed),
+            Some(false)
+        );
     }
 
     #[test]
