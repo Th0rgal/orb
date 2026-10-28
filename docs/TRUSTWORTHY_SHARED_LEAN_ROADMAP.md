@@ -36,7 +36,7 @@ not established by that test.
 Local recovery checks: all 14 fork/control tests pass, including independently
 injected archive-state, dispatch-effect and HOME-state divergences, plus stale caller snapshots with either stored
 supersession tag form. The registry
-has six adversarial tests and the ABI manifest suite has 17 passing tests.
+has six adversarial tests and the ABI manifest suite has 18 passing tests.
 The direct submission-producer regression replays stored archive and both
 stored supersession-tag forms, checking rejection before node contact and job
 publication. It also preserves a visible divergence for an archived caller
