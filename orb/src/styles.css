@@ -3252,7 +3252,7 @@ select.orb-select-native:disabled { cursor: default; }
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .skills-filter-pills {
-  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 6px 0 12px;
 }
 /* Preserve catalog controls independently of Inbox presentation. */
 .skills-filter-pill {
