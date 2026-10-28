@@ -18,6 +18,7 @@ struct OrbBitwardenSettings: View {
     @State private var selectedProjectId = ""
     @State private var requests: [OrbJSON] = []
     @State private var grants: [OrbJSON] = []
+    @AppStorage("orb.secretGrants.expanded") private var showGrants = false
     @State private var actingOn: String?
     @State private var secrets: [OrbJSON] = []
     @State private var loadingSecrets = false
@@ -293,27 +294,45 @@ struct OrbBitwardenSettings: View {
                     }
 
                     if !grants.isEmpty {
-                        ForEach(grants, id: \.selfID) { g in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(g["scope"]["kind"].text == "all" ? "Grant: All projects"
-                                         : g["scope"]["kind"].text == "project" ? "Grant: Project \(projectName(g["scope"]["project_id"].text))"
-                                         : "Grant: Secret \(g["scope"]["key"].text)")
-                                        .font(.caption.weight(.medium))
-                                    Text(g["mission_title"].text)
+                        // Collapsed by default; the choice is remembered on this device.
+                        DisclosureGroup(isExpanded: $showGrants) {
+                            // Grants of one mission are listed together so its title appears once.
+                            ForEach(grantGroups, id: \.first!.selfID) { group in
+                                HStack {
+                                    Text(group[0]["mission_title"].text)
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button("Revoke", role: .destructive) {
-                                    Task {
-                                        _ = try? await client.call("/api/bitwarden/grants/\(g["id"].text)", method: "DELETE")
-                                        await loadBroker()
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                    Spacer()
+                                    if group.count > 1 {
+                                        Button("Revoke all", role: .destructive) { revoke(group) }
+                                            .font(.caption2)
+                                            .buttonStyle(.borderless)
                                     }
                                 }
-                                .font(.caption)
-                                .buttonStyle(.borderless)
+                                ForEach(group, id: \.selfID) { g in
+                                    HStack {
+                                        Text(g["scope"]["kind"].text == "all" ? "All projects"
+                                             : g["scope"]["kind"].text == "project" ? "Project \(projectName(g["scope"]["project_id"].text))"
+                                             : g["scope"]["key"].text)
+                                            .font(.caption.monospaced())
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Text(Self.timeLeft(g["expires_at"].text))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        Button("Revoke", role: .destructive) { revoke([g]) }
+                                            .font(.caption2)
+                                            .buttonStyle(.borderless)
+                                    }
+                                    .padding(.leading, 12)
+                                }
                             }
+                        } label: {
+                            Text(grantSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 } label: {
@@ -646,6 +665,42 @@ struct OrbBitwardenSettings: View {
         requests = snap["requests"].items.filter { $0["status"].text == "pending" }
         await loadDevices()
         grants = snap["grants"].items
+    }
+
+    private var grantGroups: [[OrbJSON]] {
+        var order: [String] = []
+        var groups: [String: [OrbJSON]] = [:]
+        for g in grants {
+            let id = g["mission_id"].text
+            if groups[id] == nil { order.append(id) }
+            groups[id, default: []].append(g)
+        }
+        return order.compactMap { groups[$0] }
+    }
+
+    private var grantSummary: String {
+        let next = grants.compactMap { Self.minutesLeft($0["expires_at"].text) }.min()
+        return "\(grants.count) active \(grants.count == 1 ? "grant" : "grants")"
+            + (next.map { " · next expires in \(Self.format($0))" } ?? "")
+    }
+
+    static func minutesLeft(_ raw: String) -> Int? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = f.date(from: raw) ?? ISO8601DateFormatter().date(from: raw) else { return nil }
+        return max(0, Int(date.timeIntervalSinceNow / 60))
+    }
+
+    static func format(_ m: Int) -> String { m >= 60 ? "\(m / 60) h \(m % 60) min" : "\(m) min" }
+
+    static func timeLeft(_ raw: String) -> String { minutesLeft(raw).map(format) ?? "" }
+
+    /// Not optimistic: Core may refuse, so rows stay until the reload confirms it.
+    private func revoke(_ group: [OrbJSON]) {
+        Task {
+            for g in group { _ = try? await client.call("/api/bitwarden/grants/\(g["id"].text)", method: "DELETE") }
+            await loadBroker()
+        }
     }
 
     private func projectName(_ id: String) -> String {
