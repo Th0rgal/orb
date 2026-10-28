@@ -1,5 +1,5 @@
 import {batch} from "solid-js";
-import { clearConnection, getApiUrl, getJwt, connectionVersion } from "./api";
+import { api, clearConnection, getApiUrl, getJwt, connectionVersion } from "./api";
 import { streamLoad, timed } from "./diagnostics";
 
 export interface StoredEvent {
@@ -56,8 +56,19 @@ async function apiRaw(path: string): Promise<Response> {
 }
 
 export interface EventPage { events: StoredEvent[]; nextCursor?: number; pageMax?: number; reset?:boolean; hasMore: boolean }
+/** Tool payloads larger than this arrive shortened from event pages. */
+export const MAX_EVENT_PAYLOAD=4096;
+/** The whole call and result of one tool row, for a row Core shortened. */
+export async function fullToolCall(missionId:string,callId:string):Promise<{args?:unknown;result?:unknown}>{
+ const rows=await api<StoredEvent[]>(`/api/control/missions/${encodeURIComponent(missionId)}/tool-calls/${encodeURIComponent(callId)}`);
+ const out:{args?:unknown;result?:unknown}={};
+ for(const row of rows){const event=storedToStream(row);if(event?.type==='tool_call')out.args=event.data.args;else if(event?.type==='tool_result')out.result=event.data.result;}
+ return out;
+}
 export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all'}={}):Promise<EventPage>{
- const query=new URLSearchParams({limit:'200',include_counts:'false'});
+ // Large tool outputs arrive shortened; a row loads its full call when opened
+ // (fullToolCall). Older Cores ignore the parameter.
+ const query=new URLSearchParams({limit:'200',include_counts:'false',max_payload:String(MAX_EVENT_PAYLOAD)});
  if(cursor.view)query.set('view',cursor.view);
  if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
  if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
@@ -121,7 +132,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       } catch {
         args = ev.content;
       }
-      return d({ tool_call_id: ev.tool_call_id ?? `event-${ev.id}`, name: ev.tool_name ?? "tool", args });
+      return d({ tool_call_id: ev.tool_call_id ?? `event-${ev.id}`, name: ev.tool_name ?? "tool", args, ...(ev.metadata?.truncated === true ? { truncated: true } : {}) });
     }
     case "tool_result": {
       let result: unknown = ev.content;
@@ -130,7 +141,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       } catch {
         /* plain string */
       }
-      return d({ tool_call_id: ev.tool_call_id ?? "", name: ev.tool_name ?? "tool", result });
+      return d({ tool_call_id: ev.tool_call_id ?? "", name: ev.tool_name ?? "tool", result, ...(ev.metadata?.truncated === true ? { truncated: true } : {}) });
     }
     case "error":
       return d({ message: ev.content, resumable: false });

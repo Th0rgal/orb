@@ -44,6 +44,75 @@ pub struct GetEventsQuery {
     /// `profile=conversation`.
     #[serde(default)]
     pub trace_tail: Option<usize>,
+    /// Truncate tool call/result payloads larger than this many bytes to
+    /// their head and tail, marked `metadata.truncated` with
+    /// `metadata.full_bytes`. The full rows come from
+    /// `/api/control/missions/:id/tool-calls/:tool_call_id`.
+    #[serde(default)]
+    pub max_payload: Option<usize>,
+}
+
+/// Smallest accepted `max_payload`, so a row always keeps a useful excerpt.
+pub(super) const MIN_MAX_PAYLOAD: usize = 1024;
+
+/// Head (three quarters) and tail (one quarter) of `text` in `max` bytes.
+fn excerpt(text: &str, max: usize) -> String {
+    let mut head = max * 3 / 4;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - (max - head);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!(
+        "{}\n… {} bytes omitted …\n{}",
+        &text[..head],
+        tail - head,
+        &text[tail..]
+    )
+}
+
+/// Shorten every string longer than `max` inside a JSON value.
+fn shorten_strings(value: &mut serde_json::Value, max: usize) {
+    match value {
+        serde_json::Value::String(text) if text.len() > max => *text = excerpt(text, max),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|v| shorten_strings(v, max)),
+        serde_json::Value::Object(map) => map.values_mut().for_each(|v| shorten_strings(v, max)),
+        _ => {}
+    }
+}
+
+/// Shorten tool payloads larger than `max` bytes. JSON keeps its shape (each
+/// long string keeps its head and tail), so args still name their target;
+/// other text keeps its head and tail. Interactive UI tools stay whole.
+pub(super) fn truncate_tool_payloads(events: &mut [mission_store::StoredEvent], max: usize) {
+    let max = max.max(MIN_MAX_PAYLOAD);
+    for event in events {
+        if !matches!(event.event_type.as_str(), "tool_call" | "tool_result")
+            || event.content.len() <= max
+            || event
+                .tool_name
+                .as_deref()
+                .is_some_and(is_interactive_ui_tool)
+        {
+            continue;
+        }
+        let full = event.content.len();
+        let shaped = serde_json::from_str::<serde_json::Value>(&event.content)
+            .ok()
+            .filter(|v| v.is_object() || v.is_array())
+            .and_then(|mut v| {
+                shorten_strings(&mut v, max / 2);
+                serde_json::to_string(&v).ok()
+            })
+            .filter(|text| text.len() <= max * 2);
+        event.content = shaped.unwrap_or_else(|| excerpt(&event.content, max));
+        let mut metadata = event.metadata.as_object().cloned().unwrap_or_default();
+        metadata.insert("truncated".to_string(), serde_json::json!(true));
+        metadata.insert("full_bytes".to_string(), serde_json::json!(full));
+        event.metadata = serde_json::Value::Object(metadata);
+    }
 }
 
 pub(super) fn default_include_event_counts() -> bool {
@@ -438,6 +507,10 @@ pub async fn get_mission_events(
         summary.events =
             project_conversation_events(summary.events, &keep_full_tool_call_ids, &tool_summaries);
         summary.summarized_count = summary.events.len();
+    }
+
+    if let Some(max) = query.max_payload {
+        truncate_tool_payloads(&mut summary.events, max);
     }
 
     // Metadata headers let the client decide whether it's caught up
@@ -1157,4 +1230,70 @@ pub async fn post_control_telemetry_perf(
 ) -> StatusCode {
     state.control_metrics.record_health_report(report);
     StatusCode::ACCEPTED
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    fn event(event_type: &str, tool: &str, content: &str) -> mission_store::StoredEvent {
+        mission_store::StoredEvent {
+            id: 1,
+            mission_id: Uuid::nil(),
+            sequence: 1,
+            event_type: event_type.into(),
+            timestamp: String::new(),
+            event_id: None,
+            tool_call_id: Some("c1".into()),
+            tool_name: Some(tool.into()),
+            content: content.into(),
+            metadata: serde_json::json!({"keep": 1}),
+        }
+    }
+
+    #[test]
+    fn large_tool_payloads_keep_head_and_tail() {
+        let big = format!("{}{}", "a".repeat(6000), "é".repeat(2000));
+        let mut events = vec![
+            event("tool_result", "Bash", &big),
+            event("tool_call", "Bash", "{\"command\":\"ls\"}"),
+            event("assistant_message", "", &big),
+            event("tool_call", "AskUserQuestion", &big),
+        ];
+        truncate_tool_payloads(&mut events, 2048);
+        let cut = &events[0];
+        assert!(cut.content.len() < 2100);
+        assert!(cut.content.starts_with("aaaa") && cut.content.ends_with('é'));
+        assert_eq!(cut.metadata["truncated"], true);
+        assert_eq!(cut.metadata["full_bytes"], big.len());
+        assert_eq!(cut.metadata["keep"], 1);
+        assert_eq!(events[1].content, "{\"command\":\"ls\"}");
+        assert_eq!(events[2].content, big);
+        assert_eq!(events[3].content, big);
+    }
+
+    #[test]
+    fn json_payloads_keep_their_shape() {
+        let args =
+            serde_json::json!({"file_path": "src/a.rs", "content": "x".repeat(20_000)}).to_string();
+        let mut events = vec![event("tool_call", "Write", &args)];
+        truncate_tool_payloads(&mut events, 4096);
+        let v: serde_json::Value = serde_json::from_str(&events[0].content).unwrap();
+        assert_eq!(v["file_path"], "src/a.rs");
+        assert!(v["content"].as_str().unwrap().contains("bytes omitted"));
+        assert!(events[0].content.len() < 4200);
+        assert_eq!(events[0].metadata["full_bytes"], args.len());
+    }
+
+    #[test]
+    fn max_payload_has_a_floor() {
+        let mut events = vec![
+            event("tool_result", "Bash", &"x".repeat(1000)),
+            event("tool_result", "Bash", &"x".repeat(5000)),
+        ];
+        truncate_tool_payloads(&mut events, 10);
+        assert_eq!(events[0].content.len(), 1000);
+        assert!(events[1].content.len() < 1100);
+        assert!(events[1].content.len() >= MIN_MAX_PAYLOAD);
+    }
 }

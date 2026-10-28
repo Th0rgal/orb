@@ -45,6 +45,13 @@ export function longEvents(turns = 60) {
  return out;
 }
 
+/** Mirror of Core's `truncate_tool_payloads` (plain-text excerpts). */
+function shorten(e: Record<string, unknown>, max: number) {
+ const content = String(e.content ?? '');
+ if (!/^tool_(call|result)$/.test(String(e.event_type)) || content.length <= max) return e;
+ const head = Math.floor(max * 3 / 4), tail = max - head;
+ return {...e, content: `${content.slice(0, head)}\n… ${content.length - max} bytes omitted …\n${content.slice(-tail)}`, metadata: {truncated: true, full_bytes: content.length}};
+}
 type Stream = {res: http.ServerResponse};
 export type Core = {url: string; counts: Map<string, number>; unknown: Set<string>; push: (event: string, data: unknown) => void; close: () => Promise<void>};
 
@@ -78,11 +85,15 @@ export async function startCore(events = longEvents()): Promise<Core> {
    const limit = Number(url.searchParams.get('limit') ?? 200);
    const more = page.length > limit;
    page = since !== null ? page.slice(0, limit) : page.slice(-limit);
+   const max = Number(url.searchParams.get('max_payload') ?? 0);
+   if (max) page = page.map(e => shorten(e, max));
    const seqs = page.map(e => e.sequence as number);
    const headers: Record<string, string> = {'X-Orb-Events-Protocol': '1', 'X-Has-More': String(more), 'X-Max-Sequence': String(rows.length)};
    if (seqs.length) { headers['X-Page-Max-Sequence'] = String(Math.max(...seqs)); headers['X-Next-Cursor'] = String(since === null ? Math.min(...seqs) : Math.max(...seqs)); }
    return json(res, page, headers);
   }
+  const call = path.match(/\/tool-calls\/([^/]+)$/);
+  if (call) return json(res, events.filter(e => e.tool_call_id === decodeURIComponent(call[1])));
   const project = url.searchParams.get('project');
   if (path === '/api/projects') return json(res, {projects: ps});
   if (path === '/api/control/missions') return json(res, project ? ms.filter(m => m.project === project) : ms);
