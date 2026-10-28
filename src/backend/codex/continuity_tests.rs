@@ -452,6 +452,32 @@ async fn codex_continuity_unresolved_tool_stays_fenced_across_outer_restart() {
 }
 
 #[tokio::test]
+async fn codex_continuity_orphan_journal_cannot_create_a_fresh_thread() {
+    let f = Fixture::new();
+    let journal = ToolCallJournal::at(f.config.path.with_extension("tools.json"));
+    journal
+        .started(super::tool_call_journal::PendingToolCall {
+            id: "unknown-tool".into(),
+            name: "bash".into(),
+            start_payload: json!({"id":"unknown-tool", "type":"commandExecution"}),
+        })
+        .await
+        .unwrap();
+    let error = f
+        .start(
+            f.backend_config("normal", CancellationToken::new()),
+            "continue",
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("unresolved_tools"));
+    assert!(f.requests("initialize").is_empty());
+    assert!(f.requests("thread/start").is_empty());
+    assert_eq!(journal.pending().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn codex_continuity_reconciles_late_failed_tool_receipt_before_next_turn() {
     let f = Fixture::new();
     f.run("late-tool-receipt", "launch background verification")

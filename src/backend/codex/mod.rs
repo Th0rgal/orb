@@ -316,6 +316,17 @@ async fn send_message_streaming_app_server(
         Some(config) => Some(continuity::Lease::acquire(config).await?),
         None => None,
     };
+    if let Some(lease) = native_lease.as_ref().filter(|lease| !lease.resumed) {
+        // There is no native identity from which receipts can be read. Keep
+        // the creation fence: a leftover journal cannot authorize a new thread.
+        if !ToolCallJournal::at(lease.journal_path())
+            .pending()
+            .await?
+            .is_empty()
+        {
+            return Err(anyhow::anyhow!("codex_continuity_unresolved_tools: no bound native thread can reconcile previous tool outcomes; no command was replayed"));
+        }
+    }
     let session_arc = AppServerSession::spawn(app_cfg, &session.directory, workspace_exec).await?;
     let session_arc = Arc::new(session_arc);
 
