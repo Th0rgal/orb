@@ -72,3 +72,7 @@ messages when their batch contains an answer. Canonical answer notifications tri
 the same refresh as ordinary answers. Shared `conversation-history.json` fixtures
 replay stale history followed by several user/assistant pairs, old tails, repeated
 prompts, canonical answers, queued messages, and out-of-order event delivery.
+
+Android continuation caches can contain several missions. Both conversation and
+raw-event cursors are calculated only from rows belonging to the requested mission;
+an ancestor sequence of 1000 cannot skip a continuation at sequence 20.

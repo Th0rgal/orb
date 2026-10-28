@@ -3,6 +3,9 @@ package sh.sandboxed.dashboard.orb
 /** Conversation messages reconcile together; raw tails never own older history. */
 object OrbConversationHistory {
     val eventTypes = setOf("user_message", "assistant_message", "assistant_message_canonical")
+    fun forMission(rows: List<OrbRow>, missionId: String): List<OrbRow> =
+        rows.filter { it.str("mission_id") == missionId }
+
     fun merge(history: List<OrbRow>, events: List<OrbRow>): List<OrbRow> {
         val missions = (history + events).mapNotNull { it.str("mission_id") }.distinct()
         if (missions.size > 1 && history.any { it.str("mission_id") == null }) return history

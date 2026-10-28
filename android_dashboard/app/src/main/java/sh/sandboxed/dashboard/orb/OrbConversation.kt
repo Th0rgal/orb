@@ -641,7 +641,7 @@ fun OrbConversationPage(
             kotlinx.coroutines.coroutineScope {
                 val jobs = idsToLoad.map { cid ->
                     async(Dispatchers.IO) {
-                        val existingForCid = if (cid == targetId) events.filter { it.str("mission_id") == cid } else OrbReadCache.loadRows("mission_events_$cid")
+                        val existingForCid = OrbConversationHistory.forMission(if (cid == targetId) events else OrbReadCache.loadRows("mission_events_$cid"), cid)
                         val lastSeq = existingForCid.lastOrNull()?.int("sequence", "seq")
                         val detailDef = async {
                             orbTry(OrbLog.Category.Network, "/api/control/missions") { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}") }.getOrNull()
@@ -654,7 +654,7 @@ fun OrbConversationPage(
                         val eventsDef = async {
                             orbTry(OrbLog.Category.Network, "core.fetchRows") { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
                         }
-                        val savedHistory = OrbReadCache.loadRows("mission_msgs_$cid")
+                        val savedHistory = OrbConversationHistory.forMission(OrbReadCache.loadRows("mission_msgs_$cid"), cid)
                         val conversationCursor = savedHistory.takeIf { it.isNotEmpty() && it.all { row -> row.int("sequence") != null } }?.maxOf { it.int("sequence")!! }
                         val conversationSuffix = conversationCursor?.let { "&since_seq=$it" } ?: ""
                         val conversationDef = async {
