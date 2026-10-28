@@ -128,3 +128,16 @@ These follow-up repairs do not rerun or retroactively relabel the prior run.
 Clean source heads plus tool digests do not alone establish binary-to-source
 build lineage; build receipts and the trusted build/toolchain remain separate
 assumptions, not a compiler-correctness proof.
+
+Subsequent review also reproduced dropped LNIR observations when a process emitted
+valid one-row JSON then exited nonzero. The per-case path now applies the same
+identity/value checks to preserved execution stdout while retaining the request
+failure. Such rows are partial evidence and a mismatching row forces exit 1;
+invalid JSON or wrong identity contributes no observation. Both baseline and
+mutant WASM calls share the explicit execution role. These reporter tests use
+fixture subprocesses, not real engine qualification or a new full conformance run.
+The environment allowlist currently targets the qualified Linux toolchain;
+non-default SDK/Rustup/Nix environments may require explicit future support.
+PATH/HOME/configuration, interpreter libraries and tool-resolution mediators are
+trusted dependencies; binary hashes do not attest those dependencies. Command
+history is hashed in provenance separately from the artifact inventory.

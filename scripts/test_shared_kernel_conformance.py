@@ -15,6 +15,8 @@ import run_shared_kernel_conformance as conformance
 
 class Harness(unittest.TestCase):
     def setUp(self):
+        conformance.COMMANDS.clear()
+        conformance.EXECUTABLES.clear()
         self.cases = [{"id": 0, "symbol": "fixture", "args": [1]},
                       {"id": 1, "symbol": "fixture", "args": [2]}]
         self.reference = {0: 19, 1: 37}
@@ -78,6 +80,49 @@ class Harness(unittest.TestCase):
             self.assertEqual(partial["fixture"], {0: 18, 1: 37})
             self.assertEqual(conformance.summarize(report, values, partial, self.cases), 1)
             self.assertEqual(conformance.COMMANDS[-1]["role"], "execution")
+
+    def test_failed_lnir_execution_retains_valid_mismatch_and_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            conformance.OUT, conformance.ENV = Path(directory), dict(os.environ)
+            core = Path(directory) / "fixture-core"
+            core.write_text(f"#!{sys.executable}\nimport json\n"
+                            "print(json.dumps([{'decl':'probe_fixture','ok':True,'value_u64':'18'}]))\n"
+                            "raise SystemExit(7)\n")
+            core.chmod(0o700)
+            report, values, partial = {"engines": {}, "blockers": []}, {"stock_lean": self.reference}, {}
+            conformance.record_engine(report, values, partial, "lnir",
+                lambda: conformance.run_lnir_cases(core, Path(directory) / "fixture.lnir", self.cases), self.cases)
+            self.assertEqual(partial["lnir"], {0: 18, 1: 18})
+            self.assertEqual(conformance.summarize(report, values, partial, self.cases), 1)
+            self.assertEqual(report["engines"]["lnir"]["status"], "BLOCKED")
+            self.assertEqual(len(json.loads((Path(directory) / "lnir-errors.json").read_text())), 2)
+            self.assertTrue(all(r["exit_code"] == 7 and r["role"] == "execution" for r in conformance.COMMANDS))
+
+    def test_wasm_baseline_and_mutant_record_execution_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            conformance.OUT, conformance.ENV = Path(directory), dict(os.environ)
+            node = Path(directory) / "fixture-node"
+            node.write_text(f"#!{sys.executable}\nprint('0:18')\nprint('1:37')\n")
+            node.chmod(0o700)
+            conformance.EXECUTABLES["node"] = str(node)
+            for name in ("kernel.wasm", "mutant.wasm"):
+                self.assertEqual(conformance.wasm_rows(Path(directory) / name), {0: 18, 1: 37})
+                self.assertEqual(conformance.COMMANDS[-1]["role"], "execution")
+            conformance.EXECUTABLES.clear()
+
+    def test_failed_lnir_execution_does_not_salvage_bad_json_or_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            conformance.OUT, conformance.ENV = Path(directory), dict(os.environ)
+            core = Path(directory) / "fixture-core"
+            for response in ("garbage", "{}", "[]", '[{"decl":"probe_other","ok":true,"value_u64":"18"}]',
+                             '[{"decl":"probe_fixture","ok":true,"value_u64":18}]'):
+                core.write_text(f"#!{sys.executable}\nprint({response!r})\nraise SystemExit(7)\n")
+                core.chmod(0o700)
+                with self.assertRaises(conformance.RowFailure) as caught:
+                    conformance.run_lnir_cases(core, Path(directory) / "fixture.lnir", self.cases)
+                self.assertEqual(caught.exception.rows, {})
+                errors = json.loads((Path(directory) / "lnir-errors.json").read_text())
+                self.assertEqual(len(errors), len(self.cases))
 
     def test_engine_environment_is_allowlisted(self):
         env = conformance.conformance_environment(Path("evidence"), {

@@ -207,6 +207,45 @@ def lnir_result(row, case):
     return int(value)
 
 
+def wasm_rows(module):
+    return parse_rows(run(["node", OUT / "run-wasm.cjs", module,
+                           ORB / "shared/orb-spec/kernel_abi.json", OUT / "js-cases.json"], role="execution"))
+
+
+def run_lnir_cases(core, module, cases):
+    result, errors = {}, []
+    for c in cases:
+        # One request per process binds this response to one input/case. No
+        # positional identity within repeated-declaration batches is trusted.
+        binding = "probe_" + c["symbol"] + ":" + ",".join(map(str, c["args"]))
+        context = {"case_id": c["id"], "input_sha256": canonical_hash(c)}
+        request_errors, raw = [], None
+        try:
+            raw = run([core, "eval-lnir", "--lnir", module,
+                       "--args", binding, "--batch-json"], context=context, role="execution")
+        except CommandFailure as error:
+            request_errors.append(str(error))
+            if error.role == "execution":
+                raw = error.stdout
+        except Exception as error:
+            request_errors.append(str(error))
+        if raw is not None:
+            try:
+                rows = json.loads(raw)
+                if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+                    raise ValueError("LNIR request must return exactly one object row")
+                result[c["id"]] = lnir_result(rows[0], c)
+            except (ValueError, TypeError) as error:
+                request_errors.append(str(error))
+        if request_errors:
+            errors.append({"case": c, "error": "; ".join(request_errors)})
+    (OUT / "lnir-errors.json").write_text(json.dumps(errors, indent=2) + "\n")
+    (OUT / "lnir-observations.json").write_text(json.dumps(result, sort_keys=True) + "\n")
+    if errors:
+        raise RowFailure([f"{len(errors)} LNIR requests failed; see lnir-errors.json and commands.json"], result)
+    return result
+
+
 class QualificationFailure(ValueError):
     pass
 
@@ -450,31 +489,11 @@ for (const c of cases) {
         js_cases = [{**c, "args": list(map(str, c["args"]))} for c in cases]
         (OUT / "js-cases.json").write_text(json.dumps(js_cases))
         (OUT / "run-wasm.cjs").write_text(script)
-        return parse_rows(run(["node", OUT / "run-wasm.cjs", OUT / "kernel.wasm",
-                               ORB / "shared/orb-spec/kernel_abi.json", OUT / "js-cases.json"], role="execution"))
+        return wasm_rows(OUT / "kernel.wasm")
 
     def lnir():
         run([TURBO / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", OUT / "Wrappers.lean", "-o", OUT / "module.lnir"])
-        result, errors = {}, []
-        for c in cases:
-            # One request per process binds this response to one input/case. No
-            # positional identity within repeated-declaration batches is trusted.
-            binding = "probe_" + c["symbol"] + ":" + ",".join(map(str, c["args"]))
-            context = {"case_id": c["id"], "input_sha256": canonical_hash(c)}
-            try:
-                raw = run([TURBO / "lean/.lake/build/bin/lean-native-core", "eval-lnir", "--lnir", OUT / "module.lnir",
-                           "--args", binding, "--batch-json"], context=context, role="execution")
-                rows = json.loads(raw)
-                if len(rows) != 1:
-                    raise ValueError("LNIR request must return exactly one row")
-                result[c["id"]] = lnir_result(rows[0], c)
-            except Exception as error:
-                errors.append({"case": c, "error": str(error)})
-        (OUT / "lnir-errors.json").write_text(json.dumps(errors, indent=2) + "\n")
-        (OUT / "lnir-observations.json").write_text(json.dumps(result, sort_keys=True) + "\n")
-        if errors:
-            raise RowFailure([f"{len(errors)} LNIR requests failed; see lnir-errors.json and commands.json"], result)
-        return result
+        return run_lnir_cases(TURBO / "lean/.lake/build/bin/lean-native-core", OUT / "module.lnir", cases)
 
     for name, action in [("stock_lean", stock), ("stock_extracted_c", stock_c),
                          ("vendored_native_c", native), ("rust_abi", rust_abi), ("wasm", wasm), ("lnir", lnir)]:
@@ -502,7 +521,7 @@ for (const c of cases) {
                  *flags, "-c", src, "-o", OUT / obj])
         run([TOOLS / "ld.lld", "-flavor", "wasm", "--no-entry", "--export-all", OUT / "mutant.wasm.o", OUT / "shim.wasm.o", "-o", OUT / "mutant.wasm"])
         qualification_failed |= record_mutant(report["mutation_checks"], "wasm_scalar", values["stock_lean"], values["wasm"],
-            lambda: parse_rows(run(["node", OUT / "run-wasm.cjs", OUT / "mutant.wasm", ORB / "shared/orb-spec/kernel_abi.json", OUT / "js-cases.json"])), cases, target["name"])
+            lambda: wasm_rows(OUT / "mutant.wasm"), cases, target["name"])
     except Exception as e:
         report["mutation_checks"]["failure"] = str(e)
         qualification_failed |= isinstance(e, QualificationFailure)
