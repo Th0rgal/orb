@@ -158,6 +158,13 @@ docker compose up -d
 | Build takes too long | Rust compilation is the bottleneck (~5–10 min first time). Subsequent builds use Docker layer caching. |
 | Backend not starting | Check logs with `docker compose logs -f sandboxed-sh` |
 
+If an older Windows checkout reports `exec /entrypoint.sh: no such file or directory`,
+the entrypoint may still have CRLF line endings. After updating the repository,
+save any local changes to `docker/entrypoint.sh`, then run
+`git restore --source=HEAD --worktree -- docker/entrypoint.sh` to check it out
+with LF endings and rebuild with `docker compose build`. Fresh checkouts use LF
+for shell scripts automatically.
+
 ## Comparison with native installation
 
 Docker wraps the entire stack into a single container — backend, dashboard, reverse proxy, and all AI CLIs. Native installation gives you more control and slightly better performance.
