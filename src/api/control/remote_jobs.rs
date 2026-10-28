@@ -62,6 +62,16 @@ pub fn evaluate_remote_ssh_and_codex_confinement(
     )
 }
 
+fn mission_is_archived(mission: &Mission) -> bool {
+    mission.status == MissionStatus::Acknowledged
+        || crate::api::mission_horizon::superseded_by(mission).is_some()
+        || mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn evaluate_mission_control_gate(
     working_dir: &std::path::Path,
@@ -74,21 +84,12 @@ pub(super) async fn evaluate_mission_control_gate(
     host_admits: bool,
 ) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
     let stored_mission = mission_store.get_mission(mission.id).await?;
-    let effective_status = stored_mission
-        .as_ref()
-        .map(|m| m.status)
-        .unwrap_or(mission.status);
     // An explicit dispatch (follow-up, resume, transfer) may continue a
     // Completed mission: only Acknowledged (archived) or superseded ones are
     // closed. The automatic usage-limit replay also treats Completed as done.
-    let is_archived = mission.status == MissionStatus::Acknowledged
-        || effective_status == MissionStatus::Acknowledged
-        || crate::api::mission_horizon::superseded_by(mission).is_some()
-        || mission
-            .project
-            .tags
-            .iter()
-            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let host_archived_before = mission_is_archived(mission);
+    let host_archived_after = mission_is_archived(stored_mission.as_ref().unwrap_or(mission));
+    let is_archived = host_archived_before || host_archived_after;
     let active_run = mission_store.get_active_mission_run(mission.id).await?;
     let has_lease = active_run
         .as_ref()
@@ -126,23 +127,6 @@ pub(super) async fn evaluate_mission_control_gate(
     });
     let has_fallback_prompt =
         (!is_resume || lineage_verified) && fallback_prompt.is_some_and(|p| !p.trim().is_empty());
-    let host_archived_before = mission.status == MissionStatus::Acknowledged
-        || crate::api::mission_horizon::superseded_by(mission).is_some()
-        || mission
-            .project
-            .tags
-            .iter()
-            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
-    let host_archived_after = effective_status == MissionStatus::Acknowledged
-        || stored_mission
-            .as_ref()
-            .is_some_and(|m| crate::api::mission_horizon::superseded_by(m).is_some())
-        || stored_mission.as_ref().is_some_and(|m| {
-            m.project
-                .tags
-                .iter()
-                .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
-        });
     Ok(fork::observe_mission_control_shadow(
         crate::orb_spec::MissionControlStepInput {
             is_archived,
@@ -171,31 +155,11 @@ pub(super) async fn evaluate_usage_limit_replay_gate(
     // Nothing replays a finished mission on its own: Completed counts as
     // archived here, unlike an explicit follow-up.
     let stored_mission = mission_store.get_mission(mission.id).await?;
-    let effective_status = stored_mission
-        .as_ref()
-        .map(|m| m.status)
-        .unwrap_or(mission.status);
-    let host_archived_before = matches!(
-        mission.status,
-        MissionStatus::Acknowledged | MissionStatus::Completed
-    ) || crate::api::mission_horizon::superseded_by(mission).is_some()
-        || mission
-            .project
-            .tags
-            .iter()
-            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
-    let host_archived_after = matches!(
-        effective_status,
-        MissionStatus::Acknowledged | MissionStatus::Completed
-    ) || stored_mission
-        .as_ref()
-        .is_some_and(|m| crate::api::mission_horizon::superseded_by(m).is_some())
-        || stored_mission.as_ref().is_some_and(|m| {
-            m.project
-                .tags
-                .iter()
-                .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
-        });
+    let stored = stored_mission.as_ref().unwrap_or(mission);
+    let host_archived_before =
+        mission_is_archived(mission) || mission.status == MissionStatus::Completed;
+    let host_archived_after =
+        mission_is_archived(stored) || stored.status == MissionStatus::Completed;
     let is_archived = host_archived_before || host_archived_after;
     let active_run = mission_store.get_active_mission_run(mission.id).await?;
     let has_lease = active_run.is_none();

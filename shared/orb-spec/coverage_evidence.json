@@ -3,7 +3,7 @@
   "entries": {
     "orb_mission_control_step": {
       "status": "partial",
-      "claim": "Local tests compare archive state from the store and a caller-supplied dispatch-admission bit; injected poststate/effect mismatches are detected.",
+      "claim": "Local tests compare archive state from the store and a caller-supplied dispatch-admission bit, reject newly stored supersession with a stale caller snapshot, and detect injected poststate/effect mismatches.",
       "links": [
         {
           "kind": "theorem",
@@ -24,6 +24,11 @@
           "kind": "host_test",
           "path": "src/api/control/fork.rs",
           "symbol": "production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/fork.rs",
+          "symbol": "mission_control_rejects_store_supersession_with_stale_caller_snapshot"
         }
       ],
       "sources": [
@@ -37,15 +42,15 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-          "sha256": "b24856cfa93e3b80f2232003bbd6189697912cb9686c8cee9a2cc9097846f967"
+          "sha256": "e77c04ea3d2e5aab1e9b8f52081e2188c9b513a7c08d360c7bea00c341a38e2c"
         },
         {
           "path": "src/api/control/fork.rs",
-          "sha256": "3eba70d0ee7a93b3edaf4f8cf1b1043c656691fc20c7758ad9946b108f020b0a"
+          "sha256": "73fdee77cf29e866d8b84d8eed012d59b04ad3cc5a9865eadd15dcd277039adc"
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "019b4cf1cde0162d304635c39a6ede7764a421d68abb67775e22346ea7dc3dc5"
+          "sha256": "8c4c203c59350dd20bdb0af5835da44d46f1e302c842bae66316fd05bb8dccdd"
         }
       ],
       "execution": {
@@ -106,11 +111,11 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-          "sha256": "b24856cfa93e3b80f2232003bbd6189697912cb9686c8cee9a2cc9097846f967"
+          "sha256": "e77c04ea3d2e5aab1e9b8f52081e2188c9b513a7c08d360c7bea00c341a38e2c"
         },
         {
           "path": "src/api/control/fork.rs",
-          "sha256": "3eba70d0ee7a93b3edaf4f8cf1b1043c656691fc20c7758ad9946b108f020b0a"
+          "sha256": "73fdee77cf29e866d8b84d8eed012d59b04ad3cc5a9865eadd15dcd277039adc"
         }
       ],
       "execution": {

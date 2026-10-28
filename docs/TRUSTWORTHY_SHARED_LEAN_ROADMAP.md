@@ -5,8 +5,11 @@
 **P0–P7 remain unaccepted.** The phase DAG and exit gates below are requirements,
 not receipts that they have executed. P0 is in progress; P1 has a compiler-side
 harness PR but full Orb/LeanSys conformance remains open; P2–P7 remain open.
-PR #264 is open at `596a422d619353f7de64af5afd7245f86be3530c`; GitHub reports
-no check rollup. No merge or production deployment is authorized by this status.
+Compiler and Orb repairs are tracked in draft PRs turbo-lean #264 and Orb #1396.
+The checkpoint reviews of turbo `5869bd9` and Orb `0a1fa069` were blocked;
+follow-up fixes and fresh exact-head review remain required. Turbo has no GitHub
+check rollup; Orb kernel-abi passed, while draft Rust jobs were skipped.
+No phase acceptance, merge or production deployment follows from those checks.
 
 The coverage registry remains incomplete: 111 entries are unconnected and two
 have explicit partial evidence in `shared/orb-spec/coverage_evidence.json`.
@@ -16,12 +19,14 @@ Its 113 manifest entries are 80 `orb_*` exports, 32 `leansys_*` exports and the
 compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg`. The original
 112-export requirement still covers all public Orb/LeanSys exports; the helper
 remains inventoried separately rather than being counted as an extra public gate.
-Pending shadow changes now count missing host HOME poststates as unobserved,
-never as ExactMatch; remote execution observation remains open. Lean proof changes and Rust
-changes still need local gates and exact-head reviews.
+Shadow observations now count missing host HOME poststates as unobserved,
+never as ExactMatch; remote execution observation remains open. The stale-snapshot repair also includes newly stored supersession in the
+admission predicate; it does not close the observation-to-execution race.
+Independent exact-head reviews remain required.
 
-Local recovery checks: all 13 fork/control tests pass, including independently
-injected archive-state, dispatch-effect and HOME-state divergences. The registry
+Local recovery checks: all 14 fork/control tests pass, including independently
+injected archive-state, dispatch-effect and HOME-state divergences, plus stale caller snapshots with either stored
+supersession tag form. The registry
 has six adversarial tests and the ABI manifest suite has 17 passing tests.
 These receipts establish local execution only. Mission-control shadow effects
 currently compare dispatch admission, not exact action identity or actual dispatch;

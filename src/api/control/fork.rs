@@ -1276,6 +1276,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mission_control_rejects_store_supersession_with_stale_caller_snapshot() {
+        use crate::api::mission_store::{MissionProjectPatch, SUPERSEDED_TAG};
+        let store = crate::api::mission_store::InMemoryMissionStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        for tag in [
+            SUPERSEDED_TAG.to_string(),
+            format!("superseded_by:{}", Uuid::new_v4()),
+        ] {
+            let mission = store
+                .create_mission(None, None, None, None, None, Some("codex"), None)
+                .await
+                .unwrap();
+            let owner = "stale-snapshot-test";
+            store
+                .begin_mission_run(mission.id, owner, None)
+                .await
+                .unwrap();
+            store
+                .update_mission_project(
+                    mission.id,
+                    MissionProjectPatch {
+                        tags: Some(vec![tag]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(mission.project.tags.is_empty());
+            let verdict = super::super::remote_jobs::evaluate_mission_control_gate(
+                dir.path(),
+                &store,
+                &mission,
+                owner,
+                None,
+                &[],
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                verdict.action,
+                crate::orb_spec::MissionControlAction::RejectArchived
+            );
+            assert!(verdict.archived_next);
+            assert!(!verdict.emit_dispatch_effect);
+        }
+    }
+
+    #[tokio::test]
     async fn production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout() {
         let store: Arc<dyn MissionStore> =
             Arc::new(crate::api::mission_store::InMemoryMissionStore::new());
