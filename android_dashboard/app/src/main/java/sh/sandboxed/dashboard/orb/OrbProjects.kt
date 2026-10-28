@@ -141,6 +141,12 @@ fun OrbAppRoot(
     var settingsInitialRoute by remember { mutableStateOf(OrbSettingsRoute.Root) }
     val pendingSecrets by core.pendingSecretRequests.collectAsState()
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner, baseURL) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            OrbPresentation.monitor(core)
+        }
+    }
+
 
     // Poll the Bitwarden broker every 10 s while the app is visible (Orb App.tsx),
     // so a mission blocked on a secret request is noticed from the main screen.
@@ -1157,7 +1163,7 @@ fun OrbProjectPage(
     }
 
     var fetchedProjectMissions by remember(projectSlug) {
-        mutableStateOf(OrbReadCache.loadRows("project_missions_$projectSlug"))
+        mutableStateOf(OrbReadCache.readMemoryRows("project_missions_$projectSlug"))
     }
     var manifestFolders by remember(projectSlug) {
         val cachedManifest = OrbReadCache.loadDict("project_manifest_$projectSlug")
@@ -1226,6 +1232,8 @@ fun OrbProjectPage(
     }
 
     LaunchedEffect(projectSlug) {
+        val cached = OrbReadCache.loadRowsAsync("project_missions_$projectSlug")
+        if (fetchedProjectMissions.isEmpty() && cached.isNotEmpty()) fetchedProjectMissions = cached
         loadProjectData()
     }
 

@@ -536,7 +536,7 @@ fun OrbConversationPage(
     val eventsCacheKey = remember(missionId) { "mission_events_${missionId ?: "new"}" }
 
     var messages by remember(missionId) {
-        val cached = if (missionId != null) OrbReadCache.loadRows(messagesCacheKey) else emptyList()
+        val cached = if (missionId != null) OrbReadCache.readMemoryRows(messagesCacheKey) else emptyList()
         val seeded = if (cached.isNotEmpty()) cached else (initialMission?.rows("history") ?: emptyList())
         if (cached.isEmpty() && seeded.isNotEmpty() && missionId != null) {
             OrbReadCache.saveRows(messagesCacheKey, seeded)
@@ -544,7 +544,7 @@ fun OrbConversationPage(
         mutableStateOf(seeded)
     }
     var events by remember(missionId) {
-        mutableStateOf(if (missionId != null) OrbReadCache.loadRows(eventsCacheKey) else emptyList())
+        mutableStateOf(if (missionId != null) OrbReadCache.readMemoryRows(eventsCacheKey) else emptyList())
     }
     // Streamed reply: deltas coalesce to one state change per frame (OrbStreamText.kt).
     val live = remember(missionId) { OrbLiveText(scope) }
@@ -749,9 +749,11 @@ fun OrbConversationPage(
         if (missionId != null) {
             sse = orbTry(OrbLog.Category.Network, "core.openSSE") {
                 core.openSSE(
-                    path = "/api/control/stream?mission_id=${core.encodeComponent(missionId)}",
+                    path = "/api/control/stream?mission=${core.encodeComponent(missionId)}",
                     onEvent = { type, data ->
                         val parsed = OrbJSON.dict(OrbJSON.parse(data)) ?: return@openSSE
+                        val eventMission = OrbJSON.str(parsed, "mission_id")
+                        if (eventMission != missionId) return@openSSE
                         val evType = (type ?: OrbJSON.str(parsed, "type", "event_type") ?: "").lowercase()
                         when {
                             evType == "text_delta" || evType == "delta" -> {
@@ -777,6 +779,22 @@ fun OrbConversationPage(
 
     LaunchedEffect(missionId) {
         val id = missionId ?: return@LaunchedEffect
+        val cachedMessages = OrbReadCache.loadRowsAsync(messagesCacheKey)
+        val cachedEvents = OrbReadCache.loadRowsAsync(eventsCacheKey)
+        if (id != missionId) return@LaunchedEffect
+        // An SSE response or optimistic send may have populated these during the read.
+        if (messages.isEmpty() && cachedMessages.isNotEmpty()) messages = cachedMessages
+        if (events.isEmpty() && cachedEvents.isNotEmpty()) events = cachedEvents
+        OrbPresentation.remember(id)
+        if (messages.isEmpty()) {
+            val preview = OrbReadCache.loadRowsAsync("presentation_$id").ifEmpty {
+                try { OrbPresentation.load(id, core) } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    emptyList()
+                }
+            }
+            if (messages.isEmpty()) messages = preview
+        }
         loadHistory(id)
         while (isActive) {
             delay(if (isLive) 2800L else 10000L)
@@ -1710,7 +1728,7 @@ fun OrbConversationPage(
                     }
                     is OrbTurn.WorkFold -> {
                         androidx.compose.runtime.CompositionLocalProvider(
-                            LocalOrbWorkingLabel provides (if (handoffActive) "Sending…" else null)
+                            LocalOrbWorkingLabel provides (if (handoffActive) "Sending…" else if (events.isEmpty()) missionId?.let { OrbPresentation.activity(it) }?.takeIf { it.isNotEmpty() } else null)
                         ) {
                             OrbWorkFoldView(
                                 fold = turn,
@@ -2930,9 +2948,9 @@ fun OrbWorkFoldView(
             }
         }
         val liveNote = remember(fold.narration) { fold.narration.lastOrNull()?.let(OrbNarration::narrationLine) }
-        if (fold.isLive && !expanded && !liveNote.isNullOrEmpty()) {
+        if (fold.isLive && !expanded) {
             Text(
-                text = liveNote,
+                text = liveNote?.takeIf { it.isNotEmpty() } ?: "\u00a0",
                 color = OrbStyle.textSecondary,
                 fontSize = 12.sp,
                 maxLines = 1,

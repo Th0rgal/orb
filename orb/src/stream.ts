@@ -55,7 +55,7 @@ async function apiRaw(path: string): Promise<Response> {
   return res;
 }
 
-export interface EventPage { events: StoredEvent[]; nextCursor?: number; pageMax?: number; reset?:boolean; hasMore: boolean }
+export interface EventPage { activity?: string; events: StoredEvent[]; nextCursor?: number; pageMax?: number; reset?:boolean; hasMore: boolean }
 /** Tool payloads larger than this arrive shortened from event pages. */
 export const MAX_EVENT_PAYLOAD=4096;
 /** The whole call and result of one tool row, for a row Core shortened. */
@@ -65,10 +65,10 @@ export async function fullToolCall(missionId:string,callId:string):Promise<{args
  for(const row of rows){const event=storedToStream(row);if(event?.type==='tool_call')out.args=event.data.args;else if(event?.type==='tool_result')out.result=event.data.result;}
  return out;
 }
-export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all'}={}):Promise<EventPage>{
+export async function getMissionEventPage(id:string, cursor:{since?:number;before?:number;view?:'transcript'|'trace'|'history'|'all';limit?:number}={}):Promise<EventPage>{
  // Large tool outputs arrive shortened; a row loads its full call when opened
  // (fullToolCall). Older Cores ignore the parameter.
- const query=new URLSearchParams({limit:'200',include_counts:'false',max_payload:String(MAX_EVENT_PAYLOAD)});
+ const query=new URLSearchParams({limit:String(cursor.limit??200),include_counts:'false',max_payload:String(MAX_EVENT_PAYLOAD)});
  if(cursor.view)query.set('view',cursor.view);
  if(cursor.since!==undefined)query.set('since_seq',String(cursor.since));
  if(cursor.before!==undefined)query.set('before_seq',String(cursor.before));
@@ -79,6 +79,14 @@ export async function getMissionEventPage(id:string, cursor:{since?:number;befor
  const nextCursor=number('X-Next-Cursor'),pageMax=number('X-Page-Max-Sequence'),max=number('X-Max-Sequence'),more=response.headers.get('X-Has-More');
  if(!['true','false'].includes(more!)||((more==='true'||events.length>0)&&(nextCursor===undefined||pageMax===undefined)))throw Error('Incomplete event page cursor.');
  return {events,reset:cursor.since!==undefined&&max!==undefined&&cursor.since>max,nextCursor,pageMax,hasMore:more==='true'};
+}
+/** First paint needs the newest message, not hundreds of activity payloads. */
+export function getMissionEventPreview(id:string):Promise<EventPage>{
+ return api<{profile?:string;activity?:string;events:StoredEvent[]}>(`/api/control/missions/${id}/snapshot?profile=presentation`)
+  .then(snapshot => {
+   if(snapshot.profile!=="presentation" || !Array.isArray(snapshot.events)) throw Error("Presentation profile unavailable");
+   return {events:snapshot.events,activity:snapshot.activity,hasMore:true} as EventPage;
+  }).catch(()=>getMissionEventPage(id,{view:'transcript',limit:2}));
 }
 /** The mission's stored events, oldest first, newest last. The endpoint pages
  * 200 rows from the tail, so a single page silently drops older turns of a
@@ -160,10 +168,11 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
  * (the caller should refetch and resync).
  */
 export function streamMission(
-  missionId: string,
+  missionId: string | null,
   onEvent: (ev: StreamEvent) => void,
   onLagged: () => void,
   onReady?:()=>void,
+  profile?: "presentation",
 ): () => void {
   let stopped = false;
   let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
@@ -181,7 +190,7 @@ export function streamMission(
     controller = new AbortController();
     try {
       const jwt = getJwt();
-      const res = await fetch(`${getApiUrl()}/api/control/stream?mission=${missionId}`, {
+      const res = await fetch(`${getApiUrl()}/api/control/stream?${new URLSearchParams(missionId ? {mission: missionId} : {profile: profile ?? "presentation", kinds: "mission_presentation"})}`, {
         headers: {
           Accept: "text/event-stream",
           ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
@@ -195,6 +204,7 @@ export function streamMission(
         return;
       }
       if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+      if (profile === "presentation" && !res.headers.get("Content-Type")?.includes("text/event-stream")) throw new Error("Presentation stream unavailable");
       if(onReady)onReady();
       else if (retry > 0) {
         // Events emitted while we were disconnected never reached us.
@@ -235,7 +245,7 @@ export function streamMission(
             /* malformed frame — skip */
           }
         }
-        streamLoad(`mission ${missionId.slice(0, 8)}`, frames, value.byteLength);
+        streamLoad(`mission ${missionId?.slice(0, 8) ?? "presentation"}`, frames, value.byteLength);
       }
       flush();
       throw new Error("stream ended");

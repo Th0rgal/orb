@@ -1786,10 +1786,14 @@ fn min_free_bytes() -> u64 {
 /// Spawn the periodic disk GC: every 30 minutes, when free space on the
 /// work-dir filesystem drops below `SANDBOXED_NODE_MIN_FREE_GB` (default 10),
 /// LRU-delete (by dir mtime) checkout dirs first, then lake cache slots,
-/// until the threshold is met or nothing is left.
-pub fn spawn_cache_gc(work_root: PathBuf) {
+/// until the floor plus 20 GiB is met or no eligible candidate remains.
+/// Retired execution scratch is reclaimed independently after its grace period.
+pub fn spawn_cache_gc(work_root: PathBuf, store: super::JobStore) {
     tokio::spawn(async move {
         loop {
+            if let Err(error) = super::scratch::sweep(&store, &work_root).await {
+                tracing::warn!(%error, "node scratch sweep failed; retaining files");
+            }
             let root = work_root.clone();
             let result = tokio::task::spawn_blocking(move || {
                 crate::uploads::prune_expired_uploads(
@@ -1919,6 +1923,10 @@ fn gc_candidates(work_root: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+fn cache_gc_target(floor: u64, total: u64) -> u64 {
+    floor.saturating_add(20 << 30).min(total)
+}
+
 fn gc_once(work_root: &Path) {
     let threshold = min_free_bytes();
     let free = match fs2::available_space(work_root) {
@@ -1931,12 +1939,17 @@ fn gc_once(work_root: &Path) {
     if free >= threshold {
         return;
     }
+    let target = cache_gc_target(threshold, fs2::total_space(work_root).unwrap_or(threshold));
     tracing::info!(
         free_gb = free / (1 << 30),
+        target_gb = target / (1 << 30),
         threshold_gb = threshold / (1 << 30),
         "node cache GC: below free-space threshold, evicting LRU caches"
     );
-    for dir in gc_candidates(work_root) {
+    let candidates = gc_candidates(work_root);
+    let candidate_count = candidates.len();
+    let mut removed = 0_u64;
+    for dir in candidates {
         // Take the same `<dir>.lock` the build path holds (checkout builds
         // and lake-slot syncs) — try-lock so an in-flight build makes the
         // sweep skip its directories instead of deleting them mid-build.
@@ -1964,7 +1977,10 @@ fn gc_once(work_root: &Path) {
             continue;
         }
         match std::fs::remove_dir_all(&dir) {
-            Ok(()) => tracing::info!("node cache GC: deleted {}", dir.display()),
+            Ok(()) => {
+                removed += 1;
+                tracing::info!("node cache GC: deleted {}", dir.display());
+            }
             Err(err) => {
                 tracing::warn!("node cache GC: failed to delete {}: {err}", dir.display())
             }
@@ -1975,17 +1991,29 @@ fn gc_once(work_root: &Path) {
         // domain when a waiter already has this inode open while a later job
         // recreates and locks a different inode at the same path.
         match fs2::available_space(work_root) {
-            Ok(free) if free >= threshold => return,
+            Ok(free) if free >= target => return,
             _ => {}
         }
     }
-    tracing::warn!("node cache GC: still below threshold after evicting all caches");
+    tracing::warn!(
+        candidate_count, removed,
+        free_bytes = fs2::available_space(work_root).ok(),
+        target_bytes = target,
+        "node cache GC: eligible caches exhausted; mission sources, toolchains, CI and unmanaged temporary files are retained; use storage_inventory.py --node-work-dir for attribution"
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn cache_gc_target_leaves_headroom_without_overflow() {
+        assert_eq!(cache_gc_target(80 << 30, 444 << 30), 100 << 30);
+        assert_eq!(cache_gc_target(80 << 30, 90 << 30), 90 << 30);
+        assert_eq!(cache_gc_target(u64::MAX, u64::MAX), u64::MAX);
+    }
 
     fn source(commit: &str) -> JobSource {
         JobSource {

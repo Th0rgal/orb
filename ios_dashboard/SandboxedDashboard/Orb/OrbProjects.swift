@@ -463,6 +463,10 @@ struct OrbHome: View {
         }
         // The queue drives the banner and sheet; the per-kind monitors keep
         // their local notifications and Settings history.
+        .task(id: scenePhase) { if scenePhase == .active { await OrbPresentation.monitor() } }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("OrbPresentationChanged"))) { _ in
+            Task { await load() }
+        }
         .task(id: scenePhase) { if scenePhase == .active { await approvals.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await secretRequests.poll() } }
         .task(id: scenePhase) { if scenePhase == .active { await accessRequests.poll() } }
@@ -1203,12 +1207,13 @@ struct OrbHome: View {
         }
     }
     private func load() async {
+        let scope = api.endpoint + (api.authToken ?? "")
         defer { loading = false }
-        if projects.isEmpty, let cached = OrbDisk.read("projects", as: OrbJSON.self) {
+        if projects.isEmpty, let cached = await OrbDisk.readAsync("projects", as: OrbJSON.self) {
             let nextProjects = cached["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
             if projects != nextProjects { projects = nextProjects }
         }
-        if let cachedMissions = OrbDisk.read("inbox:missions", as: OrbJSON.self) {
+        if let cachedMissions = await OrbDisk.readAsync("inbox:missions", as: OrbJSON.self) {
             OrbReadCache.seedFromGlobalMissions(cachedMissions.items)
             let rows = cachedMissions.items.map { OrbRow($0) }.filter(\.mobile)
             let nextWorking = Self.countWorkingByProject(rows)
@@ -1219,6 +1224,7 @@ struct OrbHome: View {
         do {
             let requested = Date(), endpoint = api.endpoint
             let value = try await api.call("/api/projects")
+            guard scope == api.endpoint + (api.authToken ?? ""), !Task.isCancelled else { return }
             // Colors ride on the roster; a color chosen before the server stored any goes up here, once.
             Task { await appearance.apply(roster: value["projects"].items, fetchedAt: requested, endpoint: endpoint) }
             let nextProjects = value["projects"].items.filter { !["archived", "deleted"].contains($0["status"].text) }.map { OrbRow($0, project: true) }
@@ -1226,7 +1232,7 @@ struct OrbHome: View {
             OrbDisk.saveAsync(value, key: "projects"); error = ""; connectionIssue = nil
             let roster = nextProjects
             Task {
-                if let rawMissions = await Log.attempt(.network, "home missions", { try await api.call("/api/control/missions?limit=100") }) {
+                if let rawMissions = await Log.attempt(.network, "home missions", { try await api.call("/api/control/missions?limit=100") }), scope == api.endpoint + (api.authToken ?? "") {
                     OrbDisk.saveAsync(rawMissions, key: "inbox:missions")
                     OrbReadCache.seedFromGlobalMissions(rawMissions.items)
                     let rows = rawMissions.items.map { OrbRow($0) }.filter(\.mobile)
@@ -1801,7 +1807,10 @@ struct OrbProjectPage: View {
     private func load(force: Bool = false) async {
         let includeArchived = filter == "Archived"
         let cacheKey = includeArchived ? "project:\(project.id):all" : "project:\(project.id)"
-        if let cached = OrbReadCache.read(cacheKey) ?? OrbReadCache.read("project:\(project.id)") {
+        let cached = await OrbReadCache.readAsync(cacheKey)
+        let fallback = cached == nil ? await OrbReadCache.readAsync("project:\(project.id)") : nil
+        guard !Task.isCancelled else { return }
+        if let cached = cached ?? fallback {
             apply(cached)
             loading = false
         }

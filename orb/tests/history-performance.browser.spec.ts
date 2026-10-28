@@ -11,7 +11,9 @@ test('older history preserves scroll and remains accessible in WebKit',async({pa
   const url=new URL(route.request().url()),path=url.pathname;
   if(path==='/api/control/stream')return route.fulfill({contentType:'text/event-stream',body:''});
   if(path.endsWith('/events')){
-   limits.push(Number(url.searchParams.get('limit')));
+   const limit=Number(url.searchParams.get('limit'));
+   if(limit===2){expect(url.searchParams.get('view')).toBe('transcript');return route.fulfill(eventPage(route,[]));}
+   limits.push(limit);
    if(url.searchParams.has('before_seq')){await olderGate;olderServed++;}
    const start=url.searchParams.has('before_seq')?1:201;
    const events=Array.from({length:200},(_,n)=>({id:start+n,sequence:start+n,event_id:`event-${start+n}`,event_type:n%2===0?'user_message':'assistant_message',content:`Message ${start+n}. `+'A paragraph of history. '.repeat(12),timestamp:''}));

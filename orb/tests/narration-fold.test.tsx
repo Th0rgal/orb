@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import { describe, it, expect } from "vitest";
 import { render } from "@solidjs/testing-library";
 import { Transcript, buildTranscript } from "../src/Transcript";
@@ -77,4 +78,28 @@ describe("narration fold", () => {
     expect(note).toHaveLength(1);
     expect(note[0].textContent).toBe("Aha! Look at that error.");
   });
+});
+
+it("replaces a preview text row with a work fold when activity arrives, and restores it on replay", () => {
+  const preview: StreamItem = { kind: "text", key: "preview", text: "Inspecting the code.", live: false };
+  const [items, setItems] = createSignal<StreamItem[]>([preview]);
+  const { container } = render(() => <Transcript items={items()} />);
+  expect(container.querySelectorAll(".st-text")).toHaveLength(1);
+  setItems([preview, { kind: "tool", key: "tool", callId: "tool", name: "bash", args: {}, result: "ok", done: true },
+    { kind: "text", key: "final", text: "Final result.", live: false }]);
+  expect(container.querySelectorAll(".st-work")).toHaveLength(1);
+  expect(container.querySelectorAll(".st-text")).toHaveLength(1);
+  expect(container.querySelector(".st-text")?.textContent).toContain("Final result.");
+  setItems([preview]);
+  expect(container.querySelectorAll(".st-work")).toHaveLength(0);
+  expect(container.querySelector(".st-text")?.textContent).toContain("Inspecting the code.");
+});
+
+it('uses the existing trailing work fold for generic working while activity loads', () => {
+ const items = [{kind:'tool',key:'tool',name:'read_file',args:{path:'a'},done:true}] as StreamItem[];
+ const {container} = render(() => <Transcript items={items} working workingLabel="Working on old-agent…" />);
+ expect(container.querySelectorAll('.st-work')).toHaveLength(1);
+ expect(container.querySelector('.st-working')).toBeNull();
+ expect(container.textContent).not.toContain('Working on old-agent…');
+ expect(container.querySelector('.st-work-label')?.textContent).toBe('Read 1 file');
 });

@@ -108,3 +108,36 @@ filesystem capacity after estimate plus reserve), then soft penalties for a
 GitHub runner being busy or highly loaded. Busy/load must only rank otherwise
 admissible candidates lower; it must never become an admission rejection or
 weaken the local filesystem fail-closed checks.
+
+## Remote worker storage
+
+Use the same inventory against a worker's node ledger. It attributes full UUID
+mission directories and nested build/toolchain trees without reading command
+payloads or treating succeeded jobs as permission to delete source:
+
+```bash
+python3 scripts/storage_inventory.py \
+  --node-work-dir /var/lib/sandboxed-node \
+  --root /tmp --root /opt/actions-runner --root /srv/verity-ci-cache
+```
+
+Run in the node's mount namespace when inspecting its private /tmp, or supply the
+host-visible systemd-private path. The scanner never deletes, excludes symlinks
+and nested mounts, and reports both apparent bytes and allocated file blocks.
+Nested entries overlap and shared XFS extents are not exclusive/reclaimable bytes;
+use filesystem free-space measurements before/after any separately authorized
+cleanup. Missing or unreadable node ledgers never grant deletion permission.
+
+[Worker scratch reclamation](specs/node-storage-lifecycle.md) covers new owned
+TMPDIR/TMP/TEMP directories after confirmed supervision and a 72-hour grace period.
+Hard-coded /tmp paths and legacy data require owner review. Completed remote mission
+source still needs a future node-local implementation of the explicit discard
+contract; archive/delete does not silently opt it in.
+
+Prefer the durable Lean build API and its shared dependency cache to recursively
+copying .lake into ad-hoc review trees. Never copy a .lake directory into itself
+(the Ashur incident included a multi-GiB .lake/.lake copy). Keep persistent source
+and final artifacts in the mission workspace, outside execution scratch. CI caches
+and toolchains require their own tool-aware budgets; they are not generic temporary
+files. The node now logs eligible cache counts and the untouched storage classes
+when pressure cannot be relieved, instead of claiming all caches were evicted.

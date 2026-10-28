@@ -495,7 +495,10 @@ function groupWork(input: StreamItem[], previous: Grouped[] = []): Grouped[] {
       out.push(it);
     } else if (it.kind === "tool" || it.kind === "think" || (it.kind === "text" && narration.has(it.key))) {
       if (last && last.kind === "work") last.items.push(it);
-      else out.push({ kind: "work", key: it.key, items: [it] });
+      // Hydration can turn a preview's text into narration inside a work fold.
+      // Distinct keys prevent reconciliation from mutating a mounted text row
+      // into a different variant (and briefly handing Markdown undefined text).
+      else out.push({ kind: "work", key: `work:${it.key}`, items: [it] });
     } else {
       out.push(it);
     }
@@ -830,7 +833,7 @@ function WorkingRow(p: { items: StreamItem[]; label?: string }) {
   const seen = Date.now();
   const started = createMemo(() => turnStartedAt(p.items) ?? seen);
   // The label is the announced status; the ticking time is not read out.
-  return <div class="st-think st-working">
+  return <Show when={!["tool", "think"].includes(p.items.at(-1)?.kind ?? "")}><div class="st-think st-working">
     <div class="st-think-head"><span class="shimmer agent-wait-status" role="status" aria-live="polite">{p.label || "Working"}</span><span class="st-working-time" aria-hidden="true">{formatElapsed(now() - started())}</span></div>
-  </div>;
+  </div></Show>;
 }

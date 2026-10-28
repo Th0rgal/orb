@@ -1,7 +1,7 @@
 import {beforeEach,expect,it,vi} from 'vitest';
 const mocks=vi.hoisted(()=>({version:0,page:vi.fn(),queue:vi.fn()}));
 vi.mock('../src/api',()=>({connectionVersion:()=>mocks.version,listQueuedMessages:mocks.queue}));
-vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEventPage:mocks.page}));
+vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),getMissionEventPreview:vi.fn(async()=>null),getMissionEventPage:mocks.page}));
 import {loadTranscript,refreshTranscript,loadOlderTranscript} from '../src/missionCache';
 import {cacheReset} from '../src/pageCache';
 beforeEach(()=>{cacheReset();mocks.version=0;mocks.page.mockReset();mocks.queue.mockReset().mockResolvedValue([]);});
@@ -93,3 +93,36 @@ it('joins an in-flight initial load when refreshTranscript is called before init
  expect(mocks.page).toHaveBeenCalledTimes(1);
 });
 
+
+import {getMissionEventPreview} from '../src/stream';
+import {peekReadyTranscript,peekTranscript} from '../src/missionCache';
+it('publishes the final answer before activity and queue settle, without advancing raw cursors',async()=>{
+ vi.mocked(getMissionEventPreview).mockResolvedValueOnce({events:[row(6497,'Final response')],nextCursor:6497,pageMax:6497,hasMore:true});
+ let finishActivity!:(value:any)=>void,finishQueue!:(value:any)=>void;
+ mocks.page.mockImplementationOnce(()=>new Promise(resolve=>finishActivity=resolve));
+ mocks.queue.mockImplementationOnce(()=>new Promise(resolve=>finishQueue=resolve));
+ const loading=loadTranscript('priority');
+ await vi.waitFor(()=>expect(peekTranscript('priority')?.detailsPending).toBe(true));
+ expect(peekTranscript('priority')?.items).toMatchObject([{kind:'text',text:'Final response'}]);
+ expect(peekTranscript('priority')?.cursor).toBeUndefined();
+ expect(peekReadyTranscript('priority')).toBeUndefined();
+ expect(loadTranscript('priority')).toBe(loading);
+ expect(refreshTranscript('priority')).toBe(loading);
+ finishActivity({events:[row(6497,'Final response')],nextCursor:6298,pageMax:6500,hasMore:true});
+ finishQueue([]);
+ const hydrated=await loading;
+ expect(hydrated.detailsPending).toBeUndefined();
+ expect(hydrated.cursor).toBe(6500);
+ expect(hydrated.items.filter(i=>i.kind==='text'&&i.text==='Final response')).toHaveLength(1);
+});
+it('keeps a failed activity hydration readable but retries it on reopen',async()=>{
+ vi.mocked(getMissionEventPreview).mockResolvedValue({events:[row(9,'Saved response')],nextCursor:9,pageMax:9,hasMore:false});
+ mocks.page.mockRejectedValueOnce(new Error('activity unavailable'));
+ await expect(loadTranscript('retry-preview')).rejects.toThrow('activity unavailable');
+ expect(peekTranscript('retry-preview')?.detailsPending).toBe(true);
+ mocks.page.mockResolvedValueOnce({events:[row(9,'Saved response')],nextCursor:9,pageMax:9,hasMore:false});
+ const reopened=await loadTranscript('retry-preview');
+ expect(reopened.detailsPending).toBeUndefined();
+ expect(reopened.items).toMatchObject([{text:'Saved response'}]);
+ vi.mocked(getMissionEventPreview).mockResolvedValue(null as any);
+});
