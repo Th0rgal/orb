@@ -4254,3 +4254,10 @@ select.orb-select-native:disabled { cursor: default; }
 .md-workspace-image:hover .md-image-download, .md-image-download:focus-visible { opacity: 1; }
 .md-image-download:hover { color: var(--fg); }
 .image-action-status { position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%); padding: 6px 12px; border-radius: var(--radius-md); background: var(--bg-elev); color: var(--fg); border: 1px solid var(--stroke); font-size: 12px; z-index: 10000; pointer-events: none; }
+.bw-grants { gap: 8px; }
+.bw-grant-group { display: flex; flex-direction: column; gap: 2px; }
+.bw-grant-head, .bw-grant-row { flex-wrap: nowrap; align-items: center; }
+.bw-grant-mission { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); }
+.bw-grant-row { padding-left: 12px; }
+.bw-grant-scope { flex: 0 1 auto; margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bw-grant-row .bw-link-btn:disabled, .bw-grant-head .bw-link-btn:disabled { opacity: 0.5; }

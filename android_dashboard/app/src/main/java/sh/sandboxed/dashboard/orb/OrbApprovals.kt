@@ -43,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -224,6 +225,14 @@ internal fun Context.fragmentActivity(): FragmentActivity? {
     return null
 }
 
+private const val GRANTS_PREFS = "orb_secret_grants"
+private const val GRANTS_EXPANDED_KEY = "expanded"
+
+internal fun grantMinutesLeft(expiresAt: String?): Long? =
+    runCatching { java.time.Duration.between(java.time.Instant.now(), java.time.OffsetDateTime.parse(expiresAt).toInstant()).toMinutes().coerceAtLeast(0) }.getOrNull()
+
+internal fun formatMinutes(m: Long): String = if (m >= 60) "${m / 60} h ${m % 60} min" else "$m min"
+
 @Composable
 fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -231,6 +240,9 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     val baseURL = core.baseURLFlow.collectAsState().value
     var requests by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var grants by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
+    val context = LocalContext.current
+    val grantPrefs = remember { context.getSharedPreferences(GRANTS_PREFS, Context.MODE_PRIVATE) }
+    var showGrants by remember { mutableStateOf(grantPrefs.getBoolean(GRANTS_EXPANDED_KEY, false)) }
     var access by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var privilege by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
     var privilegeCommands by remember { mutableStateOf<List<Map<String, Any?>>>(emptyList()) }
@@ -658,21 +670,42 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
 
             if (grants.isNotEmpty()) {
                 Card("Active grants") {
-                    grants.forEach { g ->
-                        val scopeMap = dictOf(g["scope"])
-                        val label = when (scopeMap["kind"]) {
-                            "all" -> "All projects"
-                            "project" -> "Project ${projects[scopeMap["project_id"] as? String] ?: ""}"
-                            else -> "Secret ${scopeMap["key"]}"
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(label, color = Color.White, fontSize = 14.sp)
-                                Text((g["mission_title"] as? String) ?: "", color = OrbStyle.textMuted, fontSize = 12.sp)
+                    // Collapsed by default; the choice is remembered on this device.
+                    val expiries = grants.mapNotNull { grantMinutesLeft(it["expires_at"] as? String) }
+                    val summary = "${grants.size} active ${if (grants.size == 1) "grant" else "grants"}" +
+                        (expiries.minOrNull()?.let { " · next expires in ${formatMinutes(it)}" } ?: "")
+                    TextButton(onClick = {
+                        showGrants = !showGrants
+                        grantPrefs.edit().putBoolean(GRANTS_EXPANDED_KEY, showGrants).apply()
+                    }) { Text("${if (showGrants) "▾" else "▸"} $summary", color = OrbStyle.textMuted, fontSize = 13.sp) }
+                    if (showGrants) {
+                        // Grants of one mission are listed together so its title appears once.
+                        grants.groupBy { it["mission_id"] as? String ?: "" }.values.forEach { group ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    (group[0]["mission_title"] as? String) ?: "Mission",
+                                    color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                                )
+                                if (group.size > 1) TextButton(enabled = !busy, onClick = {
+                                    act { group.forEach { g -> core.request("/api/bitwarden/grants/${core.encodeComponent(g["id"] as String)}", "DELETE") } }
+                                }) { Text("Revoke all", fontSize = 12.sp) }
                             }
-                            TextButton(enabled = !busy, onClick = {
-                                act { core.request("/api/bitwarden/grants/${core.encodeComponent(g["id"] as String)}", "DELETE") }
-                            }) { Text("Revoke") }
+                            group.forEach { g ->
+                                val scopeMap = dictOf(g["scope"])
+                                val label = when (scopeMap["kind"]) {
+                                    "all" -> "All projects"
+                                    "project" -> "Project ${projects[scopeMap["project_id"] as? String] ?: ""}"
+                                    else -> "${scopeMap["key"]}"
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 12.dp)) {
+                                    Text(label, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                    Text(grantMinutesLeft(g["expires_at"] as? String)?.let { formatMinutes(it) } ?: "", color = OrbStyle.textMuted, fontSize = 12.sp)
+                                    TextButton(enabled = !busy, onClick = {
+                                        act { core.request("/api/bitwarden/grants/${core.encodeComponent(g["id"] as String)}", "DELETE") }
+                                    }) { Text("Revoke", fontSize = 12.sp) }
+                                }
+                            }
                         }
                     }
                 }

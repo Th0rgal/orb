@@ -13,11 +13,13 @@ import {
   type SecretGrant,
 } from "./bitwardenApi";
 import * as Ic from "./icons";
+import { readString, writeString } from "./storage";
 import { Select } from "./Select";
 import { ApprovalCancelled, approvalGraceSecs, graceUntil, setApprovalGraceSecs } from "./deviceApproval";
 import { FingerprintIcon, SecretKindIcon } from "./approvalIcons";
 
 const POLL_MS = 5000;
+const GRANTS_KEY = "orb.secretGrants.expanded";
 
 function since(raw?: string | null): string {
   const ts = raw ? Date.parse(raw) : NaN;
@@ -41,6 +43,8 @@ export function SecretAccessPanel(p: {
   const [snap, setSnap] = createSignal<SecretBrokerSnapshot>({ requests: [], grants: [], audit: [] });
   const [busy, setBusy] = createSignal<string | null>(null);
   const [showLog, setShowLog] = createSignal(false);
+  // Collapsed by default; the choice is remembered on this device.
+  const [showGrants, setShowGrants] = createSignal(readString(GRANTS_KEY) === "1");
 
   const projectName = (id?: string | null) =>
     (id && p.projects.find((x) => x.id === id)?.name) || (id ? id.slice(0, 8) : "");
@@ -84,6 +88,29 @@ export function SecretAccessPanel(p: {
         : `Secret ${g.scope.key}`;
   const who = (x: { mission_title?: string | null; mission_id: string; paloma_project?: string | null }) =>
     `${x.mission_title || `Mission ${x.mission_id.slice(0, 8)}`}${x.paloma_project ? ` · ${x.paloma_project}` : ""}`;
+
+  // Grants of one mission are listed together so its title appears once.
+  const grantGroups = createMemo(() => {
+    const groups = new Map<string, SecretGrant[]>();
+    for (const g of snap().grants) groups.set(g.mission_id, [...(groups.get(g.mission_id) ?? []), g]);
+    return [...groups.values()];
+  });
+  const nextExpiry = createMemo(() =>
+    snap().grants.map((g) => g.expires_at).sort((a, b) => Date.parse(a) - Date.parse(b))[0],
+  );
+  // Not optimistic: Core may refuse, so the row stays until the reload confirms it.
+  const revoke = async (id: string, grants: SecretGrant[]) => {
+    if (busy()) return;
+    setBusy(id);
+    try {
+      for (const g of grants) await revokeSecretGrant(g.id);
+    } catch (e) {
+      p.onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      await load();
+      setBusy(null);
+    }
+  };
 
   const act = async (id: string, reason: string, run: () => Promise<unknown>, secretsChanged = false) => {
     if (busy()) return;
@@ -192,45 +219,62 @@ export function SecretAccessPanel(p: {
         </div>
       </Show>
 
-      <Show when={snap().grants.length > 0}>
-        <h4 class="bw-subhead">Active grants</h4>
-      </Show>
       <div class="s-card">
-        <Show
-          when={snap().grants.length > 0}
-          fallback={null}
-        >
-          <For each={snap().grants}>
-            {(g) => (
-              <div class="s-row">
-                <div class="s-row-text">
-                  <div class="s-row-title">{scopeLabel(g)}</div>
-                  <div class="s-row-desc">
-                    {who(g)} · {until(g.expires_at)}
+        <Show when={snap().grants.length > 0}>
+          <div class="s-row">
+            <div class="s-row-text">
+              <button
+                type="button"
+                class="bw-link-btn"
+                aria-expanded={showGrants()}
+                onClick={() => {
+                  const next = !showGrants();
+                  setShowGrants(next);
+                  writeString(GRANTS_KEY, next ? "1" : "0");
+                }}
+              >
+                <Show when={showGrants()} fallback={<Ic.ChevronRight size={11} />}><Ic.ChevronDown size={11} /></Show>{" "}
+                {snap().grants.length} active {snap().grants.length === 1 ? "grant" : "grants"}
+                {nextExpiry() ? ` · next expires in ${until(nextExpiry()!).replace(" left", "")}` : ""}
+              </button>
+            </div>
+          </div>
+          <Show when={showGrants()}>
+            <div class="bw-log bw-grants">
+              <For each={grantGroups()}>
+                {(group) => (
+                  <div class="bw-grant-group">
+                    <div class="bw-log-row bw-grant-head">
+                      <span class="bw-grant-mission" title={who(group[0])}>{who(group[0])}</span>
+                      <Show when={group.length > 1}>
+                        <button
+                          type="button"
+                          class="bw-link-btn"
+                          disabled={!!busy()}
+                          onClick={() => void revoke(group[0].mission_id, group)}
+                        >
+                          Revoke all
+                        </button>
+                      </Show>
+                    </div>
+                    <For each={group}>
+                      {(g) => (
+                        <div class="bw-log-row bw-grant-row">
+                          <code class="bw-mono bw-grant-scope" title={scopeLabel(g)}>
+                            {g.scope.kind === "secret" ? g.scope.key : scopeLabel(g)}
+                          </code>
+                          <span class="s-row-desc">{until(g.expires_at)}</span>
+                          <button type="button" class="bw-link-btn" disabled={!!busy()} onClick={() => void revoke(g.id, [g])}>
+                            Revoke
+                          </button>
+                        </div>
+                      )}
+                    </For>
                   </div>
-                </div>
-                <div class="s-row-ctrl">
-                  <button
-                    class="s-btn"
-                    disabled={!!busy()}
-                    onClick={async () => {
-                      setBusy(g.id);
-                      try {
-                        await revokeSecretGrant(g.id);
-                        await load();
-                      } catch (e) {
-                        p.onError(e instanceof Error ? e.message : String(e));
-                      } finally {
-                        setBusy(null);
-                      }
-                    }}
-                  >
-                    Revoke
-                  </button>
-                </div>
-              </div>
-            )}
-          </For>
+                )}
+              </For>
+            </div>
+          </Show>
         </Show>
         <div class="s-row">
           <div class="s-row-text">
