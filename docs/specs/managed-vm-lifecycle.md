@@ -214,3 +214,29 @@ and stop paths do not delete user files; Core has delivered no guest secrets.
 Provider command/file endpoints are not exposed by this change: safely exposing
 them requires a durable per-tenant operation journal with idempotency keys,
 bounded inputs/time/output, redacted audit metadata and crash reconciliation.
+
+### Raw operation receipts
+
+`POST /api/managed-machines/:id/operations` accepts `idempotency_key` and one
+`operation` (`exec`, `write_file`, or `read_file`). Only the authenticated owner
+of a raw machine may call it. Commands and UTF-8 file writes are at most 64 KiB;
+paths are absolute, at most 4096 bytes, without NUL; exec timeout is 1–120 seconds.
+Receipts contain at most 64 KiB of serialized provider output (with explicit
+truncation); Boat HTTP response collection is capped at 512 KiB before JSON allocation;
+oversize responses are recorded as uncertain and are never replayed as commands.
+
+The journal identity hashes tenant, immutable machine id, and idempotency key;
+the request digest includes operation arguments. Before any provider call, Core
+creates a private pending record with exclusive creation, fsyncs it and its
+parent directory. A different request using that key is rejected. A matching
+pending record returns `operation_uncertain`, including after a restart; Core
+never automatically reexecutes it. A completed matching receipt is replayed.
+Timeout and provider transport failures are persisted as uncertain outcomes,
+not evidence that a guest command did not run. Final private receipts are fsynced
+and atomically renamed. A failed final persistence leaves the pending fence.
+
+Audit events contain operation kind and request digest, never command, path,
+file content or output. Receipt files are mode 0600 in a mode 0700 directory;
+they are retained as idempotency fences and may contain sensitive output.
+Operation admission refreshes `last_busy_at`; it does not disable TTL or owner
+reaping. Explicit lifecycle requests can stop a concurrently executing operation.

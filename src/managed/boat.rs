@@ -62,6 +62,20 @@ impl BoatProvider {
         idempotency_key: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<Value, String> {
+        self.call_bounded(method, path, body, idempotency_key, timeout, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_bounded(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        idempotency_key: Option<&str>,
+        timeout: Option<Duration>,
+        max_bytes: Option<usize>,
+    ) -> Result<Value, String> {
         let mut req = self
             .http
             .request(method.clone(), format!("{}{}", self.base, path))
@@ -75,12 +89,29 @@ impl BoatProvider {
         if let Some(body) = body {
             req = req.json(&body);
         }
-        let resp = req
+        let mut resp = req
             .send()
             .await
             .map_err(|e| format!("boat {method} {path}: {}", e.without_url()))?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = if let Some(limit) = max_bytes {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|_| "boat: response read failed")?
+            {
+                if chunk.len() > limit.saturating_sub(bytes.len()) {
+                    return Err(
+                        "boat: raw operation response exceeded limit; outcome uncertain".into(),
+                    );
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            String::from_utf8(bytes).map_err(|_| "boat: invalid response encoding")?
+        } else {
+            resp.text().await.unwrap_or_default()
+        };
         if !status.is_success() {
             let code = serde_json::from_str::<Value>(&text)
                 .ok()
@@ -403,6 +434,41 @@ impl ManagedProvider for BoatProvider {
             Some(Duration::from_secs(timeout_secs + 30)),
         )
         .await
+    }
+
+    async fn raw_exec(
+        &self,
+        provider_id: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
+        self.call_bounded(
+            reqwest::Method::POST,
+            &format!("/sandboxes/{provider_id}/commands"),
+            Some(json!({"command": command, "timeoutSeconds": timeout_secs})),
+            None,
+            Some(Duration::from_secs(timeout_secs + 5)),
+            Some(512 * 1024),
+        )
+        .await
+    }
+
+    async fn raw_write_file(
+        &self,
+        provider_id: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        self.call_bounded(
+            reqwest::Method::PUT,
+            &format!("/sandboxes/{provider_id}/files"),
+            Some(json!({"path": path, "content": content})),
+            None,
+            Some(Duration::from_secs(30)),
+            Some(512 * 1024),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn usage(&self, provider_id: &str) -> Result<ProviderUsage, String> {

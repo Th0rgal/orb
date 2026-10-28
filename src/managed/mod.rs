@@ -33,6 +33,7 @@
 pub mod boat;
 pub mod budget;
 pub mod lifecycle;
+pub mod raw_operations;
 pub mod relay;
 pub mod snapshots;
 
@@ -103,6 +104,23 @@ pub trait ManagedProvider: Send + Sync {
         command: &str,
         timeout_secs: u64,
     ) -> Result<Value, String>;
+    /// Raw operation calls must cap HTTP response bodies before JSON allocation.
+    async fn raw_exec(
+        &self,
+        _provider_id: &str,
+        _command: &str,
+        _timeout_secs: u64,
+    ) -> Result<Value, String> {
+        Err("bounded raw execution is unsupported".into())
+    }
+    async fn raw_write_file(
+        &self,
+        _provider_id: &str,
+        _path: &str,
+        _content: &str,
+    ) -> Result<(), String> {
+        Err("bounded raw file writes are unsupported".into())
+    }
     async fn usage(&self, provider_id: &str) -> Result<ProviderUsage, String>;
     /// Stop (keep the disk for resume/fork). Nothing is billed afterwards.
     async fn stop(&self, provider_id: &str) -> Result<(), String> {
@@ -374,9 +392,7 @@ impl MachineState {
     }
 }
 
-/// One managed machine. The persisted list of these is the cost ledger:
-/// `cost_usd` is the provider's metered cost and `ledger_closed` is true once
-/// the provider confirms nothing is billing any more.
+/// Guest provisioning policy, persisted through forks and snapshots.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvisioningMode {
@@ -402,6 +418,9 @@ impl ProvisioningMode {
     }
 }
 
+/// One managed machine. The persisted list of these is the cost ledger:
+/// `cost_usd` is the provider's metered cost and `ledger_closed` is true once
+/// the provider confirms nothing is billing any more.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedMachine {
     #[serde(default)]
@@ -1823,7 +1842,7 @@ impl ManagedManager {
         if !m.provisioning_mode.is_worker() {
             let machine = self
                 .update(id, |m| {
-                    if m.state.is_live() {
+                    if m.state == MachineState::Provisioning {
                         m.state = MachineState::Online;
                         m.online_at = Some(Utc::now());
                         m.last_busy_at = Some(Utc::now());

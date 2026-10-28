@@ -3498,7 +3498,7 @@ impl AssistantMcp {
             "machine": machine,
             "node_id": machine["node_id"],
             "name": machine["name"],
-            "next": if machine["provisioning_mode"] == "raw" { "Raw VM ready; no Orb node is installed. Use provider access, then destroy_managed_machine when done.".to_string() } else { format!(
+            "next": if machine["provisioning_mode"] == "raw" { "Raw VM ready; no Orb node is installed. Use the owner-scoped /api/managed-machines/:id/operations REST endpoint with an idempotency key, then destroy_managed_machine when done.".to_string() } else { format!(
                 "start_mission(remote_node_id=\"{name}\", backend=..., prompt=...) runs a subagent on it (its node id {node} also works); destroy_managed_machine(machine_id=\"{name}\") when done",
                 name = machine["name"].as_str().unwrap_or_default(),
                 node = machine["node_id"].as_str().unwrap_or_default(),

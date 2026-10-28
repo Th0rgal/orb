@@ -89,6 +89,22 @@ impl ManagedProvider for FakeProvider {
         }
         Ok(Value::Null)
     }
+    async fn raw_exec(
+        &self,
+        provider_id: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
+        self.exec(provider_id, command, timeout_secs).await
+    }
+    async fn raw_write_file(
+        &self,
+        provider_id: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        self.write_file(provider_id, path, content).await
+    }
     async fn stop(&self, provider_id: &str) -> Result<(), String> {
         self.stopped.lock().unwrap().push(provider_id.into());
         Ok(())
@@ -2212,4 +2228,78 @@ fn legacy_mode_defaults_to_worker_and_invalid_mode_is_rejected() {
             .provisioning_mode,
         ProvisioningMode::Worker
     );
+}
+
+#[tokio::test]
+async fn raw_operations_enforce_owner_replay_and_do_not_leak_payloads_to_audit() {
+    use super::raw_operations::{Operation, OperationRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let raw = m
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            image: Some("clean".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let request = OperationRequest {
+        idempotency_key: "exec-1".into(),
+        operation: Operation::Exec {
+            command: "printf unique-sensitive-content".into(),
+            timeout_secs: 10,
+        },
+    };
+    assert_eq!(
+        m.raw_operation(&raw.id, "t2", request.clone())
+            .await
+            .unwrap_err()
+            .error,
+        "not_found"
+    );
+    assert!(fake.execs.lock().unwrap().is_empty());
+    assert_eq!(
+        m.raw_operation(&raw.id, "t1", request.clone())
+            .await
+            .unwrap()
+            .status,
+        "completed"
+    );
+    let loaded = ManagedManager::new(settings(), Some(fake.clone()), dir.path(), 3999);
+    loaded.load().await;
+    assert_eq!(
+        loaded
+            .raw_operation(&raw.id, "t1", request.clone())
+            .await
+            .unwrap()
+            .status,
+        "completed"
+    );
+    assert_eq!(fake.execs.lock().unwrap().len(), 1);
+    let changed = OperationRequest {
+        operation: Operation::ReadFile {
+            path: "/tmp/a".into(),
+        },
+        ..request.clone()
+    };
+    assert_eq!(
+        m.raw_operation(&raw.id, "t1", changed)
+            .await
+            .unwrap_err()
+            .error,
+        "idempotency_conflict"
+    );
+    m.stop_inner(&raw.id, "test", false).await.unwrap();
+    assert_eq!(
+        m.raw_operation(&raw.id, "t1", request)
+            .await
+            .unwrap()
+            .status,
+        "completed"
+    );
+    let ledger = std::fs::read_to_string(m.ledger_path()).unwrap();
+    assert!(!ledger.contains("unique-sensitive-content"));
+    assert!(ledger.contains("raw_operation_finished"));
+    m.destroy(&raw.id, "test").await.unwrap();
 }

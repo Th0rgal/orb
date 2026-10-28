@@ -57,6 +57,10 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
             axum::routing::delete(delete_snapshot),
         )
         .route("/api/managed-machines/:id", get(get_one).delete(destroy))
+        .route(
+            "/api/managed-machines/:id/operations",
+            post(raw_operation).layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
         .route("/api/managed-machines/:id/stop", post(stop))
         .route("/api/managed-machines/:id/resume", post(resume))
         .route("/api/managed-machines/:id/fork", post(fork))
@@ -95,7 +99,7 @@ async fn list(
                 .await;
             view.machines.retain(|machine| {
                 machine.provisioning_mode.is_worker()
-                    || machine.owner_user_id.as_deref() == Some(&user.id)
+                    || machine.owner_user_id.as_deref() == Some(user.id.as_str())
             });
             Json(view).into_response()
         }
@@ -304,7 +308,7 @@ async fn set_owner(
             &id,
             &body.owner_mission_id.to_string(),
             None,
-            Some(&user.id),
+            Some(user.id.as_str()),
         )
         .await
     {
@@ -664,7 +668,7 @@ async fn list_snapshots(
     };
     Json(json!({
         "project": project,
-        "snapshots": m.list_snapshots(Some(&user.id), project.as_deref()).await,
+        "snapshots": m.list_snapshots(Some(user.id.as_str()), project.as_deref()).await,
         "included_free": crate::managed::snapshots::INCLUDED_SNAPSHOTS,
         "usd_per_month_beyond": crate::managed::snapshots::SNAPSHOT_USD_PER_MONTH,
     }))
@@ -686,7 +690,7 @@ async fn delete_snapshot(
         Err(r) => return r,
     };
     match m
-        .delete_snapshot(&name, Some(&user.id), project.as_deref())
+        .delete_snapshot(&name, Some(user.id.as_str()), project.as_deref())
         .await
     {
         Ok(()) => Json(json!({"deleted": name})).into_response(),
@@ -727,7 +731,7 @@ async fn snapshot(
             &body.name,
             project.as_deref(),
             owner.as_deref(),
-            Some(&user.id),
+            Some(user.id.as_str()),
         )
         .await
     {
@@ -738,6 +742,7 @@ async fn snapshot(
 
 #[derive(Deserialize, Default)]
 struct ForkBody {
+    provisioning_mode: Option<crate::managed::ProvisioningMode>,
     size: Option<String>,
     ttl_minutes: Option<u64>,
     reason: Option<String>,
@@ -757,12 +762,16 @@ async fn fork(
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     // A fork keeps the source's size unless one is asked for.
     let size = match body.size {
         Some(s) => Some(s),
         None => m.get(&id).await.map(|src| src.size),
     };
     let req = SpawnRequest {
+        provisioning_mode: body.provisioning_mode,
         size,
         ttl_minutes: body.ttl_minutes,
         reason: body.reason.or_else(|| Some(format!("fork of {id}"))),
@@ -782,7 +791,7 @@ async fn raw_owner_check(
 ) -> Result<(), Response> {
     if let Some(machine) = m.get(id).await {
         if !machine.provisioning_mode.is_worker()
-            && machine.owner_user_id.as_deref() != Some(&user.id)
+            && machine.owner_user_id.as_deref() != Some(user.id.as_str())
         {
             return Err(err(ManagedError {
                 error: "not_found",
@@ -800,6 +809,7 @@ async fn tenant_machine(
     id: &str,
     user: &crate::api::auth::AuthUser,
 ) -> Result<crate::managed::ManagedMachine, Response> {
+    raw_owner_check(m, id, user).await?;
     match m.get(id).await {
         Some(x)
             if (x.provisioning_mode.is_worker() && x.owner_user_id.is_none())
@@ -861,6 +871,21 @@ async fn resume(
         .await
     {
         Ok(x) => (StatusCode::ACCEPTED, Json(x)).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn raw_operation(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::managed::raw_operations::OperationRequest>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    match m.raw_operation(&id, &user.id, request).await {
+        Ok(receipt) => Json(receipt).into_response(),
         Err(e) => err(e),
     }
 }
