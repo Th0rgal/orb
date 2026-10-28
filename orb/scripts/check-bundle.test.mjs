@@ -55,9 +55,11 @@ test("rejects a script injected into HTML outside the manifest graph", () => {
   assert.match(result.stderr, /Unaccounted startup script/);
 });
 test("rejects external scripts whose size cannot be accounted for locally", () => {
-  const result = check((_, __, html) => { html.text += '<script src=https://example.com/external.js></script>'; });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /Unaccounted startup script/);
+  for (const src of ["https://example.com/external.js", "https://orb-bundle.invalid/assets/bootstrap.js", "//orb-bundle.invalid/assets/bootstrap.js"]) {
+    const result = check((_, __, html) => { html.text += `<script src=${src}></script>`; });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Unaccounted startup script/);
+  }
 });
 test("recognizes quoted and unquoted HTML entry URLs without double counting", () => {
   const result = check((_, __, html) => {

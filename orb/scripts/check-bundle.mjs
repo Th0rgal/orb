@@ -35,10 +35,11 @@ const baseURL = new URL("https://orb-bundle.invalid/");
 for (const tag of html.matchAll(/<script\b[^>]*>/gi)) {
   const src = /\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag[0]);
   if (!src) continue;
-  const value = src[1] ?? src[2] ?? src[3];
+  const value = (src[1] ?? src[2] ?? src[3]).trim();
   const url = new URL(value, baseURL);
   const file = decodeURIComponent(url.pathname).replace(/^\//, "");
-  if (url.origin !== baseURL.origin || !files.has(file)) throw new Error(`Unaccounted startup script: ${value}`);
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value) || value.includes("\\") ||
+      url.origin !== baseURL.origin || !files.has(file)) throw new Error(`Unaccounted startup script: ${value}`);
 }
 for (const file of files) {
   const code = fs.readFileSync(path.join(dist, file), "utf8");
