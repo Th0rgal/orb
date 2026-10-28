@@ -5,7 +5,7 @@ import { For, createMemo, createSignal, onMount } from "solid-js";
 import { isConnected } from "./api";
 import { listChains, routingCatalog, type ModelChain, type RoutingCatalog } from "./routingApi";
 import { RoutingPicker } from "./RoutingPicker";
-import { Toggle } from "./Settings";
+import { Toggle } from "./Toggle";
 import { sideQuestionKey } from "./sideQuestionStorage";
 
 export type InboxConfig = {

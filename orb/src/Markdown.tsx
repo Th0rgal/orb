@@ -1,8 +1,3 @@
-import katex from "katex";
-import "katex/dist/katex.min.css";
-// Copying rendered math yields its TeX source instead of the MathML and HTML
-// layers glued together ("p\n=\n0.15p=0.15").
-import "katex/contrib/copy-tex";
 import {requestHighlight} from "./codeHighlightClient";
 import { CodeBlock } from "./CodeBlock";
 import { isMermaidLang, MermaidBlock } from "./MermaidBlock";
@@ -10,6 +5,7 @@ import { FileReference, FileReferenceText } from "./fileReferenceContext";
 import { For, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
 import { openExternalUrl } from "./api";
 import { timed } from "./diagnostics";
+import { swallow } from "./log";
 import { RICH_TAG, expandMediaLines, parseRichTag, richTagSpan } from "./richTags";
 import { WorkspaceImage } from "./WorkspaceImage";
 import * as Ic from "./icons";
@@ -68,17 +64,27 @@ function plainInline(text: string, links: boolean): JSX.Element[] {
 // Rendered formulas by source: a transcript row that remounts while scrolling
 // reuses the markup instead of running KaTeX again in that frame.
 const formulas = new Map<string, string>();
-function renderFormula(text: string, display: boolean): string {
+// KaTeX (~255 kB) loads on the first formula instead of at startup; until then
+// a formula shows its source.
+type Katex = typeof import("./katexRender");
+const [katex, setKatex] = createSignal<Katex>();
+let katexLoad: Promise<void> | undefined;
+export function loadKatex(): Promise<void> { return katexLoad ??= import("./katexRender").then(m => { setKatex(() => m); }, swallow("markdown.katex")); }
+function renderFormula(text: string, display: boolean): string | undefined {
   const key = `${display ? "D" : "I"}${text}`;
   let html = formulas.get(key);
   if (html !== undefined) { formulas.delete(key); formulas.set(key, html); return html; }
-  html = katex.renderToString(text, {displayMode: display, throwOnError: false, trust: false, strict: "ignore", maxExpand: 1000});
+  const k = katex();
+  if (!k) { void loadKatex(); return undefined; }
+  html = k.renderKatex(text, display);
   if (text.length < 4000) { formulas.set(key, html); if (formulas.size > 1500) formulas.delete(formulas.keys().next().value!); }
   return html;
 }
 function MathFormula(p: {text: string; display?: boolean}) {
   const html = createMemo(() => renderFormula(p.text, !!p.display));
-  return <span class={p.display ? "md-math-block" : "md-math-inline"} innerHTML={html()} />;
+  return <Show when={html()} fallback={<span class={p.display ? "md-math-block md-math-pending" : "md-math-inline md-math-pending"}>{p.text}</span>}>
+    {markup => <span class={p.display ? "md-math-block" : "md-math-inline"} innerHTML={markup()} />}
+  </Show>;
 }
 /** A share Core could not copy (the agent's file was gone or refused). */
 function UnavailableFile(p: { label: string; path: string }) {

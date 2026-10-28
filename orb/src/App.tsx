@@ -267,7 +267,7 @@ export default function App() {
       const partial = isPartialList(rawFresh);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
       const completed = rawCompleted.filter(m => !isMissionDeleting(m.id));
-      setCompletedMissions(completed);
+      setCompletedMissions(current => mergeById(current, completed));
       const freshIds = new Set(fresh.map(m => m.id));
       const vanished = prev.filter(m => !freshIds.has(m.id));
       // Reconcile, never replace: a short answer during a restart keeps what is on screen.

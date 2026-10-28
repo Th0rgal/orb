@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { render } from "@solidjs/testing-library";
-import { parseMarkdown, MdView } from "../src/Markdown";
+import { parseMarkdown, MdView, loadKatex } from "../src/Markdown";
+beforeAll(() => loadKatex());
 import { MATH_REPLY } from "./markdown-math.fixture";
 
 const HEX_ZEROS = `On this DGX Spark the generator runs at about **1.29 billion addresses/s** (mean of three 20 s GB10 runs: 1299 / 1287 / 1281 M addr/s).
