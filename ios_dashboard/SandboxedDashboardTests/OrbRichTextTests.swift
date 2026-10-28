@@ -40,6 +40,9 @@ final class OrbRichTextTests: XCTestCase {
         }
     }
     func testInlineMathAloneUsesKaTeX() async throws {
+        let previous = OrbRichText.preferNativeWhenSimple
+        OrbRichText.preferNativeWhenSimple = true
+        defer { OrbRichText.preferNativeWhenSimple = previous }
         let web = try await render("Inline $x^2$ only")
         let formulas = try await web.evaluateJavaScript("document.querySelectorAll('.katex').length") as? Int
         XCTAssertEqual(formulas, 1)
