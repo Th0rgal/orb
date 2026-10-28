@@ -1,15 +1,18 @@
-
-running 2 tests
-test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
-test real_object_and_archive_mutations_are_rejected ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.77s
+Durable job943815d3-6bc6-5365-82fc-decd08117ec9; source head18209fb1; exit0.
+Raw streams below are grouped as stderr then stdout, not interleaved.
+   Compiling sandboxed_sh v1.3.0 (/srv/sandboxed-storage/host-missions/workspaces/mission-86d91cc3/worktrees/orb-p0)
+    Finished `test` profile [unoptimized] target(s) in 3m 22s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.31s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.07s
+     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-80ea7278ce92855a)
 
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3559 filtered out; finished in 1.80s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3576 filtered out; finished in 1.84s
 
 
 running 14 tests
@@ -28,62 +31,12 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3546 filtered out; finished in 0.44s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3563 filtered out; finished in 0.46s
 
 
-   Compiling orb-spec v1.3.0 (/srv/sandboxed-storage/host-missions/workspaces/mission-86d91cc3/worktrees/orb-p0/crates/orb-spec)
-    Finished `test` profile [unoptimized] target(s) in 0.28s
-     Running tests/artifact_symbols.rs (worktrees/orb-p0/target/debug/deps/artifact_symbols-80ea7278ce92855a)
-   Compiling sandboxed_sh v1.3.0 (/srv/sandboxed-storage/host-missions/workspaces/mission-86d91cc3/worktrees/orb-p0)
-    Finished `test` profile [unoptimized] target(s) in 55.91s
-     Running unittests src/lib.rs (worktrees/orb-p0/target/debug/deps/sandboxed_sh-634227b8721980c6)
-    Finished `test` profile [unoptimized] target(s) in 0.28s
-     Running unittests src/lib.rs (worktrees/orb-p0/target/debug/deps/sandboxed_sh-634227b8721980c6)
-   Compiling orb-spec v1.3.0 (/srv/sandboxed-storage/host-missions/workspaces/mission-86d91cc3/worktrees/orb-p0/crates/orb-spec)
-   Compiling sandboxed_sh v1.3.0 (/srv/sandboxed-storage/host-missions/workspaces/mission-86d91cc3/worktrees/orb-p0)
-warning: function `hermes_model_options` is never used
-   --> src/api/cloud_agents/hermes.rs:193:4
-    |
-193 | fn hermes_model_options(chains: &[crate::provider_health::ModelChain], models: &Value) -> Value {
-    |    ^^^^^^^^^^^^^^^^^^^^
-    |
-    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+running 2 tests
+test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
+test real_object_and_archive_mutations_are_rejected ... ok
 
-warning: function `park_followup` is never used
-   --> src/api/control/control_queue.rs:220:15
-    |
-220 | pub(super) fn park_followup(queue: &mut VecDeque<ControlQueueEntry>, first: ControlQueueEntry) {
-    |               ^^^^^^^^^^^^^
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
 
-warning: function `text_buffer_stream_looks_degenerate` is never used
-     --> src/api/mission_runner.rs:10023:15
-      |
-10023 | pub(crate) fn text_buffer_stream_looks_degenerate(
-      |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: function `degenerate_repeated_substring` is never used
-     --> src/api/mission_runner.rs:10037:15
-      |
-10037 | pub(crate) fn degenerate_repeated_substring(
-      |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: function `timed_response` is never used
-    --> src/api/proxy.rs:2695:4
-     |
-2695 | fn timed_response(resp: Response, cell: Arc<super::proxy_timing::TimingCell>) -> Response {
-     |    ^^^^^^^^^^^^^^
-
-warning: function `github_repository_identity` is never used
-    --> src/control_mcp/orchestrator.rs:2602:4
-     |
-2602 | fn github_repository_identity(remote: &str) -> Option<String> {
-     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: function `check_schema` is never used
- --> src/control_mcp/schema.rs:5:8
-  |
-5 | pub fn check_schema(schema: &Value) -> Result<(), String> {
-  |        ^^^^^^^^^^^^
-
-warning: `sandboxed_sh` (lib) generated 7 warnings
-    Finished `dev` profile [unoptimized] target(s) in 46.73s
