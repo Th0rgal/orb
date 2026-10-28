@@ -7,11 +7,12 @@ pub fn verify_listing(text: &str, macos: bool) -> Result<(), String> {
     let expected: BTreeSet<_> = EXPORTS.iter().copied().collect();
     let mut seen = BTreeSet::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let fields: Vec<_> = line.split_whitespace().collect();
         // POSIX nm emits a standalone archive-member heading before its rows.
-        if fields.len() == 1 && line.ends_with(':') {
+        // Paths and member names may contain spaces (GNU [] or Apple () format).
+        if line.ends_with("]:") || line.ends_with("):") {
             continue;
         }
+        let fields: Vec<_> = line.split_whitespace().collect();
         if fields.len() < 2 {
             return Err(format!("unrecognized nm row: {line}"));
         }

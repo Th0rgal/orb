@@ -15,6 +15,16 @@ fn missing_extra_duplicate_nontext_and_imported_symbols_fail() {
     let valid = listing();
     symbols::verify_listing(&valid, false).unwrap();
     symbols::verify_listing(&format!("archive[member]:\n{valid}"), false).unwrap();
+    symbols::verify_listing(
+        &format!("archive with spaces[member with spaces]:\n{valid}"),
+        false,
+    )
+    .unwrap();
+    symbols::verify_listing(
+        &format!("archive with spaces(member with spaces):\n{valid}"),
+        false,
+    )
+    .unwrap();
     for invalid in [
         valid.lines().skip(1).collect::<Vec<_>>().join("\n"),
         format!("{valid}injected T 0 1\n"),
@@ -40,7 +50,7 @@ fn missing_extra_duplicate_nontext_and_imported_symbols_fail() {
 #[test]
 fn real_object_and_archive_mutations_are_rejected() {
     // Separate artifacts in an isolated directory; no fake engine is counted as conformance.
-    let dir = std::env::temp_dir().join(format!("orb-symbol-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("orb symbol test {}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = root.join("../../shared/orb-spec/cabi/orb_kernel_unboxed.c");
