@@ -124,6 +124,27 @@ class Harness(unittest.TestCase):
                 errors = json.loads((Path(directory) / "lnir-errors.json").read_text())
                 self.assertEqual(len(errors), len(self.cases))
 
+    def test_lnir_parser_exception_retains_earlier_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            conformance.OUT, conformance.ENV = Path(directory), dict(os.environ)
+            core = Path(directory) / "fixture-core"
+            for code in (0, 7):
+                core.write_text(f"#!{sys.executable}\nimport sys\n"
+                                "first = sys.argv[sys.argv.index('--args')+1].endswith(':1')\n"
+                                "print('[{\"decl\":\"probe_fixture\",\"ok\":true,\"value_u64\":\"18\"}]' if first else '['*10000+']'*10000)\n"
+                                f"raise SystemExit(0 if first else {code})\n")
+                core.chmod(0o700)
+                report, values, partial = {"engines": {}, "blockers": []}, {"stock_lean": self.reference}, {}
+                conformance.record_engine(report, values, partial, "lnir",
+                    lambda: conformance.run_lnir_cases(core, Path(directory) / "fixture.lnir", self.cases), self.cases)
+                self.assertEqual(partial["lnir"], {0: 18})
+                self.assertEqual(conformance.summarize(report, values, partial, self.cases), 1)
+                self.assertEqual(report["engines"]["lnir"]["status"], "BLOCKED")
+                errors = json.loads((Path(directory) / "lnir-errors.json").read_text())
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(errors[0]["case"]["id"], 1)
+                self.assertIn("RecursionError", errors[0]["error"])
+
     def test_engine_environment_is_allowlisted(self):
         env = conformance.conformance_environment(Path("evidence"), {
             "PATH": "/toolchain/bin", "HOME": "/home/fixture", "RUSTUP_HOME": "/rustup",

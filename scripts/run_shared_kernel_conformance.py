@@ -235,8 +235,8 @@ def run_lnir_cases(core, module, cases):
                 if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
                     raise ValueError("LNIR request must return exactly one object row")
                 result[c["id"]] = lnir_result(rows[0], c)
-            except (ValueError, TypeError) as error:
-                request_errors.append(str(error))
+            except Exception as error:
+                request_errors.append(type(error).__name__ + ": " + str(error))
         if request_errors:
             errors.append({"case": c, "error": "; ".join(request_errors)})
     (OUT / "lnir-errors.json").write_text(json.dumps(errors, indent=2) + "\n")

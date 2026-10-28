@@ -141,3 +141,11 @@ non-default SDK/Rustup/Nix environments may require explicit future support.
 PATH/HOME/configuration, interpreter libraries and tool-resolution mediators are
 trusted dependencies; binary hashes do not attest those dependencies. Command
 history is hashed in provenance separately from the artifact inventory.
+
+Response processing stays inside each request's ordinary-exception boundary.
+A real subprocess regression emits an earlier valid mismatch then deeply nested
+JSON (both zero and nonzero exits): parser recursion failure retains the earlier
+partial mismatch and forces FAIL. SystemExit/KeyboardInterrupt remain outside
+that catch. Early tool-resolution failures can leave only commands.json rather
+than a normal report; such setup failures establish no engine qualification and
+must retain their original evidence directory rather than retrying over it.
