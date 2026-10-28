@@ -125,9 +125,9 @@ final class OrbSettingsTests: XCTestCase {
         do { _ = try await client.call("/should-not-send"); XCTFail("Old connection should not send") }
         catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
     }
-    func testKimiUsesNativeDeviceFlowAndAPIKeysRemainEditable() {
+    func testKimiSubscriptionsUseProxyAndLegacyNativeAccountsRemainEditable() {
         XCTAssertFalse(OrbProviderKeyEditor.apiKeyTypes.contains("kimi"))
-        XCTAssertFalse(OrbProvidersSettings.subscriptionLogin("kimi").proxy)
+        XCTAssertTrue(OrbProvidersSettings.subscriptionLogin("kimi").proxy)
         XCTAssertTrue(OrbProvidersSettings.subscriptionTypes.contains("google"))
         XCTAssertFalse(OrbProvidersSettings.subscriptionLogin("google").proxy)
         let kimi: OrbJSON = .object(["id": .string("kimi-account"), "provider_type": .string("kimi"), "uses_oauth": .bool(true), "credential_owner": .string("sandboxed_sh")])

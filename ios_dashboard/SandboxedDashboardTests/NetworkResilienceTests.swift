@@ -62,14 +62,18 @@ final class NetworkResilienceTests: XCTestCase {
             }
         }
 
+        // A new client reads saved configuration once; changing UserDefaults
+        // behind the shared client's endpoint cache does not model first launch.
         defaults.removeObject(forKey: key)
-        XCTAssertEqual(OrbCore.shared.baseURL, OrbCore.defaultBaseURL)
+        let missing = OrbCore()
+        XCTAssertEqual(missing.baseURL, OrbCore.defaultBaseURL)
         XCTAssertEqual(OrbCore.defaultBaseURL, "")
-        XCTAssertFalse(OrbCore.shared.isConfigured)
+        XCTAssertFalse(missing.isConfigured)
 
         defaults.set("   ", forKey: key)
-        XCTAssertEqual(OrbCore.shared.baseURL, OrbCore.defaultBaseURL)
-        XCTAssertFalse(OrbCore.shared.isConfigured)
+        let blank = OrbCore()
+        XCTAssertEqual(blank.baseURL, OrbCore.defaultBaseURL)
+        XCTAssertFalse(blank.isConfigured)
     }
 
     /// One error type for every backend request: HTTP failures keep the
