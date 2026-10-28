@@ -80,6 +80,10 @@ jobs:
         run: python3 scripts/lint_kernel_calls.py
       - name: Manifest / generator / lint regression tests
         run: python3 -m unittest -v scripts/test_kernel_abi.py
+      - name: Partial coverage evidence stays source-bound and incomplete
+        run: |
+          python3 scripts/gen_coverage_registry.py --check
+          python3 -m unittest discover -s scripts -p test_coverage_registry.py -v
       - name: C-ABI and JNI compile
         run: |
           set -euo pipefail

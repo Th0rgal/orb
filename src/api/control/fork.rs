@@ -8,7 +8,12 @@ pub struct ControlShadowSnapshot {
     pub total_steps: u64,
     pub total_divergences: u64,
     pub recent_divergences: usize,
+    /// Preflight checks without an independently observed host poststate.
+    pub unobserved_steps: u64,
 }
+
+static CONTROL_UNOBSERVED_STEPS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 static CONTROL_SHADOW_RING: std::sync::LazyLock<
     std::sync::Mutex<crate::orb_spec::shadow::ShadowDivergenceRing<256>>,
@@ -25,15 +30,25 @@ pub fn control_shadow_snapshot() -> ControlShadowSnapshot {
         total_steps: ring.total_events,
         total_divergences: ring.unexpected_divergences,
         recent_divergences: ring.entries().len(),
+        unobserved_steps: CONTROL_UNOBSERVED_STEPS.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
-/// Run `mission_control_step` (`orb_mission_control_step`) in lockstep with the host decision
+/// Run `mission_control_step` (`orb_mission_control_step`) in lockstep with the independent
+/// host observation (`host_archived_before`, `host_archived_after`, `host_admits`)
 /// via `RefinementSimulation::observe_step` and record the comparison in `CONTROL_SHADOW_RING`.
-pub(super) fn observe_mission_control_shadow(
+/// Never feeds Lean's own `verdict.archived_next` back as `legacy_after` (no circular comparison),
+/// and recovers from mutex poison via `unwrap_or_else(|p| p.into_inner())` rather than faking `ExactMatch`.
+pub(super) fn observe_mission_control_shadow_state_in_ring<const CAP: usize>(
     input: crate::orb_spec::MissionControlStepInput,
+    host_archived_before: bool,
+    host_archived_after: bool,
     host_admits: bool,
-) -> crate::orb_spec::MissionControlStepVerdict {
+    ring: &mut crate::orb_spec::shadow::ShadowDivergenceRing<CAP>,
+) -> (
+    crate::orb_spec::MissionControlStepVerdict,
+    crate::orb_spec::shadow::DivergenceKind,
+) {
     let verdict = crate::orb_spec::mission_control_step(input);
     let sim = crate::orb_spec::shadow::RefinementSimulation::<
         bool,
@@ -45,8 +60,10 @@ pub(super) fn observe_mission_control_shadow(
         subsystem: "mission_control",
         abs_state: |s| *s,
         norm_effects: |effs| effs.to_vec(),
-        lean_step: |_s, ev, _ctx| {
-            let v = crate::orb_spec::mission_control_step(*ev);
+        lean_step: |s, ev, _ctx| {
+            let mut ev_eff = *ev;
+            ev_eff.is_archived = *s || ev.is_archived;
+            let v = crate::orb_spec::mission_control_step(ev_eff);
             let effs = if v.emit_dispatch_effect {
                 vec![1u8]
             } else {
@@ -64,25 +81,49 @@ pub(super) fn observe_mission_control_shadow(
         boot_id_matches: true,
         schema_id: 1,
     };
-    if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
-        let _ = sim.observe_step(
-            &input.is_archived,
-            &verdict.archived_next,
-            &input,
-            &host_effects,
-            ctx,
-            &mut ring,
-        );
-    }
-    verdict
+    let kind = sim.observe_step(
+        &host_archived_before,
+        &host_archived_after,
+        &input,
+        &host_effects,
+        ctx,
+        ring,
+    );
+    (verdict, kind)
 }
 
-/// Run `fork_home_step` (`orb_fork_home_step`) in lockstep with the host decision
-/// via `RefinementSimulation::observe_step` and record the comparison in `CONTROL_SHADOW_RING`.
-pub(super) fn observe_fork_home_shadow(
-    input: crate::orb_spec::ForkHomeStepInput,
+pub(super) fn observe_mission_control_shadow(
+    input: crate::orb_spec::MissionControlStepInput,
+    host_archived_before: bool,
+    host_archived_after: bool,
     host_admits: bool,
-) -> crate::orb_spec::ForkHomeStepVerdict {
+) -> crate::orb_spec::MissionControlStepVerdict {
+    let mut ring = CONTROL_SHADOW_RING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    observe_mission_control_shadow_state_in_ring(
+        input,
+        host_archived_before,
+        host_archived_after,
+        host_admits,
+        &mut ring,
+    )
+    .0
+}
+
+/// Run `fork_home_step` (`orb_fork_home_step`) in lockstep with the independent host decision
+/// (`host_overrides_home_before`, `host_overrides_home_after`, `host_admits`)
+/// via `RefinementSimulation::observe_step` and record the comparison in `CONTROL_SHADOW_RING`.
+pub(super) fn observe_fork_home_shadow_state_in_ring<const CAP: usize>(
+    input: crate::orb_spec::ForkHomeStepInput,
+    host_overrides_home_before: bool,
+    host_overrides_home_after: bool,
+    host_admits: bool,
+    ring: &mut crate::orb_spec::shadow::ShadowDivergenceRing<CAP>,
+) -> (
+    crate::orb_spec::ForkHomeStepVerdict,
+    crate::orb_spec::shadow::DivergenceKind,
+) {
     let verdict = crate::orb_spec::fork_home_step(input);
     let sim = crate::orb_spec::shadow::RefinementSimulation::<
         bool,
@@ -113,10 +154,40 @@ pub(super) fn observe_fork_home_shadow(
         boot_id_matches: true,
         schema_id: 1,
     };
-    if let Ok(mut ring) = CONTROL_SHADOW_RING.lock() {
-        let _ = sim.observe_step(&false, &false, &input, &host_effects, ctx, &mut ring);
-    }
-    verdict
+    let kind = sim.observe_step(
+        &host_overrides_home_before,
+        &host_overrides_home_after,
+        &input,
+        &host_effects,
+        ctx,
+        ring,
+    );
+    (verdict, kind)
+}
+
+/// A remote command has no observed poststate before execution. Such preflight
+/// calls are counted separately and never manufacture an ExactMatch receipt.
+pub(super) fn observe_fork_home_shadow(
+    input: crate::orb_spec::ForkHomeStepInput,
+    host_overrides_home_before: bool,
+    host_overrides_home_after: Option<bool>,
+    host_admits: bool,
+) -> crate::orb_spec::ForkHomeStepVerdict {
+    let Some(after) = host_overrides_home_after else {
+        CONTROL_UNOBSERVED_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return crate::orb_spec::fork_home_step(input);
+    };
+    let mut ring = CONTROL_SHADOW_RING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    observe_fork_home_shadow_state_in_ring(
+        input,
+        host_overrides_home_before,
+        after,
+        host_admits,
+        &mut ring,
+    )
+    .0
 }
 
 #[derive(Deserialize)]
@@ -359,6 +430,9 @@ pub async fn fork_mission(
         let requested_override_home = std::env::var_os("HOME")
             .is_some_and(|h| std::path::Path::new(&h) == directory.as_path());
         let host_admits = dir_exists && !dir_is_symlink && same_workspace && same_node;
+        let host_overrides_home_before = requested_override_home;
+        // No host execution receipt is available at this preflight boundary.
+        let host_overrides_home_after = None;
         let fork_verdict = observe_fork_home_shadow(
             crate::orb_spec::ForkHomeStepInput {
                 is_fork_or_side: req.side_question.is_some() || workspace_source == id,
@@ -369,6 +443,8 @@ pub async fn fork_mission(
                 has_committed_transfer,
                 requested_override_home,
             },
+            host_overrides_home_before,
+            host_overrides_home_after,
             host_admits,
         );
         if !dir_exists
@@ -839,6 +915,9 @@ pub(super) async fn workspace_prefix(
         .as_deref()
         .is_some_and(|wd| std::env::var_os("HOME").is_some_and(|h| h == wd));
     let host_admits = source_exists && !source_is_symlink && same_workspace && same_node;
+    let host_overrides_home_before = requested_override_home;
+    // The returned shell prefix has not executed on the remote node yet.
+    let host_overrides_home_after = None;
     let fork_verdict = observe_fork_home_shadow(
         crate::orb_spec::ForkHomeStepInput {
             is_fork_or_side: mission
@@ -853,6 +932,8 @@ pub(super) async fn workspace_prefix(
             has_committed_transfer,
             requested_override_home,
         },
+        host_overrides_home_before,
+        host_overrides_home_after,
         host_admits,
     );
     if source.is_none() {
@@ -1190,7 +1271,7 @@ mod tests {
         }
 
         let after_shadow = super::control_shadow_snapshot();
-        assert!(after_shadow.total_steps >= before_shadow.total_steps + 4);
+        assert!(after_shadow.unobserved_steps >= before_shadow.unobserved_steps + 4);
         assert_eq!(after_shadow.total_divergences, 0);
     }
 
@@ -1363,8 +1444,27 @@ mod tests {
         //    A Completed mission is finished but still live: an explicit
         //    follow-up, resume or transfer continues it, while the automatic
         //    usage-limit replay treats it as archived.
-        let mut archived_mission = mission.clone();
-        archived_mission.status = MissionStatus::Acknowledged;
+        let archived_mission = store
+            .create_mission(
+                Some("Archived fixture"),
+                None,
+                None,
+                None,
+                None,
+                Some("codex"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(archived_mission.id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        let archived_mission = store
+            .get_mission(archived_mission.id)
+            .await
+            .unwrap()
+            .unwrap();
         let v_archived = super::super::remote_jobs::evaluate_mission_control_gate(
             dir.path(),
             store.as_ref(),
@@ -1385,6 +1485,10 @@ mod tests {
         assert!(v_archived.archived_next);
         let mut completed_mission = mission.clone();
         completed_mission.status = MissionStatus::Completed;
+        store
+            .update_mission_status(mission.id, MissionStatus::Completed)
+            .await
+            .unwrap();
         let v_completed = super::super::remote_jobs::evaluate_mission_control_gate(
             dir.path(),
             store.as_ref(),
@@ -1421,6 +1525,10 @@ mod tests {
 
         // 7. Usage-limit replay gate: while `run` is active -> RejectTrackWriterConflict;
         //    once `run` finishes -> SeedFallbackFreshSession on FRESH_SESSION_FALLBACK
+        store
+            .update_mission_status(mission.id, mission.status)
+            .await
+            .unwrap();
         let v_replay_busy = super::super::remote_jobs::evaluate_usage_limit_replay_gate(
             dir.path(),
             store.as_ref(),
@@ -1456,6 +1564,103 @@ mod tests {
         assert!(v_replay_ready.emit_dispatch_effect);
         assert!(v_replay_ready.seed_fallback_session);
         assert_eq!(super::control_shadow_snapshot().total_divergences, 0);
+    }
+
+    #[test]
+    fn unobserved_remote_home_is_not_an_exact_match() {
+        let input = crate::orb_spec::ForkHomeStepInput {
+            is_fork_or_side: true,
+            source_exists: true,
+            source_is_symlink: false,
+            same_workspace: true,
+            same_node: true,
+            has_committed_transfer: false,
+            requested_override_home: true,
+        };
+        let before = super::CONTROL_UNOBSERVED_STEPS.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            super::observe_fork_home_shadow(input, true, None, true),
+            crate::orb_spec::fork_home_step(input)
+        );
+        assert!(
+            super::CONTROL_UNOBSERVED_STEPS.load(std::sync::atomic::Ordering::Relaxed) > before
+        );
+    }
+
+    #[test]
+    fn shadow_state_observation_detects_independent_host_poststate_and_effect_divergences() {
+        let mut ring = crate::orb_spec::shadow::ShadowDivergenceRing::<16>::new();
+
+        // 1. Mission control exact match when independent host archive state and admit effect match Lean
+        let mc_input = crate::orb_spec::MissionControlStepInput {
+            is_archived: true,
+            active_track_writers: 0,
+            has_lease: true,
+            msg_already_delivered: false,
+            is_resume: false,
+            session_created: true,
+            lineage_verified: true,
+            rollout_exists: true,
+            has_fallback_prompt: true,
+        };
+        let (_, k_mc_ok) = super::observe_mission_control_shadow_state_in_ring(
+            mc_input, true, true, false, &mut ring,
+        );
+        assert_eq!(k_mc_ok, crate::orb_spec::shadow::DivergenceKind::ExactMatch);
+        assert_eq!(ring.unexpected_divergences, 0);
+
+        // 2. Mission control poststate divergence: host unarchives an archived mission (`host_archived_after = false`)
+        let (_, k_mc_state_div) = super::observe_mission_control_shadow_state_in_ring(
+            mc_input, true, false, false, &mut ring,
+        );
+        assert_eq!(
+            k_mc_state_div,
+            crate::orb_spec::shadow::DivergenceKind::LeanBug
+        );
+        assert_eq!(ring.unexpected_divergences, 1);
+
+        // 3. Mission control effect divergence: host admits dispatch on an archived mission (`host_admits = true`)
+        let (_, k_mc_eff_div) = super::observe_mission_control_shadow_state_in_ring(
+            mc_input, true, true, true, &mut ring,
+        );
+        assert_eq!(
+            k_mc_eff_div,
+            crate::orb_spec::shadow::DivergenceKind::LeanBug
+        );
+        assert_eq!(ring.unexpected_divergences, 2);
+
+        // 4. Fork home exact match: host preserves job HOME (`host_overrides_home_after = false`)
+        let fh_input = crate::orb_spec::ForkHomeStepInput {
+            is_fork_or_side: true,
+            source_exists: true,
+            source_is_symlink: false,
+            same_workspace: true,
+            same_node: true,
+            has_committed_transfer: false,
+            requested_override_home: true,
+        };
+        let (_, k_fh_ok) =
+            super::observe_fork_home_shadow_state_in_ring(fh_input, true, false, true, &mut ring);
+        assert_eq!(k_fh_ok, crate::orb_spec::shadow::DivergenceKind::ExactMatch);
+        assert_eq!(ring.unexpected_divergences, 2);
+
+        // 5. Fork home poststate divergence (#1302 bug): host overrides job HOME (`host_overrides_home_after = true`)
+        let (_, k_fh_state_div) =
+            super::observe_fork_home_shadow_state_in_ring(fh_input, true, true, true, &mut ring);
+        assert_eq!(
+            k_fh_state_div,
+            crate::orb_spec::shadow::DivergenceKind::LeanBug
+        );
+        assert_eq!(ring.unexpected_divergences, 3);
+
+        // 6. Fork home effect divergence: host rejects valid fork (`host_admits = false`)
+        let (_, k_fh_eff_div) =
+            super::observe_fork_home_shadow_state_in_ring(fh_input, true, false, false, &mut ring);
+        assert_eq!(
+            k_fh_eff_div,
+            crate::orb_spec::shadow::DivergenceKind::LeanBug
+        );
+        assert_eq!(ring.unexpected_divergences, 4);
     }
 }
 

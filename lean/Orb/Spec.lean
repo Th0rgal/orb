@@ -179,9 +179,11 @@ theorem EffectLiveness.emits_on_progress {State Event Effect : Type}
 
 /--
   Meta-Spec 8 (`CostBound`):
-  Every transition `step s e` is bounded in CPU fuel (`c0 + c1 * inputBytes e`), emitted effect
-  count (`maxEffects`), and wire output size (`maxOutBytes`), preventing unbounded loops or
-  allocation amplification.
+  Symbolic model-level transition accounting: bounds the caller-supplied `cpuFuel s e` function
+  by `c0 + c1 * inputBytes e`, emitted effect count by `maxEffects`, and `outputBytes s e` by
+  `maxOutBytes`. Note: when `cpuFuel` is instantiated to a constant (e.g. `fun _ _ => 1`),
+  `fuel_bound` is a symbolic step-count annotation and does NOT prove hardware runtime complexity
+  or branch-free execution.
 -/
 structure CostBound (State Event Effect : Type) where
   step        : State → Event → State × List Effect
@@ -2054,12 +2056,13 @@ theorem resume_codex_requires_verified_lineage
       (simp_all; try decide)
 
 /-- Corollary 60 (`ConservedResource` & `ReplayIdempotence` — `orb_mission_control_step`):
-    1. `at_most_one_writer_per_track`: when `activeTrackWriters != 0`, zero dispatch is emitted, and
-       across all transitions `hi32 ≤ 1`.
-    2. `no_user_message_lost_or_duplicated`: an already-delivered message (`deliv == 1`) is never
+    Single-step admission & delivered-flag gate (`single_step_writer_admission_and_delivered_flag_gate`):
+    1. `single_step_writer_conflict_blocks_dispatch`: when `activeTrackWriters != 0`, zero dispatch is emitted, and
+       across all transitions `hi32 ≤ 1` (assuming caller-supplied `activeTrackWriters` and `hasLease` flags).
+    2. `delivered_flag_blocks_redispatch`: an already-delivered message flag (`deliv == 1`) is never
        dispatched again, while a fresh leased turn (`arch == 0, writers == 0, lease == 1, deliv == 0, res == 0`)
        is always dispatched (`lo32 = 257, hi32 = 1`). -/
-theorem at_most_one_writer_and_no_message_lost_or_duplicated
+theorem single_step_writer_admission_and_delivered_flag_gate
     (arch : UInt8) (writers : UInt32) (lease deliv res sc lv ro fb : UInt8)
     (h_busy : (writers == 0) = false) :
     ((missionControlStep arch writers lease deliv res sc lv ro fb &&& 0xFFFFFFFF) &&& 256) = 0 ∧
@@ -2091,6 +2094,33 @@ theorem at_most_one_writer_and_no_message_lost_or_duplicated
 def effectiveArchived (archivedState : UInt8) (e : MissionControlCheck) : MissionControlCheck :=
   { e with isArchived := if archivedState == 1 || e.isArchived == 1 then 1 else 0 }
 
+/-- Expected concrete dispatch action code (`1 = DispatchFreshTurn`, `2 = ResumeVerifiedSession`,
+    `3 = SeedFallbackFreshSession`) independently derived from `MissionControlCheck`. -/
+def expectedMissionControlActionCode (e : MissionControlCheck) : UInt32 :=
+  if !(e.isResume == 1) then 1
+  else if e.sessionCreated == 1 && e.lineageVerified == 1 && e.rolloutExists == 1 then 2
+  else 3
+
+theorem missionControlStep_actionCode_eq_expected (e : MissionControlCheck)
+    (h_adm : e.Admissible) :
+    ((missionControlStep e.isArchived e.activeTrackWriters e.hasLease e.msgAlreadyDelivered
+        e.isResume e.sessionCreated e.lineageVerified e.rolloutExists e.hasFallbackPrompt &&& 0xFFFFFFFF) &&& 0xFF).toUInt32 =
+      expectedMissionControlActionCode e := by
+  unfold MissionControlCheck.Admissible at h_adm
+  unfold missionControlStep expectedMissionControlActionCode
+  rw [pack32_lo]
+  cases ha : (e.isArchived == 1) <;>
+    cases hd : (e.msgAlreadyDelivered == 1) <;>
+    cases hlw : (e.hasLease == 1 && e.activeTrackWriters == 0) <;>
+    cases hr : (e.isResume == 1) <;>
+    cases hsv : (e.sessionCreated == 1 && e.lineageVerified == 1 && e.rolloutExists == 1) <;>
+    cases hfb : (e.hasFallbackPrompt == 1) <;>
+    (simp_all; try decide)
+
+theorem expectedMissionControlActionCode_effectiveArchived (s : UInt8) (e : MissionControlCheck) :
+    expectedMissionControlActionCode (effectiveArchived s e) = expectedMissionControlActionCode e := by
+  rfl
+
 /-- Pure state-machine transition wrapper for `orb_mission_control_step` (`State × Event → State × List UInt32`). -/
 def missionControlMachineStep (archivedState : UInt8) (e : MissionControlCheck) : UInt8 × List UInt32 :=
   let e' := effectiveArchived archivedState e
@@ -2100,27 +2130,36 @@ def missionControlMachineStep (archivedState : UInt8) (e : MissionControlCheck) 
    if missionControlMetaGate.gate e' then [((w &&& 0xFFFFFFFF) &&& 0xFF).toUInt32] else [])
 
 /-- Concrete `MetaStepSpec` instance for `orb_mission_control_step` (`EffectSafety`, `EffectLiveness`
-    with multi-step reachable trace from `init = 0`, and `CostBound`). -/
+    with exact `expectedMissionControlActionCode` matching, multi-step reachable trace from `init = 0`,
+    and symbolic `CostBound`). -/
 def missionControlMetaStepSpec : MetaStepSpec UInt8 MissionControlCheck UInt32 where
   safety := {
     step := missionControlMachineStep
-    authorized := fun s e _eff => (effectiveArchived s e).Admissible
+    authorized := fun s e eff =>
+      eff == expectedMissionControlActionCode e && (effectiveArchived s e).Admissible
     sound := fun s e eff h_in => by
       dsimp [missionControlMachineStep] at h_in
       split at h_in
       · next h_emit =>
-        exact missionControlMetaGate.sound (effectiveArchived s e) h_emit
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := missionControlMetaGate.sound (effectiveArchived s e) h_emit
+        have h_act := missionControlStep_actionCode_eq_expected (effectiveArchived s e) h_adm
+        rw [expectedMissionControlActionCode_effectiveArchived] at h_act
+        simp [h_act, h_adm]
       · contradiction
   }
   liveness := {
     init := 0
     step := missionControlMachineStep
     progressRequired := fun s e => (effectiveArchived s e).Admissible
-    expectedEffect := fun _ _ => True
+    expectedEffect := fun e eff => eff == expectedMissionControlActionCode e
     live := fun s e h_req => by
       have h_gate := missionControlMetaGate.complete (effectiveArchived s e) h_req
+      have h_act := missionControlStep_actionCode_eq_expected (effectiveArchived s e) h_req
+      rw [expectedMissionControlActionCode_effectiveArchived] at h_act
       dsimp [missionControlMachineStep]
-      simp [h_gate]
+      simp [h_gate, h_act]
     traceEvents := [
       ⟨0, 0, 1, 0, 0, 0, 0, 0, 0⟩,
       ⟨0, 0, 1, 0, 1, 1, 1, 0, 1⟩
@@ -2657,10 +2696,11 @@ def transcriptReduceMetaGate : MetaGateSpec TranscriptReduceCheck
   tight      := rfl
 
 /-- Corollary 65 (`IdempotentReplay` & `MonotoneProgress` — `orb_transcript_reduce_step`):
-    1. `replay_log_eq_live_transcript`: replaying from the persisted event log (`isReplayFromLog = 1`)
-       produces the exact same 64-bit reducer transition word as live streaming (`isReplayFromLog = 0`).
+    Single-step transition word invariance (`transcript_reduce_step_word_ignores_replay_flag_and_rejects_stale_seq`):
+    1. Replaying a single step from the persisted event log (`isReplayFromLog = 1`) produces the exact same
+       64-bit reducer transition word as live streaming (`isReplayFromLog = 0`).
     2. Duplicate or stale sequence numbers (`incomingSeq <= lastAppliedSeq`) never emit a transcript entry (`emitEntryBit = 0`). -/
-theorem replay_log_eq_live_transcript_and_monotone_seq
+theorem transcript_reduce_step_word_ignores_replay_flag_and_rejects_stale_seq
     (lastSeq incSeq : UInt64) (think act : UInt8) :
     transcriptReduceStep lastSeq incSeq think act 1 = transcriptReduceStep lastSeq incSeq think act 0 ∧
     ((transcriptReduceStep lastSeq lastSeq think act 0 &&& 0xFFFFFFFF) &&& 256) = 0 := by
@@ -3104,11 +3144,12 @@ def clientParityMetaGate : MetaGateSpec ClientParityCheck
   nonVacuous := rfl
   tight      := rfl
 
-/-- Corollary 69 (`IdempotentReplay` — `orb_client_parity_step`, Cross-Client Bitwise Projection Parity):
+/-- Corollary 69 (`IdempotentReplay` — `orb_client_parity_step`, Summary Digest Word Parity Across Targets):
     Core (`0`), iOS (`1`), Android (`2`), and Desktop `wasm32` (`3`) produce the exact same
-    64-bit projection word on any `OrbWire` event frame (`wireSchemaId`, `transcriptSeq`,
-    `markdownBlocksCount`, `sendQueueDepth`, `scrollCorrectedInEpoch`). -/
-theorem client_projection_bitwise_parity_across_ios_android_wasm
+    64-bit XOR/count summary digest word on any `OrbWire` event summary (`wireSchemaId`, `transcriptSeq`,
+    `markdownBlocksCount`, `sendQueueDepth`, `scrollCorrectedInEpoch`).
+    Note: This establishes equality of the 64-bit summary word (`clientParityStep`), not full client-state equivalence. -/
+theorem client_summary_digest_word_parity_across_targets
     (schema : UInt32) (seq blocks queue : UInt32) (sc : UInt8) :
     clientParityStep 0 schema seq blocks queue sc = clientParityStep 1 schema seq blocks queue sc ∧
     clientParityStep 1 schema seq blocks queue sc = clientParityStep 2 schema seq blocks queue sc ∧

@@ -1,0 +1,1985 @@
+{
+  "schema_version": "orb-coverage-registry-v1",
+  "acceptance": "INCOMPLETE",
+  "total_exports": 113,
+  "counts_by_status": {
+    "partial": 2,
+    "unconnected": 111
+  },
+  "entries": [
+    {
+      "export": "orb_verify_writer_reuse",
+      "requirement": "Inventory ABI declaration orb_verify_writer_reuse; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyWriterReuse",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_lease_mode",
+      "requirement": "Inventory ABI declaration orb_verify_lease_mode; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyLeaseMode",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_track_hold",
+      "requirement": "Inventory ABI declaration orb_verify_track_hold; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyTrackHold",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_repo_disjoint",
+      "requirement": "Inventory ABI declaration orb_verify_repo_disjoint; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyRepoDisjoint",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_remote_outbox",
+      "requirement": "Inventory ABI declaration orb_verify_remote_outbox; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyRemoteOutbox",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_board_slots",
+      "requirement": "Inventory ABI declaration orb_verify_board_slots; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyBoardSlots",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_board_retry",
+      "requirement": "Inventory ABI declaration orb_verify_board_retry; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyBoardRetry",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_job_transition",
+      "requirement": "Inventory ABI declaration orb_verify_job_transition; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyJobTransition",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_bundle_budget",
+      "requirement": "Inventory ABI declaration orb_verify_bundle_budget; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyBundleBudget",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_token_rotation",
+      "requirement": "Inventory ABI declaration orb_verify_token_rotation; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyTokenRotation",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_approval",
+      "requirement": "Inventory ABI declaration orb_verify_approval; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyApproval",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_log_window",
+      "requirement": "Inventory ABI declaration orb_verify_log_window; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyLogWindow",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mix64_word",
+      "requirement": "Inventory ABI declaration orb_mix64_word; behavioral acceptance pending",
+      "model": "Orb.Kernel.mix64Word",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_proxy_step",
+      "requirement": "Inventory ABI declaration orb_proxy_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.proxyStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_deadlines",
+      "requirement": "Inventory ABI declaration orb_stream_deadlines; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamDeadlines",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_breaker_step",
+      "requirement": "Inventory ABI declaration orb_breaker_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.breakerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_step",
+      "requirement": "Inventory ABI declaration orb_mission_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_reconcile_step",
+      "requirement": "Inventory ABI declaration orb_reconcile_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.reconcileStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_queue_step",
+      "requirement": "Inventory ABI declaration orb_queue_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.queueStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_vm_step",
+      "requirement": "Inventory ABI declaration orb_vm_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.vmStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "lp_orb_x2dspec_Orb_Kernel_accessStep___redArg",
+      "requirement": "Inventory ABI declaration lp_orb_x2dspec_Orb_Kernel_accessStep___redArg; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "orb_access_step",
+      "requirement": "Inventory ABI declaration orb_access_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.accessStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_workfold_step",
+      "requirement": "Inventory ABI declaration orb_workfold_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.workfoldStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_taskcard_step",
+      "requirement": "Inventory ABI declaration orb_taskcard_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.taskcardStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_sidebar_visibility",
+      "requirement": "Inventory ABI declaration orb_sidebar_visibility; behavioral acceptance pending",
+      "model": "Orb.Kernel.sidebarVisibility",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_admission_step",
+      "requirement": "Inventory ABI declaration orb_admission_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.admissionStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_account_cooldown_secs",
+      "requirement": "Inventory ABI declaration orb_account_cooldown_secs; behavioral acceptance pending",
+      "model": "Orb.Kernel.accountCooldownSecs",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_cost_cents_step",
+      "requirement": "Inventory ABI declaration orb_cost_cents_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.costCentsStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_loop_step",
+      "requirement": "Inventory ABI declaration orb_stream_loop_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamLoopStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_job_ledger_step",
+      "requirement": "Inventory ABI declaration orb_job_ledger_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.jobLedgerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_proc_liveness_step",
+      "requirement": "Inventory ABI declaration orb_proc_liveness_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.procLivenessStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_pr_gate_step",
+      "requirement": "Inventory ABI declaration orb_pr_gate_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.prGateStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_turn_summary_step",
+      "requirement": "Inventory ABI declaration orb_turn_summary_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.turnSummaryStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_usage_limit_status",
+      "requirement": "Inventory ABI declaration orb_usage_limit_status; behavioral acceptance pending",
+      "model": "Orb.Kernel.usageLimitStatus",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_relative_time_bucket",
+      "requirement": "Inventory ABI declaration orb_relative_time_bucket; behavioral acceptance pending",
+      "model": "Orb.Kernel.relativeTimeBucket",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_transcript_patch_step",
+      "requirement": "Inventory ABI declaration orb_transcript_patch_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.transcriptPatchStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_attribution_step",
+      "requirement": "Inventory ABI declaration orb_attribution_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.attributionStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_schedule_step",
+      "requirement": "Inventory ABI declaration orb_schedule_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scheduleStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stats_settle_step",
+      "requirement": "Inventory ABI declaration orb_stats_settle_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.statsSettleStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_privilege_step",
+      "requirement": "Inventory ABI declaration orb_privilege_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.privilegeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_bunker_step",
+      "requirement": "Inventory ABI declaration orb_bunker_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.bunkerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_deploy_gate_step",
+      "requirement": "Inventory ABI declaration orb_deploy_gate_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.deployGateStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_max_top",
+      "requirement": "Inventory ABI declaration orb_scroll_max_top; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollMaxTop",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_clamp_top",
+      "requirement": "Inventory ABI declaration orb_scroll_clamp_top; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollClampTop",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_gap",
+      "requirement": "Inventory ABI declaration orb_scroll_gap; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollGap",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_layout_step",
+      "requirement": "Inventory ABI declaration orb_scroll_layout_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollLayoutStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_user_step",
+      "requirement": "Inventory ABI declaration orb_scroll_user_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollUserStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_jump_step",
+      "requirement": "Inventory ABI declaration orb_scroll_jump_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollJumpStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_correct",
+      "requirement": "Inventory ABI declaration orb_scroll_correct; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollCorrect",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_shows_jump",
+      "requirement": "Inventory ABI declaration orb_scroll_shows_jump; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollShowsJump",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_coalescer_step",
+      "requirement": "Inventory ABI declaration orb_stream_coalescer_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamCoalescerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_fence_step",
+      "requirement": "Inventory ABI declaration orb_stream_fence_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamFenceStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_commit_step",
+      "requirement": "Inventory ABI declaration orb_stream_commit_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamCommitStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_token_cost_step",
+      "requirement": "Inventory ABI declaration orb_stream_token_cost_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamTokenCostStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_state_classify",
+      "requirement": "Inventory ABI declaration orb_mission_state_classify; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionStateClassify",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_sort_rank",
+      "requirement": "Inventory ABI declaration orb_mission_sort_rank; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionSortRank",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_flags",
+      "requirement": "Inventory ABI declaration orb_mission_flags; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionFlags",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_inbox_section",
+      "requirement": "Inventory ABI declaration orb_mission_inbox_section; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionInboxSection",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_connection_issue_classify",
+      "requirement": "Inventory ABI declaration orb_connection_issue_classify; behavioral acceptance pending",
+      "model": "Orb.Kernel.connectionIssueClassify",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_worked_duration_bucket",
+      "requirement": "Inventory ABI declaration orb_worked_duration_bucket; behavioral acceptance pending",
+      "model": "Orb.Kernel.workedDurationBucket",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_turn_outcome_step",
+      "requirement": "Inventory ABI declaration orb_turn_outcome_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.turnOutcomeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_numeric_cell_scan",
+      "requirement": "Inventory ABI declaration orb_numeric_cell_scan; behavioral acceptance pending",
+      "model": "Orb.Kernel.numericCellScan",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_file_ref_line_span",
+      "requirement": "Inventory ABI declaration orb_file_ref_line_span; behavioral acceptance pending",
+      "model": "Orb.Kernel.fileRefLineSpan",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_machine_action_admitted",
+      "requirement": "Inventory ABI declaration orb_machine_action_admitted; behavioral acceptance pending",
+      "model": "Orb.Kernel.machineActionAdmitted",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_send_flow_step",
+      "requirement": "Inventory ABI declaration orb_send_flow_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.sendFlowStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_wire_validate_frame",
+      "requirement": "Inventory ABI declaration orb_wire_validate_frame; behavioral acceptance pending",
+      "model": "Orb.Kernel.wireValidateFrame",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_wire_pack_record",
+      "requirement": "Inventory ABI declaration orb_wire_pack_record; behavioral acceptance pending",
+      "model": "Orb.Kernel.wirePackRecord",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_wire_schema_migrate_step",
+      "requirement": "Inventory ABI declaration orb_wire_schema_migrate_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.wireSchemaMigrateStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_effect_admissible",
+      "requirement": "Inventory ABI declaration orb_effect_admissible; behavioral acceptance pending",
+      "model": "Orb.Kernel.effectAdmissible",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_provider_pool_step",
+      "requirement": "Inventory ABI declaration orb_provider_pool_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.providerPoolStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_route_argmin_step",
+      "requirement": "Inventory ABI declaration orb_route_argmin_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.routeArgminStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_control_step",
+      "requirement": "Inventory ABI declaration orb_mission_control_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionControlStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Host effects cover dispatch admission only, not action identity or actual process execution.",
+        "Snapshot-to-store races and caller evidence freshness are not proved.",
+        "The linked theorem proves a scalar archived-input property; no end-to-end refinement certificate exists."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local tests compare archive state from the store and a caller-supplied dispatch-admission bit; injected poststate/effect mismatches are detected.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "archived_mission_never_revives"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/control/remote_jobs.rs",
+            "symbol": "evaluate_mission_control_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "shadow_state_observation_detects_independent_host_poststate_and_effect_divergences"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
+            "sha256": "b24856cfa93e3b80f2232003bbd6189697912cb9686c8cee9a2cc9097846f967"
+          },
+          {
+            "path": "src/api/control/fork.rs",
+            "sha256": "3eba70d0ee7a93b3edaf4f8cf1b1043c656691fc20c7758ad9946b108f020b0a"
+          },
+          {
+            "path": "src/api/control/remote_jobs.rs",
+            "sha256": "019b4cf1cde0162d304635c39a6ede7764a421d68abb67775e22346ea7dc3dc5"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::fork::tests:: -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Host effects cover dispatch admission only, not action identity or actual process execution.",
+          "Snapshot-to-store races and caller evidence freshness are not proved.",
+          "The linked theorem proves a scalar archived-input property; no end-to-end refinement certificate exists."
+        ]
+      }
+    },
+    {
+      "export": "orb_fork_home_step",
+      "requirement": "Inventory ABI declaration orb_fork_home_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.forkHomeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Remote HOME poststate has not been observed; no production ExactMatch claim.",
+        "Synthetic injection tests do not qualify remote execution or device behavior.",
+        "The linked theorem concerns the scalar word, not the remote shell or filesystem."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local tests detect synthetic HOME poststate divergence; production preflight without execution evidence is counted as unobserved.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "fork_preserves_job_home_and_source_cwd"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/control/fork.rs",
+            "symbol": "workspace_prefix"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "shadow_state_observation_detects_independent_host_poststate_and_effect_divergences"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "production_workspace_prefix_enforces_fork_home_and_node_invariants"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "unobserved_remote_home_is_not_an_exact_match"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
+            "sha256": "b24856cfa93e3b80f2232003bbd6189697912cb9686c8cee9a2cc9097846f967"
+          },
+          {
+            "path": "src/api/control/fork.rs",
+            "sha256": "3eba70d0ee7a93b3edaf4f8cf1b1043c656691fc20c7758ad9946b108f020b0a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::fork::tests:: -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Remote HOME poststate has not been observed; no production ExactMatch claim.",
+          "Synthetic injection tests do not qualify remote execution or device behavior.",
+          "The linked theorem concerns the scalar word, not the remote shell or filesystem."
+        ]
+      }
+    },
+    {
+      "export": "orb_privd_command_step",
+      "requirement": "Inventory ABI declaration orb_privd_command_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.privdCommandStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_ssh_identity_step",
+      "requirement": "Inventory ABI declaration orb_ssh_identity_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.sshIdentityStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_agent_event_normalize_step",
+      "requirement": "Inventory ABI declaration orb_agent_event_normalize_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.agentEventNormalizeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_transcript_reduce_step",
+      "requirement": "Inventory ABI declaration orb_transcript_reduce_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.transcriptReduceStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_cursor_page_step",
+      "requirement": "Inventory ABI declaration orb_cursor_page_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.cursorPageStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_sidebar_merge_step",
+      "requirement": "Inventory ABI declaration orb_sidebar_merge_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.sidebarMergeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_epoch_step",
+      "requirement": "Inventory ABI declaration orb_scroll_epoch_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollEpochStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_client_parity_step",
+      "requirement": "Inventory ABI declaration orb_client_parity_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.clientParityStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_slice_bounds",
+      "requirement": "Inventory ABI declaration leansys_verify_slice_bounds; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_wal_frame",
+      "requirement": "Inventory ABI declaration leansys_verify_wal_frame; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_cas_digest",
+      "requirement": "Inventory ABI declaration leansys_verify_cas_digest; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_check_http_bounds",
+      "requirement": "Inventory ABI declaration leansys_check_http_bounds; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_jsonl_tape",
+      "requirement": "Inventory ABI declaration leansys_verify_jsonl_tape; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_ring_cursor",
+      "requirement": "Inventory ABI declaration leansys_verify_ring_cursor; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_sst_block",
+      "requirement": "Inventory ABI declaration leansys_verify_sst_block; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_poll_interest",
+      "requirement": "Inventory ABI declaration leansys_verify_poll_interest; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_rlimit_budget",
+      "requirement": "Inventory ABI declaration leansys_verify_rlimit_budget; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_mix64_word",
+      "requirement": "Inventory ABI declaration leansys_mix64_word; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_composite_key_order",
+      "requirement": "Inventory ABI declaration leansys_verify_composite_key_order; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_token_auth",
+      "requirement": "Inventory ABI declaration leansys_verify_token_auth; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_log_window",
+      "requirement": "Inventory ABI declaration leansys_verify_log_window; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_jsonrpc_frame",
+      "requirement": "Inventory ABI declaration leansys_verify_jsonrpc_frame; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_gate_admit",
+      "requirement": "Inventory ABI declaration leansys_gate_admit; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_mmap_seqlock",
+      "requirement": "Inventory ABI declaration leansys_verify_mmap_seqlock; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_proc_stat_fields",
+      "requirement": "Inventory ABI declaration leansys_verify_proc_stat_fields; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_sse_frame_scan",
+      "requirement": "Inventory ABI declaration leansys_sse_frame_scan; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_gfm_pipe_scan",
+      "requirement": "Inventory ABI declaration leansys_gfm_pipe_scan; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_tag_scan",
+      "requirement": "Inventory ABI declaration leansys_tag_scan; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_transcript_index",
+      "requirement": "Inventory ABI declaration leansys_transcript_index; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_par_chunk",
+      "requirement": "Inventory ABI declaration leansys_verify_par_chunk; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_arena_disjoint",
+      "requirement": "Inventory ABI declaration leansys_verify_arena_disjoint; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_snapshot_visibility",
+      "requirement": "Inventory ABI declaration leansys_verify_snapshot_visibility; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_http_route_match",
+      "requirement": "Inventory ABI declaration leansys_verify_http_route_match; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_counterexample_triage",
+      "requirement": "Inventory ABI declaration leansys_verify_counterexample_triage; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_dag_wave_step",
+      "requirement": "Inventory ABI declaration leansys_verify_dag_wave_step; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_ios_jetsam_budget",
+      "requirement": "Inventory ABI declaration leansys_verify_ios_jetsam_budget; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_worker_budget",
+      "requirement": "Inventory ABI declaration leansys_verify_worker_budget; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_page_aligned_buffer",
+      "requirement": "Inventory ABI declaration leansys_verify_page_aligned_buffer; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_select_isa",
+      "requirement": "Inventory ABI declaration leansys_select_isa; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "leansys_verify_isa_selection",
+      "requirement": "Inventory ABI declaration leansys_verify_isa_selection; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    }
+  ]
+}

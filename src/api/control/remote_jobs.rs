@@ -126,6 +126,23 @@ pub(super) async fn evaluate_mission_control_gate(
     });
     let has_fallback_prompt =
         (!is_resume || lineage_verified) && fallback_prompt.is_some_and(|p| !p.trim().is_empty());
+    let host_archived_before = mission.status == MissionStatus::Acknowledged
+        || crate::api::mission_horizon::superseded_by(mission).is_some()
+        || mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let host_archived_after = effective_status == MissionStatus::Acknowledged
+        || stored_mission
+            .as_ref()
+            .is_some_and(|m| crate::api::mission_horizon::superseded_by(m).is_some())
+        || stored_mission.as_ref().is_some_and(|m| {
+            m.project
+                .tags
+                .iter()
+                .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
+        });
     Ok(fork::observe_mission_control_shadow(
         crate::orb_spec::MissionControlStepInput {
             is_archived,
@@ -138,6 +155,8 @@ pub(super) async fn evaluate_mission_control_gate(
             rollout_exists,
             has_fallback_prompt,
         },
+        host_archived_before,
+        host_archived_after,
         host_admits,
     ))
 }
@@ -151,7 +170,12 @@ pub(super) async fn evaluate_usage_limit_replay_gate(
 ) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
     // Nothing replays a finished mission on its own: Completed counts as
     // archived here, unlike an explicit follow-up.
-    let is_archived = matches!(
+    let stored_mission = mission_store.get_mission(mission.id).await?;
+    let effective_status = stored_mission
+        .as_ref()
+        .map(|m| m.status)
+        .unwrap_or(mission.status);
+    let host_archived_before = matches!(
         mission.status,
         MissionStatus::Acknowledged | MissionStatus::Completed
     ) || crate::api::mission_horizon::superseded_by(mission).is_some()
@@ -160,6 +184,19 @@ pub(super) async fn evaluate_usage_limit_replay_gate(
             .tags
             .iter()
             .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let host_archived_after = matches!(
+        effective_status,
+        MissionStatus::Acknowledged | MissionStatus::Completed
+    ) || stored_mission
+        .as_ref()
+        .is_some_and(|m| crate::api::mission_horizon::superseded_by(m).is_some())
+        || stored_mission.as_ref().is_some_and(|m| {
+            m.project
+                .tags
+                .iter()
+                .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
+        });
+    let is_archived = host_archived_before || host_archived_after;
     let active_run = mission_store.get_active_mission_run(mission.id).await?;
     let has_lease = active_run.is_none();
     let active_track_writers = if active_run.is_some() { 1 } else { 0 };
@@ -205,6 +242,8 @@ pub(super) async fn evaluate_usage_limit_replay_gate(
             rollout_exists,
             has_fallback_prompt,
         },
+        host_archived_before,
+        host_archived_after,
         host_admits,
     ))
 }
