@@ -185,11 +185,6 @@ final class OrbInboxSettings: @unchecked Sendable {
             label: "Fast Router (builtin/fast)",
             subtitle: "Lowest latency router"
         ),
-        OrbInboxModelPreset(
-            id: "builtin/reasoning",
-            label: "Reasoning Router (builtin/reasoning)",
-            subtitle: "Deeper technical synthesis"
-        ),
     ]
 
     private let aiSummaryKey = "orb.inbox.aiSummary.v1"
@@ -415,15 +410,30 @@ final class OrbInboxDigestStore {
     }
 }
 
+enum OrbInboxSummaryChoice {
+    static func apply(model: String, choice: String) -> (aiSummary: Bool, model: String) {
+        let selected = choice.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (!selected.isEmpty, selected.isEmpty ? model : selected)
+    }
+}
+
 struct OrbInboxSettingsView: View {
     @State private var settings = OrbInboxSettings.shared
     @State private var notifications = OrbNotificationCenter.shared
-    @State private var customModel: String = {
-        let cur = OrbInboxSettings.shared.model
-        let isPreset = OrbInboxSettings.modelPresets.contains(where: { $0.id == cur })
-        return isPreset ? "" : cur
-    }()
+    @State private var client = OrbSettingsClient()
+    @State private var choices: [String] = []
+    @State private var editing = false
+    @State private var customModel = ""
 
+    private var models: [String] {
+        var seen = Set<String>()
+        return (OrbInboxSettings.modelPresets.map(\.id) + choices + [settings.model]).filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+    private func choose(_ choice: String) {
+        let next = OrbInboxSummaryChoice.apply(model: settings.model, choice: choice)
+        settings.model = next.model
+        settings.aiSummary = next.aiSummary
+    }
     var body: some View {
         List {
             Section {
@@ -431,56 +441,35 @@ struct OrbInboxSettingsView: View {
                     .accessibilityIdentifier("settings.inbox.notifications")
                 Toggle("Include autonomous agents", isOn: $settings.includeAutonomous)
                     .accessibilityIdentifier("settings.inbox.includeAutonomous")
-                Toggle("AI Overview summaries", isOn: $settings.aiSummary)
-                    .accessibilityIdentifier("settings.inbox.aiSummary")
+                Picker("AI summaries", selection: Binding(get: { settings.aiSummary ? settings.model : "" }, set: { value in
+                    if value == "__custom__" { customModel = settings.model; editing = true }
+                    else { choose(value) }
+                })) {
+                    Text("Off").tag("")
+                    ForEach(models, id: \.self) { Text($0).tag($0) }
+                    Text("Custom model or chain…").tag("__custom__")
+                }
+                .accessibilityIdentifier("settings.inbox.aiSummaries")
             } footer: {
-                Text("Notifies you with the AI Overview when a hybrid or autonomous run needs your input or finishes, and opens its Inbox summary card directly.")
-            }
-
-            if settings.aiSummary {
-                Section("Overview Router Model") {
-                    ForEach(OrbInboxSettings.modelPresets) { preset in
-                        Button {
-                            customModel = ""
-                            settings.model = preset.id
-                            OrbHaptics.selection()
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(preset.label)
-                                        .font(.subheadline.weight(.medium))
-                                        .foregroundStyle(.primary)
-                                    Text(preset.subtitle)
-                                        .font(.caption)
-                                        .foregroundStyle(OrbStyle.textSecondary)
-                                }
-                                Spacer()
-                                if settings.model == preset.id {
-                                    Image(systemName: "checkmark")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(Color.blue)
-                                }
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                Section("Custom Model Override") {
-                    TextField("e.g. builtin/smart", text: $customModel)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .onChange(of: customModel) { _, newValue in
-                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                            settings.model = trimmed.isEmpty ? OrbInboxSettings.defaultModel : trimmed
-                        }
-                }
+                Text("Choose a model or routing chain for Inbox digests. Off keeps your last choice.")
             }
         }
         .scrollContentBackground(.hidden)
         .background(OrbStyle.background)
         .navigationTitle("Inbox")
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Custom model or chain", isPresented: $editing) {
+            TextField("provider/model or chain ID", text: $customModel)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Cancel", role: .cancel) {}
+            Button("Use model") { choose(customModel) }
+                .disabled(customModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .task {
+            let chains = (try? await client.call("/api/model-routing/chains").items) ?? []
+            let providers = (try? await client.call("/api/providers?include_all=true&include_unverified=true")["providers"].items) ?? []
+            choices = chains.map { $0["id"].text } + providers.flatMap { p in p["models"].items.map { p["id"].text + "/" + $0["id"].text } }
+        }
     }
 }
 

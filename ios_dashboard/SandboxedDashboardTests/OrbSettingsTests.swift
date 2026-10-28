@@ -3,6 +3,20 @@ import XCTest
 
 @MainActor
 final class OrbSettingsTests: XCTestCase {
+    func testInboxSummaryChoiceMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/inbox-summary-choice.json")
+        for c in try XCTUnwrap(spec["cases"] as? [[String: Any]]) {
+            var model = try XCTUnwrap(c["initial"] as? String)
+            let choices = try XCTUnwrap(c["choices"] as? [String])
+            let expected = try XCTUnwrap(c["expected"] as? [[String: Any]])
+            for (index, choice) in choices.enumerated() {
+                let result = OrbInboxSummaryChoice.apply(model: model, choice: choice)
+                XCTAssertEqual(result.aiSummary, expected[index]["aiSummary"] as? Bool)
+                XCTAssertEqual(result.model, expected[index]["model"] as? String)
+                model = result.model
+            }
+        }
+    }
     /// Core trims messages, so a keyboard's trailing space must not leave the
     /// optimistic bubble next to the stored copy.
     func testOptimisticMessageMatchesTrimmedCoreCopy() {

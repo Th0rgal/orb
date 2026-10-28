@@ -35,6 +35,7 @@ async function openInbox(page: Page, theme = "dark", empty = false, aiSummary = 
   ].map((m, i) => ({ ...m, backend: "claudecode", created_at: "2026-10-09T09:00:00Z", updated_at: `2026-10-09T11:${50 - i * 5}:00Z` }));
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
+    if (path === "/api/model-routing/chains") return route.fulfill({ json: [{ id: "team/summary", entries: [], name: "Team summary" }] });
     if (path === "/api/projects") return route.fulfill({ json: { projects: [{ slug: "orb", title: "Orb", color: "blue" }, { slug: "infra", title: "Infrastructure", color: "purple" }] } });
     if (path === "/api/control/missions") return route.fulfill({ json: missions });
     const match = path.match(/^\/api\/control\/missions\/([^/]+)(\/events)?$/);
@@ -130,4 +131,27 @@ test('A numbered delete action opens confirmation, without deleting or stealing 
   expect(deletes).toBe(0);
   await page.keyboard.press('Escape');
   await expect(row.locator('textarea')).toHaveValue('Keep this draft2');
+});
+
+for (const theme of ["light", "dark"]) test(`AI summaries picker keeps the last model when Off: ${theme}`, async ({ page }) => {
+  await openInbox(page, theme);
+  await page.locator(".inbox-model-pill").click();
+  const picker = page.getByLabel("AI summaries", { exact: true });
+  await expect(picker).toHaveValue("");
+  await picker.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("listbox").getByRole("option", { name: "team/summary", exact: true }).click();
+  await expect(picker).toHaveValue("team/summary");
+  await picker.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Home");
+  await page.keyboard.press("Enter");
+  await expect(picker).toHaveValue("");
+  await page.keyboard.press("Meta+i");
+  await page.locator(".inbox-model-pill").click();
+  await expect(picker).toHaveValue("");
+  await picker.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("listbox").getByRole("option", { name: "team/summary", exact: true }).click();
+  await expect(picker).toHaveValue("team/summary");
 });

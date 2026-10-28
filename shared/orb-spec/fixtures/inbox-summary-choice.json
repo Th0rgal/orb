@@ -1,0 +1,6 @@
+{
+  "cases": [
+    { "name": "off remembers custom model across repeated selections", "initial": "openai/gpt-6-astra", "choices": ["", ""], "expected": [{"aiSummary": false, "model": "openai/gpt-6-astra"}, {"aiSummary": false, "model": "openai/gpt-6-astra"}] },
+    { "name": "model choice enables and replaces remembered model", "initial": "builtin/smart", "choices": ["builtin/fast", "", "builtin/fast", " team/summary "], "expected": [{"aiSummary": true, "model": "builtin/fast"}, {"aiSummary": false, "model": "builtin/fast"}, {"aiSummary": true, "model": "builtin/fast"}, {"aiSummary": true, "model": "team/summary"}] }
+  ]
+}
