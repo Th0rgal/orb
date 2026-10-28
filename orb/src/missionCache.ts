@@ -63,8 +63,6 @@ export function putTranscriptHeight(id: string, height: number) {
 }
 
 function mergeStreamBySequence(older: StreamEvent[], newer: StreamEvent[]): StreamEvent[] {
-  if (!older.length) return newer;
-  if (!newer.length) return older;
   const seen = new Set<string>();
   const idOf = (ev: StreamEvent) => ev.sequence !== undefined ? `seq:${ev.sequence}:${ev.type}` : ev.storedId !== undefined ? `id:${ev.storedId}:${ev.type}` : ev.eventId ? `ev:${ev.eventId}:${ev.type}` : undefined;
   const merged: StreamEvent[] = [];

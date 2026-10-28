@@ -259,7 +259,7 @@ export default function App() {
   };
   const [completedMissions, setCompletedMissions] = createSignal<Mission[]>([]);
   const listMisses: Misses = new Map();
-  let missionRefreshRevision = 0;
+  let missionRefreshRevision = 0, missionAppliedRevision = 0;
   const refreshMissions = async () => {
     const revision = ++missionRefreshRevision, connection = connectionVersion();
     try {
@@ -268,7 +268,8 @@ export default function App() {
         listMissions(200),
         listCompletedMissions(100),
       ]);
-      if (revision !== missionRefreshRevision || connection !== connectionVersion()) return;
+      if (revision < missionAppliedRevision || connection !== connectionVersion()) return;
+      missionAppliedRevision = revision;
       const partial = isPartialList(rawFresh);
       const fresh = rawFresh.filter(m => !isMissionDeleting(m.id));
       // No answer keeps the completed list on screen; it never empties it.
@@ -830,7 +831,7 @@ export default function App() {
         if (typeof id === "string" && changed.size < 12) changed.add(id);
         if (event.data.kind !== "mission_activity") needsList = true;
         presentationTimer ??= setTimeout(flushPresentation, 1000);
-      }, () => { void refreshMissions(); }, () => { void refreshMissions(); }, "presentation");
+      }, () => { void refreshMissions(); }, undefined, "presentation");
     };
     createEffect(() => { connectionVersion(); connectPresentation(); });
     document.addEventListener("visibilitychange", connectPresentation);

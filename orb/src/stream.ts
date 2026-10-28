@@ -204,6 +204,7 @@ export function streamMission(
         return;
       }
       if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+      if (profile === "presentation" && !res.headers.get("Content-Type")?.includes("text/event-stream")) throw new Error("Presentation stream unavailable");
       if(onReady)onReady();
       else if (retry > 0) {
         // Events emitted while we were disconnected never reached us.

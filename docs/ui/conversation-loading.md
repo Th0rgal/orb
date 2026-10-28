@@ -47,7 +47,7 @@ three refreshes per cycle. Existing polling remains the compatibility fallback.
 Desktop downloaded images and upload previews share a 48 MiB encoded-memory LRU;
 iOS and Android bound decoded images at 32 MiB and downsample to 2048 px. All three platforms
 share concurrent reads. Mutable images expire within five minutes;
-desktop also scopes them to mission revision. Image caches are in-memory, while
+desktop also scopes them to mission revision. Decoded/upload image caches are in-memory; native workspace files retain their existing account-scoped disk cache, while
 native presentation/history caches survive restarts. No cache is an archive.
 
 Scroll event ordering matters: a layout shrink can clamp the browser before its
@@ -55,3 +55,5 @@ ResizeObserver runs, or an earlier corrective scroll event can arrive after the
 next layout. These are not new reader intent. The scroll owner restores the old
 anchor before remembering the viewport; `scroll-anchor.browser.spec.ts` replays
 both narration collapse and stale-cache enrichment with the working row absent.
+
+Raw backfill is always sequence-sorted and deduplicated before reduction, including when a complete cache has newer presentation events beyond its raw cursor. Roster reads may only supersede an already applied newer response; a newer pending request does not invalidate useful completed data.
