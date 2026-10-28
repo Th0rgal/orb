@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
+import stat
+import uuid
 
 ACTIVE = {"active", "pending", "waiting_background"}
 TERMINAL = {"completed", "failed", "interrupted", "blocked", "not_feasible"}
@@ -69,22 +71,73 @@ def mission_index(missions_dir):
     return records, complete, audit_records
 
 
-def bytes_under(path):
-    total = 0
-    for root, _, files in os.walk(path, followlinks=False):
+def usage_under(path):
+    """Allocated blocks are not exclusive/reclaimable bytes on reflink filesystems."""
+    apparent = allocated = errors = 0
+    seen = set()
+    device = path.lstat().st_dev
+
+    def onerror(_):
+        nonlocal errors
+        errors += 1
+
+    for root, dirs, files in os.walk(path, followlinks=False, onerror=onerror):
+        kept = []
+        for name in dirs:
+            child = Path(root, name)
+            try:
+                meta = child.lstat()
+                if stat.S_ISDIR(meta.st_mode) and meta.st_dev == device and not os.path.ismount(child):
+                    kept.append(name)
+            except OSError:
+                errors += 1
+        dirs[:] = kept
         for filename in files:
             try:
-                total += os.lstat(os.path.join(root, filename)).st_size
+                meta = os.lstat(os.path.join(root, filename))
+                key = (meta.st_dev, meta.st_ino)
+                if key in seen:
+                    continue
+                seen.add(key)
+                apparent += meta.st_size
+                allocated += meta.st_blocks * 512
             except OSError:
-                pass
-    return total
+                errors += 1
+    return {"size_bytes": apparent, "allocated_bytes": allocated,
+            "measurement_errors": errors, "reclaimable_bytes": None}
+
+
+def node_index(work_dir):
+    """Job receipts attribute storage, never authorize deleting mission source."""
+    db = Path(work_dir).absolute() / "jobs.db"
+    records = {}
+    try:
+        conn = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)
+        try:
+            for mid, state, count, finished in conn.execute(
+                "SELECT mission_id,state,COUNT(*),MAX(finished_at) FROM jobs GROUP BY mission_id,state"
+            ):
+                mid = str(uuid.UUID(mid))
+                record = records.setdefault(mid, {
+                    "mission_id": mid, "status": "node_jobs_only", "updated_at": None,
+                    "workspace_id": None, "owner": "node:" + str(Path(work_dir).absolute()),
+                    "short_id_collision": False, "node_job_states": {}, "last_job_finished_at": None,
+                })
+                record["node_job_states"][state] = count
+                if finished and (not record["last_job_finished_at"] or finished > record["last_job_finished_at"]):
+                    record["last_job_finished_at"] = finished
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError) as error:
+        return {}, False, [{"record_type": "audit", "action": "index_error", "path": str(db), "error": str(error)}]
+    return records, True, []
 
 
 def kind_for(path):
     name = path.name.lower()
     if name.startswith("mission-"):
         return "mission_dir"
-    if name in {"target", ".cache", ".lean", ".lake", "cache"}:
+    if name in {"target", ".cache", ".lean", ".lake", "cache", "caches", ".elan", "toolchains"}:
         return "build_cache"
     if "image" in name or name in {"machines", "containers"}:
         return "container_image"
@@ -106,11 +159,11 @@ def paths_to_inventory(root):
         return
     seen = set()
     for path in root.iterdir():
-        if path.is_dir() and path not in seen:
+        if path.is_dir() and not path.is_symlink() and not os.path.ismount(path) and path not in seen:
             seen.add(path)
             yield path
     for current, dirs, _ in os.walk(root, followlinks=False):
-        dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(current, name))]
+        dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(current, name)) and not os.path.ismount(os.path.join(current, name))]
         for name in dirs:
             path = Path(current, name)
             if kind_for(path) == "build_cache" and path not in seen:
@@ -122,6 +175,8 @@ def mission_for_path(path, root, index):
     """Find a mission owner from this path or one of its ancestors."""
     current = path
     while True:
+        if current.name in index:
+            return index[current.name]
         if current.name.startswith("mission-"):
             return index.get(current.name.removeprefix("mission-").lower())
         if current == root:
@@ -134,13 +189,21 @@ def mission_for_path(path, root, index):
 
 def inventory(root, index, index_complete, cutoff):
     root = Path(root)
-    if not root.exists():
+    if not root.is_dir() or root.is_symlink():
         yield {"record_type": "audit", "action": "root_missing", "path": str(root)}
         return
     for path in paths_to_inventory(root):
         kind = kind_for(path)
         mission = mission_for_path(path, root, index)
-        mtime = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+        try:
+            mtime = dt.datetime.fromtimestamp(path.lstat().st_mtime, tz=dt.timezone.utc)
+            usage = usage_under(path)
+        except OSError as error:
+            yield {"record_type": "audit", "action": "measurement_error", "path": str(path), "error": str(error)}
+            continue
+        node_owned = bool(mission and "node_job_states" in mission)
+        if node_owned and path.name == mission["mission_id"]:
+            kind = "mission_dir"
         active = bool(mission and mission["status"] in ACTIVE)
         terminal = bool(mission and mission["status"] in TERMINAL)
         mission_updated_at = iso_time(mission["updated_at"]) if mission else None
@@ -158,7 +221,9 @@ def inventory(root, index, index_complete, cutoff):
             and mission_updated_at is not None
             and mission_updated_at < cutoff
         )
-        if active:
+        if node_owned:
+            reason = "node_job_history_is_not_discard_authorization"
+        elif active:
             reason = "active_mission_protected"
         elif kind != "mission_dir":
             reason = "unattributed_requires_owner_approval"
@@ -183,25 +248,39 @@ def inventory(root, index, index_complete, cutoff):
             "workspace_id": mission["workspace_id"] if mission else None,
             "mission_status": mission["status"] if mission else None,
             "age_days": round((dt.datetime.now(dt.timezone.utc) - mtime).total_seconds() / 86400, 2),
-            "size_bytes": bytes_under(path), "reason": reason,
+            **usage, "reason": reason,
+            **({"node_job_states": mission["node_job_states"],
+                "last_job_finished_at": mission["last_job_finished_at"]} if node_owned else {}),
         }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Read-only sandboxed.sh storage inventory (never deletes).")
-    parser.add_argument("--missions-dir", required=True, help="Directory containing missions-*.db")
-    parser.add_argument("--root", action="append", required=True, help="Root to inventory; repeat for workspaces, caches, images, or worktrees")
+    parser.add_argument("--missions-dir", help="Directory containing missions-*.db")
+    parser.add_argument("--root", action="append", default=[], help="Root to inventory; repeat for workspaces, caches, images, or worktrees")
+    parser.add_argument("--node-work-dir", help="Node work directory containing jobs.db; automatically inventoried, never deleted")
     parser.add_argument("--retention-days", type=int, default=7)
     parser.add_argument("--audit-log", help="Append JSONL audit records to this file")
     parser.add_argument("--apply", action="store_true", help="Rejected: this tool is inventory-only")
     args = parser.parse_args()
     if args.apply:
         parser.error("--apply is intentionally unsupported; inventory never deletes data")
+    if not args.missions_dir and not args.node_work_dir:
+        parser.error("provide --missions-dir or --node-work-dir")
+    if not args.root and not args.node_work_dir:
+        parser.error("provide --root or --node-work-dir")
     now = dt.datetime.now(dt.timezone.utc)
     cutoff = now - dt.timedelta(days=args.retention_days)
-    indexed, index_complete, index_audit_records = mission_index(args.missions_dir)
+    indexed, index_complete, index_audit_records = mission_index(args.missions_dir) if args.missions_dir else ({}, True, [])
+    if args.node_work_dir:
+        node_records, node_complete, node_audit = node_index(args.node_work_dir)
+        indexed.update(node_records)
+        index_complete = index_complete and node_complete
+        index_audit_records.extend(node_audit)
+        args.root = list(dict.fromkeys([args.node_work_dir, *args.root]))
     records = [{"record_type": "audit", "action": "inventory_started", "dry_run": True,
-                "retention_days": args.retention_days, "at": now.isoformat()}]
+                "retention_days": args.retention_days, "at": now.isoformat(),
+                "size_note": "Nested records overlap; allocated bytes include shared extents and are not reclaimable bytes."}]
     records.extend(index_audit_records)
     for root in args.root:
         records.extend(inventory(root, indexed, index_complete, cutoff))

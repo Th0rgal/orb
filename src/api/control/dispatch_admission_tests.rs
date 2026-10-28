@@ -9059,7 +9059,8 @@ async fn unified_mcp_git_executes_on_the_node_and_retry_does_not_repeat_it() {
                         crate::remote_node::run_lease_command(
                             "git-node",
                             "git-fixture-secret",
-                            root,
+                            root.clone(),
+                            &crate::node::JobStore::open(&root).await.unwrap(),
                             request,
                         )
                         .await

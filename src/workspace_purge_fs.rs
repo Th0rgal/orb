@@ -33,7 +33,7 @@ fn open_parent(path: &Path, expected: &str) -> Result<File, String> {
 thread_local! { static FAIL_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 #[cfg(test)]
-pub(super) fn fail_next_parent_sync() {
+pub(crate) fn fail_next_parent_sync() {
     FAIL_PARENT_SYNC.set(true);
 }
 
@@ -45,13 +45,13 @@ fn sync_parent_file(parent: &File) -> Result<(), String> {
     parent.sync_all().map_err(|e| e.to_string())
 }
 
-pub(super) fn sync_parent(path: &Path, expected: &str) -> Result<(), String> {
+pub(crate) fn sync_parent(path: &Path, expected: &str) -> Result<(), String> {
     sync_parent_file(&open_parent(path, expected)?)
 }
 
 /// Keep quarantine inaccessible through ordinary paths to other Unix users.
 /// Same-uid/privileged writers must participate in lifecycle admission.
-pub(super) fn secure_directory(
+pub(crate) fn secure_directory(
     path: &Path,
     parent_identity: &str,
     expected: &str,
@@ -79,7 +79,7 @@ fn set_mode(directory: &File, mode: u32) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn restore_mode(
+pub(crate) fn restore_mode(
     path: &Path,
     parent_identity: &str,
     expected: &str,
@@ -126,7 +126,7 @@ fn open_child(parent: &File, name: &CString) -> Result<File, std::io::Error> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-pub(super) fn rename(
+pub(crate) fn rename(
     source: &Path,
     destination: &Path,
     parent_identity: &str,
@@ -209,7 +209,7 @@ fn clear_directory(directory: &File, device: u64) -> Result<(), String> {
     directory.sync_all().map_err(|e| e.to_string())
 }
 
-pub(super) fn remove(
+pub(crate) fn remove(
     path: &Path,
     parent_identity: &str,
     directory_identity: &str,
@@ -250,7 +250,7 @@ pub(super) fn remove(
 
 /// Multiple views of a device (bind mounts/subvolumes), and mounts nested in
 /// the target, cannot establish physical disjointness from pathnames alone.
-pub(super) fn require_unambiguous_mount(path: &Path) -> Result<(), String> {
+pub(crate) fn require_unambiguous_mount(path: &Path) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let device = format!("{}:{}", libc::major(meta.dev()), libc::minor(meta.dev()));
     let mounts = std::fs::read_to_string("/proc/self/mountinfo").map_err(|e| e.to_string())?;
