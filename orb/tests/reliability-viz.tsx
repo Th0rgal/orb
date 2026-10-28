@@ -41,6 +41,8 @@ const health: ProxyHealth = {
 };
 
 const params = new URLSearchParams(location.search);
+// ?many=1: more problem rows than the table shows before "Show all".
+if (params.has("many")) for (let i = 0; i < 8; i++) health.groups.push(grp("openrouter", `qwen-4-coder-${i}`, { ok: 10, errors: { "server_error:503": 30 }, flags: ["low_success_rate"] }));
 if (params.get("theme")) document.documentElement.dataset.theme = params.get("theme")!;
 const [h, setH] = createSignal<ProxyHealth | null>(params.has("loading") ? null : health);
 (window as unknown as { setHealth: typeof setH }).setHealth = setH;

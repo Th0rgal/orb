@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageSettings } from "../src/UsageSettings";
+import { BreakdownTable } from "../src/components/stats";
 import { setConnection } from "../src/api";
 import { chartBuckets, formatCost, usageQuery, windowHours, type UsageSummary, type UsageTotals } from "../src/usageApi";
 import { formatMs, formatRate, type ProxyHealth, type ReliabilityStats } from "../src/proxyHealthApi";
@@ -154,17 +155,29 @@ describe("Usage page", () => {
     expect(section.textContent).toContain("8.4 s");
     expect(section.textContent).toContain("12 · 30");
     const rows = screen.getByRole("table", { name: "Reliability by provider" });
-    expect(rows.textContent).toContain("minimax · MiniMax-M3");
+    expect(within(rows).getAllByTitle("minimax · MiniMax-M3")[0].textContent).toBe("MiniMax-M3");
     expect(rows.textContent).toContain("Down");
     // Healthy rows fold behind a toggle.
     expect(rows.textContent).not.toContain("gemini");
     fireEvent.click(within(rows).getByRole("button", { name: "1 healthy · show" }));
     expect(rows.textContent).toContain("97.0%");
-    fireEvent.click(within(rows).getByText("minimax · MiniMax-M3"));
+    fireEvent.click(within(rows).getByText("MiniMax-M3"));
     expect(rows.textContent).toContain("402 out of credit");
     expect(requests).toContain("/api/ai/proxy/health?window=24h");
     fireEvent.click(screen.getByRole("radio", { name: "1h" }));
     await waitFor(() => expect(requests).toContain("/api/ai/proxy/health?window=1h"));
+  });
+
+  it("caps ranked tables at the limit behind Show all", () => {
+    const rows = Array.from({ length: 12 }, (_, i) => `row-${i}`);
+    render(() => <BreakdownTable label="Capped" rows={rows} rowKey={r => r} limit={10}
+      columns={[{ header: "Name", width: "1fr", cell: r => r }]} />);
+    const table = screen.getByRole("table", { name: "Capped" });
+    expect(within(table).queryByText("row-10")).toBeNull();
+    fireEvent.click(within(table).getByRole("button", { name: "Show all 12" }));
+    expect(within(table).getByText("row-11")).toBeTruthy();
+    fireEvent.click(within(table).getByRole("button", { name: "Show top 10" }));
+    expect(within(table).queryByText("row-11")).toBeNull();
   });
 
   it("keeps usage visible when an older core has no reliability endpoint", async () => {

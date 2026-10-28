@@ -96,6 +96,7 @@ export function UsageSettings() {
   const [window, setWindow] = createSignal("24h");
   const [filters, setFilters] = createSignal<UsageFilters>({});
   const [groupBy, setGroupBy] = createSignal<GroupBy>("mission");
+  const [allSpenders, setAllSpenders] = createSignal(false);
   const [metric, setMetric] = createSignal<Metric>("cost");
   const [granularity, setGranularity] = createSignal<Granularity>("hour");
   const [summary, setSummary] = createSignal<UsageSummary | null>(null);
@@ -224,7 +225,7 @@ export function UsageSettings() {
                 <span role="columnheader">{GROUPS.find(g => g.value === groupBy())?.label}</span>
                 <span role="columnheader">Requests</span><span role="columnheader">Tokens</span><span role="columnheader">Cost</span>
               </div>
-              <For each={rows()}>{r => <div class="usage-tr" role="row">
+              <For each={allSpenders() ? rows() : rows().slice(0, 10)}>{r => <div class="usage-tr" role="row">
                 <span role="cell" class="usage-name">
                   <Show when={r.filter} fallback={<strong>{r.name}</strong>}>
                     <button class="usage-link" title="Filter to this" onClick={() => setFilters(f => ({ ...f, ...r.filter }))}>{r.name}</button>
@@ -236,6 +237,11 @@ export function UsageSettings() {
                 <span role="cell" title={`${r.input_tokens.toLocaleString()} in · ${r.output_tokens.toLocaleString()} out · ${r.cache_read_tokens.toLocaleString()} cached`}>{formatTokens(totalTokens(r))}</span>
                 <span role="cell" title={costTitle(r)} classList={{ "usage-unknown": r.unknown_cost_requests > 0 }}>{formatCost(r)}</span>
               </div>}</For>
+              <Show when={rows().length > 10}>
+                <button class="st-more" onClick={() => setAllSpenders(v => !v)} aria-expanded={allSpenders()}>
+                  {allSpenders() ? "Show top 10" : `Show all ${rows().length}`}
+                </button>
+              </Show>
             </div>
           </Show>
         </section>

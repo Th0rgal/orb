@@ -1,5 +1,6 @@
 import { For, Show, createMemo } from "solid-js";
 import { BreakdownTable, Legend, OutcomeBar, RangeBar, StatTile, StatusPill, type Column } from "./components/stats";
+import { ProviderLogo } from "./ProviderLogo";
 import { formatMs, formatRate, type ProxyHealth } from "./proxyHealthApi";
 import { OUTCOMES, OUTCOME_LABEL, errorLabel, isProblem, outcomeMix, reliabilityRows, type Row } from "./reliability";
 
@@ -18,9 +19,12 @@ export function ReliabilityView(p: { health: ProxyHealth | null }) {
   const maxTtft = createMemo(() => Math.max(1000, ...(h()?.groups ?? []).map(g => g.ttft_p95_ms ?? 0)));
   const totalRate = () => h()?.totals.success_rate ?? null;
   const columns: Column<Row>[] = [
-    { header: "Provider · model", width: "minmax(0, 1fr)", cell: r => <span class="st-cell-name">
-      <strong title={r.name}>{r.name}</strong>
-      <Show when={r.account}><span>{r.account}</span></Show>
+    { header: "Provider · model", width: "minmax(180px, 1fr)", narrowWidth: "minmax(0, 1fr)", cell: r => <span class="st-cell-provider">
+      <ProviderLogo type={r.group.provider ?? ""} />
+      <span class="st-cell-name">
+        <strong title={r.name}>{r.group.model ?? r.name}</strong>
+        <span title={r.name}>{[r.group.provider, r.account].filter(Boolean).join(" · ")}</span>
+      </span>
     </span> },
     { header: "Outcomes", width: "96px", narrowWidth: "48px", cell: r => {
       const mix = outcomeMix(r.group);
@@ -32,7 +36,7 @@ export function ReliabilityView(p: { health: ProxyHealth | null }) {
       <RangeBar low={r.group.ttft_p50_ms} high={r.group.ttft_p95_ms} max={maxTtft()}
         tone={r.group.flags.includes("slow_first_token") ? "warning" : "neutral"}
         title={`p50 ${formatMs(r.group.ttft_p50_ms)} · p95 ${formatMs(r.group.ttft_p95_ms)}`} /> },
-    { header: "Status", width: "196px", narrowWidth: "96px", align: "end", cell: r => <StatusPill tone={r.status.tone} label={r.status.label} short={r.status.short} /> },
+    { header: "Status", width: "140px", narrowWidth: "96px", align: "end", cell: r => <StatusPill tone={r.status.tone} label={r.status.label} short={r.status.short} /> },
   ];
   return <>
     <div class="st-tiles">
@@ -47,7 +51,7 @@ export function ReliabilityView(p: { health: ProxyHealth | null }) {
         series={series().map(b => b.retried + b.fell_back)} seriesMin={0} />
     </div>
     <BreakdownTable label="Reliability by provider" columns={columns} rows={rows()} rowKey={r => r.key}
-      collapse={r => !isProblem(r)} collapsedLabel="healthy" skeletonRows={4}
+      collapse={r => !isProblem(r)} collapsedLabel="healthy" skeletonRows={4} limit={10}
       empty="No router traffic in this window."
       detail={r => <ReliabilityDetail row={r} />} />
     <Show when={rows()?.length}><Legend items={OUTCOMES.map(k => ({ key: k, label: OUTCOME_LABEL[k] }))} /></Show>
