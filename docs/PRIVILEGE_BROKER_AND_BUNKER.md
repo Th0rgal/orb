@@ -40,6 +40,8 @@ Production deployments on `agent-core` (`POST /api/system/deploy`) are protected
   3. The caller is not executing inside the target service (`!caller_is_self`),
   4. The deploy debounce window has elapsed (`!debounce_active`).
 
+The gate covers the API path used by missions. A root operator on the host deploys with `/usr/local/bin/sandboxed-sh-prod deploy --service sandboxed-sh-prod.service` (same deploy routine, same live-writer/debounce/service refusals, no grant: SSH access is already full trust). That is also the fallback when the approval UI or broker is unavailable.
+
 ---
 
 ## 3. Bunker Mode Lattice & 180s `dgx-spark` Dead-Man's Switch

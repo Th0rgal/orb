@@ -411,3 +411,12 @@ Orb follows the **"Lean Decides, Rust Does"** boundary across the control plane,
 
 See **[DEBUGGING.md](DEBUGGING.md)** for service management, logs and
 deployment procedures.
+
+Production deploys have one implementation (`run_deploy` in
+`src/api/system.rs`) and two entry points: the operator runs
+`ssh agent-core '/usr/local/bin/sandboxed-sh-prod deploy --service
+sandboxed-sh-prod.service'` (no grant needed; also the fallback when the
+approval UI or broker is down), and missions call `POST /api/system/deploy`
+with a session-scoped `service_deploy` grant. Both health-check the restart
+and roll back automatically. Do not deploy by copying binaries or with a bare
+`systemctl restart`.

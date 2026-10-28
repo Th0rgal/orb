@@ -3519,22 +3519,7 @@ pub async fn deploy_sandboxed_sh(
 
     let live_writer_count = {
         let store = state.control.get_mission_store().await;
-        let filter = crate::api::mission_store::MissionFilter {
-            attention_only: true,
-            ..Default::default()
-        };
-        match store.list_missions_filtered(&filter, 200, 0).await {
-            Ok(page) => page
-                .iter()
-                .filter(|mission| {
-                    crate::api::controller_honesty::is_live_writer_status(mission.status)
-                })
-                .count(),
-            Err(error) => {
-                tracing::warn!(%error, "deploy: could not list live writers; treating as zero");
-                0
-            }
-        }
+        count_live_writers(store.as_ref()).await
     };
 
     if let Some(refusal) = evaluate_deploy_request(
@@ -3595,11 +3580,39 @@ pub async fn deploy_sandboxed_sh(
         );
     }
 
-    Ok(Sse::new(Box::pin(stream_deploy(
-        state,
-        req,
-        actual_service,
-    ))))
+    let repo_path = match req.repo_path.clone() {
+        Some(path) => path,
+        None => resolve_sandboxed_repo_path(&state).await,
+    };
+    let plan = DeployPlan {
+        repo_path,
+        git_ref: req.git_ref.clone(),
+        skip_build: req.skip_build,
+        listen_port: state.config.port,
+        health_url: deploy_health_url(&state.config.host, state.config.port),
+        service_name: actual_service,
+        wait_for_restart: false,
+    };
+    Ok(Sse::new(Box::pin(stream_deploy(plan))))
+}
+
+/// Missions mid-turn, which a restart would SIGTERM. Shared by the deploy
+/// endpoint and the operator CLI.
+async fn count_live_writers(store: &dyn crate::api::mission_store::MissionStore) -> usize {
+    let filter = crate::api::mission_store::MissionFilter {
+        attention_only: true,
+        ..Default::default()
+    };
+    match store.list_missions_filtered(&filter, 200, 0).await {
+        Ok(page) => page
+            .iter()
+            .filter(|mission| crate::api::controller_honesty::is_live_writer_status(mission.status))
+            .count(),
+        Err(error) => {
+            tracing::warn!(%error, "deploy: could not list live writers; treating as zero");
+            0
+        }
+    }
 }
 
 fn is_orb_or_sandboxed_unit_prefix(name: &str) -> bool {
@@ -3837,414 +3850,675 @@ async fn rollback_deployed_binary(destination: &str, backup: &str, rollback: &De
     }
 }
 
-/// The actual deploy stream — git checkout (optional), build (optional),
-/// versioned install, then a detached `systemctl restart`. Mirrors
-/// `stream_sandboxed_update` but skips the "stop service first" step so the
-/// SSE response can deliver the final "deployed" event before the new
-/// binary takes over.
-fn stream_deploy(
-    state: Arc<AppState>,
-    req: DeployRequest,
-    service_name: String,
-) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+/// One progress event of a deploy. `POST /api/system/deploy` streams them as
+/// SSE; the operator CLI (`sandboxed-sh deploy`) prints them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeployEvent {
+    Log {
+        message: String,
+        progress: Option<u8>,
+    },
+    Error(String),
+    Deployed {
+        message: String,
+    },
+}
+
+/// Everything the deploy routine needs, resolved by its caller (the API
+/// handler or the operator CLI). Authorization and refusal checks happen
+/// before a plan is built; [`run_deploy`] only executes it.
+#[derive(Debug, Clone)]
+pub(crate) struct DeployPlan {
+    pub repo_path: String,
+    pub git_ref: Option<String>,
+    pub skip_build: bool,
+    pub service_name: String,
+    pub listen_port: u16,
+    /// URL the guarded restart polls after `systemctl start`; a service that
+    /// does not answer it in time is rolled back to the previous binaries.
+    pub health_url: String,
+    /// Block until the restart, health check and any rollback finished, and
+    /// report their outcome. The API cannot (the restart kills it); the
+    /// operator CLI runs outside the service and does.
+    pub wait_for_restart: bool,
+}
+
+type DeployTx = tokio::sync::mpsc::UnboundedSender<DeployEvent>;
+
+fn deploy_log(tx: &DeployTx, message: impl Into<String>, progress: Option<u8>) {
+    let _ = tx.send(DeployEvent::Log {
+        message: message.into(),
+        progress,
+    });
+}
+
+/// Report a failure and return `false`, so call sites read `return deploy_fail(..)`.
+fn deploy_fail(tx: &DeployTx, message: impl Into<String>) -> bool {
+    let _ = tx.send(DeployEvent::Error(message.into()));
+    false
+}
+
+fn deploy_event_sse(event: DeployEvent) -> Result<Event, std::convert::Infallible> {
+    match event {
+        DeployEvent::Log { message, progress } => sse("log", message, progress),
+        DeployEvent::Error(message) => sse("error", message, None),
+        DeployEvent::Deployed { message } => sse("deployed", message, Some(100)),
+    }
+}
+
+/// SSE wrapper around [`run_deploy`]. The deploy runs in its own task so a
+/// client that disconnects mid-build cannot leave a half-applied install.
+fn stream_deploy(plan: DeployPlan) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(run_deploy(plan, tx));
     async_stream::stream! {
-        yield sse("log", "Starting deploy with safety rails", Some(0));
-
-        let repo_path_str = match req.repo_path.as_deref() {
-            Some(p) => p.to_string(),
-            None => resolve_sandboxed_repo_path(&state).await,
-        };
-        let repo_path = std::path::Path::new(&repo_path_str);
-
-        if let Err(err) = ensure_repo_present(repo_path).await {
-            yield sse("error", format!("Failed to prepare source repo at {}: {}", repo_path.display(), err), None);
-            return;
-        }
-        yield sse("log", format!("Source repo: {}", repo_path.display()), Some(5));
-
-        if let Some(git_ref) = req.git_ref.as_deref() {
-            yield sse("log", format!("Fetching + checking out {}", git_ref), Some(10));
-            let fetch = Command::new("git")
-                .args(["fetch", "--tags", "origin"])
-                .current_dir(repo_path)
-                .output()
-                .await;
-            if let Ok(o) = fetch {
-                if !o.status.success() {
-                    yield sse("error", format!("git fetch failed: {}", String::from_utf8_lossy(&o.stderr)), None);
-                    return;
-                }
-            }
-            let checkout = Command::new("git")
-                .args(["checkout", git_ref])
-                .current_dir(repo_path)
-                .output()
-                .await;
-            match checkout {
-                Ok(o) if o.status.success() => {}
-                Ok(o) => {
-                    yield sse("error", format!("git checkout {} failed: {}", git_ref, String::from_utf8_lossy(&o.stderr)), None);
-                    return;
-                }
-                Err(e) => {
-                    yield sse("error", format!("git checkout {} error: {}", git_ref, e), None);
-                    return;
-                }
+        while let Some(event) = rx.recv().await {
+            let done = matches!(event, DeployEvent::Deployed { .. });
+            yield deploy_event_sse(event);
+            if done {
+                // Give the client a beat to receive the final event before
+                // the restart tears down our TCP connection.
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             }
         }
+    }
+}
 
-        let resolved_exe = match std::env::current_exe() {
-            Ok(p) => p,
+/// The one deploy routine shared by `POST /api/system/deploy` and the
+/// operator CLI: git checkout (optional), build (optional), versioned install
+/// with `.pre-deploy-<sha>` backups and rollback on install failure, then a
+/// guarded stop → port-wait → start that health-checks the new service and
+/// restores the previous binaries if it does not come up. Returns whether
+/// the deploy succeeded (for the CLI: including the health check).
+pub(crate) async fn run_deploy(plan: DeployPlan, tx: DeployTx) -> bool {
+    let service_name = plan.service_name.clone();
+    deploy_log(&tx, "Starting deploy with safety rails", Some(0));
+
+    let repo_path_str = plan.repo_path.clone();
+    let repo_path = std::path::Path::new(&repo_path_str);
+
+    if let Err(err) = ensure_repo_present(repo_path).await {
+        return deploy_fail(
+            &tx,
+            format!(
+                "Failed to prepare source repo at {}: {}",
+                repo_path.display(),
+                err
+            ),
+        );
+    }
+    deploy_log(
+        &tx,
+        format!("Source repo: {}", repo_path.display()),
+        Some(5),
+    );
+
+    if let Some(git_ref) = plan.git_ref.as_deref() {
+        deploy_log(
+            &tx,
+            format!("Fetching + checking out {}", git_ref),
+            Some(10),
+        );
+        let fetch = Command::new("git")
+            .args(["fetch", "--tags", "origin"])
+            .current_dir(repo_path)
+            .output()
+            .await;
+        if let Ok(o) = fetch {
+            if !o.status.success() {
+                return deploy_fail(
+                    &tx,
+                    format!("git fetch failed: {}", String::from_utf8_lossy(&o.stderr)),
+                );
+            }
+        }
+        let checkout = Command::new("git")
+            .args(["checkout", git_ref])
+            .current_dir(repo_path)
+            .output()
+            .await;
+        match checkout {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return deploy_fail(
+                    &tx,
+                    format!(
+                        "git checkout {} failed: {}",
+                        git_ref,
+                        String::from_utf8_lossy(&o.stderr)
+                    ),
+                );
+            }
             Err(e) => {
-                yield sse("error", format!("Failed to detect current binary path: {}", e), None);
-                return;
+                return deploy_fail(&tx, format!("git checkout {} error: {}", git_ref, e));
             }
-        };
-        let current_exe = service_binary_path_for_unit(&resolved_exe, &service_name);
-        // The cargo bin name is always `sandboxed-sh` regardless of how we
-        // rename it on install (e.g. `sandboxed-sh-prod` or `sandboxed-sh-dev`).
-        // Same for MCP binaries.
-        const MAIN_CARGO_BIN: &str = "sandboxed-sh";
-        const MCP_CARGO_BIN: &str = "sandboxed-mcp";
-        const PALOMA_CARGO_BIN: &str = "palomactl";
-        let install_dest_main = current_exe.to_string_lossy().to_string();
-        // Production owns the historical unsuffixed companion paths consumed
-        // by Hermes. Dev/staging services install suffixed companions so their
-        // deploys cannot replace production MCP or palomactl binaries.
-        let install_dest_mcp = service_companion_binary_path(&current_exe, MCP_CARGO_BIN)
-            .to_string_lossy()
-            .to_string();
-        let scoped_paloma = service_companion_binary_path(&current_exe, PALOMA_CARGO_BIN);
-        let install_dest_paloma = if scoped_paloma.file_name().and_then(|v| v.to_str())
-            != Some(PALOMA_CARGO_BIN)
-        {
+        }
+    }
+
+    let resolved_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            return deploy_fail(&tx, format!("Failed to detect current binary path: {}", e));
+        }
+    };
+    let current_exe = service_binary_path_for_unit(&resolved_exe, &service_name);
+    // The cargo bin name is always `sandboxed-sh` regardless of how we
+    // rename it on install (e.g. `sandboxed-sh-prod` or `sandboxed-sh-dev`).
+    // Same for MCP binaries.
+    const MAIN_CARGO_BIN: &str = "sandboxed-sh";
+    const MCP_CARGO_BIN: &str = "sandboxed-mcp";
+    const PALOMA_CARGO_BIN: &str = "palomactl";
+    let install_dest_main = current_exe.to_string_lossy().to_string();
+    // Production owns the historical unsuffixed companion paths consumed
+    // by Hermes. Dev/staging services install suffixed companions so their
+    // deploys cannot replace production MCP or palomactl binaries.
+    let install_dest_mcp = service_companion_binary_path(&current_exe, MCP_CARGO_BIN)
+        .to_string_lossy()
+        .to_string();
+    let scoped_paloma = service_companion_binary_path(&current_exe, PALOMA_CARGO_BIN);
+    let install_dest_paloma =
+        if scoped_paloma.file_name().and_then(|v| v.to_str()) != Some(PALOMA_CARGO_BIN) {
             scoped_paloma.to_string_lossy().to_string()
         } else {
             std::env::var("PALOMACTL_INSTALL_PATH")
                 .ok()
                 .filter(|path| !path.trim().is_empty())
                 .unwrap_or_else(|| {
-                let hermes_bin = std::path::Path::new("/var/lib/hermes-assistant/bin");
-                let wrapper = hermes_bin.join("palomactl-wrapper");
-                let real = hermes_bin.join("palomactl.real");
-                if wrapper.exists() || real.exists() {
-                    // Hermes may layer project/health/review-thread commands in
-                    // a stable wrapper whose REAL target is palomactl.real.
-                    // Updating `palomactl` itself would silently erase those
-                    // operator integrations on every sandboxed.sh deploy.
-                    real.to_string_lossy().to_string()
-                } else if hermes_bin.exists() {
-                    hermes_bin.join("palomactl").to_string_lossy().to_string()
-                } else {
-                    "/usr/local/bin/palomactl".to_string()
-                }
-            })
+                    let hermes_bin = std::path::Path::new("/var/lib/hermes-assistant/bin");
+                    let wrapper = hermes_bin.join("palomactl-wrapper");
+                    let real = hermes_bin.join("palomactl.real");
+                    if wrapper.exists() || real.exists() {
+                        // Hermes may layer project/health/review-thread commands in
+                        // a stable wrapper whose REAL target is palomactl.real.
+                        // Updating `palomactl` itself would silently erase those
+                        // operator integrations on every sandboxed.sh deploy.
+                        real.to_string_lossy().to_string()
+                    } else if hermes_bin.exists() {
+                        hermes_bin.join("palomactl").to_string_lossy().to_string()
+                    } else {
+                        "/usr/local/bin/palomactl".to_string()
+                    }
+                })
         };
-        if !req.skip_build {
-            yield sse("log", format!("Building {} + {} + {} (cargo build, debug)", MAIN_CARGO_BIN, MCP_CARGO_BIN, PALOMA_CARGO_BIN), Some(25));
-            let build_cmd = format!(
-                "source /root/.cargo/env 2>/dev/null; cargo build --bin {} --bin {} --bin {}",
+    if !plan.skip_build {
+        deploy_log(
+            &tx,
+            format!(
+                "Building {} + {} + {} (cargo build, debug)",
                 MAIN_CARGO_BIN, MCP_CARGO_BIN, PALOMA_CARGO_BIN
-            );
-            match Command::new("bash")
-                .args(["-c", &build_cmd])
-                .current_dir(repo_path)
-                .output()
-                .await
-            {
-                Ok(output) if output.status.success() => {
-                    yield sse("log", "Build complete", Some(60));
-                }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let tail: Vec<&str> = stderr.lines().rev().take(15).collect();
-                    let summary = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-                    yield sse("error", format!("Build failed:\n{}", summary), None);
-                    return;
-                }
-                Err(e) => {
-                    yield sse("error", format!("cargo build error: {}", e), None);
-                    return;
-                }
-            }
-        } else {
-            yield sse("log", "skip_build=true; using existing target/debug/ binaries", Some(60));
-        }
-
-        // Verify both source binaries exist *before* touching anything live.
-        // Surfaces the "you pointed me at a path with no build" case as a
-        // clean refusal instead of a half-applied deploy.
-        let src_main = repo_path.join("target").join("debug").join(MAIN_CARGO_BIN);
-        let src_mcp = repo_path.join("target").join("debug").join(MCP_CARGO_BIN);
-        let src_paloma = repo_path.join("target").join("debug").join(PALOMA_CARGO_BIN);
-        if !src_main.exists() {
-            yield sse("error", format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_main.display()), None);
-            return;
-        }
-        if !src_mcp.exists() {
-            yield sse("error", format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_mcp.display()), None);
-            return;
-        }
-        if !src_paloma.exists() {
-            yield sse("error", format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_paloma.display()), None);
-            return;
-        }
-        // Resolve commit sha for the "deployed" event so the agent has
-        // something concrete to confirm.
-        let sha = match Command::new("git")
-            .args(["rev-parse", "--short=12", "HEAD"])
+            ),
+            Some(25),
+        );
+        let build_cmd = format!(
+            "source /root/.cargo/env 2>/dev/null; cargo build --bin {} --bin {} --bin {}",
+            MAIN_CARGO_BIN, MCP_CARGO_BIN, PALOMA_CARGO_BIN
+        );
+        match Command::new("bash")
+            .args(["-c", &build_cmd])
             .current_dir(repo_path)
             .output()
             .await
         {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            _ => "unknown".to_string(),
-        };
-
-        // Backup the live binaries to `.pre-deploy-<sha>` so a one-line
-        // rollback is possible. If the service already uses the versioned
-        // symlink layout, preserve it and retarget the symlink atomically.
-        yield sse("log", format!("Installing {} → {}", src_main.display(), install_dest_main), Some(75));
-        let bkp_main = format!("{}.pre-deploy-{}", install_dest_main, sha);
-        let rollback_main = match prepare_deploy_backup(&install_dest_main, &bkp_main).await {
-            Ok(rollback) => rollback,
-            Err(error) => {
-                yield sse("error", error, None);
-                return;
+            Ok(output) if output.status.success() => {
+                deploy_log(&tx, "Build complete", Some(60));
             }
-        };
-        let install_main = if matches!(&rollback_main, DeployRollback::Symlink(_)) {
-            let installed_name = current_exe
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(MAIN_CARGO_BIN);
-            install_versioned_binary_as(
-                repo_path,
-                MAIN_CARGO_BIN,
-                installed_name,
-                &sha,
-                &install_dest_main,
-            )
-            .await
-        } else {
-            Command::new("install")
-                .args([
-                    "-m",
-                    "0755",
-                    src_main.to_string_lossy().as_ref(),
-                    &install_dest_main,
-                ])
-                .output()
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|output| {
-                    if output.status.success() {
-                        Ok(())
-                    } else {
-                        Err(String::from_utf8_lossy(&output.stderr).to_string())
-                    }
-                })
-        };
-        match install_main {
-            Ok(()) => {}
-            Err(error) => {
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("Install of main binary failed: {}", error), None);
-                return;
-            }
-        }
-
-        yield sse("log", format!("Installing {} → {}", src_mcp.display(), install_dest_mcp), Some(82));
-        let bkp_mcp = format!("{}.pre-deploy-{}", install_dest_mcp, sha);
-        let rollback_mcp = match prepare_deploy_backup(&install_dest_mcp, &bkp_mcp).await {
-            Ok(rollback) => rollback,
-            Err(error) => {
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", error, None);
-                return;
-            }
-        };
-        let install_mcp = Command::new("install")
-            .args([
-                "-m", "0755",
-                src_mcp.to_string_lossy().as_ref(),
-                &install_dest_mcp,
-            ])
-            .output()
-            .await;
-        match install_mcp {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                // Roll back the main binary swap before bailing — leaving
-                // the main binary swapped without its matching MCP is the
-                // worst possible half-applied state.
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("Install of sandboxed-mcp failed (main binary rolled back): {}", String::from_utf8_lossy(&o.stderr)), None);
-                return;
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let tail: Vec<&str> = stderr.lines().rev().take(15).collect();
+                let summary = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+                return deploy_fail(&tx, format!("Build failed:\n{}", summary));
             }
             Err(e) => {
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("install command error (main rolled back): {}", e), None);
-                return;
+                return deploy_fail(&tx, format!("cargo build error: {}", e));
             }
         }
-
-        // The MCP binaries we just replaced are still being executed by the
-        // Hermes agents that spawned them: those processes hold the old inode
-        // and are NOT recycled by this service's restart, because they are not
-        // in its cgroup. See `recycle_stale_companion_processes`.
-        for (binary, destination) in [
-            ("sandboxed-mcp", &install_dest_mcp),
-        ] {
-            let recycled = recycle_stale_companion_processes(binary, destination).await;
-            if recycled > 0 {
-                yield sse("log", format!("Recycled {recycled} stale {binary} process(es) still running the replaced binary"), Some(86));
-            }
-        }
-
-        yield sse("log", format!("Installing {} → {}", src_paloma.display(), install_dest_paloma), Some(87));
-        let bkp_paloma = format!("{}.pre-deploy-{}", install_dest_paloma, sha);
-        let rollback_paloma = match prepare_deploy_backup(&install_dest_paloma, &bkp_paloma).await {
-            Ok(rollback) => rollback,
-            Err(error) => {
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", error, None);
-                return;
-            }
-        };
-        let install_paloma = Command::new("install")
-            .args([
-                "-m", "0755",
-                src_paloma.to_string_lossy().as_ref(),
-                &install_dest_paloma,
-            ])
-            .output()
-            .await;
-        match install_paloma {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma).await;
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("Install of palomactl failed (service binaries rolled back): {}", String::from_utf8_lossy(&o.stderr)), None);
-                return;
-            }
-            Err(e) => {
-                rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma).await;
-                rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
-                rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
-                yield sse("error", format!("install command error for palomactl (service binaries rolled back): {}", e), None);
-                return;
-            }
-        }
-
-        // The first unified rollout must provision a scoped coordinator
-        // credential before changing Hermes's command. The operator cutover
-        // performs that exchange after this Core version is serving requests.
-        yield sse("log", "Unified MCP installed; provision the Hermes scoped session and migrate its configuration before restarting Hermes", Some(88));
-        yield sse(
-            "log",
-            format!(
-                "Backups: {}, {}, {}",
-                bkp_main,
-                bkp_mcp,
-                bkp_paloma
-            ),
-            Some(88),
+    } else {
+        deploy_log(
+            &tx,
+            "skip_build=true; using existing target/debug/ binaries",
+            Some(60),
         );
+    }
 
-        // Prune old backups now that every install succeeded. The rollback
-        // paths above consume this deploy's backups via rename, so pruning
-        // must stay on the success path only. Each deploy adds one ~440MB
-        // copy per binary; unbounded, this filled the prod disk.
-        let keep = deploy_backup_keep();
-        let mut pruned_total = 0usize;
-        let mut freed_total = 0u64;
-        for dest in [
-            &install_dest_main,
-            &install_dest_mcp,
-            &install_dest_paloma,
-        ] {
-            let (pruned, freed) = prune_deploy_backups(dest, keep).await;
-            pruned_total += pruned.len();
-            freed_total = freed_total.saturating_add(freed);
+    // Verify both source binaries exist *before* touching anything live.
+    // Surfaces the "you pointed me at a path with no build" case as a
+    // clean refusal instead of a half-applied deploy.
+    let src_main = repo_path.join("target").join("debug").join(MAIN_CARGO_BIN);
+    let src_mcp = repo_path.join("target").join("debug").join(MCP_CARGO_BIN);
+    let src_paloma = repo_path
+        .join("target")
+        .join("debug")
+        .join(PALOMA_CARGO_BIN);
+    if !src_main.exists() {
+        return deploy_fail(&tx, format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_main.display()));
+    }
+    if !src_mcp.exists() {
+        return deploy_fail(&tx, format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_mcp.display()));
+    }
+    if !src_paloma.exists() {
+        return deploy_fail(&tx, format!("Build artifact missing: {}. Either set skip_build=false, or point repo_path at a checkout that has been built.", src_paloma.display()));
+    }
+    // Resolve commit sha for the "deployed" event so the agent has
+    // something concrete to confirm.
+    let sha = match Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => "unknown".to_string(),
+    };
+
+    // Backup the live binaries to `.pre-deploy-<sha>` so a one-line
+    // rollback is possible. If the service already uses the versioned
+    // symlink layout, preserve it and retarget the symlink atomically.
+    deploy_log(
+        &tx,
+        format!("Installing {} → {}", src_main.display(), install_dest_main),
+        Some(75),
+    );
+    let bkp_main = format!("{}.pre-deploy-{}", install_dest_main, sha);
+    let rollback_main = match prepare_deploy_backup(&install_dest_main, &bkp_main).await {
+        Ok(rollback) => rollback,
+        Err(error) => {
+            return deploy_fail(&tx, error);
         }
-        if pruned_total > 0 {
-            yield sse(
-                "log",
+    };
+    let install_main = if matches!(&rollback_main, DeployRollback::Symlink(_)) {
+        let installed_name = current_exe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(MAIN_CARGO_BIN);
+        install_versioned_binary_as(
+            repo_path,
+            MAIN_CARGO_BIN,
+            installed_name,
+            &sha,
+            &install_dest_main,
+        )
+        .await
+    } else {
+        Command::new("install")
+            .args([
+                "-m",
+                "0755",
+                src_main.to_string_lossy().as_ref(),
+                &install_dest_main,
+            ])
+            .output()
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(String::from_utf8_lossy(&output.stderr).to_string())
+                }
+            })
+    };
+    match install_main {
+        Ok(()) => {}
+        Err(error) => {
+            rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
+            return deploy_fail(&tx, format!("Install of main binary failed: {}", error));
+        }
+    }
+
+    deploy_log(
+        &tx,
+        format!("Installing {} → {}", src_mcp.display(), install_dest_mcp),
+        Some(82),
+    );
+    let bkp_mcp = format!("{}.pre-deploy-{}", install_dest_mcp, sha);
+    let rollback_mcp = match prepare_deploy_backup(&install_dest_mcp, &bkp_mcp).await {
+        Ok(rollback) => rollback,
+        Err(error) => {
+            rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
+            return deploy_fail(&tx, error);
+        }
+    };
+    let install_mcp = Command::new("install")
+        .args([
+            "-m",
+            "0755",
+            src_mcp.to_string_lossy().as_ref(),
+            &install_dest_mcp,
+        ])
+        .output()
+        .await;
+    match install_mcp {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            // Roll back the main binary swap before bailing — leaving
+            // the main binary swapped without its matching MCP is the
+            // worst possible half-applied state.
+            rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
+            rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
+            return deploy_fail(
+                &tx,
                 format!(
-                    "Pruned {} old pre-deploy backups ({} MB freed, keeping {} per binary)",
-                    pruned_total,
-                    freed_total / (1024 * 1024),
-                    keep
+                    "Install of sandboxed-mcp failed (main binary rolled back): {}",
+                    String::from_utf8_lossy(&o.stderr)
                 ),
-                Some(89),
             );
         }
+        Err(e) => {
+            rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
+            rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
+            return deploy_fail(
+                &tx,
+                format!("install command error (main rolled back): {}", e),
+            );
+        }
+    }
 
-        // Schedule the restart so this SSE response can flush its final event
-        // before systemd SIGTERMs us.
-        //
-        // stop + port-wait + start instead of a bare `systemctl restart`: an
-        // orphaned old process still holding the listen port makes the fresh
-        // service die with EADDRINUSE while the orphan serves stale code
-        // (seen twice in prod). The script waits up to
-        // PORT_RELEASE_GRACE_SECS for the port to be released, then
-        // SIGTERM → SIGKILL escalates on any lingering holder before start.
-        //
-        // The script MUST run as a transient systemd unit via `systemd-run`,
-        // NOT as a `setsid`/`nohup` child of this handler. A detached child
-        // still lives inside THIS service's cgroup, so when the script runs
-        // `systemctl stop <svc>` systemd tears the whole cgroup down and kills
-        // the script itself BEFORE it reaches `systemctl start` — the PR #790
-        // regression that left prod stopped (0/SUCCESS) until a manual start.
-        // `systemd-run` launches the script under systemd (PID 1), a sibling
-        // cgroup, so the stop of <svc> does not touch it and it survives to
-        // issue the start. Where systemd is not PID 1 (Docker/dev) we fall
-        // back to a single detached `systemctl restart`, whose restart is
-        // owned atomically by whatever supervises the service.
-        let listen_port = state.config.port;
-        yield sse(
-            "log",
+    // The MCP binaries we just replaced are still being executed by the
+    // Hermes agents that spawned them: those processes hold the old inode
+    // and are NOT recycled by this service's restart, because they are not
+    // in its cgroup. See `recycle_stale_companion_processes`.
+    for (binary, destination) in [("sandboxed-mcp", &install_dest_mcp)] {
+        let recycled = recycle_stale_companion_processes(binary, destination).await;
+        if recycled > 0 {
+            deploy_log(&tx, format!("Recycled {recycled} stale {binary} process(es) still running the replaced binary"), Some(86));
+        }
+    }
+
+    deploy_log(
+        &tx,
+        format!(
+            "Installing {} → {}",
+            src_paloma.display(),
+            install_dest_paloma
+        ),
+        Some(87),
+    );
+    let bkp_paloma = format!("{}.pre-deploy-{}", install_dest_paloma, sha);
+    let rollback_paloma = match prepare_deploy_backup(&install_dest_paloma, &bkp_paloma).await {
+        Ok(rollback) => rollback,
+        Err(error) => {
+            rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
+            rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
+            return deploy_fail(&tx, error);
+        }
+    };
+    let install_paloma = Command::new("install")
+        .args([
+            "-m",
+            "0755",
+            src_paloma.to_string_lossy().as_ref(),
+            &install_dest_paloma,
+        ])
+        .output()
+        .await;
+    match install_paloma {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma).await;
+            rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
+            rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
+            return deploy_fail(
+                &tx,
+                format!(
+                    "Install of palomactl failed (service binaries rolled back): {}",
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+            );
+        }
+        Err(e) => {
+            rollback_deployed_binary(&install_dest_paloma, &bkp_paloma, &rollback_paloma).await;
+            rollback_deployed_binary(&install_dest_mcp, &bkp_mcp, &rollback_mcp).await;
+            rollback_deployed_binary(&install_dest_main, &bkp_main, &rollback_main).await;
+            return deploy_fail(
+                &tx,
+                format!(
+                    "install command error for palomactl (service binaries rolled back): {}",
+                    e
+                ),
+            );
+        }
+    }
+
+    // The first unified rollout must provision a scoped coordinator
+    // credential before changing Hermes's command. The operator cutover
+    // performs that exchange after this Core version is serving requests.
+    deploy_log(&tx, "Unified MCP installed; provision the Hermes scoped session and migrate its configuration before restarting Hermes", Some(88));
+    deploy_log(
+        &tx,
+        format!("Backups: {}, {}, {}", bkp_main, bkp_mcp, bkp_paloma),
+        Some(88),
+    );
+
+    // Prune old backups now that every install succeeded. The rollback
+    // paths above consume this deploy's backups via rename, so pruning
+    // must stay on the success path only. Each deploy adds one ~440MB
+    // copy per binary; unbounded, this filled the prod disk.
+    let keep = deploy_backup_keep();
+    let mut pruned_total = 0usize;
+    let mut freed_total = 0u64;
+    for dest in [&install_dest_main, &install_dest_mcp, &install_dest_paloma] {
+        let (pruned, freed) = prune_deploy_backups(dest, keep).await;
+        pruned_total += pruned.len();
+        freed_total = freed_total.saturating_add(freed);
+    }
+    if pruned_total > 0 {
+        deploy_log(
+            &tx,
             format!(
-                "Scheduling guarded restart: stop {}, wait up to {}s for port {} to be released (SIGTERM then SIGKILL any lingering holder), then start",
-                service_name, PORT_RELEASE_GRACE_SECS, listen_port
+                "Pruned {} old pre-deploy backups ({} MB freed, keeping {} per binary)",
+                pruned_total,
+                freed_total / (1024 * 1024),
+                keep
+            ),
+            Some(89),
+        );
+    }
+
+    // Schedule the restart so this SSE response can flush its final event
+    // before systemd SIGTERMs us.
+    //
+    // stop + port-wait + start instead of a bare `systemctl restart`: an
+    // orphaned old process still holding the listen port makes the fresh
+    // service die with EADDRINUSE while the orphan serves stale code
+    // (seen twice in prod). The script waits up to
+    // PORT_RELEASE_GRACE_SECS for the port to be released, then
+    // SIGTERM → SIGKILL escalates on any lingering holder before start.
+    //
+    // The script MUST run as a transient systemd unit via `systemd-run`,
+    // NOT as a `setsid`/`nohup` child of this handler. A detached child
+    // still lives inside THIS service's cgroup, so when the script runs
+    // `systemctl stop <svc>` systemd tears the whole cgroup down and kills
+    // the script itself BEFORE it reaches `systemctl start` — the PR #790
+    // regression that left prod stopped (0/SUCCESS) until a manual start.
+    // `systemd-run` launches the script under systemd (PID 1), a sibling
+    // cgroup, so the stop of <svc> does not touch it and it survives to
+    // issue the start. Where systemd is not PID 1 (Docker/dev) we fall
+    // back to a single detached `systemctl restart`, whose restart is
+    // owned atomically by whatever supervises the service.
+
+    let health = RestartHealthCheck {
+        url: plan.health_url.clone(),
+        timeout_secs: deploy_health_timeout_secs(),
+        rollback: vec![
+            deploy_rollback_shell(&install_dest_main, &bkp_main, &rollback_main),
+            deploy_rollback_shell(&install_dest_mcp, &bkp_mcp, &rollback_mcp),
+            deploy_rollback_shell(&install_dest_paloma, &bkp_paloma, &rollback_paloma),
+        ],
+        result_path: deploy_result_path().to_string_lossy().to_string(),
+    };
+    let listen_port = plan.listen_port;
+    deploy_log(
+            &tx,
+            format!(
+                "Scheduling guarded restart: stop {}, wait up to {}s for port {} to be released (SIGTERM then SIGKILL any lingering holder), start, then require {} to answer within {}s or restore the previous binaries",
+                service_name, PORT_RELEASE_GRACE_SECS, listen_port, health.url, health.timeout_secs
             ),
             Some(90),
         );
-        yield sse(
-            "log",
-            if systemd_run_available() {
-                "Launching guarded restart as a transient systemd-run unit (sibling cgroup, survives the service stop)".to_string()
-            } else {
-                "systemd-run unavailable (no systemd PID 1); falling back to a detached `systemctl restart`".to_string()
-            },
-            Some(91),
-        );
-        let spawn_result = spawn_guarded_restart(&service_name, listen_port);
-        if let Err(e) = spawn_result {
-            yield sse(
-                "error",
-                format!("Binary installed but failed to schedule restart: {}. Run `systemctl restart {}` manually.", e, service_name),
-                None,
-            );
-            return;
+    deploy_log(
+        &tx,
+        if systemd_run_available() {
+            "Launching guarded restart as a transient systemd-run unit (sibling cgroup, survives the service stop)".to_string()
+        } else {
+            "systemd-run unavailable (no systemd PID 1); falling back to a detached `systemctl restart` without health check".to_string()
+        },
+        Some(91),
+    );
+    let _ = std::fs::remove_file(&health.result_path);
+    let child = match spawn_guarded_restart_inner(
+        &service_name,
+        listen_port,
+        Some(&health),
+        plan.wait_for_restart,
+    ) {
+        Ok(child) => child,
+        Err(e) => {
+            return deploy_fail(
+                    &tx,
+                    format!("Binary installed but failed to schedule restart: {}. Run `systemctl restart {}` manually.", e, service_name),
+                );
         }
+    };
 
-        yield sse(
-            "deployed",
-            format!(
-                "Deployed commit {}; service {} will restart in ~2s",
-                sha, service_name
+    if !plan.wait_for_restart {
+        let _ = tx.send(DeployEvent::Deployed {
+                message: format!(
+                    "Deployed commit {}; service {} will restart in ~2s and must answer {} within {}s, or the previous binaries are restored automatically (outcome in {})",
+                    sha, service_name, health.url, health.timeout_secs, health.result_path
+                ),
+            });
+        return true;
+    }
+
+    deploy_log(&tx, "Waiting for restart and health check", Some(95));
+    let mut child = child;
+    let _ = child.wait().await;
+    let result = std::fs::read_to_string(&health.result_path).ok();
+    let outcome = if systemd_run_available() {
+        parse_restart_result(result.as_deref())
+    } else {
+        RestartOutcome::Unchecked
+    };
+    let event = restart_outcome_event(outcome, &sha, &service_name);
+    let ok = matches!(event, DeployEvent::Deployed { .. });
+    let _ = tx.send(event);
+    ok
+}
+
+/// Post-restart health check embedded in the guarded restart script.
+#[derive(Debug, Clone)]
+pub(crate) struct RestartHealthCheck {
+    pub url: String,
+    pub timeout_secs: u64,
+    /// Shell commands restoring the previous binaries (see [`deploy_rollback_shell`]).
+    pub rollback: Vec<String>,
+    /// File the script writes its outcome word to (see [`parse_restart_result`]).
+    pub result_path: String,
+}
+
+/// How the guarded restart ended, as written by the script to the result file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestartOutcome {
+    /// The new service answered the health URL in time.
+    Healthy,
+    /// No `curl` on the host, so the health check could not run.
+    Unchecked,
+    /// The new service did not answer; the previous binaries were restored
+    /// and answered.
+    RolledBack,
+    /// Neither the new nor the restored service answered.
+    RollbackUnhealthy,
+    /// No (or an unknown) result: the script did not finish.
+    Unknown,
+}
+
+pub(crate) fn parse_restart_result(raw: Option<&str>) -> RestartOutcome {
+    match raw.map(str::trim) {
+        Some("healthy") => RestartOutcome::Healthy,
+        Some("unchecked") => RestartOutcome::Unchecked,
+        Some("rolled_back") => RestartOutcome::RolledBack,
+        Some("rollback_unhealthy") => RestartOutcome::RollbackUnhealthy,
+        _ => RestartOutcome::Unknown,
+    }
+}
+
+pub(crate) fn restart_outcome_event(
+    outcome: RestartOutcome,
+    sha: &str,
+    service: &str,
+) -> DeployEvent {
+    match outcome {
+        RestartOutcome::Healthy => DeployEvent::Deployed {
+            message: format!("Deployed commit {sha}; {service} restarted and is healthy"),
+        },
+        RestartOutcome::Unchecked => DeployEvent::Deployed {
+            message: format!(
+                "Deployed commit {sha}; {service} restarted, but its health was not checked (no systemd-run or curl on this host)"
             ),
-            Some(100),
-        );
-        // Give the client a beat to receive the final event before the
-        // restart tears down our TCP connection.
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        },
+        RestartOutcome::RolledBack => DeployEvent::Error(format!(
+            "Commit {sha} did not pass the health check; {service} was rolled back to the previous binaries and is healthy"
+        )),
+        RestartOutcome::RollbackUnhealthy => DeployEvent::Error(format!(
+            "Commit {sha} did not pass the health check and the rolled-back {service} is not healthy either. Check `journalctl -u {service}`"
+        )),
+        RestartOutcome::Unknown => DeployEvent::Error(format!(
+            "The guarded restart of {service} did not report an outcome. Check `systemctl status {service}` and the journal of the `*-redeploy-*` unit"
+        )),
+    }
+}
+
+/// Seconds the restarted service has to answer its health URL. Env
+/// `DEPLOY_HEALTH_TIMEOUT_SECS`, default 120.
+fn deploy_health_timeout_secs() -> u64 {
+    std::env::var("DEPLOY_HEALTH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(120)
+}
+
+/// Where the guarded restart records its [`RestartOutcome`], next to the
+/// debounce marker.
+fn deploy_result_path() -> std::path::PathBuf {
+    deploy_marker_path().with_file_name("last_deploy_result")
+}
+
+/// Local health URL of a service bound to `host:port`. Wildcard binds are
+/// probed over loopback.
+pub(crate) fn deploy_health_url(host: &str, port: u16) -> String {
+    let host = match host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
+    };
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    format!("http://{host}:{port}/api/health")
+}
+
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// Shell command that undoes one binary's install, mirroring
+/// [`rollback_deployed_binary`] for the restart script.
+fn deploy_rollback_shell(destination: &str, backup: &str, rollback: &DeployRollback) -> String {
+    let dest = sh_single_quote(destination);
+    match rollback {
+        DeployRollback::Backup => {
+            let bkp = sh_single_quote(backup);
+            format!("[ -f {bkp} ] && cp -f {bkp} {dest}.rollback && mv -f {dest}.rollback {dest}")
+        }
+        DeployRollback::Symlink(target) => {
+            format!(
+                "ln -sfn {} {dest}",
+                sh_single_quote(&target.to_string_lossy())
+            )
+        }
+        DeployRollback::Missing => format!("rm -f {dest}"),
     }
 }
 
@@ -5462,11 +5736,30 @@ pub(crate) async fn wait_for_port_release(
 /// start guarantee. Returns the spawn result; the detached child owns the
 /// restart, so success here means "scheduled", not "restarted".
 fn spawn_guarded_restart(service_name: &str, port: u16) -> std::io::Result<tokio::process::Child> {
+    spawn_guarded_restart_inner(service_name, port, None, false)
+}
+
+/// [`spawn_guarded_restart`] with an optional post-start health check (and
+/// automatic rollback), optionally blocking until the transient unit exits
+/// (`systemd-run --wait`, used by the operator CLI).
+fn spawn_guarded_restart_inner(
+    service_name: &str,
+    port: u16,
+    health: Option<&RestartHealthCheck>,
+    wait: bool,
+) -> std::io::Result<tokio::process::Child> {
     if systemd_run_available() {
         let unit = redeploy_unit_name(service_name);
-        let script = guarded_restart_script(service_name, port);
+        let script = match health {
+            Some(health) => guarded_restart_script_with_health(service_name, port, health),
+            None => guarded_restart_script(service_name, port),
+        };
+        let mut args = redeploy_systemd_run_args(&unit, &script);
+        if wait {
+            args.insert(0, "--wait".to_string());
+        }
         Command::new("systemd-run")
-            .args(redeploy_systemd_run_args(&unit, &script))
+            .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -5488,8 +5781,47 @@ fn spawn_guarded_restart(service_name: &str, port: u16) -> std::io::Result<tokio
 /// lingering holder, then start. Uses stop+start instead of `systemctl restart`
 /// so the wait can sit between the two halves.
 pub(crate) fn guarded_restart_script(service_name: &str, port: u16) -> String {
+    format!("sleep 2 && {}", guarded_restart_steps(service_name, port))
+}
+
+/// The guarded restart followed by a health check of the started service.
+/// If it does not answer `health.url` within `health.timeout_secs`, the
+/// previous binaries are restored and the service is restarted the same
+/// guarded way. The outcome word (see [`parse_restart_result`]) is written
+/// to `health.result_path`; exit status is 0 when the new service is up.
+pub(crate) fn guarded_restart_script_with_health(
+    service_name: &str,
+    port: u16,
+    health: &RestartHealthCheck,
+) -> String {
+    let result = sh_single_quote(&health.result_path);
+    let rollback = if health.rollback.is_empty() {
+        ":".to_string()
+    } else {
+        health.rollback.join("; ")
+    };
     format!(
-        "sleep 2 && systemctl stop {svc} >/dev/null 2>&1; \
+        "restart_guarded() {{ {steps}; }}; \
+         healthy() {{ for i in $(seq 1 {timeout}); do \
+           curl -fsS -m 3 -o /dev/null {url} >/dev/null 2>&1 && return 0; sleep 1; \
+         done; return 1; }}; \
+         sleep 2; restart_guarded; \
+         if ! command -v curl >/dev/null 2>&1; then echo unchecked > {result}; exit 0; fi; \
+         if healthy; then echo healthy > {result}; exit 0; fi; \
+         echo 'deploy: health check failed, restoring previous binaries'; \
+         {rollback}; \
+         restart_guarded; \
+         if healthy; then echo rolled_back > {result}; exit 3; fi; \
+         echo rollback_unhealthy > {result}; exit 4",
+        steps = guarded_restart_steps(service_name, port),
+        timeout = health.timeout_secs,
+        url = sh_single_quote(&health.url),
+    )
+}
+
+fn guarded_restart_steps(service_name: &str, port: u16) -> String {
+    format!(
+        "systemctl stop {svc} >/dev/null 2>&1; \
          for i in $(seq 1 {grace}); do \
            ss -tlnH 'sport = :{port}' 2>/dev/null | grep -q . || break; sleep 1; \
          done; \
@@ -5547,6 +5879,328 @@ pub(crate) fn redeploy_systemd_run_args(unit_name: &str, script: &str) -> Vec<St
         "-c".to_string(),
         script.to_string(),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Operator deploy CLI: `sandboxed-sh deploy --service <unit>`.
+//
+// Run as root on the host (an operator over SSH already has full trust, so no
+// biometric grant is involved). It applies the same refusals as the API
+// (expected service, live writers, debounce; all bypassed by --force) and
+// then runs the very same `run_deploy` routine, waiting for the restart and
+// its health check instead of being killed by them.
+// ---------------------------------------------------------------------------
+
+pub const DEPLOY_CLI_USAGE: &str = "\
+Usage: sandboxed-sh deploy --service <unit> [--ref <git-ref>] [--repo <path>] [--skip-build] [--force]
+
+Build and install the sandboxed.sh binaries from the source checkout, then
+restart <unit> (stop, wait for its port, start) and require it to answer
+/api/health, restoring the previous binaries otherwise. Run as root on the
+host, e.g.:
+
+  sandboxed-sh-prod deploy --service sandboxed-sh-prod.service --ref origin/master
+
+  --service <unit>  systemd unit to deploy; must be the unit this binary serves
+  --ref <git-ref>   fetch origin and check out this ref first (default: current checkout)
+  --repo <path>     source checkout (default: the service's configured repo path)
+  --skip-build      install the existing target/debug binaries
+  --force           deploy despite running missions or a deploy in the last 5 minutes";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeployCliArgs {
+    pub service: String,
+    pub git_ref: Option<String>,
+    pub repo_path: Option<String>,
+    pub skip_build: bool,
+    pub force: bool,
+}
+
+/// Parse the arguments after `deploy`. `Ok(None)` means `--help`.
+pub(crate) fn parse_deploy_cli_args(args: &[String]) -> Result<Option<DeployCliArgs>, String> {
+    let mut service = None;
+    let mut git_ref = None;
+    let mut repo_path = None;
+    let mut skip_build = false;
+    let mut force = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
+            _ => (arg.as_str(), None),
+        };
+        let mut value = |name: &str| -> Result<String, String> {
+            let value = match inline.clone() {
+                Some(value) => value,
+                None => iter
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| format!("{name} needs a value"))?,
+            };
+            if value.trim().is_empty() || value.starts_with("--") {
+                return Err(format!("{name} needs a value"));
+            }
+            Ok(value)
+        };
+        match flag {
+            "-h" | "--help" => return Ok(None),
+            "--service" => service = Some(value("--service")?),
+            "--ref" => git_ref = Some(value("--ref")?),
+            "--repo" => repo_path = Some(value("--repo")?),
+            "--skip-build" if inline.is_none() => skip_build = true,
+            "--force" if inline.is_none() => force = true,
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    let service = service.ok_or_else(|| "--service is required".to_string())?;
+    let service = format!("{}.service", service.trim_end_matches(".service"));
+    if !is_orb_or_sandboxed_unit_prefix(&service) {
+        return Err(format!(
+            "{service} is not a sandboxed.sh / orb service unit"
+        ));
+    }
+    Ok(Some(DeployCliArgs {
+        service,
+        git_ref,
+        repo_path,
+        skip_build,
+        force,
+    }))
+}
+
+/// `KEY=VALUE` lines of a systemd `EnvironmentFile`. Comments and blank lines
+/// are skipped; one level of surrounding quotes is removed.
+pub(crate) fn parse_environment_file(content: &str) -> Vec<(String, String)> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with(';'))
+        .filter_map(|line| {
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (key, value) = line.split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() || key.contains(char::is_whitespace) {
+                return None;
+            }
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                .unwrap_or(value);
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// The only unit environment keys the deploy CLI reads. Everything else in
+/// the unit (loader, shell, git, cargo or rustc control variables, PATH...)
+/// is ignored, so the unit's configuration cannot steer the commands the
+/// CLI runs as root.
+const DEPLOY_CLI_ENV_KEYS: &[&str] = &[
+    "WORKING_DIR",
+    "HOST",
+    "PORT",
+    "SANDBOXED_SH_REPO_PATH",
+    "SANDBOXED_REPO_PATH",
+];
+
+/// Service settings the deploy CLI needs, read from the unit's environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceDeployEnv {
+    pub working_dir: std::path::PathBuf,
+    pub host: String,
+    pub port: u16,
+    pub repo_path_override: Option<String>,
+}
+
+/// Build [`ServiceDeployEnv`] from the unit's `KEY=VALUE` pairs, using only
+/// [`DEPLOY_CLI_ENV_KEYS`]. Defaults match `Config::from_env`; the working dir
+/// falls back to the unit's `WorkingDirectory=`.
+pub(crate) fn service_deploy_env(
+    pairs: &[(String, String)],
+    unit_working_directory: Option<&str>,
+) -> Result<ServiceDeployEnv, String> {
+    let get = |key: &str| {
+        debug_assert!(DEPLOY_CLI_ENV_KEYS.contains(&key));
+        pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let port = match get("PORT") {
+        Some(port) => port
+            .parse::<u16>()
+            .map_err(|e| format!("invalid PORT {port:?} in the unit: {e}"))?,
+        None => 3000,
+    };
+    let working_dir = get("WORKING_DIR")
+        .or_else(|| {
+            unit_working_directory
+                .map(str::trim)
+                .filter(|dir| dir.starts_with('/'))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "/root".to_string());
+    Ok(ServiceDeployEnv {
+        working_dir: working_dir.into(),
+        host: get("HOST").unwrap_or_else(|| "0.0.0.0".to_string()),
+        port,
+        repo_path_override: get("SANDBOXED_SH_REPO_PATH").or_else(|| get("SANDBOXED_REPO_PATH")),
+    })
+}
+
+async fn systemctl_show(service: &str, property: &str) -> Option<String> {
+    let output = Command::new("systemctl")
+        .args(["show", "-p", property, "--value", service])
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// The unit's configured `EnvironmentFile=` and `Environment=` pairs (later
+/// entries win, as in systemd). Never the live process environment, which
+/// the service itself could change. Callers keep only allowlisted keys.
+async fn unit_environment(service: &str) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(files) = systemctl_show(service, "EnvironmentFiles").await {
+        for line in files.lines() {
+            // `/etc/sandboxed-sh/prod.env (ignore_errors=no)`
+            let path = line.split(" (").next().unwrap_or("").trim();
+            if let Ok(content) = tokio::fs::read_to_string(path).await {
+                env.extend(parse_environment_file(&content));
+            }
+        }
+    }
+    if let Some(inline) = systemctl_show(service, "Environment").await {
+        env.extend(parse_environment_file(
+            &inline.split_whitespace().collect::<Vec<_>>().join("\n"),
+        ));
+    }
+    env
+}
+
+/// Live writers across every persisted SQLite mission store (the CLI has no
+/// running control hub to ask).
+async fn count_live_writers_on_disk(working_dir: &std::path::Path) -> usize {
+    let missions_dir = working_dir.join(".sandboxed-sh").join("missions");
+    let Ok(mut entries) = tokio::fs::read_dir(&missions_dir).await else {
+        return 0;
+    };
+    let mut total = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(user_key) = name
+            .strip_prefix("missions-")
+            .and_then(|rest| rest.strip_suffix(".db"))
+        else {
+            continue;
+        };
+        match crate::api::mission_store::create_mission_store(
+            crate::api::mission_store::MissionStoreType::Sqlite,
+            missions_dir.clone(),
+            user_key,
+        )
+        .await
+        {
+            Ok(store) => total += count_live_writers(store.as_ref()).await,
+            Err(error) => eprintln!("warning: could not open mission store {name}: {error}"),
+        }
+    }
+    total
+}
+
+/// Entry point of `sandboxed-sh deploy`. Returns the process exit code.
+pub async fn run_deploy_cli(args: &[String]) -> i32 {
+    let args = match parse_deploy_cli_args(args) {
+        Ok(Some(args)) => args,
+        Ok(None) => {
+            println!("{DEPLOY_CLI_USAGE}");
+            return 0;
+        }
+        Err(error) => {
+            eprintln!("error: {error}\n\n{DEPLOY_CLI_USAGE}");
+            return 2;
+        }
+    };
+
+    let unit_env = unit_environment(&args.service).await;
+    let working_directory = systemctl_show(&args.service, "WorkingDirectory").await;
+    let service_env = match service_deploy_env(&unit_env, working_directory.as_deref()) {
+        Ok(env) => env,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return 1;
+        }
+    };
+
+    // The binary must serve the unit it deploys, exactly like the API's
+    // `expected_service` guard: `sandboxed-sh-dev deploy --service
+    // sandboxed-sh-prod.service` would install dev-suffixed companions.
+    let actual_service = match current_sandboxed_service_name() {
+        Ok(service) => service,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return 1;
+        }
+    };
+    let marker = deploy_marker_path();
+    let live_writers = count_live_writers_on_disk(&service_env.working_dir).await;
+    if let Some(refusal) = evaluate_deploy_request(
+        Some(&actual_service),
+        Some(&args.service),
+        false,
+        deploy_marker_age_secs(&marker),
+        args.force,
+        live_writers,
+    ) {
+        eprintln!("refused: {}", refusal.message());
+        return 1;
+    }
+    if let Err(error) = touch_deploy_marker(&marker) {
+        eprintln!("warning: {error}");
+    }
+
+    let settings = crate::settings::SettingsStore::new(&service_env.working_dir).await;
+    let repo_path = match args.repo_path.clone() {
+        Some(path) => path,
+        None => select_repo_path(
+            settings.get_sandboxed_repo_path().await,
+            service_env.repo_path_override.clone(),
+        ),
+    };
+    let plan = DeployPlan {
+        repo_path,
+        git_ref: args.git_ref.clone(),
+        skip_build: args.skip_build,
+        service_name: args.service.clone(),
+        listen_port: service_env.port,
+        health_url: deploy_health_url(&service_env.host, service_env.port),
+        wait_for_restart: true,
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(run_deploy(plan, tx));
+    while let Some(event) = rx.recv().await {
+        match event {
+            DeployEvent::Log { message, progress } => match progress {
+                Some(progress) => println!("[{progress:>3}%] {message}"),
+                None => println!("       {message}"),
+            },
+            DeployEvent::Error(message) => eprintln!("error: {message}"),
+            DeployEvent::Deployed { message } => println!("[100%] {message}"),
+        }
+    }
+    match task.await {
+        Ok(true) => 0,
+        _ => 1,
+    }
 }
 
 #[cfg(test)]
@@ -6353,5 +7007,245 @@ mod tests {
         assert!(is_production_orb_service("assistant-mcp.service"));
         assert!(!is_production_orb_service("orb-core-dev.service"));
         assert!(!is_production_orb_service("assistant-mcp-dev.service"));
+    }
+
+    use super::{
+        deploy_health_url, deploy_rollback_shell, guarded_restart_script_with_health,
+        guarded_restart_steps, parse_deploy_cli_args, parse_environment_file, parse_restart_result,
+        restart_outcome_event, service_deploy_env, DeployEvent, RestartHealthCheck, RestartOutcome,
+        ServiceDeployEnv, DEPLOY_CLI_ENV_KEYS,
+    };
+
+    fn cli_args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn deploy_cli_parses_flags_and_normalizes_service() {
+        let parsed = parse_deploy_cli_args(&cli_args(&[
+            "--service",
+            "sandboxed-sh-prod",
+            "--ref=origin/master",
+            "--force",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.service, "sandboxed-sh-prod.service");
+        assert_eq!(parsed.git_ref.as_deref(), Some("origin/master"));
+        assert!(parsed.force);
+        assert!(!parsed.skip_build);
+        assert_eq!(parse_deploy_cli_args(&cli_args(&["--help"])), Ok(None));
+    }
+
+    #[test]
+    fn deploy_cli_rejects_bad_arguments() {
+        assert!(parse_deploy_cli_args(&cli_args(&[])).is_err());
+        assert!(parse_deploy_cli_args(&cli_args(&["--service"])).is_err());
+        assert!(parse_deploy_cli_args(&cli_args(&["--service", "--force"])).is_err());
+        assert!(parse_deploy_cli_args(&cli_args(&["--service", "nginx.service"])).is_err());
+        assert!(parse_deploy_cli_args(&cli_args(&["--service", "orb-core", "--bogus"])).is_err());
+        assert!(
+            parse_deploy_cli_args(&cli_args(&["--service", "orb-core", "--force=yes"])).is_err()
+        );
+    }
+
+    #[test]
+    fn deploy_cli_refusals_match_the_api() {
+        // The CLI passes the binary's own unit as actual, the flag as expected.
+        assert!(matches!(
+            evaluate_deploy_request(
+                Some("sandboxed-sh-dev.service"),
+                Some("sandboxed-sh-prod.service"),
+                false,
+                None,
+                true,
+                0
+            ),
+            Some(DeployRefusal::WrongService { .. })
+        ));
+        assert_eq!(
+            evaluate_deploy_request(
+                Some("sandboxed-sh-prod.service"),
+                Some("sandboxed-sh-prod.service"),
+                false,
+                None,
+                false,
+                2
+            ),
+            Some(DeployRefusal::WritersLive { count: 2 })
+        );
+        assert_eq!(
+            evaluate_deploy_request(
+                Some("sandboxed-sh-prod.service"),
+                Some("sandboxed-sh-prod.service"),
+                false,
+                Some(10),
+                true,
+                2
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn environment_parsers_handle_files_and_proc() {
+        let env = parse_environment_file(
+            "# c\n\nPORT=3100\nexport HOST=\"0.0.0.0\"\nX='a b'\nbad line\n",
+        );
+        assert_eq!(
+            env,
+            vec![
+                ("PORT".to_string(), "3100".to_string()),
+                ("HOST".to_string(), "0.0.0.0".to_string()),
+                ("X".to_string(), "a b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn deploy_cli_adopts_only_allowlisted_unit_keys() {
+        let pairs = parse_environment_file(
+            "LD_PRELOAD=/tmp/evil.so\nGIT_DIR=/tmp/evil\nBASH_ENV=/tmp/x\nPATH=/tmp\n\
+             CARGO_HOME=/tmp\nRUSTC_WRAPPER=/tmp/x\nPORT=3100\nHOST=127.0.0.1\n\
+             SANDBOXED_SH_REPO_PATH=/opt/sandboxed-sh\n",
+        );
+        let env = service_deploy_env(&pairs, Some("/var/lib/orb")).unwrap();
+        assert_eq!(
+            env,
+            ServiceDeployEnv {
+                working_dir: "/var/lib/orb".into(),
+                host: "127.0.0.1".to_string(),
+                port: 3100,
+                repo_path_override: Some("/opt/sandboxed-sh".to_string()),
+            }
+        );
+        for denied in [
+            "LD_PRELOAD",
+            "GIT_DIR",
+            "BASH_ENV",
+            "PATH",
+            "CARGO_HOME",
+            "RUSTC_WRAPPER",
+        ] {
+            assert!(
+                !DEPLOY_CLI_ENV_KEYS.contains(&denied),
+                "{denied} must never be adopted"
+            );
+        }
+        assert_eq!(service_deploy_env(&[], None).unwrap().port, 3000);
+        assert_eq!(
+            service_deploy_env(&[], None).unwrap().working_dir,
+            std::path::PathBuf::from("/root")
+        );
+        assert!(service_deploy_env(&[("PORT".into(), "x".into())], None).is_err());
+    }
+
+    #[test]
+    fn health_url_probes_loopback_for_wildcard_binds() {
+        assert_eq!(
+            deploy_health_url("0.0.0.0", 3100),
+            "http://127.0.0.1:3100/api/health"
+        );
+        assert_eq!(
+            deploy_health_url("::", 3000),
+            "http://127.0.0.1:3000/api/health"
+        );
+        assert_eq!(
+            deploy_health_url("10.0.0.2", 3000),
+            "http://10.0.0.2:3000/api/health"
+        );
+        assert_eq!(
+            deploy_health_url("::1", 3000),
+            "http://[::1]:3000/api/health"
+        );
+    }
+
+    #[test]
+    fn restart_outcome_decides_success_or_rollback() {
+        assert_eq!(
+            parse_restart_result(Some("healthy\n")),
+            RestartOutcome::Healthy
+        );
+        assert_eq!(
+            parse_restart_result(Some("rolled_back")),
+            RestartOutcome::RolledBack
+        );
+        assert_eq!(
+            parse_restart_result(Some("rollback_unhealthy")),
+            RestartOutcome::RollbackUnhealthy
+        );
+        assert_eq!(
+            parse_restart_result(Some("unchecked")),
+            RestartOutcome::Unchecked
+        );
+        assert_eq!(parse_restart_result(None), RestartOutcome::Unknown);
+        assert_eq!(
+            parse_restart_result(Some("garbage")),
+            RestartOutcome::Unknown
+        );
+        for (outcome, ok) in [
+            (RestartOutcome::Healthy, true),
+            (RestartOutcome::Unchecked, true),
+            (RestartOutcome::RolledBack, false),
+            (RestartOutcome::RollbackUnhealthy, false),
+            (RestartOutcome::Unknown, false),
+        ] {
+            let event = restart_outcome_event(outcome, "abc", "sandboxed-sh-prod.service");
+            assert_eq!(
+                matches!(event, DeployEvent::Deployed { .. }),
+                ok,
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_shell_restores_each_install_kind() {
+        let backup = deploy_rollback_shell(
+            "/usr/local/bin/x",
+            "/usr/local/bin/x.pre-deploy-1",
+            &DeployRollback::Backup,
+        );
+        assert!(
+            backup.contains("cp -f '/usr/local/bin/x.pre-deploy-1' '/usr/local/bin/x'.rollback")
+        );
+        assert!(backup.contains("mv -f '/usr/local/bin/x'.rollback '/usr/local/bin/x'"));
+        let link = deploy_rollback_shell(
+            "/usr/local/bin/x",
+            "unused",
+            &DeployRollback::Symlink("/usr/local/bin/versions/old/x".into()),
+        );
+        assert_eq!(
+            link,
+            "ln -sfn '/usr/local/bin/versions/old/x' '/usr/local/bin/x'"
+        );
+        assert_eq!(
+            deploy_rollback_shell("/a b/it's", "unused", &DeployRollback::Missing),
+            r"rm -f '/a b/it'\''s'"
+        );
+    }
+
+    #[test]
+    fn health_script_checks_then_rolls_back_and_restarts() {
+        let health = RestartHealthCheck {
+            url: "http://127.0.0.1:3100/api/health".to_string(),
+            timeout_secs: 90,
+            rollback: vec!["rm -f '/x'".to_string()],
+            result_path: "/var/lib/sandboxed-sh/last_deploy_result".to_string(),
+        };
+        let script = guarded_restart_script_with_health("sandboxed-sh-prod.service", 3100, &health);
+        assert!(!script.contains("systemctl restart"));
+        let check = script.find("if healthy; then echo healthy").unwrap();
+        let rollback = script.find("rm -f '/x'").unwrap();
+        let second = script.rfind("restart_guarded;").unwrap();
+        assert!(
+            check < rollback && rollback < second,
+            "health, rollback, restart in order"
+        );
+        assert!(script.contains("seq 1 90"));
+        assert!(script.contains("'http://127.0.0.1:3100/api/health'"));
+        assert!(script.contains("echo rolled_back > '/var/lib/sandboxed-sh/last_deploy_result'"));
+        assert!(script.contains("echo unchecked"));
+        assert!(script.contains(&guarded_restart_steps("sandboxed-sh-prod.service", 3100)));
     }
 }

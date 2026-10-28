@@ -14,6 +14,13 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .thread_stack_size(16 * 1024 * 1024)
         .build()?;
+    // `sandboxed-sh deploy --service <unit>`: operator deploy over SSH, the
+    // same routine as `POST /api/system/deploy` (see DEBUGGING.md).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("deploy") {
+        let code = runtime.block_on(api::system::run_deploy_cli(&args[1..]));
+        std::process::exit(code);
+    }
     runtime.block_on(async_main())
 }
 
