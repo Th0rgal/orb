@@ -13,10 +13,18 @@ python3 scripts/run_shared_kernel_conformance.py \
   --turbo-root /path/to/turbo-lean \
   --lean-sys-root /path/to/lean-sys \
   --lean-bin-dir /path/to/lean-4.35.0/bin \
+  --expected-orb-head FULL_REVIEWED_ORB_SHA \
+  --expected-turbo-head FULL_REVIEWED_TURBO_SHA \
   --out /path/to/new-evidence-directory
 ```
 
-The output directory must not exist. Each run preserves command arguments,
+The output directory must not exist and should be outside the source worktrees.
+The harness requires clean Orb, Turbo and pinned LeanSys inputs, checks the
+caller-supplied full revisions, records resolved tools and version responses,
+and hashes participating harness modules and generated artifacts recursively.
+It requires POSIX process groups. Only Linux execution is established here;
+Darwin command support is not a native Apple qualification receipt.
+Each run preserves command arguments,
 working directories, exit codes, stdout/stderr, source and tool hashes,
 generated sources, binaries, inputs and observed values. Per-case SHA-256 receipts
 bind the input, result, engine and the shared provenance hash. They are unsigned
@@ -36,8 +44,15 @@ LNIR uses the actual source frontend and interpreter; errors remain failures.
 No handwritten behavioral oracle, precomputed answer, or mocked engine supplies
 an execution result.
 
+Native calls execute in supervised subprocesses, with active case markers and
+flushed observations. Timeouts, crash signals and SIGTERM preserve command
+receipts; partial valid rows remain separate from complete engines and are
+compared when a complete stock reference exists. LNIR uses one request per
+input/case and validates a strict decimal UInt64 result, avoiding positional
+identity within repeated-declaration batches and unbounded command lines.
 Missing tools, unsuccessful commands, bad row identities and incomplete engines
-remain visible. A mismatch exits 1. Otherwise the harness exits 2 (`INCOMPLETE`),
+remain visible. A mismatch or mutation-qualification failure exits 1.
+Otherwise the harness exits 2 (`INCOMPLETE`),
 even when all scalar observations agree: existing production host adapters,
 loop/alias/reference-counting cases, per-family mutation qualification and target
 qualification are not implemented here. Generated Rust ABI calls do not exercise
@@ -45,10 +60,15 @@ the existing Rust host wrappers. Do not wrap exit 2 into a passing conformance g
 
 The harness compiles native and WASM mutants that flip the low result bit of one
 real forwarding export, executes them, and requires the comparator to detect all
-eight affected cases. This qualifies two bounded mutation experiments only.
+eight affected cases, with exactly the intended low-bit flip and no unrelated
+changes relative to an agreeing unmutated backend. This qualifies two bounded
+mutation experiments only.
 Adversarial harness tests reject dropped/extra/duplicate rows, swapped identities,
-changed values and tampered hashes; actual missing commands and nonzero exits
-preserve failures. A real child/grandchild timeout test checks process cleanup.
+changed unequal values, and malformed LNIR response values. Hash tests show
+payload changes alter the digest; they do not implement authenticated receipt
+ingestion or detect identity substitution independent of values. Actual missing
+commands and nonzero exits preserve failures. Real native abort/hang, SIGTERM and
+child/grandchild timeout tests check supervision and interruption receipts.
 This does not satisfy the roadmap's full engine-mutation or three-mutants-per-family
 acceptance requirements.
 

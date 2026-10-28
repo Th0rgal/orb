@@ -16,11 +16,15 @@ import re
 import subprocess
 import shutil
 import signal
+import sys
+import platform
+import time
 from gen_kernel_bindings import load_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 ORB = ROOT
 COMMANDS = []
+EXECUTABLES = {}
 REQUIRED_ENGINES = ("stock_lean", "stock_extracted_c", "vendored_native_c", "rust_abi", "wasm", "lnir")
 
 
@@ -62,37 +66,71 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def run(argv, cwd=None, env=None, timeout=240):
+class CommandFailure(RuntimeError):
+    def __init__(self, message, stdout=""):
+        super().__init__(message)
+        self.stdout = stdout
+
+
+def run(argv, cwd=None, env=None, timeout=240, context=None, ready=None):
     argv = list(map(str, argv))
-    cwd, env = cwd or OUT, env or ENV
+    argv[0] = EXECUTABLES.get(argv[0], argv[0])
+    record = {"argv": argv, "cwd": str(cwd or OUT), "exit_code": None,
+              "stdout": "", "stderr": "", "context": context}
     try:
-        with subprocess.Popen(argv, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, start_new_session=True) as process:
+        with subprocess.Popen(argv, cwd=cwd or OUT, env=env or ENV, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True) as process:
             try:
-                stdout, stderr = process.communicate(timeout=timeout)
+                if ready is not None:
+                    deadline = time.monotonic() + 10
+                    while not ready.exists():
+                        if process.poll() is not None or time.monotonic() > deadline:
+                            raise RuntimeError("command did not signal readiness")
+                        time.sleep(0.01)
+                record["stdout"], record["stderr"] = process.communicate(timeout=timeout)
             except BaseException:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                process.communicate()
+                record["stdout"], record["stderr"] = process.communicate()
+                record["exit_code"] = process.returncode
                 raise
-            r = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
-    except (subprocess.TimeoutExpired, OSError) as e:
-        def decode(value):
-            return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
-        COMMANDS.append({"argv": argv, "cwd": str(cwd), "exit_code": None,
-                         "error": str(e), "stdout": decode(getattr(e, "stdout", "")),
-                         "stderr": decode(getattr(e, "stderr", ""))})
+            record["exit_code"] = process.returncode
+    except BaseException as error:
+        record["error"] = type(error).__name__ + ": " + str(error)
+        if isinstance(error, (OSError, subprocess.TimeoutExpired)):
+            raise CommandFailure(record["error"], record["stdout"]) from error
+        raise
+    finally:
+        COMMANDS.append(record)
         (OUT / "commands.json").write_text(json.dumps(COMMANDS, indent=2) + "\n")
-        raise RuntimeError(f"command {len(COMMANDS)} did not complete; see commands.json") from e
-    rec = {"argv": r.args, "cwd": str(cwd), "exit_code": r.returncode,
-           "stdout": r.stdout, "stderr": r.stderr}
-    COMMANDS.append(rec)
-    (OUT / "commands.json").write_text(json.dumps(COMMANDS, indent=2) + "\n")
-    if r.returncode:
-        raise RuntimeError(f"command {len(COMMANDS)} failed (exit {r.returncode}); see commands.json")
-    return r.stdout
+    if record["exit_code"]:
+        raise CommandFailure(f"command {len(COMMANDS)} failed (exit {record['exit_code']}); see commands.json", record["stdout"])
+    return record["stdout"]
+
+
+def lnir_result(row, case):
+    if row.get("decl") != "probe_" + case["symbol"] or row.get("ok") is not True:
+        raise ValueError("LNIR result identity/status mismatch")
+    value = row.get("value_u64")
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+", value) or int(value) >= 2**64:
+        raise ValueError("LNIR result must be an unsigned decimal u64 string")
+    return int(value)
+
+
+class QualificationFailure(ValueError):
+    pass
+
+
+def qualify_mutant(reference, baseline, mutant, cases, target):
+    expected = {c["id"] for c in cases if c["symbol"] == target}
+    if not expected or compare_rows(reference, baseline, cases):
+        raise QualificationFailure("mutation baseline is missing or disagrees with stock")
+    actual = set(compare_rows(baseline, mutant, cases))
+    if actual != expected or any(mutant[i] != baseline[i] ^ 1 for i in expected):
+        raise QualificationFailure("mutation effect escaped or differs from its intended case set/bit flip")
+    return sorted(actual)
 
 
 def export_map(path, namespace):
@@ -112,13 +150,23 @@ def main(argv=None):
     ap.add_argument("--turbo-root", required=True, type=Path)
     ap.add_argument("--lean-sys-root", required=True, type=Path)
     ap.add_argument("--lean-bin-dir", required=True, type=Path)
+    ap.add_argument("--expected-orb-head", required=True)
+    ap.add_argument("--expected-turbo-head", required=True)
     ap.add_argument("--out", required=True, type=Path, help="new evidence directory; never overwrite a prior run")
     args = ap.parse_args(argv)
     TURBO, SYS, TOOLS = (p.resolve() for p in (args.turbo_root, args.lean_sys_root, args.lean_bin_dir))
     OUT = args.out.resolve()
     OUT.mkdir(parents=True, exist_ok=False)
-    ENV = dict(os.environ, LEAN_PATH=str(OUT))
+    ENV = dict(os.environ, LEAN_PATH=str(OUT), LC_ALL="C", LANG="C")
     COMMANDS.clear()
+    EXECUTABLES.clear()
+    for name in ("cc", "node", "rustc", "ar", "git"):
+        candidate = shutil.which(name)
+        if candidate:
+            EXECUTABLES[name] = str(Path(candidate).resolve())
+    # Proxy shims are not the compiler binary named by their symlink.
+    if Path(EXECUTABLES.get("rustc", "")).name == "rustup":
+        EXECUTABLES["rustc"] = run([EXECUTABLES["rustc"], "which", "rustc"]).strip()
     # Unwind subprocess ownership on durable-job termination as well as timeout.
     signal.signal(signal.SIGTERM, terminate)
     manifest = load_manifest(ORB / "shared/orb-spec/kernel_abi.json")
@@ -157,22 +205,52 @@ def main(argv=None):
                   "Only two scalar backend mutations are exercised; full engine/harness and per-family mutation qualification remains open"]}
     report["sources"][str(ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c")] = digest(ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c")
     report["sources"][str(ORB / "shared/orb-spec/kernel_abi.json")] = digest(ORB / "shared/orb-spec/kernel_abi.json")
+    report["sources"][str(Path(__file__))] = digest(__file__)
+    report["sources"][str(Path(__file__).with_name("gen_kernel_bindings.py"))] = digest(Path(__file__).with_name("gen_kernel_bindings.py"))
+    report["repositories"] = {}
+    for name, path in (("orb", ORB), ("turbo", TURBO), ("lean_sys", SYS)):
+        dirty = run(["git", "status", "--porcelain=v1", "--untracked-files=all"], path)
+        report["repositories"][name] = {"head": run(["git", "rev-parse", "HEAD"], path).strip(), "dirty": dirty}
+        if dirty:
+            (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+            raise ValueError(f"dirty {name} inputs; commit/preserve them explicitly before conformance")
+    for name, expected in (("orb", args.expected_orb_head), ("turbo", args.expected_turbo_head)):
+        if not re.fullmatch(r"[0-9a-f]{40}", expected) or report["repositories"][name]["head"] != expected:
+            raise ValueError(f"unexpected {name} revision")
+    report["environment"] = {"LEAN_PATH": ENV["LEAN_PATH"], "LC_ALL": "C", "LANG": "C",
+                             "platform": platform.platform(), "machine": platform.machine()}
     report["harness_sha256"] = digest(__file__)
     report["tools"] = {}
     for name, path in [(n, TOOLS / n) for n in ("lean", "leanc", "clang", "ld.lld")] + [
         (n, TURBO / "lean/.lake/build/bin" / n) for n in ("lean-native", "lean-native-core")
     ] + [(n, Path(shutil.which(n) or n)) for n in ("cc", "node", "rustc", "ar")]:
+        path = Path(EXECUTABLES.get(name, str(path))).resolve()
         report["tools"][name] = {"path": str(path), "sha256": digest(path) if path.is_file() else None}
-    values = {}
+        if path.is_file():
+            try:
+                version = run([path, "--version"])
+                report["tools"][name]["version"] = version
+            except CommandFailure as error:
+                report["tools"][name]["version_unavailable"] = str(error)
+    values, partial_values = {}, {}
 
     def engine(name, action):
+        result = {}
         try:
             result = action()
             validate_rows(result, cases)
             values[name] = result
             report["engines"][name] = {"status": "EXECUTED", "rows": len(result)}
         except Exception as e:
-            report["engines"][name] = {"status": "BLOCKED", "reason": str(e)}
+            if isinstance(e, CommandFailure):
+                try:
+                    result = parse_rows(e.stdout)
+                except (ValueError, TypeError):
+                    result = {}
+            if isinstance(result, dict) and set(result) <= {c["id"] for c in cases}:
+                partial_values[name] = result
+            report["engines"][name] = {"status": "BLOCKED", "reason": str(e), "observed_rows": len(result)}
+        (OUT / "values.json").write_text(json.dumps({"complete": values, "partial": partial_values}, sort_keys=True) + "\n")
         (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
 
     def stock():
@@ -214,17 +292,28 @@ def main(argv=None):
         return parse_rows(run([OUT / "stock-c", OUT / "cases.txt"]))
 
     def native_library(path):
-        lib = ctypes.CDLL(str(path))
-        types = {"uint8_t": ctypes.c_uint8, "uint32_t": ctypes.c_uint32, "uint64_t": ctypes.c_uint64}
-        for f in functions:
-            fun = getattr(lib, f["name"])
-            fun.argtypes = [types[p["type"]] for p in f["params"]]
-            fun.restype = types[f["ret"]]
-        return {c["id"]: getattr(lib, c["symbol"])(*c["args"]) for c in cases}
+        script = OUT / "native-runner.py"
+        script.write_text('''import ctypes,json,sys
+import resource
+from pathlib import Path
+resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+lib=ctypes.CDLL(sys.argv[1])
+manifest=json.loads(Path(sys.argv[2]).read_text())
+types={"uint8_t":ctypes.c_uint8,"uint32_t":ctypes.c_uint32,"uint64_t":ctypes.c_uint64}
+for f in manifest["functions"]:
+    fun=getattr(lib,f["name"])
+    fun.argtypes=[types[p["type"]] for p in f["params"]]
+    fun.restype=types[f["ret"]]
+for c in json.loads(Path(sys.argv[3]).read_text()):
+    print("active-case:"+str(c["id"]),file=sys.stderr,flush=True)
+    value=getattr(lib,c["symbol"])(*c["args"])
+    print(str(c["id"])+":"+str(value),flush=True)
+''')
+        return parse_rows(run([sys.executable, script, path, ORB / "shared/orb-spec/kernel_abi.json", OUT / "cases.json"]))
 
     def native():
         source = ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
-        run(["cc", "-O2", "-shared", "-fPIC", source, "-o", OUT / "kernel.so"])
+        run(["cc", "-O2", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC", source, "-o", OUT / "kernel.so"])
         return native_library(OUT / "kernel.so")
 
     def rust_abi():
@@ -243,7 +332,8 @@ def main(argv=None):
         lines += ['_ => panic!("unknown symbol"),', '}};', 'println!("{}:{}", v[0], value);', '}}']
         (OUT / "rust-abi.rs").write_text("\n".join(lines) + "\n")
         run(["cc", "-O2", "-c", ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c", "-o", OUT / "kernel.native.o"])
-        run(["rustc", "--edition=2024", OUT / "rust-abi.rs", "-C", "link-arg=" + str(OUT / "kernel.native.o"), "-o", OUT / "rust-abi"])
+        run(["rustc", "--edition=2024", OUT / "rust-abi.rs", "-C", "linker=" + EXECUTABLES["cc"],
+             "-C", "link-arg=" + str(OUT / "kernel.native.o"), "-o", OUT / "rust-abi"])
         return parse_rows(run([OUT / "rust-abi", OUT / "cases.txt"]))
 
     def wasm():
@@ -276,29 +366,45 @@ for (const c of cases) {
 
     def lnir():
         run([TURBO / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", OUT / "Wrappers.lean", "-o", OUT / "module.lnir"])
-        args = ";".join("probe_" + c["symbol"] + ":" + ",".join(map(str, c["args"])) for c in cases)
-        rows = json.loads(run([TURBO / "lean/.lake/build/bin/lean-native-core", "eval-lnir",
-                              "--lnir", OUT / "module.lnir", "--args", args, "--batch-json"]))
-        if len(rows) != len(cases) or not all(r.get("ok") is True for r in rows):
-            raise ValueError("failed/missing LNIR execution rows")
-        if not all(r["decl"] == "probe_" + c["symbol"] for r, c in zip(rows, cases)):
-            raise ValueError("LNIR declaration identity mismatch")
-        return {c["id"]: int(row["value_u64"]) for c, row in zip(cases, rows)}
+        result, errors = {}, []
+        for c in cases:
+            # One request per process binds this response to one input/case. No
+            # positional identity within repeated-declaration batches is trusted.
+            binding = "probe_" + c["symbol"] + ":" + ",".join(map(str, c["args"]))
+            context = {"case_id": c["id"], "input_sha256": canonical_hash(c)}
+            try:
+                raw = run([TURBO / "lean/.lake/build/bin/lean-native-core", "eval-lnir", "--lnir", OUT / "module.lnir",
+                           "--args", binding, "--batch-json"], context=context)
+                rows = json.loads(raw)
+                if len(rows) != 1:
+                    raise ValueError("LNIR request must return exactly one row")
+                result[c["id"]] = lnir_result(rows[0], c)
+            except Exception as error:
+                errors.append({"case": c, "error": str(error)})
+        (OUT / "lnir-errors.json").write_text(json.dumps(errors, indent=2) + "\n")
+        if errors:
+            partial_values["lnir"] = result
+            # Keep partial rows for comparisons, never count them as completion.
+            return result
+        return result
 
     for name, action in [("stock_lean", stock), ("stock_extracted_c", stock_c),
                          ("vendored_native_c", native), ("rust_abi", rust_abi), ("wasm", wasm), ("lnir", lnir)]:
         engine(name, action)
     report["mismatches"] = []
     if "stock_lean" in values:
-        for name, rows in values.items():
+        for name, rows in {**partial_values, **values}.items():
             for c in cases:
-                if rows[c["id"]] != values["stock_lean"][c["id"]]:
+                if c["id"] in rows and rows[c["id"]] != values["stock_lean"][c["id"]]:
                     report["mismatches"].append({"case": c, "engine": name,
                         "stock": str(values['stock_lean'][c['id']]), "actual": str(rows[c['id']])})
     else:
         report["blockers"].append("Stock Lean oracle unavailable; comparisons unqualified")
     report["missing_engines"] = [name for name in REQUIRED_ENGINES if name not in values]
+    report["comparisons"] = sum(len(rows) for name, rows in {**partial_values, **values}.items()
+                                if name != "stock_lean") if "stock_lean" in values else 0
     report["mutation_checks"] = {}
+    qualification_failed = False
     try:
         # Rename the real target, then interpose a bit-flipping forwarding shim.
         # This mutates executed backend code, never an expected answer.
@@ -310,27 +416,24 @@ for (const c of cases) {
                         'uint64_t orb_mix64_word(uint64_t a, uint64_t b) { return original_mix(a,b) ^ UINT64_C(1); }\n')
         source = ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c"
         run(["cc", "-O2", "-fPIC", "-Dorb_mix64_word=original_mix", "-c", source, "-o", OUT / "mutant.o"])
-        run(["cc", "-shared", "-fPIC", OUT / "mutant.o", shim, "-o", OUT / "mutant.so"])
+        run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC", OUT / "mutant.o", shim, "-o", OUT / "mutant.so"])
         if "stock_lean" not in values:
             raise RuntimeError("no executed stock reference for mutation qualification")
         mutant_rows = native_library(OUT / "mutant.so")
-        killed = compare_rows(values["stock_lean"], mutant_rows, cases)
-        if len(killed) != 8:
-            raise RuntimeError("native scalar mutant escaped")
+        killed = qualify_mutant(values["stock_lean"], values["vendored_native_c"], mutant_rows, cases, target["name"])
         report["mutation_checks"]["native_scalar"] = {"status": "KILLED", "case_ids": killed}
         for src, obj, flags in [(source, "mutant.wasm.o", ["-Dorb_mix64_word=original_mix"]), (shim, "shim.wasm.o", [])]:
             run([TOOLS / "clang", "--target=wasm32", "-O2", "-ffreestanding", "-isystem", TOOLS.parent / "include/clang",
                  *flags, "-c", src, "-o", OUT / obj])
         run([TOOLS / "ld.lld", "-flavor", "wasm", "--no-entry", "--export-all", OUT / "mutant.wasm.o", OUT / "shim.wasm.o", "-o", OUT / "mutant.wasm"])
         rows = parse_rows(run(["node", OUT / "run-wasm.cjs", OUT / "mutant.wasm", ORB / "shared/orb-spec/kernel_abi.json", OUT / "js-cases.json"]))
-        killed = compare_rows(values["stock_lean"], rows, cases)
-        if len(killed) != 8:
-            raise RuntimeError("WASM scalar mutant escaped")
+        killed = qualify_mutant(values["stock_lean"], values["wasm"], rows, cases, target["name"])
         report["mutation_checks"]["wasm_scalar"] = {"status": "KILLED", "case_ids": killed}
     except Exception as e:
         report["mutation_checks"]["failure"] = str(e)
-    (OUT / "values.json").write_text(json.dumps(values, sort_keys=True) + "\n")
-    report["artifacts"] = {p.name: digest(p) for p in OUT.iterdir()
+        qualification_failed = isinstance(e, QualificationFailure)
+    (OUT / "values.json").write_text(json.dumps({"complete": values, "partial": partial_values}, sort_keys=True) + "\n")
+    report["artifacts"] = {str(p.relative_to(OUT)): digest(p) for p in OUT.rglob("*")
                            if p.is_file() and p.name not in ("report.json", "commands.json")}
     provenance = {"sources": report["sources"], "harness_sha256": report["harness_sha256"],
                   "tools": report["tools"], "artifacts": report["artifacts"], "commands_sha256": digest(OUT / "commands.json")}
@@ -342,12 +445,12 @@ for (const c of cases) {
                 receipts.write(json.dumps(case_receipt(c, name, rows[c["id"]], report["provenance_sha256"]), sort_keys=True) + "\n")
     report["case_receipts_sha256"] = digest(OUT / "case-receipts.jsonl")
     report["case_receipts_signed"] = False
-    if report["mismatches"]:
+    if report["mismatches"] or qualification_failed:
         report["status"] = "FAIL"
     (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({k: report[k] for k in ("status", "public_exports", "cases", "engines", "blockers")}, indent=2))
-    print("mismatches:", len(report["mismatches"]))
-    return 1 if report["mismatches"] else 2  # Unqualified coverage never yields acceptance.
+    print("comparisons:", report["comparisons"], "observed mismatches:", len(report["mismatches"]))
+    return 1 if report["status"] == "FAIL" else 2  # Unqualified coverage never yields acceptance.
 
 
 if __name__ == "__main__":
