@@ -2890,7 +2890,7 @@ select.orb-select-native:disabled { cursor: default; }
 .p-acc .s-row-desc .p-st { flex:0 0 auto;max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis; }
 .p-acc .s-row-desc .p-plan { flex:1 1 0;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--fg-3); }
 .p-acc > .p-usage.compact { grid-column:3;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,max-content);column-gap:8px;margin:0;overflow:visible; }
-.p-usage.compact .p-usage-chip { display:flex;justify-content:space-between;align-items:baseline;gap:6px;min-width:120px; }
+.p-usage.compact .p-usage-chip { display:flex;justify-content:flex-start;align-items:baseline;gap:5px;min-width:0;padding:3px 6px;border-radius:5px;background:var(--stroke-soft); }
 .p-usage.compact .p-usage-label { width:auto;white-space:nowrap;font-size:11px;color:var(--fg-4); }
 .p-usage.compact .p-usage-pct, .p-usage-more { font-variant-numeric:tabular-nums;font-size:11px;color:var(--fg-3);min-width:3.5ch;text-align:right; }
 .p-usage.compact .p-usage-chip.warning :is(.p-usage-pct,.p-usage-label) { color:var(--warning);font-weight:500; }

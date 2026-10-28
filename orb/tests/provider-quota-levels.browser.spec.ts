@@ -56,18 +56,21 @@ test(`quota levels color chips and status: ${theme} ${size}`, async ({ page }, i
   const her3sy = page.locator('.p-account-header', { hasText: 'thomas.her3sy@gmail.com' });
   const m44 = page.locator('.p-account-header', { hasText: 'thomas.marchand.44@gmail.com' });
   const codex = page.locator('.p-account-header', { hasText: 'thomas@example.com' });
-  await expect(her3sy.locator('.p-st')).toHaveText('Claude & GPT and Gemini quota exhausted');
+  await expect(her3sy.locator('.p-st')).toHaveText('Limit reached');
   await expect(her3sy.locator('.p-st')).toHaveClass(/\bexhausted\b/);
-  await expect(m44.locator('.p-st')).toHaveText('Gemini quota exhausted');
+  await expect(m44.locator('.p-st')).toHaveText('Limit reached');
   await expect(codex.locator('.p-st')).toHaveText('Connected');
   if (size === 'wide') {
     await expect(her3sy.locator('.p-usage-chip.exhausted')).toHaveCount(2);
     await expect(m44.locator('.p-usage-chip.exhausted')).toHaveText(['Gemini100%']);
     await expect(m44.locator('.p-usage-chip.warning')).toHaveText(['Claude & GPT85%']);
     await expect(codex.locator('.p-usage-chip.warning, .p-usage-chip.exhausted')).toHaveCount(0);
-    // Chips line up in columns across rows.
-    const lefts = await page.locator('.p-usage.compact').evaluateAll(els => els.map(e => Math.round(e.getBoundingClientRect().left)));
-    expect(new Set(lefts).size).toBe(1);
+    // Each percentage stays next to its own pool, inside a bounded group.
+    for (const chip of await her3sy.locator('.p-usage-chip').all()) {
+      const gap = await chip.evaluate(el => el.querySelector('.p-usage-pct')!.getBoundingClientRect().left - el.querySelector('.p-usage-label')!.getBoundingClientRect().right);
+      expect(gap).toBeLessThanOrEqual(6);
+    }
+    await expect(her3sy.locator('.p-st')).toHaveAttribute('title', 'Claude & GPT and Gemini quota exhausted');
   }
   // Exhausted and warning chips/status resolve to distinct colors from neutral.
   const colors = await page.evaluate(() => {

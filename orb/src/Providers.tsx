@@ -966,6 +966,11 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
   // Quota severity uses the shared level colors (warning 80-99%, danger exhausted).
   const stClass = () => status() === "connected" ? "connected" : ["quota_exhausted", "pool_exhausted", "out_of_credit"].includes(status()) ? "exhausted" : status() === "quota_warning" ? "warning" : ["needs_reauth", "needs_verification", "error", "auth_failed"].includes(status()) ? "needs_reauth" : "not_configured";
   const stLabel = () => ({ connected: "Connected", disabled: "Disabled", needs_reauth: "Reconnect", needs_verification: "Verification required", quota_exhausted: quota()?.level === "exhausted" ? quota()!.label : "Quota exhausted", pool_exhausted: quota()?.label || "Quota exhausted", quota_warning: quota()?.label || "Connected", out_of_credit: "Out of credit", auth_failed: "Auth failed", needs_auth: "Needs auth", error: "Error" }[status()] ?? "Unknown");
+  // Pool names and percentages already live in the quota summary.
+  const statusText = () => a.provider_type === "antigravity" && quota()
+    ? ["quota_exhausted", "pool_exhausted"].includes(status()) ? "Limit reached"
+      : status() === "quota_warning" ? "Near limit" : stLabel()
+    : stLabel();
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
   const expandable = () => !!p.rank || status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
@@ -1003,7 +1008,7 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
             <Show when={p.rank}>{r => <span class="p-rank" title={`Tried ${ordinal(r().index + 1)} of ${r().count} ${title()} accounts`}>{ordinal(r().index + 1)}</span>}</Show>
           </div>
           <div class="s-row-desc">
-            <span class={`p-st ${stClass()}`} title={stLabel()}>{stLabel()}</span>
+            <span class={`p-st ${stClass()}`} title={stLabel()}>{statusText()}</span>
             <Show when={plan()}><span class="p-plan" title={plan()}><span class="p-dot">·</span>{plan()}</span></Show>
 
           </div>

@@ -23,3 +23,10 @@ Desktop geometry and light/dark/narrow behavior are covered by
 provider-expanded-layout.browser.spec.ts in Chromium and WebKit. This change is
 specific to the desktop layout shown in the report; native mobile provider rows
 are not changed. Mobile unknown-window presentation remains a parity gap.
+
+Collapsed Antigravity rows use short status text (Limit reached / Near limit).
+The full pool-specific explanation remains in the status tooltip. Each summary
+percentage sits immediately beside its pool label in a subtle bounded group;
+never spread label and value across a wide empty column. Quota colors and numeric
+values retain the existing shared thresholds. Other authentication/error states
+remain explicit. Regression checks cover partial and whole-account exhaustion.
