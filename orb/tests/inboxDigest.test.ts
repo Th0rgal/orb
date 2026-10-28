@@ -4,7 +4,8 @@ import type { Mission } from "../src/api";
 vi.mock("../src/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../src/api")>(), isConnected: () => true,
 }));
-vi.mock("../src/inboxSettings", () => ({ inboxConfig: () => ({ aiSummary: true, model: "builtin/smart" }) }));
+const saveInboxConfig = vi.hoisted(() => vi.fn(() => true));
+vi.mock("../src/inboxSettings", () => ({ inboxConfig: () => ({ aiSummary: true, model: "builtin/smart" }), saveInboxConfig }));
 
 const snapshot = [
   "Mission title: Refactor the entire platform", "Mission status: completed",
@@ -157,6 +158,18 @@ describe("structured inbox digests", () => {
     requestInboxDigest(mission, undefined, updatedMs);
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("adopts Core's disabled summaries (204) without an unavailable label or a write-back", async () => {
+    const { requestInboxDigest, inboxSummaryState } = await import("../src/inboxDigest");
+    saveInboxConfig.mockClear();
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const updatedMs = Date.parse("2026-10-09T10:05:00Z");
+    const mission: Mission = { id: "summaries-off", status: "completed", created_at: "2026-10-09", updated_at: new Date(updatedMs).toISOString() };
+    requestInboxDigest(mission, undefined, updatedMs);
+    await vi.waitFor(() => expect(saveInboxConfig).toHaveBeenCalledWith(expect.objectContaining({ aiSummary: false }), false));
+    expect(inboxSummaryState(mission.id, updatedMs)).toBeUndefined();
   });
 
   it("clears the unavailable state when a later retry succeeds", async () => {

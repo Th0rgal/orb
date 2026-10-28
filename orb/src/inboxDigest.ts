@@ -2,7 +2,7 @@ import { createSignal } from "solid-js";
 import { connectionVersion, getApiUrl, getJwt, isConnected, type Mission } from "./api";
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { formatToolDetail, isSyntheticUserMessage } from "./inboxModel";
-import { inboxConfig } from "./inboxSettings";
+import { inboxConfig, saveInboxConfig } from "./inboxSettings";
 import { isLive } from "./missionStatus";
 import { messageImages } from "./messageImages";
 import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
@@ -379,13 +379,14 @@ export function parseDigestJson(
   }
 }
 
-async function fetchSharedDigest(missionId: string, model: string, updatedMs: number): Promise<InboxDigest> {
+async function fetchSharedDigest(missionId: string, model: string, updatedMs: number): Promise<InboxDigest | null> {
   const version = connectionVersion();
   const response = await fetch(`${getApiUrl()}/api/control/missions/${encodeURIComponent(missionId)}/inbox-digest`, {
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${getJwt() ?? ""}` },
     body: JSON.stringify({ model }), signal: AbortSignal.timeout(100_000),
   });
   if (!response.ok) throw new Error(`Inbox summary HTTP ${response.status}`);
+  if (response.status === 204) return null;
   const digest = await response.json() as InboxDigest;
   if (connectionVersion() !== version) throw new Error("Connection changed");
   if (digest.schemaVersion !== 7 || !digest.outcome || !digest.sources?.length || !digest.sourceRevision) throw new Error("Invalid shared summary");
@@ -473,6 +474,9 @@ export function requestInboxDigest(
       try {
         if (connectionVersion() !== requestVersion) return;
         const parsed = await fetchSharedDigest(mission.id, cfg.model, updatedMs);
+        // Core owns the toggle: 204 means summaries are off for this account, so adopt it
+        // (no label, no retry) instead of showing "Summary unavailable".
+        if (parsed === null) { if (connectionVersion() === requestVersion) saveInboxConfig({ ...inboxConfig(), aiSummary: false }, false); return; }
         if (parsed?.schemaVersion === 7) {
           storeInboxDigest(mission.id, updatedMs, cfg.model, parsed);
           // Core answered with an older summary (throttled or still syncing): show it, but back

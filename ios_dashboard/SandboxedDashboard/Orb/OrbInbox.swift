@@ -338,6 +338,14 @@ final class OrbInboxDigestStore {
                 guard OrbCore.shared.endpoint == endpoint, OrbInboxAccount.current == account else { return }
                 let answer = try await Self.fetchShared(missionID: row.id, model: model)
                 guard OrbCore.shared.endpoint == endpoint, OrbInboxAccount.current == account else { return }
+                // Core owns the toggle: 204 means summaries are off for this account, so adopt it
+                // (no label, no retry) instead of showing "Summary unavailable".
+                guard let answer else {
+                    OrbSharedInboxState.shared.applying = true
+                    OrbInboxSettings.shared.aiSummary = false
+                    OrbSharedInboxState.shared.applying = false
+                    return
+                }
                 if let digest = Self.parseDigest(answer, updatedAt: row.updatedAt, model: model) {
                     self.failedAt.removeValue(forKey: key)
                     self.cache[key] = digest
@@ -373,7 +381,7 @@ final class OrbInboxDigestStore {
         return nil
     }
 
-    private static func fetchShared(missionID: String, model: String) async throws -> String {
+    private static func fetchShared(missionID: String, model: String) async throws -> String? {
         guard let url = URL(string: "\(OrbCore.shared.endpoint)/api/control/missions/\(OrbCore.escape(missionID))/inbox-digest") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -383,6 +391,7 @@ final class OrbInboxDigestStore {
         request.httpBody = try JSONEncoder().encode(OrbJSON.object(["model": .string(model)]))
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else { throw URLError(.badServerResponse) }
+        if response.statusCode == 204 { return nil }
         return String(data: data, encoding: .utf8) ?? ""
     }
 
