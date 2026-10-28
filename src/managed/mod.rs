@@ -213,6 +213,8 @@ pub struct ManagedSettings {
     /// Images (named snapshots) callers may request
     /// (`SANDBOXED_MANAGED_IMAGES`, comma list; default just `image`).
     pub allowed_images: Vec<String>,
+    /// Operator-approved clean images for raw VMs; empty disables fresh raw spawn.
+    pub raw_allowed_images: Vec<String>,
     #[serde(skip)]
     pub core_url: Option<String>,
     pub idle_minutes: u64,
@@ -323,6 +325,13 @@ impl ManagedSettings {
             max_size,
             image,
             allowed_images,
+            raw_allowed_images: std::env::var("SANDBOXED_MANAGED_RAW_IMAGES")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
             core_url: std::env::var("SANDBOXED_MANAGED_CORE_URL")
                 .ok()
                 .or_else(|| std::env::var("SANDBOXED_PUBLIC_URL").ok())
@@ -368,8 +377,35 @@ impl MachineState {
 /// One managed machine. The persisted list of these is the cost ledger:
 /// `cost_usd` is the provider's metered cost and `ledger_closed` is true once
 /// the provider confirms nothing is billing any more.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvisioningMode {
+    #[default]
+    Worker,
+    Raw,
+}
+
+impl ProvisioningMode {
+    pub fn is_worker(self) -> bool {
+        self == Self::Worker
+    }
+
+    fn inherit(requested: Option<Self>, source: Self) -> Result<Self, ManagedError> {
+        if requested.is_some_and(|mode| mode != source) {
+            return Err(ManagedError::new(
+                "mode_mismatch",
+                400,
+                "Provisioning mode must match the source machine or snapshot",
+            ));
+        }
+        Ok(source)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedMachine {
+    #[serde(default)]
+    pub provisioning_mode: ProvisioningMode,
     pub id: String,
     /// Short human name, unique among live machines ("small-a", "large-b").
     /// Display/targeting alias only: `node_id` stays immutable.
@@ -521,6 +557,8 @@ struct MachineSecrets {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SpawnRequest {
+    #[serde(default)]
+    pub provisioning_mode: Option<ProvisioningMode>,
     pub size: Option<String>,
     pub cpu: Option<u32>,
     pub ram_gb: Option<u32>,
@@ -660,6 +698,9 @@ pub fn allocate_name(size: &str, live: &[String]) -> String {
 }
 
 fn register_alias(machine: &ManagedMachine) {
+    if !machine.provisioning_mode.is_worker() {
+        return;
+    }
     if !machine.name.is_empty() {
         if let Ok(mut map) = ALIASES.write() {
             map.insert(machine.name.clone(), machine.node_id.clone());
@@ -747,6 +788,9 @@ fn token_env_for(machine_id: &str) -> String {
 }
 
 fn register_node(machine: &ManagedMachine, core_port: u16, token: &str) {
+    if !machine.provisioning_mode.is_worker() {
+        return;
+    }
     let config: &'static RemoteNodeConfig = Box::leak(Box::new(RemoteNodeConfig {
         id: machine.node_id.clone(),
         base_url: format!(
@@ -1199,7 +1243,8 @@ impl ManagedManager {
         let Some(m) = self.get(node_id).await else {
             return false;
         };
-        m.state.is_live()
+        m.provisioning_mode.is_worker()
+            && m.state.is_live()
             && m.node_id == node_id
             && antigravity_owner_allowed(
                 m.owner_user_id.as_deref(),
@@ -1211,7 +1256,7 @@ impl ManagedManager {
 
     pub async fn mark_antigravity_projected(&self, node_id: &str) {
         if let Some(m) = self.get(node_id).await {
-            if !m.antigravity_projected {
+            if m.provisioning_mode.is_worker() && !m.antigravity_projected {
                 if let Some(m) = self.update(&m.id, |m| m.antigravity_projected = true).await {
                     self.ledger("antigravity_projected", &m);
                 }
@@ -1540,6 +1585,19 @@ impl ManagedManager {
         Ok((spec, ttl))
     }
 
+    fn core_url_for(&self, mode: ProvisioningMode) -> Result<String, ManagedError> {
+        if !mode.is_worker() {
+            return Ok(String::new());
+        }
+        self.settings.core_url.clone().ok_or_else(|| {
+            ManagedError::new(
+                "disabled",
+                503,
+                "SANDBOXED_PUBLIC_URL / SANDBOXED_MANAGED_CORE_URL is not set",
+            )
+        })
+    }
+
     pub async fn spawn(
         self: &Arc<Self>,
         req: SpawnRequest,
@@ -1554,15 +1612,10 @@ impl ManagedManager {
         let provider = self.provider.clone().ok_or_else(|| {
             ManagedError::new("disabled", 503, "No managed-machine provider is configured")
         })?;
-        let core_url = self.settings.core_url.clone().ok_or_else(|| {
-            ManagedError::new(
-                "disabled",
-                503,
-                "SANDBOXED_PUBLIC_URL / SANDBOXED_MANAGED_CORE_URL is not set",
-            )
-        })?;
         let (spec, ttl_minutes) = Self::plan(&self.settings, &req)?;
-        let (image, source_snapshot, fork_source) = self.resolve_source(&req).await?;
+        let (image, source_snapshot, fork_source, provisioning_mode) =
+            self.resolve_source(&req).await?;
+        let core_url = self.core_url_for(provisioning_mode)?;
 
         let machine = {
             let _guard = self.admission.lock().await;
@@ -1628,6 +1681,7 @@ impl ManagedManager {
                 .collect();
             let name = allocate_name(spec.size, &live_names);
             let machine = ManagedMachine {
+                provisioning_mode,
                 name,
                 antigravity_projected: false,
                 node_id: format!("{NODE_PREFIX}{id}"),
@@ -1766,6 +1820,24 @@ impl ManagedManager {
         }
         let ready_ms = started.elapsed().as_millis() as u64;
 
+        if !m.provisioning_mode.is_worker() {
+            let machine = self
+                .update(id, |m| {
+                    if m.state.is_live() {
+                        m.state = MachineState::Online;
+                        m.online_at = Some(Utc::now());
+                        m.last_busy_at = Some(Utc::now());
+                    }
+                })
+                .await
+                .ok_or("machine vanished")?;
+            if machine.state != MachineState::Online {
+                return Err("machine destroyed while provisioning".into());
+            }
+            self.ledger("raw_ready", &machine);
+            return Ok(machine);
+        }
+
         // One-time enrollment token, delivered as a file (never in a command
         // line: boat keeps command history).
         let enroll_token = random_token();
@@ -1900,7 +1972,7 @@ impl ManagedManager {
     ) -> Result<(String, String), ManagedError> {
         let denied = || ManagedError::new("enrollment_denied", 401, "Enrollment denied");
         let machine = self.get(machine_id).await.ok_or_else(denied)?;
-        if !machine.state.is_live() {
+        if !machine.provisioning_mode.is_worker() || !machine.state.is_live() {
             return Err(denied());
         }
         let token = {
@@ -1930,7 +2002,7 @@ impl ManagedManager {
     /// Machine owning a presented node credential, if live.
     pub async fn machine_for_token(&self, machine_id: &str, token: &str) -> Option<ManagedMachine> {
         let machine = self.get(machine_id).await?;
-        if !machine.state.is_live() {
+        if !machine.provisioning_mode.is_worker() || !machine.state.is_live() {
             return None;
         }
         let secrets = self.secrets.lock().await;
@@ -2013,7 +2085,7 @@ impl ManagedManager {
         if let (Some(provider), Some(pid)) = (&self.provider, &m.provider_id) {
             // Wipe a projected sign-in before the disk is retained by the
             // provider (boat keeps stopped disks for 14 days).
-            if m.antigravity_projected {
+            if m.provisioning_mode.is_worker() && m.antigravity_projected {
                 let wiped = provider
                     .exec(
                         pid,
@@ -2774,7 +2846,8 @@ impl ManagedManager {
             .await
             .iter()
             .filter(|m| {
-                m.state == MachineState::Online
+                m.provisioning_mode.is_worker()
+                    && m.state == MachineState::Online
                     && m.size == size
                     && m.image == image
                     && Utc::now() + chrono::Duration::minutes(10) < m.expires_at

@@ -84,13 +84,21 @@ struct ListQuery {
     history_hours: Option<i64>,
 }
 
-async fn list(Query(q): Query<ListQuery>) -> Response {
+async fn list(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Query(q): Query<ListQuery>,
+) -> Response {
     match manager() {
-        Ok(m) => Json(
-            m.list(q.history_hours.unwrap_or(24).clamp(0, 24 * 30))
-                .await,
-        )
-        .into_response(),
+        Ok(m) => {
+            let mut view = m
+                .list(q.history_hours.unwrap_or(24).clamp(0, 24 * 30))
+                .await;
+            view.machines.retain(|machine| {
+                machine.provisioning_mode.is_worker()
+                    || machine.owner_user_id.as_deref() == Some(&user.id)
+            });
+            Json(view).into_response()
+        }
         Err(r) => r,
     }
 }
@@ -112,11 +120,17 @@ async fn spend(Query(q): Query<SpendQuery>) -> Response {
     }
 }
 
-async fn get_one(Path(id): Path<String>) -> Response {
+async fn get_one(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     match m.get(&id).await {
         Some(machine) => Json(machine).into_response(),
         None => err(ManagedError {
@@ -174,7 +188,11 @@ async fn spawn_for(
         Ok(m) => m,
         Err(r) => return r,
     };
-    if req.reuse_idle == Some(true) && req.from_snapshot.is_none() && req.fork_of.is_none() {
+    if req.provisioning_mode.unwrap_or_default().is_worker()
+        && req.reuse_idle == Some(true)
+        && req.from_snapshot.is_none()
+        && req.fork_of.is_none()
+    {
         if let (Some(parent), Ok((spec, _))) = (charged, ManagedManager::plan(&m.settings, &req)) {
             if let Some(machine) = reuse_idle_sibling(&m, &store, &req, parent, spec.size).await {
                 let mut body = serde_json::to_value(&machine).unwrap_or_default();
@@ -267,6 +285,9 @@ async fn set_owner(
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     let exists = match state.control.loaded_mission_store(&user.id).await {
         Some(store) => matches!(store.get_mission(body.owner_mission_id).await, Ok(Some(_))),
         None => false,
@@ -297,11 +318,18 @@ struct ExtendBody {
     ttl_minutes: u64,
 }
 
-async fn extend(Path(id): Path<String>, Json(body): Json<ExtendBody>) -> Response {
+async fn extend(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    Json(body): Json<ExtendBody>,
+) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     match m.extend(&id, body.ttl_minutes).await {
         Ok(machine) => Json(machine).into_response(),
         Err(e) => err(e),
@@ -330,11 +358,18 @@ fn client_destroy_reason(raw: Option<&str>) -> String {
     }
 }
 
-async fn destroy(Path(id): Path<String>, Query(q): Query<DestroyQuery>) -> Response {
+async fn destroy(
+    axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
+    Path(id): Path<String>,
+    Query(q): Query<DestroyQuery>,
+) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
+    if let Err(r) = raw_owner_check(&m, &id, &user).await {
+        return r;
+    }
     match m
         .destroy(&id, &client_destroy_reason(q.reason.as_deref()))
         .await
@@ -740,6 +775,25 @@ async fn fork(
     spawn_for(&state, &user, req).await
 }
 
+async fn raw_owner_check(
+    m: &ManagedManager,
+    id: &str,
+    user: &crate::api::auth::AuthUser,
+) -> Result<(), Response> {
+    if let Some(machine) = m.get(id).await {
+        if !machine.provisioning_mode.is_worker()
+            && machine.owner_user_id.as_deref() != Some(&user.id)
+        {
+            return Err(err(ManagedError {
+                error: "not_found",
+                status: 404,
+                message: "Unknown managed machine".into(),
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// Only the machine's own tenant may stop/resume it.
 async fn tenant_machine(
     m: &ManagedManager,
@@ -748,7 +802,7 @@ async fn tenant_machine(
 ) -> Result<crate::managed::ManagedMachine, Response> {
     match m.get(id).await {
         Some(x)
-            if x.owner_user_id.is_none()
+            if (x.provisioning_mode.is_worker() && x.owner_user_id.is_none())
                 || x.owner_user_id.as_deref() == Some(user.id.as_str()) =>
         {
             Ok(x)

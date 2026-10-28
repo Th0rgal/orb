@@ -13,6 +13,7 @@ fn settings() -> ManagedSettings {
         max_size: "xlarge".into(),
         image: "orb-node-base".into(),
         allowed_images: vec!["orb-node-base".into()],
+        raw_allowed_images: vec!["clean".into()],
         core_url: Some("https://core.example".into()),
         idle_minutes: 30,
         owner_grace_minutes: 0,
@@ -39,6 +40,7 @@ struct FakeProvider {
     destroyed: std::sync::Mutex<Vec<String>>,
     listed: std::sync::Mutex<Vec<ProviderMachine>>,
     execs: std::sync::Mutex<Vec<String>>,
+    writes: AtomicUsize,
     forks: std::sync::Mutex<Vec<String>>,
     stopped: std::sync::Mutex<Vec<String>>,
     saved: std::sync::Mutex<Vec<(String, String)>>,
@@ -77,6 +79,7 @@ impl ManagedProvider for FakeProvider {
         Ok(())
     }
     async fn write_file(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn exec(&self, _: &str, command: &str, _: u64) -> Result<Value, String> {
@@ -485,6 +488,7 @@ async fn spawn_rejects_unlisted_image() {
 #[test]
 fn managed_nodes_are_excluded_from_static_lookup() {
     let machine = ManagedMachine {
+        provisioning_mode: ProvisioningMode::Worker,
         name: "small-z".into(),
         antigravity_projected: false,
         id: "mmtrust01".into(),
@@ -872,6 +876,7 @@ fn spend_machine(
 ) -> ManagedMachine {
     let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
     ManagedMachine {
+        provisioning_mode: ProvisioningMode::Worker,
         name: String::new(),
         antigravity_projected: false,
         id: id.into(),
@@ -1713,6 +1718,7 @@ use super::snapshots as snaps;
 
 fn snap(name: &str, project: &str, days_old: i64, status: &str) -> snaps::ManagedSnapshot {
     snaps::ManagedSnapshot {
+        provisioning_mode: ProvisioningMode::Worker,
         name: name.into(),
         label: name.into(),
         project: Some(project.into()),
@@ -2087,4 +2093,123 @@ async fn secrets_must_be_wiped_before_any_disk_copy() {
         .snapshot_machine(&ok.id, "warm", Some("p"), None, Some("t1"))
         .await
         .is_ok());
+}
+
+#[tokio::test]
+async fn raw_lifecycle_never_touches_guest_and_preserves_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.core_url = None;
+    let (m, fake) = manager(dir.path(), s.clone());
+    let raw = m
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            image: Some("clean".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(raw.state, MachineState::Online);
+    assert!(node_config(&raw.node_id).is_none());
+    assert!(!m.antigravity_allowed(&raw.node_id).await);
+    assert_eq!(
+        m.enroll(&raw.id, "anything").await.unwrap_err().error,
+        "enrollment_denied"
+    );
+    let snapshot = m
+        .snapshot_machine(&raw.id, "raw-save", Some("p"), None, Some("t1"))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.provisioning_mode, ProvisioningMode::Raw);
+    m.stop_inner(&raw.id, "test", false).await.unwrap();
+    let resumed = m.resume(&raw.id, Some(30)).await.unwrap();
+    assert_eq!(resumed.provisioning_mode, ProvisioningMode::Raw);
+    for _ in 0..100 {
+        if m.get(&raw.id).await.unwrap().state == MachineState::Online {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    m.destroy(&raw.id, "test").await.unwrap();
+    assert!(fake.execs.lock().unwrap().is_empty());
+    assert_eq!(fake.writes.load(Ordering::SeqCst), 0);
+    let reload = ManagedManager::new(s, None, dir.path(), 3999);
+    reload.load().await;
+    assert_eq!(
+        reload.get(&raw.id).await.unwrap().provisioning_mode,
+        ProvisioningMode::Raw
+    );
+}
+
+#[tokio::test]
+async fn raw_requires_explicit_clean_image_and_cannot_convert_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    for (image, error) in [
+        (None, "image_required"),
+        (Some("orb-node-base"), "image_not_allowed"),
+    ] {
+        let e = m
+            .spawn(SpawnRequest {
+                provisioning_mode: Some(ProvisioningMode::Raw),
+                image: image.map(str::to_owned),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(e.error, error);
+    }
+    assert_eq!(fake.created.load(Ordering::SeqCst), 0);
+    let raw = m
+        .spawn(SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            image: Some("clean".into()),
+            owner_user_id: Some("t1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let req = SpawnRequest {
+        fork_of: Some(raw.id.clone()),
+        owner_user_id: Some("t1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        m.resolve_source(&req).await.unwrap().3,
+        ProvisioningMode::Raw
+    );
+    let e = m
+        .resolve_source(&SpawnRequest {
+            provisioning_mode: Some(ProvisioningMode::Worker),
+            ..req
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.error, "mode_mismatch");
+    m.destroy(&raw.id, "test").await.unwrap();
+}
+
+#[test]
+fn legacy_mode_defaults_to_worker_and_invalid_mode_is_rejected() {
+    let request: SpawnRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(
+        request.provisioning_mode.unwrap_or_default(),
+        ProvisioningMode::Worker
+    );
+    assert!(serde_json::from_value::<SpawnRequest>(
+        serde_json::json!({"provisioning_mode":"unsafe"})
+    )
+    .is_err());
+    let mut snapshot = serde_json::to_value(snap("legacy", "p", 0, "ready")).unwrap();
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("provisioning_mode");
+    assert_eq!(
+        serde_json::from_value::<snaps::ManagedSnapshot>(snapshot)
+            .unwrap()
+            .provisioning_mode,
+        ProvisioningMode::Worker
+    );
 }

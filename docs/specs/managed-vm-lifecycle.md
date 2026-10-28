@@ -188,3 +188,29 @@ live VM.
   corollaries for invariants 2-4.
 - `vmClaimAdmit (sameTenant, ownerNone, ownerIsRequester)`: admits iff
   `sameTenant && (ownerNone || ownerIsRequester)` (invariant 6).
+
+## Raw managed machines
+
+`provisioning_mode` is `worker` (default for legacy machines and requests) or
+`raw`. Both modes use the same tenant ownership, admission budgets, size caps,
+provider TTL, stop/resume, reconciliation and reaper. `Online` means provider
+ready for raw machines; it does not imply an Orb node heartbeat.
+
+A fresh raw request must explicitly name an operator-approved clean image in
+`SANDBOXED_MANAGED_RAW_IMAGES` (empty by default). Operators must exclude images
+containing Orb node services or credentials; Core cannot inspect an image to
+prove it is clean. Worker image allowlists do not authorize raw images.
+
+Raw provisioning performs no guest writes, commands, installation, enrollment,
+credential projection or cleanup. Raw machines never register node aliases or
+enter automatic worker reuse. Their activity is not observed by a node agent,
+so normal idle/owner/TTL policy still applies without busy auto-extension.
+
+Forks and named snapshots inherit source mode when omitted; an explicit mode
+mismatch is rejected before provisioning. Snapshot mode is persisted, and legacy
+snapshots default to worker. Resume retains the same machine mode. Raw snapshot
+and stop paths do not delete user files; Core has delivered no guest secrets.
+
+Provider command/file endpoints are not exposed by this change: safely exposing
+them requires a durable per-tenant operation journal with idempotency keys,
+bounded inputs/time/output, redacted audit metadata and crash reconciliation.
