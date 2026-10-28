@@ -1647,6 +1647,11 @@ pub(super) async fn settle_job_on_gone_node(
         return Ok(false);
     }
     let (mission_id, job_id) = (handle.mission_id, handle.job_id);
+    // The ledger is global; only the store that owns the mission may settle
+    // its job. Another tenant's store must not touch it.
+    if store.get_mission(mission_id).await?.is_none() {
+        return Ok(false);
+    }
     finish_remote_job_lease(store, mission_id, job_id, REMOTE_NODE_GONE).await?;
     if store
         .get_mission(mission_id)

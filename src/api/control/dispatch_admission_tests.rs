@@ -13782,6 +13782,29 @@ async fn restart_settles_jobs_on_destroyed_managed_nodes_but_retains_static_ones
     )
     .await
     .unwrap();
+    // Another tenant's store cannot settle this job by its mission id.
+    let other_dir = tempfile::tempdir().unwrap();
+    let other: Arc<dyn MissionStore> = Arc::new(
+        SqliteMissionStore::new(other_dir.path().to_path_buf(), "other-user")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        release_jobs_on_gone_nodes(&working_dir, other.as_ref(), cancelled.id)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(job_ledger::load(&working_dir)
+        .await
+        .unwrap()
+        .iter()
+        .any(|handle| handle.job_id == cancelled_job));
+    assert!(store
+        .get_active_mission_run(cancelled.id)
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(
         release_jobs_on_gone_nodes(&working_dir, store.as_ref(), cancelled.id)
             .await
