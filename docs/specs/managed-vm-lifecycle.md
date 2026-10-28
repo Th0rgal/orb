@@ -245,3 +245,8 @@ Receipt identity follows the immutable managed-machine ID across stop/resume and
 provider incarnations: reusing the same key intentionally replays its earlier
 receipt. Use a new key for a new operation after resume. Tenant-scoped display
 budgets omit other tenants' raw machines, while admission uses global totals.
+
+Global reconciliation and settings retain the existing administrator-wide policy.
+Reconciliation still operates on the whole provider registry; its response omits
+known raw machine/provider identifiers belonging to other tenants. Aggregate
+provider inventory counts remain operational administrator information.

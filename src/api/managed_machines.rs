@@ -431,18 +431,89 @@ async fn put_settings(Json(body): Json<serde_json::Value>) -> Response {
     }
 }
 
-async fn reconcile() -> Response {
+async fn reconcile(axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
     match m.reconcile_once().await {
-        Ok(report) => Json(report).into_response(),
+        Ok(mut report) => {
+            let machines = m.machines_snapshot().await;
+            let hidden = machines.iter().filter(|machine| {
+                !machine.provisioning_mode.is_worker()
+                    && machine.owner_user_id.as_deref() != Some(user.id.as_str())
+            });
+            let hidden_ids: std::collections::HashSet<_> =
+                hidden.clone().map(|m| m.id.as_str()).collect();
+            let hidden_provider_ids: std::collections::HashSet<_> =
+                hidden.filter_map(|m| m.provider_id.as_deref()).collect();
+            redact_reconcile(&mut report, &hidden_ids, &hidden_provider_ids);
+            Json(report).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error":"provider_error","message":e})),
         )
             .into_response(),
+    }
+}
+
+/// Reconciliation is still a global admin action; its receipt must not
+/// disclose another tenant's raw machine or provider identifiers.
+fn redact_reconcile(
+    report: &mut serde_json::Value,
+    hidden_ids: &std::collections::HashSet<&str>,
+    hidden_provider_ids: &std::collections::HashSet<&str>,
+) {
+    for key in ["closed_rows", "vanished_rows"] {
+        if let Some(rows) = report
+            .get_mut(key)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            rows.retain(|row| row.as_str().is_none_or(|id| !hidden_ids.contains(id)));
+        }
+    }
+    if let Some(rows) = report
+        .get_mut("orphans_stopped")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        rows.retain(|row| {
+            row.as_str()
+                .is_none_or(|id| !hidden_provider_ids.contains(id))
+        });
+    }
+    if let Some(rows) = report
+        .get_mut("orphans_pending")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        rows.retain(|row| {
+            row.get("provider_id")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|id| !hidden_provider_ids.contains(id))
+        });
+    }
+}
+
+#[cfg(test)]
+mod reconcile_visibility_tests {
+    use super::*;
+    #[test]
+    fn hides_raw_registry_and_provider_ids_but_keeps_worker_receipts() {
+        let mut report = json!({"closed_rows": ["raw", "worker"], "vanished_rows": ["raw"],
+            "orphans_stopped": ["provider-raw", "provider-worker"],
+            "orphans_pending": [{"provider_id":"provider-raw"}, {"provider_id":"provider-worker"}]});
+        redact_reconcile(
+            &mut report,
+            &std::collections::HashSet::from(["raw"]),
+            &std::collections::HashSet::from(["provider-raw"]),
+        );
+        assert_eq!(report["closed_rows"], json!(["worker"]));
+        assert_eq!(report["vanished_rows"], json!([]));
+        assert_eq!(report["orphans_stopped"], json!(["provider-worker"]));
+        assert_eq!(
+            report["orphans_pending"],
+            json!([{"provider_id":"provider-worker"}])
+        );
     }
 }
 
