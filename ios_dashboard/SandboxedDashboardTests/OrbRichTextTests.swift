@@ -32,6 +32,18 @@ final class OrbRichTextTests: XCTestCase {
         throw NSError(domain: "OrbRichTextTests", code: 1)
     }
     override func tearDown() { window?.isHidden = true; window = nil; super.tearDown() }
+    func testRendererRoutingMatchesSharedFixture() throws {
+        let spec = try OrbSpec.json("fixtures/rich-text-routing.json")
+        for c in try XCTUnwrap(spec["cases"] as? [[String: Any]]) {
+            let source = try XCTUnwrap(c["source"] as? String)
+            XCTAssertEqual(OrbNativeMarkdownView.requiresWebRenderer(source), c["web"] as? Bool, c["name"] as? String ?? "?")
+        }
+    }
+    func testInlineMathAloneUsesKaTeX() async throws {
+        let web = try await render("Inline $x^2$ only")
+        let formulas = try await web.evaluateJavaScript("document.querySelectorAll('.katex').length") as? Int
+        XCTAssertEqual(formulas, 1)
+    }
     func testChatGPTMathInlineDisplayAndCurrency() async throws {
         let web = try await render(#"""
         # Annual return
@@ -197,7 +209,7 @@ final class OrbRichTextTests: XCTestCase {
         XCTAssertEqual(blocks.count, 4)
         XCTAssertFalse(OrbNativeMarkdownView.requiresWebRenderer(sample))
         XCTAssertTrue(OrbNativeMarkdownView.requiresWebRenderer("Inline math $x^2$ requires KaTeX"))
-        XCTAssertTrue(OrbNativeMarkdownView.requiresWebRenderer("| Col A | Col B |\n| --- | --- |"))
+        XCTAssertFalse(OrbNativeMarkdownView.requiresWebRenderer("| Col A | Col B |\n| --- | --- |"), "The native block parser handles pipe tables")
 
         // Option B: Pooled WKWebView + file:/// link pill
         OrbRichText.preferNativeWhenSimple = false
