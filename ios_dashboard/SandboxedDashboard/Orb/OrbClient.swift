@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// The one HTTP client for the sandboxed.sh backend: server URL, auth (Keychain
+/// The one HTTP client for the Core backend: server URL, auth (Keychain
 /// token + saved login), typed and untyped JSON calls, control streams. Every
 /// request goes through `send`, so 401 handling and errors (`OrbHTTPError`) are
 /// the same everywhere.

@@ -180,7 +180,7 @@ function BackendTab() {
   return (
     <>
       <Card title="Backend">
-        <Row title="API URL" desc="Base URL of the sandboxed.sh core backend.">
+        <Row title="API URL" desc="Base URL of the Core backend.">
           <input
             class="s-input"
             value={url()}

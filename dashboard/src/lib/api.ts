@@ -1888,7 +1888,7 @@ export async function listLibraryCommands(): Promise<CommandSummary[]> {
 export interface BuiltinCommandsResponse {
   opencode: CommandSummary[];
   claudecode: CommandSummary[];
-  /** Grok builtin commands (sandboxed.sh-driven /goal). */
+  /** Grok builtin commands (Core-driven /goal). */
   grok?: CommandSummary[];
   /** Codex builtin commands (codex 0.128.0+ — empty on older binaries). */
   codex?: CommandSummary[];
@@ -2338,7 +2338,7 @@ export async function restartOpenCodeService(): Promise<{
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// sandboxed.sh Config API
+// Core Config API
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface SandboxedConfig {
@@ -2346,12 +2346,12 @@ export interface SandboxedConfig {
   default_agent: string | null;
 }
 
-// Get sandboxed.sh config from Library
+// Get Core config from Library
 export async function getSandboxedConfig(): Promise<SandboxedConfig> {
   try {
     return await apiGet(
       "/api/library/sandboxed-sh/config",
-      "Failed to get sandboxed.sh config",
+      "Failed to get Core config",
     );
   } catch {
     // Return default config if endpoint doesn't exist (not yet implemented)
@@ -2359,18 +2359,18 @@ export async function getSandboxedConfig(): Promise<SandboxedConfig> {
   }
 }
 
-// Save sandboxed.sh config to Library
+// Save Core config to Library
 export async function saveSandboxedConfig(
   config: SandboxedConfig,
 ): Promise<void> {
   return apiPut(
     "/api/library/sandboxed-sh/config",
     config,
-    "Failed to save sandboxed.sh config",
+    "Failed to save Core config",
   );
 }
 
-// Get visible agents (filtered by sandboxed.sh config)
+// Get visible agents (filtered by Core config)
 export async function getVisibleAgents(): Promise<unknown> {
   try {
     return await apiGet(
@@ -2482,14 +2482,14 @@ export async function deleteConfigProfile(name: string): Promise<void> {
   );
 }
 
-// Get sandboxed.sh config for a specific profile
+// Get Core config for a specific profile
 export async function getSandboxedConfigForProfile(
   profile: string,
 ): Promise<SandboxedConfig> {
   try {
     return await apiGet(
       `/api/library/config-profile/${encodeURIComponent(profile)}/sandboxed-sh/config`,
-      "Failed to get sandboxed.sh config for profile",
+      "Failed to get Core config for profile",
     );
   } catch {
     // Return default config if endpoint doesn't exist (not yet implemented)
@@ -2497,7 +2497,7 @@ export async function getSandboxedConfigForProfile(
   }
 }
 
-// Save sandboxed.sh config for a specific profile
+// Save Core config for a specific profile
 export async function saveSandboxedConfigForProfile(
   profile: string,
   config: SandboxedConfig,
@@ -2505,7 +2505,7 @@ export async function saveSandboxedConfigForProfile(
   return apiPut(
     `/api/library/config-profile/${encodeURIComponent(profile)}/sandboxed-sh/config`,
     config,
-    "Failed to save sandboxed.sh config for profile",
+    "Failed to save Core config for profile",
   );
 }
 

@@ -803,7 +803,7 @@ export default function AssistantPage() {
             <p className="mt-1 text-xs text-white/45">
               {assistantChain
                 ? `${assistantChain.entries.length} fallback ${assistantChain.entries.length === 1 ? 'entry' : 'entries'} via /v1.`
-                : 'Hermes should use the sandboxed.sh /v1 proxy chain.'}
+                : 'Hermes should use the Core /v1 proxy chain.'}
             </p>
           </div>
         </div>

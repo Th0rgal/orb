@@ -1,6 +1,6 @@
 # Orb Documentation
 
-> **Note:** **Orb** ([`orb.thomas.md`](https://orb.thomas.md)) is the project name. `sandboxed.sh` (formerly Open Agent) is the former name of the project and is now the Rust backend (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`, `palomactl`) to the Orb clients.
+> **Orb** is the client application; **Core** (formerly sandboxed.sh) is its Rust backend. Existing binary names (`sandboxed-sh`, `sandboxed-node`, `sandboxed-mcp`, `palomactl`) remain compatible.
 
 ![Orb on macOS](../screenshots/orb-desktop.webp)
 
@@ -16,7 +16,7 @@
 
 - **[Getting Started](getting-started.md)** — Connect Orb (macOS & iOS) to your backend, configure subscriptions/harnesses, and launch your first agent.
 - **[Docker Installation](install-docker.md)** — Run the backend, web admin console, and pre-installed CLIs in a single container.
-- **[Native Ubuntu 24.04 Installation](install-native.md)** — Bare-metal systemd setup with `systemd-nspawn` containers, `missions.slice` cgroups, and Tailscale.
+- **[Native Ubuntu 24.04 Installation](install-native.md)** — Bare-metal systemd setup with `systemd-nspawn` containers, `missions.slice` cgroups, and optional private networking. See [Lean-Mesh](LEAN_MESH.md) for the deployed fleet.
 
 ## 2. Orb Client & Mission Capabilities
 

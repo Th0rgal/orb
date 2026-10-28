@@ -5,7 +5,7 @@ import { getCyber, requireCyberSupport, type CyberMode } from "./cyberAccess";
 import {followNative} from "./nativeInteractionStream";
 import { rememberClientRunReceipt, type ClientRunReceipt } from "./clientRuns";
 /**
- * Local harnesses: the CLIs installed on this computer, not a sandboxed.sh
+ * Local harnesses: the CLIs installed on this computer, not a Core
  * runner. Detection and process control go through Tauri. Mention rewriting
  * is pure and tested without a desktop shell.
  */

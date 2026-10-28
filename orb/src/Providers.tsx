@@ -58,8 +58,8 @@ const KINDS: Kind[] = [
     id: "anthropic",
     name: "Anthropic",
     methods: [
-      { label: "Claude Pro/Max", kind: "oauth", desc: "Subscription via CLIProxyAPI. sandboxed.sh does not refresh this token." },
-      { label: "API key", kind: "api", desc: "Direct Anthropic API key, stored by sandboxed.sh." },
+      { label: "Claude Pro/Max", kind: "oauth", desc: "Subscription via CLIProxyAPI. Core does not refresh this token." },
+      { label: "API key", kind: "api", desc: "Direct Anthropic API key, stored by Core." },
     ],
   },
   {
@@ -82,7 +82,7 @@ const KINDS: Kind[] = [
     id: "google",
     name: "Google",
     methods: [
-      { label: "Google OAuth", kind: "oauth", desc: "Google OAuth for OpenCode, managed by sandboxed.sh." },
+      { label: "Google OAuth", kind: "oauth", desc: "Google OAuth for OpenCode, managed by Core." },
       { label: "API key", kind: "api", desc: "Google AI Studio key." },
     ],
   },
@@ -102,7 +102,7 @@ const KINDS: Kind[] = [
     id: "mistral",
     name: "Mistral",
     methods: [
-      { label: "Mistral Vibe", kind: "oauth", desc: "Mistral Vibe subscription sign-in managed by sandboxed.sh." },
+      { label: "Mistral Vibe", kind: "oauth", desc: "Mistral Vibe subscription sign-in managed by Core." },
       { label: "API key", kind: "api", desc: "MISTRAL_API_KEY" },
     ],
   },
@@ -166,7 +166,7 @@ export function Providers() {
       fallback={
         <div class="page">
           <div class="page-head"><h2>Providers</h2></div>
-          <p class="s-lead">Providers are configured on the sandboxed.sh core — connect in Settings → Backend to see them.</p>
+          <p class="s-lead">Providers are configured in Core — connect in Settings → Backend to see them.</p>
         </div>
       }
     >
@@ -304,7 +304,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           Refresh
         </button>
       </div>
-      <p class="s-lead">Configured providers from the connected sandboxed.sh backend. <button class="link-btn" onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "usage-settings" }))}>Usage history</button></p>
+      <p class="s-lead">Configured providers from the connected Core backend. <button class="link-btn" onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "usage-settings" }))}>Usage history</button></p>
       <Show when={p.loadError}>{error => <ErrorNotice title="Could not refresh providers" error={error()}>
         <button class="s-btn" onClick={p.onRefresh}>Try again</button>
       </ErrorNotice>}</Show>
@@ -709,7 +709,7 @@ function ReAuthDialog(p: { provider: AIProvider; onClose: () => void; onDone: ()
         <p class="s-lead">Could not complete the login.</p>
         <Show when={!session()}><ErrorNotice error={error()!} /></Show>
         <Show when={/^(404|405)\b/.test(error() ?? "")}>
-          <p class="s-row-desc">This backend build does not expose the login endpoints yet. Deploy the updated sandboxed.sh first.</p>
+          <p class="s-row-desc">This backend build does not expose the login endpoints yet. Deploy the updated Core backend first.</p>
         </Show>
       </Show>
       <Show when={phase() === "awaiting" || phase() === "finishing" || (phase() === "failed" && !!session())}>

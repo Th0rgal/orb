@@ -2,7 +2,7 @@
 
 Native SwiftUI iOS client for **Orb**, located in `SandboxedDashboard/Orb`.
 
-> **Note:** The iOS target builds `Orb.app` (`PRODUCT_NAME: "Orb"`) and connects to your `sandboxed.sh` backend (`sandboxed.sh` is the former name of the project and is now the backend to the Orb clients).
+> **Note:** The iOS target builds `Orb.app` (`PRODUCT_NAME: "Orb"`) and connects to your Core backend.
 
 <p align="center">
   <img src="../screenshots/orb-ios-projects.webp" width="260" alt="Orb on iOS showing the production projects list with synced project colors" />

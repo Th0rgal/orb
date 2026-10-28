@@ -26,8 +26,8 @@ import { cn } from '@/lib/utils';
 
 // Component display names
 const componentNames: Record<string, string> = {
-  open_agent: 'sandboxed.sh',
-  sandboxed_sh: 'sandboxed.sh',
+  open_agent: 'Core',
+  sandboxed_sh: 'Core',
   assistant_mcp: 'Assistant MCP',
   hermes_assistant: 'Hermes Assistant',
   opencode: 'OpenCode',
@@ -194,7 +194,7 @@ export function ServerConnectionCard({
 
   const handleHostUninstall = (component: ComponentInfo) => {
     if (component.name === 'sandboxed_sh') {
-      toast.error('Cannot uninstall sandboxed.sh - it is the main application');
+      toast.error('Cannot uninstall Core - it is the main application');
       return;
     }
     if (readonlyComponents.has(component.name)) return;

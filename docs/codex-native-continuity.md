@@ -1,7 +1,7 @@
 # Native Codex continuity
 
 A native `/goal` already iterates inside one running app-server. This change
-also preserves that native thread when sandboxed.sh ends an outer run and
+also preserves that native thread when Core ends an outer run and
 later resumes the mission. It does not replace the mission actor, ownership
 admission, durable jobs, source pins, or independent review.
 

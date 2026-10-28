@@ -37,7 +37,7 @@ define:
 - **Networking** --- shared (host network) or isolated (private network with
   optional Tailscale VPN).
 
-When you create a workspace from a template, Sandboxed.sh:
+When you create a workspace from a template, Core:
 
 1. Creates a minimal root filesystem using `debootstrap` (Debian/Ubuntu) or
    `pacstrap` (Arch).
@@ -51,7 +51,7 @@ without recreating the base filesystem.
 
 ### Missions and Workspaces
 
-Each mission targets a specific workspace. When a mission starts, Sandboxed.sh:
+Each mission targets a specific workspace. When a mission starts, Core:
 
 1. Creates a mission directory under `workspaces/mission-<short-id>` inside the
    selected workspace.
@@ -80,7 +80,7 @@ configuration. Applying a template replaces template-controlled fields; a
 container rebuild then recreates the environment from that definition.
 
 Template reads exposed to an assistant redact every `env_vars` value. If an
-encrypted value cannot be decrypted, Sandboxed.sh refuses to apply or
+encrypted value cannot be decrypted, Core refuses to apply or
 patch-save that template instead of replacing a previously valid secret with a
 decryption-error placeholder.
 
@@ -143,7 +143,7 @@ model APIs.
 ## Built-in Tools
 
 Every container workspace is provisioned with the standard development tooling
-that Sandboxed.sh's MCP servers need:
+that Core's MCP servers need:
 
 - **Bun** (`/usr/local/bin/bun`, `/usr/local/bin/bunx`) --- JavaScript runtime
   used to spawn MCP servers (Playwright, etc). Symlinked to `/usr/local/bin/`
@@ -257,7 +257,7 @@ development but give the agent unrestricted access. Container workspaces isolate
 the agent's filesystem and can be rebuilt cleanly.
 
 **Keep secrets in encrypted env vars.** Add secret names to `encrypted_keys` and
-set `PRIVATE_KEY` in the Sandboxed.sh environment. The values are encrypted at
+set `PRIVATE_KEY` in the Core environment. The values are encrypted at
 rest in the Library repo and decrypted at mission runtime.
 
 **Use `rerun-init` for fast iteration.** When developing a template's init

@@ -301,16 +301,16 @@ export default function DataSettingsPage() {
             </div>
           </div>
 
-          {/* sandboxed.sh Source */}
+          {/* Core Source */}
           <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5 flex flex-col">
             <div className="flex items-center gap-3 mb-4">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10 flex-shrink-0">
                 <Archive className="h-5 w-5 text-emerald-400" />
               </div>
               <div className="min-w-0">
-                <h2 className="text-sm font-medium text-white">sandboxed.sh Source</h2>
+                <h2 className="text-sm font-medium text-white">Core Source</h2>
                 <p className="text-xs text-white/40">
-                  Path to the sandboxed.sh git checkout used for updates
+                  Path to the Core git checkout used for updates
                 </p>
               </div>
             </div>

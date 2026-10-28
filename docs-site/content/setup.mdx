@@ -1,11 +1,11 @@
 ---
 title: Server Setup
-description: Deploy the sandboxed.sh backend for Orb clients on Ubuntu 24.04 or Docker
+description: Deploy the Core backend for Orb clients on Ubuntu 24.04 or Docker
 ---
 
 # Server Setup
 
-Choose between **Docker** (fastest on any OS) or a **Native Linux** installation on Ubuntu 24.04 LTS to run `sandboxed.sh` (the former name of the project, now the backend to the Orb clients) with native `systemd-nspawn` isolation and cgroup slices.
+Choose between **Docker** (fastest on any OS) or a **Native Linux** installation on Ubuntu 24.04 LTS to run Core with native `systemd-nspawn` isolation and cgroup slices.
 
 ## Option 1: Docker (5 minutes)
 
@@ -89,7 +89,7 @@ Create `/etc/systemd/system/sandboxed-sh.service`:
 
 ```ini
 [Unit]
-Description=sandboxed.sh (Orb) Control Plane
+Description=Core Control Plane
 After=network-online.target
 Wants=network-online.target
 
@@ -122,4 +122,4 @@ Put Nginx or Caddy in front of `127.0.0.1:3000` with TLS (for example at `https:
 | **Web Admin Console** | Deploy `dashboard/` to Vercel (`NEXT_PUBLIC_API_URL`) or run `bun dev` locally |
 | **Hermes Coordinator** | Point Hermes's MCP server config at `/usr/local/bin/sandboxed-mcp` |
 
-For full bare-metal details (cgroup slices, disk-backed container `/tmp`, CLIProxyAPI Plus, and Tailscale), see [`docs/install-native.md`](https://github.com/Th0rgal/orb/blob/master/docs/install-native.md).
+For full bare-metal details (cgroup slices, disk-backed container `/tmp`, CLIProxyAPI Plus, and optional workspace exit nodes), see [`docs/install-native.md`](https://github.com/Th0rgal/orb/blob/master/docs/install-native.md).

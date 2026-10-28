@@ -1,6 +1,6 @@
-# Sandboxed.sh Android Dashboard
+# Core Android Dashboard
 
-Native Android client for Sandboxed.sh, with feature parity against the iOS dashboard. SwiftUI ↔ Jetpack Compose port; talks to the same `/api/...` backend.
+Native Android client for Core, with feature parity against the iOS dashboard. SwiftUI ↔ Jetpack Compose port; talks to the same `/api/...` backend.
 
 ## Install
 
@@ -111,7 +111,7 @@ android_dashboard/
 
 ## Backend contract
 
-The client targets the same Sandboxed.sh HTTP/SSE/WebSocket contract as the iOS app.
+The client targets the same Core HTTP/SSE/WebSocket contract as the iOS app.
 
 ### HTTP (`ApiService`)
 
@@ -311,7 +311,7 @@ areas. Older dashboard views may still use explicit legacy colors; shared Materi
 
 ## License
 
-Same as the parent Sandboxed.sh project.
+Same as the parent Core project.
 
 ---
 

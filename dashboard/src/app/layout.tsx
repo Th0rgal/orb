@@ -21,7 +21,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Sandboxed.sh",
+  title: "Core",
   description: "Autonomous coding agents in isolated environments",
   icons: {
     icon: "/favicon.svg",

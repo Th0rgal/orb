@@ -1,4 +1,4 @@
-# Debugging Sandboxed.sh
+# Debugging Core
 
 ## Remote Servers
 
@@ -14,19 +14,19 @@ out of this public repository).
 ## Backend Services (Thomas / agent-core)
 
 `agent-core` is the only Thomas
-control plane. It runs the two sandboxed.sh instances plus the Hermes assistant
+control plane. It runs the two Core instances plus the Hermes assistant
 stack. Hermes's server inventory calls it **`agent-core`**; the historical
 `sepolia.rpc.starknet.id` name is only a compatibility DNS alias.
 
 `old-agent` is intentionally still powered on, but only as a
 leaf compute host. Its Sandboxed node ID is **`old-agent`** and exposes port
-3088 only to `agent-core`. Its former sandboxed.sh, Hermes, fleet-daemon, and
+3088 only to `agent-core`. Its former Core, Hermes, fleet-daemon, and
 nginx control-plane services remain stopped and disabled. Do not use it as a
 scheduler, relay, or rollback control plane.
 
 Network routing is direct:
 
-- `agent-core` reaches DGX Spark over Tailscale (node port 3088). There is
+- `agent-core` reaches DGX Spark over Lean-Mesh (`10.88.0.2`, node port 3088). There is
   no production SSH tunnel through `old-agent`.
 - Ashur, Babylon, Nippur, and `old-agent` expose their Sandboxed node API only
   to `agent-core`.
@@ -57,7 +57,7 @@ Remote SSH is deliberately non-interactive and fail-closed:
 - Ashur, Babylon, Nippur, and `old-agent` use
   `/var/lib/hermes-assistant/.ssh/paloma`.
 - DGX uses `/root/.ssh/agent-core-dgx-tunnel` directly; despite the historical
-  filename, this is now a direct Tailscale SSH identity.
+  filename, this is now a direct SSH identity over Lean-Mesh.
 - Every host key must already be pinned in `/root/.ssh/known_hosts`; do not
   solve a sentinel incident with `StrictHostKeyChecking=no`.
 
@@ -74,21 +74,21 @@ No output means every monitored filesystem is reachable and below its alert
 threshold. The current cron job ID is `6bfc537e6dc9`; a manual cron execution
 must also finish successfully before closing the incident.
 
-DGX is the one sentinel target that depends on the control plane's Tailscale
-service. If only `dgx-spark` is unknown, verify the route before changing SSH
-keys or adding a relay:
+The fleet uses [Lean-Mesh](docs/LEAN_MESH.md), not the retired Tailscale
+service. If `dgx-spark` is unknown, inspect the overlay route on `agent-core`
+before changing SSH keys or adding a relay:
 
 ```bash
-systemctl is-enabled tailscaled
-systemctl is-active tailscaled
-tailscale ping -c 2 dgx-spark
+systemctl is-active lean-mesh
+ip -brief address show wg-leanmesh0
+wg show wg-leanmesh0 latest-handshakes
+ip route get 10.88.0.2
 ```
 
-`tailscaled` must be both enabled and active on `agent-core`. Recover the
-expected persisted service with `systemctl enable --now tailscaled`, then
-require all three checks to pass: Tailscale ping, strict-host-key SSH to DGX,
-and a silent `disk-sentinel.sh` run. Never restore the retired `old-agent`
-tunnel to mask a stopped local Tailscale service.
+Check the signed mesh manifest, peer handshake, and DGX heartbeat before
+attempting recovery. Then require strict-host-key SSH to DGX and a silent
+`disk-sentinel.sh` run. Do not enable `tailscaled` or restore the retired
+`old-agent` tunnel to work around a mesh incident.
 
 | Service | Port | Domain | Binary |
 |---------|------|--------|--------|
@@ -101,7 +101,7 @@ tunnel to mask a stopped local Tailscale service.
 `/etc/nginx/sites-enabled/agent-backend.thomas.md` — NOT tracked in git):
 
 - `/hermes-remote` → the gateway's OpenAI-compatible API server (loopback 8642),
-  re-exposed by the sandboxed.sh backend itself (`hermes_remote_proxy` in
+  re-exposed by the Core backend itself (`hermes_remote_proxy` in
   `src/api/system.rs`). `/v1/*` + SSE only, no WebSocket. Used for *split mode*
   (a local Hermes sets `GATEWAY_PROXY_URL`/`GATEWAY_PROXY_KEY` and delegates
   agent work). Key = `API_SERVER_KEY` in `/etc/sandboxed-sh/hermes-assistant.env`,
@@ -133,7 +133,7 @@ Hermes gotchas:
 ### CLIProxyAPI inference sidecar
 
 Production subscription-backed OpenAI-compatible inference uses a loopback-only
-CLIProxyAPI sidecar. Sandboxed.sh translates `/v1/chat/completions` requests for
+CLIProxyAPI sidecar. Core translates `/v1/chat/completions` requests for
 Codex, xAI, and Anthropic OAuth accounts through this service.
 
 | Item | Production value |
@@ -154,14 +154,14 @@ available on (copy the closest sibling entry), keep a backup of the file,
 restart `cli-proxy-api`, then check `/v1/models` and one real `/v1/responses`
 call for the new ID.
 
-The Sandboxed.sh environment must define `CLI_PROXY_API_BASE_URL`,
+The Core environment must define `CLI_PROXY_API_BASE_URL`,
 `CLI_PROXY_API_KEY`, and `CLI_PROXY_AUTH_DIR`. The API key must match one of the
 sidecar's configured `api-keys`; never print either value while debugging.
 The systemd unit must set `UMask=0077`, and every OAuth JSON file in the auth
 directory must remain mode `0600` because those files contain refresh tokens.
 
 During a zero-downtime migration, CLIProxyAPI can temporarily run without
-`api-keys` so an already-running Sandboxed.sh process can use the loopback
+`api-keys` so an already-running Core process can use the loopback
 default without a restart. This is acceptable only while the listener is bound
 to `127.0.0.1`; restore key enforcement after the next safe backend restart.
 
@@ -176,7 +176,7 @@ find /var/lib/cli-proxy-api/auth -maxdepth 1 -type f -name '*.json' \
 
 Expected auth types are `codex`, `xai`, and `claude`. Create them with the
 sidecar's own OAuth login commands under the `cli-proxy-api` system account.
-Do not copy refresh tokens out of Sandboxed.sh's provider store: two independent
+Do not copy refresh tokens out of Core's provider store: two independent
 refreshers can rotate the same token and trigger `refresh_token_reused`.
 
 After changing the three `CLI_PROXY_*` environment variables, restart
@@ -403,7 +403,7 @@ afterwards; check with `get_mission_health`, not the status alone.
 **Targeting rule:** `deploy_sandboxed_sh` deploys the backend API it is sent
 to. If `target_environment` is omitted, the tool uses the API that launched the
 mission. A prod mission therefore deploys prod by default; a dev mission deploys
-dev by default. To deploy a different Sandboxed.sh environment, set
+dev by default. To deploy a different Core environment, set
 `target_environment` explicitly:
 
 | Target | Tool argument | API URL | Service restarted |
@@ -472,7 +472,7 @@ ssh agent-core "systemctl restart sandboxed-sh-dev"
 ```
 
 Do not call `deploy_sandboxed_sh` from a prod mission unless you intend to
-deploy a Sandboxed.sh backend. For dev testing from prod, prefer
+deploy a Core backend. For dev testing from prod, prefer
 `target_environment: "dev"` so the request goes to the dev API and carries the
 `sandboxed-sh-dev.service` guard.
 

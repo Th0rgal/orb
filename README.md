@@ -7,7 +7,7 @@
 <p align="center">
   <strong>All your AI providers, machines, and agent harnesses in one place.</strong><br/>
   Connect your subscriptions, API keys, and local hardware to your machines, and orchestrate every agent harness from macOS and iOS.<br/>
-  <sub>Formerly <code>sandboxed.sh</code> — <code>sandboxed.sh</code> is now the backend to the Orb clients.</sub>
+  <sub>Orb clients connect to Core, formerly sandboxed.sh.</sub>
 </p>
 
 <p align="center">
@@ -26,7 +26,7 @@
 | Mode | Where it runs | How you use it |
 | --- | --- | --- |
 | **Your computer** | A local coding agent on your desktop | Choose **New Agent → This computer**, then a harness and model. Work with your local files and tools. |
-| **Your private cloud** | Your own servers and remote machines | Add machines to sandboxed.sh, then select one in Orb. Run agents in the configured host or isolated container workspace. |
+| **Your private cloud** | Your own servers and remote machines | Add machines to Core, then select one in Orb. Run agents in the configured host or isolated container workspace. |
 | **Cloud agents** | A coordinator or provider-managed assistant | Choose **Cloud agent**, then Hermes, Grok Bot or Cursor Cloud. Continue durable or provider conversations from Orb. |
 
 Use **Claude Code**, **Codex**, **Antigravity**, **OpenCode** or **Grok** for
@@ -54,7 +54,7 @@ Projects organize missions, per-project colors, skills and a synced local
 - **Rich output**: Markdown, code, tables, LaTeX, quizzes, inline images and
   clickable file links stay readable inside the transcript.
 
-Orb for **iOS** connects to the same sandboxed.sh server: browse projects with
+Orb for **iOS** connects to the same Core server: browse projects with
 synced colors, inspect mission transcripts and activity folds, send follow-ups,
 view or edit shared Markdown context, and manage backend, machines and providers.
 
@@ -83,7 +83,7 @@ Cursor Cloud API account.
 
 ## Get started
 
-1. **Run sandboxed.sh.** Follow the [Docker guide](docs/install-docker.md) or
+1. **Run Core.** Follow the [Docker guide](docs/install-docker.md) or
    [native Linux guide](docs/install-native.md). It keeps the project record,
    mission history and remote execution services.
 2. **Open Orb.** Build the [desktop client](orb/README.md) or the
@@ -96,14 +96,16 @@ Cursor Cloud API account.
 
 ## Under the hood
 
-**Orb is the client; sandboxed.sh (the project's former name) is now the backend to the Orb clients.**
+**Orb is the client; Core is its backend.**
 Desktop is built with Tauri and SolidJS; iOS uses SwiftUI. The Rust backend owns
 projects, missions, event history and remote-node coordination, backed by a
-formally verified Lean 4 orchestration, proxy, mission lifecycle, and cross-client projection kernel
-(`lean/Orb/Kernel.lean`, `lean/Orb/Spec.lean` & `crates/orb-spec`, `0 sorryAx`, `42/42` tight
-specs across 5 Layer-I Meta-Specs, `30` C-ABI gates compiled directly to `liborb_spec_cabi.a` with zero C
-fallback). Cloud adapters observe provider work independently of the client
-window.
+Lean 4 decision kernel for orchestration, proxy and mission lifecycle, and
+cross-client projections. Rust performs I/O; the verified decisions compile to
+`liborb_spec_cabi.a` without a Lean runtime dependency. The
+[ABI manifest](shared/orb-spec/kernel_abi.json) records the exported functions,
+and the [kernel audit](lean/audit/AuditSpec.lean) checks the proof boundary.
+These guarantees cover the decision kernel, not the entire application.
+Cloud adapters observe provider work independently of the client window.
 
 The same control plane is available over MCP for coordinators such as
 [Hermes](https://github.com/Th0rgal/hermes-agent). Automation uses the same project
@@ -117,4 +119,4 @@ and mission records as Orb.
 
 ---
 
-**Orb** (`orb.thomas.md`) · Formerly `sandboxed.sh` (now the backend to the Orb clients).
+**Orb** (`orb.thomas.md`) · Powered by Core.

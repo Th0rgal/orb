@@ -720,7 +720,7 @@ struct OrbHermesSettings: View {
     private var modelSection: some View {
         let models = state["models"].items.filter { !$0.selfID.isEmpty }
         return Section("Model & router") {
-            Toggle("Route through sandboxed.sh router", isOn: $draft.useRouter)
+            Toggle("Route through Core router", isOn: $draft.useRouter)
             Picker("Default model", selection: $draft.defaultModel) {
                 if !draft.defaultModel.isEmpty && !models.contains(where: { $0.selfID == draft.defaultModel }) { Text("\(draft.defaultModel) (current)").tag(draft.defaultModel) }
                 ForEach(models, id: \.selfID) { m in Text(m["displayName"].text.isEmpty ? (m["name"].text.isEmpty ? m.selfID : m["name"].text) : m["displayName"].text).tag(m.selfID) }

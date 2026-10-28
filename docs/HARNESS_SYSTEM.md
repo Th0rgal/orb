@@ -1,6 +1,6 @@
 # Harness System
 
-Sandboxed.sh supports multiple execution backends ("harnesses") for running agent
+Core supports multiple execution backends ("harnesses") for running agent
 missions. The current architecture is **per-workspace execution**: harness CLIs
 run inside the selected workspace (host or container).
 
@@ -10,7 +10,7 @@ new backends.
 ## Overview
 
 A **harness** (also called a backend) is an execution engine that runs agent
-missions. Sandboxed.sh currently supports:
+missions. Core currently supports:
 
 | Harness | Description | Configuration Model |
 |---------|-------------|---------------------|
@@ -55,7 +55,7 @@ missions. Sandboxed.sh currently supports:
 
 ## Backend registry (metadata)
 
-Sandboxed.sh still maintains a backend registry for:
+Core still maintains a backend registry for:
 
 - listing agents
 - backend configuration UI
@@ -97,11 +97,11 @@ Claude Code is executed **per workspace** using the CLI:
 
 When `SANDBOXED_OAUTH_OWNER=cli-proxy` (the default on hosts running CLIProxyAPI),
 OAuth token refresh is owned centrally by CLIProxyAPI (`/var/lib/cli-proxy-api/auth`)
-and Sandboxed.sh deletes any stale `.credentials.json` inside the workspace so two
+and Core deletes any stale `.credentials.json` inside the workspace so two
 processes never race to consume a single-use refresh token.
 
 When direct backend OAuth ownership is used instead (`SANDBOXED_OAUTH_OWNER=backend`),
-Sandboxed.sh writes Claude Code's credentials file for automatic token refresh:
+Core writes Claude Code's credentials file for automatic token refresh:
 
 - **Container workspaces**: `/root/.claude/.credentials.json` inside the container
 - **Host workspaces**: `$HOME/.claude/.credentials.json` on the host
@@ -121,7 +121,7 @@ Model overrides must be exact IDs supported by the authenticated account.
 `gpt-5.5-sol`, for example, is not a valid Codex/ChatGPT model and is rejected
 when the mission is created instead of failing after dispatch. Use
 `gpt-5.6-terra` with `model_effort=medium` when the Terra lane is intended;
-Sandboxed.sh does not silently substitute a different model.
+Core does not silently substitute a different model.
 
 ## Antigravity and Grok harnesses
 
@@ -135,7 +135,7 @@ Antigravity and Grok Build run through their native CLIs inside the workspace:
 
 ### Harness bootstrap (auto-install)
 
-For **container workspaces**, Sandboxed.sh can automatically install the required
+For **container workspaces**, Core can automatically install the required
 CLIs during container build (best-effort):
 
 - `SANDBOXED_SH_BOOTSTRAP_CLAUDECODE=true` (default)
@@ -202,7 +202,7 @@ Every stdio MCP is started through a mission-local `0700` launcher. The launcher
 clears inherited harness variables and restores only:
 
 - the MCP transport's own `env` map;
-- mission/runtime metadata required by Sandboxed.sh; and
+- mission/runtime metadata required by Core; and
 - workspace variables named in `workspace_env_allowlist`.
 
 The generated OpenCode, Claude, and Codex configs contain the launcher path, not

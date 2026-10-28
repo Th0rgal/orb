@@ -363,7 +363,7 @@ fun OrbProvidersSettingsPage(
 
     // Mirrors iOS OrbProviderLoginView / Orb Providers.tsx: subscriptions other than
     // Google sign in through the CLIProxyAPI session flow; Google (and providers owned
-    // by sandboxed.sh) use the native flow, where the server accepts the provider type
+    // by Core) use the native flow, where the server accepts the provider type
     // in place of a provider UUID.
     fun usesCliProxyLogin(providerType: String, existingProvider: OrbRow?): Boolean {
         if (providerType == "google") return false
