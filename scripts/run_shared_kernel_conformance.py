@@ -122,8 +122,10 @@ def main(argv=None):
     # Unwind subprocess ownership on durable-job termination as well as timeout.
     signal.signal(signal.SIGTERM, terminate)
     manifest = load_manifest(ORB / "shared/orb-spec/kernel_abi.json")
-    functions = [f for f in manifest["functions"] if not f.get("internal")]
-    if len(functions) != 112 or any(not f["name"].startswith(("orb_", "leansys_")) for f in functions):
+    # `internal` also marks six public-prefix steppers not exposed to mobile.
+    # The roadmap includes those steppers; exclude only the compiler helper.
+    functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
+    if len(functions) != 112 or len(manifest["functions"]) != 113:
         raise ValueError("public export inventory changed; qualify the new surface explicitly")
     if run(["git", "rev-parse", "HEAD"], SYS).strip() != "077775ba387f1eeb2976cb8763b4633b8d5ce313":
         raise ValueError("unexpected LeanSys revision")
