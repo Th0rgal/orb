@@ -3175,6 +3175,37 @@ async fn continue_inner(
             return Ok(mission);
         }
     }
+    // A job on a managed VM that is provably destroyed cannot still run:
+    // settle it as lost instead of refusing resume forever.
+    let (mission, placement) = if placement.live
+        && super::remote_jobs::release_jobs_on_gone_nodes(
+            &state.config.working_dir,
+            store.as_ref(),
+            mission_id,
+        )
+        .await
+        .map_err(internal)?
+            > 0
+    {
+        let mission = store
+            .get_mission(mission_id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("Mission {mission_id} not found"),
+                )
+            })?;
+        let placement =
+            super::remote_grok::placement(&state.config.working_dir, &store, mission_id)
+                .await
+                .map_err(internal)?
+                .ok_or((StatusCode::CONFLICT, "Remote placement disappeared".into()))?;
+        (mission, placement)
+    } else {
+        (mission, placement)
+    };
     // A live job must never produce a replacement hint, even for a harness
     // or track that cannot resume. Clients act on that hint by creating a job.
     let job_running = placement.live || mission.status == MissionStatus::Active;

@@ -945,6 +945,8 @@ pub(super) async fn finalize_remote_mission(
 /// submitting process died before the node acceptance became durable.
 pub(crate) const REMOTE_DISPATCH_FAILED: &str = "remote_dispatch_failed";
 pub(crate) const REMOTE_DISPATCH_INTERRUPTED: &str = "remote_dispatch_interrupted";
+/// Terminal reason for a job whose managed VM is provably destroyed.
+pub(crate) const REMOTE_NODE_GONE: &str = "remote_node_gone";
 
 /// Dispatch a remote mission job with the run lease taken FIRST.
 ///

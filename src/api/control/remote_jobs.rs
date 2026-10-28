@@ -1630,6 +1630,72 @@ pub(super) async fn settle_interrupted_remote_launch(
     }
 }
 
+/// The single settlement for a job handle whose node provably no longer
+/// exists (a managed VM whose registry record is destroyed, see
+/// [`crate::managed::node_provably_gone`]). No process can still run there, so
+/// the job is closed as lost: the run lease it owns is finished with
+/// [`REMOTE_NODE_GONE`], an Active/Pending mission fails with that reason, and
+/// the ledger handle is retired so resume and cancel are no longer blocked.
+/// Returns `Ok(false)` (and changes nothing) for any other node — in
+/// particular a static node with merely missing config or token.
+pub(super) async fn settle_job_on_gone_node(
+    working_dir: &std::path::Path,
+    store: &dyn MissionStore,
+    handle: &crate::remote_node::job_ledger::JobHandle,
+) -> Result<bool, String> {
+    if !crate::managed::node_provably_gone(&handle.node_id).await {
+        return Ok(false);
+    }
+    let (mission_id, job_id) = (handle.mission_id, handle.job_id);
+    // The ledger is global; only the store that owns the mission may settle
+    // its job. Another tenant's store must not touch it.
+    if store.get_mission(mission_id).await?.is_none() {
+        return Ok(false);
+    }
+    finish_remote_job_lease(store, mission_id, job_id, REMOTE_NODE_GONE).await?;
+    if store
+        .get_mission(mission_id)
+        .await?
+        .is_some_and(|m| matches!(m.status, MissionStatus::Active | MissionStatus::Pending))
+        && store.get_active_mission_run(mission_id).await?.is_none()
+    {
+        let _ = store.set_deferred_goal(mission_id, None).await;
+        store
+            .update_mission_status_with_reason(
+                mission_id,
+                MissionStatus::Failed,
+                Some(REMOTE_NODE_GONE),
+            )
+            .await?;
+    }
+    crate::remote_node::job_ledger::finalize(working_dir, job_id, "failed", None)
+        .await
+        .map_err(|e| e.to_string())?;
+    tracing::warn!(%mission_id, %job_id, node = %handle.node_id,
+        "remote job settled as lost: its managed node is destroyed");
+    Ok(true)
+}
+
+/// Settle every ledger handle of `mission_id` whose node is provably gone
+/// (see [`settle_job_on_gone_node`]). Used by resume and cancel so a mission
+/// is never blocked by a job on a VM that no longer exists.
+pub(super) async fn release_jobs_on_gone_nodes(
+    working_dir: &std::path::Path,
+    store: &dyn MissionStore,
+    mission_id: Uuid,
+) -> Result<usize, String> {
+    let handles = crate::remote_node::job_ledger::load(working_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut released = 0;
+    for handle in handles.iter().filter(|h| h.mission_id == mission_id) {
+        if settle_job_on_gone_node(working_dir, store, handle).await? {
+            released += 1;
+        }
+    }
+    Ok(released)
+}
+
 /// Ledger handles created before `boot_cutoff`, i.e. by a previous process.
 pub(super) fn boot_leftovers(
     handles: Vec<crate::remote_node::job_ledger::JobHandle>,
@@ -1649,6 +1715,32 @@ pub(super) async fn reconcile_pending_handles(
 ) {
     {
         for handle in handles {
+            if crate::managed::node_provably_gone(&handle.node_id).await {
+                match find_remote_mission_owner(state, handle.mission_id).await {
+                    Some((owner, _)) => {
+                        match settle_job_on_gone_node(
+                            working_dir,
+                            owner.mission_store.as_ref(),
+                            &handle,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                settled.insert(handle.job_id);
+                            }
+                            Err(error) => {
+                                tracing::warn!(mission_id = %handle.mission_id, job_id = %handle.job_id, %error,
+                                    "remote job on destroyed node could not be settled; will retry");
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::info!(mission_id = %handle.mission_id, job_id = %handle.job_id,
+                            "remote job on destroyed node kept: owning mission not found; will retry");
+                    }
+                }
+                continue;
+            }
             if handle.kind == crate::remote_node::job_ledger::JobHandleKind::Tentative {
                 let node = state.config.remote_nodes.node(&handle.node_id).cloned();
                 let shared_token = node

@@ -13695,3 +13695,192 @@ async fn workspace_purge_history_delete_rejects_descendants_created_while_waitin
         .unwrap()
         .is_some());
 }
+
+/// Prod 2026-10-28: missions whose job lived on a managed VM that was later
+/// destroyed stayed `REMOTE_JOB_STILL_RUNNING` forever, because recovery
+/// retained every handle whose node config/token was gone. A destroyed
+/// managed VM proves the process is gone; a static node does not.
+#[tokio::test]
+async fn restart_settles_jobs_on_destroyed_managed_nodes_but_retains_static_ones() {
+    use crate::remote_node::job_ledger;
+    let h = Harness::new().await;
+    let store = h.control.mission_store.clone();
+    let working_dir = h.state.config.working_dir.clone();
+
+    // Managed registry: `mmgone01` destroyed, `mmlive01` still online.
+    let registry = tempfile::tempdir().unwrap();
+    let row = |id: &str, state: &str| {
+        json!({
+            "id": id, "provider": "boat", "provider_id": format!("bx_{id}"),
+            "node_id": format!("managed-{id}"), "image": "orb-node-base",
+            "size": "small", "cpu": 2, "ram_gb": 4, "disk_gb": 20,
+            "usd_per_hour": 0.1, "state": state,
+            "created_at": chrono::Utc::now(), "expires_at": chrono::Utc::now(),
+            "cost_usd": 0.0, "ledger_closed": true,
+        })
+    };
+    std::fs::create_dir_all(registry.path().join(".sandboxed-sh")).unwrap();
+    std::fs::write(
+        registry.path().join(".sandboxed-sh/managed_machines.json"),
+        serde_json::to_vec(&json!({
+            "machines": [row("mmgone01", "destroyed"), row("mmlive01", "online")]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let manager = std::sync::Arc::new(crate::managed::ManagedManager::new(
+        crate::managed::ManagedSettings::from_env(false),
+        None,
+        registry.path(),
+        3999,
+    ));
+    manager.load().await;
+    crate::managed::set_test_manager(Some(manager));
+
+    let stale = chrono::Utc::now() - chrono::Duration::hours(1);
+    let gone = active_mission(&h, "job on destroyed VM").await;
+    let gone_job = Uuid::new_v4();
+    let live_vm = active_mission(&h, "job on live VM without token").await;
+    let live_vm_job = Uuid::new_v4();
+    let static_node = active_mission(&h, "job on static node without token").await;
+    let static_job = Uuid::new_v4();
+    for (mission, node, job) in [
+        (&gone, "managed-mmgone01", gone_job),
+        (&live_vm, "managed-mmlive01", live_vm_job),
+        (&static_node, "old-agent", static_job),
+    ] {
+        job_ledger::record(
+            &working_dir,
+            accepted_mission_handle(mission.id, node, job, stale),
+        )
+        .await
+        .unwrap();
+        ensure_remote_job_lease(store.as_ref(), mission.id, job, node)
+            .await
+            .unwrap();
+        store
+            .update_mission_status(mission.id, MissionStatus::Paused)
+            .await
+            .unwrap();
+    }
+
+    // Cancel path (no restart): an Active mission on the destroyed VM is
+    // released by the same settlement and fails with `remote_node_gone`.
+    let cancelled = active_mission(&h, "cancel job on destroyed VM").await;
+    let cancelled_job = Uuid::new_v4();
+    job_ledger::record(
+        &working_dir,
+        accepted_mission_handle(cancelled.id, "managed-mmgone01", cancelled_job, stale),
+    )
+    .await
+    .unwrap();
+    ensure_remote_job_lease(
+        store.as_ref(),
+        cancelled.id,
+        cancelled_job,
+        "managed-mmgone01",
+    )
+    .await
+    .unwrap();
+    // Another tenant's store cannot settle this job by its mission id.
+    let other_dir = tempfile::tempdir().unwrap();
+    let other: Arc<dyn MissionStore> = Arc::new(
+        SqliteMissionStore::new(other_dir.path().to_path_buf(), "other-user")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        release_jobs_on_gone_nodes(&working_dir, other.as_ref(), cancelled.id)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(job_ledger::load(&working_dir)
+        .await
+        .unwrap()
+        .iter()
+        .any(|handle| handle.job_id == cancelled_job));
+    assert!(store
+        .get_active_mission_run(cancelled.id)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        release_jobs_on_gone_nodes(&working_dir, store.as_ref(), cancelled.id)
+            .await
+            .unwrap(),
+        1
+    );
+    let after_cancel = store.get_mission(cancelled.id).await.unwrap().unwrap();
+    assert_eq!(after_cancel.status, MissionStatus::Failed);
+    assert_eq!(
+        after_cancel.terminal_reason.as_deref(),
+        Some(REMOTE_NODE_GONE)
+    );
+    assert!(store
+        .get_active_mission_run(cancelled.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let handles = job_ledger::load(&working_dir).await.unwrap();
+    let mut settled = HashSet::new();
+    reconcile_pending_handles(&h.state, &working_dir, handles, &mut settled).await;
+    crate::managed::set_test_manager(None);
+
+    // Destroyed VM: handle retired, lease released, resume gate open.
+    assert!(settled.contains(&gone_job));
+    let ledger = job_ledger::load(&working_dir).await.unwrap();
+    assert!(ledger.iter().all(|handle| handle.job_id != gone_job));
+    assert!(store
+        .get_active_mission_run(gone.id)
+        .await
+        .unwrap()
+        .is_none());
+    let run = store
+        .get_latest_mission_run(gone.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(run.execution_state.is_terminal());
+    let placement = super::remote_grok::placement(&working_dir, &store, gone.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!placement.live, "resume must no longer be refused");
+    assert_eq!(
+        store.get_mission(gone.id).await.unwrap().unwrap().status,
+        MissionStatus::Paused
+    );
+
+    // Live VM and static node with missing tokens: nothing proves the
+    // process stopped, so the handle and lease are retained.
+    for (mission, job) in [(&live_vm, live_vm_job), (&static_node, static_job)] {
+        assert!(!settled.contains(&job));
+        assert!(ledger.iter().any(|handle| handle.job_id == job));
+        assert!(store
+            .get_active_mission_run(mission.id)
+            .await
+            .unwrap()
+            .is_some_and(|run| run.owner_actor_id == remote_job_lease_owner(job)));
+        assert!(
+            super::remote_grok::placement(&working_dir, &store, mission.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .live
+        );
+    }
+}
+
+#[test]
+fn managed_node_gone_verdict_requires_destroyed_record_or_authoritative_absence() {
+    use crate::managed::{node_gone_verdict, MachineState};
+    assert!(node_gone_verdict(Some(MachineState::Destroyed), false));
+    assert!(node_gone_verdict(Some(MachineState::Failed), false));
+    assert!(!node_gone_verdict(Some(MachineState::Stopped), true));
+    assert!(!node_gone_verdict(Some(MachineState::Online), true));
+    assert!(!node_gone_verdict(Some(MachineState::Destroying), true));
+    assert!(node_gone_verdict(None, true));
+    assert!(!node_gone_verdict(None, false));
+}
