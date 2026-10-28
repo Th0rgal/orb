@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, untrack, type JSX } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { visibleTree, type TreeNode, type TreeRow } from "./treeModel";
 
@@ -22,6 +22,10 @@ export function SidebarTree<T>(p: { nodes: TreeNode<T>[]; label: string; selecte
   // Keep several candidates so deleting the first visible row has a fallback.
   createEffect(() => {
     const next = visible();
+    // Same rows in the same order (a status, title or selection change): nothing
+    // moves, so skip measuring anchors, which forces a layout on every update.
+    const shown = untrack(() => rows.map(row => row.id));
+    if (shown.length === next.length && next.every((row, i) => row.id === shown[i])) { setRows(reconcile(next, { key: "id" })); return; }
     const scroller = element?.closest<HTMLElement>(".sb-scroll");
     const viewport = scroller?.getBoundingClientRect();
     const scroll = scroller?.scrollTop ?? 0;
