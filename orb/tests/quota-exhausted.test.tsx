@@ -33,11 +33,12 @@ it("names the exhausted pool instead of the whole account", () => {
   expect(effectiveProviderStatus(antigravity, agyUsage(40, 0))).toBe("connected");
 });
 
-it("shows 'Gemini quota exhausted' and highlights only the spent chip", async () => {
+it("shows a compact status with pool details and highlights only the spent chip", async () => {
   setConnection("http://core.test", "test-token");
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(url.endsWith("/providers") ? [antigravity] : url.includes("/agy/usage") ? agyUsage(100, 0) : url.endsWith("/providers/usage") ? { entries: { agy: agyUsage(100, 0) } } : {}))));
   const { container } = render(() => <Providers />);
-  await waitFor(() => expect(container.textContent).toContain("Gemini quota exhausted"));
+  await waitFor(() => expect(container.querySelector(".p-st")?.textContent).toBe("Limit reached"));
+  expect(container.querySelector(".p-st")?.getAttribute("title")).toBe("Gemini quota exhausted");
   // Collapse the row (Antigravity opens expanded) to see the summary chips.
   (container.querySelector(".p-acc-btn") as HTMLButtonElement).click();
   await waitFor(() => expect(container.querySelectorAll(".p-usage.compact .p-usage-chip")).toHaveLength(2));
