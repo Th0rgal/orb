@@ -479,8 +479,8 @@ struct OrbWorkFold: View {
                 .accessibilityIdentifier(identifier)
                 // While the fold runs, the newest narration reads as one line
                 // under its header instead of paragraphs in the transcript.
-                if !expanded, let note = model.notes.last.map({ OrbWorkModel.narrationLine($0.text) }), !note.isEmpty {
-                    Text(note)
+                if !expanded {
+                    Text(model.notes.last.map({ OrbWorkModel.narrationLine($0.text) }).flatMap { $0.isEmpty ? nil : $0 } ?? "\u{00a0}")
                         .font(.caption)
                         .foregroundStyle(OrbStyle.textSecondary)
                         .lineLimit(1)

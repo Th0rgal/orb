@@ -416,7 +416,11 @@ final class OrbCore {
             queryItems.append(URLQueryItem(name: "since_seq", value: String(sinceSeq)))
         }
         if let kinds, !kinds.isEmpty {
-            queryItems.append(URLQueryItem(name: "kinds", value: kinds.joined(separator: ",")))
+            if kinds == ["presentation"] {
+                queryItems.append(URLQueryItem(name: "profile", value: "presentation"))
+                queryItems.append(URLQueryItem(name: "kinds", value: "mission_presentation"))
+            }
+            else { queryItems.append(URLQueryItem(name: "kinds", value: kinds.joined(separator: ","))) }
         }
         guard let url = makeURL("/api/control/stream", queryItems: queryItems) else {
             emitDiagnostic(transport: .sse, phase: .error, host: nil, status: nil, bytes: nil, error: "Invalid server URL", eventType: nil, generation: generation, onDiagnostic: onDiagnostic)

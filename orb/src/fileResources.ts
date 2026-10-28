@@ -1,6 +1,6 @@
 import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
-import { imagePreview, imagePreviewScope } from "./imagePreviews";
+import { imagePreview, imagePreviewScope, loadImagePreview } from "./imagePreviews";
 import {
   api,
   getApiUrl,
@@ -370,7 +370,40 @@ export function createFileClient(scope: FileScope) {
     }
     return null;
   }
-  return { roots, call, loadUploadedImage, imagePreview: (path: string) => version === connectionVersion() ? imagePreview(previewScope, path) : undefined };
+  async function loadImage(path: string, resolve: () => Promise<FileRef[]>): Promise<string | null> {
+    if (version !== connectionVersion()) return null;
+    const uploaded = imagePreview(previewScope, path);
+    if (uploaded) return uploaded;
+    const mime = imageMime(path);
+    if (!mime) return null;
+    // Recent active files expire even if status metadata has not changed.
+    const revision = [mission?.updated_at, Math.floor(Date.now() / 300000)];
+    const scopeKey = JSON.stringify([previewScope, fileScopeKey(scope), revision]);
+    const result = await loadImagePreview(scopeKey, path, async () => {
+      const refs = await resolve();
+      if (version !== connectionVersion()) return null;
+      if (!refs.length) {
+        const url = await loadUploadedImage(path);
+        if (!url) return null;
+        try { return await (await fetch(url)).blob(); }
+        finally { URL.revokeObjectURL(url); }
+      }
+      const ref = refs[0], chunks: Uint8Array[] = [];
+      let offset = 0;
+      const limit = imageByteLimit(mime);
+      while (true) {
+        const part = await call(ref.source, { action: "download", path: ref.path, offset });
+        if (version !== connectionVersion() || !part.bytes?.length || !part.size || part.size > limit) return null;
+        offset += part.bytes.length;
+        if (offset > limit) return null;
+        chunks.push(new Uint8Array(part.bytes));
+        if (offset >= part.size) break;
+      }
+      return new Blob(chunks as BlobPart[], { type: mime });
+    });
+    return version === connectionVersion() ? result : null;
+  }
+  return { roots, call, loadUploadedImage, loadImage, imagePreview: (path: string) => version === connectionVersion() ? imagePreview(previewScope, path) : undefined };
 }
 /** Why a source cannot be read, in the user's terms. */
 export function unavailableReason(id: string, root?: FileSource): string {

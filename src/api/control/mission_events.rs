@@ -160,11 +160,14 @@ pub(super) fn thinking_event_is_done(event: &mission_store::StoredEvent) -> bool
 }
 
 pub(super) fn should_summarize_events(mission: &Mission) -> bool {
-    if mission.status == MissionStatus::Active {
+    should_summarize_status(mission.status == MissionStatus::Active, &mission.updated_at)
+}
+
+fn should_summarize_status(active: bool, updated_at: &str) -> bool {
+    if active {
         return false;
     }
-
-    let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(&mission.updated_at) else {
+    let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
         return false;
     };
     chrono::Utc::now().signed_duration_since(updated_at.with_timezone(&chrono::Utc))
@@ -429,12 +432,13 @@ pub async fn get_mission_events(
     let metrics_start = Instant::now();
     let control = control_for_user(&state, &user).await;
 
-    // Check mission exists
+    // Existence/status reads must not decode 200 historical message bodies.
     let mission = control
         .mission_store
-        .get_mission(mission_id)
+        .get_mission_summaries(&[mission_id])
         .await
         .map_err(internal_error)?
+        .remove(&mission_id)
         .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
 
     let type_names = event_types_for_query(&query);
@@ -476,7 +480,7 @@ pub async fn get_mission_events(
         query.limit,
         query.before_seq.is_some() || query.since_seq.is_none(),
     );
-    let mut summary = if should_summarize_events(&mission) {
+    let mut summary = if should_summarize_status(mission.status == "active", &mission.updated_at) {
         summarize_inactive_stream_events(events)
     } else {
         EventSummary::unchanged(events)
@@ -1046,8 +1050,73 @@ pub async fn get_mission_snapshot(
     Extension(user): Extension<AuthUser>,
     Path(mission_id): Path<Uuid>,
     axum::extract::Query(query): axum::extract::Query<SnapshotQuery>,
-) -> Result<Json<MissionSnapshotResponse>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
+    if query.profile.as_deref() == Some("presentation") {
+        let mission = control
+            .mission_store
+            .get_mission_summaries(&[mission_id])
+            .await
+            .map_err(internal_error)?
+            .remove(&mission_id)
+            .ok_or((StatusCode::NOT_FOUND, "Mission not found".to_string()))?;
+        let revision = control
+            .mission_store
+            .max_event_sequence(mission_id)
+            .await
+            .map_err(internal_error)?;
+        // Explicitly fetch the last answer: queued prompts may follow it.
+        let mut events = control
+            .mission_store
+            .get_events_before(
+                mission_id,
+                revision.saturating_add(1),
+                Some(&["assistant_message"]),
+                Some(1),
+            )
+            .await
+            .map_err(internal_error)?;
+        let tail = control
+            .mission_store
+            .get_events_before(
+                mission_id,
+                revision.saturating_add(1),
+                Some(&[
+                    "user_message",
+                    "assistant_message",
+                    "mission_activity",
+                    "phase",
+                    "mission_status_changed",
+                ]),
+                Some(3),
+            )
+            .await
+            .map_err(internal_error)?;
+        events.extend(tail);
+        events.sort_by_key(|event| event.sequence);
+        events.dedup_by_key(|event| event.sequence);
+        // The actor owns live labels. Bound this optional enrichment so a busy
+        // runner cannot delay the durable answer indefinitely.
+        let activity = if mission.status == "active" {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                get_running_missions(&control),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|rows| rows.into_iter().find(|row| row.mission_id == mission_id))
+            .and_then(|row| row.current_activity)
+            .map(|label| label.chars().take(160).collect::<String>())
+        } else {
+            None
+        };
+        return Ok(Json(serde_json::json!({
+            "profile": "presentation", "mission_id": mission_id,
+            "mission": mission, "revision": revision, "events": events,
+            "details_pending": true, "activity": activity
+        })));
+    }
     let mut mission = control
         .mission_store
         .get_mission(mission_id)
@@ -1185,18 +1254,21 @@ pub async fn get_mission_snapshot(
         .as_ref()
         .map(|run| mission_execution_projection(run, mission.status));
 
-    Ok(Json(MissionSnapshotResponse {
-        mission,
-        execution,
-        events: summary.events,
-        counts: event_counts.clone(),
-        event_counts,
-        visibility_counts,
-        total_events: total,
-        latest_sequence,
-        child_missions,
-        running,
-    }))
+    Ok(Json(
+        serde_json::to_value(MissionSnapshotResponse {
+            mission,
+            execution,
+            events: summary.events,
+            counts: event_counts.clone(),
+            event_counts,
+            visibility_counts,
+            total_events: total,
+            latest_sequence,
+            child_missions,
+            running,
+        })
+        .map_err(internal_error)?,
+    ))
 }
 
 // ==================== Parallel Mission Endpoints ====================

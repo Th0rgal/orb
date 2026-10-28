@@ -518,13 +518,13 @@ object OrbDisk {
             accountScope = "anonymous"
             return
         }
-        val material = "$trimmedBase|${trimmedToken.take(24)}|${trimmedToken.takeLast(16)}"
+        val material = "$trimmedBase|$trimmedToken"
         val digest = MessageDigest.getInstance("SHA-256").digest(material.toByteArray())
         accountScope = digest.take(10).joinToString("") { "%02x".format(it) }
     }
 
     @Synchronized
-    private fun currentScope(): String = accountScope
+    internal fun currentScope(): String = accountScope
 
     private fun rootDir(): File {
         val ctx = appContext
@@ -597,13 +597,38 @@ object OrbReadCache {
     private fun bounded(key: String, rows: List<OrbRow>) = if (key.startsWith("mission_events_")) compactEvents(rows) else rows
 
     fun loadRows(key: String): List<OrbRow> {
+        val account = OrbDisk.currentScope()
         synchronized(rowsByKey) { rowsByKey[key] }?.let { return it }
         val raw = OrbDisk.read(key)
         val rows = bounded(key, OrbJSON.dictList(raw).map { OrbRow(it) })
-        if (rows.isNotEmpty()) {
-            synchronized(rowsByKey) { rowsByKey[key] = rows }
+        return synchronized(rowsByKey) {
+            if (account != OrbDisk.currentScope()) return@synchronized emptyList()
+            rowsByKey[key]?.let { return@synchronized it }
+            if (rows.isNotEmpty()) rowsByKey[key] = rows
+            rows
         }
+    }
+
+    /** Safe for composition: never performs disk I/O or JSON decoding. */
+    fun readMemoryRows(key: String): List<OrbRow> = synchronized(rowsByKey) { rowsByKey[key] } ?: emptyList()
+
+    suspend fun loadRowsAsync(key: String): List<OrbRow> {
+        val account = OrbDisk.currentScope()
+        val rows = withContext(Dispatchers.IO) { loadRows(key) }
+        if (account != OrbDisk.currentScope()) throw CancellationException("Cache account changed")
         return rows
+    }
+
+    /** A bounded global roster cannot replace a project's more complete cached list. */
+    fun seedProjectRows(project: String, rows: List<OrbRow>, fresh: Boolean = false) {
+        val key = "project_missions_$project"
+        val cached = loadRows(key)
+        if (cached.isEmpty()) saveRowsMemoryOnly(key, rows)
+        else if (fresh) {
+            val incoming = rows.associateBy { it.id }
+            val known = cached.mapTo(mutableSetOf()) { it.id }
+            saveRowsMemoryOnly(key, cached.map { incoming[it.id] ?: it } + rows.filter { it.id !in known })
+        }
     }
 
     fun hasRowsInMemory(key: String): Boolean = synchronized(rowsByKey) { rowsByKey.containsKey(key) }
@@ -956,8 +981,7 @@ class OrbCore private constructor(context: Context) {
         _connectionIssue.value = null
     }
 
-    /** [fresh] = rows just fetched from Core: they replace whatever a project screen cached,
-     * otherwise a week-old disk cache kept showing finished missions as "Working". */
+    /** Fresh rows update known missions without removing older rows absent from the global page. */
     private fun seedMissionAndProjectCaches(missionsList: List<OrbRow>, fresh: Boolean = false) {
         val byProject = mutableMapOf<String, MutableList<OrbRow>>()
         for (m in missionsList) {
@@ -974,9 +998,7 @@ class OrbCore private constructor(context: Context) {
             }
         }
         for ((proj, rows) in byProject) {
-            if (fresh || !OrbReadCache.hasRowsInMemory("project_missions_$proj")) {
-                OrbReadCache.saveRowsMemoryOnly("project_missions_$proj", rows)
-            }
+            OrbReadCache.seedProjectRows(proj, rows, fresh)
         }
     }
 
@@ -1345,4 +1367,85 @@ class OrbCore private constructor(context: Context) {
 
     fun encodeComponent(value: String): String =
         URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+}
+
+/** Compact snapshots never own the full transcript or its pagination cursor. */
+object OrbPresentation {
+    private val recent = LinkedHashSet<String>()
+    private val pending = LinkedHashSet<String>()
+    @Volatile private var listChanged = false
+    private val revisions = LinkedHashMap<String, Long>()
+    private val labels = LinkedHashMap<String, String>()
+    @Synchronized fun activity(id: String): String? = labels["${OrbDisk.currentScope()}|$id"]
+    private var rememberedScope = ""
+    @Synchronized private fun ensureScope() {
+        val current = OrbDisk.currentScope()
+        if (current == rememberedScope) return
+        rememberedScope = current
+        recent.clear(); pending.clear(); labels.clear(); revisions.clear(); listChanged = false
+    }
+    @Synchronized fun remember(id: String) {
+        ensureScope()
+        recent.remove(id); recent.add(id)
+        while (recent.size > 12) recent.remove(recent.first())
+    }
+    @Synchronized private fun changed(id: String?) {
+        if (id == null) pending.addAll(recent) else if (id in recent) pending.add(id)
+    }
+    @Synchronized private fun batch(): List<String> = pending.take(3).also { pending.removeAll(it.toSet()) }
+    suspend fun load(id: String, core: OrbCore): List<OrbRow> {
+        val account = OrbDisk.currentScope()
+        val snapshot = core.fetchDict("/api/control/missions/${core.encodeComponent(id)}/snapshot?profile=presentation")
+        if (account != OrbDisk.currentScope() || OrbJSON.str(snapshot, "profile") != "presentation") return emptyList()
+        val rows = OrbJSON.dictList(snapshot["events"]).mapNotNull { event ->
+            val type = OrbJSON.str(event, "event_type")
+            if ((OrbJSON.dict(event["metadata"])?.get("queued") as? Boolean) == true || (type != "assistant_message" && type != "user_message")) null
+            else OrbRow("presentation:${event["sequence"] ?: event["id"]}", mapOf("role" to if (type == "user_message") "user" else "assistant", "content" to event["content"]))
+        }
+        synchronized(this) {
+            if (account != OrbDisk.currentScope()) return emptyList()
+            val key = "$account|$id"
+            val revision = (snapshot["revision"] as? Number)?.toLong() ?: 0
+            if ((revisions[key] ?: -1) >= revision) return OrbReadCache.readMemoryRows("presentation_$id")
+            if (revisions.size >= 256) { revisions.clear(); labels.clear() }
+            revisions[key] = revision
+            labels[key] = OrbJSON.str(snapshot, "activity") ?: ""
+            OrbReadCache.saveRows("presentation_$id", rows)
+        }
+        return rows
+    }
+    suspend fun monitor(core: OrbCore) {
+        while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+            ensureScope()
+            val account = OrbDisk.currentScope()
+            val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val stream = core.openSSE("/api/control/stream?profile=presentation&kinds=mission_presentation", onEvent = { type, data ->
+                if (type == "status" || type == "stream_lagged") changed(null)
+                if (type == "mission_presentation") {
+                    val hint = OrbJSON.dict(OrbJSON.parse(data))
+                    val id = OrbJSON.str(hint, "mission_id")
+                    if (OrbJSON.str(hint, "kind") == "mission_activity") {
+                        synchronized(this) {
+                            if (id in recent && account == OrbDisk.currentScope()) labels["$account|$id"] = OrbJSON.str(hint, "label")?.take(160) ?: ""
+                        }
+                    } else {
+                        synchronized(this) { labels.remove("$account|$id") }
+                        listChanged = true
+                        changed(id)
+                    }
+                }
+            }, onClosed = { closed.set(true) })
+            changed(null)
+            try {
+                while (kotlinx.coroutines.currentCoroutineContext().isActive && account == OrbDisk.currentScope() && !closed.get()) {
+                    if (listChanged) { listChanged = false; core.refreshMissionsQuietly() }
+                    for (id in batch()) {
+                        try { load(id, core) } catch (e: Exception) { if (e is CancellationException) throw e }
+                    }
+                    delay(1000)
+                }
+            } finally { stream.cancel() }
+            delay(2000)
+        }
+    }
 }

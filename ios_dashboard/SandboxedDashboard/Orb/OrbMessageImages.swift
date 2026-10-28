@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 
 /// Mirrors the desktop `messageImages`: `[Image #n] [Uploaded: /path.png]` transport
 /// lines become thumbnails; the visible text keeps only the `[Image #n]` reference.
@@ -42,12 +43,27 @@ struct OrbMessageImages: Equatable {
     private static var cache: [String: UIImage] = [:]
     /// Decoded images are large; keep the most recent ones only.
     private static var order: [String] = []
+    private static var dates: [String: Date] = [:]
+    private static var pending: [String: Task<UIImage?, Never>] = [:]
+    private static func cost(_ image: UIImage) -> Int { (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0) }
+    private static func decode(_ data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 2048,
+                kCGImageSourceCreateThumbnailWithTransform: true
+              ] as CFDictionary) else { return nil }
+        return UIImage(cgImage: image)
+    }
     private static func remember(_ key: String, _ image: UIImage) {
         cache[key] = image
-        order.append(key)
-        while order.count > 24 { cache[order.removeFirst()] = nil }
+        dates[key] = Date()
+        order.removeAll { $0 == key }; order.append(key)
+        while order.count > 24 || cache.values.reduce(0, { $0 + cost($1) }) > 32 * 1024 * 1024 {
+            let oldest = order.removeFirst(); cache[oldest] = nil; dates[oldest] = nil
+        }
     }
-    static func trimCache() { cache.removeAll(); order.removeAll() }
+    static func trimCache() { cache.removeAll(); order.removeAll(); dates.removeAll() }
     static let limit = 20 * 1024 * 1024
     static func load(_ path: String, missionID: String?) async -> UIImage? {
         // Legacy desktop messages carry the image inline; never send it to a server.
@@ -58,19 +74,31 @@ struct OrbMessageImages: Equatable {
                   path.utf8.count - path[..<comma].utf8.count <= limit / 3 * 4 + 4,
                   let data = Data(base64Encoded: String(path[path.index(after: comma)...])),
                   data.count <= limit else { return nil }
-            return UIImage(data: data)
+            return decode(data)
         }
         // Scoped to server, account and mission: the same path elsewhere is another file.
         let token = OrbCore.shared.authToken ?? ""
         var hash: UInt64 = 14695981039346656037
         for byte in token.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
         let key = "\(OrbCore.shared.endpoint)|\(String(hash, radix: 36))|\(missionID ?? "")|\(path)"
-        if let hit = cache[key] { return hit }
+        if let hit = cache[key], Date().timeIntervalSince(dates[key] ?? .distantPast) < 300 {
+            order.removeAll { $0 == key }; order.append(key)
+            return hit
+        }
+        if let task = pending[key] { return await task.value }
+        let endpoint = OrbCore.shared.endpoint
+        let task = Task { await fetch(path, missionID: missionID, key: key, token: token, endpoint: endpoint) }
+        pending[key] = task
+        let result = await task.value
+        pending[key] = nil
+        return result
+    }
+    private static func fetch(_ path: String, missionID: String?, key: String, token: String, endpoint: String) async -> UIImage? {
         var candidates: [[URLQueryItem]] = []
         if let missionID { candidates.append([.init(name: "path", value: path), .init(name: "mission_id", value: missionID)]) }
         candidates.append([.init(name: "path", value: path)])
         for query in candidates {
-            var components = URLComponents(string: OrbCore.shared.endpoint + "/api/fs/download")
+            var components = URLComponents(string: endpoint + "/api/fs/download")
             components?.queryItems = query
             guard let url = components?.url else { continue }
             var request = URLRequest(url: url)
@@ -81,7 +109,8 @@ struct OrbMessageImages: Equatable {
             defer { try? FileManager.default.removeItem(at: file) }
             guard (response as? HTTPURLResponse)?.statusCode == 200,
                   let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0, size <= limit,
-                  let data = try? Data(contentsOf: file), let image = UIImage(data: data) else { continue }
+                  let data = try? Data(contentsOf: file), let image = decode(data) else { continue }
+            guard endpoint == OrbCore.shared.endpoint, token == (OrbCore.shared.authToken ?? "") else { return nil }
             remember(key, image)
             return image
         }
