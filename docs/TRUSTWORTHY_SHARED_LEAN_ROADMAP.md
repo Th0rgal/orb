@@ -6,8 +6,9 @@
 not receipts that they have executed. P0 is in progress; P1 has a compiler-side
 harness PR but full Orb/LeanSys conformance remains open; P2–P7 remain open.
 Compiler and Orb repairs are tracked in draft PRs turbo-lean #264 and Orb #1396.
-The checkpoint reviews of turbo `5869bd9` and Orb `0a1fa069` were blocked;
-follow-up fixes and fresh exact-head review remain required. Turbo has no GitHub
+Bounded source-and-receipt reviews of turbo `8108785` and Orb `5d961353`
+found no new confirmed repair regression; both remained overall BLOCKED.
+Fresh exact-head reviews are required for subsequent changes. Turbo has no GitHub
 check rollup; Orb kernel-abi passed, while draft Rust jobs were skipped.
 No phase acceptance, merge or production deployment follows from those checks.
 
@@ -24,10 +25,24 @@ never as ExactMatch; remote execution observation remains open. The stale-snapsh
 admission predicate; it does not close the observation-to-execution race.
 Independent exact-head reviews remain required.
 
+The native builder now derives its entire symbol inventory from the ABI
+manifest and checks both the object and archive, requiring exactly one strong
+text definition per entry and no extra globals or unresolved imports. Tool
+failure rejects the artifact. This establishes a symbol-table constraint, not
+C signature correctness, target qualification or compiler correctness. Apple
+underscore normalization is parser-tested; physical/native Apple execution is
+not established by that test.
+
 Local recovery checks: all 14 fork/control tests pass, including independently
 injected archive-state, dispatch-effect and HOME-state divergences, plus stale caller snapshots with either stored
 supersession tag form. The registry
 has six adversarial tests and the ABI manifest suite has 17 passing tests.
+The direct submission-producer regression replays stored archive and both
+stored supersession-tag forms, checking rejection before node contact and job
+publication. It also preserves a visible divergence for an archived caller
+paired with a live store: the scalar monotone-archive model does not refine
+that reverse snapshot. The SQLite fixture preserves the store's prohibition
+on acknowledging a nonterminal run; this is not an atomic execution fence.
 These receipts establish local execution only. Mission-control shadow effects
 currently compare dispatch admission, not exact action identity or actual dispatch;
 HOME preflights lack remote poststate receipts. Neither is an end-to-end proof.

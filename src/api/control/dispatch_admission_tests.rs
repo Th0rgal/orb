@@ -6,6 +6,129 @@ use crate::api::{
 use serde_json::{json, Value};
 
 type AdmissionHooks = std::sync::Mutex<HashMap<(Uuid, &'static str), oneshot::Sender<()>>>;
+
+#[tokio::test]
+async fn remote_submission_rejects_closed_snapshots_and_records_host_observations() {
+    // The shadow ring is global; isolate its deltas from parallel test activity.
+    const CHILD: &str = "ORB_SUBMISSION_SHADOW_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let h = Harness::new().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node = crate::remote_node::RemoteNodeConfig {
+        id: "must-not-submit".into(),
+        base_url: format!("http://{}", listener.local_addr().unwrap()),
+        token_env: "PATH".into(),
+        labels: None,
+    };
+    for case in [
+        "caller-archived",
+        "stored-archived",
+        "superseded",
+        "superseded_by",
+    ] {
+        let mut caller = h
+            .control
+            .mission_store
+            .create_mission(None, None, None, None, None, Some("raw"), None)
+            .await
+            .unwrap();
+        let job_id = Uuid::new_v4();
+        // Replay a caller snapshot captured before the store closes the mission.
+        match case {
+            "caller-archived" => caller.status = MissionStatus::Acknowledged,
+            "stored-archived" => {
+                h.control
+                    .mission_store
+                    .update_mission_status(caller.id, MissionStatus::Acknowledged)
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                let tag = if case == "superseded" {
+                    crate::api::mission_store::SUPERSEDED_TAG.to_string()
+                } else {
+                    format!("superseded_by:{}", Uuid::new_v4())
+                };
+                h.control
+                    .mission_store
+                    .update_mission_project(
+                        caller.id,
+                        MissionProjectPatch {
+                            tags: Some(vec![tag]),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        // The persistent store forbids acknowledging an active run. Keep that
+        // invariant: only supersession cases retain an otherwise valid lease.
+        if case != "stored-archived" {
+            h.control
+                .mission_store
+                .begin_mission_run(caller.id, &remote_job_lease_owner(job_id), None)
+                .await
+                .unwrap();
+        }
+        let before = fork::control_shadow_snapshot();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            remote_jobs::submit_leased_remote_job(
+                &h.state,
+                &h.control,
+                &caller,
+                node.clone(),
+                job_id,
+                &RemoteHarnessPlan::Raw {
+                    command: "exit 0".into(),
+                },
+            ),
+        )
+        .await
+        .expect("closed mission must reject before remote I/O");
+        assert_eq!(
+            result.unwrap_err(),
+            "Remote job submission rejected by mission control kernel gate (RejectArchived)",
+            "{case}"
+        );
+        let after = fork::control_shadow_snapshot();
+        assert_eq!(after.total_steps, before.total_steps + 1, "{case}");
+        // An archived caller paired with a live store is an actual mismatch of
+        // this scalar monotone model and the observed host state. Keep it visible.
+        assert_eq!(
+            after.total_divergences,
+            before.total_divergences + u64::from(case == "caller-archived"),
+            "{case}"
+        );
+        assert!(
+            crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+                .await
+                .unwrap()
+                .iter()
+                .all(|job| job.mission_id != caller.id),
+            "{case}: rejected submission must not publish a job"
+        );
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept())
+            .await
+            .is_err(),
+        "rejected submissions must not contact the node"
+    );
+}
+
 static HOOKS: std::sync::LazyLock<AdmissionHooks> = std::sync::LazyLock::new(Default::default);
 pub(crate) fn notify_wait(id: Uuid, kind: &'static str) {
     if let Some(tx) = HOOKS.lock().unwrap().remove(&(id, kind)) {

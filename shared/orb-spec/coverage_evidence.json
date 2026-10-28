@@ -3,7 +3,7 @@
   "entries": {
     "orb_mission_control_step": {
       "status": "partial",
-      "claim": "Local tests compare archive state from the store and a caller-supplied dispatch-admission bit, reject newly stored supersession with a stale caller snapshot, and detect injected poststate/effect mismatches.",
+      "claim": "Local tests compare store archive state and dispatch admission, reject stored closure through the actual submission producer before node contact or job publication, and preserve divergence when an archived caller contradicts a live store.",
       "links": [
         {
           "kind": "theorem",
@@ -29,6 +29,11 @@
           "kind": "host_test",
           "path": "src/api/control/fork.rs",
           "symbol": "mission_control_rejects_store_supersession_with_stale_caller_snapshot"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/dispatch_admission_tests.rs",
+          "symbol": "remote_submission_rejects_closed_snapshots_and_records_host_observations"
         }
       ],
       "sources": [
@@ -41,21 +46,25 @@
           "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-          "sha256": "27694360938e2d3359ed6278b42090d949100f3d85e1f81da35c922dc4eda1e4"
-        },
-        {
           "path": "src/api/control/fork.rs",
           "sha256": "73fdee77cf29e866d8b84d8eed012d59b04ad3cc5a9865eadd15dcd277039adc"
         },
         {
           "path": "src/api/control/remote_jobs.rs",
           "sha256": "2b3a20d6f733d39fb5684facb18a4c28022d3127b2269b4fc5e4dfdbb753b89f"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
+          "sha256": "919459a73c11c7a13c069a82acbd2e1d7283ec5b8a7dd5379631318e1ed98614"
+        },
+        {
+          "path": "src/api/control/dispatch_admission_tests.rs",
+          "sha256": "386c5a6fcc3b3e50fb6a9d148a45f71a2e8ab1840eb521c858eabff46c64cb75"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::fork::tests:: -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
+        "command": "cargo test --locked -j 1 --lib remote_submission_rejects_closed_snapshots_and_records_host_observations -- --test-threads=1 && cargo test --locked -j 1 --lib api::control::fork::tests:: -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -67,7 +76,8 @@
       "blockers": [
         "Host effects cover dispatch admission only, not action identity or actual process execution.",
         "Snapshot-to-store races and caller evidence freshness are not proved.",
-        "The linked theorem proves a scalar archived-input property; no end-to-end refinement certificate exists."
+        "The linked theorem proves a scalar archived-input property; no end-to-end refinement certificate exists.",
+        "An archived caller with a live stored snapshot produces a recorded divergence; the monotone scalar archive model does not refine reverse snapshots."
       ]
     },
     "orb_fork_home_step": {
