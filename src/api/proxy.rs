@@ -1608,10 +1608,46 @@ impl ProxyTokens {
     }
 }
 
+/// A clean socket EOF is not evidence of native protocol completion.
+#[derive(Debug, Clone, Copy)]
+struct NativeStreamState {
+    protocol: NativeProtocol,
+    completed: bool,
+    errored: bool,
+}
+
+impl NativeStreamState {
+    fn observe(&mut self, kind: &str, value: Option<&serde_json::Value>) {
+        if kind == "error" || value.is_some_and(|v| v.get("error").is_some_and(|e| !e.is_null())) {
+            self.errored = true;
+        }
+        match (self.protocol, kind) {
+            (NativeProtocol::Responses, "response.failed" | "response.incomplete") => {
+                self.errored = true
+            }
+            (NativeProtocol::Responses, "response.completed") if value.is_some() => {
+                self.completed = true;
+                if value
+                    .and_then(|v| v.pointer("/response/status"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|status| status != "completed")
+                {
+                    self.errored = true;
+                }
+            }
+            (NativeProtocol::AnthropicMessages, "message_stop") if value.is_some() => {
+                self.completed = true
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Accumulates usage across SSE events or one JSON body. Values are maxed,
 /// not summed: providers repeat cumulative counts across events.
 #[derive(Debug, Clone, Copy, Default)]
 struct UsageAccumulator {
+    native: Option<NativeStreamState>,
     input: u64,
     output: u64,
     cache_creation: u64,
@@ -2559,6 +2595,7 @@ async fn native_protocol_proxy(
                     ),
                     outcome.started,
                 )),
+                Some(protocol),
             );
             let mut response = (status, Body::from_stream(tracked_stream)).into_response();
             for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
@@ -4088,6 +4125,7 @@ async fn chat_completions_routed(
                     )),
                     liveness_mission_id,
                     outcome_sink,
+                    None,
                 );
 
                 let success_provider = entry.provider_id.clone();
@@ -4445,6 +4483,7 @@ async fn chat_completions_routed(
                             )),
                             liveness_mission_id,
                             outcome_sink,
+                            None,
                         );
 
                         let success_provider = entry.provider_id.clone();
@@ -5161,6 +5200,7 @@ async fn chat_completions_routed(
                         )),
                         liveness_mission_id,
                         outcome_sink,
+                        None,
                     );
 
                     return (
@@ -6924,25 +6964,39 @@ fn observe_sse_event(event: &[u8], acc: &mut UsageAccumulator) {
     let Ok(text) = std::str::from_utf8(event) else {
         return;
     };
-    for line in text.lines() {
-        let Some(data) = line.trim_end_matches('\r').strip_prefix("data: ") else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-            continue;
-        };
-        for usage in [
-            value.get("usage"),
-            value.pointer("/response/usage"),
-            value.pointer("/message/usage"),
-            value.pointer("/delta/usage"),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if acc.observe(usage) {
-                return;
-            }
+    let kind = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("event:").map(str::trim))
+        .next_back()
+        .unwrap_or("");
+    if let Some(native) = acc.native.as_mut() {
+        native.observe(kind, None);
+    }
+    let data = text
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("data:")
+                .map(|data| data.strip_prefix(' ').unwrap_or(data))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return;
+    };
+    if let Some(native) = acc.native.as_mut() {
+        native.observe(value["type"].as_str().unwrap_or(kind), Some(&value));
+    }
+    for usage in [
+        value.get("usage"),
+        value.pointer("/response/usage"),
+        value.pointer("/message/usage"),
+        value.pointer("/delta/usage"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if acc.observe(usage) {
+            break;
         }
     }
 }
@@ -6992,6 +7046,7 @@ fn track_stream_health(
     usage_sink: Option<Box<dyn FnOnce(ProxyTokens) + Send>>,
     liveness_mission_id: Option<uuid::Uuid>,
     outcome_sink: Option<StreamEndSink>,
+    native_protocol: Option<NativeProtocol>,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     // Built once the first content chunk was peeked: that is this attempt's
     // time to first content. The cell rides along until the stream ends.
@@ -7016,7 +7071,10 @@ fn track_stream_health(
         let mut errored = false;
         let mut received_any = false;
         let mut idle_timeout = false;
-        let mut usage = UsageAccumulator::default();
+        let mut usage = UsageAccumulator {
+            native: native_protocol.map(|protocol| NativeStreamState { protocol, completed: false, errored: false }),
+            ..Default::default()
+        };
         let mut sse_buffer = Vec::new();
         // Wait budget for the next translated item; raw upstream bytes that
         // the translator swallowed (keepalives, thought-only chunks) extend it.
@@ -7069,9 +7127,10 @@ fn track_stream_health(
                 }
             }
         }
-        if !sse_buffer.is_empty() {
+        if !sse_buffer.is_empty() && native_protocol.is_none() {
             observe_sse_event(&sse_buffer, &mut usage);
         }
+        errored |= usage.native.is_some_and(|native| native.errored || !native.completed);
         let tokens = usage.tokens();
         if let Some(cell) = &timing {
             cell.set_tokens(usage.input, tokens.output, tokens.cache_read, usage.reasoning);
@@ -12290,6 +12349,7 @@ mod tests {
             None,
             None,
             sink(seen.clone()),
+            None,
         );
         let _: Vec<_> = tracked.collect().await;
         let failing = futures::stream::iter(vec![
@@ -12305,12 +12365,44 @@ mod tests {
             None,
             None,
             sink(seen.clone()),
+            None,
         );
         let _: Vec<_> = tracked.collect().await;
         assert_eq!(
             *seen.lock().unwrap(),
             vec![StreamEnd::Completed, StreamEnd::Errored]
         );
+    }
+
+    #[tokio::test]
+    async fn native_stream_outcomes_require_successful_terminal_events() {
+        use NativeProtocol::{AnthropicMessages, Responses};
+        for (protocol, wire, success) in [
+            (Responses, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n", true),
+            (Responses, "event: response.completed\r\ndata:{\r\ndata: \"response\":{\"status\":\"completed\"}}\r\n\r\n", true),
+            (Responses, "data: {\"type\":\"response.failed\"}\n\n", false),
+            (Responses, "data: {\"type\":\"response.incomplete\"}\n\n", false),
+            (Responses, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n", false),
+            (Responses, ": keepalive\n\n", false),
+            (Responses, "data: {\"type\":\"response.completed\"}", false),
+            (Responses, "event: response.completed\ndata: {\n\n", false),
+            (Responses, "data: {\"type\":\"message_stop\"}\n\n", false),
+            (AnthropicMessages, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", true),
+            (AnthropicMessages, "event: error\ndata: {\"error\":{\"type\":\"overloaded_error\"}}\n\n", false),
+            (AnthropicMessages, "data: {\"type\":\"content_block_delta\"}\n\n", false),
+            (AnthropicMessages, "data: {\"type\":\"message_stop\"}\n\nevent: error\ndata: {}\n\n", false),
+        ] {
+            let tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
+            let account = uuid::Uuid::new_v4();
+            let observed = Arc::new(std::sync::Mutex::new(None));
+            let captured = observed.clone();
+            let chunks = wire.as_bytes().chunks(2).map(bytes::Bytes::copy_from_slice).map(Ok::<_,std::io::Error>).collect::<Vec<_>>();
+            let tracked = track_stream_health(futures::stream::iter(chunks), tracker.clone(), account, None, None, None, None, Some(Box::new(move |end| *captured.lock().unwrap() = Some(end))), Some(protocol));
+            let output = tracked.collect::<Vec<_>>().await.into_iter().flat_map(|chunk| chunk.unwrap().to_vec()).collect::<Vec<_>>();
+            assert_eq!(output, wire.as_bytes(), "native bytes must remain unchanged");
+            assert_eq!(*observed.lock().unwrap(), Some(if success { StreamEnd::Completed } else { StreamEnd::Errored }), "{protocol:?}: {wire}");
+            assert_eq!(tracker.get_health(account).await.last_failure_reason.is_none(), success);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -12332,6 +12424,7 @@ mod tests {
             inner,
             tracker.clone(),
             account_id,
+            None,
             None,
             None,
             None,
@@ -12384,6 +12477,7 @@ mod tests {
             inner,
             tracker.clone(),
             account_id,
+            None,
             None,
             None,
             None,
@@ -13189,7 +13283,7 @@ mod latency_tests {
                 Err(std::io::Error::other("upstream reset")),
             ]);
             let tracked =
-                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None);
+                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None, None);
             let _ = tracked.collect::<Vec<_>>().await;
         })
         .await;
@@ -13335,6 +13429,7 @@ mod latency_tests {
                 None,
                 None,
                 None,
+                None,
             );
             tracked.collect::<Vec<_>>().await
         })
@@ -13362,7 +13457,7 @@ mod latency_tests {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             };
             let tracked =
-                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None);
+                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None, None);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/event-stream")
@@ -13420,6 +13515,7 @@ mod latency_tests {
                 inner,
                 tracker.clone(),
                 account,
+                None,
                 None,
                 None,
                 None,

@@ -130,3 +130,10 @@ the later harness completion is then suppressed without erasing pre-transition
 history. Legacy unbound missions retain their existing aggregation. A subsequent
 switch back to direct inference still needs per-turn provenance to distinguish
 mixed routes; this change does not infer that missing history.
+
+Native SSE success requires a complete framed protocol terminal event
+(`response.completed` or `message_stop`) and no error event. HTTP 200, bytes,
+keepalives and clean EOF alone cannot establish success. Failure is sticky even
+if a completion marker is also received; the relay never rewrites these bytes.
+A missing `PORT` uses Core's configured default (3000), including the local
+Codex capability route.

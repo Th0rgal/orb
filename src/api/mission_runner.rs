@@ -667,11 +667,14 @@ pub(super) fn localhost_api_base_url_from_env() -> Option<String> {
 /// private-network containers, where the host is only reachable via the
 /// veth gateway address (see `Workspace::host_ip_from_workspace`).
 pub(crate) fn workspace_api_base_url(workspace: &Workspace) -> Option<String> {
-    let port = std::env::var("PORT").ok()?;
-    let port = port.trim();
-    if port.is_empty() {
-        return None;
-    }
+    workspace_api_base_url_with_port(workspace, std::env::var("PORT").ok().as_deref())
+}
+
+fn workspace_api_base_url_with_port(workspace: &Workspace, port: Option<&str>) -> Option<String> {
+    let port = match port {
+        None => crate::config::DEFAULT_PORT,
+        Some(port) => port.trim().parse::<u16>().ok()?,
+    };
     Some(format!(
         "http://{}:{}",
         workspace.host_ip_from_workspace(),
@@ -14718,6 +14721,30 @@ mod tests {
         assert_eq!(
             public_api_base_url(Some(" https://example.com ")).as_deref(),
             Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn workspace_api_base_url_uses_the_configured_default_port() {
+        let workspace = crate::workspace::Workspace::default_host("/tmp/fixture".into());
+        assert_eq!(
+            super::workspace_api_base_url_with_port(&workspace, None),
+            Some(format!(
+                "http://127.0.0.1:{}",
+                crate::config::Config::new("/tmp/fixture".into()).port
+            ))
+        );
+        assert_eq!(
+            super::workspace_api_base_url_with_port(&workspace, Some("3002")).as_deref(),
+            Some("http://127.0.0.1:3002")
+        );
+        assert_eq!(
+            super::workspace_api_base_url_with_port(&workspace, Some("")),
+            None
+        );
+        assert_eq!(
+            super::workspace_api_base_url_with_port(&workspace, Some("invalid")),
+            None
         );
     }
 
