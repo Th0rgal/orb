@@ -57,6 +57,8 @@ object OrbActivityCompaction {
             val exitCode = (entry["exit_code"] as? Number)?.toInt()
             val id = str(entry["id"]).ifBlank { "cmd-$idx" }
             val missionId = str(entry["mission_id"])
+            val grantId = str(entry["grant_id"])
+            val cwd = str(entry["cwd"])
             val ts = str(entry["at"])
                 .ifBlank { str(entry["recorded_at"]) }
                 .ifBlank { str(entry["created_at"]) }
@@ -73,6 +75,9 @@ object OrbActivityCompaction {
                     val olderHost = str(older["target_host"]).ifBlank { str(older["host"]) }
                     if ((older["exit_code"] as? Number) == null &&
                         olderHost == host &&
+                        str(older["mission_id"]) == missionId &&
+                        str(older["grant_id"]) == grantId &&
+                        str(older["cwd"]) == cwd &&
                         str(older["command"]).trim() == expectedPre
                     ) {
                         consumed.add(olderIdx)

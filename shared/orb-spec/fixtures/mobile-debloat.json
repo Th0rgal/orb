@@ -15,6 +15,18 @@
         { "id": "c3", "status": "EXIT 0", "host": "dgx-spark", "command": "docker ps --filter name=hindsight" },
         { "id": "c1", "status": "EXIT 1", "host": "dgx-spark", "command": "psql -c SELECT 1" }
       ]
+    },
+    {
+      "name": "concurrent_missions_do_not_cross_coalesce",
+      "input": [
+        { "id": "a_exit", "mission_id": "m-a", "grant_id": "g-a", "cwd": "/srv/a", "target_host": "dgx-spark", "command": "systemctl status open-agent", "exit_code": 0, "at": "2026-10-29T12:05:02Z" },
+        { "id": "b_pre", "mission_id": "m-b", "grant_id": "g-b", "cwd": "/srv/b", "target_host": "dgx-spark", "command": "[pre-exec] systemctl status open-agent", "exit_code": null, "at": "2026-10-29T12:05:01Z" },
+        { "id": "a_pre", "mission_id": "m-a", "grant_id": "g-a", "cwd": "/srv/a", "target_host": "dgx-spark", "command": "[pre-exec] systemctl status open-agent", "exit_code": null, "at": "2026-10-29T12:05:00Z" }
+      ],
+      "expected": [
+        { "id": "a_exit", "status": "EXIT 0", "host": "dgx-spark", "command": "systemctl status open-agent" },
+        { "id": "b_pre", "status": "RUN", "host": "dgx-spark", "command": "systemctl status open-agent" }
+      ]
     }
   ],
   "error_coalescing": [

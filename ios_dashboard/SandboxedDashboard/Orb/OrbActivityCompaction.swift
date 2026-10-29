@@ -46,6 +46,8 @@ enum OrbActivityCompaction {
             let exitVal = entry["exit_code"].doubleValue.map { Int($0) }
             let id = entry["id"].text.isEmpty ? "cmd-\(idx)" : entry["id"].text
             let missionId = entry["mission_id"].text
+            let grantId = entry["grant_id"].text
+            let cwd = entry["cwd"].text
             let ts = !entry["at"].text.isEmpty ? entry["at"].text : (!entry["recorded_at"].text.isEmpty ? entry["recorded_at"].text : (!entry["created_at"].text.isEmpty ? entry["created_at"].text : entry["timestamp"].text))
             let stderr = entry["stderr"].text
             let stdout = entry["stdout"].text
@@ -59,6 +61,9 @@ enum OrbActivityCompaction {
                         let olderHost = !older["target_host"].text.isEmpty ? older["target_host"].text : older["host"].text
                         if older["exit_code"].doubleValue == nil,
                            olderHost == host,
+                           older["mission_id"].text == missionId,
+                           older["grant_id"].text == grantId,
+                           older["cwd"].text == cwd,
                            older["command"].text.trimmingCharacters(in: .whitespacesAndNewlines) == expectedPre {
                             consumed.insert(olderIdx)
                             break
