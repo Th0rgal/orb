@@ -77,6 +77,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -330,10 +331,14 @@ fun OrbProvidersSettingsPage(
         )
     }
 
-    suspend fun loadProvidersAndUsage() {
+    var usageRefreshJob by remember { mutableStateOf<Job?>(null) }
+
+    suspend fun loadProvidersAndUsage(forceUsage: Boolean = false) {
+        var loadedProviders = providers
         try {
             val loaded = core.fetchRows("/api/ai/providers", "providers")
             providers = loaded
+            loadedProviders = loaded
             errorBanner = null
         } catch (e: Throwable) {
             errorBanner = e.message
@@ -347,20 +352,45 @@ fun OrbProvidersSettingsPage(
             }
             // Publish bulk usage immediately so quota colors/labels render without waiting on per-account probes.
             usageEntries = mutableEntries.toMap()
-            val missingTargets = providers.filter { p ->
+            val refreshTargets = loadedProviders.filter { p ->
                 val pType = p.str("provider_type") ?: ""
-                p.id !in mutableEntries && (pType in setOf("kimi", "minimax", "zai") || p.bool("uses_oauth") == true)
+                val tracked = pType in setOf("kimi", "minimax", "zai", "muse-code", "mistral") || p.bool("uses_oauth") == true
+                val cached = mutableEntries[p.id]
+                tracked && (forceUsage || cached == null || OrbJSON.bool(cached, "stale") == true)
             }
-            if (missingTargets.isNotEmpty()) {
-                scope.launch {
-                    for (target in missingTargets) {
-                        val id = target.id
-                        val detail = orbTry(OrbLog.Category.Network, "/api/ai/providers") {
-                            core.fetchDict("/api/ai/providers/${core.encodeComponent(id)}/usage")
-                        }.getOrNull()
-                        if (detail != null && detail.isNotEmpty()) {
-                            usageEntries = usageEntries + (id to detail)
+            val needsFollowupSnapshot = !forceUsage && mutableEntries.isNotEmpty()
+            usageRefreshJob?.cancel()
+            if (refreshTargets.isNotEmpty() || needsFollowupSnapshot) {
+                usageRefreshJob = scope.launch {
+                    val refreshedIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+                    val jobs = refreshTargets.map { target ->
+                        launch {
+                            val id = target.id
+                            val query = if (forceUsage) "?force=true" else ""
+                            val detail = orbTry(OrbLog.Category.Network, "/api/ai/providers") {
+                                core.fetchDict("/api/ai/providers/${core.encodeComponent(id)}/usage$query")
+                            }.getOrNull()
+                            if (detail != null && detail.isNotEmpty()) {
+                                refreshedIds.add(id)
+                                usageEntries = usageEntries + (id to detail)
+                            }
                         }
+                    }
+                    jobs.forEach { it.join() }
+                    if (needsFollowupSnapshot) {
+                        // Pick up background refreshes kicked off by list_all_provider_usage for entries > REFRESH_AFTER.
+                        delay(2500)
+                        val followup = orbTry(OrbLog.Category.Network, "/api/ai/providers/usage") {
+                            core.fetchDict("/api/ai/providers/usage")
+                        }.getOrNull()
+                        val followupEntries = OrbJSON.dict(followup?.get("entries")) ?: emptyMap()
+                        val merged = usageEntries.toMutableMap()
+                        for ((k, v) in followupEntries) {
+                            if (k !in refreshedIds) {
+                                OrbJSON.dict(v)?.let { merged[k] = it }
+                            }
+                        }
+                        usageEntries = merged.toMap()
                     }
                 }
             }
@@ -533,6 +563,10 @@ fun OrbProvidersSettingsPage(
         } finally {
             isRefreshing = false
         }
+        while (isActive) {
+            delay(30_000)
+            loadProvidersAndUsage()
+        }
     }
 
     fun toggleProvider(provider: OrbRow) {
@@ -634,7 +668,7 @@ fun OrbProvidersSettingsPage(
                         scope.launch {
                             isRefreshing = true
                             try {
-                                loadProvidersAndUsage()
+                                loadProvidersAndUsage(forceUsage = true)
                                 core.refreshAll()
                             } finally {
                                 isRefreshing = false
@@ -658,7 +692,7 @@ fun OrbProvidersSettingsPage(
                 scope.launch {
                     isRefreshing = true
                     try {
-                        loadProvidersAndUsage()
+                        loadProvidersAndUsage(forceUsage = true)
                         core.refreshAll()
                     } finally {
                         isRefreshing = false
