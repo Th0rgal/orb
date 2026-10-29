@@ -17,7 +17,12 @@ async function setup(page:Page, opts:{failMove?:string; deleteRunning?:boolean; 
     if(req.method()==='POST' && path.endsWith('/project')) {
       writes.push(id); await gate;
       if(id===opts.failMove) return route.fulfill({status:409,body:'Mission is locked'});
-      const body=req.postDataJSON();missions=missions.map(m=>m.id===id?{...m,project:body.project,tags:body.tags}:m);
+      const body=req.postDataJSON();
+      missions=missions.map(m=>{
+        if(m.id===id) return {...m,project:body.project,tags:body.tags};
+        if(body.include_descendants && m.parent_mission_id===id) return {...m,project:body.project,tags:m.tags.filter((t:string)=>!t.startsWith('orb-folder:'))};
+        return m;
+      });
       return route.fulfill({json:{ok:true}});
     }
     if(req.method()==='POST' && path.endsWith('/cancel')) { cancels.push(id); missions=missions.map(m=>m.id===id?{...m,status:'interrupted'}:m); return route.fulfill({json:{ok:true}}); }
@@ -128,11 +133,12 @@ test('Cmd+X/Cmd+V moves the open mission once across projects despite stale deta
   await expect(tree.locator('.mission-cut')).toHaveCount(1);
   const destination=tree.getByRole('button',{name:'Other',exact:true});
   await destination.click();await destination.focus();await page.keyboard.press('Meta+v');
-  await expect.poll(()=>writes.length).toBe(2); // parent plus launched child
+  await expect.poll(()=>writes).toEqual([P]); // single atomic root subtree write (no standalone child write)
   await expect(row).toHaveCount(1);
   await expect(tree.locator('.row.project.contains-current')).toHaveAttribute('data-drop-project','other');
   release();
   await expect.poll(()=>missions().find(m=>m.id===P)?.project).toBe('other');
+  await expect.poll(()=>missions().find(m=>m.id===C)?.project).toBe('other');
   await expect(tree.locator('.mission-cut')).toHaveCount(0);
   await page.clock.fastForward(31_000);
   await expect(row).toHaveCount(1);

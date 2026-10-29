@@ -66,23 +66,45 @@ it('lists every session a delete takes with it, flagging running ones',()=>{
  expect(descendantsSentence([])).toBe('');
  expect(descendantsSentence(Array.from({length:8},(_,i)=>({id:`${i}`,title:`S${i}`,running:false})),3)).toBe('This also deletes 8 sessions: S0, S1, S2, and 5 more.');
 });
-it('sets includeDescendants on cross-project and split-subtree root moves and forwards include_descendants to Core',async()=>{
- const crossPlan=planMissionMoves([P],'other','Audits',known);
- expect(crossPlan[0]).toEqual({id:P,from:'verity',folder:'Audits',includeDescendants:true});
+it('sets includeDescendants on cross-project and split-subtree root moves and executes a single atomic root write per subtree',async()=>{
+ resetMoves();
+ const CB='55555555-5555-5555-5555-555555555555';
+ const crossKnown=[...known,{id:CB,project:'verity',callback_parent_mission_id:P}];
+ const crossPlan=planMissionMoves([P],'other','Audits',crossKnown);
+ expect(crossPlan[0]).toEqual({id:P,from:'verity',folder:'Audits',includeDescendants:true,descendantIds:[CB]});
+ expect(crossPlan.slice(1).every(s=>s.viaRootId===P)).toBe(true);
  const splitKnown=[{id:P,project:'other'},{id:C,project:'verity',parent_mission_id:P}];
  const healPlan=planMissionMoves([P],'other','',splitKnown);
  expect(healPlan).toEqual([
   {id:P,from:'other',folder:'',includeDescendants:true},
-  {id:C,from:'verity',folder:''},
+  {id:C,from:'verity',folder:'',viaRootId:P},
  ]);
  vi.mocked(getMission).mockResolvedValue({id:P,tags:[]} as any);
- vi.mocked(api).mockResolvedValue({ok:true} as any);
- await moveMissions([crossPlan[0]],'other');
+ let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+ vi.mocked(api).mockImplementation(async ()=>{ await gate; return {ok:true} as any; });
+ const done=moveMissions(crossPlan,'other');
+ await vi.waitFor(()=>expect(vi.mocked(api)).toHaveBeenCalledTimes(1));
+ // Root and every descendant are projected optimistically while only 1 server write is in flight.
+ expect([...pendingMoves().keys()].sort()).toEqual([P,C,G,CB].map(m=>`mission:${m}`).sort());
+ release();
+ expect(await done).toEqual([]);
+ expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
  expect(JSON.parse(vi.mocked(api).mock.calls[0][1]!.body as string)).toEqual({
   project:'other',
   tags:['orb-folder:Audits'],
   include_descendants:true,
+  descendant_ids:[CB],
  });
+
+ // On failure (e.g. descendant track conflict rolled back on Core), root and all child projections roll back together.
+ resetMoves();
+ vi.clearAllMocks();
+ vi.mocked(getMission).mockResolvedValue({id:P,tags:[]} as any);
+ vi.mocked(api).mockRejectedValueOnce(new Error('writer_conflict'));
+ const failed=await moveMissions(crossPlan,'other');
+ expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
+ expect(failed.map(f=>f.id)).toEqual([P,C,G,CB]);
+ expect(pendingMoves().size).toBe(0);
 });
 it('assigns distinct tree IDs to cross-project placeholder parents while resolving canonical mission IDs',()=>{
  expect(missionTreeId(P)).toBe(`m:${P}`);

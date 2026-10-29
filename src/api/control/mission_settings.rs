@@ -26,10 +26,114 @@ pub struct UpdateMissionProjectRequest {
     #[serde(default, deserialize_with = "deserialize_string_patch")]
     pub next_check_at: Option<Option<String>>,
     /// When true and `project` assigns a destination slug, also move every
-    /// `parent_mission_id` descendant not yet in that project (clearing child
+    /// launched descendant not yet in that project (clearing child
     /// `orb-folder:*` tags while preserving capability and hierarchy tags).
     #[serde(default)]
     pub include_descendants: bool,
+    /// Optional client-known callback children (`callback_parent_mission_id`)
+    /// to verify via `callback_parent::links` and include in the atomic
+    /// subtree transfer alongside `parent_mission_id` descendants.
+    #[serde(default)]
+    pub descendant_ids: Vec<Uuid>,
+}
+
+fn is_fork_of_parent(mission: &Mission, parent_id: Uuid) -> bool {
+    let expected_fork_tag = format!("fork-of:{parent_id}");
+    if mission
+        .project
+        .tags
+        .iter()
+        .any(|tag| tag == &expected_fork_tag)
+    {
+        return true;
+    }
+    mission
+        .title
+        .as_deref()
+        .is_some_and(|title| title.to_ascii_lowercase().ends_with(" · fork"))
+}
+
+async fn collect_launched_descendant_ids(
+    mission_store: &Arc<dyn MissionStore>,
+    root_id: Uuid,
+    extra_candidates: &[Uuid],
+) -> Result<Vec<Uuid>, (StatusCode, String)> {
+    let mut visited = HashSet::from([root_id]);
+    let mut stack = vec![root_id];
+    let mut out = Vec::new();
+
+    let mut candidate_missions = Vec::new();
+    for &cid in extra_candidates {
+        if cid == root_id {
+            continue;
+        }
+        if let Some(m) = mission_store
+            .get_mission(cid)
+            .await
+            .map_err(internal_error)?
+        {
+            if m.parent_mission_id
+                .is_none_or(|pid| !is_fork_of_parent(&m, pid))
+            {
+                candidate_missions.push(m);
+            }
+        }
+    }
+    let callback_links = if candidate_missions.is_empty() {
+        HashMap::new()
+    } else {
+        super::callback_parent::links(&candidate_missions, mission_store).await
+    };
+
+    loop {
+        while let Some(cur) = stack.pop() {
+            let children = mission_store
+                .get_child_missions(cur)
+                .await
+                .map_err(internal_error)?;
+            for summary in children {
+                if visited.contains(&summary.id) {
+                    continue;
+                }
+                // `SqliteMissionStore::get_child_missions` omits `project.tags`;
+                // load the full mission so `fork-of:<cur>` tags are honored.
+                let Some(child) = mission_store
+                    .get_mission(summary.id)
+                    .await
+                    .map_err(internal_error)?
+                else {
+                    continue;
+                };
+                if is_fork_of_parent(&child, cur) {
+                    continue;
+                }
+                if visited.insert(child.id) {
+                    out.push(child.id);
+                    stack.push(child.id);
+                }
+            }
+        }
+
+        let mut added_callback = false;
+        for m in &candidate_missions {
+            if visited.contains(&m.id) {
+                continue;
+            }
+            let parent = m
+                .parent_mission_id
+                .or_else(|| callback_links.get(&m.id).copied());
+            if parent.is_some_and(|p| visited.contains(&p)) && visited.insert(m.id) {
+                out.push(m.id);
+                stack.push(m.id);
+                added_callback = true;
+            }
+        }
+        if !added_callback {
+            break;
+        }
+    }
+
+    Ok(out)
 }
 
 fn folder_only_tag_diff(a: &[String], b: &[String]) -> bool {
@@ -295,6 +399,7 @@ where
     F: Fn(Uuid) -> bool,
 {
     let include_descendants = std::mem::take(&mut req.include_descendants);
+    let extra_descendants = std::mem::take(&mut req.descendant_ids);
     if !include_descendants {
         return update_mission_project_locked(
             is_actor_busy(id),
@@ -328,13 +433,16 @@ where
     if updated.project.project.is_some() || explicit_project_patch {
         let target_project = updated.project.project.clone();
         let mut moved = vec![root_snap];
-        let descendants = match collect_child_mission_ids(&control.mission_store, id).await {
-            Ok(ids) => ids,
-            Err(err) => {
-                rollback_moved_missions(&state, &control.mission_store, moved).await;
-                return Err(err);
-            }
-        };
+        let descendants =
+            match collect_launched_descendant_ids(&control.mission_store, id, &extra_descendants)
+                .await
+            {
+                Ok(ids) => ids,
+                Err(err) => {
+                    rollback_moved_missions(&state, &control.mission_store, moved).await;
+                    return Err(err);
+                }
+            };
         for child_id in descendants {
             let child = match control.mission_store.get_mission(child_id).await {
                 Ok(Some(child)) => child,
@@ -376,6 +484,7 @@ where
                     desired_state: None,
                     next_check_at: None,
                     include_descendants: false,
+                    descendant_ids: Vec::new(),
                 }),
             )
             .await

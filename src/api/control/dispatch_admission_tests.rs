@@ -13389,12 +13389,30 @@ async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_c
         )
         .await
         .unwrap();
+    let forked_sibling = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("forked conversation"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
     for (id, tags) in [
         (
             child.id,
             vec!["pr-writer".to_string(), "orb-folder:Old".to_string()],
         ),
         (grandchild.id, vec!["pr-readonly".to_string()]),
+        (forked_sibling.id, vec![format!("fork-of:{}", parent.id)]),
     ] {
         h.control
             .mission_store
@@ -13445,6 +13463,13 @@ async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_c
         .await
         .unwrap()
         .unwrap();
+    let f_after = h
+        .control
+        .mission_store
+        .get_mission(forked_sibling.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(p_after.project.project.as_deref(), Some("verity"));
     assert!(p_after
         .project
@@ -13454,6 +13479,8 @@ async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_c
     assert_eq!(c_after.project.tags, vec!["pr-writer".to_string()]);
     assert_eq!(g_after.project.project.as_deref(), Some("verity"));
     assert_eq!(g_after.project.tags, vec!["pr-readonly".to_string()]);
+    // Independent forked conversations are versions, not launched sub-missions.
+    assert_eq!(f_after.project.project.as_deref(), Some("lido"));
 }
 
 #[tokio::test]
