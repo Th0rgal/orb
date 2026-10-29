@@ -258,4 +258,21 @@ class OrbManagedMachinesTest {
         assertEquals("Scaleway", OrbManagedMachines.providerLabel("scaleway"))
         assertNull(OrbManagedMachines.reapLine(base.copy(state = "destroyed", reapAt = "2026-10-23T12:04:00Z"), now))
     }
+
+    @Test
+    fun parsesSharedMultiProviderResponseFixture() {
+        val r = OrbManagedMachines.parse(OrbSpec.dict("fixtures/managed-machines-response.json"))
+        assertTrue(r.enabled)
+        assertEquals("boat", r.provider)
+        assertEquals(listOf("boat", "hetzner", "vastai", "scaleway"), r.providers.map { it.provider })
+        assertEquals(listOf("boat.dev", "Hetzner Cloud", "Vast.ai", "Scaleway"), r.providers.map { it.displayName })
+        assertEquals(listOf(true, true, false, false), r.providers.map { it.configured })
+        assertEquals(listOf(true, false, false, false), r.providers.map { it.supportsFreeStop })
+        assertEquals(listOf(true, false, false, false), r.providers.map { it.supportsSnapshots })
+        assertEquals("arm64", r.providers[1].sizes.first { it.size == "cax31" }.arch)
+        assertEquals("RTX 4090", r.providers[2].sizes.first { it.size == "rtx4090" }.gpu)
+        assertEquals(1, r.machines.size)
+        assertEquals("hetzner", r.machines[0].provider)
+        assertFalse(OrbManagedMachines.canStop(r.machines[0], r.providers))
+    }
 }

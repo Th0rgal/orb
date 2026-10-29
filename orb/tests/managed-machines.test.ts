@@ -139,7 +139,10 @@ describe("managed row v3 and unlimited budgets", () => {
   });
 });
 
-import { canStopMachine, managedSectionTitle, providerLabel } from "../src/managedMachineModel";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { canStopMachine, managedSectionTitle, providerLabel, type ManagedMachinesResponse } from "../src/managedMachineModel";
 
 describe("ownership and reaping", () => {
   it("classifies the owner", () => {
@@ -168,5 +171,22 @@ describe("ownership and reaping", () => {
     expect(canStopMachine({ state: "online", provider: "boat" })).toBe(true);
     expect(canStopMachine({ state: "online", provider: "hetzner" })).toBe(false);
     expect(canStopMachine({ state: "stopped", provider: "boat" })).toBe(false);
+  });
+  it("decodes the shared multi-provider managed-machines response fixture", () => {
+    const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "shared", "orb-spec", "fixtures", "managed-machines-response.json"), "utf8");
+    const resp = JSON.parse(raw) as ManagedMachinesResponse;
+    expect(resp.enabled).toBe(true);
+    expect(resp.providers?.map(p => [p.provider, p.display_name, p.configured, p.supports_free_stop, p.supports_snapshots])).toEqual([
+      ["boat", "boat.dev", true, true, true],
+      ["hetzner", "Hetzner Cloud", true, false, false],
+      ["vastai", "Vast.ai", false, false, false],
+      ["scaleway", "Scaleway", false, false, false],
+    ]);
+    expect(managedSectionTitle(resp.providers, resp.machines)).toBe("Managed cloud");
+    expect(canStopMachine(resp.machines[0]!, resp.providers)).toBe(false);
+    const vastRtx = resp.providers?.find(p => p.provider === "vastai")?.sizes.find(s => s.size === "rtx4090");
+    expect(vastRtx?.gpu).toBe("RTX 4090");
+    const cax = resp.providers?.find(p => p.provider === "hetzner")?.sizes.find(s => s.size === "cax31");
+    expect(cax?.arch).toBe("arm64");
   });
 });

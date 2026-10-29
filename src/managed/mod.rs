@@ -66,6 +66,9 @@ const PROVISION_PATH: &str = "/home/user/.orb/provision.sh";
 /// Per-VM fixups run as root before orb-node starts (writable
 /// `/tmp/opencode`, GitHub credential helper, user rustup env).
 pub const PROVISION_SCRIPT: &str = include_str!("orb-node-provision.sh");
+pub const UPDATE_NODE_CODEX_SCRIPT: &str = include_str!("../../scripts/update-node-codex.py");
+pub const UPDATE_NODE_HARNESSES_SCRIPT: &str =
+    include_str!("../../scripts/update-node-harnesses.py");
 
 // ---------------------------------------------------------------- provider
 
@@ -73,6 +76,8 @@ pub const PROVISION_SCRIPT: &str = include_str!("orb-node-provision.sh");
 pub struct SpawnSpec {
     pub machine_id: String,
     pub size: String,
+    pub cpu: u32,
+    pub ram_gb: u32,
     pub ttl_seconds: u64,
     pub image: Option<String>,
     pub name: String,
@@ -81,7 +86,18 @@ pub struct SpawnSpec {
     pub gpu: Option<String>,
     pub arch: Option<String>,
     pub max_hourly_usd: Option<f64>,
+    pub preferred_offer_id: Option<String>,
+    pub exclude_offer_ids: Vec<String>,
     pub allow_24h_commitment: bool,
+    pub provisioning_mode: ProvisioningMode,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnQuote {
+    pub offer_id: Option<String>,
+    pub usd_per_hour: f64,
+    pub cpu: u32,
+    pub ram_gb: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +136,9 @@ pub trait ManagedProvider: Send + Sync {
     }
     fn is_stopped_state(&self, state: &str) -> bool {
         boat::is_stopped_state(state)
+    }
+    async fn quote_spawn(&self, _spec: &SpawnSpec) -> Result<Option<SpawnQuote>, String> {
+        Ok(None)
     }
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String>;
     async fn get(&self, provider_id: &str) -> Result<ProviderMachine, String>;
@@ -182,13 +201,18 @@ pub struct ProviderSnapshot {
 
 // ------------------------------------------------------------------- sizes
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct SizeSpec {
     pub size: &'static str,
     pub cpu: u32,
     pub ram_gb: u32,
     pub disk_gb: u32,
     pub usd_per_hour: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<&'static str>,
+    pub arch: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_billing_hours: Option<u32>,
 }
 
 pub const SIZES: [SizeSpec; 4] = [
@@ -198,6 +222,9 @@ pub const SIZES: [SizeSpec; 4] = [
         ram_gb: 4,
         disk_gb: 12,
         usd_per_hour: 0.018,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "default",
@@ -205,6 +232,9 @@ pub const SIZES: [SizeSpec; 4] = [
         ram_gb: 8,
         disk_gb: 50,
         usd_per_hour: 0.036,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "large",
@@ -212,6 +242,9 @@ pub const SIZES: [SizeSpec; 4] = [
         ram_gb: 16,
         disk_gb: 125,
         usd_per_hour: 0.072,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "xlarge",
@@ -219,6 +252,9 @@ pub const SIZES: [SizeSpec; 4] = [
         ram_gb: 32,
         disk_gb: 251,
         usd_per_hour: 0.20,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
 ];
 
@@ -1087,12 +1123,25 @@ pub struct BudgetView {
     pub image: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProviderCatalogEntry {
-    pub name: String,
+    pub provider: String,
+    pub display_name: String,
+    pub configured: bool,
     pub supports_free_stop: bool,
     pub supports_snapshots: bool,
     pub sizes: Vec<SizeSpec>,
+}
+
+pub fn provider_display_name(provider: &str) -> &'static str {
+    match provider {
+        "boat" => "boat.dev",
+        "hetzner" => "Hetzner Cloud",
+        "vastai" => "Vast.ai",
+        "scaleway" => "Scaleway",
+        "fake" => "Fake",
+        _ => "Custom",
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1272,10 +1321,10 @@ impl ManagedManager {
         if let Some(p) = map.get(&key) {
             return Some(Arc::clone(p));
         }
-        // In unit tests a single `FakeProvider` ("fake") backs rows whose
-        // default provider string was "boat".
+        // In unit tests ONLY, a single `FakeProvider` ("fake") backs rows whose
+        // default provider string was "boat". Never alias real cloud providers.
         if map.len() == 1 && (key.is_empty() || key == "boat") {
-            return map.values().next().cloned();
+            return map.get("fake").cloned();
         }
         None
     }
@@ -1300,20 +1349,52 @@ impl ManagedManager {
         let Ok(map) = self.providers.read() else {
             return Vec::new();
         };
-        let order = ["boat", "hetzner", "vastai", "scaleway"];
-        let mut keys: Vec<String> = map.keys().cloned().collect();
-        keys.sort_by_key(|k| order.iter().position(|o| o == k).unwrap_or(order.len() + 1));
-        keys.into_iter()
-            .filter_map(|k| {
-                let p = map.get(&k)?;
-                Some(ProviderCatalogEntry {
-                    name: p.name().to_string(),
+        let canonical: [(&str, bool, bool, &[SizeSpec]); 4] = [
+            ("boat", true, true, &SIZES),
+            ("hetzner", false, false, &hetzner::HETZNER_SIZES),
+            ("vastai", false, false, &vastai::VASTAI_SIZES),
+            ("scaleway", false, false, scaleway::SCALEWAY_WORKER_SIZES),
+        ];
+        let mut out = Vec::with_capacity(canonical.len() + 1);
+        for (id, free_stop, snapshots, fallback_sizes) in canonical {
+            if let Some(p) = map.get(id) {
+                out.push(ProviderCatalogEntry {
+                    provider: id.to_string(),
+                    display_name: provider_display_name(id).to_string(),
+                    configured: true,
                     supports_free_stop: p.supports_free_stop(),
                     supports_snapshots: p.supports_snapshots(),
                     sizes: p.sizes().to_vec(),
-                })
-            })
-            .collect()
+                });
+            } else {
+                out.push(ProviderCatalogEntry {
+                    provider: id.to_string(),
+                    display_name: provider_display_name(id).to_string(),
+                    configured: false,
+                    supports_free_stop: free_stop,
+                    supports_snapshots: snapshots,
+                    sizes: fallback_sizes.to_vec(),
+                });
+            }
+        }
+        let mut extras: Vec<&String> = map
+            .keys()
+            .filter(|k| !canonical.iter().any(|(c, ..)| c == &k.as_str()))
+            .collect();
+        extras.sort();
+        for key in extras {
+            if let Some(p) = map.get(key) {
+                out.push(ProviderCatalogEntry {
+                    provider: p.name().to_string(),
+                    display_name: provider_display_name(p.name()).to_string(),
+                    configured: true,
+                    supports_free_stop: p.supports_free_stop(),
+                    supports_snapshots: p.supports_snapshots(),
+                    sizes: p.sizes().to_vec(),
+                });
+            }
+        }
+        out
     }
 
     /// Register a cloud provider (from env or Bitwarden vault) in memory and
@@ -1897,7 +1978,7 @@ impl ManagedManager {
         })
     }
 
-    /// Validate a request against size / TTL policy for a specific provider.
+    /// Validate a request against size / arch / mode / TTL policy for a specific provider.
     pub fn plan_for_provider(
         settings: &ManagedSettings,
         provider_name: &str,
@@ -1905,7 +1986,39 @@ impl ManagedManager {
     ) -> Result<(SizeSpec, u64), ManagedError> {
         let prov = provider_name.trim().to_ascii_lowercase();
         let requested_size = req.size.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let check_cpu_ram = |spec: SizeSpec| -> Result<SizeSpec, ManagedError> {
+        let requested_arch = match req.arch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(a)
+                if a.eq_ignore_ascii_case("x86_64")
+                    || a.eq_ignore_ascii_case("amd64")
+                    || a.eq_ignore_ascii_case("x64") =>
+            {
+                Some("x86_64")
+            }
+            Some(a) if a.eq_ignore_ascii_case("arm64") || a.eq_ignore_ascii_case("aarch64") => {
+                Some("arm64")
+            }
+            Some(other) => {
+                return Err(ManagedError::new(
+                    "invalid_arch",
+                    400,
+                    format!("Unsupported architecture '{other}'; use x86_64 or arm64"),
+                ));
+            }
+        };
+        let check_spec = |spec: SizeSpec| -> Result<SizeSpec, ManagedError> {
+            if let Some(arch) = requested_arch {
+                if spec.arch != arch {
+                    return Err(ManagedError::new(
+                        "invalid_size",
+                        400,
+                        format!(
+                            "Size '{}' is {}, not requested architecture '{arch}'",
+                            spec.size, spec.arch
+                        ),
+                    ));
+                }
+            }
             if req.cpu.is_some_and(|c| c > spec.cpu) || req.ram_gb.is_some_and(|r| r > spec.ram_gb)
             {
                 return Err(ManagedError::new(
@@ -1921,14 +2034,16 @@ impl ManagedManager {
         };
         let find_smallest = |catalog: &[SizeSpec]| -> Option<SizeSpec> {
             catalog.iter().copied().find(|s| {
-                req.cpu.is_none_or(|c| s.cpu >= c) && req.ram_gb.is_none_or(|r| s.ram_gb >= r)
+                requested_arch.is_none_or(|a| s.arch == a)
+                    && req.cpu.is_none_or(|c| s.cpu >= c)
+                    && req.ram_gb.is_none_or(|r| s.ram_gb >= r)
             })
         };
 
         let (spec, boat_rank_pair) = match prov.as_str() {
             "hetzner" => {
                 let s = match (requested_size, req.cpu, req.ram_gb) {
-                    (Some(name), _, _) => hetzner::hetzner_size_spec(name, req.arch.as_deref())
+                    (Some(name), _, _) => hetzner::hetzner_size_spec(name, requested_arch)
                         .ok_or_else(|| {
                             ManagedError::new(
                                 "invalid_size",
@@ -1938,20 +2053,18 @@ impl ManagedManager {
                                 ),
                             )
                         })
-                        .and_then(check_cpu_ram)?,
-                    (None, None, None) => {
-                        hetzner::hetzner_size_spec("default", req.arch.as_deref())
-                            .unwrap_or(hetzner::HETZNER_SIZES[1])
-                    }
+                        .and_then(check_spec)?,
+                    (None, None, None) => hetzner::hetzner_size_spec("default", requested_arch)
+                        .unwrap_or(hetzner::HETZNER_SIZES[1]),
                     (None, _, _) => find_smallest(&hetzner::HETZNER_SIZES).ok_or_else(|| {
                         ManagedError::new(
                             "invalid_size",
                             400,
-                            "No Hetzner machine size satisfies the requested CPU/RAM",
+                            "No Hetzner machine size satisfies the requested CPU/RAM/arch",
                         )
                     })?,
                 };
-                (s, (0u8, 0u8))
+                (check_spec(s)?, (0u8, 0u8))
             }
             "vastai" => {
                 let s = match (requested_size, req.cpu, req.ram_gb) {
@@ -1965,19 +2078,20 @@ impl ManagedManager {
                                 ),
                             )
                         })
-                        .and_then(check_cpu_ram)?,
-                    (None, None, None) => vastai::VASTAI_SIZES[0],
+                        .and_then(check_spec)?,
+                    (None, None, None) => check_spec(vastai::VASTAI_SIZES[0])?,
                     (None, _, _) => find_smallest(&vastai::VASTAI_SIZES).ok_or_else(|| {
                         ManagedError::new(
                             "invalid_size",
                             400,
-                            "No Vast.ai GPU tier satisfies the requested CPU/RAM",
+                            "No Vast.ai GPU tier satisfies the requested CPU/RAM/arch",
                         )
                     })?,
                 };
                 (s, (0u8, 0u8))
             }
             "scaleway" => {
+                let mode = req.provisioning_mode.unwrap_or_default();
                 let s = match (requested_size, req.cpu, req.ram_gb) {
                     (Some(name), _, _) => scaleway::scaleway_size_spec(name)
                         .ok_or_else(|| {
@@ -1989,27 +2103,54 @@ impl ManagedManager {
                                 ),
                             )
                         })
-                        .and_then(check_cpu_ram)?,
-                    (None, None, None) => scaleway::SCALEWAY_SIZES[1],
-                    (None, _, _) => find_smallest(&scaleway::SCALEWAY_SIZES).ok_or_else(|| {
-                        ManagedError::new(
-                            "invalid_size",
-                            400,
-                            "No Scaleway instance size satisfies the requested CPU/RAM",
-                        )
-                    })?,
+                        .and_then(check_spec)?,
+                    (None, None, None) if requested_arch == Some("arm64") => {
+                        find_smallest(&scaleway::SCALEWAY_SIZES).ok_or_else(|| {
+                            ManagedError::new(
+                                "invalid_size",
+                                400,
+                                "No Scaleway arm64 size available",
+                            )
+                        })?
+                    }
+                    (None, None, None) => check_spec(scaleway::SCALEWAY_SIZES[1])?,
+                    (None, _, _) => {
+                        let pool: &[SizeSpec] = if mode.is_worker() && requested_arch.is_none() {
+                            scaleway::SCALEWAY_WORKER_SIZES
+                        } else {
+                            &scaleway::SCALEWAY_SIZES
+                        };
+                        find_smallest(pool).ok_or_else(|| {
+                            ManagedError::new(
+                                "invalid_size",
+                                400,
+                                "No Scaleway instance size satisfies the requested CPU/RAM/arch",
+                            )
+                        })?
+                    }
                 };
-                if scaleway::is_apple_silicon_type(s.size) && req.allow_24h_commitment != Some(true)
-                {
-                    return Err(ManagedError::new(
-                        "commitment_confirmation_required",
-                        400,
-                        format!(
-                            "Scaleway Apple Silicon '{}' carries a mandatory 24-hour minimum billing lease (deletable_at, ~${:.2} committed). Pass allow_24h_commitment: true to confirm.",
-                            s.size,
-                            s.usd_per_hour * 24.0
-                        ),
-                    ));
+                if scaleway::is_apple_silicon_type(s.size) {
+                    if mode.is_worker() {
+                        return Err(ManagedError::new(
+                            "unsupported_provisioning_mode",
+                            400,
+                            format!(
+                                "Scaleway Apple Silicon '{}' runs macOS without cloud-init/Linux worker containment and cannot enroll as an orb-node worker. Pass provisioning_mode: \"raw\" with allow_24h_commitment: true.",
+                                s.size
+                            ),
+                        ));
+                    }
+                    if req.allow_24h_commitment != Some(true) {
+                        return Err(ManagedError::new(
+                            "commitment_confirmation_required",
+                            400,
+                            format!(
+                                "Scaleway Apple Silicon '{}' carries a mandatory 24-hour minimum billing lease (deletable_at, ~${:.2} committed). Pass allow_24h_commitment: true to confirm.",
+                                s.size,
+                                s.usd_per_hour * 24.0
+                            ),
+                        ));
+                    }
                 }
                 (s, (0u8, 0u8))
             }
@@ -2025,13 +2166,15 @@ impl ManagedManager {
                                 ),
                             )
                         })
-                        .and_then(check_cpu_ram)?,
-                    (None, None, None) => size_spec(&settings.default_size).unwrap_or(SIZES[0]),
-                    (None, cpu, ram) => size_for(cpu, ram).ok_or_else(|| {
+                        .and_then(check_spec)?,
+                    (None, None, None) => {
+                        check_spec(size_spec(&settings.default_size).unwrap_or(SIZES[0]))?
+                    }
+                    (None, _, _) => find_smallest(&SIZES).ok_or_else(|| {
                         ManagedError::new(
                             "invalid_size",
                             400,
-                            "No machine size has that much CPU/RAM (max 16 vCPU / 32 GB)",
+                            "No machine size satisfies the requested CPU/RAM/arch (max 16 vCPU / 32 GB x86_64)",
                         )
                     })?,
                 };
@@ -2130,7 +2273,8 @@ impl ManagedManager {
                 let configured: Vec<String> = self
                     .provider_catalog()
                     .into_iter()
-                    .map(|p| p.name)
+                    .filter(|p| p.configured)
+                    .map(|p| p.provider)
                     .collect();
                 ManagedError::new(
                     "unknown_provider",
@@ -2197,6 +2341,38 @@ impl ManagedManager {
         } else {
             ttl_minutes
         };
+        let min_cpu = req.cpu.map_or(spec.cpu, |c| c.max(spec.cpu));
+        let min_ram_gb = req.ram_gb.map_or(spec.ram_gb, |r| r.max(spec.ram_gb));
+        let quote = if fork_source.is_none() {
+            let quote_spec = SpawnSpec {
+                machine_id: String::new(),
+                size: spec.size.into(),
+                cpu: min_cpu,
+                ram_gb: min_ram_gb,
+                ttl_seconds: ttl_minutes * 60 + 300,
+                image: Some(image.clone()),
+                name: String::new(),
+                idempotency_key: String::new(),
+                bootstrap_script: None,
+                gpu: req.gpu.clone(),
+                arch: req.arch.clone(),
+                max_hourly_usd: req.max_hourly_usd,
+                preferred_offer_id: None,
+                exclude_offer_ids: Vec::new(),
+                allow_24h_commitment: req.allow_24h_commitment.unwrap_or(false),
+                provisioning_mode,
+            };
+            provider
+                .quote_spawn(&quote_spec)
+                .await
+                .map_err(|e| ManagedError::new("provider_quote_failed", 502, e))?
+        } else {
+            None
+        };
+        let effective_usd_per_hour = quote.as_ref().map_or(spec.usd_per_hour, |q| q.usd_per_hour);
+        let effective_cpu = quote.as_ref().map_or(spec.cpu, |q| q.cpu);
+        let effective_ram_gb = quote.as_ref().map_or(spec.ram_gb, |q| q.ram_gb);
+        let quoted_offer_id = quote.and_then(|q| q.offer_id);
 
         let machine = {
             let _guard = self.admission.lock().await;
@@ -2213,7 +2389,7 @@ impl ManagedManager {
                     ));
                 }
             }
-            let new_cost = committed_minutes as f64 / 60.0 * spec.usd_per_hour;
+            let new_cost = committed_minutes as f64 / 60.0 * effective_usd_per_hour;
             if let Some(cap) = self
                 .settings
                 .daily_cap_usd
@@ -2265,7 +2441,7 @@ impl ManagedManager {
             let reserve = if committed_minutes > ttl_minutes {
                 new_cost
             } else {
-                budget::reservation_for(ttl_minutes, spec.usd_per_hour)
+                budget::reservation_for(ttl_minutes, effective_usd_per_hour)
             };
             if let Some(sub) = req.sub_budget_usd {
                 if reserve > sub {
@@ -2307,10 +2483,10 @@ impl ManagedManager {
                 provider_id: None,
                 image: image.clone(),
                 size: spec.size.into(),
-                cpu: spec.cpu,
-                ram_gb: spec.ram_gb,
+                cpu: effective_cpu,
+                ram_gb: effective_ram_gb,
                 disk_gb: spec.disk_gb,
-                usd_per_hour: spec.usd_per_hour,
+                usd_per_hour: effective_usd_per_hour,
                 state: MachineState::Provisioning,
                 created_at: now,
                 expires_at: now + chrono::Duration::minutes(ttl_minutes as i64),
@@ -2368,10 +2544,21 @@ impl ManagedManager {
         };
         self.ledger("spawn_requested", &machine);
 
+        let admitted_ceiling = if quoted_offer_id.is_some() {
+            Some(
+                req.max_hourly_usd
+                    .map_or(effective_usd_per_hour, |m| m.min(effective_usd_per_hour)),
+            )
+        } else {
+            req.max_hourly_usd
+        };
         let extras = SpawnExtras {
             gpu: req.gpu.clone(),
             arch: req.arch.clone(),
-            max_hourly_usd: req.max_hourly_usd,
+            max_hourly_usd: admitted_ceiling,
+            preferred_offer_id: quoted_offer_id,
+            min_cpu: Some(min_cpu),
+            min_ram_gb: Some(min_ram_gb),
             allow_24h_commitment: req.allow_24h_commitment.unwrap_or(false),
         };
         let this = Arc::clone(self);
@@ -2418,10 +2605,8 @@ impl ManagedManager {
         ttl_minutes: u64,
         extras: SpawnExtras,
     ) -> Result<ManagedMachine, String> {
-        let m = self.get(id).await.ok_or("machine vanished")?;
+        let mut m = self.get(id).await.ok_or("machine vanished")?;
         let started = tokio::time::Instant::now();
-        let capacity = (m.cpu / 2).max(1);
-        let job_memory = managed_job_memory_bytes(m.ram_gb);
         // Mint the one-time enrollment token upfront so cloud-init / onstart
         // providers can embed it in the root-only bootstrap payload without SSH.
         let enroll_token = if m.provisioning_mode.is_worker() {
@@ -2435,43 +2620,120 @@ impl ManagedManager {
         } else {
             None
         };
-        let bootstrap_script = match (&enroll_token, provider.uses_cloud_init_bootstrap()) {
-            (Some(tok), true) => Some(cloud_bootstrap_script(
-                core_url,
-                id,
-                &m.node_id,
-                tok,
-                capacity,
-                job_memory,
-                &m.provider,
-                &m.size,
-                &m.image,
-            )),
-            _ => None,
-        };
-        // boat stops the sandbox itself at TTL + a small grace, even if Core
-        // is down: the hard backstop against runaway cost.
-        let spec = SpawnSpec {
-            machine_id: m.id.clone(),
-            size: m.size.clone(),
-            ttl_seconds: ttl_minutes * 60 + 300,
-            image: Some(m.image.clone()),
-            name: format!("{SANDBOX_NAME_PREFIX}{}", m.id),
-            // A resume provisions the same machine id again.
-            idempotency_key: if m.resumes == 0 {
-                format!("orb-managed-{}", m.id)
-            } else {
-                format!("orb-managed-{}-r{}", m.id, m.resumes)
-            },
-            bootstrap_script,
-            gpu: extras.gpu,
-            arch: extras.arch,
-            max_hourly_usd: extras.max_hourly_usd,
-            allow_24h_commitment: extras.allow_24h_commitment,
+        let build_spec = |m: &ManagedMachine,
+                          preferred_offer_id: Option<String>,
+                          exclude_offer_ids: Vec<String>| {
+            let capacity = (m.cpu / 2).max(1);
+            let job_memory = managed_job_memory_bytes(m.ram_gb);
+            let bootstrap_script = match (&enroll_token, provider.uses_cloud_init_bootstrap()) {
+                (Some(tok), true) => Some(cloud_bootstrap_script(
+                    core_url,
+                    id,
+                    &m.node_id,
+                    tok,
+                    capacity,
+                    job_memory,
+                    &m.provider,
+                    &m.size,
+                    &m.image,
+                )),
+                _ => None,
+            };
+            // boat stops the sandbox itself at TTL + a small grace, even if Core
+            // is down: the hard backstop against runaway cost.
+            SpawnSpec {
+                machine_id: m.id.clone(),
+                size: m.size.clone(),
+                cpu: m.cpu,
+                ram_gb: m.ram_gb,
+                ttl_seconds: ttl_minutes * 60 + 300,
+                image: Some(m.image.clone()),
+                name: format!("{SANDBOX_NAME_PREFIX}{}", m.id),
+                // A resume provisions the same machine id again.
+                idempotency_key: if m.resumes == 0 {
+                    format!("orb-managed-{}", m.id)
+                } else {
+                    format!("orb-managed-{}-r{}", m.id, m.resumes)
+                },
+                bootstrap_script,
+                gpu: extras.gpu.clone(),
+                arch: extras.arch.clone(),
+                max_hourly_usd: extras.max_hourly_usd,
+                preferred_offer_id,
+                exclude_offer_ids,
+                allow_24h_commitment: extras.allow_24h_commitment,
+                provisioning_mode: m.provisioning_mode,
+            }
         };
         let created = match m.fork_source_provider_id.clone() {
-            Some(source) => provider.fork(&source, &spec).await?,
-            None => provider.spawn(&spec).await?,
+            Some(source) => {
+                let spec = build_spec(&m, extras.preferred_offer_id.clone(), Vec::new());
+                provider.fork(&source, &spec).await?
+            }
+            None => {
+                let mut current_offer = extras.preferred_offer_id.clone();
+                let mut excluded = Vec::new();
+                let admitted_rate = m.usd_per_hour;
+                loop {
+                    let spec = build_spec(&m, current_offer.clone(), excluded.clone());
+                    match provider.spawn(&spec).await {
+                        Ok(created) => break created,
+                        Err(first_err) => {
+                            let Some(failed_offer) = current_offer.take() else {
+                                return Err(first_err);
+                            };
+                            if excluded.len() >= 2 {
+                                return Err(first_err);
+                            }
+                            excluded.push(failed_offer);
+                            if !self.get(id).await.is_some_and(|cur| cur.state.is_live()) {
+                                return Err("machine destroyed while provisioning".into());
+                            }
+                            let requote_spec = SpawnSpec {
+                                cpu: extras.min_cpu.unwrap_or(m.cpu),
+                                ram_gb: extras.min_ram_gb.unwrap_or(m.ram_gb),
+                                bootstrap_script: None,
+                                preferred_offer_id: None,
+                                exclude_offer_ids: excluded.clone(),
+                                max_hourly_usd: Some(
+                                    extras
+                                        .max_hourly_usd
+                                        .map_or(admitted_rate, |cap| cap.min(admitted_rate)),
+                                ),
+                                ..spec
+                            };
+                            let Some(next_quote) = provider
+                                .quote_spawn(&requote_spec)
+                                .await
+                                .map_err(|re_err| {
+                                    format!("{first_err}; replacement quote failed: {re_err}")
+                                })?
+                            else {
+                                return Err(first_err);
+                            };
+                            let Some(next_offer) = next_quote
+                                .offer_id
+                                .clone()
+                                .filter(|o| !excluded.contains(o))
+                            else {
+                                return Err(first_err);
+                            };
+                            if next_quote.usd_per_hour > admitted_rate + 1e-9 {
+                                return Err(first_err);
+                            }
+                            m = self
+                                .update(id, |row| {
+                                    row.cpu = next_quote.cpu;
+                                    row.ram_gb = next_quote.ram_gb;
+                                    row.usd_per_hour = next_quote.usd_per_hour;
+                                })
+                                .await
+                                .ok_or("machine vanished")?;
+                            current_offer = Some(next_offer);
+                        }
+                    }
+                }
+            }
         };
         let provider_id = created.provider_id.clone();
         let created_deletable_at = created.deletable_at;
@@ -2543,6 +2805,8 @@ impl ManagedManager {
             // PROVISION_SCRIPT and starts sandboxed-node inside the guest.
             (0u64, Ok(()))
         } else {
+            let capacity = (m.cpu / 2).max(1);
+            let job_memory = managed_job_memory_bytes(m.ram_gb);
             let env = format!(
                 "SANDBOXED_NODE_DIAL_CORE_URL={core_url}\nSANDBOXED_NODE_MANAGED_ID={id}\nSANDBOXED_NODE_ENROLL_TOKEN={enroll_token}\nSANDBOXED_NODE_ID={node}\nSANDBOXED_NODE_CAPACITY={capacity}\nSANDBOXED_NODE_JOB_MEMORY_BYTES={job_memory}\nSANDBOXED_NODE_LABELS=managed,trust=managed,provider={prov},size={size},image={image},lean\n",
                 node = m.node_id,
@@ -2604,7 +2868,7 @@ impl ManagedManager {
 
         // Wait for the node to enroll and answer a heartbeat over the relay.
         let enroll_timeout = if provider.uses_cloud_init_bootstrap() {
-            300
+            420
         } else {
             240
         };
@@ -3772,11 +4036,14 @@ struct SpawnExtras {
     gpu: Option<String>,
     arch: Option<String>,
     max_hourly_usd: Option<f64>,
+    preferred_offer_id: Option<String>,
+    min_cpu: Option<u32>,
+    min_ram_gb: Option<u32>,
     allow_24h_commitment: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cloud_bootstrap_script(
+pub(crate) fn cloud_bootstrap_script(
     core_url: &str,
     machine_id: &str,
     node_id: &str,
@@ -3791,30 +4058,36 @@ fn cloud_bootstrap_script(
     format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
-
-if ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -y -qq curl ca-certificates git sudo
-  fi
+H=/var/lib/orb-node; B=/usr/local/bin; S=/usr/local/sbin; O=/home/user/.orb
+P=$B:/usr/sbin:/usr/bin:/sbin:/bin
+E="OPENCODE_TMPDIR=/tmp/opencode GIT_TERMINAL_PROMPT=0 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTOUPDATE=1 CODEX_DISABLE_UPDATE_CHECK=1 NO_UPDATE_NOTIFIER=1"
+q() {{ "$@" >/dev/null 2>&1; }}
+if q command -v apt-get; then
+  n=0; for c in curl git python3 jq xz zstd runuser; do q command -v "$c" || n=1; done
+  [ -d /run/systemd/system ] && [ ! -e /usr/lib/systemd/user/dbus.socket ] && [ ! -e /lib/systemd/user/dbus.socket ] && n=1 || true
+  [ "$n" = 1 ] && export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -yqq curl ca-certificates git sudo python3 dbus-user-session jq xz-utils zstd util-linux
 fi
-
-id -u user >/dev/null 2>&1 || useradd -m -s /bin/bash user || true
-id -u orbnode >/dev/null 2>&1 || useradd -r -m -d /var/lib/orb-node -s /bin/bash orbnode || true
-install -d -m 0755 /usr/local/bin /var/lib/orb-node /var/lib/orb-node/work
-chown -R orbnode:orbnode /var/lib/orb-node
-install -d -m 0700 -o user -g user /home/user/.orb || mkdir -p /home/user/.orb
-
-if [ ! -x /usr/local/bin/sandboxed-node ]; then
-  curl -fsSL --retry 6 --retry-delay 3 \
-    -H "Authorization: Bearer {enroll_token}" \
-    "{core_url}/api/managed-machines/bootstrap-binary/{machine_id}" \
-    -o /usr/local/bin/sandboxed-node.tmp
-  chmod 0755 /usr/local/bin/sandboxed-node.tmp
-  mv /usr/local/bin/sandboxed-node.tmp /usr/local/bin/sandboxed-node
-fi
-
-cat > /home/user/.orb/enroll.env <<'ORB_ENROLL_EOF'
+q id -u user || useradd -m -s /bin/bash user || true
+q id -u orbnode || useradd -r -m -d "$H" -s /bin/bash orbnode || true
+for g in sudo adm admin wheel docker lxd; do q gpasswd -d orbnode "$g" || true; done
+rm -f /etc/sudoers.d/orbnode
+install -d -m 0755 "$B" "$S" /opt/sandboxed-tools
+install -d -m 0750 -o orbnode -g orbnode "$H" "$H/work" "$H/work/caches"
+install -d -m 0700 -o user -g user "$O" || mkdir -p -m 0700 "$O"
+chmod 0750 /home/user 2>/dev/null || true
+A=$O/auth; printf 'header = "Authorization: Bearer %s"\n' '{enroll_token}' >"$A"; chmod 0600 "$A"
+trap 'rm -f "$A"' EXIT
+U="{core_url}/api/managed-machines/bootstrap-binary/{machine_id}?binary="
+orb_fetch() {{ curl -fsSL --retry 6 --retry-delay 3 -K "$A" "$U$1" -o "$2.t" && chmod "$3" "$2.t" && mv "$2.t" "$2"; }}
+[ -x "$B/sandboxed-node" ] || orb_fetch sandboxed-node "$B/sandboxed-node" 0755
+[ -x "$B/sandboxed-mcp" ] || orb_fetch sandboxed-mcp "$B/sandboxed-mcp" 0755
+orb_fetch provision-script "$O/provision.sh" 0700
+orb_fetch update-node-codex "$S/update-node-codex" 0755
+orb_fetch update-node-harnesses "$S/update-node-harnesses" 0755
+rm -f "$A"
+for h in opencode claude codex; do [ -x "$B/$h" ] || python3 "$S/update-node-harnesses" --only "$h" --probe-user orbnode; done
+[ -x "$B/grok" ] || python3 "$S/update-node-harnesses" --only grok --probe-user orbnode || true
+cat >"$O/enroll.env" <<'EOF'
 SANDBOXED_NODE_DIAL_CORE_URL={core_url}
 SANDBOXED_NODE_MANAGED_ID={machine_id}
 SANDBOXED_NODE_ENROLL_TOKEN={enroll_token}
@@ -3823,46 +4096,35 @@ SANDBOXED_NODE_CAPACITY={capacity}
 SANDBOXED_NODE_JOB_MEMORY_BYTES={job_memory}
 SANDBOXED_NODE_WORK_DIR=/var/lib/orb-node/work
 SANDBOXED_NODE_LABELS=managed,trust=managed,provider={provider},size={size},image={image},lean
-ORB_ENROLL_EOF
-chmod 0600 /home/user/.orb/enroll.env
-cp /home/user/.orb/enroll.env /var/lib/orb-node/enroll.env
-chown orbnode:orbnode /var/lib/orb-node/enroll.env
-chmod 0600 /var/lib/orb-node/enroll.env
-
-cat > /home/user/.orb/provision.sh <<'ORB_PROVISION_EOF'
-{provision_script}
-ORB_PROVISION_EOF
-bash /home/user/.orb/provision.sh || true
-rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth
-
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-  cat > /etc/systemd/system/orb-node.service <<'ORB_UNIT_EOF'
+EOF
+chmod 0600 "$O/enroll.env"
+bash "$O/provision.sh" || true
+rm -rf "$H/node.cred" "$H/work/managed-auth"
+if q command -v systemctl && [ -d /run/systemd/system ]; then
+  UID_N=$(id -u orbnode)
+  cat >/etc/systemd/system/orb-node.service <<EOF
 [Unit]
-Description=Orb Managed Compute Node
-After=network-online.target
+After=network-online.target systemd-logind.service
 Wants=network-online.target
-
 [Service]
-Type=simple
 User=orbnode
 Group=orbnode
-WorkingDirectory=/var/lib/orb-node
-EnvironmentFile=/home/user/.orb/enroll.env
-ExecStart=/usr/local/bin/sandboxed-node
+WorkingDirectory=$H
+EnvironmentFile=$O/enroll.env
+Environment=HOME=$H PATH=$P XDG_RUNTIME_DIR=/run/user/${{UID_N}} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${{UID_N}}/bus $E
+NoNewPrivileges=true
+ExecStartPre=+/bin/sh -c 'loginctl enable-linger orbnode; systemctl start user@${{UID_N}}.service || true; for _ in \$\$(seq 100); do [ -S /run/user/${{UID_N}}/bus ] && exit 0; sleep 0.2; done; echo user bus missing >&2; exit 1'
+ExecStart=$B/sandboxed-node
 Restart=always
 RestartSec=2
-
 [Install]
 WantedBy=multi-user.target
-ORB_UNIT_EOF
-  systemctl daemon-reload
-  systemctl enable --now orb-node.service
-  systemctl restart orb-node.service
+EOF
+  systemctl daemon-reload && systemctl enable orb-node.service && systemctl restart orb-node.service
 else
-  su -s /bin/bash orbnode -c 'nohup bash -c "set -a; source /var/lib/orb-node/enroll.env; set +a; cd /var/lib/orb-node && while true; do /usr/local/bin/sandboxed-node || true; sleep 2; done" >/var/lib/orb-node/orb-node.log 2>&1 &'
+  nohup bash -c "set -a; . $O/enroll.env; set +a; cd $H; while true; do runuser -u orbnode -- env HOME=$H PATH=$P $E $B/sandboxed-node || true; sleep 2; done" >"$H/orb-node.log" 2>&1 &
 fi
-"#,
-        provision_script = PROVISION_SCRIPT
+"#
     )
 }
 

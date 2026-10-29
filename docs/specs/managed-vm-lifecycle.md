@@ -152,11 +152,20 @@ starting `orb-node` (best effort, logged): `/tmp/opencode` writable by
 `orbnode`, a git credential helper answering only `https://github.com` with
 the mission's GitHub token (the `paloma-secrets` file Core delivered, else
 `GITHUB_TOKEN`/`GH_TOKEN`; never written by the script), ssh GitHub URLs
-rewritten to https, and the orbnode rustup env when the image has it. For
-cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`), Core generates a
-one-time enrollment bundle that installs/starts `orb-node` and dials back over
-the reverse relay (`SANDBOXED_NODE_DIAL_CORE_URL`). The `online` ledger event
-records `ready_ms`, `provision_ms`, `enroll_ms` and `total_ms`.
+rewritten to https, and the orbnode rustup env when the image has it. For cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`), Core generates a
+one-time `<4 KiB` enrollment script (fitting Vast.ai's `onstart` limit) that
+fetches `sandboxed-node`, `sandboxed-mcp`, and verified native harnesses
+(`opencode`, `claude`, `codex`) over streaming `GET /api/managed-machines/bootstrap-binary/:id`
+(which verifies ELF `e_machine` matches the machine's `arch`), keeps
+`/home/user/.orb/enroll.env` `0600` unprivileged-unreadable, enables `orbnode`'s
+lingering user D-Bus session (`XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS`), and
+dials back over the reverse relay (`SANDBOXED_NODE_DIAL_CORE_URL`). Marketplace
+providers (`vastai`) quote a verified offer (`quote_spawn`) enforcing CPU/RAM floors
+before budget admission so daily caps, pool reservations, and machine ledger rows use
+the real `dph_total` rate rather than catalog placeholders. Scaleway Apple Silicon
+(`M2-*`, 24h minimum lease) is rejected for Linux `worker` provisioning and omitted
+from the worker size catalog (`raw`-only with `allow_24h_commitment: true`). The
+`online` ledger event records `ready_ms`, `provision_ms`, `enroll_ms` and `total_ms`.
 
 ## Snapshots, forks, stop
 

@@ -534,6 +534,8 @@ mod raw_image_tests {
         SpawnSpec {
             machine_id: "mmtest000".into(),
             size: "small".into(),
+            cpu: 2,
+            ram_gb: 4,
             ttl_seconds: 600,
             image: Some(image.into()),
             name: "test".into(),
@@ -542,7 +544,10 @@ mod raw_image_tests {
             gpu: None,
             arch: None,
             max_hourly_usd: None,
+            preferred_offer_id: None,
+            exclude_offer_ids: Vec::new(),
             allow_24h_commitment: false,
+            provisioning_mode: crate::managed::ProvisioningMode::Worker,
         }
     }
     #[test]

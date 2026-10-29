@@ -23,6 +23,9 @@ pub const VASTAI_SIZES: [SizeSpec; 4] = [
         ram_gb: 64,
         disk_gb: 120,
         usd_per_hour: 0.45,
+        gpu: Some("RTX 4090"),
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "l40s",
@@ -30,6 +33,9 @@ pub const VASTAI_SIZES: [SizeSpec; 4] = [
         ram_gb: 64,
         disk_gb: 160,
         usd_per_hour: 0.95,
+        gpu: Some("L40S"),
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "a100",
@@ -37,6 +43,9 @@ pub const VASTAI_SIZES: [SizeSpec; 4] = [
         ram_gb: 96,
         disk_gb: 200,
         usd_per_hour: 1.35,
+        gpu: Some("A100 SXM4"),
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "h100",
@@ -44,6 +53,9 @@ pub const VASTAI_SIZES: [SizeSpec; 4] = [
         ram_gb: 128,
         disk_gb: 250,
         usd_per_hour: 2.40,
+        gpu: Some("H100 SXM"),
+        arch: "x86_64",
+        min_billing_hours: None,
     },
 ];
 
@@ -147,10 +159,36 @@ impl VastAiProvider {
     }
 }
 
+pub(crate) fn default_max_dph(size: &str) -> f64 {
+    vastai_size_spec(size).map_or(2.50, |s| (s.usd_per_hour * 1.6 * 10000.0).round() / 10000.0)
+}
+
+pub(crate) fn min_ram_mb_for_gb(ram_gb: u32) -> u32 {
+    // Physical Linux hosts report MemTotal ~95-99% of nominal DIMM capacity in MB.
+    ram_gb.saturating_mul(960)
+}
+
+fn spec_floors(spec: &SpawnSpec) -> (u32, u32, f64) {
+    let tier = vastai_size_spec(&spec.size);
+    let min_cpu = if spec.cpu > 0 {
+        spec.cpu
+    } else {
+        tier.map_or(1, |s| s.cpu)
+    };
+    let min_ram_gb = if spec.ram_gb > 0 {
+        spec.ram_gb
+    } else {
+        tier.map_or(1, |s| s.ram_gb)
+    };
+    let max_dph = spec
+        .max_hourly_usd
+        .unwrap_or_else(|| default_max_dph(&spec.size));
+    (min_cpu, min_ram_gb, max_dph)
+}
+
 pub(crate) fn search_bundles_body(spec: &SpawnSpec) -> Value {
     let gpu_name = gpu_model_for_size(&spec.size, spec.gpu.as_deref());
-    let default_ceiling = vastai_size_spec(&spec.size).map_or(2.50, |s| s.usd_per_hour * 1.6);
-    let max_dph = spec.max_hourly_usd.unwrap_or(default_ceiling);
+    let (min_cpu, min_ram_gb, max_dph) = spec_floors(spec);
     json!({
         "verified": {"eq": true},
         "external": {"eq": false},
@@ -158,11 +196,67 @@ pub(crate) fn search_bundles_body(spec: &SpawnSpec) -> Value {
         "rented": {"eq": false},
         "gpu_name": {"eq": gpu_name},
         "dph_total": {"lte": max_dph},
+        "cpu_cores_effective": {"gte": min_cpu},
+        "cpu_ram": {"gte": min_ram_mb_for_gb(min_ram_gb)},
         "reliability2": {"gte": 0.98},
         "order": [["dph_total", "asc"]],
         "type": "on-demand",
         "limit": 10
     })
+}
+
+pub(crate) fn select_verified_offer(
+    offers: &[Value],
+    min_cpu: u32,
+    min_ram_gb: u32,
+    max_dph: f64,
+    preferred_offer_id: Option<&str>,
+    exclude_offer_ids: &[String],
+) -> Option<super::SpawnQuote> {
+    let min_ram_mb = f64::from(min_ram_mb_for_gb(min_ram_gb));
+    let parse_one = |o: &Value| -> Option<super::SpawnQuote> {
+        let offer_id = o.get("id").and_then(|x| {
+            x.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| x.as_str().map(str::to_string))
+        })?;
+        if exclude_offer_ids.iter().any(|ex| ex == &offer_id) {
+            return None;
+        }
+        let dph = o.get("dph_total").and_then(Value::as_f64)?;
+        if !dph.is_finite() || dph <= 0.0 || dph > max_dph + 1e-9 {
+            return None;
+        }
+        let cpu = o
+            .get("cpu_cores_effective")
+            .or_else(|| o.get("cpu_cores"))
+            .and_then(Value::as_f64)
+            .map(|c| c.floor() as u32)?;
+        if cpu < min_cpu {
+            return None;
+        }
+        let ram_mb = o.get("cpu_ram").and_then(Value::as_f64)?;
+        if !ram_mb.is_finite() || ram_mb < min_ram_mb {
+            return None;
+        }
+        let ram_gb = ((ram_mb / 1024.0).round() as u32).max(1);
+        Some(super::SpawnQuote {
+            offer_id: Some(offer_id),
+            usd_per_hour: ((dph * 10000.0 - 1e-9).ceil()).max(0.0) / 10000.0,
+            cpu,
+            ram_gb,
+        })
+    };
+    if let Some(pref) = preferred_offer_id {
+        if let Some(q) = offers
+            .iter()
+            .filter_map(parse_one)
+            .find(|q| q.offer_id.as_deref() == Some(pref))
+        {
+            return Some(q);
+        }
+    }
+    offers.iter().find_map(parse_one)
 }
 
 pub(crate) fn create_instance_body(spec: &SpawnSpec, disk_gb: u32) -> Value {
@@ -243,34 +337,83 @@ impl ManagedProvider for VastAiProvider {
         matches!(state, "stopped" | "exited" | "destroyed" | "offline")
     }
 
-    async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
+    async fn quote_spawn(&self, spec: &SpawnSpec) -> Result<Option<super::SpawnQuote>, String> {
+        let (min_cpu, min_ram_gb, max_dph) = spec_floors(spec);
         let query = search_bundles_body(spec);
         let offers_resp = self
             .call(reqwest::Method::POST, "/bundles/", Some(query))
             .await?;
-        let offer_id = offers_resp
+        let offers = offers_resp
             .get("offers")
             .and_then(Value::as_array)
-            .and_then(|arr| arr.first())
-            .and_then(|o| {
-                o.get("id").and_then(|x| {
-                    x.as_u64()
-                        .map(|n| n.to_string())
-                        .or_else(|| x.as_str().map(str::to_string))
-                })
-            })
-            .ok_or_else(|| {
-                "vastai spawn: no verified GPU offers matched size/price ceiling".to_string()
-            })?;
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        select_verified_offer(
+            offers,
+            min_cpu,
+            min_ram_gb,
+            max_dph,
+            spec.preferred_offer_id.as_deref(),
+            &spec.exclude_offer_ids,
+        )
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "vastai quote: no verified GPU offers matched size '{}' (>={min_cpu} vCPU, >={min_ram_gb} GB RAM, <=${max_dph:.2}/h)",
+                spec.size
+            )
+        })
+    }
+
+    async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
         let disk_gb = vastai_size_spec(&spec.size).map_or(120, |s| s.disk_gb);
         let create_body = create_instance_body(spec, disk_gb);
-        let created = self
-            .call(
+        // When `ManagedManager` has already quoted a specific offer and embedded
+        // its exact CPU/RAM into `bootstrap_script`, rent ONLY that offer here;
+        // if it was sniped, return an error so `ManagedManager` reconciles the
+        // replacement offer's CPU/RAM/price and regenerates `bootstrap_script`.
+        let created = if let Some(pref_id) =
+            spec.preferred_offer_id.as_deref().filter(|s| !s.is_empty())
+        {
+            self.call(
+                reqwest::Method::PUT,
+                &format!("/asks/{pref_id}/"),
+                Some(create_body),
+            )
+            .await?
+        } else {
+            let (min_cpu, min_ram_gb, max_dph) = spec_floors(spec);
+            let query = search_bundles_body(spec);
+            let offers_resp = self
+                .call(reqwest::Method::POST, "/bundles/", Some(query))
+                .await?;
+            let offers = offers_resp
+                .get("offers")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let quote = select_verified_offer(
+                offers,
+                min_cpu,
+                min_ram_gb,
+                max_dph,
+                None,
+                &spec.exclude_offer_ids,
+            )
+            .ok_or_else(|| {
+                format!(
+                    "vastai spawn: no verified GPU offers matched size '{}' (>={min_cpu} vCPU, >={min_ram_gb} GB RAM, <=${max_dph:.2}/h)",
+                    spec.size
+                )
+            })?;
+            let offer_id = quote.offer_id.unwrap_or_default();
+            self.call(
                 reqwest::Method::PUT,
                 &format!("/asks/{offer_id}/"),
                 Some(create_body),
             )
-            .await?;
+            .await?
+        };
         let id = created
             .get("new_contract")
             .and_then(|x| {
@@ -379,6 +522,8 @@ mod tests {
         let spec = SpawnSpec {
             machine_id: "mmgpu1234".into(),
             size: "rtx4090".into(),
+            cpu: 16,
+            ram_gb: 64,
             ttl_seconds: 3600,
             image: None,
             name: "orb-managed-mmgpu1234".into(),
@@ -387,11 +532,16 @@ mod tests {
             gpu: None,
             arch: None,
             max_hourly_usd: Some(0.60),
+            preferred_offer_id: None,
+            exclude_offer_ids: Vec::new(),
             allow_24h_commitment: false,
+            provisioning_mode: crate::managed::ProvisioningMode::Worker,
         };
         let q = search_bundles_body(&spec);
         assert_eq!(q["gpu_name"]["eq"], "RTX 4090");
         assert_eq!(q["dph_total"]["lte"], 0.60);
+        assert_eq!(q["cpu_cores_effective"]["gte"], 16);
+        assert_eq!(q["cpu_ram"]["gte"], min_ram_mb_for_gb(64));
         let create = create_instance_body(&spec, 120);
         assert_eq!(create["label"], "orb-managed-mmgpu1234");
         assert!(create["onstart"].as_str().is_some());
