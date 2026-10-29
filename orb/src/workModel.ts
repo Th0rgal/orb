@@ -124,8 +124,7 @@ function lineDiff(oldStr: string, newStr: string) {
   return { additions: Math.max(0, newLines.length - common), deletions: Math.max(0, oldLines.length - common) };
 }
 
-// Per tool row, keyed by its args and result: the Changes summary and work
-// folds recount every tool on each streamed delta.
+// Cache per-tool diff stats by arguments and result across streamed updates.
 const diffCache = new WeakMap<object, { args: unknown; result: unknown; stats: DiffStats | null }>();
 export function computeDiffStats(tool: Tool): DiffStats | null {
   const hit = diffCache.get(tool);

@@ -14255,3 +14255,174 @@ async fn codex_oauth_protocols_pin_accounts_and_local_scope_records_usage() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn recovery_supervision_reports_absent_runner_without_claiming_recent_activity() {
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "idle without runner").await;
+    let (tx, rx) = oneshot::channel();
+    h.control
+        .cmd_tx
+        .send(ControlCommand::CancelMission {
+            mission_id: mission.id,
+            min_idle: Some(std::time::Duration::from_secs(900)),
+            keep_remote_queue: false,
+            respond: tx,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rx.await.unwrap().unwrap(), CancelMissionOutcome::NoRunner);
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(mission.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn recovery_handoff_survives_orphan_sweep_with_stale_active_snapshot() {
+    let h = Harness::new().await;
+    let store = h.control.mission_store.clone();
+    let mission = active_mission(&h, "background handoff").await;
+    let stale = store.get_all_active_missions().await.unwrap();
+    let job = Uuid::new_v4();
+    ensure_remote_job_lease(store.as_ref(), mission.id, job, "fixture")
+        .await
+        .unwrap();
+    let wait = usage_limit_wait::RemoteWait {
+        resume_at: Some(chrono::Utc::now()),
+        limit: usage_limit_wait::BACKGROUND_HANDOFF.into(),
+        replays: 0,
+        retries: 0,
+        failed_job_id: Some(job),
+        fallbacks: 0,
+    };
+    usage_limit_wait::update_remote_wait(&h.state.config.working_dir, mission.id, |_| {
+        Some(wait.clone())
+    })
+    .await;
+    finalize_remote_mission(
+        &RemoteMissionOwner::live(&h.control),
+        mission.id,
+        Some(job),
+        "fixture",
+        false,
+        "Partial response".into(),
+        usage_limit_wait::BACKGROUND_HANDOFF_REASON,
+        false,
+        None,
+        Some(&h.state.config.working_dir),
+    )
+    .await
+    .unwrap();
+    let mut resumed = HashSet::new();
+    crate::api::supervision::repair_orphaned_active_missions(
+        &store,
+        &h.state.config.working_dir,
+        &h.control.cmd_tx,
+        &h.control.events_tx,
+        &stale,
+        &HashSet::new(),
+        &mut resumed,
+        chrono::Utc::now(),
+    )
+    .await;
+    let after = store.get_mission(mission.id).await.unwrap().unwrap();
+    assert_eq!(after.status, MissionStatus::Interrupted);
+    assert!(usage_limit_wait::is_waiting_remote(&after));
+    assert!(store
+        .get_active_mission_run(mission.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        usage_limit_wait::remote_wait(&h.state.config.working_dir, mission.id).await,
+        Some(wait.clone())
+    );
+    assert_eq!(
+        usage_limit_wait::due_remote_waits(&h.state.config.working_dir, chrono::Utc::now())
+            .await
+            .len(),
+        1
+    );
+    // Explicit Stop invalidates replay even if a timer already took a snapshot.
+    cancel_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+    )
+    .await
+    .unwrap();
+    super::remote_jobs::replay_remote_mission_after_usage_limit(&h.state, mission.id, wait).await;
+    assert_eq!(
+        store
+            .get_mission(mission.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminal_reason
+            .as_deref(),
+        Some("cancelled")
+    );
+    assert!(
+        usage_limit_wait::remote_wait(&h.state.config.working_dir, mission.id)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn recovery_stale_timer_cannot_restart_or_fail_a_manual_resume() {
+    let h = Harness::new().await;
+    let store = h.control.mission_store.clone();
+    let mission = active_mission(&h, "manual resume supersedes timer").await;
+    let job = Uuid::new_v4();
+    ensure_remote_job_lease(store.as_ref(), mission.id, job, "fixture")
+        .await
+        .unwrap();
+    let stale = usage_limit_wait::RemoteWait {
+        resume_at: Some(chrono::Utc::now()),
+        limit: usage_limit_wait::BACKGROUND_HANDOFF.into(),
+        replays: 0,
+        retries: 0,
+        failed_job_id: Some(Uuid::new_v4()),
+        fallbacks: 0,
+    };
+    let newer = usage_limit_wait::RemoteWait {
+        failed_job_id: Some(job),
+        ..stale.clone()
+    };
+    usage_limit_wait::update_remote_wait(&h.state.config.working_dir, mission.id, |_| {
+        Some(newer.clone())
+    })
+    .await;
+    let placement = remote_grok::placement(&h.state.config.working_dir, &store, mission.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let refused = remote_grok::continue_recovery_on_node(
+        &h.state, &h.control, mission.id, placement, None, &stale,
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.1.contains("superseded"), "{refused:?}");
+    super::remote_jobs::replay_remote_mission_after_usage_limit(&h.state, mission.id, stale).await;
+    assert_eq!(
+        store.get_mission(mission.id).await.unwrap().unwrap().status,
+        MissionStatus::Active
+    );
+    assert_eq!(
+        usage_limit_wait::remote_wait(&h.state.config.working_dir, mission.id).await,
+        Some(newer)
+    );
+    assert!(store
+        .get_active_mission_run(mission.id)
+        .await
+        .unwrap()
+        .is_some());
+}

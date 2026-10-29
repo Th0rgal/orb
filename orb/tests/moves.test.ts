@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createMemo, createRoot } from "solid-js";
-import { MOVE_CONFIRM_MS, fileMoveKey, filesMovedAway, filesMovedInto, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, withMovedMissions } from "../src/moves";
+import { MOVE_CONFIRM_MS, fileMoveKey, filesMovedAway, filesMovedInto, missionMoveKey, missionsMovedInto, moveOptimistically, movedMission, movingOutOf, previewMove, resetMoves, settleMove, withMovedMissions } from "../src/moves";
 
 beforeEach(() => resetMoves());
 afterEach(() => { vi.useRealTimers(); resetMoves(); });
@@ -34,15 +34,17 @@ it("moves it back and shows an error toast when the request fails", async () => 
   expect(document.body.textContent).toContain("403 forbidden");
 });
 
-it("ignores a stale poll still carrying the old project until the server confirms", async () => {
+it("does not mistake a projected destination for acknowledgement", async () => {
   vi.useFakeTimers();
   await moveOptimistically(missionMoveKey("m1"), move, async () => {});
   // A list fetched before the move landed still says alpha.
   expect(withMovedMissions([mission])[0].project).toBe("beta");
-  // Core reports the new place: the override is released.
+  // Even a matching row may be the output of our own projection.
   const confirmed = { id: "m1", project: "beta", tags: ["keep", "orb-folder:docs"] };
   expect(movedMission(confirmed)).toBe(confirmed);
   await Promise.resolve();
+  expect(movedMission(mission).project).toBe("beta");
+  settleMove(missionMoveKey("m1"));
   expect(movedMission({ ...mission, project: "gamma" }).project).toBe("gamma");
 });
 

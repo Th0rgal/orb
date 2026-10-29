@@ -59,7 +59,8 @@ test(`quota levels color chips and status: ${theme} ${size}`, async ({ page }, i
   await expect(her3sy.locator('.p-st')).toHaveText('Limit reached');
   await expect(her3sy.locator('.p-st')).toHaveClass(/\bexhausted\b/);
   await expect(m44.locator('.p-st')).toHaveText('Limit reached');
-  await expect(codex.locator('.p-st')).toHaveText('Connected');
+  await expect(codex.locator('.p-st')).toHaveCount(0);
+  await expect(codex.locator('.p-plan')).toHaveText('pro');
   if (size === 'wide') {
     await expect(her3sy.locator('.p-usage-chip.exhausted')).toHaveCount(2);
     await expect(m44.locator('.p-usage-chip.exhausted')).toHaveText(['Gemini100%']);

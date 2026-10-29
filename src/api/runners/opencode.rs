@@ -18,6 +18,12 @@ use crate::opencode::{extract_reasoning, extract_text};
 use crate::workspace::Workspace;
 use crate::workspace_exec::WorkspaceExec;
 
+/// Redirect inside the PTY wrapper so OpenCode sees non-TTY stdin and reads
+/// the entire prompt through EOF, while stdout retains its terminal behavior.
+fn opencode_prompt_script(command: &str, prompt_path: &str) -> String {
+    format!("#!/bin/sh\n{command} < {}\n", shell_quote(prompt_path))
+}
+
 /// Stop the exact launch scope before releasing the runner. A PTY helper
 /// such as `script` creates a new session, so killing a parent/group alone
 /// cannot guarantee that its writer is gone. Never select scopes by name
@@ -435,9 +441,8 @@ pub async fn run_opencode_turn(
         )
         .await;
     }
-    // The message is written to a temp file and passed via $(cat ...) to avoid
-    // argument splitting issues when multi-line messages go through
-    // systemd-nspawn or nsenter shell wrappers.
+    // Keep the complete message out of argv: a transferred transcript can exceed
+    // Linux's per-argument limit even when the outer shell command is small.
     let prompt_file_host = work_dir.join(".sandboxed-sh-prompt.txt");
     if let Err(e) = std::fs::write(&prompt_file_host, message) {
         let err_msg = format!("Failed to write prompt file: {}", e);
@@ -447,21 +452,7 @@ pub async fn run_opencode_turn(
     let prompt_file_env = workspace_path_for_env(workspace, &prompt_file_host);
     let prompt_file_arg = prompt_file_env.to_string_lossy().to_string();
 
-    // Build the opencode run command as a shell string so that $(cat <file>)
-    // correctly expands the message as a single argument.
-    let shell_escape = |s: &str| -> String {
-        let mut escaped = String::with_capacity(s.len() + 2);
-        escaped.push('\'');
-        for ch in s.chars() {
-            if ch == '\'' {
-                escaped.push_str("'\"'\"'");
-            } else {
-                escaped.push(ch);
-            }
-        }
-        escaped.push('\'');
-        escaped
-    };
+    let shell_escape = shell_quote;
 
     let opencode_model = opencode_model_argument(resolved_model.as_deref());
     // OpenCode's `--model` parser splits on the first `/`. A slash-less
@@ -495,7 +486,6 @@ pub async fn run_opencode_turn(
     }
 
     let mut inner_cmd = String::new();
-    inner_cmd.push_str("#!/bin/sh\n");
     inner_cmd.push_str(&shell_escape(&cli_runner));
     // Without `--thinking` the CLI drops reasoning parts from its JSON output.
     inner_cmd.push_str(" run --format json --thinking --model ");
@@ -559,9 +549,7 @@ pub async fn run_opencode_turn(
         )
         .to_string_lossy(),
     ));
-    inner_cmd.push_str(" \"$(cat ");
-    inner_cmd.push_str(&shell_escape(&prompt_file_arg));
-    inner_cmd.push_str(")\"");
+    let inner_cmd = opencode_prompt_script(&inner_cmd, &prompt_file_arg);
 
     let script_host_path = format!("{}/.sandboxed-sh-opencode-cmd.sh", work_dir.display());
     let script_env_path = format!(
@@ -831,8 +819,8 @@ pub async fn run_opencode_turn(
     cleanup_opencode_listeners(&workspace_exec, work_dir, Some(&opencode_port)).await;
 
     // Use WorkspaceExec to spawn the CLI in the correct workspace context.
-    // We invoke /bin/sh -c '...' so the prompt file is read via $(cat ...)
-    // and passed as a single argument regardless of workspace type.
+    // The inner script redirects the prompt file onto stdin in the target
+    // workspace, after the PTY wrapper has been established.
     let mut child = match workspace_exec
         .spawn_streaming(
             &crate::workspace::configured_project_dir(workspace, work_dir),
@@ -2394,6 +2382,83 @@ mod path_tests {
         opencode_inactivity_should_kill, opencode_model_argument, opencode_path,
     };
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_prompt_stdin_preserves_large_transfers() {
+        let temp = tempfile::tempdir().unwrap();
+        let prompt_path = temp.path().join("prompt ' $quoted.txt");
+        // Larger than Linux MAX_ARG_STRLEN; include shell syntax and trailing
+        // newlines, which command substitution used to strip from the prompt.
+        let prompt =
+            "Transferred context: 日本語 ' \" $HOME $(exit 99) `exit 98`\n".repeat(10_000) + "\n\n";
+        std::fs::write(&prompt_path, &prompt).unwrap();
+        let script = super::opencode_prompt_script(
+            &format!(
+                "sh -c {}",
+                super::shell_quote("test ! -t 0 || exit 91; test \"$#\" -eq 0 || exit 92; cat")
+            ),
+            prompt_path.to_str().unwrap(),
+        );
+        assert!(script.len() < 1024);
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(output.stdout, prompt.as_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_prompt_stdin_missing_file_does_not_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("launched");
+        let script = super::opencode_prompt_script(
+            &format!("touch {}", super::shell_quote(marker.to_str().unwrap())),
+            temp.path().join("missing").to_str().unwrap(),
+        );
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!marker.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opencode_prompt_stdin_redirects_inside_pty() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let prompt_path = temp.path().join("prompt.txt");
+        let received = temp.path().join("received.txt");
+        let prompt = "transferred history\n".repeat(20_000) + "\n\n";
+        std::fs::write(&prompt_path, &prompt).unwrap();
+        let probe = format!(
+            "test ! -t 0 || exit 91; test -t 1 || exit 92; cat > {}",
+            super::shell_quote(received.to_str().unwrap())
+        );
+        let script_path = temp.path().join("launch.sh");
+        std::fs::write(
+            &script_path,
+            super::opencode_prompt_script(
+                &format!("sh -c {}", super::shell_quote(&probe)),
+                prompt_path.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new("script")
+            .args(["-qe", "/dev/null", "-c"])
+            .arg(super::shell_quote(script_path.to_str().unwrap()))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(std::fs::read(received).unwrap(), prompt.as_bytes());
+    }
 
     #[test]
     fn teardown_scope_requires_exact_mission_ownership() {

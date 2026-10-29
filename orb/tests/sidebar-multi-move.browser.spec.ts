@@ -2,13 +2,14 @@ import {test, expect, type Page} from '@playwright/test';
 test.use({browserName:'webkit'});
 const P='00000000-0000-0000-0000-0000000000a1', F='00000000-0000-0000-0000-0000000000a2', C='00000000-0000-0000-0000-0000000000a3';
 type M={id:string;title:string;status:string;project:string;tags:string[];history:[];updated_at:string;parent_mission_id?:string};
-async function setup(page:Page, opts:{failMove?:string; deleteRunning?:boolean}={}) {
+async function setup(page:Page, opts:{failMove?:string; deleteRunning?:boolean; crossProject?:boolean; staleDetails?:boolean}={}) {
   await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
   let missions:M[]=[
     {id:P,title:'Pareto',status:'completed',project:'verity',tags:[],history:[],updated_at:'2026-10-20T07:00:00Z'},
     {id:F,title:'Fredrik',status:'completed',project:'verity',tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'},
     {id:C,title:'Deep Audit',status:opts.deleteRunning?'active':'interrupted',project:'verity',tags:[],history:[],updated_at:'2026-10-20T05:00:00Z',parent_mission_id:P},
   ];
+  const original=missions.map(m=>({...m}));
   const writes:string[]=[]; const cancels:string[]=[];
   let release:()=>void=()=>{}; const gate=new Promise<void>(r=>release=r);
   await page.route('**/api/**',async route=>{
@@ -27,9 +28,9 @@ async function setup(page:Page, opts:{failMove?:string; deleteRunning?:boolean}=
       const gone=[id,...missions.filter(m=>m.parent_mission_id===id).map(m=>m.id)];
       missions=missions.filter(m=>!gone.includes(m.id)); return route.fulfill({json:{deleted_ids:gone}});
     }
-    const json=path==='/api/projects'?{projects:[{slug:'verity',title:'Verity'}]}
+    const json=path==='/api/projects'?{projects:[{slug:'verity',title:'Verity'},...(opts.crossProject?[{slug:'other',title:'Other'}]:[])]}
       :path==='/api/control/missions'?missions.filter(m=>!url.searchParams.has('project')||m.project===url.searchParams.get('project'))
-      :path.startsWith('/api/control/missions/')?missions.find(m=>m.id===id)??{}
+      :path.startsWith('/api/control/missions/')?(opts.staleDetails?original:missions).find(m=>m.id===id)??{}
       :path.endsWith('/files')?{entries:(url.searchParams.get('path')??'')===''?[{name:'Audits',kind:'dir'}]:[]}
       :path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
     await route.fulfill({json});
@@ -115,4 +116,26 @@ test('deleting a mission without children uses the plain wording and no cascade 
   await dialog.getByRole('button',{name:'Delete',exact:true}).click();
   await expect.poll(()=>missions().map(m=>m.title).sort()).toEqual(['Deep Audit','Pareto']);
   expect(urls).toEqual(['']);
+});
+
+
+test('Cmd+X/Cmd+V moves the open mission once across projects despite stale detail reads', async ({page}) => {
+  await page.clock.install();
+  const {tree,writes,release,missions}=await setup(page,{crossProject:true,staleDetails:true});
+  const row=tree.getByRole('button',{name:'Pareto',exact:true});
+  await row.click();
+  await row.focus();await page.keyboard.press('Meta+x');
+  await expect(tree.locator('.mission-cut')).toHaveCount(1);
+  const destination=tree.getByRole('button',{name:'Other',exact:true});
+  await destination.click();await destination.focus();await page.keyboard.press('Meta+v');
+  await expect.poll(()=>writes.length).toBe(2); // parent plus launched child
+  await expect(row).toHaveCount(1);
+  await expect(tree.locator('.row.project.contains-current')).toHaveAttribute('data-drop-project','other');
+  release();
+  await expect.poll(()=>missions().find(m=>m.id===P)?.project).toBe('other');
+  await expect(tree.locator('.mission-cut')).toHaveCount(0);
+  await page.clock.fastForward(31_000);
+  await expect(row).toHaveCount(1);
+  await expect(tree.locator('.row.project.contains-current')).toHaveAttribute('data-drop-project','other');
+  await expect(tree.getByRole('button',{name:'Show the 1 mission launched by Pareto'})).toHaveCount(1);
 });
