@@ -15,7 +15,7 @@ import { Lightbox } from "./Lightbox";
 import { FileReferenceContext } from "./fileReferenceContext";
 import { copyText } from "./clipboard";
 import { remoteLog } from "./remoteLog";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
 import { forkContext } from "./forkContext";
 import { backgroundWake, type BackgroundWake } from "./backgroundWake";
 import { For, Show, batch, createSignal, createEffect, createMemo, createContext, useContext, onCleanup } from "solid-js";
@@ -655,7 +655,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
   );
 }
 
-export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; loadToolCall?: ToolCallLoader }) {
+export function Transcript(p: { sizeKey?: string; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -731,8 +731,9 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
             case "tool":
               return isOrchestrationTool(item.name) ? <OrchestrationCard item={item} /> : <ToolRow item={item} />;
             case "error":
-              return <ErrorNotice error={item.text} title={item.title ?? (item.cancelled ? "Mission cancelled" : "Mission failed")}>
-                <Show when={!item.cancelled && p.onResume && item.key === lastErrorKey()}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
+              return <ErrorNotice backend={p.backend} error={item.text} title={item.title ?? (item.cancelled ? "Mission cancelled" : "Mission failed")}>
+                <Show when={!item.cancelled && p.onResume && item.key === lastErrorKey() && !isNonResumableError(item.text, p.backend)}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
+                <Show when={p.onOpenSource && item.key === lastErrorKey()}><button type="button" class="error-notice-link" onClick={() => p.onOpenSource?.()}>Open original conversation</button></Show>
               </ErrorNotice>;
           }
         }}

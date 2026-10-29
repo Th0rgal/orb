@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { harnessName } from "./harnesses";
 /**
  * One vocabulary for Core mission statuses. Every check that used to carry
  * its own list of status strings asks one of these predicates instead, so a
@@ -224,4 +225,39 @@ export function presentedStatus(mission: ActivityMission & { status: string }, a
   if (activity.working) return activity.reason === "queued" ? "queued" : activity.reason === "starting" ? "starting" : isLive(mission.status) ? mission.status : "running";
   if (!isLive(mission.status)) return mission.status;
   return activity.reason === "failed" ? "failed" : "interrupted";
+}
+
+/**
+ * Single execution-derived phase label for `MissionPending` and `WorkingRow`.
+ * Reports `"Starting <Harness>"` while startup is unconfirmed (`destination_starting`
+ * transfer, `status === "starting"`, or host CLI startup before first output),
+ * and `"Working"` once execution or output is confirmed.
+ */
+export function executionPhaseLabel(
+  mission: (ActivityMission & { backend?: string | null; tags?: readonly string[] | null }) | null | undefined,
+  opts: {
+    activity?: boolean;
+    handoff?: boolean;
+    stopping?: boolean;
+    transferStarting?: boolean;
+  } = {},
+): string {
+  if (opts.handoff) return "Sending";
+  if (opts.stopping) return "Stopping the current turn…";
+  if (mission?.remote_job?.node_state === "queued") return "Waiting for a free slot";
+  const slotWait = queueWaitLabel(mission);
+  if (slotWait) return slotWait;
+  const backend = mission?.backend?.trim();
+  const harness = backend ? harnessName(backend).replace(/\s+CLI$/, "") : "";
+  const remoteConfirmedRunning = mission?.remote_job?.node_state === "running";
+  const isTransferred = !!mission?.tags?.some(tag => tag.startsWith("fork-of:"));
+  if (!opts.activity) {
+    if (opts.transferStarting || mission?.status === "starting" || (isTransferred && !remoteConfirmedRunning)) {
+      return harness ? `Starting ${harness}` : "Starting";
+    }
+    if ((backend === "opencode" || backend === "claudecode") && !remoteConfirmedRunning && !mission?.remote_job) {
+      return `Starting ${harness}`;
+    }
+  }
+  return "Working";
 }

@@ -3,10 +3,64 @@ import { Show, createMemo, createSignal, createEffect, type JSX } from "solid-js
 import { copyText } from "./clipboard";
 import { CloseIcon, CopyIcon, CheckIcon } from "./icons";
 import { Dialog, DialogButton } from "./Dialog";
+import { harnessName } from "./harnesses";
 import { providerLimit, resetPhrase } from "./usageLimit";
 
-export type ErrorInfo = { title: string; message: string; tone?: "warning"; link?: { label: string; url: string } };
-export function describeError(raw: string, fallback = "Something went wrong"): ErrorInfo {
+export type ErrorInfo = { title: string; message: string; tone?: "warning"; link?: { label: string; url: string }; nonResumable?: boolean };
+export type ProcessLaunchFailureKind = "arg_list_too_long" | "missing_binary" | "spawn_failed";
+
+function inferLaunchHarness(raw: string, backend?: string | null): string {
+  if (backend && backend.trim()) return harnessName(backend.trim()).replace(/\s+CLI$/, "");
+  const matched = raw.match(/\.sandboxed-sh-(opencode|claudecode|claude|codex|antigravity|agy|grok|vibe)-cmd\.sh/i)?.[1]
+    ?? raw.match(/\bRemote\s+(opencode|claudecode|claude|codex|antigravity|grok|vibe)\s+job\b/i)?.[1]
+    ?? raw.match(/Failed to (?:start|spawn|launch|write)\s+(OpenCode|Claude Code|claudecode|claude|Codex|Antigravity|agy|Grok|Vibe)\b/i)?.[1]
+    ?? raw.match(/(?:^|:\s*)(opencode|claude|claudecode|codex|agy|antigravity|grok|vibe):\s*(?:Argument list too long|not found|command not found|No such file or directory|Permission denied|Exec format error)/im)?.[1]
+    ?? raw.match(/command not found:\s*(opencode|claude|claudecode|codex|agy|antigravity|grok|vibe)\b/i)?.[1];
+  if (!matched) return "Agent";
+  const key = matched.toLowerCase().replace(/\s+/g, "");
+  const normalized = key === "claude" ? "claudecode" : key === "agy" ? "antigravity" : key;
+  return harnessName(normalized).replace(/\s+CLI$/, "");
+}
+
+export function classifyProcessLaunchFailure(raw: string, backend?: string | null): (ErrorInfo & { kind: ProcessLaunchFailureKind; nonResumable: true }) | null {
+  if (/argument list too long|\bE2BIG\b|\bos error 7\b/i.test(raw)) {
+    const agent = inferLaunchHarness(raw, backend);
+    return {
+      kind: "arg_list_too_long",
+      nonResumable: true,
+      title: `${agent} could not start`,
+      message: `The carried conversation history exceeded the system command-line limit before ${agent} could launch. Your workspace and conversation history are preserved. Update the backend so ${agent} receives large histories over stdin, then continue or send a message in this conversation directly without transferring again — or send a shorter message, switch agents, or continue in the original conversation.`,
+    };
+  }
+  if (/(?:\.sandboxed-sh-[\w-]+-cmd\.sh[^\n]*:\s*(?:not found|No such file or directory)|(?:\b(?:opencode|claude|claudecode|codex|agy|antigravity|grok|vibe)\b)[^\n]*:\s*(?:command not found|not found|No such file or directory)|command not found:\s*(?:opencode|claude|claudecode|codex|agy|antigravity|grok|vibe)\b|(?:failed to (?:start|spawn|launch|exec)|posix_spawn)[^\n]*(?:No such file or directory|\bos error 2\b|not found))/i.test(raw)) {
+    const agent = inferLaunchHarness(raw, backend);
+    return {
+      kind: "missing_binary",
+      nonResumable: true,
+      title: `${agent} could not start`,
+      message: `The ${agent} CLI was not found on the execution machine. Your workspace and conversation history are preserved. Install or update ${agent} on that machine, then continue in this conversation directly without transferring again — or switch to another agent.`,
+    };
+  }
+  if (/(?:\.sandboxed-sh-[\w-]+-cmd\.sh[^\n]*:\s*(?:Permission denied|Exec format error)|(?:\b(?:opencode|claude|claudecode|codex|agy|antigravity|grok|vibe)\b)[^\n]*:\s*(?:Permission denied|Exec format error)|(?:failed to (?:start|spawn|launch|exec)|posix_spawn)[^\n]*(?:Permission denied|\bos error (?:8|13)\b|Exec format error)|Failed to (?:start|write) [^\n]*(?:CLI|command script))/i.test(raw)) {
+    const agent = inferLaunchHarness(raw, backend);
+    return {
+      kind: "spawn_failed",
+      nonResumable: true,
+      title: `${agent} could not start`,
+      message: `The execution machine could not launch the ${agent} CLI process. Your workspace and conversation history are preserved. Check the ${agent} CLI installation or update the backend on that machine, then continue in this conversation directly without transferring again — or switch to another agent.`,
+    };
+  }
+  return null;
+}
+
+export function isNonResumableError(raw: string, backend?: string | null): boolean {
+  if (!raw) return false;
+  return describeError(raw, "Mission failed", backend).nonResumable === true;
+}
+
+export function describeError(raw: string, fallback = "Something went wrong", backend?: string | null): ErrorInfo {
+  const launch = classifyProcessLaunchFailure(raw, backend);
+  if (launch) return launch;
   if (/daybreak[^\n]*(?:isn|not)[^\n]*available/i.test(raw)) return {title:"Daybreak is unavailable for this account or model",message:"OpenAI refused Daybreak for the selected model on this connection. Check the account’s approved access or explicitly choose Standard. The model and program were not changed automatically."};
   if (/access_program_not_enabled/.test(raw)) return {title:"Cyber access is not enabled",message:"The account is not approved for this program and model. Check its Daybreak access or explicitly choose Standard. The selected model has not been changed."};
   if (/unsupported_access_program/.test(raw)) return {title:"Cyber selection is unsupported on this connection",message:"This connection cannot apply the requested program reliably. Use a supported connection, or explicitly choose Automatic. Your conversation is saved."};
@@ -37,7 +91,7 @@ export function describeError(raw: string, fallback = "Something went wrong"): E
   if (/Antigravity ended its headless turn while background task\(s\).*were still running/i.test(raw)) return { title: "Antigravity turn ended while background tasks were still running", message: "Your conversation is saved. Resume to inspect task logs or continue from the last completed step." };
   if (/Antigravity ended without a SUCCESS result/i.test(raw)) return { title: "Antigravity stopped before completing its turn", message: "The CLI exited early without a final result. Your conversation is saved; resume to continue from the last completed step." };
   const agyLimit = raw.match(/Antigravity prompts must be at most (\d+ KiB)/i);
-  if (agyLimit) return { title: `Antigravity prompt exceeds ${agyLimit[1]}`, message: `Shorten the message or put large context in workspace files so the prompt stays within ${agyLimit[1]}. Your draft is kept.` };
+  if (agyLimit) return { nonResumable: true, title: `Antigravity prompt exceeds ${agyLimit[1]}`, message: `Shorten the message or put large context in workspace files so the prompt stays within ${agyLimit[1]}. Your draft is kept.` };
   if (/Failed to fetch|NetworkError|Load failed|fetch failed/i.test(raw)) return { title: "Can’t reach the backend", message: "Check your connection and backend settings, then try again." };
   if (/Workspace exceeds transfer limit/.test(raw)) {
     const found = raw.match(/: (.+?) in (\d+) files\. Largest: (.+)$/);
@@ -46,12 +100,13 @@ export function describeError(raw: string, fallback = "Something went wrong"): E
   }
   const outdated = raw.match(/Update (.+) to receive a workspace (containing links|with selected build folders)/);
   if (outdated) return { title: `${outdated[1]} needs an update`, message: `This workspace ${outdated[2] === "containing links" ? "contains links" : "includes build folders you selected"}, which that machine cannot receive yet. Update it, or choose another machine. The conversation has not moved.` };
+  if (raw.trim() === "Model error") return { title: fallback, message: "The run ended with an error before returning a response. Your workspace and conversation history are preserved." };
   const technical = raw.length > 260 || /(?:^\s*[{[]|\\n|Traceback|Internal error|statvfs:)/.test(raw);
   return { title: fallback, message: technical ? "The request could not be completed. See details for the backend response." : raw };
 }
 
 /** Inline, non-modal feedback. Never truncates or discards the original error. */
-export function ErrorNotice(p: { error: string; title?: string; onDismiss?: () => void; children?: JSX.Element }) {
+export function ErrorNotice(p: { error: string; title?: string; backend?: string | null; onDismiss?: () => void; children?: JSX.Element }) {
   const [copied, setCopied] = createSignal(false);
   const [copyError, setCopyError] = createSignal("");
   createEffect(() => { p.error; setCopied(false); setCopyError(""); });
@@ -64,7 +119,7 @@ export function ErrorNotice(p: { error: string; title?: string; onDismiss?: () =
       if (p.error === error) { setCopied(false); setCopyError(e instanceof Error ? e.message : String(e)); }
     }
   };
-  const info = createMemo(() => describeError(p.error, p.title));
+  const info = createMemo(() => describeError(p.error, p.title, p.backend));
   return <section class="error-notice" classList={{ warning: info().tone === "warning" }} role="alert">
     <svg class="error-notice-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="8" cy="8" r="6" /><path d="M8 4.5v4M8 10.5v1" /></svg>
     <div class="error-notice-body"><strong>{info().title}</strong><p>{info().message}</p>

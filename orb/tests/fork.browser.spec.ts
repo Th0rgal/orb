@@ -1,66 +1,90 @@
-import {eventPage} from "./eventPageFixture";
+import { eventPage } from "./eventPageFixture";
 import { test, expect } from "@playwright/test";
 
-for (const target of [{ backend: "opencode", name: "OpenCode", model: "builtin/smart", label: "Smart (Default)" }, { backend: "antigravity", name: "Antigravity CLI", model: "node-argon", label: "Node Argon" }]) {
-test(`fork dialog uses ${target.name} on the source destination without mutating it`, async ({ page }) => {
-  const source: any = { id: "original", title: "Original work", status: "active", backend: "grok", model_override: "grok-4.6", project: "test", remote_node_id: "dgx-spark", history: [], created_at: "", updated_at: "" };
-  const fork = { ...source, id: "forked", title: "Original work", tags: ["fork-of:original"], updated_at: "2099-01-01T00:00:00Z", backend: target.backend, model_override: target.model };
-  let created = false;
-  const mutations: { path: string; body: any }[] = [];
-  await page.addInitScript(() => { localStorage.setItem("orb.apiUrl", location.origin); localStorage.setItem("orb.jwt", "test"); localStorage.setItem("orb-theme", "dark"); });
-  await page.route("**/api/**", async route => {
-    const req = route.request(), path = new URL(req.url()).pathname;
-    if(path === "/api/providers/antigravity-models") return route.fulfill({json:[new URL(req.url()).searchParams.get("node_id") === "dgx-spark" ? ["node-argon", "Node Argon"] : ["core-only", "Core Only"]]});
-    if(path === "/api/model-routing/chains") return route.fulfill({json:[{id:"builtin/smart",name:"Smart (Default)"}]});
-    if (req.method() !== "GET") {
-      mutations.push({ path, body: req.postDataJSON() });
-      if (path === "/api/control/missions/original/fork") { created = true; return route.fulfill({ json: fork }); }
-      // A transfer stops the original first, then archives it once the new agent exists.
-      if (path === "/api/control/missions/original/cancel") { source.status = "interrupted"; return route.fulfill({ json: {} }); }
-      if (path === "/api/control/missions/original/status") { source.status = req.postDataJSON().status; return route.fulfill({ json: source }); }
-      return route.fulfill({ status: 400 });
+for (const target of [
+  { backend: "opencode", name: "OpenCode", shortName: "OpenCode", model: "builtin/smart", label: "Smart (Default)" },
+  { backend: "antigravity", name: "Antigravity CLI", shortName: "Antigravity", model: "node-argon", label: "Node Argon" },
+]) {
+  test(`fork dialog uses ${target.name} on the source destination and archives source only after startup is confirmed`, async ({ page }) => {
+    const source: any = { id: "original", title: "Original work", status: "active", backend: "grok", model_override: "grok-4.6", project: "test", remote_node_id: "dgx-spark", history: [], created_at: "", updated_at: "" };
+    const fork: any = { ...source, id: "forked", title: "Original work", tags: ["fork-of:original"], updated_at: "2099-01-01T00:00:00Z", backend: target.backend, model_override: target.model };
+    let created = false;
+    let started = false;
+    const mutations: { path: string; body: any }[] = [];
+    await page.addInitScript(() => { localStorage.setItem("orb.apiUrl", location.origin); localStorage.setItem("orb.jwt", "test"); localStorage.setItem("orb-theme", "dark"); });
+    await page.route("**/api/**", async route => {
+      const req = route.request(), path = new URL(req.url()).pathname;
+      if (path === "/api/providers/antigravity-models") return route.fulfill({ json: [new URL(req.url()).searchParams.get("node_id") === "dgx-spark" ? ["node-argon", "Node Argon"] : ["core-only", "Core Only"]] });
+      if (path === "/api/model-routing/chains") return route.fulfill({ json: [{ id: "builtin/smart", name: "Smart (Default)" }] });
+      if (req.method() !== "GET") {
+        if (path.endsWith("/inbox-digest") || path.endsWith("/opened") || path.includes("/inbox-state/seen/")) {
+          return route.fulfill({ json: {} });
+        }
+        mutations.push({ path, body: req.postDataJSON() });
+        if (path === "/api/control/missions/original/fork") { created = true; return route.fulfill({ json: fork }); }
+        if (path === "/api/control/missions/original/cancel") { source.status = "interrupted"; return route.fulfill({ json: {} }); }
+        if (path === "/api/control/missions/original/status") { source.status = req.postDataJSON().status; return route.fulfill({ json: source }); }
+        return route.fulfill({ status: 400 });
+      }
+      if (path === "/api/control/stream") {
+        const missionId = new URL(req.url()).searchParams.get("mission_id");
+        const body = missionId === "forked" && started
+          ? `event: thinking\ndata: ${JSON.stringify({ content: "Inspecting workspace", done: true })}\n\n`
+          : "";
+        return route.fulfill({ contentType: "text/event-stream", body });
+      }
+      const forkedEvents = started
+        ? [
+            { id: 1, event_id: "u1", sequence: 1, event_type: "user_message", content: "Carried prompt", timestamp: "" },
+            { id: 2, event_id: "t1", sequence: 2, event_type: "thinking", content: "Inspecting workspace", metadata: { done: true }, timestamp: "" },
+          ]
+        : [{ id: 1, event_id: "u1", sequence: 1, event_type: "user_message", content: "Carried prompt", timestamp: "" }];
+      const json = path === "/api/projects" ? { projects: [{ slug: "test", title: "Test" }] }
+        : path === "/api/backends" ? [{ id: "grok", name: "Grok Build" }, { id: "opencode", name: "OpenCode" }, { id: "antigravity", name: "Antigravity" }]
+        : path === "/api/providers/backend-models" ? { backends: { grok: [{ value: "grok-4.6", label: "Grok 4.6" }], opencode: [{ value: "qwen", label: "Qwen" }] } }
+        : path === "/api/control/missions" || path.endsWith("/missions") ? created ? [source, fork].filter(m => m.status !== "acknowledged") : [source]
+        : path === "/api/control/missions/original" ? source
+        : path === "/api/control/missions/forked" ? fork
+        : path === "/api/control/missions/forked/events" ? forkedEvents
+        : path.endsWith("/events") || path.endsWith("/queue") ? []
+        : path.endsWith("/crons") ? { jobs: [] }
+        : path.endsWith("/files") ? { entries: [] }
+        : path === "/api/remote-nodes" ? { nodes: [{ id: "dgx-spark", status: "online" }] }
+        : { job: null, runs: [] };
+      return route.fulfill(path.endsWith("/events") ? eventPage(route, Array.isArray(json) ? json : []) : { json });
+    });
+    await page.goto("/");
+    await page.locator(".row.project .row-main", { hasText: "Test" }).click();
+    await page.getByRole("button", { name: /Original work/ }).click();
+    await page.getByRole("button", { name: "Transfer to another agent", exact: true }).click();
+    const menu = page.getByRole("menu", { name: "Transfer to another agent", exact: true });
+    await expect(menu).toBeVisible();
+    await menu.getByRole("menuitem", { name: target.name }).click();
+    const models = page.getByRole("menu", { name: "Choose a model" });
+    await expect(models.getByRole("menuitem", { name: target.label })).toBeVisible();
+    await models.getByRole("menuitem", { name: target.label }).click();
+    if (target.backend === "antigravity") {
+      const efforts = page.getByRole("menu", { name: "Choose effort" });
+      await expect(efforts.getByRole("menuitem", { name: "High", exact: true })).toBeVisible();
+      await efforts.getByRole("menuitem", { name: "High", exact: true }).click();
     }
-    if (path === "/api/control/stream") return route.fulfill({ contentType: "text/event-stream", body: "" });
-    const json = path === "/api/projects" ? { projects: [{ slug: "test", title: "Test" }] }
-      : path === "/api/backends" ? [{ id: "grok", name: "Grok Build" }, { id: "opencode", name: "OpenCode" }, { id: "antigravity", name: "Antigravity" }]
-      : path === "/api/providers/backend-models" ? { backends: { grok: [{ value: "grok-4.6", label: "Grok 4.6" }], opencode: [{ value: "qwen", label: "Qwen" }] } }
-      : path === "/api/control/missions" || path.endsWith("/missions") ? created ? [source, fork] : [source]
-      : path === "/api/control/missions/original" ? source
-      : path === "/api/control/missions/forked" ? fork
-      : path.endsWith("/events") || path.endsWith("/queue") ? []
-      : path.endsWith("/crons") ? { jobs: [] }
-      : path.endsWith("/files") ? { entries: [] }
-      : path === "/api/remote-nodes" ? { nodes: [{ id: "dgx-spark", status: "online" }] }
-      : { job: null, runs: [] };
-    return route.fulfill(path.endsWith("/events")?eventPage(route,Array.isArray(json)?json:[]):{json});
-  });
-  await page.goto("/");
-  await page.locator(".row.project .row-main", { hasText: "Test" }).click();
-  await page.getByRole("button", { name: /Original work/ }).click();
-  await page.getByRole("button", { name: "Transfer to another agent", exact: true }).click();
-  const menu = page.getByRole("menu", { name: "Transfer to another agent", exact: true });
-  await expect(menu).toBeVisible();
-  await menu.getByRole("menuitem", { name: target.name }).click();
-  const models = page.getByRole("menu", { name: "Choose a model" });
-  await expect(models.getByRole("menuitem", { name: target.label })).toBeVisible();
-  await models.getByRole("menuitem", { name: target.label }).click();
-  if (target.backend === "antigravity") {
-    const efforts = page.getByRole("menu", { name: "Choose effort" });
-    await expect(efforts.getByRole("menuitem", { name: "High", exact: true })).toBeVisible();
-    await efforts.getByRole("menuitem", { name: "High", exact: true }).click();
-  }
-  await expect(menu).toHaveCount(0);
-  await expect(page.locator(".under-harness")).toHaveText(target.name);
-  await expect(page.locator(".row.agent.active")).toHaveCount(1);
-  // The transfer replaces the conversation under its name; the archived original leaves the sidebar.
-  await expect(page.locator(".row.agent.active .row-label")).toHaveText("Original work");
-  await expect(page.locator(".row.agent", { hasText: "Original work" })).toHaveCount(1);
-  // Stop the original, create the transfer, then archive the original: in that order, once each.
-  expect(mutations.map(m => m.path)).toEqual(["/api/control/missions/original/cancel", "/api/control/missions/original/fork", "/api/control/missions/original/status"]);
-  expect(mutations[1]).toMatchObject({ body: { backend: target.backend, model_override: target.model } });
-  if (target.backend === "antigravity") expect(mutations[1].body.model_effort).toBe("high");
-  expect(mutations[2].body).toEqual({ status: "acknowledged" });
-  await expect(page.locator(".row.agent", { hasText: "Original work" }).first()).toBeVisible();
-});
+    await expect(menu).toHaveCount(0);
+    await expect(page.locator(".under-harness")).toHaveText(target.name);
+    // Before startup is confirmed, the destination announces Starting <Harness> and source is NOT yet archived.
+    await expect(page.locator('.scroll [role="status"]').first()).toContainText(`Starting ${target.shortName}`);
+    expect(mutations.map(m => m.path)).toEqual(["/api/control/missions/original/cancel", "/api/control/missions/original/fork"]);
 
+    // Confirm destination startup; source archives cleanly once.
+    started = true;
+    await expect.poll(() => mutations.map(m => m.path)).toEqual([
+      "/api/control/missions/original/cancel",
+      "/api/control/missions/original/fork",
+      "/api/control/missions/original/status",
+    ]);
+    expect(mutations[1]).toMatchObject({ body: { backend: target.backend, model_override: target.model } });
+    if (target.backend === "antigravity") expect(mutations[1].body.model_effort).toBe("high");
+    expect(mutations[2].body).toEqual({ status: "acknowledged" });
+    await expect(page.locator(".row.agent.active .row-label")).toHaveText("Original work");
+    await expect(page.locator(".row.agent", { hasText: "Original work" })).toHaveCount(1);
+  });
 }

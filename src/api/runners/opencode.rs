@@ -24,6 +24,17 @@ fn opencode_prompt_script(command: &str, prompt_path: &str) -> String {
     format!("#!/bin/sh\n{command} < {}\n", shell_quote(prompt_path))
 }
 
+/// Outer PTY shell wrapper command. Linux (`util-linux`) uses `script -qe /dev/null -c`;
+/// macOS host runs use BSD `script -q /dev/null <script> </dev/null`.
+fn opencode_pty_shell_command(script_env_path: &str, host_macos: bool) -> String {
+    let quoted = shell_quote(script_env_path);
+    if host_macos {
+        format!("script -q /dev/null {quoted} </dev/null 2>/dev/null")
+    } else {
+        format!("script -qe /dev/null -c {quoted} 2>/dev/null")
+    }
+}
+
 /// Stop the exact launch scope before releasing the runner. A PTY helper
 /// such as `script` creates a new session, so killing a parent/group alone
 /// cannot guarantee that its writer is gone. Never select scopes by name
@@ -570,9 +581,11 @@ pub async fn run_opencode_turn(
         let _ = std::fs::set_permissions(&script_host_path, std::fs::Permissions::from_mode(0o755));
     }
 
-    let mut shell_cmd = String::from("script -qe /dev/null -c ");
-    shell_cmd.push_str(&shell_escape(&script_env_path));
-    shell_cmd.push_str(" 2>/dev/null");
+    let shell_cmd = opencode_pty_shell_command(
+        &script_env_path,
+        cfg!(target_os = "macos")
+            && workspace.workspace_type == crate::workspace::WorkspaceType::Host,
+    );
 
     let args = vec!["-c".to_string(), shell_cmd.clone()];
     let cli_runner_shell = "/bin/sh".to_string();
@@ -2458,6 +2471,104 @@ mod path_tests {
             .unwrap();
         assert!(output.status.success(), "{:?}", output);
         assert_eq!(std::fs::read(received).unwrap(), prompt.as_bytes());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_pty_launch_preserves_large_unicode_fork_context() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::AsyncReadExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let prompt_path = temp.path().join(".sandboxed-sh-prompt.txt");
+        let received_path = temp.path().join("received_prompt.bin");
+        let fake_cli = temp.path().join("fake-opencode");
+
+        let turn_msg = serde_json::json!({
+            "role": "assistant",
+            "content": "Unicode: 日本語 العربية 한국어 🚀🧪 ∑∀∃∇ 'single' \"double\" $HOME $(exit 99) `exit 98` </fork_context>\nline2"
+        });
+        let messages: Vec<_> = (0..3_200).map(|_| turn_msg.clone()).collect();
+        let envelope = serde_json::json!({
+            "source_mission_id": "86d91cc3-671c-472d-91d4-0fc17e446ad4",
+            "source_title": "Codex -> OpenCode Unicode Transfer",
+            "messages": messages,
+        });
+        let prompt = format!(
+            "Continue the work from this conversation in a fresh native session.\n\n<fork_context>\n{}\n</fork_context>\n\n",
+            serde_json::to_string(&envelope).unwrap()
+        );
+        assert!(
+            prompt.len() > 500 * 1024,
+            "prompt must exceed OS per-arg limits: {}",
+            prompt.len()
+        );
+        std::fs::write(&prompt_path, prompt.as_bytes()).unwrap();
+
+        let fake_cli_script = format!(
+            "#!/bin/sh\nset -eu\ntest ! -t 0 || exit 91\ntest -t 1 || exit 92\ntest \"$#\" -eq 8 || exit 93\ncat > {}\nprintf '%s\\n' '{{\"type\":\"text\",\"part\":{{\"text\":\"unicode-pty-ok\"}}}}'\nprintf '%s\\n' '{{\"type\":\"step_finish\",\"part\":{{\"reason\":\"stop\"}}}}'\n",
+            super::shell_quote(received_path.to_str().unwrap())
+        );
+        std::fs::write(&fake_cli, fake_cli_script).unwrap();
+        std::fs::set_permissions(&fake_cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut inner_cmd = String::new();
+        inner_cmd.push_str(&super::shell_quote(fake_cli.to_str().unwrap()));
+        inner_cmd.push_str(" run --format json --thinking --model builtin/smart --dir ");
+        inner_cmd.push_str(&super::shell_quote(temp.path().to_str().unwrap()));
+        let inner_cmd = super::opencode_prompt_script(&inner_cmd, prompt_path.to_str().unwrap());
+        assert!(inner_cmd.len() < 1024);
+
+        let script_path = temp.path().join(".sandboxed-sh-opencode-cmd.sh");
+        std::fs::write(&script_path, &inner_cmd).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            super::opencode_pty_shell_command("/ws/.sandboxed-sh-opencode-cmd.sh", false),
+            "script -qe /dev/null -c '/ws/.sandboxed-sh-opencode-cmd.sh' 2>/dev/null"
+        );
+        let shell_cmd = super::opencode_pty_shell_command(
+            script_path.to_str().unwrap(),
+            cfg!(target_os = "macos"),
+        );
+
+        let workspace: crate::workspace::Workspace = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "name": "host",
+            "workspace_type": "host",
+            "path": temp.path(),
+            "status": "ready",
+            "error_message": null,
+            "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let exec = crate::workspace_exec::WorkspaceExec::new(workspace);
+        let mut child = exec
+            .spawn_streaming(
+                temp.path(),
+                "/bin/sh",
+                &["-c".to_string(), shell_cmd],
+                std::collections::HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .await
+            .unwrap();
+        let status = child.wait().await.unwrap();
+        assert!(
+            status.success(),
+            "PTY launch failed: {status:?}, stdout={stdout:?}"
+        );
+        assert!(stdout.contains("\"unicode-pty-ok\""), "stdout={stdout:?}");
+        let received = std::fs::read(&received_path).unwrap();
+        assert_eq!(received.len(), prompt.len());
+        assert_eq!(received, prompt.as_bytes());
     }
 
     #[test]

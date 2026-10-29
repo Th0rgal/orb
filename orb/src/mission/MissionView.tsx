@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, queueWaitLabel, remoteJobEnded } from "../missionStatus";
+import { executionPhaseLabel, isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -29,7 +29,8 @@ import { shallowEqual } from "../poll";
 import { Show, batch, createMemo, createSignal, createEffect, on, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import * as Ic from "../icons";
-import { ForkMission, stopSource } from "../ForkMission";
+import { ForkMission, observeTransferDestination, stopSource, transferForDestination } from "../ForkMission";
+import { forkSource } from "../missionTree";
 import { fullToolCall, streamMission, heldAfterHistory, type StreamEvent } from "../stream";
 import { localActivitiesToStreamItems } from "../workModel";
 import { Chapters } from "../Chapters";
@@ -525,6 +526,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             setMission(old => ({ ...(old ?? {id:p.id,title:null,history:[],created_at:"",updated_at:""}), status,
               ...(isLive(status) && old?.remote_job && remoteJobEnded(old.remote_job) ? { remote_job: null, terminal_reason: null } : {}),
               status_message: typeof ev.data.summary === "string" ? ev.data.summary : old?.status_message }));
+            if (!missionPhase({ status } as Mission, false).moving) void resync(true);
           }
           void refresh(true);
           return;
@@ -663,8 +665,23 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if(clientPlaced() && !localRunActive(p.id) && (localFailure(p.id) || queuedLocalMessages(p.id).some(row=>row.interrupted)))return false;
     return busy() || optimisticList().some(item => !item.waiting && !item.failed) || awaitingTurn() || queuedLocalMessages(p.id).some(row=>!row.error && (!row.waiting || row.state==='dispatching' || row.state==='accepted'));
   };
-  // A remote job queued for capacity has not started: say so instead of "Working".
-  const phaseLabel = () => handoff() ? "Sending" : sendingImmediate() ? "Stopping the current turn…" : mission()?.remote_job?.node_state === "queued" ? "Waiting for a free slot" : queueWaitLabel(mission()) ?? (mission()?.backend === "claudecode" && !activity() ? "Waiting for Claude Code" : "Working");
+  // Unified execution-derived phase label (`missionStatus.ts`): starting/transferred
+  // missions say "Starting <Harness>" until execution or first output is confirmed.
+  const transferStarting = () => Boolean(p.id && transferForDestination(p.id)?.stage === "destination_starting");
+  createEffect(() => {
+    observeTransferDestination(mission(), items(), Boolean(p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)));
+  });
+  const phaseLabel = () => executionPhaseLabel(mission(), {
+    activity: activity(),
+    handoff: Boolean(handoff()),
+    stopping: sendingImmediate(),
+    transferStarting: transferStarting(),
+  });
+  const openOriginalSource = createMemo(() => {
+    const sourceId = forkSource(mission() ?? {});
+    if (!sourceId) return undefined;
+    return () => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: `m:${sourceId}` }));
+  });
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());
@@ -1052,7 +1069,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
@@ -1066,7 +1083,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>
-              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
+              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (awaiting() && mission()?.status_message === "Model error") || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} onOpenSource={openOriginalSource()} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
             </Show>
           </Show>
 
