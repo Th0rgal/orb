@@ -335,5 +335,29 @@ jobs:
         with:
           context: .
           push: false
+          load: true
+          tags: orb-ci:local
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Check API proxy with default and custom backend ports
+        run: |
+          set -euo pipefail
+          name="orb-docker-port-test"
+          trap 'docker rm -f -v "$name" >/dev/null 2>&1 || true' EXIT
+          for port in 3000 3100; do
+            docker run -d --name "$name" --network none -e "PORT=$port" orb-ci:local
+            ready=false
+            for attempt in {1..60}; do
+              if docker exec "$name" curl -fsS http://127.0.0.1:80/api/health >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [ "$ready" != true ]; then
+              docker logs "$name"
+              exit 1
+            fi
+            docker rm -f -v "$name" >/dev/null
+          done
