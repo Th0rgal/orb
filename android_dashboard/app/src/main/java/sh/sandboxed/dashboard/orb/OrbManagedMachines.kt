@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -84,6 +85,8 @@ fun OrbManagedMachinesBlock(
     var details by remember { mutableStateOf<ManagedMachine?>(null) }
     var creating by remember { mutableStateOf(false) }
     var showRecent by remember { mutableStateOf(false) }
+    var busyProvider by remember { mutableStateOf<String?>(null) }
+    var editingProvider by remember { mutableStateOf<ManagedProviderInfo?>(null) }
 
     suspend fun refresh() {
         try {
@@ -162,10 +165,40 @@ fun OrbManagedMachinesBlock(
     val isActiveManaged = data?.enabled == true
     LaunchedEffect(isActiveManaged) { onActiveChanged(isActiveManaged) }
     val d = data ?: return
-    if (!d.enabled) return
+    if (!d.enabled && d.providers.isEmpty()) return
+
+    fun toggleProvider(pr: ManagedProviderInfo, targetEnabled: Boolean) {
+        if (busyProvider != null) return
+        val before = d
+        busyProvider = pr.provider
+        actionError = null
+        data = d.copy(providers = d.providers.map { if (it.provider == pr.provider) it.copy(enabled = targetEnabled) else it })
+        scope.launch {
+            try {
+                val updated = OrbJSON.dict(
+                    core.request(
+                        "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}",
+                        method = "PUT",
+                        body = mapOf("enabled" to targetEnabled)
+                    )
+                )?.let { OrbManagedMachines.parseProvider(it) }
+                if (updated != null) {
+                    data = data?.let { cur -> cur.copy(providers = cur.providers.map { if (it.provider == updated.provider) updated else it }) }
+                }
+                refresh()
+            } catch (e: Throwable) {
+                data = before
+                actionError = "Couldn’t update ${pr.displayName}. ${OrbManagedMachines.errorMessage(e)}"
+            } finally {
+                busyProvider = null
+            }
+        }
+    }
+
     val live = d.machines.filter { OrbManagedMachines.isLive(it) }
     val stopped = d.machines.filter { OrbManagedMachines.isStopped(it) }
     val recent = OrbManagedMachines.recentMachines(d.machines, now)
+    val noUsableProvider = d.providers.isNotEmpty() && d.providers.none { OrbManagedMachines.isProviderUsable(it) }
 
     // Mission titles for owner chips, fetched once per id.
     val missionIds = (d.machines.mapNotNull { it.ownerMissionId } + d.dailySpend.orEmpty().flatMap { day -> day.missions.mapNotNull { it.first } }).toSet()
@@ -223,6 +256,54 @@ fun OrbManagedMachinesBlock(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (d.providers.isNotEmpty()) {
+            Text(
+                text = "MACHINE PROVIDERS",
+                color = OrbStyle.textMuted,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.7.sp
+            )
+            ManagedCard {
+                d.providers.forEachIndexed { idx, pr ->
+                    val usable = OrbManagedMachines.isProviderUsable(pr)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(if (usable) OrbStyle.success else OrbStyle.textMuted)
+                        )
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(pr.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(OrbManagedMachines.providerStatusLine(pr), color = OrbStyle.textSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Switch(
+                            checked = OrbManagedMachines.isProviderEnabled(pr),
+                            enabled = busyProvider != pr.provider,
+                            onCheckedChange = { next -> toggleProvider(pr, next) }
+                        )
+                        ManagedPill(
+                            label = if (pr.configured) "Configure" else "Set up",
+                            tint = OrbStyle.inboxBlue,
+                            busy = busyProvider == pr.provider,
+                            quiet = true,
+                            onClick = { editingProvider = pr }
+                        )
+                    }
+                    if (idx < d.providers.lastIndex) {
+                        HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+                    }
+                }
+            }
+        }
+        if (d.enabled) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = OrbManagedMachines.sectionTitle(d.providers, d.machines).uppercase(java.util.Locale.US),
@@ -235,8 +316,8 @@ fun OrbManagedMachinesBlock(
             ManagedPill(
                 label = "+ New",
                 tint = OrbStyle.inboxBlue,
-                busy = busyId != null || OrbManagedMachines.budgetFull(d.budget),
-                onClick = { if (!OrbManagedMachines.budgetFull(d.budget)) creating = true }
+                busy = busyId != null || noUsableProvider || OrbManagedMachines.budgetFull(d.budget),
+                onClick = { if (!noUsableProvider && !OrbManagedMachines.budgetFull(d.budget)) creating = true }
             )
         }
         val spend = d.dailySpend
@@ -332,6 +413,34 @@ fun OrbManagedMachinesBlock(
                 }
             }
         }
+        } else {
+            actionError?.let { Text(it, color = OrbStyle.warning, fontSize = 12.sp) }
+        }
+    }
+
+    editingProvider?.let { pr ->
+        ManagedConfigureProviderDialog(
+            provider = pr,
+            onDismiss = { editingProvider = null },
+            onSave = { patch ->
+                val updated = OrbJSON.dict(
+                    core.request(
+                        "${OrbManagedMachines.PATH}/providers/${core.encodeComponent(pr.provider)}",
+                        method = "PUT",
+                        body = patch
+                    )
+                )?.let { OrbManagedMachines.parseProvider(it) }
+                if (updated != null) {
+                    data = data?.let { cur ->
+                        cur.copy(
+                            enabled = cur.enabled || updated.configured,
+                            providers = cur.providers.map { if (it.provider == updated.provider) updated else it }
+                        )
+                    }
+                }
+                refresh()
+            }
+        )
     }
 
     if (creating) {
@@ -644,15 +753,115 @@ private fun ManagedMachineRow(
 }
 
 @Composable
+private fun ManagedConfigureProviderDialog(
+    provider: ManagedProviderInfo,
+    onDismiss: () -> Unit,
+    onSave: suspend (Map<String, Any>) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var apiKey by remember(provider.provider) { mutableStateOf("") }
+    var region by remember(provider.provider) { mutableStateOf(provider.region.orEmpty()) }
+    var projectId by remember(provider.provider) { mutableStateOf(provider.projectId.orEmpty()) }
+    var saving by remember { mutableStateOf(false) }
+    var err by remember { mutableStateOf<String?>(null) }
+
+    fun submit(overridePatch: Map<String, Any>? = null) {
+        if (saving) return
+        saving = true
+        err = null
+        scope.launch {
+            try {
+                val patch = overridePatch ?: buildMap {
+                    val trimmedKey = apiKey.trim()
+                    if (trimmedKey.isNotEmpty()) {
+                        put("api_key", trimmedKey)
+                        put("enabled", true)
+                    }
+                    if (provider.provider == "hetzner" || provider.provider == "scaleway") {
+                        put("region", region.trim())
+                    }
+                    if (provider.provider == "scaleway") {
+                        put("project_id", projectId.trim())
+                    }
+                }
+                onSave(patch)
+                onDismiss()
+            } catch (e: Throwable) {
+                err = OrbManagedMachines.errorMessage(e)
+            } finally {
+                saving = false
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text("Configure ${provider.displayName}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = if (provider.configured) {
+                        val src = OrbManagedMachines.credentialSourceLabel(provider.credentialSource).lowercase(java.util.Locale.US)
+                        "Leave blank to keep the current $src key${provider.keyHint?.let { " ($it)" } ?: ""}. Credentials are encrypted on Core."
+                    } else {
+                        "Credentials are encrypted on Core and never returned to clients."
+                    },
+                    color = OrbStyle.textSecondary,
+                    fontSize = 12.sp
+                )
+                OrbMiniField(
+                    label = "API key",
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    secret = true
+                )
+                if (provider.provider == "hetzner") {
+                    OrbMiniField(
+                        label = "Default location (fsn1, hel1, nbg1)",
+                        value = region,
+                        onValueChange = { region = it }
+                    )
+                }
+                if (provider.provider == "scaleway") {
+                    OrbMiniField(
+                        label = "Default zone (e.g. fr-par-1)",
+                        value = region,
+                        onValueChange = { region = it }
+                    )
+                    OrbMiniField(
+                        label = "Project ID",
+                        value = projectId,
+                        onValueChange = { projectId = it }
+                    )
+                }
+                if (provider.credentialSource == "settings") {
+                    TextButton(enabled = !saving, onClick = { submit(mapOf("api_key" to "")) }) {
+                        Text("Remove saved key", color = OrbStyle.error)
+                    }
+                }
+                err?.let { Text(it, color = OrbStyle.warning, fontSize = 12.sp) }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !saving && (provider.configured || apiKey.trim().isNotEmpty()),
+                onClick = { submit() }
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(enabled = !saving, onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+@Composable
 private fun ManagedNewMachineDialog(
     response: ManagedMachinesResponse,
     onDismiss: () -> Unit,
     onCreate: (provider: String?, size: String, ttlMinutes: Int, allow24h: Boolean) -> Unit
 ) {
-    val configured = response.providers.filter { it.configured }
-    val initProv = configured.firstOrNull { it.provider == "boat" }?.provider ?: configured.firstOrNull()?.provider ?: "boat"
+    val usable = response.providers.filter { OrbManagedMachines.isProviderUsable(it) }
+    val initProv = usable.firstOrNull { it.provider == "boat" }?.provider ?: usable.firstOrNull()?.provider ?: "boat"
     var provider by remember { mutableStateOf(initProv) }
-    val sizes = configured.firstOrNull { it.provider == provider }?.sizes?.takeIf { it.isNotEmpty() } ?: response.sizes
+    val sizes = usable.firstOrNull { it.provider == provider }?.sizes?.takeIf { it.isNotEmpty() } ?: response.sizes
     var size by remember(provider) {
         mutableStateOf(sizes.firstOrNull { it.size == response.budget.defaultSize }?.size ?: sizes.firstOrNull()?.size ?: "small")
     }
@@ -669,10 +878,10 @@ private fun ManagedNewMachineDialog(
         title = { Text("New managed machine") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (configured.size > 1) {
+                if (usable.size > 1) {
                     Text("Provider", color = OrbStyle.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        configured.forEach { pr ->
+                        usable.forEach { pr ->
                             ManagedPill(
                                 label = pr.displayName,
                                 tint = if (pr.provider == provider) OrbStyle.inboxBlue else OrbStyle.textSecondary,

@@ -62,12 +62,13 @@ describe("managed machine formatting", () => {
   it("explains budget and quota refusals", () => {
     expect(managedError(new ApiError(402, JSON.stringify({ error: "budget_exceeded", message: "$20.00 cap reached" })))).toBe("Daily budget reached: $20.00 cap reached");
     expect(managedError(new ApiError(429, JSON.stringify({ error: "quota_exceeded" })))).toBe("Machine limit reached.");
+    expect(managedError(new ApiError(409, JSON.stringify({ error: "provider_disabled", message: "Hetzner Cloud is disabled" })))).toBe("Provider disabled: Hetzner Cloud is disabled");
     expect(managedError(new ApiError(500, ""))).toBe("Request failed (500)");
     expect(managedError(new ApiError(400, "bad size"))).toBe("bad size");
   });
 });
 
-import { nodeLabel, rememberNodeNames, nodeSize } from "../src/machines/nodes";
+import { nodeLabel, rememberNodeNames, nodeSize, nodeProvider, managedFleetLabel } from "../src/machines/nodes";
 import { availabilityLine } from "../src/AntigravityProvider";
 import { placeholder } from "../src/ManagedMachines";
 import { machineName, stateLabel, isStarting } from "../src/managedMachineModel";
@@ -142,7 +143,7 @@ describe("managed row v3 and unlimited budgets", () => {
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canStopMachine, managedSectionTitle, providerLabel, type ManagedMachinesResponse } from "../src/managedMachineModel";
+import { canStopMachine, isProviderEnabled, isProviderUsable, managedSectionTitle, providerLabel, providerStatusLine, type ManagedMachinesResponse } from "../src/managedMachineModel";
 
 describe("ownership and reaping", () => {
   it("classifies the owner", () => {
@@ -168,6 +169,14 @@ describe("ownership and reaping", () => {
     expect(providerLabel("scaleway")).toBe("Scaleway");
     expect(managedSectionTitle([{ provider: "boat", display_name: "boat.dev", configured: true, supports_snapshots: true, supports_free_stop: true, sizes: [] }], [])).toBe("Managed (boat.dev)");
     expect(managedSectionTitle([{ provider: "hetzner", display_name: "Hetzner", configured: true, supports_snapshots: false, supports_free_stop: false, sizes: [] }], [])).toBe("Managed cloud");
+    expect(managedSectionTitle([
+      { provider: "boat", display_name: "boat.dev", configured: true, enabled: true, supports_snapshots: true, supports_free_stop: true, sizes: [] },
+      { provider: "hetzner", display_name: "Hetzner", configured: true, enabled: false, supports_snapshots: false, supports_free_stop: false, sizes: [] },
+    ], [])).toBe("Managed (boat.dev)");
+    expect(nodeProvider({ id: "managed-h1", labels: ["managed", "provider=hetzner"] })).toBe("hetzner");
+    expect(managedFleetLabel([{ id: "managed-b1", labels: ["managed", "boat"] }])).toBe("Managed (boat.dev)");
+    expect(managedFleetLabel([{ id: "managed-h1", labels: ["managed", "provider=hetzner"] }])).toBe("Managed (Hetzner)");
+    expect(managedFleetLabel([{ id: "managed-b1", labels: ["managed", "boat"] }, { id: "managed-h1", labels: ["managed", "provider=hetzner"] }])).toBe("Managed cloud");
     expect(canStopMachine({ state: "online", provider: "boat" })).toBe(true);
     expect(canStopMachine({ state: "online", provider: "hetzner" })).toBe(false);
     expect(canStopMachine({ state: "stopped", provider: "boat" })).toBe(false);
@@ -176,14 +185,19 @@ describe("ownership and reaping", () => {
     const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "shared", "orb-spec", "fixtures", "managed-machines-response.json"), "utf8");
     const resp = JSON.parse(raw) as ManagedMachinesResponse;
     expect(resp.enabled).toBe(true);
-    expect(resp.providers?.map(p => [p.provider, p.display_name, p.configured, p.supports_free_stop, p.supports_snapshots])).toEqual([
-      ["boat", "boat.dev", true, true, true],
-      ["hetzner", "Hetzner Cloud", true, false, false],
-      ["vastai", "Vast.ai", false, false, false],
-      ["scaleway", "Scaleway", false, false, false],
+    expect(resp.providers?.map(p => [p.provider, p.display_name, p.configured, isProviderEnabled(p), isProviderUsable(p), p.supports_free_stop, p.supports_snapshots])).toEqual([
+      ["boat", "boat.dev", true, true, true, true, true],
+      ["hetzner", "Hetzner Cloud", true, true, true, false, false],
+      ["vastai", "Vast.ai", false, true, false, false, false],
+      ["scaleway", "Scaleway", false, false, false, false, false],
     ]);
+    expect(providerStatusLine(resp.providers![0]!)).toBe("Configured · Bitwarden ••••1234");
+    expect(providerStatusLine(resp.providers![1]!)).toBe("Configured · Settings ••••5678 · fsn1");
+    expect(providerStatusLine(resp.providers![2]!)).toBe("Not configured");
+    expect(providerStatusLine(resp.providers![3]!)).toBe("Disabled · Not configured");
     expect(managedSectionTitle(resp.providers, resp.machines)).toBe("Managed cloud");
     expect(canStopMachine(resp.machines[0]!, resp.providers)).toBe(false);
+    expect(resp.machines[0]!.size).toBe("cpx42");
     const vastRtx = resp.providers?.find(p => p.provider === "vastai")?.sizes.find(s => s.size === "rtx4090");
     expect(vastRtx?.gpu).toBe("RTX 4090");
     const cax = resp.providers?.find(p => p.provider === "hetzner")?.sizes.find(s => s.size === "cax31");

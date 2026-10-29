@@ -4,7 +4,8 @@ import { readHistory, saveHistory, freshSamples, historyScope } from "./resource
 import { ResourceHistory, appendSamples, type ResourceSample } from "./ResourceHistory";
 import { LocalMachine } from "./LocalMachine";
 import { ManagedMachines } from "./ManagedMachines";
-import { isManagedNode, nodeSize } from "./machines/nodes";
+import { providerLabel } from "./managedMachineModel";
+import { isManagedNode, managedFleetLabel, nodeProvider, nodeSize } from "./machines/nodes";
 import { For, Show, createSignal, createEffect, untrack, onCleanup, onMount } from "solid-js";
 import { pollWhileVisible } from "./poll";
 import * as Ic from "./icons";
@@ -62,7 +63,7 @@ function FleetRow(p: { node?: RemoteNodeView; core?: Metrics; live?: boolean; hi
   const disk = () => p.node ? (p.node.disk_total_bytes != null && p.node.disk_available_bytes != null ? p.node.disk_total_bytes - p.node.disk_available_bytes : undefined) : p.core?.disk_used;
   return <div class="p-acc-wrap"><button class="s-row p-acc-btn" aria-expanded={open()} onClick={() => setOpen(!open())}>
     <Show when={p.node} fallback={<Ic.CoreServerIcon size={18} />}><Ic.ComputeNodeIcon size={18} /></Show>
-    <div class="s-row-text"><div class="s-row-title" title={p.node?.display_name ? p.node.id : undefined}>{p.node ? p.node.display_name || p.node.id : "Core"}<Show when={isManagedNode(p.node)}><span class="m-tag">Managed</span></Show></div><div class="s-row-desc">{p.node ? `${p.node.status}${isManagedNode(p.node) && nodeSize(p.node) ? ` · ${nodeSize(p.node)}` : ""}${p.node.cordoned ? " · Cordoned" : ""}` : p.live ? "Live · Control plane" : p.core ? "Disconnected · Last snapshot" : "Connecting · Control plane"}</div></div>
+    <div class="s-row-text"><div class="s-row-title" title={p.node?.display_name ? p.node.id : undefined}>{p.node ? p.node.display_name || p.node.id : "Core"}<Show when={isManagedNode(p.node)}><span class="m-tag">Managed</span><Show when={nodeProvider(p.node) && nodeProvider(p.node) !== "boat"}><span class="m-tag">{providerLabel(nodeProvider(p.node))}</span></Show></Show></div><div class="s-row-desc">{p.node ? `${p.node.status}${isManagedNode(p.node) && nodeSize(p.node) ? ` · ${nodeSize(p.node)}` : ""}${p.node.cordoned ? " · Cordoned" : ""}` : p.live ? "Live · Control plane" : p.core ? "Disconnected · Last snapshot" : "Connecting · Control plane"}</div></div>
     <Show when={p.node?.active_jobs != null}><span class="s-row-desc">{p.node!.active_jobs} active</span></Show>
     <span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span></button>
     <Show when={open()}><div class="p-acc-body machine-expanded">
@@ -165,7 +166,7 @@ function MachinesPage() {
           <FleetRow core={core()} live={live()} history={history()} />
           <For each={(nodes() ?? []).filter(n => !isManagedNode(n)).map(n => n.id)}>{id => <FleetRow node={nodes()?.find(n => n.id === id)} />}</For>
           <Show when={nodes()?.some(isManagedNode)}>
-            <div class="machine-section-label fleet-group-label">Managed (boat.dev)</div>
+            <div class="machine-section-label fleet-group-label">{managedFleetLabel(nodes() ?? [])}</div>
             <For each={(nodes() ?? []).filter(isManagedNode).map(n => n.id)}>{id => <FleetRow node={nodes()?.find(n => n.id === id)} />}</For>
           </Show>
           <Show when={nodes()?.length === 0}>
