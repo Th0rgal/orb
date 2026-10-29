@@ -463,12 +463,30 @@ impl LimitCooldown {
     }
 }
 
+/// Live mirror of an in-memory proxy cooldown (rate-limit, timeout, server
+/// error, or circuit breaker), written to `account_cooldowns.json` under
+/// `transient_cooldowns` for operator/script visibility without marking the
+/// account as a multi-hour hard usage limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransientCooldown {
+    /// When the in-memory cooldown expires (UTC).
+    pub until: DateTime<Utc>,
+    /// Provider type id ("google", "openai", ...).
+    #[serde(default)]
+    pub provider: String,
+    /// Cooldown reason ("rate_limit", "timeout", ...).
+    pub reason: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct CooldownsFile {
     #[serde(default)]
     version: u32,
     #[serde(default)]
     cooldowns: HashMap<String, LimitCooldown>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    transient_cooldowns: HashMap<String, TransientCooldown>,
 }
 
 /// Registry key of a provider-store account.
@@ -495,6 +513,7 @@ pub fn credential_key(secret: &str) -> String {
 pub struct AccountCooldowns {
     path: Mutex<Option<PathBuf>>,
     entries: Mutex<HashMap<String, LimitCooldown>>,
+    transient: Mutex<HashMap<String, TransientCooldown>>,
 }
 
 impl AccountCooldowns {
@@ -530,10 +549,10 @@ impl AccountCooldowns {
             "Loaded account usage-limit cooldowns"
         );
         *self.path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
-        let expired_on_disk = stored > entries.len();
-        if expired_on_disk {
-            self.persist(&entries);
-        }
+        let transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
+        // Always rewrite on attach so any stale `transient_cooldowns` from a
+        // previous process lifetime are cleared on disk.
+        self.persist(&entries, &transient);
     }
 
     /// Park `key` until `cooldown.until`. A newer announcement replaces the
@@ -544,17 +563,49 @@ impl AccountCooldowns {
             return;
         }
         entries.insert(key.to_string(), cooldown);
-        self.persist(&entries);
+        let transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
+        self.persist(&entries, &transient);
     }
 
     /// Forget the cooldown of `key`. Returns whether one was recorded.
     pub fn clear(&self, key: &str) -> bool {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let removed = entries.remove(key).is_some();
+        let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
+        let removed = entries.remove(key).is_some() || transient.remove(key).is_some();
         if removed {
-            self.persist(&entries);
+            self.persist(&entries, &transient);
         }
         removed
+    }
+
+    /// Mirror an in-memory proxy cooldown into `account_cooldowns.json` under
+    /// `transient_cooldowns` so operators and scripts can inspect its expiry.
+    pub fn set_transient(&self, key: &str, cooldown: TransientCooldown) {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
+        transient.insert(key.to_string(), cooldown);
+        self.persist(&entries, &transient);
+    }
+
+    /// Remove a mirrored transient cooldown when the account recovers or is reset.
+    pub fn clear_transient(&self, key: &str) -> bool {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
+        let removed = transient.remove(key).is_some();
+        if removed {
+            self.persist(&entries, &transient);
+        }
+        removed
+    }
+
+    /// Clear all mirrored transient cooldowns.
+    pub fn clear_all_transient(&self) {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
+        if !transient.is_empty() {
+            transient.clear();
+            self.persist(&entries, &transient);
+        }
     }
 
     /// The cooldown of `key`, when it has not expired at `now`.
@@ -593,7 +644,11 @@ impl AccountCooldowns {
 
     /// Write the registry, without the entries that have expired. The file is
     /// replaced atomically so a crash cannot leave it half written.
-    fn persist(&self, entries: &HashMap<String, LimitCooldown>) {
+    fn persist(
+        &self,
+        entries: &HashMap<String, LimitCooldown>,
+        transient: &HashMap<String, TransientCooldown>,
+    ) {
         let Some(path) = self.path.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
             return;
         };
@@ -601,6 +656,11 @@ impl AccountCooldowns {
         let file = CooldownsFile {
             version: 1,
             cooldowns: entries
+                .iter()
+                .filter(|(_, cooldown)| cooldown.until > now)
+                .map(|(key, cooldown)| (key.clone(), cooldown.clone()))
+                .collect(),
+            transient_cooldowns: transient
                 .iter()
                 .filter(|(_, cooldown)| cooldown.until > now)
                 .map(|(key, cooldown)| (key.clone(), cooldown.clone()))
@@ -826,6 +886,7 @@ mod tests {
             &CooldownsFile {
                 version: 1,
                 cooldowns,
+                transient_cooldowns: HashMap::new(),
             },
         )
         .unwrap();
@@ -1194,6 +1255,7 @@ mod tests {
                 (live.clone(), cooldown(Utc::now() + Duration::hours(1))),
                 (stale.clone(), cooldown(Utc::now() - Duration::hours(1))),
             ]),
+            transient_cooldowns: HashMap::new(),
         };
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
 

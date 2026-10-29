@@ -167,6 +167,13 @@ impl Drop for InflightGuard {
     }
 }
 
+/// Active upstream requests currently open against `(provider, account_id)`.
+pub fn inflight_for_account(provider: &str, account_id: uuid::Uuid) -> usize {
+    let key = format!("account:{provider}:{account_id}");
+    let map = REGISTRY.inflight.lock().unwrap_or_else(|e| e.into_inner());
+    map.get(&key).copied().unwrap_or(0).max(0) as usize
+}
+
 struct CellState {
     record: TimingRecord,
     current_attempt: Option<usize>,

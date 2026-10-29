@@ -40,11 +40,29 @@ pub fn first_token_timeout() -> Duration {
 /// client gets a 524 and the proxy can no longer fall back). Any upstream
 /// chunk — a thought part, a keepalive comment — resets the idle clock, so
 /// this only fires on a stream that is truly silent.
+#[cfg(test)]
 pub fn first_token_timeout_for(provider: &str, model: &str) -> Duration {
+    first_token_timeout_for_request(provider, model, true)
+}
+
+/// First-token limit accounting for whether the caller came through
+/// Cloudflare's orange cloud (`via_cloudflare = true`, 100 s origin read
+/// cliff → default 90 s) or a direct endpoint (`orbrouter.thomas.md` /
+/// loopback, `via_cloudflare = false` → `PROXY_GEMINI_DIRECT_FIRST_TOKEN_TIMEOUT_SECS`,
+/// default 240 s).
+pub fn first_token_timeout_for_request(
+    provider: &str,
+    model: &str,
+    via_cloudflare: bool,
+) -> Duration {
     let gemini_provider = matches!(provider, "google" | "gemini" | "antigravity");
     if gemini_provider && crate::api::proxy::is_gemini_thinking_model(model) {
-        return Duration::from_secs(env_secs("PROXY_GEMINI_FIRST_TOKEN_TIMEOUT_SECS", 90))
-            .max(first_token_timeout());
+        let secs = if via_cloudflare {
+            env_secs("PROXY_GEMINI_FIRST_TOKEN_TIMEOUT_SECS", 90)
+        } else {
+            env_secs("PROXY_GEMINI_DIRECT_FIRST_TOKEN_TIMEOUT_SECS", 240)
+        };
+        return Duration::from_secs(secs).max(first_token_timeout());
     }
     first_token_timeout()
 }
@@ -716,6 +734,10 @@ mod tests {
         assert_eq!(
             first_token_timeout_for("google", "gemini-4-argon-eap").as_secs(),
             90
+        );
+        assert_eq!(
+            first_token_timeout_for_request("google", "gemini-4-carbon-eap", false).as_secs(),
+            240
         );
         assert_eq!(
             first_token_timeout_for("antigravity", "gemini-4-argon-high").as_secs(),

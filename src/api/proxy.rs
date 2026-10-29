@@ -337,19 +337,40 @@ fn cooldown_retry_after_secs() -> u64 {
 }
 
 fn cooldown_error_response_with_retry_after(chain_id: &str, retry_after_secs: u64) -> Response {
-    let mut response = error_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        format!(
-            "All providers in chain '{}' are currently in cooldown or unconfigured",
-            chain_id
-        ),
-        "rate_limit_exceeded",
-    );
-    let retry_after = retry_after_secs
+    let unclamped_secs = retry_after_secs.max(1);
+    let now = chrono::Utc::now();
+    let until = now + chrono::Duration::seconds(unclamped_secs.min(i64::MAX as u64) as i64);
+    let until_rfc3339 = until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let body = serde_json::json!({
+        "error": {
+            "message": format!(
+                "All providers in chain '{}' are currently in cooldown until {} ({}s remaining)",
+                chain_id, until_rfc3339, unclamped_secs
+            ),
+            "type": "rate_limit_exceeded",
+            "code": "rate_limit_exceeded",
+            "resets_at": until.timestamp(),
+            "resets_in_seconds": unclamped_secs,
+            "cooldown_until": until_rfc3339,
+        }
+    });
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    // Keep standard `Retry-After` capped at 60s so AI SDK / OpenCode clients
+    // do not abort the turn on `maxRetryDelay`, while `X-Cooldown-*` headers
+    // and the JSON error body carry the exact unclamped reset window for scripts.
+    let retry_after = unclamped_secs
         .clamp(1, MAX_COOLDOWN_RETRY_AFTER_SECS)
         .to_string();
     if let Ok(value) = HeaderValue::from_str(&retry_after) {
         response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&until_rfc3339) {
+        response.headers_mut().insert("x-cooldown-reset", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&unclamped_secs.to_string()) {
+        response
+            .headers_mut()
+            .insert("x-cooldown-remaining-secs", value);
     }
     response
 }
@@ -431,6 +452,140 @@ static KIMI_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
         );
         tokio::sync::Semaphore::new(n)
     });
+
+/// Per-account concurrency semaphores for Google Gemini accounts.
+/// Opening 15+ concurrent reasoning calls on one Google account causes upstream
+/// stalls/timeouts; capping each Google account (`PROXY_GOOGLE_MAX_CONCURRENCY`,
+/// default 5) keeps latency healthy, spills burst traffic onto the secondary
+/// Google account immediately, and queues excess callers cleanly in FIFO order.
+pub(crate) fn google_max_concurrency() -> usize {
+    std::env::var("PROXY_GOOGLE_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(5)
+}
+
+fn proxy_queue_timeout() -> std::time::Duration {
+    let secs = std::env::var("PROXY_QUEUE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(180);
+    std::time::Duration::from_secs(secs)
+}
+
+static GOOGLE_ACCOUNT_CONCURRENCY: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<uuid::Uuid, Arc<tokio::sync::Semaphore>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+pub(crate) fn google_account_semaphore(account_id: uuid::Uuid) -> Arc<tokio::sync::Semaphore> {
+    let mut map = GOOGLE_ACCOUNT_CONCURRENCY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    Arc::clone(
+        map.entry(account_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(google_max_concurrency()))),
+    )
+}
+
+/// Hold `permit` for the lifetime of an SSE body stream so streaming calls
+/// occupy their per-account concurrency slot until completion or client drop.
+fn with_concurrency_permit<S>(
+    inner: S,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> impl futures::Stream<Item = S::Item>
+where
+    S: futures::Stream + Send + 'static,
+    S::Item: Send + 'static,
+{
+    async_stream::stream! {
+        let _permit = permit;
+        let mut inner = std::pin::pin!(inner);
+        while let Some(item) = inner.next().await {
+            yield item;
+        }
+    }
+}
+
+/// Acquire a per-account concurrency slot for `entries[entry_idx]` across the
+/// contiguous `(provider_id, model_id)` sibling group `entries[entry_idx..group_end]`.
+///
+/// 1. Tries `try_acquire_owned()` in priority order (`entry_idx` first — e.g.
+///    `GEMINI_API_KEY` #1, `thomas.marchand44@gmail.com` #2). If #1 has free
+///    capacity (`< 5` inflight), #1 wins immediately; if #1 is at `5/5` and #2
+///    has free capacity, #2 is rotated into `entry_idx` with 0ms wait.
+/// 2. If every healthy account in the group is at `5/5`, awaits the first
+///    account in the group to release a slot (bounded by `queue_timeout`),
+///    rotating the winner into `entry_idx`. Returns `Err(())` on queue timeout.
+async fn acquire_google_group_permit(
+    entries: &mut [crate::provider_health::ResolvedEntry],
+    entry_idx: usize,
+    queue_timeout: std::time::Duration,
+) -> Result<(tokio::sync::OwnedSemaphorePermit, std::time::Duration), std::time::Duration> {
+    let provider_id = entries[entry_idx].provider_id.clone();
+    let model_id = entries[entry_idx].model_id.clone();
+    let mut group_end = entry_idx + 1;
+    while group_end < entries.len()
+        && entries[group_end].provider_id == provider_id
+        && entries[group_end].model_id == model_id
+    {
+        group_end += 1;
+    }
+
+    // Fast path: pick the highest-priority sibling account with an immediate slot.
+    for candidate_idx in entry_idx..group_end {
+        let ptype = ProviderType::from_id(&entries[candidate_idx].provider_id)
+            .unwrap_or(ProviderType::Custom);
+        if !has_routable_proxy_credentials(
+            ptype,
+            entries[candidate_idx].api_key.is_some(),
+            entries[candidate_idx].has_oauth,
+        ) {
+            continue;
+        }
+        let sem = google_account_semaphore(entries[candidate_idx].account_id);
+        if let Ok(permit) = sem.try_acquire_owned() {
+            if candidate_idx > entry_idx {
+                entries[entry_idx..=candidate_idx].rotate_right(1);
+            }
+            return Ok((permit, std::time::Duration::ZERO));
+        }
+    }
+
+    // Slow path: all sibling accounts are at max concurrency — race their FIFO
+    // semaphores and wake as soon as any account finishes a request.
+    let wait_start = std::time::Instant::now();
+    let mut waiters = Vec::new();
+    for (offset, candidate) in entries[entry_idx..group_end].iter().enumerate() {
+        let candidate_idx = entry_idx + offset;
+        let ptype = ProviderType::from_id(&candidate.provider_id).unwrap_or(ProviderType::Custom);
+        if !has_routable_proxy_credentials(ptype, candidate.api_key.is_some(), candidate.has_oauth)
+        {
+            continue;
+        }
+        let sem = google_account_semaphore(candidate.account_id);
+        waiters.push(Box::pin(async move {
+            (candidate_idx, sem.acquire_owned().await)
+        }));
+    }
+    if waiters.is_empty() {
+        let sem = google_account_semaphore(entries[entry_idx].account_id);
+        return match tokio::time::timeout(queue_timeout, sem.acquire_owned()).await {
+            Ok(Ok(permit)) => Ok((permit, wait_start.elapsed())),
+            _ => Err(wait_start.elapsed()),
+        };
+    }
+    match tokio::time::timeout(queue_timeout, futures::future::select_all(waiters)).await {
+        Ok(((winner_idx, Ok(permit)), _, _)) => {
+            if winner_idx > entry_idx {
+                entries[entry_idx..=winner_idx].rotate_right(1);
+            }
+            Ok((permit, wait_start.elapsed()))
+        }
+        _ => Err(wait_start.elapsed()),
+    }
+}
 
 /// Default base URL for OpenAI-compatible providers.
 ///
@@ -628,6 +783,8 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/responses", post(responses))
         .route("/messages", post(anthropic_messages))
         .route("/capabilities", get(list_capabilities))
+        .route("/cooldowns", get(list_proxy_cooldowns))
+        .route("/cooldowns/clear", post(clear_proxy_cooldowns))
         .route("/deferred/:id", get(get_deferred_request))
         .route("/deferred/:id", delete(cancel_deferred_request))
         .route("/models", axum::routing::get(list_models))
@@ -969,6 +1126,66 @@ async fn list_capabilities(
     .into_response()
 }
 
+async fn list_proxy_cooldowns(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
+        return resp;
+    }
+    let snapshots = state.health_tracker.get_all_health().await;
+    let active_cooldowns: Vec<_> = snapshots
+        .iter()
+        .filter(|s| !s.is_healthy)
+        .cloned()
+        .collect();
+    let inflight = super::proxy_timing::inflight_snapshot();
+    Json(serde_json::json!({
+        "object": "cooldowns",
+        "google_max_concurrency_per_account": google_max_concurrency(),
+        "active_cooldowns": active_cooldowns,
+        "accounts": snapshots,
+        "inflight": inflight,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct ClearProxyCooldownRequest {
+    #[serde(default)]
+    account_id: Option<uuid::Uuid>,
+}
+
+async fn clear_proxy_cooldowns(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+    body: Option<Json<ClearProxyCooldownRequest>>,
+) -> Response {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
+        return resp;
+    }
+    let target = body.and_then(|Json(req)| req.account_id);
+    match target {
+        Some(account_id) => {
+            state.health_tracker.clear_cooldown(account_id).await;
+            Json(serde_json::json!({
+                "cleared": true,
+                "scope": "account",
+                "account_id": account_id,
+            }))
+            .into_response()
+        }
+        None => {
+            state.health_tracker.clear_all_cooldowns().await;
+            Json(serde_json::json!({
+                "cleared": true,
+                "scope": "all",
+            }))
+            .into_response()
+        }
+    }
+}
+
 async fn list_models(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
@@ -1117,6 +1334,10 @@ async fn routable_direct_catalog_models(
 ) -> Vec<crate::api::providers::CatalogModelOption> {
     let standard_accounts =
         crate::api::ai_providers::read_standard_accounts(&state.config.working_dir);
+    // Check credential/configuration routability rather than transient
+    // cooldowns so temporary backoffs never make configured models vanish
+    // from `/v1/models`.
+    let unfiltered_health = crate::provider_health::ProviderHealthTracker::new();
     let mut routable = Vec::new();
     for model in models {
         if !model.configured {
@@ -1132,7 +1353,7 @@ async fn routable_direct_catalog_models(
                 &[entry],
                 &state.ai_providers,
                 &standard_accounts,
-                &state.health_tracker,
+                &unfiltered_health,
             )
             .await;
         if entries.iter().any(|entry| {
@@ -3382,7 +3603,66 @@ async fn chat_completions_routed(
         std::collections::HashSet::new();
     let mut waterfall_first_byte_locked = false;
     let mut waterfall_account_ordinals = crate::provider_health::AccountOrdinalTable::new();
-    for (entry_idx, entry) in entries.iter().enumerate() {
+    let via_cloudflare = headers.contains_key("cf-ray");
+    let queue_timeout = proxy_queue_timeout();
+    let mut skip_saturated_group: Option<(String, String)> = None;
+    for entry_idx in 0..entries.len() {
+        if let Some((ref sat_provider, ref sat_model)) = skip_saturated_group {
+            if entries[entry_idx].provider_id == *sat_provider
+                && entries[entry_idx].model_id == *sat_model
+            {
+                continue;
+            }
+            skip_saturated_group = None;
+        }
+
+        // For Google, acquire a per-account concurrency slot across the sibling
+        // account group (`GEMINI_API_KEY` first, `thomas.marchand44@gmail.com`
+        // second). When #1 hits max concurrency (default 5), traffic spills
+        // immediately onto #2; when both are at 5/5, callers wait in FIFO order
+        // for whichever account frees a slot first.
+        let entry_provider_type =
+            ProviderType::from_id(&entries[entry_idx].provider_id).unwrap_or(ProviderType::Custom);
+        let mut concurrency_permit = if entry_provider_type == ProviderType::Google {
+            if !has_routable_proxy_credentials(
+                entry_provider_type,
+                entries[entry_idx].api_key.is_some(),
+                entries[entry_idx].has_oauth,
+            ) {
+                continue;
+            }
+            match acquire_google_group_permit(&mut entries, entry_idx, queue_timeout).await {
+                Ok((permit, waited)) => {
+                    if !waited.is_zero() {
+                        if let Some(cell) = super::proxy_timing::current() {
+                            cell.add_queue_wait(waited);
+                        }
+                    }
+                    Some(permit)
+                }
+                Err(waited) => {
+                    if let Some(cell) = super::proxy_timing::current() {
+                        cell.add_queue_wait(waited);
+                    }
+                    tracing::warn!(
+                        provider = %entries[entry_idx].provider_id,
+                        model = %entries[entry_idx].model_id,
+                        waited_secs = waited.as_secs_f64(),
+                        "Google per-account concurrency queue timed out; skipping group without cooling accounts"
+                    );
+                    skip_saturated_group = Some((
+                        entries[entry_idx].provider_id.clone(),
+                        entries[entry_idx].model_id.clone(),
+                    ));
+                    rate_limit_count += 1;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        let entry = &entries[entry_idx];
         let now_epoch = chrono::Utc::now().timestamp().max(0) as u64;
         let cand_ord = waterfall_account_ordinals.intern(entry.account_id);
         let pool_verdict = crate::provider_health::observe_account_candidate_shadow(
@@ -3407,14 +3687,17 @@ async fn chat_completions_routed(
             break;
         }
         // Gemini thinking models may think silently for a long time before
-        // their first chunk; they get a longer first-token limit.
-        let first_token_timeout =
-            reliability::first_token_timeout_for(&entry.provider_id, &entry.model_id);
+        // their first chunk; direct endpoints (e.g. orbrouter.thomas.md) get a
+        // 240s budget while Cloudflare orange-cloud requests stay under 100s.
+        let first_token_timeout = reliability::first_token_timeout_for_request(
+            &entry.provider_id,
+            &entry.model_id,
+            via_cloudflare,
+        );
         // Non-builtin prefixes are custom providers referenced by their
         // sanitized name (e.g. "spark"); they all route as `Custom` through the
         // OpenAI-compatible path using the account's `base_url`.
-        let provider_type =
-            ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
+        let provider_type = entry_provider_type;
 
         // Custom providers may work without an API key (base_url only).
         // Standard providers require credentials (API key or provider OAuth).
@@ -4141,7 +4424,10 @@ async fn chat_completions_routed(
                 return (
                     status,
                     response_headers,
-                    Body::from_stream(sse_error_terminated(tracked_stream)),
+                    Body::from_stream(with_concurrency_permit(
+                        sse_error_terminated(tracked_stream),
+                        concurrency_permit.take(),
+                    )),
                 )
                     .into_response();
             }
@@ -4499,7 +4785,10 @@ async fn chat_completions_routed(
                         return (
                             status,
                             response_headers,
-                            Body::from_stream(sse_error_terminated(tracked_stream)),
+                            Body::from_stream(with_concurrency_permit(
+                                sse_error_terminated(tracked_stream),
+                                concurrency_permit.take(),
+                            )),
                         )
                             .into_response();
                     }
@@ -5206,7 +5495,10 @@ async fn chat_completions_routed(
                     return (
                         status,
                         response_headers,
-                        Body::from_stream(sse_error_terminated(tracked_stream)),
+                        Body::from_stream(with_concurrency_permit(
+                            sse_error_terminated(tracked_stream),
+                            concurrency_permit.take(),
+                        )),
                     )
                         .into_response();
                 }
@@ -5513,6 +5805,14 @@ async fn chat_completions_routed(
         // (and resume) until the quota comes back.
         if let Some(limit) = chain_usage_limit(&state, &chain_entries, &standard_accounts).await {
             return usage_limit_response(NativeProtocol::Responses, &chain_id, &limit);
+        }
+        let tried_ids: Vec<uuid::Uuid> = entries.iter().map(|e| e.account_id).collect();
+        if let Some(remaining) = state
+            .health_tracker
+            .min_remaining_cooldown(&tried_ids)
+            .await
+        {
+            return cooldown_error_response_with_retry_after(&chain_id, remaining.as_secs().max(1));
         }
         cooldown_error_response(&chain_id)
     }
@@ -10372,6 +10672,96 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("60")
         );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-cooldown-remaining-secs")
+                .and_then(|value| value.to_str().ok()),
+            Some("3600")
+        );
+        assert!(response.headers().get("x-cooldown-reset").is_some());
+    }
+
+    #[tokio::test]
+    async fn cooldown_error_body_reports_exact_cooldown_end_time() {
+        let response = cooldown_error_response_with_retry_after("google/gemini-4-carbon-eap", 240);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"]["resets_in_seconds"], 240);
+        assert!(json["error"]["cooldown_until"].as_str().is_some());
+        assert!(json["error"]["resets_at"].as_i64().is_some());
+    }
+
+    #[tokio::test]
+    async fn google_group_permit_prioritizes_primary_spills_to_secondary_and_queues() {
+        let primary_id = uuid::Uuid::new_v4();
+        let secondary_id = uuid::Uuid::new_v4();
+        let cap = google_max_concurrency();
+        let make_entries = || {
+            vec![
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: primary_id,
+                    api_key: Some("AIza-primary".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: secondary_id,
+                    api_key: None,
+                    has_oauth: true,
+                    base_url: None,
+                    subscription_key: None,
+                },
+            ]
+        };
+
+        // 1..=cap go to primary (GEMINI_API_KEY)
+        let mut primary_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (permit, waited) =
+                acquire_google_group_permit(&mut entries, 0, std::time::Duration::from_secs(1))
+                    .await
+                    .unwrap();
+            assert_eq!(entries[0].account_id, primary_id);
+            assert!(waited.is_zero());
+            primary_permits.push(permit);
+        }
+
+        // (cap + 1)..=(2 * cap) spill immediately to secondary (thomas.marchand44@gmail.com)
+        let mut secondary_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (permit, waited) =
+                acquire_google_group_permit(&mut entries, 0, std::time::Duration::from_secs(1))
+                    .await
+                    .unwrap();
+            assert_eq!(entries[0].account_id, secondary_id);
+            assert_eq!(entries[1].account_id, primary_id);
+            assert!(waited.is_zero());
+            secondary_permits.push(permit);
+        }
+
+        // Next request queues until secondary frees 1 slot, then picks secondary!
+        let releaser = secondary_permits.pop().unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            drop(releaser);
+        });
+        let mut entries = make_entries();
+        let (_queued_permit, waited) =
+            acquire_google_group_permit(&mut entries, 0, std::time::Duration::from_secs(2))
+                .await
+                .unwrap();
+        assert_eq!(entries[0].account_id, secondary_id);
+        assert!(waited >= std::time::Duration::from_millis(15));
     }
 
     #[test]
