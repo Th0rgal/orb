@@ -1168,14 +1168,17 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
                     }
                     if (content != original) {
                         TextButton(enabled = !saving, onClick = {
+                            val submitted = content
                             saving = true
                             scope.launch {
                                 try {
-                                    core.request("/api/library/skill/${core.encodeComponent(name)}", "PUT", body = mapOf("content" to content))
+                                    core.request("/api/library/skill/${core.encodeComponent(name)}", "PUT", body = mapOf("content" to submitted))
                                     core.request("/api/library/commit", "POST", body = mapOf("message" to "skill: update $name"))
                                     core.request("/api/library/push", "POST")
-                                    original = content
-                                    editing = false
+                                    original = submitted
+                                    if (content == submitted) {
+                                        editing = false
+                                    }
                                     error = null
                                 } catch (e: Throwable) {
                                     error = "Couldn’t save: ${e.message}"
@@ -1201,6 +1204,7 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
                 OutlinedTextField(
                     value = content,
                     onValueChange = { content = it },
+                    enabled = !saving,
                     textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 320.dp)
                 )
