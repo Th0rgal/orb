@@ -99,20 +99,20 @@ export function planMissionMoves(ids: readonly string[], project: string, folder
       const rootId = rootOf.get(parent)!;
       rootOf.set(m.id, rootId);
       added = true;
+      if (m.callback_parent_mission_id && parent === m.callback_parent_mission_id && parent !== m.parent_mission_id) {
+        callbackIdsByRoot.set(rootId, [...(callbackIdsByRoot.get(rootId) ?? []), m.id]);
+      }
       if ((m.project ?? null) !== project) {
         const step: MovePlanStep = { id: m.id, from: m.project ?? null, folder: '', viaRootId: rootId };
         childSteps.push(step);
         crossProjectByRoot.set(rootId, [...(crossProjectByRoot.get(rootId) ?? []), step]);
-        if (!m.parent_mission_id && m.callback_parent_mission_id) {
-          callbackIdsByRoot.set(rootId, [...(callbackIdsByRoot.get(rootId) ?? []), m.id]);
-        }
       }
     }
   }
   const plan: MovePlan = roots.map(id => {
     const from = byId.get(id)?.project ?? null;
     const cross = from !== project || (crossProjectByRoot.get(id)?.length ?? 0) > 0;
-    const cbIds = callbackIdsByRoot.get(id);
+    const cbIds = cross ? callbackIdsByRoot.get(id) : undefined;
     return {
       id,
       from,

@@ -72,8 +72,10 @@ async fn collect_launched_descendant_ids(
             .await
             .map_err(internal_error)?
         {
-            if m.parent_mission_id
-                .is_none_or(|pid| !is_fork_of_parent(&m, pid))
+            let non_fork_parent = m
+                .parent_mission_id
+                .filter(|&pid| !is_fork_of_parent(&m, pid));
+            if non_fork_parent.is_some() || m.parent_mission_id.is_none() || m.session_id.is_some()
             {
                 candidate_missions.push(m);
             }
@@ -121,6 +123,7 @@ async fn collect_launched_descendant_ids(
             }
             let parent = m
                 .parent_mission_id
+                .filter(|&pid| !is_fork_of_parent(m, pid))
                 .or_else(|| callback_links.get(&m.id).copied());
             if parent.is_some_and(|p| visited.contains(&p)) && visited.insert(m.id) {
                 out.push(m.id);

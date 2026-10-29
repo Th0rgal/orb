@@ -73,10 +73,10 @@ it('sets includeDescendants on cross-project and split-subtree root moves and ex
  const crossPlan=planMissionMoves([P],'other','Audits',crossKnown);
  expect(crossPlan[0]).toEqual({id:P,from:'verity',folder:'Audits',includeDescendants:true,descendantIds:[CB]});
  expect(crossPlan.slice(1).every(s=>s.viaRootId===P)).toBe(true);
- const splitKnown=[{id:P,project:'other'},{id:C,project:'verity',parent_mission_id:P}];
+ const splitKnown=[{id:P,project:'other'},{id:CB,project:'other',callback_parent_mission_id:P},{id:C,project:'verity',parent_mission_id:CB}];
  const healPlan=planMissionMoves([P],'other','',splitKnown);
  expect(healPlan).toEqual([
-  {id:P,from:'other',folder:'',includeDescendants:true},
+  {id:P,from:'other',folder:'',includeDescendants:true,descendantIds:[CB]},
   {id:C,from:'verity',folder:'',viaRootId:P},
  ]);
  vi.mocked(getMission).mockResolvedValue({id:P,tags:[]} as any);
