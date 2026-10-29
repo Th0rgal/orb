@@ -33,7 +33,6 @@ import { ForkMission, stopSource } from "../ForkMission";
 import { fullToolCall, streamMission, heldAfterHistory, type StreamEvent } from "../stream";
 import { localActivitiesToStreamItems } from "../workModel";
 import { Chapters } from "../Chapters";
-import { Changes } from "../Changes";
 import { TurnRecap } from "../TurnRecap";
 import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "../Transcript";
 import { cacheRemember } from "../pageCache";
@@ -1019,7 +1018,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     <>
       {/* Centred in the title-bar row, just left of its icons (Codex / ChatGPT desktop). */}
       <Show when={document.getElementById("tb-tools")}>{slot => <Portal mount={slot()}>
-        <div class="mission-tools"><Changes items={viewItems()} githubPr={mission()?.github_pr} /><Chapters items={viewItems()} scroller={() => scroller} /></div>
+        <div class="mission-tools"><Chapters items={viewItems()} scroller={() => scroller} /></div>
       </Portal>}</Show>
       <div
         class="scroll"

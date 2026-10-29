@@ -57,3 +57,28 @@ anchor before remembering the viewport; `scroll-anchor.browser.spec.ts` replays
 both narration collapse and stale-cache enrichment with the working row absent.
 
 Raw backfill is always sequence-sorted and deduplicated before reduction, including when a complete cache has newer presentation events beyond its raw cursor. Roster reads may only supersede an already applied newer response; a newer pending request does not invalidate useful completed data.
+
+## Native transcript parity
+
+Native clients fetch the sequenced conversational rows (user, assistant, canonical
+assistant) separately from the raw tool tail, using the existing events endpoint.
+`OrbConversationHistory` owns their merge on iOS and Android. Identified rows merge
+by sequence, retaining repeated identical messages and chronological order. Legacy
+unsequenced caches may only append events after a known overlap; an unanchored tail
+cannot append old prompts below newer answers. Queued prompts and unsuccessful
+assistant events are not delivered conversation rows. A failed conversation read
+retains the cached conversation. Tool-only refreshes must also rebuild conversation
+messages when their batch contains an answer. Canonical answer notifications trigger
+the same refresh as ordinary answers. Shared `conversation-history.json` fixtures
+replay stale history followed by several user/assistant pairs, old tails, repeated
+prompts, canonical answers, queued messages, and out-of-order event delivery.
+
+Android continuation caches can contain several missions. Both conversation and
+raw-event cursors are calculated only from rows belonging to the requested mission;
+an ancestor sequence of 1000 cannot skip a continuation at sequence 20.
+
+Canonical bubble IDs and revisions survive in the stored conversation. Rendering
+replaces stale bubble revisions and suppresses the ordinary terminal receipt when
+it repeats the native bubbles, matching desktop. Storage retains that receipt so
+the incremental cursor still advances. Legacy overlap must reach the final stored
+row; matching an earlier repeated prompt is not sufficient.

@@ -1,6 +1,7 @@
-.provider-usage-meter { display:flex;flex-direction:column;gap:9px;padding:12px 0;min-width:0; }
+.provider-usage-meter { display:flex;flex-direction:column;gap:7px;padding:4px 0;min-width:0; }
 .provider-usage-heading { display:flex;align-items:baseline;justify-content:space-between;gap:16px;color:var(--fg-2);font-size:13px; }
-.provider-usage-heading > :last-child { font-variant-numeric:tabular-nums; }
+.provider-usage-heading > :last-child { font-variant-numeric:tabular-nums;flex-shrink:0; }
+.provider-usage-caption { display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;min-width:0; }
 .provider-usage-meter .p-bar { flex:none;height:7px;width:100%;border-radius:5px; }
 .provider-usage-meter .p-bar-fill { border-radius:5px;background:var(--blue); }
 .p-bar-fill.warning { background:var(--warning) !important; }

@@ -115,6 +115,7 @@
 		F27A47BB880A0287FE3BBB17 /* OrbSendFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 067CABDD48BEA5928AE8027E /* OrbSendFlow.swift */; };
 		F5D7580196676313DEB5380B /* OrbComputers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0103F58746466AC87D0A5A /* OrbComputers.swift */; };
 		FA899996474B9DD43915EC48 /* OrbDictation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94B98C32C31466233A2EFB2B /* OrbDictation.swift */; };
+		FD21B86FBF0D9E414FFA9C8A /* OrbConversationHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CCE42E0B3BE32839DCFF8F5 /* OrbConversationHistory.swift */; };
 		FD574F14F3AEA398FCA65F31 /* FidoApprovalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613C89CCE0D7D594A5B48445 /* FidoApprovalTests.swift */; };
 		FE4C9B523EA5D3B698782B3C /* OrbProvidersSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52C96EACDC68FCCABE9820AE /* OrbProvidersSettings.swift */; };
 		FF9AD27CB2EDBA4E942F09D4 /* FidoSignRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCD9630B60B3E470E64B1AB4 /* FidoSignRequest.swift */; };
@@ -224,6 +225,7 @@
 		82AA118A5010F08109573E09 /* OrbConversation+Composer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "OrbConversation+Composer.swift"; sourceTree = "<group>"; };
 		884A33B3C040821BDB103A97 /* OrbSecretRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbSecretRequests.swift; sourceTree = "<group>"; };
 		8BF8C369AA9AEE45087D99CB /* SandboxedDashboardUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SandboxedDashboardUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		8CCE42E0B3BE32839DCFF8F5 /* OrbConversationHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbConversationHistory.swift; sourceTree = "<group>"; };
 		8D55624F920B8E49AF5CBCB5 /* OrbUsageTelemetryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbUsageTelemetryTests.swift; sourceTree = "<group>"; };
 		8EB13B92B70F6884D323E5FF /* FidoApprovalState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FidoApprovalState.swift; sourceTree = "<group>"; };
 		919CD711EE488A95E44AE184 /* OrbTranscriptScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTranscriptScrollTests.swift; sourceTree = "<group>"; };
@@ -356,6 +358,7 @@
 				BFA9AF87C230C7A8BAFB1E26 /* OrbConversation+Menu.swift */,
 				1EAB105440167654A8DE2602 /* OrbConversation+Sync.swift */,
 				572383255134A5E8E0D31C86 /* OrbConversation+Transcript.swift */,
+				8CCE42E0B3BE32839DCFF8F5 /* OrbConversationHistory.swift */,
 				717FFF091D1EDB3F27D08712 /* OrbCore.swift */,
 				D361F38D66FC44DB9F7A4874 /* OrbDebugInfo.swift */,
 				94B98C32C31466233A2EFB2B /* OrbDictation.swift */,
@@ -671,6 +674,7 @@
 				46A6E7234A1670920A2C6F8A /* OrbConversation+Sync.swift in Sources */,
 				32F8BD3D905E40E231069056 /* OrbConversation+Transcript.swift in Sources */,
 				AA2F722EE90CC2C4E182861E /* OrbConversation.swift in Sources */,
+				FD21B86FBF0D9E414FFA9C8A /* OrbConversationHistory.swift in Sources */,
 				86C9D56D2E0A4F576734B3F1 /* OrbCore.swift in Sources */,
 				85152A48162502B82E5358A5 /* OrbDebugInfo.swift in Sources */,
 				FA899996474B9DD43915EC48 /* OrbDictation.swift in Sources */,
@@ -838,7 +842,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102804;
+				CURRENT_PROJECT_VERSION = 2026102805;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -858,7 +862,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.21.0;
+				MARKETING_VERSION = 1.21.1;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -989,7 +993,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026102804;
+				CURRENT_PROJECT_VERSION = 2026102805;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_PREVIEWS = YES;
@@ -1003,7 +1007,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.21.0;
+				MARKETING_VERSION = 1.21.1;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
