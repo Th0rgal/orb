@@ -32,7 +32,7 @@ it("shows the xAI subscription quota and plan and detects exhaustion", async () 
   vi.stubGlobal("fetch", vi.fn(async (url:string)=>new Response(JSON.stringify(url.endsWith("/providers")?[xai]:url.includes("/grok/usage")?quota:{}))));
   const {container}=render(()=><Providers/>);
   await waitFor(()=>expect(container.textContent).toContain("42%"));
-  expect(container.textContent).toContain("SuperGrok plan");
+  expect(container.textContent).toContain("SuperGrok");
   expect(usageWindows(quota)).toEqual([{label:"Weekly",used:.42}]);
   expect(effectiveProviderStatus(xai,{...quota,xai_credit_used_percent:100})).toBe("quota_exhausted");
   expect(usageWindows({provider_type:"xai"})).toEqual([]);
@@ -44,7 +44,7 @@ it("loads Kimi subscription-key quota on first visit and avoids duplicate window
   vi.stubGlobal("fetch",vi.fn(async(url:string)=>new Response(JSON.stringify(url.endsWith("/providers")?[kimi]:url.includes("/kimi-account/usage")?quota:{}))));
   const {container}=render(()=><Providers/>);
   await waitFor(()=>expect(container.textContent).toContain("75%"));
-  expect(container.textContent).toContain("Moderato plan");
+  expect(container.textContent).toContain("Moderato");
   expect(usageWindows(quota)).toEqual([{label:"5h",used:0},{label:"Weekly",used:.75}]);
   expect(usageWindows({...quota,kimi_windows:undefined})).toEqual(usageWindows(quota));
   expect(effectiveProviderStatus(kimi,{provider_type:"kimi",kimi_weekly_used_percent:100})).toBe("quota_exhausted");
@@ -119,4 +119,28 @@ it("an account Google wants verified asks for verification, not re-authenticatio
   ui.getByRole("button", { name: "Check again" }).click();
   await waitFor(() => expect(ui.container.textContent).not.toContain("Google requires you to verify this account."));
   expect(fetch.mock.calls.some(([url]) => String(url).endsWith("/new/antigravity/recheck"))).toBe(true);
+});
+
+it.each([
+  [0, 0, null], [35, 100, 35], [100, 100, 100], [0, 100, 0],
+  [35, undefined, null], [undefined, 100, null],
+])("renders credit allowance honestly (used=%s, cap=%s)", async (used, cap, percent) => {
+  setConnection("http://core.test", "test-token");
+  const xai = {...account("grok"), provider_type:"xai"};
+  const quota: ProviderUsage = {provider_type:"xai", xai_plan:"SuperGrok Heavy", xai_credit_used_percent:38, xai_credit_label:"Weekly", xai_on_demand_used:used, xai_on_demand_cap:cap, xai_prepaid_usd:0};
+  vi.stubGlobal("fetch", vi.fn(async (url:string) => new Response(JSON.stringify(url.endsWith("/providers") ? [xai] : url.includes("/grok/usage") ? quota : {}))));
+  const ui = render(() => <Providers />);
+  await waitFor(() => expect(ui.container.textContent).toContain("SuperGrok Heavy"));
+  (ui.container.querySelector('.p-acc-btn') as HTMLButtonElement).click();
+  const bar = ui.queryByRole('progressbar', {name:'On-demand credits usage'});
+  if (percent === null) expect(bar).toBeNull();
+  else {
+    expect(bar?.getAttribute('aria-valuenow')).toBe(String(percent));
+    expect(bar?.getAttribute('aria-valuetext')).toContain(`${used} / ${cap} used`);
+  }
+  if (used === 0 && cap === 0) expect(ui.container.textContent).not.toContain('On-demand credits');
+  if (cap === undefined) expect(ui.container.textContent).toContain('35 used');
+  if (used === undefined) expect(ui.container.textContent).toContain('usage unavailable');
+  expect(ui.container.textContent).not.toContain('Prepaid balance');
+  expect(ui.container.textContent).not.toContain('Connected');
 });
