@@ -13887,6 +13887,34 @@ fn managed_node_gone_verdict_requires_destroyed_record_or_authoritative_absence(
 }
 
 #[tokio::test]
+async fn recovery_supervision_reports_absent_runner_without_claiming_recent_activity() {
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "idle without runner").await;
+    let (tx, rx) = oneshot::channel();
+    h.control
+        .cmd_tx
+        .send(ControlCommand::CancelMission {
+            mission_id: mission.id,
+            min_idle: Some(std::time::Duration::from_secs(900)),
+            keep_remote_queue: false,
+            respond: tx,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rx.await.unwrap().unwrap(), CancelMissionOutcome::NoRunner);
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(mission.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
+}
+
+#[tokio::test]
 async fn recovery_handoff_survives_orphan_sweep_with_stale_active_snapshot() {
     let h = Harness::new().await;
     let store = h.control.mission_store.clone();

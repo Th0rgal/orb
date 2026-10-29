@@ -405,9 +405,8 @@ pub(crate) async fn cleanup_stale_active_missions_once(
                 // `running_mission_id` pinned and /api/control/running
                 // would keep reporting the mission as "running, stalled"
                 // until the daemon restarts. CancelMission is idempotent
-                // — it returns "not found" when there is no live runner,
-                // which is the common case for stale missions, and we
-                // ignore that error.
+                // — NoRunner allows cleanup to proceed, while
+                // SkippedRecentlyActive protects a runner with new activity.
                 let (tx, rx) = oneshot::channel();
                 let mut cancellation_skipped = false;
                 if cmd_tx

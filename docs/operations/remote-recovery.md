@@ -107,6 +107,10 @@ and concrete native errors retain their own causes. A stall alone does not
 establish that replaying side effects is safe: absent an existing continuation,
 show Resume rather than promising an automatic retry.
 
+Conditional supervision reports an absent runner separately from renewed
+activity. Stale cleanup may close an idle mission with no runner; only actual
+recent runner activity vetoes that cleanup.
+
 Partial assistant prose is preserved once, separately from failure evidence.
 It must not hide a later lifecycle interruption. Legacy generic `Cancelled`
 is not proof of a user Stop. Tests replay handoff/orphan ordering, stale timers,

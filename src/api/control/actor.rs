@@ -3475,7 +3475,7 @@ pub(super) async fn control_actor_loop(
                                         runner_force_clear_deadline = Some(tokio::time::Instant::now() + RUNNER_FORCE_CLEAR_GRACE);
                                         running_run.clone()
                                     } else {
-                                        let _ = respond.send(Ok(CancelMissionOutcome::SkippedRecentlyActive));
+                                        let _ = respond.send(Ok(CancelMissionOutcome::NoRunner));
                                         continue;
                                     };
                                     if let Some(run) = run {
