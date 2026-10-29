@@ -105,3 +105,41 @@ it("shift selection exposes Archive and archives each selected idle conversation
  await waitFor(()=>expect(listed.every(m=>m.status==="acknowledged")).toBe(true));
  expect(vi.mocked(fetch).mock.calls.filter(([url,init])=>String(url).endsWith("/status")&&init?.method==="POST")).toHaveLength(2);
 });
+
+it("keeps an open mission only at its moved destination across delayed lists and stale details", async () => {
+  const { moveOptimistically, missionMoveKey, movedMission, resetMoves } = await import('../src/moves');
+  resetMoves();
+  listed = [mission];
+  let releaseOldList!:()=>void;
+  const oldList = new Promise<void>(resolve=>releaseOldList=resolve);
+  const fetcher = vi.mocked(fetch);
+  fetcher.mockImplementation(async (input) => {
+    const url = new URL(String(input)), path = url.pathname;
+    if (path.endsWith('/missions') && url.searchParams.get('project') === 'verity') await oldList;
+    const body = path === '/api/projects' ? {projects:[{slug:'verity',title:'Verity'},{slug:'other',title:'Other'}]}
+      : path.endsWith('/files') ? {entries:[]}
+      : path.endsWith('/controller') ? {job:null,runs:[]}
+      : path.endsWith('/crons') ? {jobs:[]}
+      : path.endsWith('/missions') ? (url.searchParams.get('project') === 'other' ? [] : listed) : [];
+    return new Response(JSON.stringify(body));
+  });
+  const view = render(() => <LiveProjectsSection currentMission={movedMission(mission)} selected={() => 'm:restored'}
+    harnessChoices={[]} onFork={()=>{}} open={()=>{}} onNewAgent={()=>{}} onNewProject={()=>{}} />);
+  await view.findByRole('button',{name:'Open plan',exact:true});
+  let release!:()=>void;
+  const gate = new Promise<void>(r=>release=r);
+  const done = moveOptimistically(missionMoveKey(mission.id), {kind:'mission',fromProject:'verity',toProject:'other',path:''}, async()=>{
+    await gate;
+    window.dispatchEvent(new CustomEvent('orb:mission-moved',{detail:{id:mission.id,project:'other',tags:[]}}));
+  });
+  await waitFor(()=>expect(view.getAllByRole('button',{name:'Open plan',exact:true})).toHaveLength(1));
+  release(); await done;
+  releaseOldList();
+  await new Promise(r=>setTimeout(r,20));
+  expect(view.getAllByRole('button',{name:'Open plan',exact:true})).toHaveLength(1);
+  // Clearing the transient overlay must not resurrect the stale open detail.
+  resetMoves();
+  await waitFor(()=>expect(view.getAllByRole('button',{name:'Open plan',exact:true})).toHaveLength(1));
+  const projects = view.container.querySelectorAll('.row.project.contains-current');
+  expect([...projects].map(el=>el.getAttribute('data-drop-project'))).toEqual(['other']);
+});

@@ -184,3 +184,23 @@ placeholder is the follow-up.
 - Core: `callback_parent::tests::attach_adds_a_derived_parent_and_keeps_an_existing_one`.
 - Mobile: `OrbContractTests.testParentLinkIsStickyAcrossPayloadsThatOmitIt`,
   `OrbMissionTreeTest.parentLinkIsStickyAcrossPayloadsThatOmitIt`.
+
+## Cut/paste placement ownership
+
+A mission has one visible project/folder during and after a move, including when
+it is the open conversation. The loaded sidebar listing owns placement; open
+conversation details may refresh status/content but cannot restore an older
+project or folder. Apply the shared move projection to that resolved placement.
+Rendering a projected destination is not server acknowledgement.
+
+A successful move commits its placement to the sidebar listings atomically:
+remove the old membership, insert/update the destination, and fence reads started
+before that acknowledgement. Do not wait for a destination list request before
+making this change. Failed writes remove only their optimistic projection and
+restore their original placement with a visible retryable error.
+
+Regression sequence: open a mission in A; cut/paste into B while the write is
+held; observe exactly one row in B; acknowledge the write while holding B's list
+refresh; deliver the old A response and old conversation details; expire the
+move overlay. At every step the row remains only in B. Repeat for a nested
+folder and a rejected move, which must restore A.
