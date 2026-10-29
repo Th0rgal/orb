@@ -37,7 +37,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
   let detach: (() => void) | undefined;
   const [pinned, setPinned] = createSignal(true);
   let landedFor = "";
-  let intentAt = -Infinity, dragging = false, lastTop = 0, lastScrollHeight = 0, lastClientHeight = 0, lastColHeight = 0;
+  let intentAt = -Infinity, dragging = false, lastTop = 0, lastScrollHeight = 0, lastClientHeight = 0, lastColHeight = 0, jumping = false;
   let anchor: { el: Element; top: number; row: Element | null; rowTop: number } | undefined;
   let content: HTMLElement | undefined, held = 0;
   const reserve = (px: number) => { held = px; scroller?.style.setProperty("--scroll-reserve", px ? `${px}px` : ""); };
@@ -53,6 +53,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     recordGeometry(el);
   };
   const remember = () => {
+    if (jumping) return;
     const el = scroller;
     recordGeometry(el);
     // Hit-testing forces layout: only a reader who is not following needs an anchor.
@@ -72,6 +73,7 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
   };
   /** Put the anchor back where the reader saw it. A folded-away anchor falls back to its turn. */
   const restore = () => {
+    if (jumping) return;
     const el = scroller;
     if (!el) return;
     const height = content?.offsetHeight ?? 0;
@@ -179,10 +181,39 @@ export function createPinnedScroll(o: { key: () => string; onResize?: () => void
     pinned,
     /** A send by the reader, or "Jump to latest": follow the newest message again. */
     pin: () => { setPinned(true); queueMicrotask(scrollIfPinned); },
+    /** Begin an app-driven passage jump (e.g. search hit): suspend bottom-follow and anchor restore while virtual rows mount. */
+    beginJump: () => {
+      jumping = true;
+      setPinned(false);
+      anchor = undefined;
+    },
+    /** Finish an app-driven passage jump, optionally centering `target` and locking it as the active viewport anchor. */
+    endJump: (target?: Element | null) => {
+      markIntent();
+      if (target && scroller && scroller.contains(target)) {
+        target.scrollIntoView({ block: "center", behavior: "instant" });
+      }
+      jumping = false;
+      if (scroller) {
+        recordGeometry(scroller);
+        if (target && scroller.contains(target)) {
+          const box = scroller.getBoundingClientRect();
+          const row = target.closest(TURN_SELECTOR);
+          anchor = {
+            el: target,
+            top: target.getBoundingClientRect().top,
+            row,
+            rowTop: row?.getBoundingClientRect().top ?? box.top,
+          };
+        } else {
+          remember();
+        }
+      }
+    },
     scrollIfPinned,
     onScroll: () => {
       const el = scroller;
-      if (!el) return;
+      if (!el || jumping) return;
       const top = el.scrollTop, gap = gapOf(el);
       // A collapsing narration can clamp scrollTop before ResizeObserver runs.
       // This is layout, even inside the recent wheel-intent window. Preserve

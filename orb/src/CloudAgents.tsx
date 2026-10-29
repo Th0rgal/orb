@@ -18,6 +18,7 @@ import type { ModelParam } from './cloudAgentApi';
 import { AgentChoice, AgentChoiceMenu } from './AgentChoice';
 import { type DraftImage, imagePrompt, stageRemoteImages } from './imageAttachments';
 import { DEFAULT_PROJECT, ensureDefaultProject } from './defaultProject';
+import { fulfillSearchTarget, hasPendingSearchTarget, pendingSearchTarget } from './searchTarget';
 
 function splitResultWithInlineThoughts(keyPrefix: string, raw: string, isLive: boolean, existingThoughts: Set<string>): StreamItem[] {
   const out: StreamItem[] = [];
@@ -221,6 +222,7 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   const [outgoing, setOutgoing] = createSignal<{id: string; text: string; images: DraftImage[]; turns: number}[]>([]);
   const [sendError, setSendError] = createSignal<string | null>(null);
   const pin = createPinnedScroll({ key: () => p.id });
+  let scroller: HTMLDivElement | undefined;
   pin.observe();
   const send = async (text: string, images: DraftImage[] = []) => {
     if ((!text.trim() && !images.length) || !execution() || !cloudCanSend(execution()!)) return false;
@@ -249,15 +251,30 @@ export function CloudConversation(p: { id: string; launch?: CloudLaunchSeed; onM
   const launchPending = () => !execution()?.turns.length && !!seed();
   const items = (): StreamItem[] => [...launchItems(), ...(execution()?.turns ?? []).flatMap(t => turnToStreamItems(t, working(t))),
     ...outgoing().map((r): StreamItem => ({ kind: 'user', key: `outgoing:${r.id}`, text: r.text, images: r.images, messageId: r.id }))];
-  createEffect(on(items, () => queueMicrotask(pin.scrollIfPinned), { defer: true }));
-  createEffect(on(execution, e => { if (e) queueMicrotask(pin.landAtBottom); }));
+  createEffect(on(items, () => { if (!hasPendingSearchTarget(p.id)) queueMicrotask(pin.scrollIfPinned); }, { defer: true }));
+  createEffect(on(execution, e => { if (e && !hasPendingSearchTarget(p.id)) queueMicrotask(pin.landAtBottom); }));
+  let fulfillingTargetId = 0;
+  createEffect(() => {
+    const target = pendingSearchTarget();
+    if (!target || target.missionId !== p.id || !(execution() || seed()) || fulfillingTargetId === target.requestId) return;
+    fulfillingTargetId = target.requestId;
+    void fulfillSearchTarget({
+      missionId: p.id,
+      target,
+      getItems: items,
+      getScroller: () => scroller,
+      beginJump: pin.beginJump,
+      endJump: pin.endJump,
+      isCloud: true,
+    });
+  });
   const progress = () => {
     const t = execution()?.turns.find(working); if (!t) return;
     return t.phase === 'cancel_requested' ? 'Stopping…' : t.phase === 'queued' ? 'Queued…'
       : t.phase === 'waiting_user' ? 'Waiting for approval' : t.phase === 'submitting' ? (t.detail ?? `Opening ${cloudNames[execution()!.selection.provider]}…`)
       : t.result ? 'Writing…' : (t.detail ?? 'Working…');
   };
-  return <><div class="scroll" ref={pin.ref} onScroll={pin.onScroll}><div class="col">
+  return <><div class="scroll" ref={el => { scroller = el; pin.ref(el); }} onScroll={pin.onScroll}><div class="col">
     <Show when={error()}><p class="cloud-note inline-error" role="alert">{error()}</p></Show>
     <Show when={execution() || seed()} fallback={<div class="sk-transcript" role="status" aria-label="Loading conversation" aria-busy="true"><div class="sk-lines" aria-hidden="true"><i style={{ width: "58%" }} /><i style={{ width: "86%" }} /><i style={{ width: "72%" }} /></div></div>}>
       <Transcript sizeKey={`m:${p.id || 'launch'}`} items={items()} pending={launchPending() || (active() && !outgoing().length)} sending={outgoing().at(-1)?.id} working={launchPending() || active() || outgoing().length > 0} workingLabel={progress() ?? (launchPending() ? 'Working…' : 'Sending…')}/>

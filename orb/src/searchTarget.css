@@ -1,0 +1,28 @@
+.search-target-flash {
+  border-radius: var(--radius-md);
+  animation: orb-search-target-flash 2.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes orb-search-target-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--amber) 24%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber) 42%, transparent);
+  }
+  55% {
+    background-color: color-mix(in srgb, var(--amber) 14%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--amber) 26%, transparent);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search-target-flash {
+    animation: none;
+    background-color: color-mix(in srgb, var(--amber) 18%, transparent);
+    outline: 1px solid color-mix(in srgb, var(--amber) 45%, transparent);
+    outline-offset: 3px;
+  }
+}

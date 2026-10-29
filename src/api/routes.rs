@@ -1000,6 +1000,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(control::search_mission_moments),
         )
         .route(
+            "/api/control/missions/search/messages",
+            get(control::search_conversation_messages),
+        )
+        .route(
             "/api/control/missions/current",
             get(control::get_current_mission),
         )
@@ -1010,6 +1014,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(control::resolve_mission_id),
         )
         .route("/api/control/missions/:id", get(control::get_mission))
+        .route(
+            "/api/control/missions/:id/messages/context",
+            get(control::get_mission_passage_context),
+        )
         .route(
             "/api/control/missions/:id/board",
             get(control::get_mission_board),

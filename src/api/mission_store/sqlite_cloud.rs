@@ -83,6 +83,7 @@ pub(super) async fn save(
         if let Some(turn) = execution.turns.iter().find(|t| !t.phase.terminal()).or_else(|| execution.turns.last()) {
             tx.execute("UPDATE missions SET status=?2,updated_at=?3 WHERE id=?1 AND (status<>'acknowledged' OR ?4)",params![execution.mission_id.to_string(),turn.phase.mission_status(),now_string(),new_turn]).map_err(err)?;
         }
+        search_index::on_cloud_execution_saved(&tx, &execution, &now_string())?;
         tx.commit().map_err(err)?; Ok(execution)
     }).await.map_err(err)?
 }

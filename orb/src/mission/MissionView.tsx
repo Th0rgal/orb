@@ -83,6 +83,7 @@ import { createHandoffTracker } from "./handoff";
 import { createOptimisticList } from "./optimisticList";
 import { notify } from "../toast";
 import { usageTelemetry } from "../usageTelemetry";
+import { fulfillSearchTarget, hasPendingSearchTarget, pendingSearchTarget } from "../searchTarget";
 
 function MissionDock(p: {
   mission: Mission | null;
@@ -365,7 +366,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   // keep fetching older pages: a scroll event alone never fires otherwise.
   const older=()=>{
     const el=scroller;
-    if(!el)return;
+    if(!el||hasPendingSearchTarget(p.id))return;
     const short=el.scrollHeight<=el.clientHeight+800;
     if((el.scrollTop<800||short)&&peekReadyTranscript(p.id)?.hasOlder)void loadOlder().then(()=>requestAnimationFrame(older)).catch(e=>setError(String(e)));
   };
@@ -411,6 +412,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     void resync(true);
   };
   let replaying = false;
+  const [syncing, setSyncing] = createSignal(false);
   let refreshAgain = false;
   const [refreshing, setRefreshing] = createSignal(false);
   let held: StreamEvent[] = [];
@@ -430,6 +432,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if(disposed||!p.id)return;
     if (replaying) { refreshAgain ||= fresh; return; }
     replaying = true;
+    setSyncing(true);
     held = [];
     let history: StreamEvent[] = [];
     try {
@@ -458,9 +461,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       }else setError(e instanceof Error ? e.message : String(e));
     } finally {
       replaying = false;
+      setSyncing(false);
       if(disposed)return;
       setAwaiting(false);
-      landAtBottom();
+      if (!hasPendingSearchTarget(p.id)) landAtBottom();
       const queued = held;
       held = [];
       for (const ev of heldAfterHistory(history, queued)) applyLive(ev);
@@ -513,7 +517,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     void refresh();
     // History must load even when the live connection has not opened yet.
     let initialReady = true;
-    void resync(true).then(() => { scrollIfPinned(); });
+    void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
     const stopStream = streamMission(
       p.id,
       (ev) => {
@@ -538,10 +542,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       () => {
         if (initialReady) {
           initialReady = false;
-          scrollIfPinned();
+          if (!hasPendingSearchTarget(p.id)) scrollIfPinned();
           return;
         }
-        void resync(true).then(() => { scrollIfPinned(); });
+        void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
       },
     );
     // Slow status poll — the stream is authoritative for content, but the
@@ -729,6 +733,21 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   createEffect(()=>p.onPlan?.(p.id,planProgress()));
   const titleContext = createMemo(() => awaiting() ? null : contextPct(estimateTokens(viewItems()), contextWindow(mission()?.backend)));
   createEffect(() => p.onContext?.(p.id, titleContext()));
+  let fulfillingTargetId = 0;
+  createEffect(() => {
+    const target = pendingSearchTarget();
+    if (!target || target.missionId !== p.id || awaiting() || syncing() || fulfillingTargetId === target.requestId) return;
+    fulfillingTargetId = target.requestId;
+    void fulfillSearchTarget({
+      missionId: p.id,
+      target,
+      getItems: () => viewItems().filter(i => i.kind !== "user" || !i.queued),
+      onHydrated: next => setItems(reuseUnchanged(items(), next)),
+      getScroller: () => scroller,
+      beginJump: pin.beginJump,
+      endJump: pin.endJump,
+    });
+  });
 
   // Retrying an uncertain network result reuses the original message identity.
   // A different draft/selection, or a definitive rejection, starts a new attempt.

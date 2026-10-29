@@ -5,9 +5,9 @@ import { deferredMessages } from "./deferredMessages";
 import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
-  | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
+  | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
   | { kind: "think"; key: string; text: string; done: boolean }
-  | { kind: "text"; key: string; text: string; live: boolean; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
+  | { kind: "text"; key: string; text: string; live: boolean; eventId?: string; sequence?: number; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
   | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean; title?: string }
   | {
       kind: "tool";
@@ -17,6 +17,7 @@ export type StreamItem =
       args: unknown;
       result?: unknown;
       done: boolean;
+      sequence?: number;
       unresolved?: boolean;
       /** Core shortened the args or result (`max_payload`); the full call loads on expand. */
       truncated?: boolean;
@@ -201,13 +202,13 @@ export class TranscriptReducer {
         if (this.lastFinal != null && this.lastFinal > index) this.lastFinal--;
         this.lastUser = this.items.length;
         this.users.set(messageId!, this.items.length);
-        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, at: typeof d.at === "string" ? d.at : previous.at });
+        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), at: typeof d.at === "string" ? d.at : previous.at });
         return;
       }
       if (!queued) { this.close(); this.lastFinal = undefined; }
       if (messageId) this.users.set(messageId, this.items.length);
       if (!queued) this.lastUser = this.items.length;
-      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(typeof d.at === "string" ? { at: d.at } : {}) });
+      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, eventId: messageId, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(typeof d.at === "string" ? { at: d.at } : {}) });
       return;
     }
     const id = ev.eventId ?? (typeof d.id === "string" ? d.id : undefined);
@@ -312,7 +313,7 @@ export class TranscriptReducer {
           // must remain distinct. Keep it available for the turn's final event.
           const index=this.bubbles.get(finalBubble) ?? (finalBubble==="text_delta_latest" ? this.lastFinal : undefined);
           const previous=index==null ? undefined : this.items[index];
-          const stamp=typeof d.at==="string"?{at:d.at}:{};
+          const stamp={...(typeof d.at==="string"?{at:d.at}:{}),...(id?{eventId:id}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{})};
           if(previous?.kind==="text"&&index!=null){this.put(index,{...previous,text:text||previous.text,live:false,...stamp});this.bubbles.set(finalBubble,index);}
           else if(text){this.placeText(finalBubble,{kind:"text",key:this.key("text"),text,live:false,...stamp});}
           return;
@@ -360,11 +361,11 @@ export class TranscriptReducer {
           }
           return;
         }
-        const at=typeof d.at==="string"?{at:d.at}:{};
+        const at={...(typeof d.at==="string"?{at:d.at}:{}),...(id?{eventId:id}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{})};
         if(!isNativeReceipt){
           if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false,...at});this.lastFinal=index;}
           else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false,...at});}
-        }else if(d.at){const row=nativeLast==null?undefined:this.items[nativeLast];if(row?.kind==="text")this.put(nativeLast!,{...row,...at});}
+        }else if(d.at){const row=nativeLast==null?undefined:this.items[nativeLast];if(row?.kind==="text")this.put(nativeLast!,{...row,...(typeof d.at==="string"?{at:d.at}:{})});}
         // Settle the turn's shape only after the final text is in place.
         this.hoistTrailingThoughts();
         return;
@@ -400,7 +401,7 @@ export class TranscriptReducer {
           return;
         }
         this.tools.set(callId,this.items.length);
-        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:str(d.name)||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),done:ev.type==="tool_result"});return;
+        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:str(d.name)||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
       }
       case "error": this.close(); this.items.push({kind:"error",key:this.key("error"),text:str(d.message)});return;
       case "mission_status_changed": {

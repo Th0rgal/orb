@@ -6,6 +6,7 @@ fn err(e: impl std::fmt::Display) -> String {
 pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Result<(), String> {
     snapshot.validate()?;
     let conn = store.conn.clone();
+    let content_dir = store.content_dir.clone();
     tokio::task::spawn_blocking(move||{
   let mut c=conn.blocking_lock();let tx=c.transaction().map_err(err)?;
   tx.execute_batch("CREATE TABLE IF NOT EXISTS local_origins (mission_id TEXT PRIMARY KEY, origin TEXT NOT NULL, sequence INTEGER NOT NULL, terminal INTEGER NOT NULL DEFAULT 0)").map_err(err)?;
@@ -44,6 +45,7 @@ pub(super) async fn sync(store: &SqliteMissionStore, snapshot: Snapshot) -> Resu
   tx.execute("UPDATE mission_runs SET execution_state=?2,heartbeat_at=?3,ended_at=?4,terminal_reason=?5 WHERE run_id=?1",params![run,if terminal{"terminal"}else{"running"},now,terminal.then_some(&now),terminal.then_some("client_runner")]).map_err(err)?;
   tx.execute("UPDATE missions SET status=?2,updated_at=?3,terminal_reason=?4 WHERE id=?1",params![id,snapshot.status,now,snapshot.error]).map_err(err)?;
   tx.execute("UPDATE local_origins SET sequence=?2,terminal=?3 WHERE mission_id=?1",params![id,snapshot.sequence,terminal]).map_err(err)?;
+  search_index::reconcile_mission_docs(&tx, &content_dir, &id)?;
   tx.commit().map_err(err)
  }).await.map_err(err)?
 }
