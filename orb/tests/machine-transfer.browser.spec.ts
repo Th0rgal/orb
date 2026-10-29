@@ -58,3 +58,75 @@ test("moves from the footer with an inventory and no automatic execution", async
   expect([...new Set(calls)]).toEqual(["prepare", "inventory", "select", "snapshot", "stage", "read", "write", "verify", "activate"]);
   expect(selection).toEqual({ op: "select", omit: ["data/raw"], include: ["target"] });
 });
+
+test("transfers a queued remote mission with an unmaterialized workspace to Core without flipping to Core → Core", async ({ page }) => {
+  const calls: string[] = [];
+  const action = {
+    id: "move-empty",
+    mission_id: "test",
+    phase: "preparing",
+    source: { kind: "node", id: "old-agent" },
+    destination: { kind: "core" },
+    backend: "opencode",
+    model: "builtin/smart",
+    source_root: "mission:test",
+    created_at: "",
+    manifest: null as unknown,
+  };
+  let cancelled = false;
+  await page.route("**/api/control/missions/test/cancel", async route => {
+    cancelled = true;
+    await page.evaluate(() => window.dispatchEvent(new Event("orb:test-mission-cancelled")));
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/control/missions/test/machine-transfer", async route => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        json: {
+          version: 1,
+          source: { kind: "node", id: "old-agent" },
+          actions: [],
+          destinations: [
+            { machine: { kind: "core" }, label: "Core", available: true, harnesses: ["opencode"] },
+            { machine: { kind: "node", id: "old-agent" }, label: "old-agent", available: true, harnesses: ["opencode"] },
+          ],
+        },
+      });
+      return;
+    }
+    const body = route.request().postDataJSON();
+    calls.push(body.op === "files" ? body.operation.op : body.op);
+    let result: unknown = { ok: true };
+    if (body.op === "prepare") result = action;
+    else if (body.operation?.op === "inventory") result = { rows: [], bytes: 0, files: 0, reserved: { bytes: 0, files: 0 }, truncated: false, protected: 0, limits: { bytes: 1000, files: 100 } };
+    else if (body.operation?.op === "snapshot") { action.manifest = { files: [], bytes: 0, excluded: [] }; action.phase = "copying"; result = action; }
+    else if (body.operation?.op === "stage") result = { received: {}, sealed: false };
+    else if (body.operation?.op === "verify") { action.phase = "verified"; result = action; }
+    else if (body.op === "activate") { action.phase = "activated"; result = action; }
+    await route.fulfill({ json: result });
+  });
+  await page.route("**/api/control/missions/test", route =>
+    route.fulfill({
+      json: {
+        id: "test",
+        status: action.phase === "activated" ? "awaiting_user" : cancelled ? "interrupted" : "active",
+        machine_transfer: action.phase === "activated" ? action : undefined,
+      },
+    }),
+  );
+
+  await page.goto("/tests/machine-transfer.html?queued=old-agent");
+  await page.getByRole("button", { name: "Change machine: old-agent" }).click();
+  await expect(page.getByRole("menuitem", { name: /old-agent/ })).toBeDisabled();
+  await page.getByRole("menuitem", { name: "Core ›" }).click();
+  await expect(page.getByText("old-agent → Core")).toBeVisible();
+  await page.getByRole("button", { name: "Stop and prepare" }).click();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
+  await expect(page.getByText("old-agent → Core")).toBeVisible();
+  await expect(page.getByText("Core → Core")).toHaveCount(0);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("button", { name: "Move to Core" })).toBeVisible();
+  await page.getByRole("button", { name: "Move to Core" }).click();
+  await expect(page.getByRole("button", { name: "Change machine: Core" })).toBeVisible();
+  expect(calls).toEqual(["prepare", "inventory", "select", "snapshot", "stage", "verify", "activate"]);
+});

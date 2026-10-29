@@ -36,6 +36,7 @@ pub struct Skipped {
 pub const OUTSIDE_LINK: &str = "link points outside the workspace";
 pub const UNUSUAL_LINK: &str = "link target is not portable";
 pub const SPECIAL_FILE: &str = "socket, pipe or device";
+pub const MISSING_SOURCE_WORKSPACE: &str = "Source workspace directory does not exist";
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Manifest {
     pub files: Vec<Entry>,
@@ -938,6 +939,17 @@ pub(crate) fn lock_area(area: &Path) -> Result<File, String> {
     fs2::FileExt::lock_exclusive(&lock).map_err(err)?;
     Ok(lock)
 }
+fn canonical_source(source: Option<&Path>) -> Result<(&Path, PathBuf), String> {
+    let given = source.ok_or("Source workspace unavailable")?;
+    let canonical = given.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            MISSING_SOURCE_WORKSPACE.into()
+        } else {
+            err(e)
+        }
+    })?;
+    Ok((given, canonical))
+}
 pub fn operate(
     area: &Path,
     source: Option<&Path>,
@@ -946,12 +958,10 @@ pub fn operate(
     let root = area.join("workspace");
     let _lock = lock_area(area)?;
     match op {
-        Operation::Inventory => survey(
-            &source
-                .ok_or("Source workspace unavailable")?
-                .canonicalize()
-                .map_err(err)?,
-        ),
+        Operation::Inventory => {
+            let (_, source) = canonical_source(source)?;
+            survey(&source)
+        }
         Operation::Select { omit, include } => {
             let selection = Selection { omit, include };
             if manifest_path(area).exists() {
@@ -982,8 +992,7 @@ pub fn operate(
             if manifest_path(area).exists() {
                 return Ok(serde_json::json!(load(area)?));
             }
-            let given = source.ok_or("Source workspace unavailable")?;
-            let source = given.canonicalize().map_err(err)?;
+            let (given, source) = canonical_source(source)?;
             let roots = [source.as_path(), given];
             if area.starts_with(&source) {
                 return Err("Checkpoint directory must be outside the workspace".into());
@@ -1068,8 +1077,7 @@ pub fn operate(
             Ok(serde_json::json!(m))
         }
         Operation::CheckSource => {
-            let given = source.ok_or("Source workspace unavailable")?;
-            let source = given.canonicalize().map_err(err)?;
+            let (given, source) = canonical_source(source)?;
             let expected = load(area)?;
             let mut current = Manifest::default();
             inventory(
@@ -1973,5 +1981,21 @@ mod integrity_tests {
         fs::write(b.join("workspace/file"), "uncommitted").unwrap();
         git(&b.join("workspace"), &["branch", "created-after-snapshot"]).unwrap();
         assert!(operate(&c, Some(&b.join("workspace")), Operation::CheckSource).is_err());
+    }
+    #[test]
+    fn missing_source_workspace_reports_actionable_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("does-not-exist");
+        let area = temp.path().join("a");
+        for op in [
+            Operation::Inventory,
+            Operation::Snapshot,
+            Operation::CheckSource,
+        ] {
+            assert_eq!(
+                operate(&area, Some(&missing), op).unwrap_err(),
+                MISSING_SOURCE_WORKSPACE
+            );
+        }
     }
 }
