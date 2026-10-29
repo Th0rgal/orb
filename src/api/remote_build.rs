@@ -619,6 +619,7 @@ async fn resolve_node(
     state: &AppState,
     node_id: &str,
     requirements: &[String],
+    estimated_disk_bytes: u64,
     min_disk_bytes: u64,
     min_protocol_version: u32,
     source: Option<crate::remote_node::protocol::SourceBundleRequirement>,
@@ -634,17 +635,16 @@ async fn resolve_node(
         let reservations = core_side_reservations(state)
             .await
             .map_err(|message| (StatusCode::SERVICE_UNAVAILABLE, message))?;
-        let first = state
-            .fleet
-            .place_auto_with_source_and_resource_reservations(
-                settings,
-                requirements,
-                min_disk_bytes,
-                min_protocol_version,
-                source,
-                &reservations.jobs,
-                &reservations.disk_bytes,
-            );
+        let first = state.fleet.place_auto_with_estimated_disk_and_source(
+            settings,
+            requirements,
+            estimated_disk_bytes,
+            min_disk_bytes,
+            min_protocol_version,
+            source,
+            &reservations.jobs,
+            &reservations.disk_bytes,
+        );
         let picked = match first {
             Ok(picked) => picked,
             Err(initial_err) => {
@@ -678,9 +678,10 @@ async fn resolve_node(
                     .map_err(|message| (StatusCode::SERVICE_UNAVAILABLE, message))?;
                 state
                     .fleet
-                    .place_auto_with_source_and_resource_reservations(
+                    .place_auto_with_estimated_disk_and_source(
                         settings,
                         requirements,
+                        estimated_disk_bytes,
                         min_disk_bytes,
                         min_protocol_version,
                         source,
@@ -721,19 +722,14 @@ async fn resolve_node(
     }
     check_node_source_capacity(&heartbeat, source)?;
     let reserved = reservations.disk_bytes.get(&node.id).copied().unwrap_or(0);
-    let effective = heartbeat.disk_available_bytes.saturating_sub(reserved);
-    if effective < min_disk_bytes {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "remote node '{}' has {} GiB effective free after {} GiB reserved; {} GiB required",
-                node.id,
-                effective / GIB,
-                reserved / GIB,
-                min_disk_bytes / GIB
-            ),
-        ));
-    }
+    heartbeat
+        .check_disk_admission(reserved, estimated_disk_bytes, min_disk_bytes)
+        .map_err(|reason| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("remote node '{}': {reason}", node.id),
+            )
+        })?;
     Ok(node)
 }
 
@@ -1327,6 +1323,7 @@ async fn submit_remote_build(
         &state,
         &req.node_id,
         &requirements,
+        req.estimated_disk_bytes,
         min_disk_bytes,
         min_protocol_version,
         source,

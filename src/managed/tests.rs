@@ -16,6 +16,8 @@ fn settings() -> ManagedSettings {
         raw_allowed_images: vec!["clean".into()],
         core_url: Some("https://core.example".into()),
         idle_minutes: 30,
+        working_idle_minutes: 0,
+        post_job_idle_minutes: 5,
         owner_grace_minutes: 0,
         waiting_grace_minutes: 60,
         orphan_grace_minutes: 0,
@@ -53,12 +55,19 @@ impl ManagedProvider for FakeProvider {
     fn name(&self) -> &'static str {
         "fake"
     }
+    fn supports_free_stop(&self) -> bool {
+        true
+    }
+    fn supports_snapshots(&self) -> bool {
+        true
+    }
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
         let n = self.created.fetch_add(1, Ordering::SeqCst);
         Ok(ProviderMachine {
             provider_id: format!("bx_fake{n}"),
             state: "ready".into(),
             name: spec.name.clone(),
+            deletable_at: None,
         })
     }
     async fn get(&self, provider_id: &str) -> Result<ProviderMachine, String> {
@@ -66,6 +75,7 @@ impl ManagedProvider for FakeProvider {
             provider_id: provider_id.into(),
             state: "ready".into(),
             name: String::new(),
+            deletable_at: None,
         })
     }
     async fn list(&self) -> Result<Vec<ProviderMachine>, String> {
@@ -314,16 +324,19 @@ async fn reconcile_stops_tagged_orphans_only() {
             provider_id: "bx_orphan1".into(),
             state: "ready".into(),
             name: "orb-managed-mmzzzz".into(),
+            deletable_at: None,
         },
         ProviderMachine {
             provider_id: "bx_research".into(),
             state: "ready".into(),
             name: "autoresearch run".into(),
+            deletable_at: None,
         },
         ProviderMachine {
             provider_id: "bx_old".into(),
             state: "archived".into(),
             name: "orb-managed-mmold".into(),
+            deletable_at: None,
         },
     ];
     let report = m.reconcile_once().await.unwrap();
@@ -412,11 +425,17 @@ async fn boat_e2e_provider_round_trip() {
     let provider = boat::BoatProvider::from_env().expect("BOAT_API_KEY");
     let tag = format!("{SANDBOX_NAME_PREFIX}e2e{}", random_id());
     let spec = SpawnSpec {
+        machine_id: tag.clone(),
         size: "small".into(),
+        gpu: None,
+        arch: None,
+        max_hourly_usd: None,
         ttl_seconds: 900,
         image: None,
         name: tag.clone(),
         idempotency_key: tag.clone(),
+        bootstrap_script: None,
+        allow_24h_commitment: false,
     };
     let created = provider.spawn(&spec).await.expect("spawn");
     let id = created.provider_id.clone();
@@ -548,6 +567,11 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         run_started_at: None,
         cost_before_resume: 0.0,
         secrets_wiped: false,
+        project: None,
+        root_mission_id: None,
+        active_mission_ids: Vec::new(),
+        deletable_at: None,
+        has_executed_job: false,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -940,6 +964,11 @@ fn spend_machine(
         run_started_at: None,
         cost_before_resume: 0.0,
         secrets_wiped: false,
+        project: None,
+        root_mission_id: None,
+        active_mission_ids: Vec::new(),
+        deletable_at: None,
+        has_executed_job: false,
     }
 }
 
@@ -1199,12 +1228,14 @@ async fn reconcile_orphan_grace_and_vanished_rows() {
         provider_id: "bx_unrelated".into(),
         state: "ready".into(),
         name: "not ours".into(),
+        deletable_at: None,
     };
     *fake.listed.lock().unwrap() = vec![
         ProviderMachine {
             provider_id: "bx_orphan".into(),
             state: "ready".into(),
             name: "orb-managed-mmzz".into(),
+            deletable_at: None,
         },
         other.clone(),
     ];
@@ -1215,7 +1246,7 @@ async fn reconcile_orphan_grace_and_vanished_rows() {
     assert_eq!(m.get(&live.id).await.unwrap().state, MachineState::Online);
     // Grace passed (age the first sighting).
     m.reconcile_state.lock().await.orphans_seen.insert(
-        "bx_orphan".into(),
+        "fake:bx_orphan".into(),
         Utc::now() - chrono::Duration::minutes(11),
     );
     let r = m.reconcile_once().await.unwrap();
@@ -1252,6 +1283,7 @@ async fn reconcile_dry_run_keeps_orphans() {
         provider_id: "bx_orphan".into(),
         state: "ready".into(),
         name: "orb-managed-mmzz".into(),
+        deletable_at: None,
     }];
     let r = m.reconcile_once().await.unwrap();
     assert_eq!(r["dry_run"], serde_json::json!(true));
@@ -2377,4 +2409,207 @@ async fn worker_only_spawn_rejects_raw_snapshot_before_renting() {
     assert_eq!(provider.created.load(Ordering::SeqCst), 0);
     assert!(provider.forks.lock().unwrap().is_empty());
     assert!(manager.machines_snapshot().await.is_empty());
+}
+
+#[tokio::test]
+async fn working_owner_idle_reaps_unused_and_post_job_machines() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.working_idle_minutes = 15;
+    s.post_job_idle_minutes = 5;
+    s.max_concurrent = Some(4);
+    let (m, _) = manager(dir.path(), s);
+    let unused = online_machine(&m, "parent-working").await;
+    let post_job = online_machine(&m, "parent-working").await;
+    let mut map = std::collections::HashMap::new();
+    map.insert("parent-working".to_string(), OwnerState::Working);
+    m.set_owner_probe(probe_from(map));
+
+    // Unused worker at 6 minutes: kept (< 15m working_idle_minutes).
+    // Post-job worker at 6 minutes: reaped (>= 5m post_job_idle_minutes).
+    let six_min_ago = Utc::now() - chrono::Duration::minutes(6);
+    m.update(&unused.id, |x| {
+        x.last_busy_at = Some(six_min_ago);
+        x.has_executed_job = false;
+    })
+    .await;
+    m.update(&post_job.id, |x| {
+        x.last_busy_at = Some(six_min_ago);
+        x.has_executed_job = true;
+    })
+    .await;
+    m.reap_once().await;
+    assert_eq!(m.get(&unused.id).await.unwrap().state, MachineState::Online);
+    let reaped_post = m.get(&post_job.id).await.unwrap();
+    assert_eq!(reaped_post.state, MachineState::Destroyed);
+    assert_eq!(
+        reaped_post.destroy_reason.as_deref(),
+        Some("working_owner_idle")
+    );
+
+    // Unused worker at 16 minutes: now reaped too.
+    m.update(&unused.id, |x| {
+        x.last_busy_at = Some(Utc::now() - chrono::Duration::minutes(16));
+    })
+    .await;
+    m.reap_once().await;
+    let reaped_unused = m.get(&unused.id).await.unwrap();
+    assert_eq!(reaped_unused.state, MachineState::Destroyed);
+    assert_eq!(
+        reaped_unused.destroy_reason.as_deref(),
+        Some("working_owner_idle")
+    );
+}
+
+#[tokio::test]
+async fn crash_recovery_closes_half_provisioned_rows_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = Some(4);
+    let (m, _) = manager(dir.path(), s.clone());
+    let mut no_pid = online_machine(&m, "owner").await;
+    no_pid.id = "mm_nopid".into();
+    no_pid.state = MachineState::Provisioning;
+    no_pid.provider_id = None;
+    no_pid.ledger_closed = false;
+
+    let mut with_pid = online_machine(&m, "owner").await;
+    with_pid.id = "mm_withpid".into();
+    with_pid.state = MachineState::Enrolling;
+    with_pid.provider_id = Some("bx_half".into());
+    with_pid.ledger_closed = false;
+
+    *m.machines.lock().await = vec![no_pid, with_pid];
+    m.persist().await;
+
+    let reloaded_fake = Arc::new(FakeProvider::default());
+    let reloaded = Arc::new(ManagedManager::new(
+        s,
+        Some(reloaded_fake.clone()),
+        dir.path(),
+        3999,
+    ));
+    reloaded.load().await;
+
+    let r1 = reloaded.get("mm_nopid").await.unwrap();
+    assert_eq!(r1.state, MachineState::Failed);
+    assert!(r1.ledger_closed);
+    assert_eq!(
+        r1.destroy_reason.as_deref(),
+        Some("core_restarted_during_provision")
+    );
+
+    let r2 = reloaded.get("mm_withpid").await.unwrap();
+    assert_eq!(r2.state, MachineState::Destroying);
+    reloaded.reap_once().await;
+    assert_eq!(
+        reloaded.get("mm_withpid").await.unwrap().state,
+        MachineState::Destroyed
+    );
+    assert!(reloaded_fake
+        .destroyed
+        .lock()
+        .unwrap()
+        .contains(&"bx_half".to_string()));
+}
+
+#[tokio::test]
+async fn stopped_machine_reserves_its_name_against_duplicate_allocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = Some(4);
+    s.daily_cap_usd = Some(50.0);
+    let (m, _) = manager(dir.path(), s);
+    let first = online_machine_sized(&m, "o1", Some("xlarge")).await;
+    assert_eq!(first.name, "xlarge-a");
+    m.stop_inner(&first.id, "user_stopped", false)
+        .await
+        .unwrap();
+    assert_eq!(m.get(&first.id).await.unwrap().state, MachineState::Stopped);
+
+    // Spawning another xlarge while `xlarge-a` is Stopped must allocate `xlarge-b`, never `xlarge-a`.
+    let second = online_machine_sized(&m, "o2", Some("xlarge")).await;
+    assert_eq!(second.name, "xlarge-b");
+}
+
+#[tokio::test]
+async fn deletable_at_defers_provider_destroy_until_minimum_lease_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let vm = online_machine(&m, "mac-owner").await;
+    let lease_end = Utc::now() + chrono::Duration::hours(23);
+    m.update(&vm.id, |x| x.deletable_at = Some(lease_end)).await;
+
+    // Attempting to destroy before `deletable_at` unregisters the node and schedules
+    // `awaiting_deletable_at`, without calling provider.destroy prematurely.
+    let deferred = m.destroy(&vm.id, "user_destroyed").await.unwrap();
+    assert_eq!(deferred.state, MachineState::Online);
+    assert_eq!(deferred.reap_at, Some(lease_end));
+    assert_eq!(
+        deferred.reap_reason.as_deref(),
+        Some("awaiting_deletable_at:user_destroyed")
+    );
+    assert!(fake.destroyed.lock().unwrap().is_empty());
+
+    // Once `deletable_at` passes, `reap_once` destroys the VM cleanly.
+    m.update(&vm.id, |x| {
+        let past = Utc::now() - chrono::Duration::seconds(5);
+        x.deletable_at = Some(past);
+        x.reap_at = Some(past);
+    })
+    .await;
+    m.reap_once().await;
+    assert_eq!(m.get(&vm.id).await.unwrap().state, MachineState::Destroyed);
+    assert_eq!(fake.destroyed.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn multi_provider_planning_and_scaleway_commitment_gate() {
+    let s = settings();
+    let (hz, _) = ManagedManager::plan_for_provider(
+        &s,
+        "hetzner",
+        &SpawnRequest {
+            size: Some("large".into()),
+            arch: Some("arm64".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(hz.size, "cax31");
+
+    let (vast, _) = ManagedManager::plan_for_provider(
+        &s,
+        "vastai",
+        &SpawnRequest {
+            size: Some("a100".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(vast.size, "a100");
+
+    let err = ManagedManager::plan_for_provider(
+        &s,
+        "scaleway",
+        &SpawnRequest {
+            size: Some("M2-M".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.error, "commitment_confirmation_required");
+
+    let (mac, _) = ManagedManager::plan_for_provider(
+        &s,
+        "scaleway",
+        &SpawnRequest {
+            size: Some("M2-M".into()),
+            allow_24h_commitment: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(mac.size, "M2-M");
+    assert!(!RuntimeSettings::default().reaper_dry_run);
 }

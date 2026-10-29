@@ -19,7 +19,7 @@ import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
 import {MentionProjectContext} from "./PromptEditor";
 import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
-import { navigationShortcut, shortcutLabel } from "./keyboardShortcuts";
+import { isSearchShortcut, navigationShortcut, searchShortcutLabel, shortcutLabel } from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
@@ -37,9 +37,12 @@ import { goalDraft, goalPrompt, planObjective, missionTitle, displayTitle, EMPTY
 import { chipToAttachment, type AttachChip } from "./attach";
 import { DEFAULT_PROJECT, ensureDefaultProject, projectChoices } from "./defaultProject";
 import { ProjectPicker, ProjectCreation } from "./ProjectPicker";
-import { hasOverlay } from "./overlayLayer";
-import { For, Show, Switch, Match, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch, type JSX } from "solid-js";
+import { hasInteractiveOverlay, hasOverlay, overlayTrigger } from "./overlayLayer";
+import { For, Show, Switch, Match, Suspense, lazy, createMemo, createSignal, createEffect, on, onCleanup, onMount, batch, type JSX } from "solid-js";
+import { Portal } from "solid-js/web";
+import { requestSearchTarget } from "./searchTarget";
 import * as Ic from "./icons";
+const SearchDialog = lazy(() => import("./SearchDialog"));
 const Settings=lazy(()=>import("./Settings").then(module=>({default:module.Settings})));
 const LocalAgentsSettings=lazy(()=>import("./Settings").then(module=>({default:module.LocalAgentsSettings})));
 const SecuritySettings=lazy(()=>import("./SettingsShell").then(module=>({default:module.SecuritySettings})));
@@ -129,6 +132,23 @@ export default function App() {
   const [bunkerActive, setBunkerActive] = createSignal(false);
   const [deviceUnenrolled, setDeviceUnenrolled] = createSignal(false);
   const [quotaExhausted, setQuotaExhausted] = createSignal(false);
+  const [searchOpen, setSearchOpen] = createSignal(false);
+  const [searchQuery, setSearchQuery] = createSignal("");
+  const [searchReturnFocus, setSearchReturnFocus] = createSignal<HTMLElement | null>(null);
+  let searchInputEl: HTMLInputElement | undefined;
+  const openSearch = () => {
+    if (searchOpen()) {
+      searchInputEl?.focus({ preventScroll: true });
+      return;
+    }
+    const trigger = overlayTrigger() ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setSearchReturnFocus(trigger);
+    setSearchOpen(true);
+  };
+  onMount(() => {
+    const warm = setTimeout(() => { void import("./SearchDialog"); }, 400);
+    onCleanup(() => clearTimeout(warm));
+  });
   const settingsDots = createMemo(() => settingsAttention({ bunkerActive: bunkerActive(), deviceEnrolled: !deviceUnenrolled(), quotaExhausted: quotaExhausted() }));
   onMount(() => onCleanup(trackScrollbarHover()));
   onMount(() => { const stop = monitorSoftware(); onCleanup(stop); });
@@ -715,6 +735,18 @@ export default function App() {
 
   const onKey = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.isComposing) return;
+    if (isSearchShortcut(e)) {
+      if (searchOpen()) {
+        e.preventDefault();
+        searchInputEl?.focus({ preventScroll: true });
+        return;
+      }
+      if (!hasInteractiveOverlay()) {
+        e.preventDefault();
+        openSearch();
+      }
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r" && !e.altKey) {
       e.preventDefault();
       window.dispatchEvent(new Event("orb:refresh"));
@@ -903,6 +935,16 @@ export default function App() {
     window.removeEventListener("keydown", onKey);
   });
 
+  const commitFork = (m: Mission) => {
+    batch(() => {
+      setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]);
+      setOpenMission(m);
+      window.dispatchEvent(new CustomEvent("orb:mission-forked", { detail: { mission: m } }));
+      bumpProjects();
+      open(`m:${m.id}`);
+    });
+  };
+
   const startResize = (e: PointerEvent) => {
     e.preventDefault();
     document.body.classList.add("resizing");
@@ -982,7 +1024,7 @@ export default function App() {
                     harnessChoices={harnessChoices()}
                     forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
                     onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
-                    onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }}
+                    onFork={commitFork}
                     selected={selected}
                     onDeleted={ids => {
                       const idSet = new Set(ids);
@@ -1062,7 +1104,7 @@ export default function App() {
           <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title="Toggle sidebar (⌘B)" onClick={() => setSidebar(!sidebar())}>
             <Ic.SidebarIcon />
           </button>
-          <button class="icon-btn" title="Search">
+          <button class="icon-btn" aria-label="Search conversations" title={`Search (${searchShortcutLabel()})`} onClick={openSearch}>
             <Ic.SearchIcon />
           </button>
           <span class="tb-gap" />
@@ -1397,8 +1439,8 @@ export default function App() {
           </Match>
           <Match when={currentMissionId() || (selected()===null && launchPreview())}>
             <Show when={currentMissionId() ? launchedViewKeys.get(currentMissionId()!) || currentMissionId() : launchViewKey()} keyed>{viewKey =>
-              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id) ?? lookupMissionById(id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/></MissionLookupContext.Provider>}>
-                <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={setOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/>
+              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id) ?? lookupMissionById(id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={commitFork}/></MissionLookupContext.Provider>}>
+                <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={setOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={commitFork}/>
               </Show>
             }</Show>
           </Match>
@@ -1429,6 +1471,97 @@ export default function App() {
         {(c) => <PopupMenu x={c().x} y={c().y} items={c().items} onClose={() => setCtx(null)} />}
       </Show>
       <Show when={newProjectDraft()}><ProjectCreation anchor={projectCreationAnchor()} existingIds={projectChoices(liveProjects()).map(p => p.id)} onCreate={submitNewProject} onClose={() => setNewProjectDraft(false)} /></Show>
+      <Show when={searchOpen()}>
+        <Suspense
+          fallback={
+            <Portal>
+              <div
+                class="dlg-back dlg-back-dim"
+                style={{ "z-index": 1300 }}
+                onPointerDown={e => {
+                  if (e.target === e.currentTarget) {
+                    setSearchOpen(false);
+                    searchReturnFocus()?.focus({ preventScroll: true });
+                  }
+                }}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Search conversations"
+                  data-testid="conversation-search-dialog"
+                  onKeyDown={e => {
+                    if (!e.isComposing && e.key === "Escape") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setSearchOpen(false);
+                      searchReturnFocus()?.focus({ preventScroll: true });
+                    }
+                  }}
+                  style={{
+                    width: "min(920px, calc(100vw - 32px))",
+                    height: "min(620px, calc(100dvh - 56px))",
+                    background: "var(--bg-elev)",
+                    border: "1px solid var(--stroke)",
+                    "border-radius": "var(--radius-xl)",
+                    "box-shadow": "var(--shadow-dlg)",
+                    padding: "12px 14px",
+                    "box-sizing": "border-box",
+                  }}
+                >
+                  <input
+                    ref={el => {
+                      searchInputEl = el;
+                      queueMicrotask(() => el.focus({ preventScroll: true }));
+                    }}
+                    type="text"
+                    aria-label="Search conversations and messages"
+                    value={searchQuery()}
+                    onInput={e => setSearchQuery(e.currentTarget.value)}
+                    placeholder="Search conversations, code, identifiers, and messages…"
+                    style={{
+                      width: "100%",
+                      border: "none",
+                      background: "transparent",
+                      color: "var(--fg-strong)",
+                      "font-size": "16px",
+                      outline: "none",
+                    }}
+                  />
+                </div>
+              </div>
+            </Portal>
+          }
+        >
+          <SearchDialog
+            query={searchQuery()}
+            onQueryChange={setSearchQuery}
+            projects={liveProjects()}
+            recentMissions={inboxMissions()}
+            returnFocus={searchReturnFocus()}
+            onInputRef={el => {
+              searchInputEl = el;
+            }}
+            onClose={() => setSearchOpen(false)}
+            onOpenMission={missionId => {
+              setSearchOpen(false);
+              open(`m:${missionId}`);
+            }}
+            onOpenHit={(hit, query) => {
+              requestSearchTarget({
+                missionId: hit.mission_id,
+                locator: hit.locator,
+                role: hit.role,
+                sequence: hit.sequence,
+                eventId: hit.event_id,
+                query,
+              });
+              setSearchOpen(false);
+              open(`m:${hit.mission_id}`);
+            }}
+          />
+        </Suspense>
+      </Show>
 
       </FilePanelProvider>
       </MentionProjectContext.Provider>

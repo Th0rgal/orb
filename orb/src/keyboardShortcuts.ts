@@ -12,3 +12,21 @@ export function navigationShortcut(event: KeyboardEvent) {
   return navigationShortcuts.find(shortcut => shortcut.code === event.code);
 }
 export const shortcutLabel = (id: typeof navigationShortcuts[number]['id']) => navigationShortcuts.find(s => s.id === id)!.label;
+
+export function isMacKeyboardPlatform(): boolean {
+  if (typeof navigator === "undefined") return true;
+  const platform = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform ?? navigator.userAgent ?? "";
+  return /mac|iphone|ipad|ipod/i.test(platform);
+}
+
+export const searchShortcutLabel = () => (isMacKeyboardPlatform() ? "⌘K" : "Ctrl+K");
+
+/** Command-K on macOS, Control-K elsewhere; ignores IME composition and extra modifiers. */
+export function isSearchShortcut(event: KeyboardEvent): boolean {
+  if (event.isComposing || event.defaultPrevented || event.altKey || event.shiftKey) return false;
+  const keyMatches = event.code === "KeyK" || event.key.toLowerCase() === "k";
+  if (!keyMatches) return false;
+  return isMacKeyboardPlatform()
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+}

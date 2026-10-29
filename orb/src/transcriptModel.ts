@@ -5,9 +5,9 @@ import { deferredMessages } from "./deferredMessages";
 import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
-  | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
+  | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; eventId?: string; sequence?: number; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
   | { kind: "think"; key: string; text: string; done: boolean }
-  | { kind: "text"; key: string; text: string; live: boolean; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
+  | { kind: "text"; key: string; text: string; live: boolean; eventId?: string; sequence?: number; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
   | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean; title?: string }
   | {
       kind: "tool";
@@ -17,6 +17,7 @@ export type StreamItem =
       args: unknown;
       result?: unknown;
       done: boolean;
+      sequence?: number;
       unresolved?: boolean;
       /** Core shortened the args or result (`max_payload`); the full call loads on expand. */
       truncated?: boolean;
@@ -201,13 +202,13 @@ export class TranscriptReducer {
         if (this.lastFinal != null && this.lastFinal > index) this.lastFinal--;
         this.lastUser = this.items.length;
         this.users.set(messageId!, this.items.length);
-        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, at: typeof d.at === "string" ? d.at : previous.at });
+        this.items.push({ ...previous, source: source ?? previous.source, text: str(d.content) || previous.text, queued: false, receipt: d.receipt === true, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), at: typeof d.at === "string" ? d.at : previous.at });
         return;
       }
       if (!queued) { this.close(); this.lastFinal = undefined; }
       if (messageId) this.users.set(messageId, this.items.length);
       if (!queued) this.lastUser = this.items.length;
-      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(typeof d.at === "string" ? { at: d.at } : {}) });
+      this.items.push({ kind: "user", key: messageId ? `user:${messageId}` : this.key("user"), text: str(d.content), messageId, eventId: messageId, ...(ev.sequence != null ? { sequence: ev.sequence } : {}), source, queued, attached: d.attached === true, receipt: d.receipt === true, ...(typeof d.at === "string" ? { at: d.at } : {}) });
       return;
     }
     const id = ev.eventId ?? (typeof d.id === "string" ? d.id : undefined);
@@ -312,7 +313,7 @@ export class TranscriptReducer {
           // must remain distinct. Keep it available for the turn's final event.
           const index=this.bubbles.get(finalBubble) ?? (finalBubble==="text_delta_latest" ? this.lastFinal : undefined);
           const previous=index==null ? undefined : this.items[index];
-          const stamp=typeof d.at==="string"?{at:d.at}:{};
+          const stamp={...(typeof d.at==="string"?{at:d.at}:{}),...(id?{eventId:id}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{})};
           if(previous?.kind==="text"&&index!=null){this.put(index,{...previous,text:text||previous.text,live:false,...stamp});this.bubbles.set(finalBubble,index);}
           else if(text){this.placeText(finalBubble,{kind:"text",key:this.key("text"),text,live:false,...stamp});}
           return;
@@ -341,14 +342,30 @@ export class TranscriptReducer {
               : reason==="server_shutdown"?"The backend restarted during this run. The conversation is preserved."
               : "The execution was interrupted before completion. Resume to continue from the saved conversation."
             : prefix&&trimmed.startsWith(prefix)&&trimmed.length>prefix.length?trimmed.slice(prefix.length).trim():text||"Mission failed";
-          this.items.push({kind:"error",key:this.key("error"),text:detail,terminal:true,cancelled:!interruption&&text.trim().toLowerCase()==="cancelled",...(interruption?{title:"Mission interrupted"}:{})});
+          const nextError:Extract<StreamItem,{kind:"error"}>={kind:"error",key:this.key("error"),text:detail,terminal:true,cancelled:!interruption&&text.trim().toLowerCase()==="cancelled",...(interruption?{title:"Mission interrupted"}:{})};
+          const nextText=detail.trim();
+          const overlaps=(row:StreamItem)=>{
+            if(row.kind!=="error")return false;
+            const prevText=row.text.trim();
+            return !!row.terminal||(!!prevText&&!!nextText&&(prevText===nextText||nextText.includes(prevText)||prevText.includes(nextText)));
+          };
+          const matching:number[]=[];
+          for(let i=this.lastUser+1;i<this.items.length;i++)if(overlaps(this.items[i]))matching.push(i);
+          if(matching.length>0){
+            const keep=matching[0];
+            const prev=this.items[keep] as Extract<StreamItem,{kind:"error"}>;
+            this.put(keep,{...nextError,key:prev.key});
+            for(let j=matching.length-1;j>=1;j--)this.removeAt(matching[j]);
+          }else{
+            this.items.push(nextError);
+          }
           return;
         }
-        const at=typeof d.at==="string"?{at:d.at}:{};
+        const at={...(typeof d.at==="string"?{at:d.at}:{}),...(id?{eventId:id}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{})};
         if(!isNativeReceipt){
           if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false,...at});this.lastFinal=index;}
           else if(text){this.lastFinal=this.items.length;this.items.push({kind:"text",key:this.key("text"),text,live:false,...at});}
-        }else if(d.at){const row=nativeLast==null?undefined:this.items[nativeLast];if(row?.kind==="text")this.put(nativeLast!,{...row,...at});}
+        }else if(d.at){const row=nativeLast==null?undefined:this.items[nativeLast];if(row?.kind==="text")this.put(nativeLast!,{...row,...(typeof d.at==="string"?{at:d.at}:{})});}
         // Settle the turn's shape only after the final text is in place.
         this.hoistTrailingThoughts();
         return;
@@ -384,7 +401,7 @@ export class TranscriptReducer {
           return;
         }
         this.tools.set(callId,this.items.length);
-        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:str(d.name)||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),done:ev.type==="tool_result"});return;
+        this.items.push({kind:"tool",key:reused?`tool:${callId}:${this.items.length}`:`tool:${callId}`,callId,name:str(d.name)||"tool",args:d.args??null,...(ev.type==="tool_result"?{result:d.result}:{}),...(d.truncated===true?{truncated:true}:{}),...(ev.sequence!=null?{sequence:ev.sequence}:{}),done:ev.type==="tool_result"});return;
       }
       case "error": this.close(); this.items.push({kind:"error",key:this.key("error"),text:str(d.message)});return;
       case "mission_status_changed": {
@@ -406,9 +423,21 @@ export class TranscriptReducer {
           if(terminal?.kind==="error" && status==="interrupted") {
             this.put(terminalIndex,{...terminal,title:"Mission interrupted",text:summary==="Cancelled by user"?"The execution was interrupted before completion. Resume to continue from the saved conversation.":summary});
           }
-          const alreadyShown = terminalIndex>=0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && item.text.trim() === summary);
-          if (!alreadyShown) {
-            this.items.push({ kind: "error", key: this.key("error"), text: summary, terminal: true });
+          const genericSummary = summary === "Model error" || summary === "Task execution failed unexpectedly" || /^Remote node ['"].+['"] finished$/i.test(summary);
+          let priorErrorIndex = -1;
+          if (terminalIndex < 0 && genericSummary) {
+            for (let i = this.items.length - 1; i > lastUser; i--) {
+              if (this.items[i].kind === "error" && (this.items[i] as Extract<StreamItem, { kind: "error" }>).text.trim()) { priorErrorIndex = i; break; }
+            }
+          }
+          if (priorErrorIndex >= 0) {
+            const prior = this.items[priorErrorIndex] as Extract<StreamItem, { kind: "error" }>;
+            this.put(priorErrorIndex, { ...prior, terminal: true });
+          } else {
+            const alreadyShown = terminalIndex >= 0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && item.text.trim() === summary);
+            if (!alreadyShown) {
+              this.items.push({ kind: "error", key: this.key("error"), text: summary, terminal: true });
+            }
           }
         }
         return;

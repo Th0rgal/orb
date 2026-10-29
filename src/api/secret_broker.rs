@@ -276,6 +276,51 @@ pub struct Caller {
     pub subject: approval_flow::RequesterSubject,
     pub mission_title: Option<String>,
     pub paloma_project: Option<String>,
+    /// True when the calling mission executes on an untrusted `managed-*` VM.
+    pub on_managed_node: bool,
+}
+
+/// Cloud-compute provider credentials reserved exclusively for Core's native
+/// `ManagedManager` (`spawn_managed_machine`, `start_mission(auto-managed:...)`).
+/// Agents never receive raw cloud-compute API keys over `secret_get` because
+/// direct provider API calls bypass Core's ownership tracking, daily spend
+/// caps, concurrency limits, and idle/orphan reaper.
+pub fn is_core_reserved_compute_secret(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_uppercase().as_str(),
+        "BOAT_API_KEY"
+            | "HETZNER_CLOUD_APIKEY"
+            | "HCLOUD_TOKEN"
+            | "SCALEWAY_SECRET_KEY"
+            | "SCALEWAY_KEY_ID"
+            | "SCW_SECRET_KEY"
+            | "SCW_ACCESS_KEY"
+            | "VASTAI_API_KEY"
+            | "VAST_API_KEY"
+            | "RUNPOD_API_KEY"
+            | "COLAB_API_DOTENV_PRIVATE_KEY"
+    )
+}
+
+/// Secrets safe to deliver to an untrusted `managed-*` compute worker when the
+/// mission's project/grant authorizes them. All other vault secrets stay on
+/// trusted static nodes or Core.
+pub fn is_allowlisted_managed_secret(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_uppercase().as_str(),
+        "GITHUB_TOKEN" | "GH_TOKEN"
+    )
+}
+
+/// Formal kernel admission gate (`orb_compute_secret_gate`) deciding whether
+/// `secret_get` may deliver `key` to `caller`.
+pub fn admits_secret_delivery(key: &str, caller_on_managed_node: bool) -> bool {
+    crate::orb_spec::compute_secret_admit(crate::orb_spec::ComputeSecretInput {
+        is_core_reserved_compute_key: is_core_reserved_compute_secret(key),
+        caller_on_managed_node,
+        is_allowlisted_managed_secret: is_allowlisted_managed_secret(key),
+        operator_break_glass: false,
+    })
 }
 
 impl SecretBroker {
@@ -916,7 +961,7 @@ async fn caller_for(
     p: &crate::control_mcp::gateway::Principal,
 ) -> Result<Caller, String> {
     let subject = p.requester_subject();
-    let mission = if let Some(mission_id) = p.mission_id {
+    let (mission, on_managed_node) = if let Some(mission_id) = p.mission_id {
         let control = state
             .control
             .get_or_spawn(&crate::api::auth::AuthUser {
@@ -924,14 +969,24 @@ async fn caller_for(
                 username: p.username.clone(),
             })
             .await;
-        control
+        let mission = control
             .mission_store
             .get_mission(mission_id)
             .await
             .ok()
-            .flatten()
+            .flatten();
+        let on_managed_node = crate::api::control::remote_grok::placement(
+            &state.config.working_dir,
+            &control.mission_store,
+            mission_id,
+        )
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|pl| crate::managed::is_managed_node(&pl.node_id));
+        (mission, on_managed_node)
     } else {
-        None
+        (None, false)
     };
     // The signed session's project decides default access; the mission record
     // is only a fallback for mission sessions issued without one.
@@ -945,6 +1000,7 @@ async fn caller_for(
         subject,
         mission_title: mission.and_then(|m| m.title),
         paloma_project,
+        on_managed_node,
     })
 }
 
@@ -997,12 +1053,20 @@ pub async fn handle_tool(
             let secrets = broker.list_all(state, false).await?;
             let mut accessible = Vec::new();
             let mut by_request = BTreeMap::<String, Vec<String>>::new();
+            let mut core_reserved = Vec::new();
             for s in secrets {
                 let project = s
                     .project_id
                     .as_deref()
                     .and_then(|id| names.get(id))
                     .cloned();
+                if is_core_reserved_compute_secret(&s.key) {
+                    core_reserved.push(s.key);
+                    continue;
+                }
+                if !admits_secret_delivery(&s.key, caller.on_managed_node) {
+                    continue;
+                }
                 if access.allows(&s.key, s.project_id.as_deref()) {
                     accessible.push(json!({"name": s.key, "project": project}));
                 } else {
@@ -1014,16 +1078,33 @@ pub async fn handle_tool(
             }
             Ok(json!({
                 "paloma_project": caller.paloma_project,
+                "on_managed_node": caller.on_managed_node,
                 "accessible": accessible,
                 "requires_approval": by_request,
+                "core_reserved": core_reserved,
                 "projects": projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
                 "hint": "secret_get NAME returns accessible secrets immediately and asks Thomas for the others. \
+                         Cloud-compute keys in core_reserved are managed natively by Core: use spawn_managed_machine(provider=...) \
+                         or start_mission(remote_node_id=\"auto-managed:<provider>:<size>\") instead of calling cloud APIs directly. \
                          secret_request bitwarden_project asks for a whole Bitwarden project. secret_put stores a new secret after approval; \
                          secret_delete and secret_move remove or relocate one after approval.",
             }))
         }
         "secret_get" => {
             let key = str_arg("name").ok_or("`name` is required")?.to_string();
+            if !admits_secret_delivery(&key, caller.on_managed_node) {
+                if is_core_reserved_compute_secret(&key) {
+                    return Err(format!(
+                        "`{key}` is a Core-reserved cloud-compute credential. Never call provider APIs directly; \
+                         use `spawn_managed_machine(provider=...)` or `start_mission(remote_node_id=\"auto-managed:<provider>:<size>\")` \
+                         so Core tracks ownership, budgets, and automatic reaping."
+                    ));
+                }
+                return Err(format!(
+                    "`{key}` cannot be delivered to an untrusted managed compute node (`managed-*`). \
+                     Managed workers only allow worker-safe repository tokens (`GITHUB_TOKEN` / `GH_TOKEN`)."
+                ));
+            }
             let secrets = broker.list_all(state, false).await?;
             let matches: Vec<_> = secrets.iter().filter(|s| s.key == key).collect();
             let Some(summary) = matches.first().copied() else {
@@ -1108,6 +1189,13 @@ pub async fn handle_tool(
             Ok(delivery(&detail, project_name.as_deref()))
         }
         "secret_request" => {
+            if caller.on_managed_node {
+                return Err(
+                    "Project-wide secret grants are disabled on untrusted managed compute nodes (`managed-*`). \
+                     Request individual worker-safe tokens (`GITHUB_TOKEN` / `GH_TOKEN`) via `secret_get` instead."
+                        .into(),
+                );
+            }
             let projects = bitwarden::list_projects_raw(state)
                 .await
                 .map_err(|(_, e)| e)?;
@@ -1170,6 +1258,12 @@ pub async fn handle_tool(
             }
         }
         "secret_put" => {
+            if caller.on_managed_node {
+                return Err(
+                    "Mutating Bitwarden vault secrets (`secret_put`) is disabled on untrusted managed compute nodes (`managed-*`)."
+                        .into(),
+                );
+            }
             let key = str_arg("name").ok_or("`name` is required")?.to_string();
             if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 return Err("Secret names use A-Z, 0-9 and _ (environment-variable style).".into());
@@ -1244,6 +1338,11 @@ pub async fn handle_tool(
             }
         }
         "secret_delete" | "secret_move" => {
+            if caller.on_managed_node {
+                return Err(format!(
+                    "Mutating Bitwarden vault secrets (`{name}`) is disabled on untrusted managed compute nodes (`managed-*`)."
+                ));
+            }
             let kind = if name == "secret_delete" {
                 RequestKind::Delete
             } else {
@@ -1571,5 +1670,35 @@ mod tests {
         assert_eq!(v["target_project_id"], "to");
         let names: Vec<_> = tool_definitions().into_iter().map(|t| t.name).collect();
         assert!(TOOL_NAMES.iter().all(|n| names.iter().any(|d| d == n)));
+    }
+
+    #[test]
+    fn compute_secret_confinement_blocks_reserved_keys_and_untrusted_nodes() {
+        for reserved in [
+            "BOAT_API_KEY",
+            "HETZNER_CLOUD_APIKEY",
+            "hcloud_token",
+            "SCALEWAY_SECRET_KEY",
+            "SCALEWAY_KEY_ID",
+            "VASTAI_API_KEY",
+            "RUNPOD_API_KEY",
+            "COLAB_API_DOTENV_PRIVATE_KEY",
+        ] {
+            assert!(is_core_reserved_compute_secret(reserved));
+            assert!(!admits_secret_delivery(reserved, false));
+            assert!(!admits_secret_delivery(reserved, true));
+        }
+
+        // Ordinary vault secrets are deliverable on trusted static nodes,
+        // never on untrusted `managed-*` workers.
+        assert!(admits_secret_delivery("OPENAI_API_KEY", false));
+        assert!(!admits_secret_delivery("OPENAI_API_KEY", true));
+        assert!(!admits_secret_delivery("CLOUDFLARE_API_TOKEN", true));
+
+        // Worker-safe repository tokens remain deliverable on `managed-*` VMs.
+        assert!(is_allowlisted_managed_secret("GITHUB_TOKEN"));
+        assert!(is_allowlisted_managed_secret("gh_token"));
+        assert!(admits_secret_delivery("GITHUB_TOKEN", true));
+        assert!(admits_secret_delivery("GH_TOKEN", true));
     }
 }

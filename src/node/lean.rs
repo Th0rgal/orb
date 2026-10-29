@@ -19,7 +19,9 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine;
 use fs2::FileExt;
@@ -38,9 +40,12 @@ pub const DEFAULT_ENV_ALLOWLIST: &str = "LEAN_NUM_THREADS,LAKE_JOBS";
 /// Binaries a lean-build argv may start with (basename of argv[0]).
 pub const ALLOWED_COMMANDS: [&str; 2] = ["lake", "lean"];
 
-/// Default node GC threshold: keep at least this many GiB free on the
-/// filesystem backing the work dir (`SANDBOXED_NODE_MIN_FREE_GB` overrides).
-const DEFAULT_MIN_FREE_GB: u64 = 10;
+/// Shared checkouts and Lake dependency slots newer than this cutoff are
+/// considered hot (`< 2h`) and protected by the anti-thrashing guard unless
+/// reclaiming them recovers the floor or free space breaches the emergency floor.
+const COLD_CACHE_IDLE_SECS: u64 = 2 * 60 * 60;
+/// Cap on the emergency survival floor (`min(floor / 2, 10 GiB)`).
+const EMERGENCY_FLOOR_CAP_BYTES: u64 = 10 << 30;
 const DEFAULT_MAX_SOURCE_BUNDLE_BYTES: u64 = 1 << 20;
 const DEFAULT_MAX_COMPLETE_SOURCE_BUNDLE_BYTES: u64 = 32 << 20;
 const MAX_SOURCE_BUNDLE_FILES: usize = 256;
@@ -474,13 +479,14 @@ pub fn validate_lean_build(
 pub fn validate_disk_admission(work_root: &Path, estimated_disk_bytes: u64) -> Result<(), String> {
     let available = fs2::available_space(work_root)
         .map_err(|error| format!("cannot stat node work dir disk space: {error}"))?;
-    let required = estimated_disk_bytes.saturating_add(min_free_bytes());
+    let floor = min_free_bytes();
+    let required = estimated_disk_bytes.saturating_add(floor);
     if available < required {
         return Err(format!(
             "insufficient node disk: {} GiB available, {} GiB estimated plus {} GiB emergency floor",
             available / (1 << 30),
             estimated_disk_bytes / (1 << 30),
-            min_free_bytes() / (1 << 30)
+            floor / (1 << 30)
         ));
     }
     Ok(())
@@ -1772,60 +1778,244 @@ async fn sync_lake_cache_back(
 }
 
 // ---------------------------------------------------------------------------
-// Node-side cache GC
+// Node-side tiered disk-pressure GC & anti-thrashing controller
 // ---------------------------------------------------------------------------
 
-fn min_free_bytes() -> u64 {
-    let gb = std::env::var("SANDBOXED_NODE_MIN_FREE_GB")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_MIN_FREE_GB);
-    gb.saturating_mul(1 << 30)
+static DISK_PRESSURE_PINNED: AtomicBool = AtomicBool::new(false);
+static GC_NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+
+fn gc_notify() -> &'static tokio::sync::Notify {
+    GC_NOTIFY.get_or_init(tokio::sync::Notify::new)
 }
 
-/// Spawn the periodic disk GC: every 30 minutes, when free space on the
-/// work-dir filesystem drops below `SANDBOXED_NODE_MIN_FREE_GB` (default 10),
-/// LRU-delete (by dir mtime) checkout dirs first, then lake cache slots,
-/// until the floor plus 20 GiB is met or no eligible candidate remains.
-/// Retired execution scratch is reclaimed independently after its grace period.
+/// Wake the periodic GC task immediately after a hot-reloaded `SANDBOXED_NODE_MIN_FREE_GB` change.
+pub fn notify_min_free_changed() {
+    gc_notify().notify_one();
+}
+
+/// Whether the node's work-dir disk is currently pinned below `SANDBOXED_NODE_MIN_FREE_GB` by
+/// non-reclaimable storage (mission workspaces, toolchains, external data). Clears immediately
+/// as soon as `available_space >= min_free_bytes()` without waiting for the next 30m GC tick.
+pub fn disk_pressure_pinned(work_root: &Path) -> bool {
+    if !DISK_PRESSURE_PINNED.load(Ordering::Acquire) {
+        return false;
+    }
+    if fs2::available_space(work_root).is_ok_and(|free| free >= min_free_bytes()) {
+        DISK_PRESSURE_PINNED.store(false, Ordering::Release);
+        return false;
+    }
+    true
+}
+
+fn min_free_bytes() -> u64 {
+    super::capacity::current_min_free_bytes()
+}
+
+fn emergency_floor_bytes(floor_bytes: u64) -> u64 {
+    (floor_bytes / 2).min(EMERGENCY_FLOOR_CAP_BYTES)
+}
+
+/// Spawn the periodic disk GC: every 30 minutes (or immediately when
+/// `SANDBOXED_NODE_MIN_FREE_GB` reloads), run baseline 72h retired-scratch
+/// cleanup, then evaluate `orb_node_gc_step` when free space drops below
+/// `min_free_bytes()` to cascade reclamation across aged scratch (`>= 6h`),
+/// cold caches (`>= 2h`), fresh retired scratch (`< 6h`), and — only when
+/// recoverable or below the emergency floor — hot (`< 2h`) caches.
 pub fn spawn_cache_gc(work_root: PathBuf, store: super::JobStore) {
     tokio::spawn(async move {
         loop {
-            if let Err(error) = super::scratch::sweep(&store, &work_root).await {
-                tracing::warn!(%error, "node scratch sweep failed; retaining files");
+            run_gc_pass(&work_root, &store).await;
+            tokio::select! {
+                _ = tokio::time::sleep(GC_INTERVAL) => {}
+                _ = gc_notify().notified() => {}
             }
-            let root = work_root.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                crate::uploads::prune_expired_uploads(
-                    &root.join("uploads"),
-                    std::time::Duration::from_secs(crate::uploads::BATCH_OPEN_SECS),
-                );
-                gc_once(&root)
-            })
-            .await;
-            if let Err(err) = result {
-                tracing::warn!("node cache GC task panicked: {err}");
-            }
-            tokio::time::sleep(GC_INTERVAL).await;
         }
     });
 }
 
-/// Directories eligible for GC, LRU-ordered: checkouts before lake slots,
-/// each group by mtime ascending.
-fn gc_candidates(work_root: &Path) -> Vec<PathBuf> {
-    fn dirs_by_mtime(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
-        let mut with_mtime: Vec<(std::time::SystemTime, PathBuf)> = dirs
+async fn run_gc_pass(work_root: &Path, store: &super::JobStore) {
+    if let Err(error) = super::scratch::sweep(store, work_root).await {
+        tracing::warn!(%error, "node scratch sweep failed; retaining files");
+    }
+    let uploads_root = work_root.join("uploads");
+    if let Err(err) = tokio::task::spawn_blocking(move || {
+        crate::uploads::prune_expired_uploads(
+            &uploads_root,
+            Duration::from_secs(crate::uploads::BATCH_OPEN_SECS),
+        );
+    })
+    .await
+    {
+        tracing::warn!("node upload prune task panicked: {err}");
+    }
+
+    let floor = min_free_bytes();
+    let free = match fs2::available_space(work_root) {
+        Ok(free) => free,
+        Err(err) => {
+            tracing::warn!("node cache GC: cannot stat work dir: {err}");
+            return;
+        }
+    };
+    if free >= floor {
+        DISK_PRESSURE_PINNED.store(false, Ordering::Release);
+        return;
+    }
+    let total = fs2::total_space(work_root).unwrap_or(floor);
+    let target = cache_gc_target(floor, total);
+    let (aged_scratch_bytes, fresh_scratch_bytes) =
+        match super::scratch::reclaimable_retired_bytes(store, work_root, chrono::Utc::now()).await
+        {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::warn!(%error, "node cache GC: scratch sizing failed; assuming 0");
+                (0, 0)
+            }
+        };
+
+    let scan_root = work_root.to_path_buf();
+    let tiered = match tokio::task::spawn_blocking(move || {
+        collect_tiered_gc_candidates(&scan_root, SystemTime::now())
+    })
+    .await
+    {
+        Ok(tiered) => tiered,
+        Err(err) => {
+            tracing::warn!("node cache GC: candidate scan panicked: {err}");
+            return;
+        }
+    };
+
+    let verdict = crate::orb_spec::node_gc_step(crate::orb_spec::NodeGcStepInput {
+        free_bytes: free,
+        floor_bytes: floor,
+        emergency_floor_bytes: emergency_floor_bytes(floor),
+        aged_scratch_bytes,
+        fresh_scratch_bytes,
+        cold_cache_bytes: tiered.cold_bytes,
+        hot_cache_bytes: tiered.hot_bytes,
+    });
+
+    tracing::info!(
+        free_gb = free / (1 << 30),
+        floor_gb = floor / (1 << 30),
+        target_gb = target / (1 << 30),
+        action = ?verdict.action,
+        grace_hours = verdict.retired_grace_hours,
+        aged_scratch_mb = aged_scratch_bytes >> 20,
+        fresh_scratch_mb = fresh_scratch_bytes >> 20,
+        cold_cache_mb = tiered.cold_bytes >> 20,
+        hot_cache_mb = tiered.hot_bytes >> 20,
+        pinned_pressure = verdict.pinned_pressure,
+        "node cache GC: below free-space floor, executing tiered reclamation plan"
+    );
+
+    if verdict.sweep_aged_scratch {
+        if let Err(error) = super::scratch::sweep_with_grace_hours(
+            store,
+            work_root,
+            chrono::Utc::now(),
+            verdict.retired_grace_hours,
+            Some(target),
+        )
+        .await
+        {
+            tracing::warn!(%error, grace_hours = verdict.retired_grace_hours, "node pressure scratch sweep failed");
+        }
+    }
+
+    let hot_count = tiered.hot_dirs.len();
+    let hot_bytes = tiered.hot_bytes;
+    let total_candidates = tiered.cold_dirs.len() + hot_count;
+    let mut removed = 0_u64;
+    if (verdict.evict_cold_cache || verdict.evict_hot_cache)
+        && fs2::available_space(work_root).is_ok_and(|now_free| now_free < target)
+    {
+        let evict_root = work_root.to_path_buf();
+        match tokio::task::spawn_blocking(move || {
+            evict_tiered_candidates(&evict_root, target, verdict, tiered, |p| {
+                fs2::available_space(p)
+            })
+        })
+        .await
+        {
+            Ok(count) => removed = count,
+            Err(err) => tracing::warn!("node cache GC eviction panicked: {err}"),
+        }
+    }
+
+    let free_after = fs2::available_space(work_root).unwrap_or(free);
+    let pinned_now = verdict.pinned_pressure && free_after < floor;
+    DISK_PRESSURE_PINNED.store(pinned_now, Ordering::Release);
+
+    if free_after >= floor {
+        tracing::info!(
+            removed,
+            free_gb = free_after / (1 << 30),
+            floor_gb = floor / (1 << 30),
+            "node cache GC: recovered free space above floor"
+        );
+    } else if verdict.action == crate::orb_spec::NodeGcAction::PinnedPreserveHot {
+        tracing::warn!(
+            removed,
+            hot_preserved_count = hot_count,
+            hot_preserved_bytes = hot_bytes,
+            free_bytes = free_after,
+            floor_bytes = floor,
+            "node cache GC: disk pressure pinned by non-cache storage; preserved hot (<2h) caches to prevent thrashing; use storage_inventory.py --node-work-dir for attribution"
+        );
+    } else {
+        tracing::warn!(
+            candidate_count = total_candidates,
+            removed,
+            free_bytes = free_after,
+            target_bytes = target,
+            "node cache GC: eligible caches exhausted; mission sources, toolchains, CI and unmanaged temporary files are retained; use storage_inventory.py --node-work-dir for attribution"
+        );
+    }
+}
+
+struct TieredGcCandidates {
+    cold_dirs: Vec<PathBuf>,
+    cold_bytes: u64,
+    hot_dirs: Vec<PathBuf>,
+    hot_bytes: u64,
+}
+
+/// Non-destructive check whether `<dir>.lock` is currently held by an active build.
+/// Does not create `<dir>.lock` if absent so scanning leaves no stray lock files.
+fn is_unlocked_for_gc(dir: &Path) -> bool {
+    let lock_path = dir.with_extension("lock");
+    let file = match std::fs::OpenOptions::new().write(true).open(&lock_path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    if fs2::FileExt::try_lock_exclusive(&file).is_ok() {
+        let _ = fs2::FileExt::unlock(&file);
+        true
+    } else {
+        false
+    }
+}
+
+/// Partition unlocked GC candidates into cold (`>= 2h` idle + stale mutation builds)
+/// and hot (`< 2h` checkouts & Lake dependency slots), each LRU-ordered (checkouts
+/// before Lake slots, oldest mtime first) with non-symlink-following byte totals.
+fn collect_tiered_gc_candidates(work_root: &Path, now: SystemTime) -> TieredGcCandidates {
+    fn dirs_with_mtime(dirs: Vec<PathBuf>) -> Vec<(SystemTime, PathBuf)> {
+        let mut out: Vec<(SystemTime, PathBuf)> = dirs
             .into_iter()
+            .filter(|dir| is_unlocked_for_gc(dir))
             .map(|dir| {
                 let mtime = std::fs::metadata(&dir)
                     .and_then(|m| m.modified())
-                    .unwrap_or(std::time::UNIX_EPOCH);
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
                 (mtime, dir)
             })
             .collect();
-        with_mtime.sort();
-        with_mtime.into_iter().map(|(_, dir)| dir).collect()
+        out.sort();
+        out
     }
     fn subdirs(dir: &Path) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1833,8 +2023,8 @@ fn gc_candidates(work_root: &Path) -> Vec<PathBuf> {
         };
         entries
             .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_dir()))
             .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
             .filter(|path| {
                 // Skip in-flight tmp dirs and lock files.
                 path.file_name()
@@ -1846,7 +2036,7 @@ fn gc_candidates(work_root: &Path) -> Vec<PathBuf> {
     }
     fn collect_stale_mutation_lake_builds(
         root: &Path,
-        cutoff: std::time::SystemTime,
+        cutoff: SystemTime,
         depth: usize,
         out: &mut Vec<PathBuf>,
     ) {
@@ -1876,7 +2066,7 @@ fn gc_candidates(work_root: &Path) -> Vec<PathBuf> {
             {
                 let mtime = std::fs::metadata(&path)
                     .and_then(|m| m.modified())
-                    .unwrap_or(std::time::UNIX_EPOCH);
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
                 if mtime <= cutoff {
                     out.push(path);
                 }
@@ -1885,10 +2075,15 @@ fn gc_candidates(work_root: &Path) -> Vec<PathBuf> {
             collect_stale_mutation_lake_builds(&path, cutoff, depth + 1, out);
         }
     }
+
+    let mutation_cutoff = now
+        .checked_sub(Duration::from_secs(20 * 60))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let cold_cutoff = now
+        .checked_sub(Duration::from_secs(COLD_CACHE_IDLE_SECS))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
     let mut mutation_builds = Vec::new();
-    let cutoff = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(20 * 60))
-        .unwrap_or(std::time::UNIX_EPOCH);
     if let Ok(transfers) = std::fs::read_dir(work_root.join(".transfers")) {
         for transfer in transfers.filter_map(|e| e.ok()) {
             let repos_dir = transfer.path().join("destination/workspace/repositories");
@@ -1899,55 +2094,82 @@ fn gc_candidates(work_root: &Path) -> Vec<PathBuf> {
                 };
                 for entry in lake_entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.is_dir()
+                    if entry.file_type().is_ok_and(|ft| ft.is_dir())
                         && path
                             .file_name()
                             .and_then(|n| n.to_str())
                             .is_some_and(|n| n.contains("mutations"))
                     {
-                        collect_stale_mutation_lake_builds(&path, cutoff, 0, &mut mutation_builds);
+                        collect_stale_mutation_lake_builds(
+                            &path,
+                            mutation_cutoff,
+                            0,
+                            &mut mutation_builds,
+                        );
                     }
                 }
             }
         }
     }
-    // checkouts/<repo-hash>/<commit>
+
     let mut checkouts = Vec::new();
     for repo_dir in subdirs(&work_root.join("checkouts")) {
         checkouts.extend(subdirs(&repo_dir));
     }
     let lake_slots = subdirs(&caches_dir(work_root).join("lake"));
-    let mut candidates = dirs_by_mtime(mutation_builds);
-    candidates.extend(dirs_by_mtime(checkouts));
-    candidates.extend(dirs_by_mtime(lake_slots));
-    candidates
+
+    let mut cold_dirs = Vec::new();
+    let mut cold_bytes = 0_u64;
+    let mut hot_dirs = Vec::new();
+    let mut hot_bytes = 0_u64;
+
+    for (_, dir) in dirs_with_mtime(mutation_builds) {
+        cold_bytes = cold_bytes.saturating_add(super::scratch::dir_tree_bytes_nofollow(&dir));
+        cold_dirs.push(dir);
+    }
+
+    let mut hot_lake_dirs = Vec::new();
+    for (mtime, dir) in dirs_with_mtime(checkouts) {
+        let bytes = super::scratch::dir_tree_bytes_nofollow(&dir);
+        if mtime <= cold_cutoff {
+            cold_bytes = cold_bytes.saturating_add(bytes);
+            cold_dirs.push(dir);
+        } else {
+            hot_bytes = hot_bytes.saturating_add(bytes);
+            hot_dirs.push(dir);
+        }
+    }
+    for (mtime, dir) in dirs_with_mtime(lake_slots) {
+        let bytes = super::scratch::dir_tree_bytes_nofollow(&dir);
+        if mtime <= cold_cutoff {
+            cold_bytes = cold_bytes.saturating_add(bytes);
+            cold_dirs.push(dir);
+        } else {
+            hot_bytes = hot_bytes.saturating_add(bytes);
+            hot_lake_dirs.push(dir);
+        }
+    }
+    // Within hot caches, evict hot checkouts before shared Lake dependency slots.
+    hot_dirs.extend(hot_lake_dirs);
+
+    TieredGcCandidates {
+        cold_dirs,
+        cold_bytes,
+        hot_dirs,
+        hot_bytes,
+    }
 }
 
 fn cache_gc_target(floor: u64, total: u64) -> u64 {
     floor.saturating_add(20 << 30).min(total)
 }
 
-fn gc_once(work_root: &Path) {
-    let threshold = min_free_bytes();
-    let free = match fs2::available_space(work_root) {
-        Ok(free) => free,
-        Err(err) => {
-            tracing::warn!("node cache GC: cannot stat work dir: {err}");
-            return;
-        }
-    };
-    if free >= threshold {
-        return;
-    }
-    let target = cache_gc_target(threshold, fs2::total_space(work_root).unwrap_or(threshold));
-    tracing::info!(
-        free_gb = free / (1 << 30),
-        target_gb = target / (1 << 30),
-        threshold_gb = threshold / (1 << 30),
-        "node cache GC: below free-space threshold, evicting LRU caches"
-    );
-    let candidates = gc_candidates(work_root);
-    let candidate_count = candidates.len();
+fn evict_dir_list(
+    work_root: &Path,
+    target: u64,
+    candidates: Vec<PathBuf>,
+    available_space: &mut impl FnMut(&Path) -> std::io::Result<u64>,
+) -> (u64, bool) {
     let mut removed = 0_u64;
     for dir in candidates {
         // Take the same `<dir>.lock` the build path holds (checkout builds
@@ -1990,17 +2212,34 @@ fn gc_once(work_root: &Path) {
         // Keep the lock inode stable. Unlinking here can split the flock
         // domain when a waiter already has this inode open while a later job
         // recreates and locks a different inode at the same path.
-        match fs2::available_space(work_root) {
-            Ok(free) if free >= target => return,
-            _ => {}
+        if available_space(work_root).is_ok_and(|free| free >= target) {
+            return (removed, true);
         }
     }
-    tracing::warn!(
-        candidate_count, removed,
-        free_bytes = fs2::available_space(work_root).ok(),
-        target_bytes = target,
-        "node cache GC: eligible caches exhausted; mission sources, toolchains, CI and unmanaged temporary files are retained; use storage_inventory.py --node-work-dir for attribution"
-    );
+    (removed, false)
+}
+
+fn evict_tiered_candidates(
+    work_root: &Path,
+    target: u64,
+    verdict: crate::orb_spec::NodeGcStepVerdict,
+    tiered: TieredGcCandidates,
+    mut available_space: impl FnMut(&Path) -> std::io::Result<u64>,
+) -> u64 {
+    let mut removed = 0_u64;
+    if verdict.evict_cold_cache {
+        let (count, met_target) =
+            evict_dir_list(work_root, target, tiered.cold_dirs, &mut available_space);
+        removed += count;
+        if met_target {
+            return removed;
+        }
+    }
+    if verdict.evict_hot_cache {
+        let (count, _) = evict_dir_list(work_root, target, tiered.hot_dirs, &mut available_space);
+        removed += count;
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -3628,5 +3867,149 @@ mod tests {
         assert_eq!(clamp_timeout(Some(50), 100), 50);
         assert_eq!(clamp_timeout(None, 100), 100);
         assert_eq!(clamp_timeout(Some(0), 100), 1);
+    }
+
+    #[test]
+    fn tiered_gc_preserves_hot_caches_when_disk_pressure_is_pinned_above_emergency() {
+        const GIB: u64 = 1 << 30;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let cold_checkout = root.join("checkouts/repo-a/old-commit");
+        let hot_checkout = root.join("checkouts/repo-a/warm-commit");
+        let cold_lake = caches_dir(root).join("lake/old-slot");
+        let hot_lake = caches_dir(root).join("lake/warm-slot");
+        for path in [&cold_checkout, &hot_checkout, &cold_lake, &hot_lake] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("payload.olean"), vec![7_u8; 2048]).unwrap();
+        }
+
+        // Advance `now` by 3 hours so existing dirs look 3h old (`cold`), then
+        // re-touch `hot_checkout` and `hot_lake` after a simulated future cutoff:
+        // equivalently, evaluate at `SystemTime::now() + 3h` for cold dirs vs
+        // set mtime via filetime-free relative cutoff by creating cold first and
+        // evaluating with `now = cold_mtime + 3h`? Even simpler: `collect_tiered_gc_candidates`
+        // compares `mtime <= now - 2h`, so if `cold` has `mtime = T` and we set
+        // `hot` mtime forward or evaluate at `T + 1s`? Wait: on POSIX/macOS we can
+        // set file mtimes directly via `std::fs::File::set_modified` (stable since Rust 1.75)!
+        let now = SystemTime::now();
+        let three_hours_ago = now - Duration::from_secs(3 * 3600);
+        let ten_mins_ago = now - Duration::from_secs(10 * 60);
+        std::fs::File::open(&cold_checkout)
+            .unwrap()
+            .set_modified(three_hours_ago)
+            .unwrap();
+        std::fs::File::open(&cold_lake)
+            .unwrap()
+            .set_modified(three_hours_ago)
+            .unwrap();
+        std::fs::File::open(&hot_checkout)
+            .unwrap()
+            .set_modified(ten_mins_ago)
+            .unwrap();
+        std::fs::File::open(&hot_lake)
+            .unwrap()
+            .set_modified(ten_mins_ago)
+            .unwrap();
+
+        let tiered = collect_tiered_gc_candidates(root, now);
+        assert_eq!(tiered.cold_dirs.len(), 2);
+        assert_eq!(tiered.hot_dirs.len(), 2);
+        assert_eq!(tiered.cold_bytes, 4096);
+        assert_eq!(tiered.hot_bytes, 4096);
+
+        // Ashur scenario: 50 GiB free vs 80 GiB floor (above 10 GiB emergency floor).
+        // Even deleting every cache (8 KiB) cannot recover the 30 GiB deficit.
+        let floor = 80 * GIB;
+        let free = 50 * GIB;
+        let verdict = crate::orb_spec::node_gc_step(crate::orb_spec::NodeGcStepInput {
+            free_bytes: free,
+            floor_bytes: floor,
+            emergency_floor_bytes: emergency_floor_bytes(floor),
+            aged_scratch_bytes: 0,
+            fresh_scratch_bytes: 0,
+            cold_cache_bytes: tiered.cold_bytes,
+            hot_cache_bytes: tiered.hot_bytes,
+        });
+        assert_eq!(
+            verdict.action,
+            crate::orb_spec::NodeGcAction::PinnedPreserveHot
+        );
+        assert!(verdict.evict_cold_cache);
+        assert!(!verdict.evict_hot_cache);
+        assert!(verdict.pinned_pressure);
+
+        let removed = evict_tiered_candidates(
+            root,
+            cache_gc_target(floor, 444 * GIB),
+            verdict,
+            tiered,
+            |_| Ok(free),
+        );
+        assert_eq!(removed, 2);
+        assert!(!cold_checkout.exists());
+        assert!(!cold_lake.exists());
+        // Hot (< 2h) checkouts and Lake dependency caches are preserved!
+        assert!(hot_checkout.exists());
+        assert!(hot_lake.exists());
+    }
+
+    #[test]
+    fn tiered_gc_evicts_hot_caches_under_emergency_floor_while_respecting_active_locks() {
+        const GIB: u64 = 1 << 30;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let hot_unlocked = caches_dir(root).join("lake/hot-unlocked");
+        let hot_locked = caches_dir(root).join("lake/hot-locked");
+        for path in [&hot_unlocked, &hot_locked] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("dep.olean"), vec![9_u8; 1024]).unwrap();
+        }
+
+        // Hold an exclusive build lock on `hot_locked.lock`.
+        let held_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(hot_locked.with_extension("lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&held_lock).unwrap();
+
+        let now = SystemTime::now();
+        let tiered = collect_tiered_gc_candidates(root, now);
+        // Actively locked slot is excluded from both sizing and eviction candidates!
+        assert_eq!(tiered.hot_dirs, vec![hot_unlocked.clone()]);
+        assert_eq!(tiered.hot_bytes, 1024);
+
+        // Emergency survival: 8 GiB free < 10 GiB emergency floor overrides anti-thrashing.
+        let floor = 80 * GIB;
+        let free = 8 * GIB;
+        let verdict = crate::orb_spec::node_gc_step(crate::orb_spec::NodeGcStepInput {
+            free_bytes: free,
+            floor_bytes: floor,
+            emergency_floor_bytes: emergency_floor_bytes(floor),
+            aged_scratch_bytes: 0,
+            fresh_scratch_bytes: 0,
+            cold_cache_bytes: tiered.cold_bytes,
+            hot_cache_bytes: tiered.hot_bytes,
+        });
+        assert_eq!(
+            verdict.action,
+            crate::orb_spec::NodeGcAction::EvictHotCaches
+        );
+        assert!(verdict.evict_hot_cache);
+
+        let removed = evict_tiered_candidates(
+            root,
+            cache_gc_target(floor, 444 * GIB),
+            verdict,
+            tiered,
+            |_| Ok(free),
+        );
+        assert_eq!(removed, 1);
+        assert!(!hot_unlocked.exists());
+        assert!(hot_locked.exists());
+        drop(held_lock);
     }
 }

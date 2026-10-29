@@ -9,10 +9,14 @@ uses Core's conversation-fork API with the same workspace and portable history.
    stop the operation; they must never be treated as successful cancellation.
 2. Submit the fork with a stable idempotency key and unchanged payload on retry.
    Do not start a successor before the source stops.
-3. Retain the creation receipt, then archive the source. An archive failure stays
-   visible, and retry only archives; it must not create another successor.
-4. Navigate to the successor after success. The workspace and conversation
-   history remain available. The old conversation is retained in the archive.
+3. Retain the creation receipt and navigate to the successor (`destination_starting`).
+   Archive the source only after the successor confirms startup (first agent
+   activity or clean settlement); if the successor fails or is cancelled before
+   starting, retain the source unarchived and keep the idempotent receipt. An
+   archive failure after startup stays visible, and retry only archives; it must
+   not create another successor. See [`docs/specs/mission-transfer-ux.md`](specs/mission-transfer-ux.md).
+4. Once startup is confirmed, the workspace and conversation history continue in
+   the successor while the old conversation is retained in the archive.
 
 A failed fork leaves the source stopped and available for retry. Selecting a
 new target is allowed before submission; after submission retry uses the exact

@@ -33,5 +33,29 @@ mod tests {
             transcript_patch_step(TranscriptPatchState { len: 10, seq: 1 }, 0, 5),
             TranscriptPatchState { len: 15, seq: 2 }
         );
+        assert_eq!(
+            node_gc_step(NodeGcStepInput {
+                free_bytes: 50 << 30,
+                floor_bytes: 80 << 30,
+                emergency_floor_bytes: 10 << 30,
+                aged_scratch_bytes: 0,
+                fresh_scratch_bytes: 0,
+                cold_cache_bytes: 0,
+                hot_cache_bytes: 10 << 30,
+            })
+            .action,
+            NodeGcAction::PinnedPreserveHot
+        );
+        assert!(
+            !node_disk_admission_step(NodeDiskAdmissionInput {
+                free_bytes: 50 << 30,
+                reserved_bytes: 0,
+                node_floor_bytes: 80 << 30,
+                core_floor_bytes: 20 << 30,
+                hysteresis_bytes: 20 << 30,
+                node_pinned_pressure: false,
+            })
+            .admitted
+        );
     }
 }

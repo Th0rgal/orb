@@ -617,6 +617,23 @@ unsafe extern "C" {
         risk: u8,
         confirmed: u8,
     ) -> u8;
+    fn orb_vm_lifecycle_step(
+        owner_class: u8,
+        busy: u8,
+        ttl_expired: u8,
+        grace_or_idle_elapsed: u8,
+        working_idle_enabled: u8,
+        supports_free_stop: u8,
+        min_delete_pending: u8,
+    ) -> u32;
+    fn orb_vm_claim_step(is_live: u8, same_tenant: u8, owner_none: u8, owner_in_lineage: u8)
+        -> u32;
+    fn orb_compute_secret_gate(
+        is_core_reserved_compute_key: u8,
+        caller_on_managed_node: u8,
+        is_allowlisted_managed_secret: u8,
+        operator_break_glass: u8,
+    ) -> u32;
     fn orb_verify_log_window(
         off: u64,
         req: u64,
@@ -982,6 +999,23 @@ unsafe extern "C" {
         markdown_blocks_count: u32,
         send_queue_depth: u32,
         scroll_corrected_in_epoch: u8,
+    ) -> u64;
+    fn orb_node_gc_step(
+        free_bytes: u64,
+        floor_bytes: u64,
+        emergency_floor_bytes: u64,
+        aged_scratch_bytes: u64,
+        fresh_scratch_bytes: u64,
+        cold_cache_bytes: u64,
+        hot_cache_bytes: u64,
+    ) -> u64;
+    fn orb_node_disk_admission_step(
+        free_bytes: u64,
+        reserved_bytes: u64,
+        node_floor_bytes: u64,
+        core_floor_bytes: u64,
+        hysteresis_bytes: u64,
+        node_pinned_pressure: u8,
     ) -> u64;
 }
 
@@ -1594,6 +1628,108 @@ pub fn vm_should_reap(input: VmReapInput) -> bool {
             0,
         ) != 0
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VmOwnerClass {
+    Unknown = 0,
+    Working = 1,
+    Waiting = 2,
+    TerminalOrMissing = 3,
+    UserOrUnowned = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VmLifecycleAction {
+    Keep = 0,
+    Schedule = 1,
+    Stop = 2,
+    Destroy = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmLifecycleInput {
+    pub owner_class: VmOwnerClass,
+    pub busy: bool,
+    pub ttl_expired: bool,
+    pub grace_or_idle_elapsed: bool,
+    pub working_idle_enabled: bool,
+    pub supports_free_stop: bool,
+    pub min_delete_pending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmLifecycleVerdict {
+    pub action: VmLifecycleAction,
+    pub admitted: bool,
+    pub defer_for_min_lease: bool,
+}
+
+pub fn vm_lifecycle_step(input: VmLifecycleInput) -> VmLifecycleVerdict {
+    let raw = unsafe {
+        orb_vm_lifecycle_step(
+            input.owner_class as u8,
+            u8::from(input.busy),
+            u8::from(input.ttl_expired),
+            u8::from(input.grace_or_idle_elapsed),
+            u8::from(input.working_idle_enabled),
+            u8::from(input.supports_free_stop),
+            u8::from(input.min_delete_pending),
+        )
+    };
+    let action = match raw & 0xFF {
+        1 => VmLifecycleAction::Schedule,
+        2 => VmLifecycleAction::Stop,
+        3 => VmLifecycleAction::Destroy,
+        _ => VmLifecycleAction::Keep,
+    };
+    VmLifecycleVerdict {
+        action,
+        admitted: ((raw >> 8) & 1) != 0,
+        defer_for_min_lease: ((raw >> 16) & 1) != 0,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmClaimInput {
+    pub is_live: bool,
+    pub same_tenant: bool,
+    pub owner_none: bool,
+    pub owner_in_lineage: bool,
+}
+
+pub fn vm_claim_admit(input: VmClaimInput) -> bool {
+    let raw = unsafe {
+        orb_vm_claim_step(
+            u8::from(input.is_live),
+            u8::from(input.same_tenant),
+            u8::from(input.owner_none),
+            u8::from(input.owner_in_lineage),
+        )
+    };
+    ((raw >> 8) & 1) != 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeSecretInput {
+    pub is_core_reserved_compute_key: bool,
+    pub caller_on_managed_node: bool,
+    pub is_allowlisted_managed_secret: bool,
+    pub operator_break_glass: bool,
+}
+
+pub fn compute_secret_admit(input: ComputeSecretInput) -> bool {
+    let raw = unsafe {
+        orb_compute_secret_gate(
+            u8::from(input.is_core_reserved_compute_key),
+            u8::from(input.caller_on_managed_node),
+            u8::from(input.is_allowlisted_managed_secret),
+            u8::from(input.operator_break_glass),
+        )
+    };
+    ((raw >> 8) & 1) != 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3288,6 +3424,126 @@ pub fn client_parity_step(
             send_queue_depth,
             u8::from(scroll_corrected_in_epoch),
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NodeGcAction {
+    Healthy = 0,
+    SweepAgedScratch = 1,
+    EvictColdCaches = 2,
+    SweepAllRetiredScratch = 3,
+    EvictHotCaches = 4,
+    PinnedPreserveHot = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeGcStepInput {
+    pub free_bytes: u64,
+    pub floor_bytes: u64,
+    pub emergency_floor_bytes: u64,
+    pub aged_scratch_bytes: u64,
+    pub fresh_scratch_bytes: u64,
+    pub cold_cache_bytes: u64,
+    pub hot_cache_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeGcStepVerdict {
+    pub action: NodeGcAction,
+    pub sweep_aged_scratch: bool,
+    pub evict_cold_cache: bool,
+    pub sweep_fresh_scratch: bool,
+    pub evict_hot_cache: bool,
+    pub pinned_pressure: bool,
+    pub retired_grace_hours: u32,
+    pub raw: u64,
+}
+
+#[inline]
+pub fn node_gc_step(input: NodeGcStepInput) -> NodeGcStepVerdict {
+    let raw = unsafe {
+        orb_node_gc_step(
+            input.free_bytes,
+            input.floor_bytes,
+            input.emergency_floor_bytes,
+            input.aged_scratch_bytes,
+            input.fresh_scratch_bytes,
+            input.cold_cache_bytes,
+            input.hot_cache_bytes,
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => NodeGcAction::SweepAgedScratch,
+        2 => NodeGcAction::EvictColdCaches,
+        3 => NodeGcAction::SweepAllRetiredScratch,
+        4 => NodeGcAction::EvictHotCaches,
+        5 => NodeGcAction::PinnedPreserveHot,
+        _ => NodeGcAction::Healthy,
+    };
+    NodeGcStepVerdict {
+        action,
+        sweep_aged_scratch: ((raw >> 8) & 1) != 0,
+        evict_cold_cache: ((raw >> 9) & 1) != 0,
+        sweep_fresh_scratch: ((raw >> 10) & 1) != 0,
+        evict_hot_cache: ((raw >> 11) & 1) != 0,
+        pinned_pressure: ((raw >> 12) & 1) != 0,
+        retired_grace_hours: (raw >> 32) as u32,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NodeDiskAdmissionAction {
+    RejectBelowFloor = 0,
+    Admit = 1,
+    RejectPinnedPressure = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeDiskAdmissionInput {
+    pub free_bytes: u64,
+    pub reserved_bytes: u64,
+    pub node_floor_bytes: u64,
+    pub core_floor_bytes: u64,
+    pub hysteresis_bytes: u64,
+    pub node_pinned_pressure: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeDiskAdmissionVerdict {
+    pub action: NodeDiskAdmissionAction,
+    pub admitted: bool,
+    pub soft_pressure: bool,
+    pub headroom_gib: u32,
+    pub raw: u64,
+}
+
+#[inline]
+pub fn node_disk_admission_step(input: NodeDiskAdmissionInput) -> NodeDiskAdmissionVerdict {
+    let raw = unsafe {
+        orb_node_disk_admission_step(
+            input.free_bytes,
+            input.reserved_bytes,
+            input.node_floor_bytes,
+            input.core_floor_bytes,
+            input.hysteresis_bytes,
+            u8::from(input.node_pinned_pressure),
+        )
+    };
+    let action = match (raw & 0xFF) as u8 {
+        1 => NodeDiskAdmissionAction::Admit,
+        2 => NodeDiskAdmissionAction::RejectPinnedPressure,
+        _ => NodeDiskAdmissionAction::RejectBelowFloor,
+    };
+    NodeDiskAdmissionVerdict {
+        action,
+        admitted: ((raw >> 8) & 1) != 0,
+        soft_pressure: ((raw >> 9) & 1) != 0,
+        headroom_gib: (raw >> 32) as u32,
+        raw,
     }
 }
 
@@ -5101,5 +5357,190 @@ mod tests {
         let route_mesh = mesh_service_route_step(true, false, false, false);
         assert!(route_mesh.admitted);
         assert!(!route_mesh.rejected_retired_tailnet);
+    }
+
+    #[test]
+    fn wave12_node_disk_pressure_and_placement_kernels_match_specs() {
+        const GIB: u64 = 1 << 30;
+
+        // 1. Healthy node (`free >= floor`) keeps 72h grace and performs zero evictions.
+        let healthy = node_gc_step(NodeGcStepInput {
+            free_bytes: 95 * GIB,
+            floor_bytes: 80 * GIB,
+            emergency_floor_bytes: 10 * GIB,
+            aged_scratch_bytes: 12 * GIB,
+            fresh_scratch_bytes: 4 * GIB,
+            cold_cache_bytes: 20 * GIB,
+            hot_cache_bytes: 15 * GIB,
+        });
+        assert_eq!(healthy.action, NodeGcAction::Healthy);
+        assert!(!healthy.sweep_aged_scratch);
+        assert!(!healthy.evict_cold_cache);
+        assert!(!healthy.sweep_fresh_scratch);
+        assert!(!healthy.evict_hot_cache);
+        assert!(!healthy.pinned_pressure);
+        assert_eq!(healthy.retired_grace_hours, 72);
+
+        // 2. Aged retired scratch alone covers deficit -> 6h grace, caches untouched.
+        let aged_only = node_gc_step(NodeGcStepInput {
+            free_bytes: 72 * GIB,
+            floor_bytes: 80 * GIB,
+            emergency_floor_bytes: 10 * GIB,
+            aged_scratch_bytes: 10 * GIB,
+            fresh_scratch_bytes: 4 * GIB,
+            cold_cache_bytes: 20 * GIB,
+            hot_cache_bytes: 15 * GIB,
+        });
+        assert_eq!(aged_only.action, NodeGcAction::SweepAgedScratch);
+        assert!(aged_only.sweep_aged_scratch);
+        assert!(!aged_only.evict_cold_cache);
+        assert!(!aged_only.sweep_fresh_scratch);
+        assert!(!aged_only.evict_hot_cache);
+        assert!(!aged_only.pinned_pressure);
+        assert_eq!(aged_only.retired_grace_hours, 6);
+
+        // 3. Aged scratch + cold caches cover deficit -> warm `< 6h` scratch and `< 2h` hot caches untouched.
+        let cold_enough = node_gc_step(NodeGcStepInput {
+            free_bytes: 60 * GIB,
+            floor_bytes: 80 * GIB,
+            emergency_floor_bytes: 10 * GIB,
+            aged_scratch_bytes: 5 * GIB,
+            fresh_scratch_bytes: 8 * GIB,
+            cold_cache_bytes: 18 * GIB,
+            hot_cache_bytes: 15 * GIB,
+        });
+        assert_eq!(cold_enough.action, NodeGcAction::EvictColdCaches);
+        assert!(cold_enough.sweep_aged_scratch);
+        assert!(cold_enough.evict_cold_cache);
+        assert!(!cold_enough.sweep_fresh_scratch);
+        assert!(!cold_enough.evict_hot_cache);
+        assert!(!cold_enough.pinned_pressure);
+        assert_eq!(cold_enough.retired_grace_hours, 6);
+
+        // 4. Fresh `< 6h` retired scratch covers remaining deficit BEFORE hot `< 2h` Lake caches!
+        let fresh_saves_hot = node_gc_step(NodeGcStepInput {
+            free_bytes: 60 * GIB,
+            floor_bytes: 80 * GIB,
+            emergency_floor_bytes: 10 * GIB,
+            aged_scratch_bytes: 5 * GIB,
+            fresh_scratch_bytes: 10 * GIB,
+            cold_cache_bytes: 8 * GIB,
+            hot_cache_bytes: 25 * GIB,
+        });
+        assert_eq!(fresh_saves_hot.action, NodeGcAction::SweepAllRetiredScratch);
+        assert!(fresh_saves_hot.sweep_aged_scratch);
+        assert!(fresh_saves_hot.evict_cold_cache);
+        assert!(fresh_saves_hot.sweep_fresh_scratch);
+        assert!(!fresh_saves_hot.evict_hot_cache);
+        assert!(!fresh_saves_hot.pinned_pressure);
+        assert_eq!(fresh_saves_hot.retired_grace_hours, 0);
+
+        // 5. Ashur incident (`node_gc_preserves_hot_cache_when_pinned_above_emergency`):
+        //    50 GiB free vs 80 GiB floor, only 10 GiB hot cache -> non-cache storage pins node
+        //    below floor; hot caches are PRESERVED (`evict_hot_cache == false`) and `pinned_pressure == true`.
+        let ashur_pinned = node_gc_step(NodeGcStepInput {
+            free_bytes: 50 * GIB,
+            floor_bytes: 80 * GIB,
+            emergency_floor_bytes: 10 * GIB,
+            aged_scratch_bytes: 2 * GIB,
+            fresh_scratch_bytes: 1 * GIB,
+            cold_cache_bytes: 4 * GIB,
+            hot_cache_bytes: 10 * GIB,
+        });
+        assert_eq!(ashur_pinned.action, NodeGcAction::PinnedPreserveHot);
+        assert!(ashur_pinned.sweep_aged_scratch);
+        assert!(ashur_pinned.evict_cold_cache);
+        assert!(ashur_pinned.sweep_fresh_scratch);
+        assert!(!ashur_pinned.evict_hot_cache);
+        assert!(ashur_pinned.pinned_pressure);
+        assert_eq!(ashur_pinned.retired_grace_hours, 0);
+
+        // 6. Emergency survival (`node_gc_emergency_evicts_hot_cache`):
+        //    8 GiB free < 10 GiB emergency floor -> hot caches ARE evicted even though pinned.
+        let emergency = node_gc_step(NodeGcStepInput {
+            free_bytes: 8 * GIB,
+            floor_bytes: 80 * GIB,
+            emergency_floor_bytes: 10 * GIB,
+            aged_scratch_bytes: 0,
+            fresh_scratch_bytes: 0,
+            cold_cache_bytes: 0,
+            hot_cache_bytes: 5 * GIB,
+        });
+        assert_eq!(emergency.action, NodeGcAction::EvictHotCaches);
+        assert!(emergency.evict_hot_cache);
+        assert!(emergency.pinned_pressure);
+        assert_eq!(emergency.retired_grace_hours, 0);
+
+        // 7. 64-bit overflow safety at `u64::MAX` byte counts.
+        let max_safe = node_gc_step(NodeGcStepInput {
+            free_bytes: 0,
+            floor_bytes: u64::MAX,
+            emergency_floor_bytes: 10 * GIB,
+            aged_scratch_bytes: u64::MAX / 2,
+            fresh_scratch_bytes: u64::MAX / 2,
+            cold_cache_bytes: 0,
+            hot_cache_bytes: 1,
+        });
+        assert_eq!(max_safe.action, NodeGcAction::EvictHotCaches);
+        assert!(max_safe.evict_hot_cache);
+
+        // 8. Core placement admission (`node_disk_admission_step`):
+        //    - Rejects node when `free < node_floor` even if `free >= core_floor` (Ashur 50 GiB < 80 GiB vs 20 GiB).
+        let reject_floor = node_disk_admission_step(NodeDiskAdmissionInput {
+            free_bytes: 50 * GIB,
+            reserved_bytes: 0,
+            node_floor_bytes: 80 * GIB,
+            core_floor_bytes: 20 * GIB,
+            hysteresis_bytes: 20 * GIB,
+            node_pinned_pressure: false,
+        });
+        assert_eq!(
+            reject_floor.action,
+            NodeDiskAdmissionAction::RejectBelowFloor
+        );
+        assert!(!reject_floor.admitted);
+
+        //    - Rejects pinned pressure even if nominal bytes look above Core floor.
+        let reject_pinned = node_disk_admission_step(NodeDiskAdmissionInput {
+            free_bytes: 50 * GIB,
+            reserved_bytes: 0,
+            node_floor_bytes: 30 * GIB,
+            core_floor_bytes: 20 * GIB,
+            hysteresis_bytes: 20 * GIB,
+            node_pinned_pressure: true,
+        });
+        assert_eq!(
+            reject_pinned.action,
+            NodeDiskAdmissionAction::RejectPinnedPressure
+        );
+        assert!(!reject_pinned.admitted);
+
+        //    - Admits within hysteresis band (`42 GiB - 30 GiB = 12 GiB < 20 GiB`) with `soft_pressure = true`.
+        let soft = node_disk_admission_step(NodeDiskAdmissionInput {
+            free_bytes: 42 * GIB,
+            reserved_bytes: 0,
+            node_floor_bytes: 30 * GIB,
+            core_floor_bytes: 20 * GIB,
+            hysteresis_bytes: 20 * GIB,
+            node_pinned_pressure: false,
+        });
+        assert_eq!(soft.action, NodeDiskAdmissionAction::Admit);
+        assert!(soft.admitted);
+        assert!(soft.soft_pressure);
+        assert_eq!(soft.headroom_gib, 12);
+
+        //    - Admits comfortably (`280 GiB - 30 GiB = 250 GiB >= 20 GiB`) with `soft_pressure = false`.
+        let comfortable = node_disk_admission_step(NodeDiskAdmissionInput {
+            free_bytes: 280 * GIB,
+            reserved_bytes: 0,
+            node_floor_bytes: 30 * GIB,
+            core_floor_bytes: 20 * GIB,
+            hysteresis_bytes: 20 * GIB,
+            node_pinned_pressure: false,
+        });
+        assert_eq!(comfortable.action, NodeDiskAdmissionAction::Admit);
+        assert!(comfortable.admitted);
+        assert!(!comfortable.soft_pressure);
+        assert_eq!(comfortable.headroom_gib, 250);
     }
 }

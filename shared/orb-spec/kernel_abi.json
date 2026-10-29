@@ -292,6 +292,84 @@
       ]
     },
     {
+      "name": "orb_vm_lifecycle_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "ownerClass",
+          "type": "uint8_t"
+        },
+        {
+          "name": "busy",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ttlExpired",
+          "type": "uint8_t"
+        },
+        {
+          "name": "graceOrIdleElapsed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "workingIdleEnabled",
+          "type": "uint8_t"
+        },
+        {
+          "name": "supportsFreeStop",
+          "type": "uint8_t"
+        },
+        {
+          "name": "minDeletePending",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "orb_vm_claim_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "isLive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sameTenant",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ownerNone",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ownerInLineage",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "orb_compute_secret_gate",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "isCoreReservedComputeKey",
+          "type": "uint8_t"
+        },
+        {
+          "name": "callerOnManagedNode",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isAllowlistedManagedSecret",
+          "type": "uint8_t"
+        },
+        {
+          "name": "operatorBreakGlass",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
       "name": "orb_verify_log_window",
       "ret": "uint8_t",
       "params": [
@@ -2450,6 +2528,72 @@
         "method": "orbClientParityStep",
         "ret": "jlong"
       }
+    },
+    {
+      "name": "orb_node_gc_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "freeBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "floorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "emergencyFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "agedScratchBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "freshScratchBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "coldCacheBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "hotCacheBytes",
+          "type": "uint64_t"
+        }
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_node_disk_admission_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "freeBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "reservedBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nodeFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "coreFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "hysteresisBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nodePinnedPressure",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true
     },
     {
       "name": "leansys_verify_slice_bounds",
