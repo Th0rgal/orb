@@ -198,6 +198,7 @@ jobs:
           cache-dependency-path: orb/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - run: node --test scripts/check-bundle.test.mjs
       - run: pnpm check:bundle
       - run: pnpm test
 
@@ -231,6 +232,18 @@ jobs:
       # Downloads only on a cache miss; always installs the apt deps.
       - run: pnpm exec playwright install --with-deps chromium webkit
       - run: pnpm test:browser --shard=${{ matrix.shard }}/2
+      - name: Shared kernel startup and browser adapters
+        if: matrix.shard == 1
+        env:
+          ORB_KERNEL_BROWSERS: chromium,webkit
+        run: pnpm exec playwright test --config=playwright.kernel.config.ts
+      - name: Shared kernel production startup and bundle projections
+        if: matrix.shard == 1
+        env:
+          ORB_KERNEL_BROWSERS: chromium,webkit
+        run: |
+          pnpm build
+          ORB_KERNEL_PREVIEW=1 pnpm exec playwright test --config=playwright.kernel.config.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -316,10 +329,7 @@ jobs:
       - name: cargo fmt --check (non-blocking)
         continue-on-error: true
         run: cargo fmt --check
-      # TODO: switch to `-- -D warnings` once orb/src-tauri's existing dead-code
-      # and unused-variable warnings (mostly Linux-only cfg gaps) are fixed by
-      # the Orb refactor owners. Compile errors still fail this step.
-      - run: cargo clippy --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D clippy::all -D warnings
       - run: cargo test --locked --bin orb
 
   docker:

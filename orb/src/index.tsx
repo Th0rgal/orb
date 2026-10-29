@@ -1,14 +1,9 @@
-import {restoreDesktopConnection} from "./api";
-import { render } from "solid-js/web";
-import App from "./App";
-import {FindBar} from "./FindBar";
-import { Toaster } from "./toast";
+import { initializeKernel } from "./orbKernelAbi";
+import { startApp } from "./startup";
 import { initTheme } from "./theme";
-import "./styles.css";
-import { startDiagnostics } from "./diagnostics";
 
 initTheme();
-startDiagnostics();
-void restoreDesktopConnection().finally(() => {
-  render(() => <><App /><FindBar /><Toaster /></>, document.getElementById("root")!);
+startApp(document.getElementById("root")!, initializeKernel, async () => {
+  const { mountApp } = await import("./appEntry");
+  await mountApp(document.getElementById("root")!);
 });

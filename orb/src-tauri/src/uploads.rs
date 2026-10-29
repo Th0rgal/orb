@@ -205,6 +205,7 @@ impl FolderOffer {
     pub fn len(&self) -> usize {
         self.files.len()
     }
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
@@ -572,7 +573,7 @@ mod tests {
         std::fs::write(&outside, "secret").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
-        let (files, offer) = allow_drop(&[root.clone()]);
+        let (files, offer) = allow_drop(std::slice::from_ref(&root));
         assert!(files.is_empty());
         let relative: Vec<_> = offer
             .files

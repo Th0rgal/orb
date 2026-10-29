@@ -319,11 +319,11 @@
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "1f26be0eac61f6df5453af64ed7fdeec39eed75b139cd2b6c4f6ffc222a264e9"
+            "sha256": "3065391e2c76a1212f466803b79b3d9bf000e9710de307fc645c58dce07f5ccd"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+            "sha256": "ae0bb0b743301b5c8c3cfc3c39722e0703ce08bd7beb02b32318938f646bc0c4"
           }
         ],
         "execution": {
@@ -394,11 +394,11 @@
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "1f26be0eac61f6df5453af64ed7fdeec39eed75b139cd2b6c4f6ffc222a264e9"
+            "sha256": "3065391e2c76a1212f466803b79b3d9bf000e9710de307fc645c58dce07f5ccd"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+            "sha256": "ae0bb0b743301b5c8c3cfc3c39722e0703ce08bd7beb02b32318938f646bc0c4"
           }
         ],
         "execution": {
@@ -585,7 +585,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+            "sha256": "ae0bb0b743301b5c8c3cfc3c39722e0703ce08bd7beb02b32318938f646bc0c4"
           }
         ],
         "execution": {
@@ -787,7 +787,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+            "sha256": "ae0bb0b743301b5c8c3cfc3c39722e0703ce08bd7beb02b32318938f646bc0c4"
           }
         ],
         "execution": {
@@ -1801,7 +1801,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-            "sha256": "0fd810eb4c97bd9389da3e586499e7291d93a3c8f2d296b7bb13e95f0cbae15e"
+            "sha256": "200d5b5678e8616483f618f778eb1e7e22b32a7f9d10fb6912ce979427e32434"
           },
           {
             "path": "src/api/control/dispatch_admission_tests.rs",
@@ -1974,7 +1974,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+            "sha256": "ae0bb0b743301b5c8c3cfc3c39722e0703ce08bd7beb02b32318938f646bc0c4"
           }
         ],
         "execution": {
@@ -2058,7 +2058,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+            "sha256": "ae0bb0b743301b5c8c3cfc3c39722e0703ce08bd7beb02b32318938f646bc0c4"
           }
         ],
         "execution": {

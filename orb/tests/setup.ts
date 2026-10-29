@@ -2,6 +2,13 @@ import { afterEach } from "vitest";
 import { cleanup } from "@solidjs/testing-library";
 import { render } from "solid-js/web";
 import { Toaster, clearToasts } from "../src/toast";
+import { readFileSync } from "node:fs";
+import { webcrypto } from "node:crypto";
+import { initializeKernel } from "../src/orbKernelAbi";
+
+// Execute the shipped shared WASM in tests too; no TypeScript behavioral oracle.
+Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
+await initializeKernel(new Uint8Array(readFileSync("src/assets/orb_kernel.wasm")));
 
 // The app mounts one Toaster at the root (index.tsx); tests get the same.
 const toasterHost = document.createElement("div");
