@@ -28,7 +28,7 @@ async function openMission(page: Page, title: string, theme: string) {
   await project.click();
   await page.getByRole("button", { name: title, exact: true }).click();
   await expect(page.getByPlaceholder("Send follow-up")).toBeVisible();
-  await expect(page.locator(".mission-tools .chapters-btn")).toHaveCount(2);
+  await expect(page.locator(".mission-tools .chapters-btn")).toHaveCount(1);
 }
 
 const box = async (page: Page, sel: string) => (await page.locator(sel).first().boundingBox())!;
@@ -57,17 +57,15 @@ for (const scheme of ["light", "dark"] as const) for (const width of [1100, 640]
     // The transcript starts below the title bar, so nothing hides under the pills.
     expect((await box(page, ".scroll")).y).toBeGreaterThanOrEqual(bar.y + bar.height - 1);
     if (process.env.ORB_SHOTS) await page.screenshot({ path: `${process.env.ORB_SHOTS}/tools-${scheme}-${width}.png` });
-    // Both dropdowns open below their pill and above the transcript.
-    for (const [i, list] of [[0, ".changes-list"], [1, ".chapters-list:not(.changes-list)"]] as const) {
-      const pill = page.locator(".mission-tools .chapters-btn").nth(i);
-      await pill.click();
-      const menu = await box(page, list), p = (await pill.boundingBox())!;
-      expect(menu.y).toBeGreaterThanOrEqual(p.y + p.height);
-      expect(menu.x + menu.width).toBeLessThanOrEqual(width);
-      const hit = await page.evaluate(([x, y]) => !!document.elementFromPoint(x, y)?.closest(".chapters-list"), [menu.x + menu.width / 2, menu.y + 10]);
-      expect(hit).toBe(true);
-      if (process.env.ORB_SHOTS && width === 1100) await page.screenshot({ path: `${process.env.ORB_SHOTS}/tools-${scheme}-${width}-menu${i}.png` });
-      await page.keyboard.press("Escape");
-    }
+    // Chapter navigation opens below its pill and above the transcript.
+    const pill = page.locator(".mission-tools .chapters-btn").first();
+    await pill.click();
+    const menu = await box(page, ".chapters-list"), p = (await pill.boundingBox())!;
+    expect(menu.y).toBeGreaterThanOrEqual(p.y + p.height);
+    expect(menu.x + menu.width).toBeLessThanOrEqual(width);
+    const hit = await page.evaluate(([x, y]) => !!document.elementFromPoint(x, y)?.closest(".chapters-list"), [menu.x + menu.width / 2, menu.y + 10]);
+    expect(hit).toBe(true);
+    if (process.env.ORB_SHOTS && width === 1100) await page.screenshot({ path: `${process.env.ORB_SHOTS}/tools-${scheme}-${width}-chapters-menu.png` });
+    await page.keyboard.press("Escape");
   });
 }

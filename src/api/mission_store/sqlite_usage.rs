@@ -19,6 +19,7 @@ const PROXY_USAGE_COLUMNS: &[(&str, &str)] = &[
     ("cache_read_tokens", "INTEGER NOT NULL DEFAULT 0"),
     ("provider", "TEXT"),
     ("account_id", "TEXT"),
+    ("account_bound", "INTEGER NOT NULL DEFAULT 0"),
     ("api_key_id", "TEXT"),
     ("api_key_name", "TEXT"),
     ("mission_id", "TEXT"),
@@ -65,10 +66,13 @@ pub(super) async fn record(
         "INSERT INTO proxy_usage (timestamp, model, input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens, cost_cents,
             provider, account_id, api_key_id, api_key_name, mission_id,
-            caller_kind, purpose, reasoning_tokens)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            caller_kind, purpose, reasoning_tokens, account_bound)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
-            chrono::Utc::now().to_rfc3339(),
+            record
+                .observed_at
+                .clone()
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             record.model,
             record.input_tokens as i64,
             record.output_tokens as i64,
@@ -83,6 +87,7 @@ pub(super) async fn record(
             record.caller_kind,
             record.purpose,
             record.reasoning_tokens as i64,
+            record.account_bound,
         ],
     )
     .map_err(err)?;
@@ -171,8 +176,12 @@ fn legacy_caller_kind(api_key_name: Option<&str>, mission_id: Option<&str>) -> &
 
 /// Harness rows are the `harness_direct` route: usage a harness reported
 /// for traffic that did not go through Core's proxy. A mission with any
-/// proxied traffic is billed from `proxy_usage` only, so the same request is
-/// never counted twice (proxy wins).
+/// legacy unbound proxied traffic retains its existing proxy-only aggregation.
+/// New bound traffic takes over from its first server observation, before the
+/// response is forwarded: migrating an old native mission must not hide its
+/// earlier direct usage, and asynchronous storage must not double-count its
+/// later harness completion. Returning to direct routing within that same
+/// mission still requires explicit per-turn provenance (not inferred here).
 fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRecord>, String> {
     let sql = r#"
         SELECT
@@ -197,7 +206,8 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
         FROM mission_events e
         LEFT JOIN missions m ON m.id = e.mission_id
         WHERE e.event_type = 'assistant_message' AND (?1 IS NULL OR e.timestamp >= ?1)
-          AND NOT EXISTS (SELECT 1 FROM proxy_usage p WHERE p.mission_id = e.mission_id)
+          AND NOT EXISTS (SELECT 1 FROM proxy_usage p WHERE p.mission_id = e.mission_id
+              AND (p.account_bound = 0 OR p.timestamp <= e.timestamp))
     "#;
     let mut stmt = conn.prepare(sql).map_err(err)?;
     let rows = stmt
@@ -276,6 +286,7 @@ fn harness_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRe
             api_key_id: None,
             api_key_name: None,
             account_id: None,
+            account_bound: false,
             input_tokens: input,
             output_tokens: output,
             cache_creation_tokens: creation,
@@ -294,7 +305,7 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
             p.timestamp, p.model, p.provider, p.account_id, p.api_key_id, p.api_key_name,
             p.mission_id, m.backend, m.title,
             p.input_tokens, p.output_tokens, p.cache_creation_tokens, p.cache_read_tokens,
-            p.cost_cents, p.caller_kind, p.purpose, p.reasoning_tokens, p.id
+            p.cost_cents, p.caller_kind, p.purpose, p.reasoning_tokens, p.id, p.account_bound
         FROM proxy_usage p
         LEFT JOIN missions m ON m.id = p.mission_id
         WHERE (?1 IS NULL OR p.timestamp >= ?1)
@@ -326,13 +337,20 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
                     row.get::<_, Option<String>>(15)?,
                 ],
                 row.get::<_, i64>(17)?,
+                row.get::<_, bool>(18)?,
             ))
         })
         .map_err(err)?;
     let mut out = Vec::new();
     for row in rows {
-        let ([timestamp, model], attribution, numbers, [caller_kind, purpose], row_id) =
-            row.map_err(err)?;
+        let (
+            [timestamp, model],
+            attribution,
+            numbers,
+            [caller_kind, purpose],
+            row_id,
+            account_bound,
+        ) = row.map_err(err)?;
         let [provider, account_id, api_key_id, api_key_name, mission_id, backend, title] =
             attribution;
         let [input, output, creation, read, stored_cost, reasoning] = numbers.map(non_negative);
@@ -359,6 +377,7 @@ fn router_records(conn: &Connection, since: Option<&str>) -> Result<Vec<UsageRec
             api_key_id,
             api_key_name,
             account_id,
+            account_bound,
             input_tokens: input,
             output_tokens: output,
             cache_creation_tokens: creation,
@@ -409,6 +428,7 @@ mod tests {
         let records = router_records(&conn, None).expect("legacy rows read");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].api_key_id, None);
+        assert!(!records[0].account_bound);
         assert_eq!(records[0].cache_read_tokens, 0);
     }
 
@@ -419,9 +439,11 @@ mod tests {
         let account = uuid::Uuid::new_v4();
         store
             .record_proxy_usage_attributed(&ProxyUsageRecord {
+                observed_at: None,
                 model: "gemini-4-argon".into(),
                 provider: Some("google".into()),
                 account_id: Some(account),
+                account_bound: true,
                 api_key_id: Some(key),
                 api_key_name: Some("Cursor".into()),
                 mission_id: None,
@@ -452,6 +474,7 @@ mod tests {
             .find(|r| r.model == "gemini-4-argon")
             .unwrap();
         assert_eq!(argon.source, UsageSource::Router);
+        assert!(argon.account_bound);
         assert_eq!(argon.api_key_id.as_deref(), Some(key.to_string().as_str()));
         assert_eq!(argon.api_key_name.as_deref(), Some("Cursor"));
         assert_eq!(
@@ -472,6 +495,42 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn binding_a_native_mission_preserves_earlier_harness_usage() {
+        let (_dir, store) = store().await;
+        let mission = uuid::Uuid::new_v4();
+        {
+            let conn = store.conn.lock().await;
+            conn.execute("INSERT INTO missions (id,status,title,created_at,updated_at,backend,workspace_id) VALUES (?1,'active','t',?2,?2,'codex','w')", params![mission.to_string(), "2026-10-29T00:00:00+00:00"]).unwrap();
+            for (seq, timestamp) in [
+                (1, "2026-10-29T00:00:01+00:00"),
+                (2, "2026-10-29T00:00:03+00:00"),
+            ] {
+                conn.execute("INSERT INTO mission_events (mission_id,sequence,event_type,timestamp,content,metadata) VALUES (?1,?2,'assistant_message',?3,'',?4)",params![mission.to_string(),seq,timestamp,r#"{"model":"gpt-6-astra","usage":{"input_tokens":10,"output_tokens":5}}"#]).unwrap();
+            }
+        }
+        // Persist after both harness events, as an asynchronous stream sink may,
+        // but retain the server observation made before forwarding the new turn.
+        store
+            .record_proxy_usage_attributed(&ProxyUsageRecord {
+                observed_at: Some("2026-10-29T00:00:02+00:00".into()),
+                model: "gpt-6-astra".into(),
+                mission_id: Some(mission),
+                account_bound: true,
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let records = store.get_usage_records(None).await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].source, UsageSource::Harness);
+        assert_eq!(records[0].timestamp, "2026-10-29T00:00:01+00:00");
+        assert_eq!(records[1].source, UsageSource::Router);
+        assert_eq!(records.iter().map(|r| r.input_tokens).sum::<u64>(), 20);
     }
 
     #[tokio::test]

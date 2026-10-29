@@ -731,7 +731,7 @@ export function Transcript(p: { sizeKey?: string; prepareSearch?:(signal:AbortSi
             case "tool":
               return isOrchestrationTool(item.name) ? <OrchestrationCard item={item} /> : <ToolRow item={item} />;
             case "error":
-              return <ErrorNotice error={item.text} title={item.cancelled ? "Mission cancelled" : "Mission failed"}>
+              return <ErrorNotice error={item.text} title={item.title ?? (item.cancelled ? "Mission cancelled" : "Mission failed")}>
                 <Show when={!item.cancelled && p.onResume && item.key === lastErrorKey()}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
               </ErrorNotice>;
           }

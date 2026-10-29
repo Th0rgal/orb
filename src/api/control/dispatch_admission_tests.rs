@@ -127,6 +127,104 @@ async fn remote_submission_rejects_closed_snapshots_and_records_host_observation
             .is_err(),
         "rejected submissions must not contact the node"
     );
+
+    // Exact action-identity shadow check: even when host and Lean agree on boolean
+    // admission or boolean rejection, mismatched action codes record a divergence
+    // in `CONTROL_SHADOW_RING`.
+    let live_codex = h
+        .control
+        .mission_store
+        .create_mission(None, None, None, None, None, Some("codex"), None)
+        .await
+        .unwrap();
+    let codex_job_id = Uuid::new_v4();
+    let codex_owner = remote_job_lease_owner(codex_job_id);
+    let codex_run = h
+        .control
+        .mission_store
+        .begin_mission_run(live_codex.id, &codex_owner, None)
+        .await
+        .unwrap();
+    let codex_fence = crate::api::mission_store::SessionUpdateRun::from(&codex_run);
+    h.control
+        .mission_store
+        .update_mission_session_id(
+            live_codex.id,
+            "thread-shadow-1",
+            "codex",
+            Some(&codex_fence),
+        )
+        .await
+        .unwrap();
+    let live_codex = h
+        .control
+        .mission_store
+        .get_mission(live_codex.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // 1. Both admit dispatch (`emit_dispatch_effect = true`), but host claims standard
+    //    fresh turn (`DispatchFreshTurn`) when Lean requires `SeedFallbackFreshSession`.
+    let before_admit_div = fork::control_shadow_snapshot();
+    let v_admit_div = remote_jobs::evaluate_mission_control_gate(
+        &h.state.config.working_dir,
+        h.control.mission_store.as_ref(),
+        &live_codex,
+        &codex_owner,
+        Some("thread-shadow-1"),
+        &[],
+        Some("seeded fallback prompt"),
+        crate::orb_spec::MissionControlAction::DispatchFreshTurn as u8,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        v_admit_div.action,
+        crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+    );
+    assert!(v_admit_div.emit_dispatch_effect);
+    let after_admit_div = fork::control_shadow_snapshot();
+    assert_eq!(
+        after_admit_div.total_steps,
+        before_admit_div.total_steps + 1
+    );
+    assert_eq!(
+        after_admit_div.total_divergences,
+        before_admit_div.total_divergences + 1,
+        "exact action mismatch on admitted turn must increment shadow divergences"
+    );
+
+    // 2. Both reject dispatch (`emit_dispatch_effect = false`), but host claims duplicate
+    //    delivery (`DedupeDeliveredMessage`) when Lean requires `RejectTrackWriterConflict`.
+    let before_reject_div = fork::control_shadow_snapshot();
+    let v_reject_div = remote_jobs::evaluate_mission_control_gate(
+        &h.state.config.working_dir,
+        h.control.mission_store.as_ref(),
+        &live_codex,
+        "remote-job:conflicting-owner",
+        Some("thread-shadow-1"),
+        &[],
+        Some("seeded fallback prompt"),
+        crate::orb_spec::MissionControlAction::DedupeDeliveredMessage as u8,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        v_reject_div.action,
+        crate::orb_spec::MissionControlAction::RejectTrackWriterConflict
+    );
+    assert!(!v_reject_div.emit_dispatch_effect);
+    let after_reject_div = fork::control_shadow_snapshot();
+    assert_eq!(
+        after_reject_div.total_steps,
+        before_reject_div.total_steps + 1
+    );
+    assert_eq!(
+        after_reject_div.total_divergences,
+        before_reject_div.total_divergences + 1,
+        "exact action mismatch on rejected turn must increment shadow divergences"
+    );
 }
 
 static HOOKS: std::sync::LazyLock<AdmissionHooks> = std::sync::LazyLock::new(Default::default);
@@ -13739,13 +13837,227 @@ async fn workspace_purge_history_delete_does_not_rpc_into_locked_actor() {
 }
 
 #[tokio::test]
+async fn workspace_purge_history_delete_ignores_unrelated_uncertain_actions() {
+    let h = Harness::new().await;
+    let mission = h.writer(MissionStatus::Acknowledged, None).await;
+    let other = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("unrelated accepted action"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(other.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        crate::control_mcp::actions::init(&conn).unwrap();
+        let principal = crate::control_mcp::gateway::Principal {
+            sub: h.user.id.clone(),
+            username: h.user.username.clone(),
+            role: crate::control_mcp::Role::Operator,
+            mission_id: None,
+            project: None,
+            action_run_generation: None,
+            session_id: Uuid::new_v4(),
+            exp: usize::MAX,
+        };
+        conn.execute(
+            "INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state) VALUES('uncertain',?1,'test','retry','fingerprint',?2,'resume_mission',?3,'reconciliation_required')",
+            rusqlite::params![h.user.id, serde_json::to_string(&principal).unwrap(), serde_json::json!({"mission_id":other.id}).to_string()],
+        ).unwrap();
+    }
+    let result = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.0["deleted"], serde_json::json!(mission.id));
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(mission.id)
+        .await
+        .unwrap()
+        .is_none());
+    let blocked = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(other.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(blocked.0, StatusCode::CONFLICT);
+    assert!(blocked.1.contains("uncertain"));
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(other.id)
+        .await
+        .unwrap()
+        .is_some());
+    let conn = h.state.projects.connection.lock().unwrap();
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM mcp_actions_v1 WHERE id='uncertain'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "reconciliation_required");
+}
+
+#[tokio::test]
+async fn workspace_purge_history_delete_retains_inherited_successor_parent() {
+    let h = Harness::new().await;
+    let store = &h.control.mission_store;
+    let retired = store
+        .create_mission(
+            Some("retired"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    let current = store
+        .create_mission(
+            Some("current"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(current.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            retired.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("superseded_by:{}", current.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let worker = store
+        .create_mission_with_parent(
+            Some("worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(retired.id),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(collect_child_mission_ids(store, current.id)
+        .await
+        .unwrap()
+        .is_empty());
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        crate::control_mcp::actions::init(&conn).unwrap();
+        let principal = crate::control_mcp::gateway::Principal {
+            sub: h.user.id.clone(),
+            username: h.user.username.clone(),
+            role: crate::control_mcp::Role::Operator,
+            mission_id: None,
+            project: None,
+            action_run_generation: None,
+            session_id: Uuid::new_v4(),
+            exp: usize::MAX,
+        };
+        conn.execute("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state) VALUES('replacement',?1,'test','retry','fingerprint',?2,'start_mission',?3,'queued')",
+            rusqlite::params![h.user.id, serde_json::to_string(&principal).unwrap(), json!({"supersedes_mission_id":worker.id}).to_string()]).unwrap();
+    }
+    let error = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(current.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(error.1.contains("replacement parent"));
+    assert!(store.get_mission(current.id).await.unwrap().is_some());
+    // Intermediate successor records are needed too, not only the final parent.
+    let newest = store
+        .create_mission(
+            Some("newest"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(newest.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            current.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("superseded_by:{}", newest.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    for id in [current.id, newest.id] {
+        let error = delete_mission(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Path(id),
+            Query(DeleteMissionQuery::default()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(error.1.contains("replacement parent"));
+    }
+}
+
+#[tokio::test]
 async fn workspace_purge_history_delete_retains_accepted_action_target() {
     let h = Harness::new().await;
     let mission = h.writer(MissionStatus::Acknowledged, None).await;
     {
         let conn = h.state.projects.connection.lock().unwrap();
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS mcp_actions_v1(id TEXT,owner TEXT,scope TEXT,retry_key TEXT,fingerprint TEXT,principal TEXT,tool TEXT,arguments TEXT,state TEXT DEFAULT 'queued');").unwrap();
-        conn.execute("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments) VALUES('pending','test','test','retry','fingerprint','{}','resume_mission','{}')", []).unwrap();
+        crate::control_mcp::actions::init(&conn).unwrap();
+        conn.execute("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments) VALUES('pending',?1,'test','retry','fingerprint','{}','resume_mission','{}')", [&h.user.id]).unwrap();
     }
     let result = delete_mission(
         State(h.state.clone()),
@@ -14007,4 +14319,545 @@ fn managed_node_gone_verdict_requires_destroyed_record_or_authoritative_absence(
     assert!(!node_gone_verdict(Some(MachineState::Destroying), true));
     assert!(node_gone_verdict(None, true));
     assert!(!node_gone_verdict(None, false));
+}
+
+// Isolate environment and credential discovery from the operator and other tests.
+fn routing_test_child(name: &str) -> bool {
+    const CHILD: &str = "ORB_TEST_PINNED_CODEX_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(name) {
+        return false;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("api::control::dispatch_admission_tests::{name}"),
+            "--nocapture",
+        ])
+        .env(CHILD, name)
+        .env("HOME", home.path())
+        .env("CODEX_HOME", home.path().join("codex"))
+        .env("XDG_CONFIG_HOME", home.path().join("config"))
+        .env("CLAUDE_CODE_DISABLE_CLI_PROXY", "1")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    true
+}
+
+/// Native Responses uses Core's priority/failover AND usage ledger.
+#[tokio::test]
+async fn native_proxy_uses_core_account_order_and_bound_usage() {
+    if routing_test_child("native_proxy_uses_core_account_order_and_bound_usage") {
+        return;
+    }
+    use axum::{body::Bytes, http::HeaderMap, response::IntoResponse};
+    let h = Harness::new().await;
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let captured = calls.clone();
+    let reject_all = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reject = reject_all.clone();
+    let app = axum::Router::new().route("/v1/responses", axum::routing::post(move |headers: HeaderMap, body: Bytes| {
+        let captured = captured.clone();
+        let reject = reject.clone();
+        async move {
+            let key = headers["authorization"].to_str().unwrap().to_string();
+            captured.lock().unwrap().push(key.clone());
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(request["model"], "gpt-6-astra");
+            if key == "Bearer first-fixture" || reject.load(std::sync::atomic::Ordering::Relaxed) {
+                return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":{"code":"turn_rate_limit_exceeded","message":"capacity"}}))).into_response();
+            }
+            (StatusCode::OK, Json(json!({"id":"fixture","output":[],"usage":{"input_tokens":10,"output_tokens":4}}))).into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut ids = Vec::new();
+    for (priority, name) in ["first", "second"].into_iter().enumerate() {
+        let mut account =
+            crate::ai_providers::AIProvider::new(crate::ProviderType::OpenAI, name.into());
+        account.priority = priority as u32;
+        account.api_key = Some(format!("{name}-fixture"));
+        account.base_url = Some(base.clone());
+        ids.push(h.state.ai_providers.add(account).await);
+    }
+    let user = crate::api::auth::implicit_single_tenant_user(&h.state.config);
+    let control = h.state.control.get_or_spawn(&user).await;
+    let mission = control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            Some("gpt-6-astra"),
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer test-only".parse().unwrap());
+    headers.insert(
+        "x-sandboxed-mission-id",
+        mission.id.to_string().parse().unwrap(),
+    );
+    let response = crate::api::proxy::responses(
+        State(h.state.clone()),
+        headers,
+        Bytes::from_static(br#"{"model":"gpt-6-astra","input":[],"stream":false}"#),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["Bearer first-fixture", "Bearer second-fixture"]
+    );
+    let records = control.mission_store.get_usage_records(None).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].account_id.as_deref(),
+        Some(ids[1].to_string().as_str())
+    );
+    assert!(records[0].account_bound);
+    assert_eq!(
+        records[0].mission_id.as_deref(),
+        Some(mission.id.to_string().as_str())
+    );
+    assert_eq!(records[0].caller_kind, "mission");
+    assert_eq!(records[0].input_tokens, 10);
+    let events = h.state.health_tracker.get_recent_events(10).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].from_account_id, ids[0]);
+    // Local subscription scopes must never use the API-key fallback above.
+    let endpoint = crate::api::oauth_owner::CliProxyEndpoint {
+        base_url: "http://unused-proxy.test".into(),
+        api_key: "unused".into(),
+        identity_url: None,
+    };
+    let (_scope, capability) = speed_proxy::register(
+        &h.url,
+        "gpt-6-astra",
+        crate::codex_speed::Tier::Standard,
+        mission.id,
+        endpoint,
+    )
+    .unwrap();
+    let mut scoped_headers = HeaderMap::new();
+    scoped_headers.insert(
+        "authorization",
+        format!("Bearer {}", capability.api_key).parse().unwrap(),
+    );
+    let refusal = speed_proxy::responses(
+        State(h.state.clone()),
+        scoped_headers,
+        Bytes::from_static(br#"{"model":"gpt-6-astra","input":[],"stream":false}"#),
+    )
+    .await;
+    assert!(!refusal.status().is_success());
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        2,
+        "subscription capability spent API credits"
+    );
+    reject_all.store(true, std::sync::atomic::Ordering::Relaxed);
+    h.state.health_tracker.clear_cooldown(ids[0]).await;
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer test-only".parse().unwrap());
+    let exhausted = crate::api::proxy::responses(
+        State(h.state.clone()),
+        headers,
+        Bytes::from_static(br#"{"model":"gpt-6-astra","input":[],"stream":false}"#),
+    )
+    .await;
+    assert_eq!(exhausted.status(), StatusCode::TOO_MANY_REQUESTS);
+    let outcomes = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let rows = control
+                .mission_store
+                .get_proxy_outcomes(None)
+                .await
+                .unwrap();
+            if rows.len() == 4 {
+                break rows;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("native outcomes persisted");
+    assert_eq!(outcomes.iter().filter(|r| !r.superseded).count(), 2);
+    assert!(outcomes
+        .iter()
+        .any(|r| !r.superseded && r.http_status == Some(429) && r.account_id == Some(ids[1])));
+    assert_eq!(
+        control
+            .mission_store
+            .get_usage_records(None)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "failed requests cannot invent token usage"
+    );
+    server.abort();
+}
+
+/// End-to-end OAuth regression: both public protocols and local capabilities
+/// must name the actual proxy account, not merely annotate the selected UUID.
+#[tokio::test]
+async fn codex_oauth_protocols_pin_accounts_and_local_scope_records_usage() {
+    if routing_test_child("codex_oauth_protocols_pin_accounts_and_local_scope_records_usage") {
+        return;
+    }
+    use axum::{body::Bytes, extract::Query, http::HeaderMap, response::IntoResponse};
+    let h = Harness::new().await;
+    let root = h.state.config.working_dir.clone();
+    let auth_dir = root.join("proxy-auth");
+    std::fs::create_dir_all(&auth_dir).unwrap();
+    std::env::set_var("CLI_PROXY_AUTH_DIR", &auth_dir);
+    std::env::set_var("SANDBOXED_OAUTH_OWNER", "cli-proxy");
+    std::env::set_var("CLI_PROXY_MANAGEMENT_KEY", "fixture-management");
+    for name in crate::util::CLI_PROXY_API_KEY_ENV_VARS {
+        std::env::set_var(name, "fixture-proxy");
+    }
+    std::env::remove_var("CLAUDE_CODE_DISABLE_CLI_PROXY");
+    let mut ids = Vec::new();
+    for (priority, name) in ["first", "second"].into_iter().enumerate() {
+        let mut account =
+            crate::ai_providers::AIProvider::new(crate::ProviderType::OpenAI, name.into());
+        account.priority = priority as u32;
+        account.cli_proxy_auth_file = Some(format!("{name}.json"));
+        account.oauth = Some(crate::ai_providers::OAuthCredentials {
+            access_token: "fixture-access".into(),
+            refresh_token: "fixture-refresh".into(),
+            expires_at: 4_000_000_000_000,
+        });
+        std::fs::write(auth_dir.join(format!("{name}.json")), json!({"type":"codex","email":format!("{name}@fixture.invalid"),"access_token":"fixture-access","refresh_token":"fixture-refresh","expired":"2099-01-01T00:00:00Z","prefix":name,"sandboxed_provider_id":account.id}).to_string()).unwrap();
+        ids.push(h.state.ai_providers.add(account).await);
+    }
+    let canonical = root.join(crate::util::AI_PROVIDERS_PATH);
+    std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+    std::fs::copy(root.join("providers.json"), canonical).unwrap();
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let captured = calls.clone();
+    let inference = move |headers: HeaderMap, body: Bytes| {
+        let captured = captured.clone();
+        async move {
+            assert_eq!(headers["authorization"], "Bearer fixture-proxy");
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let model = request["model"].as_str().unwrap().to_owned();
+            captured.lock().unwrap().push(model.clone());
+            assert!(
+                model == "first/gpt-6-astra" || model == "second/gpt-6-astra",
+                "unbound inference: {model}"
+            );
+            if model.starts_with("first/") {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error":{"code":"turn_rate_limit_exceeded","message":"capacity"}})),
+                )
+                    .into_response();
+            }
+            if request["stream"] == true {
+                let event = json!({"type":"response.completed","response":{"id":"fixture","output":[],"usage":{"input_tokens":10,"output_tokens":4}}});
+                return (
+                    StatusCode::OK,
+                    [("content-type", "text/event-stream")],
+                    format!("data: {event}\n\ndata: [DONE]\n\n"),
+                )
+                    .into_response();
+            }
+            (StatusCode::OK, Json(json!({"id":"fixture","output":[],"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"input_tokens":10,"output_tokens":4,"prompt_tokens":10,"completion_tokens":4}}))).into_response()
+        }
+    };
+    let app = axum::Router::new()
+        .route("/v0/management/auth-files", axum::routing::get(|| async { Json(json!({"files":[{"provider":"codex","name":"first.json","auth_index":"first","prefix":"first"},{"provider":"codex","name":"second.json","auth_index":"second","prefix":"second"}]})) }))
+        .route("/v0/management/auth-files/models", axum::routing::get(|Query(q): Query<HashMap<String,String>>| async move {
+            let name = q["name"].trim_end_matches(".json");
+            Json(json!({"models":[{"id":format!("{name}/gpt-6-astra")},{"id":"gpt-6-astra"}]}))
+        }))
+        .route("/v1/responses", axum::routing::post(inference.clone()))
+        .route("/v1/chat/completions", axum::routing::post(inference));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::env::set_var("CLAUDE_CODE_PROXY_BASE_URL", &base);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let user = crate::api::auth::implicit_single_tenant_user(&h.state.config);
+    let control = h.state.control.get_or_spawn(&user).await;
+    let mission = control
+        .mission_store
+        .create_mission(
+            None,
+            None,
+            None,
+            Some("gpt-6-astra"),
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer test-only".parse().unwrap());
+    headers.insert(
+        "x-sandboxed-mission-id",
+        mission.id.to_string().parse().unwrap(),
+    );
+    let response = crate::api::proxy::responses(
+        State(h.state.clone()),
+        headers.clone(),
+        Bytes::from_static(br#"{"model":"gpt-6-astra","input":[],"stream":false}"#),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["first/gpt-6-astra", "second/gpt-6-astra"]
+    );
+    // Ensure the reordered winner is not merely the only account off cooldown.
+    h.state.health_tracker.clear_cooldown(ids[0]).await;
+    h.state
+        .ai_providers
+        .reorder(&[ids[1], ids[0]])
+        .await
+        .unwrap();
+    let response = crate::api::proxy::chat_completions_inner(h.state.clone(), headers, Bytes::from_static(br#"{"model":"openai/gpt-6-astra","messages":[{"role":"user","content":"fixture"}],"stream":false}"#)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let endpoint = crate::api::oauth_owner::CliProxyEndpoint {
+        base_url: base,
+        api_key: "fixture-proxy".into(),
+        identity_url: None,
+    };
+    let (_scope, scoped) = speed_proxy::register(
+        &h.url,
+        "gpt-6-astra",
+        crate::codex_speed::Tier::Standard,
+        mission.id,
+        endpoint,
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", scoped.api_key).parse().unwrap(),
+    );
+    let response = speed_proxy::responses(
+        State(h.state.clone()),
+        headers,
+        Bytes::from_static(br#"{"model":"gpt-6-astra","input":[],"stream":true}"#),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let stream = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&stream).contains("response.completed"));
+    let records = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let records = control.mission_store.get_usage_records(None).await.unwrap();
+            if records.len() == 3 {
+                break records;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stream usage persisted");
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|r| r.account_bound
+        && r.account_id.as_deref() == Some(ids[1].to_string().as_str())
+        && r.mission_id.as_deref() == Some(mission.id.to_string().as_str())));
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            "first/gpt-6-astra",
+            "second/gpt-6-astra",
+            "second/gpt-6-astra",
+            "second/gpt-6-astra"
+        ]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_supervision_reports_absent_runner_without_claiming_recent_activity() {
+    let h = Harness::new().await;
+    let mission = active_mission(&h, "idle without runner").await;
+    let (tx, rx) = oneshot::channel();
+    h.control
+        .cmd_tx
+        .send(ControlCommand::CancelMission {
+            mission_id: mission.id,
+            min_idle: Some(std::time::Duration::from_secs(900)),
+            keep_remote_queue: false,
+            respond: tx,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rx.await.unwrap().unwrap(), CancelMissionOutcome::NoRunner);
+    assert_eq!(
+        h.control
+            .mission_store
+            .get_mission(mission.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MissionStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn recovery_handoff_survives_orphan_sweep_with_stale_active_snapshot() {
+    let h = Harness::new().await;
+    let store = h.control.mission_store.clone();
+    let mission = active_mission(&h, "background handoff").await;
+    let stale = store.get_all_active_missions().await.unwrap();
+    let job = Uuid::new_v4();
+    ensure_remote_job_lease(store.as_ref(), mission.id, job, "fixture")
+        .await
+        .unwrap();
+    let wait = usage_limit_wait::RemoteWait {
+        resume_at: Some(chrono::Utc::now()),
+        limit: usage_limit_wait::BACKGROUND_HANDOFF.into(),
+        replays: 0,
+        retries: 0,
+        failed_job_id: Some(job),
+        fallbacks: 0,
+    };
+    usage_limit_wait::update_remote_wait(&h.state.config.working_dir, mission.id, |_| {
+        Some(wait.clone())
+    })
+    .await;
+    finalize_remote_mission(
+        &RemoteMissionOwner::live(&h.control),
+        mission.id,
+        Some(job),
+        "fixture",
+        false,
+        "Partial response".into(),
+        usage_limit_wait::BACKGROUND_HANDOFF_REASON,
+        false,
+        None,
+        Some(&h.state.config.working_dir),
+    )
+    .await
+    .unwrap();
+    let mut resumed = HashSet::new();
+    crate::api::supervision::repair_orphaned_active_missions(
+        &store,
+        &h.state.config.working_dir,
+        &h.control.cmd_tx,
+        &h.control.events_tx,
+        &stale,
+        &HashSet::new(),
+        &mut resumed,
+        chrono::Utc::now(),
+    )
+    .await;
+    let after = store.get_mission(mission.id).await.unwrap().unwrap();
+    assert_eq!(after.status, MissionStatus::Interrupted);
+    assert!(usage_limit_wait::is_waiting_remote(&after));
+    assert!(store
+        .get_active_mission_run(mission.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        usage_limit_wait::remote_wait(&h.state.config.working_dir, mission.id).await,
+        Some(wait.clone())
+    );
+    assert_eq!(
+        usage_limit_wait::due_remote_waits(&h.state.config.working_dir, chrono::Utc::now())
+            .await
+            .len(),
+        1
+    );
+    // Explicit Stop invalidates replay even if a timer already took a snapshot.
+    cancel_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+    )
+    .await
+    .unwrap();
+    super::remote_jobs::replay_remote_mission_after_usage_limit(&h.state, mission.id, wait).await;
+    assert_eq!(
+        store
+            .get_mission(mission.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminal_reason
+            .as_deref(),
+        Some("cancelled")
+    );
+    assert!(
+        usage_limit_wait::remote_wait(&h.state.config.working_dir, mission.id)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn recovery_stale_timer_cannot_restart_or_fail_a_manual_resume() {
+    let h = Harness::new().await;
+    let store = h.control.mission_store.clone();
+    let mission = active_mission(&h, "manual resume supersedes timer").await;
+    let job = Uuid::new_v4();
+    ensure_remote_job_lease(store.as_ref(), mission.id, job, "fixture")
+        .await
+        .unwrap();
+    let stale = usage_limit_wait::RemoteWait {
+        resume_at: Some(chrono::Utc::now()),
+        limit: usage_limit_wait::BACKGROUND_HANDOFF.into(),
+        replays: 0,
+        retries: 0,
+        failed_job_id: Some(Uuid::new_v4()),
+        fallbacks: 0,
+    };
+    let newer = usage_limit_wait::RemoteWait {
+        failed_job_id: Some(job),
+        ..stale.clone()
+    };
+    usage_limit_wait::update_remote_wait(&h.state.config.working_dir, mission.id, |_| {
+        Some(newer.clone())
+    })
+    .await;
+    let placement = remote_grok::placement(&h.state.config.working_dir, &store, mission.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let refused = remote_grok::continue_recovery_on_node(
+        &h.state, &h.control, mission.id, placement, None, &stale,
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.1.contains("superseded"), "{refused:?}");
+    super::remote_jobs::replay_remote_mission_after_usage_limit(&h.state, mission.id, stale).await;
+    assert_eq!(
+        store.get_mission(mission.id).await.unwrap().unwrap().status,
+        MissionStatus::Active
+    );
+    assert_eq!(
+        usage_limit_wait::remote_wait(&h.state.config.working_dir, mission.id).await,
+        Some(newer)
+    );
+    assert!(store
+        .get_active_mission_run(mission.id)
+        .await
+        .unwrap()
+        .is_some());
 }

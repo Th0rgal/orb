@@ -1,3 +1,4 @@
+import conversationHistoryFixtures from "../../shared/orb-spec/fixtures/conversation-history.json";
 import { describe,it,expect } from "vitest";
 import { buildTranscript,applyStreamEvent } from "../src/Transcript";
 import { storedToStream,heldAfterHistory,type StreamEvent } from "../src/stream";
@@ -188,3 +189,16 @@ it('deduplicates trimmed terminal assistant_message receipt against native antig
  expect(texts(items)[0].text).toBe(`${msg}\n\n`);
 });
 
+
+
+it("matches mobile canonical conversation fixtures", () => {
+ for (const fixture of conversationHistoryFixtures.filter(f => f.history.length === 0)) {
+  const events: StreamEvent[] = fixture.events.map(event => ({
+   type: event.event_type === "assistant_message_canonical" ? "assistant_message" : event.event_type,
+   sequence: event.sequence,
+   data: { content: event.content, canonical: event.event_type === "assistant_message_canonical", ...("metadata" in event ? event.metadata : {}) },
+  }));
+  const displayed = buildTranscript(events).flatMap(item => item.kind === "text" || (item.kind === "user" && !item.queued) ? [item.text] : []);
+  expect(displayed, fixture.name).toEqual(fixture.expected);
+ }
+});

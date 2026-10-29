@@ -49,17 +49,31 @@ typedef void *jobject;
 #endif
 EOF
   FREESTANDING_FLAGS=(-ffreestanding -fuse-ld=lld -nostdlib "-I$JNI_SHIM_DIR")
+  if [ -d "$(dirname "$BIN")/include/clang" ]; then
+    FREESTANDING_FLAGS+=(-isystem "$(dirname "$BIN")/include/clang")
+  fi
 else
   echo "Android NDK or clang+lld not found (set ANDROID_NDK_HOME)" >&2
   exit 1
 fi
 
+if [ -x "$BIN/llvm-nm" ]; then
+  NM_BIN="$BIN/llvm-nm"
+else
+  NM_BIN="$(command -v llvm-nm || command -v nm)"
+fi
+if [ -x "$BIN/llvm-readelf" ]; then
+  READELF_BIN="$BIN/llvm-readelf"
+else
+  READELF_BIN="$(command -v llvm-readelf || command -v readelf)"
+fi
+
 stamp() { cat "${SOURCES[@]}" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1; }
-abi_syms() { "$BIN/llvm-nm" -D --defined-only -j "$1" | grep -E '^(orb_|leansys_|Java_)' | sort; }
+abi_syms() { "$NM_BIN" -D --defined-only -j "$1" | grep -E '^(orb_|leansys_|Java_)' | sort; }
 check_page_align_16k() {
   local so="$1"
   local aligns
-  aligns="$("$BIN/llvm-readelf" -l "$so" | awk '$1 == "LOAD" { print $NF }')"
+  aligns="$("$READELF_BIN" -W -l "$so" | awk '$1 == "LOAD" { print $NF }')"
   [ -n "$aligns" ] || { echo "$so: no ELF LOAD segments found" >&2; exit 1; }
   for a in $aligns; do
     [ "$a" = "0x4000" ] || { echo "$so: expected 16 KB LOAD alignment 0x4000, got $a" >&2; exit 1; }

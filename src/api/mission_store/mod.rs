@@ -1015,12 +1015,16 @@ impl UsageSource {
 /// One routed `/v1` request, as written by the proxy.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProxyUsageRecord {
+    /// Server observation before forwarding the response, even if storage is asynchronous.
+    pub observed_at: Option<String>,
     /// Normalized model id (see `crate::cost::normalized_model`).
     pub model: String,
     /// Provider type the request was served by (e.g. "google").
     pub provider: Option<String>,
-    /// Provider account that served the request.
+    /// Account selected by Core (historical rows may be unbound).
     pub account_id: Option<Uuid>,
+    /// Dispatch was constrained to this account, rather than an upstream pool.
+    pub account_bound: bool,
     /// Proxy API key that authenticated the request. `None` for the internal
     /// proxy secret.
     pub api_key_id: Option<Uuid>,
@@ -1104,6 +1108,8 @@ pub struct UsageRecord {
     pub api_key_id: Option<String>,
     pub api_key_name: Option<String>,
     pub account_id: Option<String>,
+    #[serde(default)]
+    pub account_bound: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,

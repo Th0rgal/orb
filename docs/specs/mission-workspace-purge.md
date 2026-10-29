@@ -103,12 +103,34 @@ do not prevent such mutations. This service already trusts its execution identit
 this change does not claim OS isolation from that identity. Deployments allowing
 unmanaged writers with that identity must leave the sweep disabled.
 
-The first implementation defers while *any* accepted MCP action or managed exec /
+Filesystem purge defers while *any* accepted MCP action or managed exec /
 durable scope is present. This favors retention over throughput; implicit action
 arguments and legacy scope names cannot prove physical disjointness. Remote job
 termination without node-local proof also retains data regardless of display status.
 
-This policy applies to mission history, retention and mission-directory purge.
+Conversation deletion checks accepted actions against the full deletion set
+(including descendants), under the same admission fence. It retains issuer,
+parent (including the existing `orb_<uuid>` origin-session inference), superseded
+and explicit target missions for queued, dispatching and
+uncertain actions. Replacement launches also retain their inherited successor
+parent, resolved with the same helper used by mission creation; failed store
+reads or an overlong successor chain refuse deletion. Unrelated actions with audited dependencies do not block
+history deletion; malformed/legacy targets and unaudited tools fail closed.
+Board acceptance only records a settled verdict, but its task UUID blocks
+deletion of the boss whose deletion would cascade to that task. Task keys are
+board-local and protected by the issuing boss identity, never compared globally. Machine
+destruction owns the machine. Neither requires unrelated conversation history. Rejection/resumption
+through indirect board references remains conservative. Blockers identify the
+action ID, tool and state without exposing arguments. Action receipts are never
+settled or removed by conversation deletion. Existing execution, durable-job,
+cloud, descendant and purge-receipt guards still apply.
+
+Regression order: accept work for B; leave its dispatch uncertain; delete terminal
+A successfully; refuse deleting B or its issuer/parent/superseded mission, including
+when B is a descendant in the deletion set. Unknown scopes must still refuse.
+
+The global policy remains for project-wide history deletion, retention and
+mission-directory purge.
 The separate administrator workspace/container destruction API is unchanged and
 remains an explicit whole-container operation; this feature does not route GC
 through it or claim to govern container destruction, manual shell removal, or

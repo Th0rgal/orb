@@ -301,6 +301,8 @@ pub struct UsageSummaryResponse {
     pub by_root_mission: Vec<UsageGroup>,
     pub by_api_key: Vec<UsageGroup>,
     pub by_account: Vec<UsageGroup>,
+    /// Core selections, including historical requests with unverified upstream identity.
+    pub by_selected_account: Vec<UsageGroup>,
     pub by_day: Vec<DailyUsageResponse>,
     /// Only populated for windows of 7 days or less.
     pub by_hour: Vec<HourlyUsageResponse>,
@@ -366,6 +368,7 @@ pub fn summarize(
     let mut root_missions = BTreeMap::new();
     let mut titles: BTreeMap<&str, &str> = BTreeMap::new();
     let mut keys = BTreeMap::new();
+    let mut selected_accounts = BTreeMap::new();
     let mut accounts = BTreeMap::new();
     let mut days: BTreeMap<String, Bucket> = BTreeMap::new();
     let mut hours: BTreeMap<String, Bucket> = BTreeMap::new();
@@ -417,7 +420,13 @@ pub fn summarize(
                 r.api_key_name.as_deref(),
                 r,
             );
-            add_group(&mut accounts, r.account_id.as_deref(), None, r);
+            add_group(&mut selected_accounts, r.account_id.as_deref(), None, r);
+            add_group(
+                &mut accounts,
+                r.account_id.as_deref().filter(|_| r.account_bound),
+                None,
+                r,
+            );
         }
         if let Some(day) = r.timestamp.get(..10) {
             days.entry(day.to_string()).or_default().add(r);
@@ -457,6 +466,7 @@ pub fn summarize(
         by_root_mission: groups(root_missions),
         by_api_key: groups(keys),
         by_account: groups(accounts),
+        by_selected_account: groups(selected_accounts),
         by_day: days
             .into_iter()
             .map(|(day, b)| DailyUsageResponse {
@@ -482,6 +492,53 @@ pub fn summarize(
 mod tests {
     use super::*;
 
+    #[test]
+    fn historical_selection_is_not_promoted_to_bound_account() {
+        let mut old = record(UsageSource::Router, "gpt-6-astra", "2026-10-28T12");
+        old.account_id = Some("selected".into());
+        old.input_tokens = 100;
+        let mut bound = old.clone();
+        bound.account_bound = true;
+        bound.input_tokens = 200;
+        let summary = summarize(
+            &[old, bound],
+            &parse_window(Some("all")).unwrap(),
+            None,
+            &UsageFilter::default(),
+        );
+        assert_eq!(summary.totals.input_tokens, 300);
+        assert_eq!(
+            summary
+                .by_selected_account
+                .iter()
+                .find(|g| g.key.as_deref() == Some("selected"))
+                .unwrap()
+                .totals
+                .input_tokens,
+            300
+        );
+        assert_eq!(
+            summary
+                .by_account
+                .iter()
+                .find(|g| g.key.as_deref() == Some("selected"))
+                .unwrap()
+                .totals
+                .input_tokens,
+            200
+        );
+        assert_eq!(
+            summary
+                .by_account
+                .iter()
+                .find(|g| g.key.is_none())
+                .unwrap()
+                .totals
+                .input_tokens,
+            100
+        );
+    }
+
     fn record(source: UsageSource, model: &str, hour: &str) -> UsageRecord {
         UsageRecord {
             request_id: None,
@@ -501,6 +558,7 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
             account_id: None,
+            account_bound: false,
             input_tokens: 100,
             output_tokens: 10,
             cache_creation_tokens: 0,

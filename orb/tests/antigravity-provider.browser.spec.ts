@@ -39,7 +39,7 @@ for (const theme of ['dark', 'light']) test(`provider accounts and machine detai
   await expect(list).toBeVisible();
   expect((await list.boundingBox())!.height).toBeLessThanOrEqual(200);
   await page.screenshot({ path: `/tmp/orb-providers-expanded-${browserName}-${theme}.png`, fullPage: true });
-  await page.getByRole('button', { name: /Google Antigravity Connected/ }).click();
+  await page.getByRole('button', { name: /Google Antigravity Subscription account/ }).click();
   await expect(native).toHaveCount(0);
 });
 
@@ -103,8 +103,9 @@ test('Mistral monthly usage renders once the console session is connected', asyn
   await page.goto('/');
   await page.getByRole('button',{name:'Providers',exact:true}).click();
   await expect(page.getByText('Chat · Individual')).toBeVisible();
+  await expect(page.locator('.p-acc .p-st')).toHaveCount(0);
   await expect(page.getByRole('button',{name:'View Mistral monthly usage'})).toHaveCount(0);
-  await page.getByRole('button',{name:/Mistral Vibe Connected/}).click();
+  await page.getByRole('button',{name:/Mistral Vibe Chat · Individual/}).click();
   await expect(page.getByText('Monthly',{exact:true}).first()).toBeVisible();
   await expect(page.getByRole('button',{name:'Disconnect usage'})).toBeVisible();
 });

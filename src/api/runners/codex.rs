@@ -738,7 +738,12 @@ pub(crate) async fn run_codex_turn_with_rotation(
         tracing::warn!(%mission_id, "Codex legacy mission has no verified native binding; preserving legacy continuation until an explicit checkpoint migration");
     }
     let mut speed_scope = None;
-    let accelerated_pool = if service_tier != crate::codex_speed::Tier::Standard {
+    let default_model = crate::api::control::resolve_codex_default_model();
+    let selected_model = requested_model.unwrap_or(&default_model);
+    let requested_model = Some(selected_model);
+    let accelerated_pool = if service_tier != crate::codex_speed::Tier::Standard
+        || crate::api::oauth_owner::codex_via_cli_proxy().is_some()
+    {
         if let Err(error) = crate::api::control::speed::validate(
             app_working_dir,
             "codex",
@@ -752,25 +757,6 @@ pub(crate) async fn run_codex_turn_with_rotation(
         }
         let mut pool = Vec::new();
         if let Some(endpoint) = crate::api::oauth_owner::codex_via_cli_proxy() {
-            let mut prefixes = Vec::new();
-            for account in crate::api::control::speed::eligible_proxy_accounts(
-                app_working_dir,
-                requested_model.unwrap(),
-                service_tier,
-            )
-            .await
-            {
-                match crate::api::control::speed::proxy_prefix(
-                    app_working_dir,
-                    &account,
-                    requested_model.unwrap(),
-                )
-                .await
-                {
-                    Ok(prefix) => prefixes.push(prefix),
-                    Err(error) => return AgentResult::failure(error, 0),
-                }
-            }
             let Some(base) = workspace_api_base_url(workspace) else {
                 return AgentResult::failure(
                     "Core speed routing is unavailable for this workspace",
@@ -779,9 +765,9 @@ pub(crate) async fn run_codex_turn_with_rotation(
             };
             let (scope, scoped_endpoint) = match crate::api::control::speed_proxy::register(
                 &base,
-                requested_model.unwrap(),
+                selected_model,
                 service_tier,
-                prefixes,
+                mission_id,
                 endpoint,
             ) {
                 Ok(value) => value,
@@ -793,7 +779,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
             pool.extend(
                 crate::api::control::speed::eligible_accounts(
                     app_working_dir,
-                    requested_model.unwrap(),
+                    selected_model,
                     service_tier,
                 )
                 .await

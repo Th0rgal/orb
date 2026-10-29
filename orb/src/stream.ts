@@ -123,7 +123,7 @@ export function storedToStream(ev: StoredEvent): StreamEvent | null {
       if (isGeneratedRemoteJobStatus(ev)) return null;
       // Canonical rows are the finalized text_op bubble; treat both as the
       // turn's final message (the reducer dedupes identical text).
-      return { ...d({ content: ev.content, success: ev.metadata?.success !== false, canonical: ev.event_type === "assistant_message_canonical", bubble_id: ev.metadata?.bubble_id, revision: ev.metadata?.revision, ...(isPartialTurn(ev.metadata) ? { partial: true } : {}), at: ev.timestamp }), type: "assistant_message" };
+      return { ...d({ content: ev.content, success: ev.metadata?.success !== false, completion_evidence: ev.metadata?.completion_evidence, canonical: ev.event_type === "assistant_message_canonical", bubble_id: ev.metadata?.bubble_id, revision: ev.metadata?.revision, ...(isPartialTurn(ev.metadata) ? { partial: true } : {}), at: ev.timestamp }), type: "assistant_message" };
     case "text_op": {
       let ops: unknown = [];
       try {

@@ -24,8 +24,8 @@ pub(crate) const USAGE_LIMIT_WAIT_REASON: &str = "usage_limit_wait";
 pub(crate) const BACKGROUND_HANDOFF: &str = "Antigravity background task handoff";
 
 /// `terminal_reason` of a mission whose Antigravity turn handed off to a
-/// background task. The replay follows within a minute, so the mission stays
-/// `Active` instead of looking stopped.
+/// background task. The execution has ended; the durable recovery record,
+/// not an Active presentation status, owns the interval before replay.
 pub(crate) const BACKGROUND_HANDOFF_REASON: &str = "background_task_handoff";
 
 /// The `terminal_reason` of a remote mission waiting for the replay of `limit`.
@@ -43,12 +43,8 @@ pub(crate) fn is_remote_wait_reason(reason: &str) -> bool {
 }
 
 /// The status a remote mission shows while it waits with `reason`.
-pub(crate) fn remote_wait_status(reason: &str) -> MissionStatus {
-    if reason == BACKGROUND_HANDOFF_REASON {
-        MissionStatus::Active
-    } else {
-        MissionStatus::Interrupted
-    }
+pub(crate) fn remote_wait_status(_reason: &str) -> MissionStatus {
+    MissionStatus::Interrupted
 }
 
 /// Opens every automatic resume prompt, so a second wait in a row reuses the
@@ -513,7 +509,7 @@ pub(crate) fn attach_recovery(value: &mut serde_json::Value, wait: Option<&Remot
     // A stale ledger entry must never advertise a retry after Stop or Resume.
     let waiting = match value["terminal_reason"].as_str() {
         Some(USAGE_LIMIT_WAIT_REASON) => value["status"] == "interrupted",
-        Some(BACKGROUND_HANDOFF_REASON) => value["status"] == "active",
+        Some(BACKGROUND_HANDOFF_REASON) => value["status"] == "interrupted",
         _ => false,
     };
     if !waiting {
@@ -2152,11 +2148,10 @@ mod tests {
     }
 
     /// A background-task handoff (mission 2e3bf791, 2026-10-28) is replayed
-    /// within a minute: the mission stays Active, still counts as waiting for
-    /// its replay, and still advertises the recovery. Quota waits keep the
-    /// Interrupted status.
+    /// without a live runner. Recovery metadata supplies the waiting UI; the
+    /// presentation row must not claim that an execution is Active.
     #[tokio::test]
-    async fn background_handoff_waits_while_active() {
+    async fn background_handoff_waits_without_a_live_runner() {
         let failure = "Antigravity ended its headless turn while background task(s) were running";
         assert_eq!(
             antigravity_resumable_interruption(failure),
@@ -2172,7 +2167,7 @@ mod tests {
         );
         assert_eq!(
             remote_wait_status(BACKGROUND_HANDOFF_REASON),
-            MissionStatus::Active
+            MissionStatus::Interrupted
         );
         assert_eq!(
             remote_wait_status(USAGE_LIMIT_WAIT_REASON),
@@ -2183,10 +2178,10 @@ mod tests {
         let (_dir, store) = sqlite_store().await;
         let mission = active_mission(&store, "antigravity").await;
         for (status, reason, waiting) in [
-            (MissionStatus::Active, BACKGROUND_HANDOFF_REASON, true),
+            (MissionStatus::Interrupted, BACKGROUND_HANDOFF_REASON, true),
             (MissionStatus::Interrupted, USAGE_LIMIT_WAIT_REASON, true),
             // Stopped by the operator during the handoff: no replay.
-            (MissionStatus::Interrupted, BACKGROUND_HANDOFF_REASON, false),
+            (MissionStatus::Interrupted, "cancelled", false),
             (MissionStatus::Active, USAGE_LIMIT_WAIT_REASON, false),
         ] {
             store
@@ -2206,11 +2201,10 @@ mod tests {
             fallbacks: 0,
         };
         let mut value =
-            serde_json::json!({"status":"active","terminal_reason":BACKGROUND_HANDOFF_REASON});
+            serde_json::json!({"status":"interrupted","terminal_reason":BACKGROUND_HANDOFF_REASON});
         attach_recovery(&mut value, Some(&wait));
         assert_eq!(value["recovery"]["kind"], "background");
-        let mut stopped =
-            serde_json::json!({"status":"interrupted","terminal_reason":BACKGROUND_HANDOFF_REASON});
+        let mut stopped = serde_json::json!({"status":"interrupted","terminal_reason":"cancelled"});
         attach_recovery(&mut stopped, Some(&wait));
         assert!(stopped.get("recovery").is_none());
     }

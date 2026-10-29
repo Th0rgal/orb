@@ -28,7 +28,7 @@
         "evidence": [
           {
             "path": "ios_dashboard/SandboxedDashboard/Orb/OrbTranscriptModel.swift",
-            "pattern": "for (offset, element) in mission[\"history\"].items.enumerated() {"
+            "pattern": "for (offset, element) in OrbConversationHistory.visible(OrbConversationHistory.merge(mission[\"history\"].items, events: events)).enumerated() {"
           }
         ]
       }

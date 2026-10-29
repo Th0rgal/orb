@@ -237,7 +237,9 @@ pub enum DivergenceKind {
     ExactMatch,
     /// Legacy Rust exhibited a known historical bug that the Lean specification provably blocks.
     LegacyBugFixedByLean(&'static str),
-    /// Unexpected mismatch requiring investigation before cutover.
+    /// Poststate matched, but emitted effects/action codes differed between Legacy Rust and Lean.
+    EffectMismatch,
+    /// Unexpected poststate mismatch requiring investigation before cutover.
     LeanBug,
     /// Effects are identical up to permutation (non-canonical map iteration in Legacy Rust).
     OrderingNondeterminism,
@@ -262,6 +264,7 @@ impl ShadowDivergenceEntry {
         let kind_str = match self.kind {
             DivergenceKind::ExactMatch => "exact_match".to_string(),
             DivergenceKind::LegacyBugFixedByLean(tag) => format!("legacy_bug_fixed_by_lean:{tag}"),
+            DivergenceKind::EffectMismatch => "effect_mismatch".to_string(),
             DivergenceKind::LeanBug => "lean_bug".to_string(),
             DivergenceKind::OrderingNondeterminism => "ordering_nondeterminism".to_string(),
             DivergenceKind::SerializationMismatch => "serialization_mismatch".to_string(),
@@ -327,7 +330,8 @@ impl<const CAP: usize> ShadowDivergenceRing<CAP> {
             DivergenceKind::LegacyBugFixedByLean(_) => {
                 self.legacy_bugs_caught = self.legacy_bugs_caught.saturating_add(1);
             }
-            DivergenceKind::LeanBug
+            DivergenceKind::EffectMismatch
+            | DivergenceKind::LeanBug
             | DivergenceKind::OrderingNondeterminism
             | DivergenceKind::SerializationMismatch => {
                 self.unexpected_divergences = self.unexpected_divergences.saturating_add(1);
@@ -400,6 +404,8 @@ where
             lean_sorted.sort();
             if lean_after == lean_expected_after && rust_sorted == lean_sorted {
                 DivergenceKind::OrderingNondeterminism
+            } else if lean_after == lean_expected_after {
+                DivergenceKind::EffectMismatch
             } else {
                 DivergenceKind::LeanBug
             }
@@ -789,6 +795,51 @@ mod tests {
         assert!(ring.entries()[0]
             .to_jsonl_line()
             .contains("legacy_bug_fixed_by_lean:antigravity_wrong_account"));
+
+        assert!(verify_effect_batch_admissible(&[
+            EffectAdmissibleInput {
+                effect_kind: crate::EffectKind::LaunchJob,
+                has_valid_lease: true,
+                session_created: false,
+                lineage_verified: false,
+                is_archived: false,
+                idempotency_fresh: true,
+                account_bound: false,
+                account_rejected: false,
+                first_byte_locked: false,
+                grammar_allowed: false,
+                env_scrubbed: false,
+                budget_ok: true,
+            },
+            EffectAdmissibleInput {
+                effect_kind: crate::EffectKind::ResumeSession,
+                has_valid_lease: true,
+                session_created: true,
+                lineage_verified: true,
+                is_archived: false,
+                idempotency_fresh: false,
+                account_bound: false,
+                account_rejected: false,
+                first_byte_locked: false,
+                grammar_allowed: false,
+                env_scrubbed: false,
+                budget_ok: true,
+            },
+        ]));
+        assert!(!verify_effect_batch_admissible(&[EffectAdmissibleInput {
+            effect_kind: crate::EffectKind::LaunchJob,
+            has_valid_lease: false,
+            session_created: false,
+            lineage_verified: false,
+            is_archived: false,
+            idempotency_fresh: true,
+            account_bound: false,
+            account_rejected: false,
+            first_byte_locked: false,
+            grammar_allowed: false,
+            env_scrubbed: false,
+            budget_ok: true,
+        }]));
     }
 
     #[test]

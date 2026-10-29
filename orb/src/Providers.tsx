@@ -831,8 +831,14 @@ function UsageDetail(p: { usage: ProviderUsage; headerEmail?: string; planInHead
         <Show when={u().xai_credit_used_percent != null}>
           <DetailBar label={u().xai_credit_label || "Credits"} usedPct={u().xai_credit_used_percent ?? 0} reset={u().xai_credit_reset ? `reset ${fmtResetEpoch(u().xai_credit_reset!)}` : undefined} />
         </Show>
-        <Show when={u().xai_prepaid_usd != null}><div class="p-detail-meta"><span>Prepaid balance: ${u().xai_prepaid_usd?.toFixed(2)}</span></div></Show>
-        <Show when={u().xai_on_demand_used != null}><div class="p-detail-meta"><span>On-demand credits: {u().xai_on_demand_used}<Show when={u().xai_on_demand_cap != null}> / {u().xai_on_demand_cap}</Show></span></div></Show>
+        <Show when={Number.isFinite(u().xai_prepaid_usd) && u().xai_prepaid_usd! > 0}><div class="p-detail-meta"><span>Prepaid balance: ${u().xai_prepaid_usd?.toFixed(2)}</span></div></Show>
+        <Show when={Number.isFinite(u().xai_on_demand_cap) && u().xai_on_demand_cap! > 0}
+          fallback={<Show when={Number.isFinite(u().xai_on_demand_used) && u().xai_on_demand_used! > 0}><div class="p-detail-meta"><span>On-demand credits: {u().xai_on_demand_used} used</span></div></Show>}>
+          <Show when={Number.isFinite(u().xai_on_demand_used) && u().xai_on_demand_used! >= 0}
+            fallback={<div class="p-detail-meta"><span>On-demand credits: {u().xai_on_demand_cap} total · usage unavailable</span></div>}>
+            <DetailBar label="On-demand credits" usedPct={u().xai_on_demand_used! / u().xai_on_demand_cap! * 100} valueText={`${u().xai_on_demand_used} / ${u().xai_on_demand_cap} used`} />
+          </Show>
+        </Show>
       </Show>
 
       <Show when={type() === "minimax" && !codingPlanWindows(u()).length && u().model_usage && (u().model_usage?.length ?? 0) > 0}>
@@ -990,7 +996,7 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
   const email = () => a.account_email || p.usage?.account_email || a.name.match(/\(([^()]+@[^()]+)\)/)?.[1];
   const plan = () => a.provider_type === "antigravity" ? p.usage?.antigravity_plan || "Subscription account"
     : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "API key" : "Model routing")
-    : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan} plan`
+    : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan}`
     : p.usage?.muse_plan || p.usage?.mistral_plan || undefined;
   const title = () => a.provider_type === "antigravity" ? "Google Antigravity" : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "Gemini API" : "Gemini model access") : email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
   return (
@@ -1008,8 +1014,8 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
             <Show when={p.rank}>{r => <span class="p-rank" title={`Tried ${ordinal(r().index + 1)} of ${r().count} ${title()} accounts`}>{ordinal(r().index + 1)}</span>}</Show>
           </div>
           <div class="s-row-desc">
-            <span class={`p-st ${stClass()}`} title={stLabel()}>{statusText()}</span>
-            <Show when={plan()}><span class="p-plan" title={plan()}><span class="p-dot">·</span>{plan()}</span></Show>
+            <Show when={status() !== "connected" || !plan()}><span class={`p-st ${stClass()}`} title={stLabel()}>{statusText()}</span></Show>
+            <Show when={plan()}><span class="p-plan" title={plan()}><Show when={status() !== "connected"}><span class="p-dot">·</span></Show>{plan()}</span></Show>
 
           </div>
         </div>
