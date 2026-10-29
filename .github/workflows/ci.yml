@@ -328,6 +328,15 @@ jobs:
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v6
+      - name: Verify Docker entrypoint with Windows line-ending settings
+        run: |
+          mkdir -p "$RUNNER_TEMP/orb-crlf-check"
+          git -c core.autocrlf=true checkout-index --force \
+            --prefix="$RUNNER_TEMP/orb-crlf-check/" -- docker/entrypoint.sh
+          if LC_ALL=C grep -q $'\r' "$RUNNER_TEMP/orb-crlf-check/docker/entrypoint.sh"; then
+            echo "Docker entrypoint contains CRLF line endings" >&2
+            exit 1
+          fi
       - uses: docker/setup-buildx-action@v3
       # The image is the documented install path; build it so a missing
       # input (lockfile, build.rs, shared/ sources, a binary) fails here.
