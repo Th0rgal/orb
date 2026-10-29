@@ -179,25 +179,124 @@ fn verify_jwt(token: &str, secret: &str) -> anyhow::Result<Claims> {
     Ok(token_data.claims)
 }
 
-/// Verify a JWT against the server config.
-/// Returns true iff:
-/// - auth is not required (dev mode), OR
-/// - auth is required and the token is valid.
-pub fn verify_token_for_config(token: &str, config: &Config) -> bool {
-    if !config.auth.auth_required(config.dev_mode) {
-        return true;
+fn authority_host(authority: &str) -> Option<&str> {
+    let authority = authority.trim();
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|c| matches!(c, '/' | '@' | '?' | '#' | ' ' | '\t'))
+    {
+        return None;
     }
-    let secret = match config.auth.jwt_secret.as_deref() {
-        Some(s) => s,
-        None => return false,
-    };
-    let Ok(claims) = verify_jwt(token, secret) else {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (ipv6, after) = rest.split_once(']')?;
+        if !after.is_empty() {
+            let port = after.strip_prefix(':')?;
+            if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+        }
+        return Some(ipv6);
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if !host.contains(':') {
+            if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            return Some(host);
+        }
+    }
+    Some(authority)
+}
+
+fn is_loopback_authority_host(host: &str) -> bool {
+    crate::config::is_loopback_host(host) || host.eq_ignore_ascii_case("tauri.localhost")
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    let origin = origin.trim();
+    if origin.is_empty() || origin.eq_ignore_ascii_case("null") {
+        return false;
+    }
+    let Some((scheme, rest)) = origin.split_once("://") else {
         return false;
     };
-    match config.auth.auth_mode(config.dev_mode) {
-        AuthMode::MultiUser => user_for_claims(&claims, &config.auth.users).is_some(),
-        AuthMode::SingleTenant => true,
-        AuthMode::Disabled => true,
+    if !matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "ws" | "wss" | "tauri" | "asset"
+    ) {
+        return false;
+    }
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    authority_host(authority).is_some_and(is_loopback_authority_host)
+}
+
+/// Enforce loopback-only invariants whenever unauthenticated `dev_mode` is active.
+///
+/// Blocks non-loopback listener configs, DNS-rebinding / reverse-proxy exposure
+/// via non-loopback `Host` headers, and Cross-Site WebSocket/HTTP Hijacking via
+/// browser `Origin` headers.
+pub(crate) fn ensure_dev_mode_loopback_request(
+    headers: &axum::http::HeaderMap,
+    config: &Config,
+) -> Result<(), (StatusCode, &'static str)> {
+    if !crate::config::is_loopback_host(&config.host) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Unauthenticated dev mode requires a loopback listener",
+        ));
+    }
+    if let Some(raw_host) = headers.get(axum::http::header::HOST) {
+        let Ok(host_str) = raw_host.to_str() else {
+            return Err((StatusCode::FORBIDDEN, "Invalid Host header"));
+        };
+        if !authority_host(host_str).is_some_and(is_loopback_authority_host) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Unauthenticated dev mode requires a loopback Host header",
+            ));
+        }
+    }
+    if let Some(raw_origin) = headers.get(axum::http::header::ORIGIN) {
+        let Ok(origin_str) = raw_origin.to_str() else {
+            return Err((StatusCode::FORBIDDEN, "Invalid Origin header"));
+        };
+        if !is_loopback_origin(origin_str) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Unauthenticated dev mode rejects non-loopback Origin",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Extract `jwt.<token>` from `Sec-WebSocket-Protocol` and authenticate a
+/// subprotocol-authenticated WebSocket upgrade (`/api/console/ws`,
+/// `/api/workspaces/:id/shell`, `/api/desktop/stream`, `/api/monitoring/ws`).
+///
+/// Returns `Ok(Some(token))` for authenticated sessions, or `Ok(None)` in
+/// loopback-only `dev_mode`.
+pub(crate) fn authenticate_websocket_protocols(
+    headers: &axum::http::HeaderMap,
+    config: &Config,
+) -> Result<Option<String>, (StatusCode, &'static str)> {
+    if config.auth.auth_required(config.dev_mode) {
+        let raw = headers
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok())
+            .ok_or((StatusCode::UNAUTHORIZED, "Missing websocket JWT"))?;
+        let token = raw
+            .split(',')
+            .map(str::trim)
+            .find_map(|part| part.strip_prefix("jwt.").filter(|rest| !rest.is_empty()))
+            .ok_or((StatusCode::UNAUTHORIZED, "Missing websocket JWT"))?;
+        authenticate_token(config, token)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
+        Ok(Some(token.to_string()))
+    } else {
+        ensure_dev_mode_loopback_request(headers, config)?;
+        Ok(None)
     }
 }
 
@@ -308,6 +407,12 @@ pub fn authenticate_token(
     token: &str,
 ) -> Result<AuthUser, (StatusCode, &'static str)> {
     if config.dev_mode {
+        if !crate::config::is_loopback_host(&config.host) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Unauthenticated dev mode requires a loopback listener",
+            ));
+        }
         return Ok(implicit_single_tenant_user(config));
     }
     let secret = config.auth.jwt_secret.as_deref().ok_or((
@@ -327,7 +432,10 @@ pub fn authenticate_token(
             id: claims.sub,
             username: claims.usr,
         }),
-        AuthMode::Disabled => Ok(implicit_single_tenant_user(config)),
+        AuthMode::Disabled => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Authentication not configured",
+        )),
     }
 }
 
@@ -385,6 +493,13 @@ pub async fn require_auth(
             )
                 .into_response()
         };
+    }
+    if !state.config.auth.auth_required(state.config.dev_mode) {
+        if let Err((status, message)) =
+            ensure_dev_mode_loopback_request(req.headers(), &state.config)
+        {
+            return (status, message).into_response();
+        }
     }
     match authenticate_token(&state.config, token) {
         Ok(user) => {
@@ -623,5 +738,125 @@ mod tests {
             implicit_single_tenant_user_from_id(&test_config(false), Some("legacy-prod".into()));
         assert_eq!(user.id, "legacy-prod");
         assert_eq!(user.username, "legacy-prod");
+    }
+
+    #[test]
+    fn dev_mode_auth_blocks_non_loopback_bind_host_and_origin() {
+        use axum::http::{header, HeaderMap, HeaderValue};
+
+        let mut wildcard_cfg = test_config(true);
+        wildcard_cfg.host = "0.0.0.0".to_string();
+        assert_eq!(
+            authenticate_token(&wildcard_cfg, "").unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            authenticate_websocket_protocols(&HeaderMap::new(), &wildcard_cfg)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        let local_cfg = test_config(true);
+        assert!(
+            authenticate_websocket_protocols(&HeaderMap::new(), &local_cfg)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut loopback_headers = HeaderMap::new();
+        loopback_headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        loopback_headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:3000"),
+        );
+        assert!(authenticate_websocket_protocols(&loopback_headers, &local_cfg).is_ok());
+
+        let mut tauri_headers = HeaderMap::new();
+        tauri_headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3000"));
+        tauri_headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("tauri://localhost"),
+        );
+        assert!(authenticate_websocket_protocols(&tauri_headers, &local_cfg).is_ok());
+
+        // Remote Host header (e.g. DNS rebinding or reverse proxy to public IP/domain)
+        let mut remote_host_headers = HeaderMap::new();
+        remote_host_headers.insert(header::HOST, HeaderValue::from_static("203.0.113.5:3000"));
+        assert_eq!(
+            authenticate_websocket_protocols(&remote_host_headers, &local_cfg)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // Cross-site WebSocket hijacking via external or sandboxed-null Origin
+        for bad_origin in [
+            "https://evil.example",
+            "http://192.168.1.50:3000",
+            "null",
+            "http://localhost@evil.example",
+        ] {
+            let mut cswsh_headers = HeaderMap::new();
+            cswsh_headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:3000"));
+            cswsh_headers.insert(header::ORIGIN, HeaderValue::from_str(bad_origin).unwrap());
+            assert_eq!(
+                authenticate_websocket_protocols(&cswsh_headers, &local_cfg)
+                    .unwrap_err()
+                    .0,
+                StatusCode::FORBIDDEN,
+                "expected {bad_origin} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn non_dev_websocket_auth_always_requires_valid_jwt() {
+        use axum::http::{HeaderMap, HeaderValue};
+
+        // Even a misconfigured non-dev Config (AuthMode::Disabled) must fail closed.
+        let unconfigured_non_dev = test_config(false);
+        assert_eq!(
+            authenticate_websocket_protocols(&HeaderMap::new(), &unconfigured_non_dev)
+                .unwrap_err()
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let mut cfg = test_config(false);
+        cfg.auth.dashboard_password = Some("strong-unique-passphrase".to_string());
+        cfg.auth.jwt_secret = Some("real-random-jwt-secret-value-12345".to_string());
+
+        // Missing Sec-WebSocket-Protocol -> 401 (exact PoC scenario with DEV_MODE=false)
+        let mut poc_headers = HeaderMap::new();
+        poc_headers.insert("sec-websocket-protocol", HeaderValue::from_static("pty"));
+        assert_eq!(
+            authenticate_websocket_protocols(&poc_headers, &cfg)
+                .unwrap_err()
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Valid JWT in subprotocol -> accepted
+        let (jwt, _) = issue_jwt(
+            cfg.auth.jwt_secret.as_deref().unwrap(),
+            1,
+            &AuthUser {
+                id: "default".to_string(),
+                username: "default".to_string(),
+            },
+        )
+        .unwrap();
+        let mut valid_headers = HeaderMap::new();
+        valid_headers.insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_str(&format!("sandboxed, jwt.{jwt}")).unwrap(),
+        );
+        assert_eq!(
+            authenticate_websocket_protocols(&valid_headers, &cfg)
+                .unwrap()
+                .as_deref(),
+            Some(jwt.as_str())
+        );
     }
 }

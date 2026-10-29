@@ -128,7 +128,7 @@ RUN mkdir -p /root/.sandboxed-sh /root/.claude /root/work/screenshots
 ENV HOST=127.0.0.1 \
     PORT=3000 \
     WORKING_DIR=/root \
-    DEV_MODE=true \
+    DEV_MODE=false \
     DESKTOP_ENABLED=true \
     DESKTOP_RESOLUTION=1920x1080 \
     GIT_TERMINAL_PROMPT=0
