@@ -48,6 +48,7 @@ extension OrbConversation {
         events = unique.values.sorted { $0.sequence < $1.sequence }
         OrbReadCache.saveEvents(id, events: events)
         rebuildWorkModel()
+        rebuildHistory()
     }
 
     /// Refreshes are coalesced, never dropped: a forced refresh requested while one
@@ -70,10 +71,15 @@ extension OrbConversation {
         if !force && !working && Date().timeIntervalSince(lastRefresh) < 30 { return }
         refreshing = true; defer { refreshing = false; loading = false }
         do {
+            let account = api.endpoint + (api.authToken ?? "")
             let knownCloud = mission != .null && OrbRow(mission).cloud
             let sinceSeq = events.last?.sequence
             async let valueTask = OrbReadCache.conversation(id, force: force)
             async let batchTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
+            let savedHistory = mission["history"].items
+            let conversationCursor = savedHistory.allSatisfy { $0["sequence"].doubleValue != nil }
+                ? savedHistory.compactMap { $0["sequence"].doubleValue }.max().map { Int64($0) } : nil
+            async let conversationTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, types: OrbConversationHistory.eventTypes, limit: 400, sinceSeq: conversationCursor).events)
             let queueFetchedAt = Date()
             async let queueTask: OrbJSON = knownCloud ? .null : ((try? await api.call("/api/control/queue")) ?? .null)
 
@@ -81,6 +87,16 @@ extension OrbConversation {
             if value["history"].items.isEmpty && !mission["history"].items.isEmpty, case var .object(dict) = value {
                 dict["history"] = mission["history"]
                 value = .object(dict)
+            }
+            let conversation = await conversationTask
+            guard !Task.isCancelled, id == self.id, account == api.endpoint + (api.authToken ?? "") else { return }
+            if !knownCloud, case var .object(fields) = value {
+                if let conversation, !conversation.isEmpty {
+                    fields["history"] = .array(OrbConversationHistory.merge(conversationCursor == nil ? [] : savedHistory, events: conversation))
+                } else if conversationCursor != nil {
+                    fields["history"] = .array(savedHistory)
+                }
+                value = .object(fields)
             }
             if mission != value {
                 mission = value
@@ -110,7 +126,7 @@ extension OrbConversation {
                             if op == "append" { live.append(content) }
                             else if op == "replace" { live.replace(content) }
                         }
-                        if ["assistant_message", "mission_status_changed", "user_message"].contains(type) {
+                        if ["assistant_message", "assistant_message_canonical", "mission_status_changed", "user_message"].contains(type) {
                             Task { await refresh(force: true) }
                         } else if ["tool_call", "tool_result", "thinking"].contains(type) {
                             scheduleCoalescedRefresh()

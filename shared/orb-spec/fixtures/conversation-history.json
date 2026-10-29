@@ -1,0 +1,293 @@
+[
+  {
+    "name": "stale history receives prompts and replies together",
+    "history": [
+      {
+        "role": "user",
+        "content": "start"
+      }
+    ],
+    "events": [
+      {
+        "sequence": 10,
+        "event_type": "user_message",
+        "content": "start"
+      },
+      {
+        "sequence": 11,
+        "event_type": "assistant_message",
+        "content": "answer"
+      },
+      {
+        "sequence": 12,
+        "event_type": "user_message",
+        "content": "follow up"
+      },
+      {
+        "sequence": 13,
+        "event_type": "assistant_message",
+        "content": "new answer"
+      }
+    ],
+    "expected": [
+      "start",
+      "answer",
+      "follow up",
+      "new answer"
+    ]
+  },
+  {
+    "name": "old tail does not append prompts below latest answer",
+    "history": [
+      {
+        "role": "user",
+        "content": "new"
+      },
+      {
+        "role": "assistant",
+        "content": "latest"
+      }
+    ],
+    "events": [
+      {
+        "sequence": 1,
+        "event_type": "user_message",
+        "content": "old"
+      },
+      {
+        "sequence": 2,
+        "event_type": "assistant_message",
+        "content": "old answer"
+      }
+    ],
+    "expected": [
+      "new",
+      "latest"
+    ]
+  },
+  {
+    "name": "sequenced partial tail preserves repeated prompts and order",
+    "history": [
+      {
+        "sequence": 10,
+        "role": "user",
+        "content": "again"
+      },
+      {
+        "sequence": 11,
+        "role": "assistant",
+        "content": "first"
+      }
+    ],
+    "events": [
+      {
+        "sequence": 13,
+        "event_type": "assistant_message",
+        "content": "second"
+      },
+      {
+        "sequence": 12,
+        "event_type": "user_message",
+        "content": "again"
+      },
+      {
+        "sequence": 11,
+        "event_type": "assistant_message",
+        "content": "first"
+      }
+    ],
+    "expected": [
+      "again",
+      "first",
+      "again",
+      "second"
+    ]
+  },
+  {
+    "name": "canonical reply and queued exclusion",
+    "history": [],
+    "events": [
+      {
+        "sequence": 1,
+        "event_type": "user_message",
+        "content": "question"
+      },
+      {
+        "sequence": 2,
+        "event_type": "assistant_message_canonical",
+        "content": "answer"
+      },
+      {
+        "sequence": 3,
+        "event_type": "user_message",
+        "content": "queued",
+        "metadata": {
+          "queued": true
+        }
+      },
+      {
+        "sequence": 4,
+        "event_type": "assistant_message",
+        "content": "failed",
+        "metadata": {
+          "success": false
+        }
+      }
+    ],
+    "expected": [
+      "question",
+      "answer"
+    ]
+  },
+  {
+    "name": "failed empty read preserves history",
+    "history": [
+      {
+        "sequence": 1,
+        "role": "user",
+        "content": "question"
+      },
+      {
+        "sequence": 2,
+        "role": "assistant",
+        "content": "answer"
+      }
+    ],
+    "events": [],
+    "expected": [
+      "question",
+      "answer"
+    ]
+  },
+  {
+    "name": "older raw tail cannot extend sequenced conversation backwards",
+    "history": [
+      {
+        "sequence": 10,
+        "role": "user",
+        "content": "new"
+      },
+      {
+        "sequence": 11,
+        "role": "assistant",
+        "content": "answer"
+      }
+    ],
+    "events": [
+      {
+        "sequence": 1,
+        "event_type": "user_message",
+        "content": "old"
+      }
+    ],
+    "expected": [
+      "new",
+      "answer"
+    ]
+  },
+  {
+    "name": "legacy overlap must reach the last stored answer",
+    "history": [
+      {
+        "role": "user",
+        "content": "continue"
+      },
+      {
+        "role": "assistant",
+        "content": "latest answer"
+      }
+    ],
+    "events": [
+      {
+        "sequence": 1,
+        "event_type": "user_message",
+        "content": "continue"
+      },
+      {
+        "sequence": 2,
+        "event_type": "assistant_message_canonical",
+        "content": "old answer"
+      }
+    ],
+    "expected": [
+      "continue",
+      "latest answer"
+    ]
+  },
+  {
+    "name": "native revisions and aggregate terminal receipt",
+    "history": [],
+    "events": [
+      {
+        "sequence": 1,
+        "event_type": "user_message",
+        "content": "start"
+      },
+      {
+        "sequence": 2,
+        "event_type": "assistant_message_canonical",
+        "content": "First update complete",
+        "metadata": {
+          "bubble_id": "antigravity:conversation:turn:1",
+          "revision": 2
+        }
+      },
+      {
+        "sequence": 3,
+        "event_type": "assistant_message_canonical",
+        "content": "First update",
+        "metadata": {
+          "bubble_id": "antigravity:conversation:turn:1",
+          "revision": 1
+        }
+      },
+      {
+        "sequence": 4,
+        "event_type": "assistant_message_canonical",
+        "content": "Second update",
+        "metadata": {
+          "bubble_id": "antigravity:conversation:turn:3",
+          "revision": 1
+        }
+      },
+      {
+        "sequence": 5,
+        "event_type": "assistant_message",
+        "content": "First update completeSecond update"
+      }
+    ],
+    "expected": [
+      "start",
+      "First update complete",
+      "Second update"
+    ]
+  },
+  {
+    "name": "distinct identified bubbles with a shared prefix survive",
+    "history": [],
+    "events": [
+      {
+        "sequence": 1,
+        "event_type": "assistant_message_canonical",
+        "content": "Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation first",
+        "metadata": {
+          "bubble_id": "opencode:s:p1",
+          "revision": 1
+        }
+      },
+      {
+        "sequence": 2,
+        "event_type": "assistant_message_canonical",
+        "content": "Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation second",
+        "metadata": {
+          "bubble_id": "opencode:s:p2",
+          "revision": 1
+        }
+      }
+    ],
+    "expected": [
+      "Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation first",
+      "Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation Shared explanation second"
+    ]
+  }
+]
