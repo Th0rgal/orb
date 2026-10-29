@@ -114,7 +114,22 @@ def resolve_leansys_root(out_dir):
     return clone_dir
 
 
-def leansys_c(out_dir):
+def parse_lean_exports(lean_text, module_prefix):
+    export_map = {}
+    lines = lean_text.splitlines()
+    for i, ln in enumerate(lines):
+        m = re.search(r"@\[(?:inline,\s*)?export\s+(\w+)\]", ln)
+        if m:
+            sym = m.group(1)
+            for j in range(i + 1, min(i + 6, len(lines))):
+                dm = re.match(r"\s*def\s+(\w+)", lines[j])
+                if dm:
+                    export_map[sym] = f"{module_prefix}.{dm.group(1)}"
+                    break
+    return export_map
+
+
+def leansys_c_and_models(out_dir):
     root = resolve_leansys_root(out_dir)
     env = {**os.environ, "LEAN_PATH": str(out_dir)}
     for mod in ["LeanSys/Contracts/MetaGate", "LeanSys/Contracts/SpeculativeGate", "LeanSys/Gate"]:
@@ -122,11 +137,13 @@ def leansys_c(out_dir):
         olean.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["lean", "-DwarningAsError=true", f"{mod}.lean", "-o", str(olean)],
                        cwd=root, env=env, check=True)
+    spec_path = root / "LeanSys/Spec.lean"
+    models = parse_lean_exports(spec_path.read_text(encoding="utf-8"), "LeanSys.Spec")
     c = out_dir / "LeanSys_Spec.c"
     subprocess.run(["lean", "-DwarningAsError=true", "LeanSys/Spec.lean",
                     "-o", str(out_dir / "LeanSys/Spec.olean"), "-c", str(c)],
                    cwd=root, env=env, check=True)
-    return c
+    return c, models
 
 
 def extract(src):
@@ -204,8 +221,22 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = pathlib.Path(tmp)
         lean_c = args.lean_c or orb_c(tmp_path)
-        ls_c = args.leansys_c or leansys_c(tmp_path)
+        if args.leansys_c:
+            ls_c = args.leansys_c
+            ls_models = None
+        else:
+            ls_c, ls_models = leansys_c_and_models(tmp_path)
         new = transform(lean_c.read_text(), ls_c.read_text())
+        if ls_models is not None:
+            manifest = json.loads((ROOT / "shared/orb-spec/kernel_abi.json").read_text())
+            for fn in manifest["functions"]:
+                if fn["name"].startswith("leansys_"):
+                    expected_model = ls_models.get(fn["name"])
+                    if fn.get("model") != expected_model:
+                        sys.exit(
+                            f"kernel_abi.json model mismatch for {fn['name']}: "
+                            f"got {fn.get('model')!r}, expected {expected_model!r}"
+                        )
     if args.check:
         if OUT.read_text() != new:
             sys.exit(f"{OUT.relative_to(ROOT)} is stale; run scripts/gen_orb_kernel_unboxed.py")

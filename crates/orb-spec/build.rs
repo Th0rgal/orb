@@ -4,89 +4,7 @@ use std::{
     process::Command,
 };
 
-const ORB_EXPORTS: &[&str] = &[
-    "orb_verify_writer_reuse",
-    "orb_verify_lease_mode",
-    "orb_verify_track_hold",
-    "orb_verify_repo_disjoint",
-    "orb_verify_remote_outbox",
-    "orb_verify_board_slots",
-    "orb_verify_board_retry",
-    "orb_verify_job_transition",
-    "orb_verify_bundle_budget",
-    "orb_verify_token_rotation",
-    "orb_verify_approval",
-    "orb_vm_lifecycle_step",
-    "orb_vm_claim_step",
-    "orb_compute_secret_gate",
-    "orb_verify_log_window",
-    "orb_mix64_word",
-    "orb_proxy_step",
-    "orb_stream_deadlines",
-    "orb_breaker_step",
-    "orb_mission_step",
-    "orb_reconcile_step",
-    "orb_queue_step",
-    "orb_vm_step",
-    "orb_access_step",
-    "orb_workfold_step",
-    "orb_taskcard_step",
-    "orb_sidebar_visibility",
-    "orb_admission_step",
-    "orb_account_cooldown_secs",
-    "orb_cost_cents_step",
-    "orb_stream_loop_step",
-    "orb_job_ledger_step",
-    "orb_proc_liveness_step",
-    "orb_pr_gate_step",
-    "orb_turn_summary_step",
-    "orb_usage_limit_status",
-    "orb_relative_time_bucket",
-    "orb_transcript_patch_step",
-    "orb_attribution_step",
-    "orb_schedule_step",
-    "orb_stats_settle_step",
-    "orb_privilege_step",
-    "orb_bunker_step",
-    "orb_deploy_gate_step",
-    "orb_wire_validate_frame",
-    "orb_wire_pack_record",
-    "orb_wire_schema_migrate_step",
-    "orb_effect_admissible",
-    "orb_provider_pool_step",
-    "orb_route_argmin_step",
-    "orb_node_gc_step",
-    "orb_node_disk_admission_step",
-];
-
-const LEANSYS_EXPORTS: &[&str] = &[
-    "leansys_verify_slice_bounds",
-    "leansys_verify_wal_frame",
-    "leansys_verify_cas_digest",
-    "leansys_check_http_bounds",
-    "leansys_verify_jsonl_tape",
-    "leansys_verify_ring_cursor",
-    "leansys_verify_sst_block",
-    "leansys_verify_poll_interest",
-    "leansys_verify_rlimit_budget",
-    "leansys_mix64_word",
-    "leansys_verify_composite_key_order",
-    "leansys_verify_token_auth",
-    "leansys_verify_log_window",
-    "leansys_verify_jsonrpc_frame",
-    "leansys_gate_admit",
-    "leansys_verify_mmap_seqlock",
-    "leansys_verify_proc_stat_fields",
-    "leansys_sse_frame_scan",
-    "leansys_gfm_pipe_scan",
-    "leansys_tag_scan",
-    "leansys_transcript_index",
-    "leansys_verify_ios_jetsam_budget",
-    "leansys_verify_worker_budget",
-    "leansys_verify_page_aligned_buffer",
-    "leansys_select_isa",
-    "leansys_verify_isa_selection",
-];
+mod artifact_symbols;
 
 fn verify_lean_sources_if_requested(root: &Path, out_dir: &Path) {
     println!("cargo:rerun-if-env-changed=ORB_VERIFY_LEAN");
@@ -199,39 +117,8 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
     }
     assert!(compiled, "failed to compile {}", unboxed_c.display());
 
-    let nm_out = Command::new("nm")
-        .args(["-P", "-u"])
-        .arg(&obj_path)
-        .output()
-        .unwrap_or_else(|e| panic!("nm failed: {e}"));
-    let undefined = String::from_utf8_lossy(&nm_out.stdout);
-    assert!(
-        undefined.trim().is_empty(),
-        "Orb/LeanSys unboxed C-ABI object has undefined symbols:\n{undefined}"
-    );
-
-    let defined = Command::new("nm")
-        .args(["-P"])
-        .arg(&obj_path)
-        .output()
-        .unwrap_or_else(|e| panic!("nm failed: {e}"));
-    let defined_text = String::from_utf8_lossy(&defined.stdout);
-    for sym in ORB_EXPORTS.iter().chain(LEANSYS_EXPORTS.iter()) {
-        assert!(
-            defined_text.lines().any(|line| {
-                let mut parts = line.split_whitespace();
-                let name = parts.next().map(|n| {
-                    if macos {
-                        n.strip_prefix('_').unwrap_or(n)
-                    } else {
-                        n
-                    }
-                });
-                name == Some(*sym) && parts.next() == Some("T")
-            }),
-            "missing defined C-ABI export {sym}"
-        );
-    }
+    artifact_symbols::verify_artifact(&obj_path, macos)
+        .unwrap_or_else(|e| panic!("C-ABI object symbol verification failed: {e}"));
 
     let _ = fs::remove_file(&lib_path);
     let mut archived = false;
@@ -249,12 +136,16 @@ fn build_orb_spec_cabi(root: &Path, out_dir: &Path) {
         }
     }
     assert!(archived, "failed to archive liborb_spec_cabi.a");
+    artifact_symbols::verify_artifact(&lib_path, macos)
+        .unwrap_or_else(|e| panic!("C-ABI archive symbol verification failed: {e}"));
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=orb_spec_cabi");
 }
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=artifact_symbols.rs");
+    println!("cargo:rerun-if-changed=../../shared/orb-spec/cabi/orb_kernel_exports.rs");
     println!("cargo:rerun-if-changed=src/lib.rs");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest_dir

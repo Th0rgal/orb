@@ -1,0 +1,103 @@
+   Compiling orb-spec v1.3.0 (/tmp/orb-work/orb/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 0.86s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-cce4852a0adf52dc)
+
+running 1 test
+test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 3m 25s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 1 test
+test api::privilege_broker::tests::phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.01s
+
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 1m 00s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 1 test
+test api::control::remote_jobs::boot_leftover_tests::phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.00s
+
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 50.03s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 12 tests
+test api::mission_access::tests::a_revoke_that_cannot_be_saved_changes_nothing ... ok
+test api::mission_access::tests::agent_sees_nothing_of_the_target_before_a_live_grant ... ok
+test api::mission_access::tests::an_approved_grant_never_allows_control ... ok
+test api::mission_access::tests::approve_all_is_all_or_nothing_and_owner_scoped ... ok
+test api::mission_access::tests::denied_and_revoked_grant_nothing ... ok
+test api::mission_access::tests::grants_and_pending_requests_expire ... ok
+test api::mission_access::tests::other_tenants_cannot_see_decide_or_use ... ok
+test api::mission_access::tests::pending_requests_per_mission_are_capped ... ok
+test api::mission_access::tests::read_allowed_only_after_approval ... ok
+test api::mission_access::tests::scope_hint_points_reads_to_the_tool_and_refuses_control ... ok
+test api::mission_access::tests::state_survives_restart ... ok
+test api::mission_access::tests::ttl_is_clamped_and_self_requests_refused ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3637 filtered out; finished in 0.02s
+
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 42.23s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 21 tests
+test remote_node::job_ledger::tests::accepted_handle_replaces_pre_submit_tentative_handle ... ok
+test remote_node::job_ledger::tests::attached_missions_get_their_own_receipts_and_wakes ... ok
+test remote_node::job_ledger::tests::finalization_retains_immutable_remote_validation_receipt ... ok
+test remote_node::job_ledger::tests::fire_and_forget_validation_never_supersedes_a_continuation_owner ... ok
+test remote_node::job_ledger::tests::heartbeat_advances_only_an_existing_handle ... ok
+test remote_node::job_ledger::tests::identity_hash_is_content_not_commit_and_every_input_matters ... ok
+test remote_node::job_ledger::tests::immutable_validation_lookup_blocks_active_and_reuses_success ... ok
+test remote_node::job_ledger::tests::legacy_handles_default_to_mission_kind ... ok
+test remote_node::job_ledger::tests::legacy_v0_receipts_never_replay_but_still_exclude ... ok
+test remote_node::job_ledger::tests::legacy_validation_identity_keeps_cwd_unknown ... ok
+test remote_node::job_ledger::tests::newer_tentative_submission_defers_without_suppressing_wake ... ok
+test remote_node::job_ledger::tests::newer_terminal_validation_prevents_old_handle_from_owning_wait_lease ... ok
+test remote_node::job_ledger::tests::newer_terminal_wake_is_not_blocked_by_an_older_active_validation ... ok
+test remote_node::job_ledger::tests::newer_validation_suppresses_stale_terminal_wake ... ok
+test remote_node::job_ledger::tests::record_is_durable_and_idempotent ... ok
+test remote_node::job_ledger::tests::record_surfaces_an_unwritable_ledger_path ... ok
+test remote_node::job_ledger::tests::remote_build_continuation_mode_is_explicit_and_legacy_safe ... ok
+test remote_node::job_ledger::tests::sql_mirror_tracks_handles_receipts_and_backfills ... ok
+test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_ties_without_using_uuid_order ... ok
+test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
+test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3628 filtered out; finished in 2.76s
+
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 43.16s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 1 test
+test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.00s
+
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 31.64s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 1 test
+test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.00s
+
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 35.89s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 1 test
+test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.00s
+

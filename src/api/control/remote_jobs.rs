@@ -62,6 +62,71 @@ pub fn evaluate_remote_ssh_and_codex_confinement(
     )
 }
 
+fn mission_is_archived(mission: &Mission) -> bool {
+    mission.status == MissionStatus::Acknowledged
+        || crate::api::mission_horizon::superseded_by(mission).is_some()
+        || mission
+            .project
+            .tags
+            .iter()
+            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn host_expected_submission_action(
+    working_dir: &std::path::Path,
+    caller_mission: &Mission,
+    stored_mission: Option<&Mission>,
+    active_run: Option<&crate::api::mission_store::MissionRun>,
+    expected_lease_owner: &str,
+    resume_session_id: Option<&str>,
+    events: &[crate::api::mission_store::StoredEvent],
+    fallback_prompt: Option<&str>,
+) -> crate::orb_spec::MissionControlAction {
+    if mission_is_archived(caller_mission)
+        || mission_is_archived(stored_mission.unwrap_or(caller_mission))
+    {
+        return crate::orb_spec::MissionControlAction::RejectArchived;
+    }
+    if resume_session_id.is_none()
+        && fork::side_launch_receipt(working_dir, caller_mission.id)
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.accepted)
+    {
+        return crate::orb_spec::MissionControlAction::DedupeDeliveredMessage;
+    }
+    let lease_ok = active_run.is_some_and(|run| run.owner_actor_id == expected_lease_owner);
+    let conflicting_writer = active_run.is_some_and(|run| {
+        !run.owner_actor_id.is_empty() && run.owner_actor_id != expected_lease_owner
+    });
+    if !lease_ok || conflicting_writer {
+        return crate::orb_spec::MissionControlAction::RejectTrackWriterConflict;
+    }
+    let Some(req_sid) = resume_session_id else {
+        return crate::orb_spec::MissionControlAction::DispatchFreshTurn;
+    };
+    let stored_sid = stored_mission
+        .and_then(|m| m.session_id.as_deref())
+        .or(caller_mission.session_id.as_deref())
+        .filter(|sid| !sid.trim().is_empty());
+    let lineage_ok = stored_sid.is_some_and(|sid| {
+        req_sid == sid || (caller_mission.backend == "opencode" && req_sid.starts_with("ses_"))
+    });
+    let rollout_ok = events.iter().any(|event| {
+        event.event_type == "assistant_message"
+            && !event.content.trim().is_empty()
+            && event.metadata["success"] != serde_json::json!(false)
+    });
+    if stored_sid.is_some() && lineage_ok && rollout_ok {
+        crate::orb_spec::MissionControlAction::ResumeVerifiedSession
+    } else if lineage_ok && fallback_prompt.is_some_and(|p| !p.trim().is_empty()) {
+        crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+    } else {
+        crate::orb_spec::MissionControlAction::RejectUnverifiedResume
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn evaluate_mission_control_gate(
     working_dir: &std::path::Path,
@@ -71,24 +136,15 @@ pub(super) async fn evaluate_mission_control_gate(
     resume_session_id: Option<&str>,
     events: &[crate::api::mission_store::StoredEvent],
     fallback_prompt: Option<&str>,
-    host_admits: bool,
+    host_action_code: u8,
 ) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
     let stored_mission = mission_store.get_mission(mission.id).await?;
-    let effective_status = stored_mission
-        .as_ref()
-        .map(|m| m.status)
-        .unwrap_or(mission.status);
     // An explicit dispatch (follow-up, resume, transfer) may continue a
     // Completed mission: only Acknowledged (archived) or superseded ones are
     // closed. The automatic usage-limit replay also treats Completed as done.
-    let is_archived = mission.status == MissionStatus::Acknowledged
-        || effective_status == MissionStatus::Acknowledged
-        || crate::api::mission_horizon::superseded_by(mission).is_some()
-        || mission
-            .project
-            .tags
-            .iter()
-            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let host_archived_before = mission_is_archived(mission);
+    let host_archived_after = mission_is_archived(stored_mission.as_ref().unwrap_or(mission));
+    let is_archived = host_archived_before || host_archived_after;
     let active_run = mission_store.get_active_mission_run(mission.id).await?;
     let has_lease = active_run
         .as_ref()
@@ -138,7 +194,9 @@ pub(super) async fn evaluate_mission_control_gate(
             rollout_exists,
             has_fallback_prompt,
         },
-        host_admits,
+        host_archived_before,
+        host_archived_after,
+        host_action_code,
     ))
 }
 
@@ -151,15 +209,13 @@ pub(super) async fn evaluate_usage_limit_replay_gate(
 ) -> Result<crate::orb_spec::MissionControlStepVerdict, String> {
     // Nothing replays a finished mission on its own: Completed counts as
     // archived here, unlike an explicit follow-up.
-    let is_archived = matches!(
-        mission.status,
-        MissionStatus::Acknowledged | MissionStatus::Completed
-    ) || crate::api::mission_horizon::superseded_by(mission).is_some()
-        || mission
-            .project
-            .tags
-            .iter()
-            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG);
+    let stored_mission = mission_store.get_mission(mission.id).await?;
+    let stored = stored_mission.as_ref().unwrap_or(mission);
+    let host_archived_before =
+        mission_is_archived(mission) || mission.status == MissionStatus::Completed;
+    let host_archived_after =
+        mission_is_archived(stored) || stored.status == MissionStatus::Completed;
+    let is_archived = host_archived_before || host_archived_after;
     let active_run = mission_store.get_active_mission_run(mission.id).await?;
     let has_lease = active_run.is_none();
     let active_track_writers = if active_run.is_some() { 1 } else { 0 };
@@ -188,11 +244,19 @@ pub(super) async fn evaluate_usage_limit_replay_gate(
                 && event.metadata["success"] != serde_json::json!(false)
         });
     let has_fallback_prompt = replay_prompt.is_some_and(|p| !p.trim().is_empty());
-    let host_admits = !is_archived
-        && has_lease
-        && active_track_writers == 0
-        && !msg_already_delivered
-        && ((session_created && lineage_verified && rollout_exists) || has_fallback_prompt);
+    let host_action = if is_archived {
+        crate::orb_spec::MissionControlAction::RejectArchived
+    } else if msg_already_delivered {
+        crate::orb_spec::MissionControlAction::DedupeDeliveredMessage
+    } else if !has_lease || active_track_writers != 0 {
+        crate::orb_spec::MissionControlAction::RejectTrackWriterConflict
+    } else if session_created && lineage_verified && rollout_exists {
+        crate::orb_spec::MissionControlAction::ResumeVerifiedSession
+    } else if has_fallback_prompt {
+        crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+    } else {
+        crate::orb_spec::MissionControlAction::RejectUnverifiedResume
+    };
     Ok(fork::observe_mission_control_shadow(
         crate::orb_spec::MissionControlStepInput {
             is_archived,
@@ -205,7 +269,9 @@ pub(super) async fn evaluate_usage_limit_replay_gate(
             rollout_exists,
             has_fallback_prompt,
         },
-        host_admits,
+        host_archived_before,
+        host_archived_after,
+        host_action as u8,
     ))
 }
 
@@ -346,45 +412,16 @@ pub(super) async fn submit_leased_remote_job(
         .get_active_mission_run(mission.id)
         .await?;
     let stored_mission = control.mission_store.get_mission(mission.id).await?;
-    let effective_status = stored_mission
-        .as_ref()
-        .map(|m| m.status)
-        .unwrap_or(mission.status);
-    let stored_sid = stored_mission
-        .as_ref()
-        .and_then(|m| m.session_id.as_deref())
-        .or(mission.session_id.as_deref());
-    let host_admits_submission = mission.status != MissionStatus::Acknowledged
-        && effective_status != MissionStatus::Acknowledged
-        && crate::api::mission_horizon::superseded_by(mission).is_none()
-        && !mission
-            .project
-            .tags
-            .iter()
-            .any(|t| t == crate::api::mission_store::SUPERSEDED_TAG)
-        && active_run
-            .as_ref()
-            .is_some_and(|run| run.owner_actor_id == expected_owner)
-        && !(resume_sid_opt.is_none()
-            && fork::side_launch_receipt(&state.config.working_dir, mission.id)
-                .ok()
-                .flatten()
-                .is_some_and(|r| r.accepted))
-        && match resume_sid_opt {
-            Some(req_sid) => {
-                let lineage_ok = stored_sid.is_some_and(|sid| {
-                    req_sid == sid || (mission.backend == "opencode" && req_sid.starts_with("ses_"))
-                });
-                let rollout_ok = resume_events.iter().any(|event| {
-                    event.event_type == "assistant_message"
-                        && !event.content.trim().is_empty()
-                        && event.metadata["success"] != serde_json::json!(false)
-                });
-                lineage_ok
-                    && (rollout_ok || fallback_prompt_opt.is_some_and(|p| !p.trim().is_empty()))
-            }
-            None => true,
-        };
+    let host_submission_action = host_expected_submission_action(
+        &state.config.working_dir,
+        mission,
+        stored_mission.as_ref(),
+        active_run.as_ref(),
+        &expected_owner,
+        resume_sid_opt,
+        &resume_events,
+        fallback_prompt_opt,
+    );
     let submission_verdict = evaluate_mission_control_gate(
         &state.config.working_dir,
         control.mission_store.as_ref(),
@@ -393,7 +430,7 @@ pub(super) async fn submit_leased_remote_job(
         resume_sid_opt,
         &resume_events,
         fallback_prompt_opt,
-        host_admits_submission,
+        host_submission_action as u8,
     )
     .await?;
     if !submission_verdict.emit_dispatch_effect || submission_verdict.archived_next {

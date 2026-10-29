@@ -260,8 +260,10 @@ example : commitOf [ln false false (some (false, 3)), ln true false, ln false fa
 
 Each update of a reply of `len` bytes, committed up to `commit`, parses the newly
 committed chunk once and re-parses only the open tail. The total is the final committed
-length plus the sum of the tails: linear when tails are bounded, where a full re-parse per
-update costs the sum of all lengths (quadratic in the number of deltas). -/
+length plus the sum of the tails: linear when tails are bounded (`∀ u ∈ us, u.len - u.commit ≤ t`),
+where a full re-parse per update costs the sum of all lengths (quadratic in the number of deltas).
+Note: Without a bounded-tail assumption or host tail cap, a giant unclosed code fence holds
+`commit` fixed while `u.len - u.commit` grows with the fence body. -/
 
 structure Upd where
   len : Nat

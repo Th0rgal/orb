@@ -337,8 +337,8 @@ pub fn evaluate_transcript_reduce_gate(
     )
 }
 
-/// Evaluate `orb_client_parity_step` (`client_projection_bitwise_parity_across_ios_android_wasm`)
-/// on the Core transcript projection and record the comparison in `client_parity_shadow_counter()`.
+/// Evaluate `orb_client_parity_step` (`client_summary_digest_word_parity_across_targets`)
+/// on the Core transcript summary digest and record the comparison in `client_parity_shadow_counter()`.
 pub fn evaluate_client_parity_gate(
     client_target: crate::orb_spec::ClientProjectionTarget,
     wire_schema_id: u32,
