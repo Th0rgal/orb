@@ -3352,4 +3352,323 @@ theorem soc2_host_scope_rejects_eol_os_missing_egress_or_unfenced_legacy
   unfold soc2HostScopeStep
   repeat (first | constructor | split | decide | simp_all)
 
+-- ===========================================================================
+-- Wave 12: Worker Disk-Pressure Tiered Reclamation, Anti-Thrashing & Placement
+-- ===========================================================================
+
+structure NodeDiskAdmissionCheck where
+  freeBytes          : UInt64
+  reservedBytes      : UInt64
+  nodeFloorBytes     : UInt64
+  coreFloorBytes     : UInt64
+  hysteresisBytes    : UInt64
+  nodePinnedPressure : UInt8
+  deriving Repr, DecidableEq
+
+def NodeDiskAdmissionCheck.EffectiveFloor (c : NodeDiskAdmissionCheck) : UInt64 :=
+  if c.nodeFloorBytes >= c.coreFloorBytes then c.nodeFloorBytes else c.coreFloorBytes
+
+def NodeDiskAdmissionCheck.EffectiveFree (c : NodeDiskAdmissionCheck) : UInt64 :=
+  if c.freeBytes >= c.reservedBytes then c.freeBytes - c.reservedBytes else 0
+
+def NodeDiskAdmissionCheck.Safe (c : NodeDiskAdmissionCheck) : Bool :=
+  c.nodePinnedPressure == 0 && c.EffectiveFree >= c.EffectiveFloor
+
+def nodeDiskAdmissionMetaGate : MetaGateSpec NodeDiskAdmissionCheck
+    (fun c => c.Safe = true) where
+  gate c :=
+    ((nodeDiskAdmissionStep
+      c.freeBytes c.reservedBytes c.nodeFloorBytes c.coreFloorBytes
+      c.hysteresisBytes c.nodePinnedPressure &&& 0xFFFFFFFF) &&& 256) != 0
+  sound c h := by
+    unfold NodeDiskAdmissionCheck.Safe NodeDiskAdmissionCheck.EffectiveFloor NodeDiskAdmissionCheck.EffectiveFree
+    unfold nodeDiskAdmissionStep at h
+    rw [pack32_lo] at h
+    generalize (if c.nodeFloorBytes >= c.coreFloorBytes then c.nodeFloorBytes else c.coreFloorBytes) = effFloor at h ⊢
+    generalize (if c.freeBytes >= c.reservedBytes then c.freeBytes - c.reservedBytes else 0) = effFree at h ⊢
+    have hpne : (c.nodePinnedPressure != 0) = !(c.nodePinnedPressure == 0) := by
+      cases c.nodePinnedPressure; rfl
+    rw [hpne] at h
+    cases hp : (c.nodePinnedPressure == 0)
+    · simp only [hp, Bool.not_false, ↓reduceIte] at h
+      exact absurd h (by decide)
+    · cases hf : decide (effFree >= effFloor)
+      · simp only [hp, hf, Bool.not_true, Bool.not_false, ↓reduceIte] at h
+        exact absurd h (by decide)
+      · simp [hp, hf]
+  complete c h := by
+    unfold NodeDiskAdmissionCheck.Safe NodeDiskAdmissionCheck.EffectiveFloor NodeDiskAdmissionCheck.EffectiveFree at h
+    unfold nodeDiskAdmissionStep
+    rw [pack32_lo]
+    generalize (if c.nodeFloorBytes >= c.coreFloorBytes then c.nodeFloorBytes else c.coreFloorBytes) = effFloor at h ⊢
+    generalize (if c.freeBytes >= c.reservedBytes then c.freeBytes - c.reservedBytes else 0) = effFree at h ⊢
+    have hpne : (c.nodePinnedPressure != 0) = !(c.nodePinnedPressure == 0) := by
+      cases c.nodePinnedPressure; rfl
+    rw [hpne]
+    cases hp : (c.nodePinnedPressure == 0)
+    · simp [hp] at h
+    · cases hf : decide (effFree >= effFloor)
+      · simp [hp, hf] at h
+      · cases hs : decide (effFree - effFloor < c.hysteresisBytes) <;>
+          (simp only [hp, hf, hs, Bool.not_true, Bool.not_false, Bool.true_and, ↓reduceIte]; decide)
+  posWitness := ⟨100, 10, 30, 20, 20, 0⟩
+  negWitness := ⟨50, 0, 80, 20, 20, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def nodeDiskAdmissionConserved : ConservedResource NodeDiskAdmissionCheck where
+  admit := nodeDiskAdmissionMetaGate.gate
+  withinBudget c := c.EffectiveFree >= c.EffectiveFloor && c.nodePinnedPressure == 0
+  conserved c h := by
+    have hs := nodeDiskAdmissionMetaGate.sound c h
+    unfold NodeDiskAdmissionCheck.Safe at hs
+    rw [Bool.and_eq_true] at hs ⊢
+    exact ⟨hs.2, hs.1⟩
+
+/-- Corollary 79 (`StickyFence` — `orb_node_disk_admission_step`, Pinned Disk Pressure Blocks Placement):
+    Any node reporting `nodePinnedPressure != 0` is rejected (`action = 2`, `admittedBit = 0`) regardless
+    of nominal free bytes or Core floor settings. -/
+theorem node_disk_admission_rejects_pinned
+    (free res nodeFloor coreFloor hyst : UInt64) (pinned : UInt8)
+    (h_pin : (pinned != 0) = true) :
+    (nodeDiskAdmissionStep free res nodeFloor coreFloor hyst pinned &&& 0xFFFFFFFF) = 2 := by
+  unfold nodeDiskAdmissionStep
+  rw [pack32_lo]
+  simp [h_pin]
+
+/-- Corollary 80 (`ConservedResource` — `orb_node_disk_admission_step`, Node Floor Overrides Lower Core Floor):
+    Whenever `effectiveFree < nodeFloor` (even if `effectiveFree ≥ coreFloor`, as in the Ashur `50 GiB < 80 GiB`
+    vs Core `20 GiB` mismatch), `nodeDiskAdmissionStep` rejects placement (`admittedBit = 0`). -/
+theorem node_disk_admission_respects_node_floor
+    (free res nodeFloor coreFloor hyst : UInt64)
+    (h_below : (if free >= res then free - res else 0) < nodeFloor) :
+    ((nodeDiskAdmissionStep free res nodeFloor coreFloor hyst 0 &&& 0xFFFFFFFF) &&& 256) = 0 := by
+  unfold nodeDiskAdmissionStep
+  rw [pack32_lo]
+  generalize (if free >= res then free - res else 0) = effFree at h_below ⊢
+  have h_not_ge : decide (effFree >= (if nodeFloor >= coreFloor then nodeFloor else coreFloor)) = false := by
+    apply decide_eq_false
+    intro h_ge
+    change (if nodeFloor >= coreFloor then nodeFloor else coreFloor).toNat ≤ effFree.toNat at h_ge
+    change effFree.toNat < nodeFloor.toNat at h_below
+    split at h_ge
+    · omega
+    · next h_nc =>
+      change ¬ (coreFloor.toNat ≤ nodeFloor.toNat) at h_nc
+      omega
+  simp [h_not_ge]
+
+structure NodeGcCheck where
+  freeBytes           : UInt64
+  floorBytes          : UInt64
+  emergencyFloorBytes : UInt64
+  agedScratchBytes    : UInt64
+  freshScratchBytes   : UInt64
+  coldCacheBytes      : UInt64
+  hotCacheBytes       : UInt64
+  deriving Repr, DecidableEq
+
+def NodeGcCheck.RemAfterFresh (g : NodeGcCheck) : UInt64 :=
+  let underFloor : Bool := g.freeBytes < g.floorBytes
+  let deficit : UInt64 := if underFloor then g.floorBytes - g.freeBytes else 0
+  let rem1 : UInt64 := if g.agedScratchBytes >= deficit then 0 else deficit - g.agedScratchBytes
+  let rem2 : UInt64 := if g.coldCacheBytes >= rem1 then 0 else rem1 - g.coldCacheBytes
+  if g.freshScratchBytes >= rem2 then 0 else rem2 - g.freshScratchBytes
+
+def NodeGcCheck.ShouldEvictHot (g : NodeGcCheck) : Bool :=
+  let underFloor : Bool := g.freeBytes < g.floorBytes
+  let inEmergency : Bool := underFloor && g.freeBytes < g.emergencyFloorBytes
+  let rem3 : UInt64 := g.RemAfterFresh
+  let unrecoverable : Bool := g.hotCacheBytes < rem3
+  rem3 > 0 && (!unrecoverable || (inEmergency && g.hotCacheBytes > 0))
+
+theorem NodeGcCheck.remAfterFresh_eq_zero_of_not_under (g : NodeGcCheck)
+    (hu : decide (g.freeBytes < g.floorBytes) = false) : g.RemAfterFresh = 0 := by
+  unfold NodeGcCheck.RemAfterFresh
+  have ha : g.agedScratchBytes >= 0 := Nat.zero_le _
+  have hc : g.coldCacheBytes >= 0 := Nat.zero_le _
+  have hf : g.freshScratchBytes >= 0 := Nat.zero_le _
+  simp [hu, ha, hc, hf]
+
+def nodeGcHotEvictMetaGate : MetaGateSpec NodeGcCheck
+    (fun g => g.ShouldEvictHot = true) where
+  gate g :=
+    ((nodeGcStep g.freeBytes g.floorBytes g.emergencyFloorBytes
+      g.agedScratchBytes g.freshScratchBytes g.coldCacheBytes g.hotCacheBytes &&& 0xFFFFFFFF) &&& 2048) != 0
+  sound g h := by
+    unfold NodeGcCheck.ShouldEvictHot NodeGcCheck.RemAfterFresh
+    unfold nodeGcStep at h
+    cases hu : decide (g.freeBytes < g.floorBytes)
+    · simp only [hu, Bool.not_false, ↓reduceIte] at h
+      exact absurd h (by decide)
+    · simp only [hu, Bool.not_true, Bool.false_eq_true, Bool.true_and, ↓reduceIte] at h ⊢
+      rw [pack32_lo] at h
+      generalize (if g.agedScratchBytes >= g.floorBytes - g.freeBytes then (0 : UInt64)
+        else g.floorBytes - g.freeBytes - g.agedScratchBytes) = r1 at h ⊢
+      generalize (if g.coldCacheBytes >= r1 then (0 : UInt64) else r1 - g.coldCacheBytes) = r2 at h ⊢
+      generalize (if g.freshScratchBytes >= r2 then (0 : UInt64) else r2 - g.freshScratchBytes) = r3 at h ⊢
+      cases hc1 : decide (r1 > 0) <;>
+        cases hc2 : decide (r2 > 0) <;>
+        cases hc3 : decide (r3 > 0) <;>
+        cases hunrec : decide (g.hotCacheBytes < r3) <;>
+        cases hemerg : decide (g.freeBytes < g.emergencyFloorBytes) <;>
+        cases hhot : decide (g.hotCacheBytes > 0) <;>
+        (simp only [hc1, hc2, hc3, hunrec, hemerg, hhot, Bool.not_true, Bool.not_false, Bool.false_eq_true, ↓reduceIte] at h ⊢
+         revert h; decide)
+  complete g h := by
+    unfold nodeGcStep
+    cases hu : decide (g.freeBytes < g.floorBytes)
+    · have h0 := NodeGcCheck.remAfterFresh_eq_zero_of_not_under g hu
+      unfold NodeGcCheck.ShouldEvictHot at h
+      rw [h0] at h
+      simp at h
+    · unfold NodeGcCheck.ShouldEvictHot NodeGcCheck.RemAfterFresh at h
+      simp only [hu, Bool.not_true, Bool.false_eq_true, Bool.true_and, ↓reduceIte] at h ⊢
+      rw [pack32_lo]
+      generalize (if g.agedScratchBytes >= g.floorBytes - g.freeBytes then (0 : UInt64)
+        else g.floorBytes - g.freeBytes - g.agedScratchBytes) = r1 at h ⊢
+      generalize (if g.coldCacheBytes >= r1 then (0 : UInt64) else r1 - g.coldCacheBytes) = r2 at h ⊢
+      generalize (if g.freshScratchBytes >= r2 then (0 : UInt64) else r2 - g.freshScratchBytes) = r3 at h ⊢
+      cases hc1 : decide (r1 > 0) <;>
+        cases hc2 : decide (r2 > 0) <;>
+        cases hc3 : decide (r3 > 0) <;>
+        cases hunrec : decide (g.hotCacheBytes < r3) <;>
+        cases hemerg : decide (g.freeBytes < g.emergencyFloorBytes) <;>
+        cases hhot : decide (g.hotCacheBytes > 0) <;>
+        (simp only [hc1, hc2, hc3, hunrec, hemerg, hhot, Bool.not_true, Bool.not_false, Bool.false_eq_true, ↓reduceIte] at h ⊢
+         revert h; decide)
+  posWitness := ⟨50, 80, 10, 5, 2, 5, 25⟩
+  negWitness := ⟨50, 80, 10, 5, 2, 5, 10⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def nodeGcMachineStep (_ : UInt8) (g : NodeGcCheck) : UInt8 × List UInt8 :=
+  let evict := nodeGcHotEvictMetaGate.gate g
+  (if evict then 4 else 0, if evict then [4] else [])
+
+/-- Concrete `MetaStepSpec` instance #8 for Wave 12 (`orb_node_gc_step`). -/
+def nodeGcMetaStepSpec : MetaStepSpec UInt8 NodeGcCheck UInt8 where
+  safety := {
+    step := nodeGcMachineStep
+    authorized := fun _ g eff => eff == 4 && g.ShouldEvictHot
+    sound := fun s g eff h_in => by
+      dsimp [nodeGcMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := nodeGcHotEvictMetaGate.sound g h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := 0
+    step := nodeGcMachineStep
+    progressRequired := fun _ g => g.ShouldEvictHot
+    expectedEffect := fun _ eff => eff == 4
+    live := fun s g h_req => by
+      have h_gate := nodeGcHotEvictMetaGate.complete g h_req
+      dsimp [nodeGcMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨50, 80, 10, 5, 2, 5, 10⟩, ⟨50, 80, 10, 5, 2, 5, 25⟩]
+    posEvent := ⟨50, 80, 10, 5, 2, 5, 25⟩
+    negEvent := ⟨50, 80, 10, 5, 2, 5, 10⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := nodeGcMachineStep
+    cpuFuel := fun _ _ => 1
+    inputBytes := fun _ => 56
+    outputBytes := fun _ _ => 8
+    c0 := 1
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 8
+    fuel_bound := fun _ _ => by omega
+    eff_bound := fun s g => by
+      dsimp [nodeGcMachineStep]
+      split <;> simp
+    out_bound := fun _ _ => by omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Corollary 81 (`ConservedResource` — `orb_node_gc_step`, Healthy Node Keeps 72h Grace and Zero Evictions):
+    Whenever `floorBytes ≤ freeBytes`, `nodeGcStep` emits `lo32 = 0` (zero scratch or cache sweeps,
+    `pinnedPressureBit = 0`) and `hi32 = 72` hours of retired-scratch retention grace. -/
+theorem node_gc_healthy_keeps_72h_grace
+    (free floor emerg aged fresh cold hot : UInt64)
+    (h_healthy : floor ≤ free) :
+    nodeGcStep free floor emerg aged fresh cold hot = ((72 : UInt64) <<< 32) := by
+  have hu : decide (free < floor) = false :=
+    decide_eq_false (Nat.not_lt_of_ge h_healthy)
+  unfold nodeGcStep
+  simp [hu]
+
+/-- Corollary 82 (`ConservedResource` — `orb_node_gc_step`, Anti-Thrashing Guard Preserves Hot Lake Caches):
+    When a node is below `floorBytes` (`free < floor`), at or above `emergencyFloorBytes` (`emerg ≤ free`),
+    and non-cache storage pins the disk below `floorBytes` even if all scratch and caches were deleted
+    (`hot < RemAfterFresh`), `nodeGcStep` sets `pinnedPressureBit` (`4096`) while strictly clearing
+    `evictHotCacheBit` (`2048`), preventing 30-minute Lake cache thrashing. -/
+theorem node_gc_preserves_hot_cache_when_pinned_above_emergency
+    (free floor emerg aged fresh cold hot : UInt64)
+    (h_under : free < floor)
+    (h_above_emerg : emerg ≤ free)
+    (h_pinned : hot < NodeGcCheck.RemAfterFresh ⟨free, floor, emerg, aged, fresh, cold, hot⟩) :
+    ((nodeGcStep free floor emerg aged fresh cold hot &&& 0xFFFFFFFF) &&& 6144) = 4096 := by
+  have hu : decide (free < floor) = true := decide_eq_true h_under
+  have he : decide (free < emerg) = false := decide_eq_false (Nat.not_lt_of_ge h_above_emerg)
+  unfold NodeGcCheck.RemAfterFresh at h_pinned
+  simp only [hu, ↓reduceIte] at h_pinned
+  have hp : decide (hot < (if fresh >= (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
+      else (if aged >= floor - free then 0 else floor - free - aged) - cold) then 0
+      else (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
+      else (if aged >= floor - free then 0 else floor - free - aged) - cold) - fresh)) = true :=
+    decide_eq_true h_pinned
+  unfold nodeGcStep
+  simp only [hu, he, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, Bool.false_and, ↓reduceIte]
+  rw [pack32_lo]
+  generalize (if aged >= floor - free then (0 : UInt64) else floor - free - aged) = r1 at hp ⊢
+  generalize (if cold >= r1 then (0 : UInt64) else r1 - cold) = r2 at hp ⊢
+  generalize (if fresh >= r2 then (0 : UInt64) else r2 - fresh) = r3 at hp ⊢
+  have hr3_pos : decide (r3 > 0) = true := by
+    have : 0 < r3.toNat := Nat.lt_of_le_of_lt (Nat.zero_le hot.toNat) (of_decide_eq_true hp)
+    exact decide_eq_true this
+  cases hc1 : decide (r1 > 0) <;>
+    cases hc2 : decide (r2 > 0) <;>
+    (simp only [hp, hr3_pos, hc1, hc2, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, ↓reduceIte]
+     decide)
+
+/-- Corollary 83 (`EffectLiveness` — `orb_node_gc_step`, Emergency Survival Overrides Anti-Thrashing Guard):
+    When free space drops below both `floorBytes` and `emergencyFloorBytes` (`free < floor`, `free < emerg`),
+    deficit remains after retired scratch and cold caches (`0 < RemAfterFresh`), and non-empty hot caches
+    exist (`0 < hot`), `nodeGcStep` sets `evictHotCacheBit` (`2048`) even if pressure is pinned. -/
+theorem node_gc_emergency_evicts_hot_cache
+    (free floor emerg aged fresh cold hot : UInt64)
+    (h_under : free < floor)
+    (h_emerg : free < emerg)
+    (h_hot : 0 < hot)
+    (h_rem : 0 < NodeGcCheck.RemAfterFresh ⟨free, floor, emerg, aged, fresh, cold, hot⟩) :
+    ((nodeGcStep free floor emerg aged fresh cold hot &&& 0xFFFFFFFF) &&& 2048) = 2048 := by
+  have hu : decide (free < floor) = true := decide_eq_true h_under
+  have he : decide (free < emerg) = true := decide_eq_true h_emerg
+  have hh : decide (hot > 0) = true := decide_eq_true h_hot
+  unfold NodeGcCheck.RemAfterFresh at h_rem
+  simp only [hu, ↓reduceIte] at h_rem
+  have hr : decide ((if fresh >= (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
+      else (if aged >= floor - free then 0 else floor - free - aged) - cold) then 0
+      else (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
+      else (if aged >= floor - free then 0 else floor - free - aged) - cold) - fresh) > 0) = true :=
+    decide_eq_true h_rem
+  unfold nodeGcStep
+  simp only [hu, he, hh, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, ↓reduceIte]
+  rw [pack32_lo]
+  generalize (if aged >= floor - free then (0 : UInt64) else floor - free - aged) = r1 at hr ⊢
+  generalize (if cold >= r1 then (0 : UInt64) else r1 - cold) = r2 at hr ⊢
+  generalize (if fresh >= r2 then (0 : UInt64) else r2 - fresh) = r3 at hr ⊢
+  cases hc1 : decide (r1 > 0) <;>
+    cases hc2 : decide (r2 > 0) <;>
+    cases hun : decide (hot < r3) <;>
+    (simp only [hr, hc1, hc2, hun, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.and_false, ↓reduceIte]
+     decide)
+
 end Orb.Spec

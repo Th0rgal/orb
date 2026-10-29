@@ -52,6 +52,8 @@ const ORB_EXPORTS: &[&str] = &[
     "orb_effect_admissible",
     "orb_provider_pool_step",
     "orb_route_argmin_step",
+    "orb_node_gc_step",
+    "orb_node_disk_admission_step",
 ];
 
 const LEANSYS_EXPORTS: &[&str] = &[

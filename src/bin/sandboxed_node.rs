@@ -428,6 +428,8 @@ async fn heartbeat(
         side_jobs: state.runner.side_job_count(),
         cached_toolchains: sandboxed_sh::node::cached_toolchains(&state.work_root),
         source_bundle_capacity: Some(sandboxed_sh::node::lean::source_bundle_capacity()),
+        min_free_disk_bytes: Some(state.runner.capacity().min_free_bytes()),
+        disk_pressure_pinned: sandboxed_sh::node::lean::disk_pressure_pinned(&state.work_root),
         lean_runtime_ready: Some(lean_runtime_ready),
         managed_auth: state.managed_auth.advertised(),
     }))

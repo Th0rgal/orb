@@ -2452,6 +2452,72 @@
       }
     },
     {
+      "name": "orb_node_gc_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "freeBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "floorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "emergencyFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "agedScratchBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "freshScratchBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "coldCacheBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "hotCacheBytes",
+          "type": "uint64_t"
+        }
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_node_disk_admission_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "freeBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "reservedBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nodeFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "coreFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "hysteresisBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nodePinnedPressure",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true
+    },
+    {
       "name": "leansys_verify_slice_bounds",
       "ret": "uint8_t",
       "params": [

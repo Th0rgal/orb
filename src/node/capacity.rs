@@ -1,5 +1,6 @@
 //! Live-resizable node admission (`SANDBOXED_NODE_CAPACITY`,
-//! `SANDBOXED_NODE_SIDE_CAPACITY`) and the env-file reload that drives it.
+//! `SANDBOXED_NODE_SIDE_CAPACITY`), disk floor (`SANDBOXED_NODE_MIN_FREE_GB`),
+//! and the env-file reload that drives them.
 //!
 //! A restart of `sandboxed-node` retires every running job, so capacity
 //! changes are applied in place instead: on `SIGHUP` (or when the env file's
@@ -13,7 +14,7 @@
 //!   running job is ever interrupted.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -26,11 +27,17 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Default side-question lane width when unset or out of range.
 pub const DEFAULT_SIDE_CAPACITY: usize = 2;
+/// Default node free-disk floor in GiB (`SANDBOXED_NODE_MIN_FREE_GB`).
+pub const DEFAULT_MIN_FREE_GB: u64 = 10;
+
+const UNSET_MIN_FREE_GB: u64 = u64::MAX;
 
 /// Current main-slot capacity, read by the per-job memory budget.
 static CURRENT_CAPACITY: AtomicU32 = AtomicU32::new(0);
 /// Current side-question capacity, read by the per-job memory budget.
 static CURRENT_SIDE_CAPACITY: AtomicUsize = AtomicUsize::new(0);
+/// Current free-disk floor in GiB (`u64::MAX` until published by `for_process`).
+static CURRENT_MIN_FREE_GB: AtomicU64 = AtomicU64::new(UNSET_MIN_FREE_GB);
 
 /// Live main capacity (falls back to the process environment before the node
 /// has published one).
@@ -56,9 +63,31 @@ pub fn current_side_capacity() -> usize {
     }
 }
 
+/// Live free-disk floor in GiB (`SANDBOXED_NODE_MIN_FREE_GB`, default 10).
+pub fn current_min_free_gb() -> u64 {
+    match CURRENT_MIN_FREE_GB.load(Ordering::Acquire) {
+        UNSET_MIN_FREE_GB => {
+            parse_min_free_gb(std::env::var("SANDBOXED_NODE_MIN_FREE_GB").ok().as_deref())
+                .ok()
+                .flatten()
+                .unwrap_or(DEFAULT_MIN_FREE_GB)
+        }
+        gb => gb,
+    }
+}
+
+/// Live free-disk floor in bytes.
+pub fn current_min_free_bytes() -> u64 {
+    current_min_free_gb().saturating_mul(1 << 30)
+}
+
 pub(crate) fn publish_capacities(capacity: u32, side: usize) {
     CURRENT_CAPACITY.store(capacity.max(1), Ordering::Release);
     CURRENT_SIDE_CAPACITY.store(side.max(1), Ordering::Release);
+}
+
+fn publish_min_free_gb(min_free_gb: u64) {
+    CURRENT_MIN_FREE_GB.store(min_free_gb, Ordering::Release);
 }
 
 /// `SANDBOXED_NODE_CAPACITY`: unset → `Ok(None)`; otherwise a positive integer.
@@ -82,11 +111,22 @@ pub fn parse_side_capacity(raw: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_SIDE_CAPACITY)
 }
 
+/// `SANDBOXED_NODE_MIN_FREE_GB`: unset → `Ok(None)`; otherwise a non-negative integer (`0` allowed).
+pub fn parse_min_free_gb(raw: Option<&str>) -> anyhow::Result<Option<u64>> {
+    match raw {
+        None => Ok(None),
+        Some(raw) => raw.trim().parse::<u64>().map(Some).map_err(|_| {
+            anyhow::anyhow!("SANDBOXED_NODE_MIN_FREE_GB must be a non-negative integer")
+        }),
+    }
+}
+
 /// Capacities parsed from an env file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capacities {
     pub capacity: u32,
     pub side_capacity: usize,
+    pub min_free_gb: u64,
 }
 
 /// Minimal systemd `EnvironmentFile=` parser: `KEY=value` lines, optional
@@ -135,6 +175,8 @@ pub fn capacities_from_env_content(
         side_capacity: get("SANDBOXED_NODE_SIDE_CAPACITY")
             .map(|raw| parse_side_capacity(Some(raw)))
             .unwrap_or(fallback.side_capacity),
+        min_free_gb: parse_min_free_gb(get("SANDBOXED_NODE_MIN_FREE_GB"))?
+            .unwrap_or(fallback.min_free_gb),
     })
 }
 
@@ -235,13 +277,14 @@ impl Admission {
     }
 }
 
-/// Both admission pools of a node.
+/// Both admission pools and live free-disk floor of a node.
 #[derive(Clone)]
 pub struct NodeCapacity {
     pub main: Arc<Admission>,
     pub side: Arc<Admission>,
+    min_free_gb: Arc<AtomicU64>,
     /// Whether this is the process's own node (publishes the live values
-    /// read by the per-job memory budget).
+    /// read by the per-job memory budget and GC floor).
     publish: bool,
 }
 
@@ -257,16 +300,21 @@ impl NodeCapacity {
         Self {
             main,
             side,
+            min_free_gb: Arc::new(AtomicU64::new(current_min_free_gb())),
             publish: false,
         }
     }
 
     /// The running node's pools: also publishes process-wide live values.
     pub fn for_process(capacity: u32, side_capacity: usize) -> Self {
+        let min_free_gb = current_min_free_gb();
         publish_capacities(capacity, side_capacity);
+        publish_min_free_gb(min_free_gb);
         Self {
+            main: Admission::new(capacity.max(1) as usize),
+            side: Admission::new(side_capacity.max(1)),
+            min_free_gb: Arc::new(AtomicU64::new(min_free_gb)),
             publish: true,
-            ..Self::new(capacity, side_capacity)
         }
     }
 
@@ -278,21 +326,36 @@ impl NodeCapacity {
         self.side.capacity()
     }
 
-    /// Apply new capacities. Returns whether anything changed.
+    pub fn min_free_gb(&self) -> u64 {
+        self.min_free_gb.load(Ordering::Acquire)
+    }
+
+    pub fn min_free_bytes(&self) -> u64 {
+        self.min_free_gb().saturating_mul(1 << 30)
+    }
+
+    /// Apply new capacities and disk floor. Returns whether anything changed.
     pub fn apply(&self, next: Capacities) -> bool {
         let capacity = next.capacity.max(1) as usize;
         let side = next.side_capacity.max(1);
         let old_main = self.main.resize(capacity);
         let old_side = self.side.resize(side);
+        let old_min_free_gb = self.min_free_gb.swap(next.min_free_gb, Ordering::AcqRel);
         if self.publish {
             publish_capacities(next.capacity, side);
+            publish_min_free_gb(next.min_free_gb);
+            if old_min_free_gb != next.min_free_gb {
+                super::lean::notify_min_free_changed();
+            }
         }
-        if old_main != capacity || old_side != side {
+        if old_main != capacity || old_side != side || old_min_free_gb != next.min_free_gb {
             tracing::info!(
                 capacity_from = old_main,
                 capacity_to = capacity,
                 side_capacity_from = old_side,
                 side_capacity_to = side,
+                min_free_gb_from = old_min_free_gb,
+                min_free_gb_to = next.min_free_gb,
                 main_in_use = self.main.in_use(),
                 "node capacity reloaded"
             );
@@ -309,6 +372,7 @@ impl NodeCapacity {
         let current = Capacities {
             capacity: self.capacity(),
             side_capacity: self.side_capacity(),
+            min_free_gb: self.min_free_gb(),
         };
         Ok(self.apply(capacities_from_env_content(&content, current)?))
     }
@@ -385,17 +449,28 @@ mod tests {
     const FALLBACK: Capacities = Capacities {
         capacity: 7,
         side_capacity: 3,
+        min_free_gb: 30,
     };
 
     #[test]
-    fn env_reparse_reads_both_capacities() {
+    fn env_reparse_reads_capacities_and_disk_floor() {
         let content = "# node\nSANDBOXED_NODE_TOKEN=x\nexport SANDBOXED_NODE_CAPACITY=\"6\"\n\
-                       SANDBOXED_NODE_SIDE_CAPACITY='4'\n";
+                       SANDBOXED_NODE_SIDE_CAPACITY='4'\nSANDBOXED_NODE_MIN_FREE_GB=80\n";
         assert_eq!(
             capacities_from_env_content(content, FALLBACK).unwrap(),
             Capacities {
                 capacity: 6,
-                side_capacity: 4
+                side_capacity: 4,
+                min_free_gb: 80,
+            }
+        );
+        // Explicit 0 GiB floor is preserved (not treated as unset).
+        assert_eq!(
+            capacities_from_env_content("SANDBOXED_NODE_MIN_FREE_GB=0\n", FALLBACK).unwrap(),
+            Capacities {
+                capacity: 7,
+                side_capacity: 3,
+                min_free_gb: 0,
             }
         );
         // Running values kept when absent; last assignment wins.
@@ -407,31 +482,44 @@ mod tests {
             .unwrap(),
             Capacities {
                 capacity: 3,
-                side_capacity: 3
+                side_capacity: 3,
+                min_free_gb: 30,
             }
         );
         assert_eq!(capacities_from_env_content("", FALLBACK).unwrap(), FALLBACK);
-        // A bad value is rejected rather than silently becoming 1.
+        // A bad value is rejected rather than silently becoming 1 or 10.
         assert!(capacities_from_env_content("SANDBOXED_NODE_CAPACITY=0\n", FALLBACK).is_err());
         assert!(capacities_from_env_content("SANDBOXED_NODE_CAPACITY=lots\n", FALLBACK).is_err());
+        assert!(capacities_from_env_content("SANDBOXED_NODE_MIN_FREE_GB=-5\n", FALLBACK).is_err());
+        assert!(capacities_from_env_content("SANDBOXED_NODE_MIN_FREE_GB=bad\n", FALLBACK).is_err());
     }
 
     #[test]
-    fn reload_from_file_resizes_and_keeps_capacity_on_error() {
+    fn reload_from_file_resizes_updates_floor_and_keeps_running_on_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node.env");
-        std::fs::write(&path, "SANDBOXED_NODE_CAPACITY=2\n").unwrap();
         let capacity = NodeCapacity::new(2, 2);
+        let initial_floor = capacity.min_free_gb();
+        std::fs::write(
+            &path,
+            format!("SANDBOXED_NODE_CAPACITY=2\nSANDBOXED_NODE_MIN_FREE_GB={initial_floor}\n"),
+        )
+        .unwrap();
         assert!(!capacity.reload_from(&path).unwrap());
         std::fs::write(
             &path,
-            "SANDBOXED_NODE_CAPACITY=5\nSANDBOXED_NODE_SIDE_CAPACITY=3\n",
+            "SANDBOXED_NODE_CAPACITY=5\nSANDBOXED_NODE_SIDE_CAPACITY=3\nSANDBOXED_NODE_MIN_FREE_GB=45\n",
         )
         .unwrap();
         assert!(capacity.reload_from(&path).unwrap());
         assert_eq!(capacity.capacity(), 5);
         assert_eq!(capacity.side_capacity(), 3);
+        assert_eq!(capacity.min_free_gb(), 45);
+        assert_eq!(capacity.min_free_bytes(), 45 << 30);
         assert_eq!(capacity.main.available_permits(), 5);
+        std::fs::write(&path, "SANDBOXED_NODE_MIN_FREE_GB=not-a-number\n").unwrap();
+        assert!(capacity.reload_from(&path).is_err());
+        assert_eq!(capacity.min_free_gb(), 45);
         std::fs::write(&path, "SANDBOXED_NODE_CAPACITY=-1\n").unwrap();
         assert!(capacity.reload_from(&path).is_err());
         assert_eq!(capacity.capacity(), 5);
