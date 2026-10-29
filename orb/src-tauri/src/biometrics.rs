@@ -6,6 +6,7 @@
 use serde::Serialize;
 
 /// Error string returned when the user dismisses the prompt; the UI ignores it.
+#[cfg(target_os = "macos")]
 pub const CANCELLED: &str = "biometric_cancelled";
 
 #[derive(Debug, Clone, Serialize)]

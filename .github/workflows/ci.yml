@@ -329,10 +329,7 @@ jobs:
       - name: cargo fmt --check (non-blocking)
         continue-on-error: true
         run: cargo fmt --check
-      # TODO: switch to `-- -D warnings` once orb/src-tauri's existing dead-code
-      # and unused-variable warnings (mostly Linux-only cfg gaps) are fixed by
-      # the Orb refactor owners. Compile errors still fail this step.
-      - run: cargo clippy --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D clippy::all -D warnings
       - run: cargo test --locked --bin orb
 
   docker:

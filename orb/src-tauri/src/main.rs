@@ -115,6 +115,7 @@ fn reveal_download(name: String) -> Result<(), String> {
     let downloads = std::env::var_os("HOME")
         .map(|home| std::path::PathBuf::from(home).join("Downloads"))
         .ok_or("no home directory")?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let file = downloads.join(&name);
     #[cfg(target_os = "macos")]
     let status = if file.exists() {
