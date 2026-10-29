@@ -127,6 +127,104 @@ async fn remote_submission_rejects_closed_snapshots_and_records_host_observation
             .is_err(),
         "rejected submissions must not contact the node"
     );
+
+    // Exact action-identity shadow check: even when host and Lean agree on boolean
+    // admission or boolean rejection, mismatched action codes record a divergence
+    // in `CONTROL_SHADOW_RING`.
+    let live_codex = h
+        .control
+        .mission_store
+        .create_mission(None, None, None, None, None, Some("codex"), None)
+        .await
+        .unwrap();
+    let codex_job_id = Uuid::new_v4();
+    let codex_owner = remote_job_lease_owner(codex_job_id);
+    let codex_run = h
+        .control
+        .mission_store
+        .begin_mission_run(live_codex.id, &codex_owner, None)
+        .await
+        .unwrap();
+    let codex_fence = crate::api::mission_store::SessionUpdateRun::from(&codex_run);
+    h.control
+        .mission_store
+        .update_mission_session_id(
+            live_codex.id,
+            "thread-shadow-1",
+            "codex",
+            Some(&codex_fence),
+        )
+        .await
+        .unwrap();
+    let live_codex = h
+        .control
+        .mission_store
+        .get_mission(live_codex.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // 1. Both admit dispatch (`emit_dispatch_effect = true`), but host claims standard
+    //    fresh turn (`DispatchFreshTurn`) when Lean requires `SeedFallbackFreshSession`.
+    let before_admit_div = fork::control_shadow_snapshot();
+    let v_admit_div = remote_jobs::evaluate_mission_control_gate(
+        &h.state.config.working_dir,
+        h.control.mission_store.as_ref(),
+        &live_codex,
+        &codex_owner,
+        Some("thread-shadow-1"),
+        &[],
+        Some("seeded fallback prompt"),
+        crate::orb_spec::MissionControlAction::DispatchFreshTurn as u8,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        v_admit_div.action,
+        crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+    );
+    assert!(v_admit_div.emit_dispatch_effect);
+    let after_admit_div = fork::control_shadow_snapshot();
+    assert_eq!(
+        after_admit_div.total_steps,
+        before_admit_div.total_steps + 1
+    );
+    assert_eq!(
+        after_admit_div.total_divergences,
+        before_admit_div.total_divergences + 1,
+        "exact action mismatch on admitted turn must increment shadow divergences"
+    );
+
+    // 2. Both reject dispatch (`emit_dispatch_effect = false`), but host claims duplicate
+    //    delivery (`DedupeDeliveredMessage`) when Lean requires `RejectTrackWriterConflict`.
+    let before_reject_div = fork::control_shadow_snapshot();
+    let v_reject_div = remote_jobs::evaluate_mission_control_gate(
+        &h.state.config.working_dir,
+        h.control.mission_store.as_ref(),
+        &live_codex,
+        "remote-job:conflicting-owner",
+        Some("thread-shadow-1"),
+        &[],
+        Some("seeded fallback prompt"),
+        crate::orb_spec::MissionControlAction::DedupeDeliveredMessage as u8,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        v_reject_div.action,
+        crate::orb_spec::MissionControlAction::RejectTrackWriterConflict
+    );
+    assert!(!v_reject_div.emit_dispatch_effect);
+    let after_reject_div = fork::control_shadow_snapshot();
+    assert_eq!(
+        after_reject_div.total_steps,
+        before_reject_div.total_steps + 1
+    );
+    assert_eq!(
+        after_reject_div.total_divergences,
+        before_reject_div.total_divergences + 1,
+        "exact action mismatch on rejected turn must increment shadow divergences"
+    );
 }
 
 static HOOKS: std::sync::LazyLock<AdmissionHooks> = std::sync::LazyLock::new(Default::default);

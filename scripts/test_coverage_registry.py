@@ -55,12 +55,42 @@ class CoverageRegistryTests(unittest.TestCase):
 
     def test_partial_evidence_never_implies_acceptance(self):
         partial = [e for e in self.value["entries"] if e["status"] == "partial"]
-        self.assertEqual({e["export"] for e in partial},
-                         {"orb_mission_control_step", "orb_fork_home_step"})
+        self.assertEqual(
+            {e["export"] for e in partial},
+            {
+                "orb_mission_control_step",
+                "orb_fork_home_step",
+                "orb_wire_validate_frame",
+                "orb_wire_pack_record",
+                "orb_wire_schema_migrate_step",
+                "orb_effect_admissible",
+                "orb_privd_command_step",
+                "orb_ssh_identity_step",
+                "orb_access_step",
+                "orb_stream_deadlines",
+                "orb_proxy_step",
+                "orb_job_ledger_step",
+            },
+        )
         for entry in partial:
             self.assertEqual(entry["authoritative_callers"], [])
             self.assertEqual(entry["adapter_tests"], [])
             self.assertEqual(entry["evidence"]["execution"]["result"], "TESTED_LOCAL")
+
+    def test_leansys_models_resolved_and_compiler_helper_remains_null(self):
+        by_name = {e["export"]: e for e in self.value["entries"]}
+        leansys = [e for name, e in by_name.items() if name.startswith("leansys_")]
+        self.assertEqual(len(leansys), 32)
+        self.assertTrue(all(e["model"] and e["model"].startswith("LeanSys.Spec.") for e in leansys))
+        self.assertIsNone(by_name["lp_orb_x2dspec_Orb_Kernel_accessStep___redArg"]["model"])
+        for mode in ("bad_prefix", "orb_conflict"):
+            bad_manifest = json.loads(registry.MANIFEST_PATH.read_text())
+            if mode == "bad_prefix":
+                next(f for f in bad_manifest["functions"] if f["name"].startswith("leansys_"))["model"] = "Orb.Kernel.fake"
+            else:
+                bad_manifest["functions"][0]["model"] = "LeanSys.Spec.fake"
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                registry.build_registry(bad_manifest)
 
     def test_reject_stale_fabricated_or_failed_partial_evidence(self):
         evidence = json.loads(registry.EVIDENCE_PATH.read_text())

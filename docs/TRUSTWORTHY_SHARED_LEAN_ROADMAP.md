@@ -12,13 +12,14 @@ Fresh exact-head reviews are required for subsequent changes. Turbo has no GitHu
 check rollup; Orb kernel-abi passed, while draft Rust jobs were skipped.
 No phase acceptance, merge or production deployment follows from those checks.
 
-The coverage registry remains incomplete: 111 entries are unconnected and two
+The coverage registry remains incomplete: 101 entries are unconnected and 12
 have explicit partial evidence in `shared/orb-spec/coverage_evidence.json`.
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.
-Its 113 manifest entries are 80 `orb_*` exports, 32 `leansys_*` exports and the
-compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg`. The original
-112-export requirement still covers all public Orb/LeanSys exports; the helper
+Its 113 manifest entries are 80 `orb_*` exports (`Orb.Kernel.*`), 32 `leansys_*`
+exports (`LeanSys.Spec.*`, verified against pinned `lean-sys` by `gen_orb_kernel_unboxed.py`),
+and the compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg` (`model: null`).
+The original 112-export requirement still covers all public Orb/LeanSys exports; the helper
 remains inventoried separately rather than being counted as an extra public gate.
 Shadow observations now count missing host HOME poststates as unobserved,
 never as ExactMatch; remote execution observation remains open. The stale-snapshot repair also includes newly stored supersession in the
@@ -34,17 +35,19 @@ underscore normalization is parser-tested; physical/native Apple execution is
 not established by that test.
 
 Local recovery checks: all 14 fork/control tests pass, including independently
-injected archive-state, dispatch-effect and HOME-state divergences, plus stale caller snapshots with either stored
+injected archive-state, exact action-identity (`EffectMismatch`), and HOME-state divergences, plus stale caller snapshots with either stored
 supersession tag form. The registry
-has six adversarial tests and the ABI manifest suite has 18 passing tests.
+has seven adversarial tests and the ABI manifest suite has 18 passing tests.
 The direct submission-producer regression replays stored archive and both
 stored supersession-tag forms, checking rejection before node contact and job
-publication. It also preserves a visible divergence for an archived caller
+publication, and verifies `EffectMismatch` detection when host and Lean agree on
+boolean admission or rejection yet disagree on exact `MissionControlAction` codes.
+It also preserves a visible divergence for an archived caller
 paired with a live store: the scalar monotone-archive model does not refine
 that reverse snapshot. The SQLite fixture preserves the store's prohibition
 on acknowledging a nonterminal run; this is not an atomic execution fence.
 These receipts establish local execution only. Mission-control shadow effects
-currently compare dispatch admission, not exact action identity or actual dispatch;
+compare exact pre-dispatch `MissionControlAction` codes against independent host expectations, not post-dispatch remote node process execution;
 HOME preflights lack remote poststate receipts. Neither is an end-to-end proof.
 
 Host/device information below comes from earlier enumeration. This handoff has

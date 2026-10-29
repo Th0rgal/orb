@@ -68,9 +68,9 @@ def checked_evidence(names: list[str]) -> dict[str, Any]:
     return entries
 
 
-def parse_kernel_export_map(kernel_text: str) -> dict[str, str]:
+def parse_lean_export_map(lean_text: str, module_prefix: str) -> dict[str, str]:
     export_map: dict[str, str] = {}
-    lines = kernel_text.splitlines()
+    lines = lean_text.splitlines()
     for i, ln in enumerate(lines):
         m = re.search(r"@\[(?:inline,\s*)?export\s+(\w+)\]", ln)
         if m:
@@ -78,8 +78,50 @@ def parse_kernel_export_map(kernel_text: str) -> dict[str, str]:
             for j in range(i + 1, min(i + 6, len(lines))):
                 dm = re.match(r"\s*def\s+(\w+)", lines[j])
                 if dm:
-                    export_map[sym] = f"Orb.Kernel.{dm.group(1)}"
+                    export_map[sym] = f"{module_prefix}.{dm.group(1)}"
                     break
+    return export_map
+
+
+def parse_kernel_export_map(kernel_text: str) -> dict[str, str]:
+    return parse_lean_export_map(kernel_text, "Orb.Kernel")
+
+
+def resolve_local_leansys_spec() -> Path | None:
+    import os
+
+    env_dir = os.environ.get("LEAN_SYS_DIR")
+    if env_dir and (Path(env_dir) / "LeanSys/Spec.lean").is_file():
+        return Path(env_dir) / "LeanSys/Spec.lean"
+    sibling = ROOT.parent / "lean-sys/LeanSys/Spec.lean"
+    if sibling.is_file():
+        return sibling
+    return None
+
+
+def resolve_export_models(manifest: dict[str, Any]) -> dict[str, str]:
+    export_map = parse_kernel_export_map(KERNEL_LEAN.read_text(encoding="utf-8"))
+    leansys_spec = resolve_local_leansys_spec()
+    leansys_map = (
+        parse_lean_export_map(leansys_spec.read_text(encoding="utf-8"), "LeanSys.Spec")
+        if leansys_spec is not None
+        else {}
+    )
+    for fn in manifest["functions"]:
+        sym = fn["name"]
+        manifest_model = fn.get("model")
+        if manifest_model is not None:
+            if not isinstance(manifest_model, str) or not manifest_model.startswith("LeanSys.Spec."):
+                raise ValueError(f"unsupported manifest model for {sym}: {manifest_model!r}")
+            if sym in export_map:
+                raise ValueError(f"manifest model conflicts with Orb.Kernel export {sym}")
+            if leansys_map and leansys_map.get(sym) != manifest_model:
+                raise ValueError(
+                    f"manifest model mismatch for {sym}: {manifest_model!r} != {leansys_map.get(sym)!r}"
+                )
+            export_map[sym] = manifest_model
+        elif sym in leansys_map:
+            export_map[sym] = leansys_map[sym]
     return export_map
 
 
@@ -87,10 +129,10 @@ def build_registry(manifest: dict[str, Any] | None = None) -> dict[str, Any]:
     """Inventory declarations only. Source occurrence does not certify a proof or caller."""
     if manifest is None:
         manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    export_map = parse_kernel_export_map(KERNEL_LEAN.read_text(encoding="utf-8"))
     names = [fn["name"] for fn in manifest["functions"]]
     if len(names) != len(set(names)):
         raise ValueError("duplicate manifest export")
+    export_map = resolve_export_models(manifest)
     evidence = checked_evidence(names)
     entries = []
     for sym in names:
