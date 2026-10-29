@@ -121,11 +121,15 @@ impl Client {
             }
         }
         let scoped = credential.starts_with("mcp1.");
-        let auth = session
-            .as_ref()
-            .map(|(token, _)| token.clone())
-            .filter(|_| scoped)
-            .unwrap_or(credential);
+        let auth = if self.token_file.is_some() {
+            credential
+        } else {
+            session
+                .as_ref()
+                .map(|(token, _)| token.clone())
+                .filter(|_| scoped)
+                .unwrap_or(credential)
+        };
         let path = if scoped {
             "/api/mcp/renew"
         } else {
@@ -498,6 +502,62 @@ mod tests {
         );
         assert_eq!(renewals.load(Ordering::SeqCst), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn token_file_renewal_prefers_externally_repaired_file_over_stale_memory() {
+        use axum::{routing::post, Json, Router};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-credential");
+        persist_scoped_credential(&path, "mcp1.repaired").unwrap();
+
+        let app = Router::new()
+            .route(
+                "/api/mcp/renew",
+                post(|headers: axum::http::HeaderMap| async move {
+                    if headers["authorization"] != "Bearer mcp1.repaired" {
+                        return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({})));
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({
+                            "token": "mcp1.rotated",
+                            "expires_at": chrono::Utc::now().timestamp() + 3600
+                        })),
+                    )
+                }),
+            )
+            .route(
+                "/api/mcp/call",
+                post(|headers: axum::http::HeaderMap| async move {
+                    if headers["authorization"] != "Bearer mcp1.rotated" {
+                        return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({})));
+                    }
+                    (axum::http::StatusCode::OK, Json(json!({"ok": true})))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(
+            url,
+            String::new(),
+            Some(path.clone()),
+            Role::Coordinator,
+            None,
+        )
+        .unwrap();
+        *client.session.lock().await =
+            Some(("mcp1.dead".into(), chrono::Utc::now().timestamp() + 3600));
+        assert_eq!(
+            client
+                .request("/api/mcp/call", Some(&json!({"name": "test"})))
+                .await
+                .unwrap()["ok"],
+            true
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mcp1.rotated");
         server.abort();
     }
 
