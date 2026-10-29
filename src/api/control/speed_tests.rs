@@ -7,11 +7,7 @@ use crate::codex_speed::Tier;
 use axum::{
     body::Bytes,
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::post,
-    Router,
 };
-use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn codex_service_tier_survives_store_reopen_and_legacy_clear() {
@@ -96,69 +92,79 @@ async fn codex_service_tier_survives_store_reopen_and_legacy_clear() {
     }
 }
 
-#[tokio::test]
-async fn codex_speed_scope_rotates_compatible_accounts_and_revokes_at_turn_end() {
-    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
-    let captured = requests.clone();
-    let app=Router::new().route("/v1/responses",post(move |headers:HeaderMap,body:Bytes|{
-        let captured=captured.clone();async move {
-            assert_eq!(headers["authorization"],"Bearer proxy-fixture-key");
-            let request:serde_json::Value=serde_json::from_slice(&body).unwrap();
-            assert_eq!(request["service_tier"],"ultrafast");
-            let model=request["model"].as_str().unwrap().to_string();captured.lock().unwrap().push(model.clone());
-            if model.starts_with("first/"){return (StatusCode::TOO_MANY_REQUESTS,"quota exceeded").into_response();}
-            (StatusCode::OK,[("content-type","text/event-stream")],"data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"ultrafast\"}}\n\n").into_response()
-        }
-    }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+#[test]
+fn codex_scope_binds_caller_model_tier_and_revokes_at_turn_end() {
+    let mission = uuid::Uuid::new_v4();
     let endpoint = CliProxyEndpoint {
-        base_url: format!("http://{addr}"),
-        api_key: "proxy-fixture-key".into(),
+        base_url: "http://proxy.test".into(),
+        api_key: "never-exposed".into(),
         identity_url: None,
     };
-    let (guard, scoped) = speed_proxy::register(
-        "http://core.test",
-        "gpt-6.1-sol",
-        Tier::Ultrafast,
-        vec!["first".into(), "second".into()],
-        endpoint.clone(),
-    )
-    .unwrap();
-    assert_eq!(
-        scoped.identity_url.as_deref(),
-        Some(endpoint.base_url.as_str())
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "authorization",
-        format!("Bearer {}", scoped.api_key).parse().unwrap(),
-    );
-    let wrong =
-        Bytes::from_static(br#"{"model":"gpt-6.1-sol","service_tier":"default","input":[]}"#);
-    assert_eq!(
-        speed_proxy::responses(headers.clone(), wrong)
-            .await
-            .status(),
-        StatusCode::BAD_REQUEST
-    );
-    assert!(requests.lock().unwrap().is_empty());
-    let body = Bytes::from_static(br#"{"model":"gpt-6.1-sol","input":[]}"#);
-    let response = speed_proxy::responses(headers.clone(), body.clone()).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let text = axum::body::to_bytes(response.into_body(), 4096)
-        .await
+    for tier in [Tier::Standard, Tier::Ultrafast] {
+        let (guard, scoped) = speed_proxy::register(
+            "http://core.test",
+            "gpt-6.1-sol",
+            tier,
+            mission,
+            endpoint.clone(),
+        )
         .unwrap();
-    assert!(String::from_utf8_lossy(&text).contains("ultrafast"));
-    assert_eq!(
-        *requests.lock().unwrap(),
-        vec!["first/gpt-6.1-sol", "second/gpt-6.1-sol"]
-    );
-    drop(guard);
-    assert_eq!(
-        speed_proxy::responses(headers, body).await.status(),
-        StatusCode::UNAUTHORIZED
-    );
-    server.abort();
+        assert_eq!(
+            scoped.identity_url.as_deref(),
+            Some(endpoint.base_url.as_str())
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", scoped.api_key).parse().unwrap(),
+        );
+        headers.insert("x-sandboxed-mission-id", "forged".parse().unwrap());
+        let wrong = Bytes::from_static(br#"{"model":"other","input":[]}"#);
+        assert_eq!(
+            speed_proxy::prepare_request(&headers, &wrong, "core-secret")
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let wrong_tier = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "gpt-6.1-sol", "input": [],
+                "service_tier": if tier == Tier::Standard { "ultrafast" } else { "default" }
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            speed_proxy::prepare_request(&headers, &wrong_tier, "core-secret")
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let body = Bytes::from_static(br#"{"model":"gpt-6.1-sol","input":[]}"#);
+        let (trusted, payload, cancel) =
+            speed_proxy::prepare_request(&headers, &body, "core-secret").unwrap();
+        assert_eq!(trusted["authorization"], "Bearer core-secret");
+        assert_eq!(trusted["x-sandboxed-codex-subscription-only"], "true");
+        assert_eq!(trusted["x-sandboxed-mission-id"], mission.to_string());
+        assert_eq!(trusted["x-sandboxed-codex-speed"], tier.wire());
+        let request: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(request["model"], "gpt-6.1-sol");
+        assert_eq!(request["service_tier"], tier.wire());
+        let stateful = Bytes::from_static(
+            br#"{"model":"gpt-6.1-sol","previous_response_id":"opaque","input":[]}"#,
+        );
+        assert_eq!(
+            speed_proxy::prepare_request(&headers, &stateful, "core-secret")
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        drop(guard);
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            speed_proxy::prepare_request(&headers, &body, "core-secret")
+                .unwrap_err()
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
 }
