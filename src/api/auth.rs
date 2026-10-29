@@ -348,12 +348,18 @@ pub async fn require_auth(
         .unwrap_or("");
 
     if token.starts_with("mcp1.") {
-        let allowed = matches!(
-            (req.method().as_str(), req.uri().path()),
-            ("GET", "/api/mcp/capabilities")
-                | ("POST", "/api/mcp/call")
-                | ("POST", "/api/mcp/renew")
-        );
+        let path = req.uri().path();
+        let wait_route = req.method().as_str() == "GET" && {
+            let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+            matches!(seg.as_slice(), ["", "api", "mcp", "requests", _, _, "wait"])
+        };
+        let allowed = wait_route
+            || matches!(
+                (req.method().as_str(), path),
+                ("GET", "/api/mcp/capabilities")
+                    | ("POST", "/api/mcp/call")
+                    | ("POST", "/api/mcp/renew")
+            );
         if !allowed {
             return (
                 StatusCode::FORBIDDEN,
@@ -368,6 +374,18 @@ pub async fn require_auth(
         };
         return match verified {
             Ok(principal) => {
+                if principal.mission_id.is_none()
+                    && crate::api::privilege_broker::store(&state)
+                        .bunker_state()
+                        .await
+                        >= crate::api::privilege_broker::BunkerState::HardLockdown
+                {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        "Bunker HardLockdown is active; external MCP sessions are suspended",
+                    )
+                        .into_response();
+                }
                 req.extensions_mut().insert(principal);
                 next.run(req).await
             }

@@ -38,9 +38,7 @@ object OrbPrivilegeAccess {
         return if (r["session_scoped"] == true) "for this session (max $span)" else "for $span"
     }
 
-    fun requester(r: Map<String, Any?>): String =
-        (r["requester_title"] as? String)?.takeIf { it.isNotBlank() }
-            ?: "Mission ${(r["requester_mission_id"] as? String)?.take(8) ?: ""}"
+    fun requester(r: Map<String, Any?>): String = OrbApprovalQueue.actorLabel(r)
 
     /** Approved, not revoked and not yet expired (Core still decides every command). */
     fun isLive(r: Map<String, Any?>, now: Instant = Instant.now()): Boolean =

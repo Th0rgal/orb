@@ -46,6 +46,29 @@ pub struct Principal {
     pub action_run_generation: Option<u64>,
     pub session_id: Uuid,
     pub exp: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_kind: Option<crate::api::approval_flow::ExternalClientKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_hint: Option<String>,
+}
+
+impl Principal {
+    pub fn requester_subject(&self) -> crate::api::approval_flow::RequesterSubject {
+        if let Some(mission_id) = self.mission_id {
+            crate::api::approval_flow::RequesterSubject::mission(mission_id)
+        } else {
+            let kind = self.client_kind.unwrap_or_default();
+            let label = self.client_label.as_deref().unwrap_or(kind.as_str());
+            crate::api::approval_flow::RequesterSubject::external_session(
+                self.session_id,
+                kind,
+                label,
+                self.host_hint.clone(),
+            )
+        }
+    }
 }
 
 fn key(state: &AppState) -> Result<String, String> {
@@ -90,7 +113,8 @@ fn verify_with(state: &AppState, token: &str, renewal: bool) -> Result<Principal
     )
     .map(|v| v.claims)
     .map_err(|_| "Invalid or expired MCP session")?;
-    if renewal && (principal.exp as i64) + RENEWAL_GRACE_SECS < chrono::Utc::now().timestamp() {
+    let now = chrono::Utc::now().timestamp();
+    if renewal && (principal.exp as i64) + RENEWAL_GRACE_SECS < now {
         return Err("Invalid or expired MCP session".into());
     }
     let conn = state
@@ -98,19 +122,31 @@ fn verify_with(state: &AppState, token: &str, renewal: bool) -> Result<Principal
         .connection
         .lock()
         .map_err(|_| "Session store unavailable")?;
-    let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0 AND expires_at>=?3)",rusqlite::params![principal.session_id.to_string(),principal.sub,principal.exp as i64],|r|r.get(0)).map_err(|_|"Session unavailable")?;
+    let valid: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0 AND expires_at>=?3 AND (hard_expires_at IS NULL OR hard_expires_at>?4))",
+            rusqlite::params![principal.session_id.to_string(), principal.sub, principal.exp as i64, now],
+            |r| r.get(0),
+        )
+        .map_err(|_| "Session unavailable")?;
     if !valid {
         return Err("MCP session revoked".into());
     }
     Ok(principal)
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
     pub role: Role,
     pub mission_id: Option<Uuid>,
     pub project: Option<String>,
+    #[serde(default)]
+    pub client_kind: Option<crate::api::approval_flow::ExternalClientKind>,
+    #[serde(default)]
+    pub client_label: Option<String>,
+    #[serde(default)]
+    pub host_hint: Option<String>,
 }
 
 pub async fn session(
@@ -170,6 +206,21 @@ pub async fn session(
         }
     }
     // Only an owner login reaches this endpoint; mcp1 tokens cannot issue grants.
+    let (client_kind, client_label, host_hint) = if req.mission_id.is_none() {
+        let kind = req.client_kind.unwrap_or_default();
+        let label = req
+            .client_label
+            .as_deref()
+            .map(|s| crate::api::approval_flow::sanitize_client_label(s, kind))
+            .or_else(|| Some(kind.as_str().to_string()));
+        let host = req
+            .host_hint
+            .as_deref()
+            .and_then(crate::api::approval_flow::sanitize_host_hint);
+        (Some(kind), label, host)
+    } else {
+        (None, None, None)
+    };
     let principal = Principal {
         sub: user.id,
         username: user.username,
@@ -179,6 +230,9 @@ pub async fn session(
         action_run_generation: None,
         session_id: Uuid::new_v4(),
         exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+        client_kind,
+        client_label,
+        host_hint,
     };
     issue_session(&state, &principal)
         .map(Json)
@@ -234,9 +288,32 @@ pub async fn capabilities(
 fn capabilities_value(p: &Principal, scheduling_enabled: bool) -> Value {
     let tools: Vec<_> = wire_catalog(p.role)
         .into_iter()
-        .filter(|t| scheduling_enabled || !is_wakeup(t["name"].as_str().unwrap_or("")))
+        .filter(|t| {
+            let name = t["name"].as_str().unwrap_or("");
+            (scheduling_enabled || !is_wakeup(name))
+                && (p.role != Role::Executor
+                    || p.mission_id.is_some()
+                    || external_executor_allows(name))
+                && (p.mission_id.is_some() || !is_wakeup(name))
+        })
         .collect();
-    json!({"contract_version":CONTRACT_VERSION,"build":env!("SOFTWARE_BUILD_ID"),"identity":{"user_id":p.sub,"mission_id":p.mission_id,"project":p.project,"role":p.role},"tools":tools,"limits":{"concurrent_calls":8,"session_expires_at":p.exp},"cloud_discovery":"list_cloud_accounts"})
+    json!({"contract_version":CONTRACT_VERSION,"build":env!("SOFTWARE_BUILD_ID"),"identity":{"user_id":p.sub,"session_id":p.session_id,"mission_id":p.mission_id,"subject":p.requester_subject(),"project":p.project,"role":p.role},"tools":tools,"limits":{"concurrent_calls":8,"session_expires_at":p.exp},"cloud_discovery":"list_cloud_accounts"})
+}
+
+fn external_executor_allows(name: &str) -> bool {
+    crate::api::secret_broker::TOOL_NAMES.contains(&name)
+        || crate::api::privilege_broker::TOOL_NAMES.contains(&name)
+        || crate::api::mission_access::TOOL_NAMES.contains(&name)
+        || crate::api::mission_access::READ_TOOLS.contains(&name)
+        || matches!(
+            name,
+            "get_capabilities"
+                | "get_action"
+                | "cancel_action"
+                | "list_cloud_models"
+                | "list_cloud_accounts"
+                | "get_cloud_execution"
+        )
 }
 
 fn is_wakeup(name: &str) -> bool {
@@ -262,6 +339,18 @@ async fn authorize(
     }
     if args.get("parent_mission_id").is_some() || args.get("caller").is_some() {
         return Err(ToolError::invalid("Parent identity is provided by Core"));
+    }
+    if p.mission_id.is_none() && is_wakeup(&tool.definition.name) {
+        return Err(ToolError::denied("Wake-ups require a mission"));
+    }
+    if p.mission_id.is_none()
+        && tool.handler == super::Handler::Orchestrator
+        && !matches!(
+            tool.definition.name.as_str(),
+            "get_backend_auth_status" | "deploy_sandboxed_sh"
+        )
+    {
+        return Err(ToolError::denied("This operation requires a mission"));
     }
     if tool.definition.name == "plan_tasks" {
         let id = p.mission_id.ok_or_else(|| {
@@ -418,9 +507,43 @@ async fn authorize(
     if p.role != Role::Executor {
         return Ok(());
     }
-    let own = p
-        .mission_id
-        .ok_or_else(|| ToolError::denied("Missing mission scope"))?;
+    let Some(own) = p.mission_id else {
+        if !external_executor_allows(&tool.definition.name) {
+            return Err(ToolError::denied(
+                "This tool requires a mission-scoped session",
+            ));
+        }
+        let user = AuthUser {
+            id: p.sub.clone(),
+            username: p.username.clone(),
+        };
+        let store = state.control.get_or_spawn(&user).await.mission_store;
+        for field in ["mission_id", "supersedes_mission_id"] {
+            if let Some(raw) = args.get(field).filter(|v| !v.is_null()) {
+                let id = raw
+                    .as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .ok_or_else(|| ToolError::invalid("A full mission UUID is required"))?;
+                store
+                    .get_mission(id)
+                    .await
+                    .map_err(|_| ToolError::denied("Mission unavailable"))?
+                    .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
+                match granted_read(state, p, &tool.definition.name, id).await {
+                    Some(grant) => {
+                        record_granted_read(state, p, grant, &tool.definition.name).await;
+                    }
+                    None => {
+                        return Err(ToolError::denied(&crate::api::mission_access::scope_hint(
+                            &tool.definition.name,
+                            id,
+                        )))
+                    }
+                }
+            }
+        }
+        return Ok(());
+    };
     let user = AuthUser {
         id: p.sub.clone(),
         username: p.username.clone(),
@@ -678,16 +801,15 @@ fn launches_child(name: &str) -> bool {
     matches!(name, "start_mission" | "consult_model")
 }
 
-/// Live read grant of the calling mission on `target`, for read-only tools.
+/// Live read grant of the calling subject on `target`, for read-only tools.
 async fn granted_read(
     state: &Arc<AppState>,
     p: &Principal,
     tool: &str,
     target: Uuid,
 ) -> Option<Uuid> {
-    let own = p.mission_id?;
     crate::api::mission_access::store(state)
-        .grant_for_tool(&p.sub, own, target, tool)
+        .grant_for_tool(&p.sub, &p.requester_subject(), target, tool)
         .await
 }
 
@@ -781,7 +903,9 @@ async fn authorize_job(
             .await
             .map_err(|_| ToolError::denied("Job unavailable"))?
             .0;
-            if p.role == Role::Executor && job.started_by_mission_id != p.mission_id {
+            if p.role == Role::Executor
+                && (p.mission_id.is_none() || job.started_by_mission_id != p.mission_id)
+            {
                 return Err(ToolError::denied("Job is outside this session's scope"));
             }
             if let Some(project) = p.project.as_deref() {
@@ -856,13 +980,29 @@ async fn call_inner(
         .ok_or_else(|| ToolError::invalid("Unknown tool"))?;
     super::schema::validate(&tool.definition.input_schema, &call.arguments)
         .map_err(|e| ToolError::invalid(&e))?;
+    if p.mission_id.is_none()
+        && crate::api::privilege_broker::store(&state)
+            .bunker_state()
+            .await
+            >= crate::api::privilege_broker::BunkerState::HardLockdown
+    {
+        return Err(ToolError::denied(
+            "Bunker HardLockdown is active; external MCP sessions are suspended",
+        ));
+    }
     authorize(&state, p, &tool, &mut call.arguments).await?;
     if call.name == "get_capabilities" {
         let mut value = capabilities_value(p, state.config.automations_enabled);
         value["tools"] = json!(registry()
             .into_iter()
-            .filter(|t| t.visible_to(p.role)
-                && (state.config.automations_enabled || !is_wakeup(&t.definition.name)))
+            .filter(|t| {
+                t.visible_to(p.role)
+                    && (state.config.automations_enabled || !is_wakeup(&t.definition.name))
+                    && (p.role != Role::Executor
+                        || p.mission_id.is_some()
+                        || external_executor_allows(&t.definition.name))
+                    && (p.mission_id.is_some() || !is_wakeup(&t.definition.name))
+            })
             .map(|t| json!({"name":t.definition.name,"mutation":t.mutation}))
             .collect::<Vec<_>>());
         return Ok(value);
@@ -1095,13 +1235,31 @@ async fn run_accepted(
     }
     // A queued action has not reached its target yet. Revocation or a deleted
     // mission must prevent dispatch even if acceptance happened earlier.
-    let session_valid:bool=state.projects.connection.lock().map_err(|_|ToolError::denied("Session store unavailable"))?.query_row(
-        "SELECT EXISTS(SELECT 1 FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0 AND expires_at>?3)",
-        rusqlite::params![p.session_id.to_string(),p.sub,chrono::Utc::now().timestamp()],|r|r.get(0)
-    ).map_err(|_|ToolError::denied("Session store unavailable"))?;
+    let now_ts = chrono::Utc::now().timestamp();
+    let session_valid: bool = state
+        .projects
+        .connection
+        .lock()
+        .map_err(|_| ToolError::denied("Session store unavailable"))?
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0 AND expires_at>?3 AND (hard_expires_at IS NULL OR hard_expires_at>?3))",
+            rusqlite::params![p.session_id.to_string(), p.sub, now_ts],
+            |r| r.get(0),
+        )
+        .map_err(|_| ToolError::denied("Session store unavailable"))?;
     if !session_valid {
         return Err(ToolError::denied(
             "Session revoked or expired before dispatch",
+        ));
+    }
+    if p.mission_id.is_none()
+        && crate::api::privilege_broker::store(state)
+            .bunker_state()
+            .await
+            >= crate::api::privilege_broker::BunkerState::HardLockdown
+    {
+        return Err(ToolError::denied(
+            "Bunker HardLockdown is active; external MCP sessions are suspended",
         ));
     }
     if is_wakeup(&call.name) && p.action_run_generation.is_none() {
@@ -1145,10 +1303,15 @@ async fn run_accepted(
     )
     .map_err(|_| ToolError::denied("Authentication unavailable"))?
     .0;
+    let scope_actor = p.mission_id.unwrap_or(p.session_id);
     let key = crate::project_context::digest(
         json!([
             p.sub,
-            p.mission_id,
+            if p.mission_id.is_some() {
+                json!(p.mission_id)
+            } else {
+                json!(scope_actor)
+            },
             p.project,
             call.name,
             arguments["idempotency_key"]
@@ -1183,25 +1346,393 @@ async fn run_accepted(
 }
 
 pub(crate) fn issue_session(state: &AppState, p: &Principal) -> Result<Value, String> {
+    issue_session_with_hard_expiry(state, p, None)
+}
+
+fn issue_session_with_hard_expiry(
+    state: &AppState,
+    p: &Principal,
+    hard_expires_at: Option<i64>,
+) -> Result<Value, String> {
     let token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         p,
         &jsonwebtoken::EncodingKey::from_secret(key(state)?.as_bytes()),
     )
     .map_err(|_| "Cannot issue MCP session")?;
-    state.projects.connection.lock().map_err(|_|"Session store unavailable")?.execute("INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET expires_at=excluded.expires_at WHERE revoked=0",rusqlite::params![p.session_id.to_string(),p.sub,p.mission_id.map(|id|id.to_string()),p.exp as i64]).map_err(|_|"Session store unavailable")?;
-    Ok(
-        json!({"token":format!("mcp1.{token}"),"expires_at":p.exp,"session_id":p.session_id,"contract_version":CONTRACT_VERSION}),
-    )
+    let subject_kind = if p.mission_id.is_some() {
+        "mission"
+    } else {
+        "external_session"
+    };
+    state
+        .projects
+        .connection
+        .lock()
+        .map_err(|_| "Session store unavailable")?
+        .execute(
+            "INSERT INTO mcp_sessions_v1(id,owner,mission_id,expires_at,subject_kind,client_label,host_hint,project_scope,hard_expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET expires_at=excluded.expires_at, client_label=COALESCE(excluded.client_label, mcp_sessions_v1.client_label), host_hint=COALESCE(excluded.host_hint, mcp_sessions_v1.host_hint) WHERE revoked=0",
+            rusqlite::params![
+                p.session_id.to_string(),
+                p.sub,
+                p.mission_id.map(|id| id.to_string()),
+                p.exp as i64,
+                subject_kind,
+                p.client_label,
+                p.host_hint,
+                p.project,
+                hard_expires_at,
+            ],
+        )
+        .map_err(|_| "Session store unavailable")?;
+    let mut out = json!({
+        "token": format!("mcp1.{token}"),
+        "expires_at": p.exp,
+        "session_id": p.session_id,
+        "contract_version": CONTRACT_VERSION,
+    });
+    if let Some(hard) = hard_expires_at {
+        out["hard_expires_at"] = json!(hard);
+    }
+    Ok(out)
 }
-/// Renewal preserves exactly the signed identity and privileges. A retired
-/// mission cannot extend a credential; its trusted launcher must establish a
-/// fresh session after a legitimate resume.
+
+pub async fn session_hard_expires_at(
+    state: &Arc<AppState>,
+    session_id: Uuid,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let ts: Option<i64> = state
+        .projects
+        .connection
+        .lock()
+        .ok()?
+        .query_row(
+            "SELECT hard_expires_at FROM mcp_sessions_v1 WHERE id=?1 AND revoked=0",
+            rusqlite::params![session_id.to_string()],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    ts.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+}
+
+pub async fn external_session_is_live(state: &Arc<AppState>, session_id: Uuid) -> bool {
+    if crate::api::privilege_broker::store(state)
+        .bunker_state()
+        .await
+        >= crate::api::privilege_broker::BunkerState::HardLockdown
+    {
+        return false;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let Ok(conn) = state.projects.connection.lock() else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mcp_sessions_v1 WHERE id=?1 AND revoked=0 AND (hard_expires_at IS NULL OR hard_expires_at>?2))",
+        rusqlite::params![session_id.to_string(), now],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
+pub const MAX_EXTERNAL_SESSION_TTL_DAYS: u32 = 30;
+pub const DEFAULT_EXTERNAL_SESSION_TTL_DAYS: u32 = 7;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateExternalSessionRequest {
+    #[serde(default)]
+    pub role: Role,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub client_kind: Option<crate::api::approval_flow::ExternalClientKind>,
+    #[serde(default)]
+    pub client_label: Option<String>,
+    #[serde(default)]
+    pub host_hint: Option<String>,
+    #[serde(default)]
+    pub ttl_days: Option<u32>,
+    #[serde(default)]
+    pub hard_ttl_hours: Option<u32>,
+}
+
+impl CreateExternalSessionRequest {
+    fn hard_ttl_hours(&self) -> Result<u32, String> {
+        let max_hours = MAX_EXTERNAL_SESSION_TTL_DAYS * 24;
+        let hours = match (self.hard_ttl_hours, self.ttl_days) {
+            (Some(_), Some(_)) => {
+                return Err("Specify either ttl_days or hard_ttl_hours, not both".into());
+            }
+            (Some(h), None) => h,
+            (None, Some(d)) => d.saturating_mul(24),
+            (None, None) => DEFAULT_EXTERNAL_SESSION_TTL_DAYS * 24,
+        };
+        if hours == 0 || hours > max_hours {
+            return Err(format!(
+                "External session TTL must be between 1 hour and {} days",
+                MAX_EXTERNAL_SESSION_TTL_DAYS
+            ));
+        }
+        Ok(hours)
+    }
+
+    pub fn describe_for_approval(&self) -> String {
+        let kind = self.client_kind.unwrap_or_default();
+        let label = self
+            .client_label
+            .as_deref()
+            .map(|s| crate::api::approval_flow::sanitize_client_label(s, kind))
+            .unwrap_or_else(|| kind.as_str().to_string());
+        let host = self
+            .host_hint
+            .as_deref()
+            .and_then(crate::api::approval_flow::sanitize_host_hint);
+        let who = match host {
+            Some(h) => format!("External · {h} ({label})"),
+            None => format!("External · {label}"),
+        };
+        let role = match self.role {
+            Role::Executor => "executor",
+            Role::Coordinator => "coordinator",
+            Role::Operator => "operator",
+        };
+        let scope = match self
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(proj) => format!(" in project {}", crate::api::approvals::quoted(proj)),
+            None => String::new(),
+        };
+        let hours = self
+            .hard_ttl_hours()
+            .unwrap_or(DEFAULT_EXTERNAL_SESSION_TTL_DAYS * 24);
+        let ttl = if hours.is_multiple_of(24) {
+            format!("{}d", hours / 24)
+        } else {
+            format!("{hours}h")
+        };
+        format!(
+            "Mint {role} MCP session for {}{scope} ({ttl})",
+            crate::api::approvals::quoted(&who)
+        )
+    }
+}
+
+pub async fn create_external_session(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Json(req): Json<CreateExternalSessionRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    if req.role == Role::Operator {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "External MCP sessions cannot hold the operator role".into(),
+        ));
+    }
+    let hours = req
+        .hard_ttl_hours()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if crate::api::privilege_broker::store(&state)
+        .bunker_state()
+        .await
+        >= crate::api::privilege_broker::BunkerState::HardLockdown
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Bunker HardLockdown is active; external MCP sessions cannot be minted".into(),
+        ));
+    }
+    let project = req
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(ref slug) = project {
+        if state
+            .projects
+            .get_project(slug)
+            .map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Project lookup failed".into(),
+                )
+            })?
+            .is_none()
+        {
+            return Err((StatusCode::BAD_REQUEST, "Unknown project scope".into()));
+        }
+    }
+    let kind = req.client_kind.unwrap_or_default();
+    let label = req
+        .client_label
+        .as_deref()
+        .map(|s| crate::api::approval_flow::sanitize_client_label(s, kind))
+        .unwrap_or_else(|| kind.as_str().to_string());
+    let host_hint = req
+        .host_hint
+        .as_deref()
+        .and_then(crate::api::approval_flow::sanitize_host_hint);
+    let now = chrono::Utc::now();
+    let hard_exp = (now + chrono::Duration::hours(hours as i64)).timestamp();
+    let rolling_exp = (now + chrono::Duration::hours(1)).timestamp().min(hard_exp);
+    let principal = Principal {
+        sub: user.id,
+        username: user.username,
+        role: req.role,
+        mission_id: None,
+        project,
+        action_run_generation: None,
+        session_id: Uuid::new_v4(),
+        exp: rolling_exp as usize,
+        client_kind: Some(kind),
+        client_label: Some(label),
+        host_hint,
+    };
+    let mut issued = issue_session_with_hard_expiry(&state, &principal, Some(hard_exp))
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
+    issued["subject"] = json!(principal.requester_subject());
+    issued["role"] = json!(principal.role);
+    issued["project"] = json!(principal.project);
+    Ok(Json(issued))
+}
+
+pub async fn list_external_sessions(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    let conn = state.projects.connection.lock().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Session store unavailable".into(),
+        )
+    })?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, expires_at, revoked, client_label, host_hint, project_scope, hard_expires_at FROM mcp_sessions_v1 WHERE owner=?1 AND subject_kind='external_session' ORDER BY COALESCE(hard_expires_at, expires_at) DESC LIMIT 200",
+        )
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Session store unavailable".into(),
+            )
+        })?;
+    let now = chrono::Utc::now().timestamp();
+    let rows = stmt
+        .query_map(rusqlite::params![user.id], |r| {
+            let id: String = r.get(0)?;
+            let expires_at: i64 = r.get(1)?;
+            let revoked: i64 = r.get(2)?;
+            let client_label: Option<String> = r.get(3)?;
+            let host_hint: Option<String> = r.get(4)?;
+            let project: Option<String> = r.get(5)?;
+            let hard_expires_at: Option<i64> = r.get(6)?;
+            let hard_expired = hard_expires_at.is_some_and(|h| h <= now);
+            Ok(json!({
+                "session_id": id,
+                "expires_at": expires_at,
+                "hard_expires_at": hard_expires_at,
+                "revoked": revoked != 0,
+                "active": revoked == 0 && !hard_expired,
+                "client_label": client_label,
+                "host_hint": host_hint,
+                "project": project,
+            }))
+        })
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Session store unavailable".into(),
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Session store unavailable".into(),
+            )
+        })?;
+    Ok(Json(json!({ "sessions": rows })))
+}
+
+pub async fn revoke_external_session(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    let updated = {
+        let conn = state.projects.connection.lock().map_err(|_| {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Session store unavailable".into(),
+            )
+        })?;
+        conn.execute(
+            "UPDATE mcp_sessions_v1 SET revoked=1 WHERE id=?1 AND owner=?2 AND subject_kind='external_session'",
+            rusqlite::params![id.to_string(), user.id],
+        )
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Session store unavailable".into(),
+            )
+        })?
+    };
+    if updated == 0 {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "External MCP session not found".into(),
+        ));
+    }
+    let reaped_privileges = crate::api::privilege_broker::store(&state)
+        .reap_session_grants(id, "external_session_revoked")
+        .await;
+    let revoked_secrets = crate::api::secret_broker::broker(&state)
+        .revoke_session_grants(id)
+        .await;
+    let revoked_mission_access = crate::api::mission_access::store(&state)
+        .revoke_session_grants(&user.id, id)
+        .await;
+    Ok(Json(json!({
+        "revoked": true,
+        "session_id": id,
+        "reaped_privilege_grants": reaped_privileges,
+        "revoked_secret_grants": revoked_secrets,
+        "revoked_mission_access_grants": revoked_mission_access,
+    })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenewBody {
+    #[serde(default)]
+    pub client_label: Option<String>,
+    #[serde(default)]
+    pub host_hint: Option<String>,
+}
+
+/// Renewal preserves the signed identity and privileges. A retired mission
+/// cannot extend a credential; external sessions are bounded by `hard_expires_at`
+/// and Bunker HardLockdown.
 pub async fn renew(
     State(state): State<Arc<AppState>>,
     Extension(mut p): Extension<Principal>,
+    body: axum::body::Bytes,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
+    let renew_body: RenewBody = if body.is_empty() {
+        RenewBody::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid renewal body".into()))?
+    };
+    let mut hard_exp_out: Option<i64> = None;
     if let Some(id) = p.mission_id {
         let user = AuthUser {
             id: p.sub.clone(),
@@ -1230,11 +1761,103 @@ pub async fn renew(
                 "Mission is not running; reconnect through its launcher".into(),
             ));
         }
+        p.exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
+    } else {
+        if crate::api::privilege_broker::store(&state)
+            .bunker_state()
+            .await
+            >= crate::api::privilege_broker::BunkerState::HardLockdown
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Bunker HardLockdown is active; external MCP sessions cannot renew".into(),
+            ));
+        }
+        let now = chrono::Utc::now().timestamp();
+        let hard_expires_at: Option<i64> = {
+            let conn = state.projects.connection.lock().map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Session store unavailable".into(),
+                )
+            })?;
+            conn.query_row(
+                "SELECT hard_expires_at FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0",
+                rusqlite::params![p.session_id.to_string(), p.sub],
+                |r| r.get(0),
+            )
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "MCP session revoked".into()))?
+        };
+        if let Some(hard) = hard_expires_at {
+            if now >= hard {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "External MCP session reached its hard expiry".into(),
+                ));
+            }
+        }
+        let kind = p.client_kind.unwrap_or_default();
+        p.client_kind = Some(kind);
+        if let Some(ref label) = renew_body.client_label {
+            p.client_label = Some(crate::api::approval_flow::sanitize_client_label(
+                label, kind,
+            ));
+        } else if p.client_label.is_none() {
+            p.client_label = Some(kind.as_str().to_string());
+        }
+        if let Some(ref host) = renew_body.host_hint {
+            p.host_hint = crate::api::approval_flow::sanitize_host_hint(host);
+        }
+        let rolling = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+        p.exp = hard_expires_at.map_or(rolling, |hard| rolling.min(hard)) as usize;
+        hard_exp_out = hard_expires_at;
     }
-    p.exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
-    issue_session(&state, &p)
+    issue_session_with_hard_expiry(&state, &p, hard_exp_out)
         .map(Json)
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WaitQuery {
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+pub const MAX_WAIT_SECS: u64 = 25;
+
+pub async fn wait_request(
+    State(state): State<Arc<AppState>>,
+    Extension(p): Extension<Principal>,
+    axum::extract::Path((kind, id)): axum::extract::Path<(String, Uuid)>,
+    axum::extract::Query(query): axum::extract::Query<WaitQuery>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    let secs = query.timeout_secs.unwrap_or(20).min(MAX_WAIT_SECS);
+    let wait = std::time::Duration::from_secs(secs);
+    let requester = p.requester_subject();
+    let value = match kind.as_str() {
+        "secret" => {
+            crate::api::secret_broker::broker(&state)
+                .wait_for_requester(&p.sub, &requester, id, wait)
+                .await?
+        }
+        "privilege" => {
+            crate::api::privilege_broker::store(&state)
+                .wait_for_requester(&p.sub, &requester, id, wait)
+                .await?
+        }
+        "mission_access" => {
+            crate::api::mission_access::store(&state)
+                .wait_for_requester(&p.sub, &requester, id, wait)
+                .await?
+        }
+        _ => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "Unknown approval request kind".into(),
+            ))
+        }
+    };
+    Ok(Json(value))
 }
 pub async fn revoke(
     State(state): State<Arc<AppState>>,

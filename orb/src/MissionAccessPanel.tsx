@@ -2,12 +2,14 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-j
 import { ApprovalCancelled } from "./deviceApproval";
 import * as Ic from "./icons";
 import {
+  actorLabel,
   approveMissionAccess,
   denyMissionAccess,
   getMissionAccess,
   liveGrant,
   missionLabel,
   revokeMissionAccess,
+  type MissionAccessAudit,
   type MissionAccessRequest,
   type MissionAccessSnapshot,
 } from "./missionAccessApi";
@@ -48,7 +50,9 @@ export function MissionAccessPanel(p: { onError: (message: string) => void; init
   const pending = createMemo(() => snap().requests.filter((r) => r.state === "pending"));
   const grants = createMemo(() => snap().requests.filter((r) => liveGrant(r, now())));
   const history = createMemo(() => snap().requests.filter((r) => r.state !== "pending" && !liveGrant(r, now())).slice(0, 20));
-  const who = (r: MissionAccessRequest) => missionLabel(r.requester_title, r.requester_mission_id);
+  const who = (r: MissionAccessRequest) => actorLabel(r);
+  const auditWho = (a: MissionAccessAudit) =>
+    a.requester_mission_id ? a.requester_mission_id.slice(0, 8) : actorLabel(a);
   const target = (r: MissionAccessRequest) => missionLabel(r.target_title, r.target_mission_id);
 
   const run = async (id: string, job: () => Promise<unknown>) => {
@@ -137,7 +141,7 @@ export function MissionAccessPanel(p: { onError: (message: string) => void; init
               {(a) => (
                 <div class="bw-log-row">
                   <span class={`bw-log-status ${a.action}`}>{a.action}</span>
-                  <span>{a.requester_mission_id.slice(0, 8)} → {a.target_mission_id.slice(0, 8)}{a.detail ? ` · ${a.detail}` : ""}</span>
+                  <span>{auditWho(a)} → {a.target_mission_id.slice(0, 8)}{a.detail ? ` · ${a.detail}` : ""}</span>
                   <span class="s-row-desc">{since(a.at)}</span>
                 </div>
               )}

@@ -955,10 +955,23 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/mcp/session",
             post(crate::control_mcp::gateway::session),
         )
+        .route(
+            "/api/mcp/external-sessions",
+            get(crate::control_mcp::gateway::list_external_sessions)
+                .post(crate::control_mcp::gateway::create_external_session),
+        )
+        .route(
+            "/api/mcp/external-sessions/:id",
+            axum::routing::delete(crate::control_mcp::gateway::revoke_external_session),
+        )
         .route("/api/mcp/renew", post(crate::control_mcp::gateway::renew))
         .route(
             "/api/mcp/sessions/:id",
             axum::routing::delete(crate::control_mcp::gateway::revoke),
+        )
+        .route(
+            "/api/mcp/requests/:kind/:id/wait",
+            get(crate::control_mcp::gateway::wait_request),
         )
         .route(
             "/api/mcp/capabilities",

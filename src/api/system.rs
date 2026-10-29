@@ -1971,6 +1971,9 @@ async fn adopt_hermes_assistant(
             project: None,
             role: crate::control_mcp::Role::Coordinator,
             mission_id: None,
+            client_kind: Some(crate::api::approval_flow::ExternalClientKind::LocalMcp),
+            client_label: Some(runtime_name.to_string()),
+            host_hint: None,
         }),
     )
     .await?

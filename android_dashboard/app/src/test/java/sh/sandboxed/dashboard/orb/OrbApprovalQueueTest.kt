@@ -97,4 +97,40 @@ class OrbApprovalQueueTest {
         assertEquals("Approve all (2, incl. 1 critical)", OrbApprovalQueue.approveAllLabel(listOf(read, root)))
         assertEquals("Approve all", OrbApprovalQueue.approveAllLabel(listOf(read)))
     }
+
+    @Test fun v1AndV2SubjectDigestsMatchSharedFixture() {
+        val digests = OrbJSON.dictList(spec["digests"])
+        assertTrue(digests.isNotEmpty())
+        for (v in digests) {
+            val subject = v["subject"] as Map<String, Any?>
+            val fields = (v["fields"] as List<*>).map { it as String }
+            assertEquals(v["canonical_subject"], OrbApprovalQueue.canonicalSubjectId(subject))
+            assertEquals(v["digest"], OrbApprovalQueue.approvalDigest(v["kind"] as String, v["id"] as String, subject, fields))
+        }
+    }
+
+    @Test fun externalSessionLegacyItemAndSubjectKeyPreserveIdentityWithNullMissionId() {
+        val raw = mapOf(
+            "id" to "s9",
+            "status" to "pending",
+            "kind" to "read",
+            "mission_id" to null,
+            "requester" to mapOf(
+                "kind" to "external_session",
+                "session_id" to "c4d5e6f7-0000-4000-8000-000000000099",
+                "client_kind" to "local_mcp",
+                "client_label" to "claude-code",
+                "host_hint" to "macbook-air",
+            ),
+            "key" to "OPENAI_API_KEY",
+            "all_projects" to false,
+            "reason" to "need key",
+            "created_at" to "2026-10-29T10:00:00Z",
+        )
+        val ext = OrbApprovalQueue.legacyItem("secret", raw)
+        assertEquals(null, ext["requester_mission_id"])
+        assertEquals("External · macbook-air (claude-code)", OrbApprovalQueue.requester(ext))
+        assertEquals("Read OPENAI_API_KEY for External · macbook-air (claude-code)", OrbApprovalQueue.signingReason(listOf(ext)))
+        assertEquals("session:c4d5e6f7-0000-4000-8000-000000000099", OrbApprovalQueue.subjectKey(raw))
+    }
 }

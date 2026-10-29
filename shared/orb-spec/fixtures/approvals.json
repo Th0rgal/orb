@@ -348,6 +348,57 @@
       "title": "Move OLD_TOKEN",
       "requester": "Ship usage fix",
       "detail": "From 3b1f9c2a to 8d2e4f6a"
+    },
+    {
+      "item": {
+        "kind": "secret",
+        "tier": "read",
+        "target": "OPENAI_API_KEY",
+        "risk": "routine",
+        "requester_title": null,
+        "requester_mission_id": null,
+        "requester_label": "External \u00b7 macbook-air (claude-code)",
+        "requester_subject": {
+          "kind": "external_session",
+          "session_id": "c4d5e6f7-0000-4000-8000-000000000099",
+          "client_kind": "local_mcp",
+          "client_label": "claude-code",
+          "host_hint": "macbook-air"
+        },
+        "request": {
+          "kind": "read",
+          "key": "OPENAI_API_KEY"
+        }
+      },
+      "title": "Read OPENAI_API_KEY",
+      "requester": "External \u00b7 macbook-air (claude-code)",
+      "detail": ""
+    },
+    {
+      "item": {
+        "kind": "privilege",
+        "tier": "ops_read",
+        "target": "dgx-spark",
+        "risk": "routine",
+        "requester_title": null,
+        "requester_mission_id": null,
+        "requester_label": null,
+        "requester_subject": {
+          "kind": "external_session",
+          "session_id": "d5e6f7a8-0000-4000-8000-000000000088",
+          "client_kind": "cli",
+          "client_label": "sandboxed-mcp"
+        },
+        "request": {
+          "scope": "ops_read",
+          "target_host": "dgx-spark",
+          "session_scoped": true,
+          "ttl_minutes": 60
+        }
+      },
+      "title": "Read-only ops on dgx-spark",
+      "requester": "External \u00b7 sandboxed-mcp",
+      "detail": "Allows logs, status and disk checks as root; no changes \u00b7 for this session (max 1 h)"
     }
   ],
   "summaries": [
@@ -370,6 +421,81 @@
       "risks": "2 routine",
       "missions": "Ship usage fix",
       "without_critical": 2
+    },
+    {
+      "items": [
+        0,
+        10,
+        11
+      ],
+      "risks": "1 elevated \u00b7 2 routine",
+      "missions": "External \u00b7 macbook-air (claude-code), External \u00b7 sandboxed-mcp, Ship usage fix",
+      "without_critical": 3
+    }
+  ],
+  "digests": [
+    {
+      "name": "v1 mission privilege digest",
+      "domain": "orb-approval-v1",
+      "kind": "privilege",
+      "id": "a1b2c3d4-0000-4000-8000-000000000010",
+      "subject": {
+        "kind": "mission",
+        "mission_id": "7c1d2e3f-0000-4000-8000-000000000001"
+      },
+      "canonical_subject": "mission:7c1d2e3f-0000-4000-8000-000000000001",
+      "fields": [
+        "service_deploy",
+        "agent-core",
+        "",
+        "240",
+        "session"
+      ],
+      "digest": "db33f6a77e11349420b2bdea048047d3526d28a332d222062722ad1f49946db7"
+    },
+    {
+      "name": "v2 external local_mcp secret read digest with host hint",
+      "domain": "orb-approval-v2",
+      "kind": "secret",
+      "id": "b2c3d4e5-0000-4000-8000-000000000011",
+      "subject": {
+        "kind": "external_session",
+        "session_id": "c4d5e6f7-0000-4000-8000-000000000099",
+        "client_kind": "local_mcp",
+        "client_label": "claude-code",
+        "host_hint": "macbook-air"
+      },
+      "canonical_subject": "session:c4d5e6f7-0000-4000-8000-000000000099:local_mcp:12d3eca42f3b19b6",
+      "fields": [
+        "read",
+        "OPENAI_API_KEY",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "digest": "2ec3bf5abecf82806835e4f60b07d65a4b1531b9e1b75ec7ce31abd4255477e6"
+    },
+    {
+      "name": "v2 external cli privilege digest without host hint",
+      "domain": "orb-approval-v2",
+      "kind": "privilege",
+      "id": "e6f7a8b9-0000-4000-8000-000000000012",
+      "subject": {
+        "kind": "external_session",
+        "session_id": "d5e6f7a8-0000-4000-8000-000000000088",
+        "client_kind": "cli",
+        "client_label": "sandboxed-mcp"
+      },
+      "canonical_subject": "session:d5e6f7a8-0000-4000-8000-000000000088:cli:c35b95c8949e58bb",
+      "fields": [
+        "ops_read",
+        "dgx-spark",
+        "",
+        "60",
+        "session"
+      ],
+      "digest": "617ec6d41152351f09f86f601ad879216bc5b0bf94e33356e816b009e7a9579e"
     }
   ]
 }

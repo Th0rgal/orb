@@ -35,9 +35,29 @@ pub struct Client {
     role: Role,
     mission_id: Option<uuid::Uuid>,
     project: Option<String>,
+    client_kind: Option<crate::api::approval_flow::ExternalClientKind>,
+    client_label: Option<String>,
+    host_hint: Option<String>,
+    secrets_dir_override: Option<PathBuf>,
     http: reqwest::Client,
     session: Mutex<Option<(String, i64)>>,
+    resolved_session_id: Mutex<Option<uuid::Uuid>>,
 }
+
+fn decode_mcp_token_session_id(token: &str) -> Option<uuid::Uuid> {
+    use base64::Engine as _;
+    let jwt = token.strip_prefix("mcp1.")?;
+    let payload_b64 = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
+        .ok()?;
+    let v: Value = serde_json::from_slice(&bytes).ok()?;
+    v["session_id"]
+        .as_str()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+}
+
 impl Client {
     pub fn new(
         api_url: String,
@@ -53,6 +73,7 @@ impl Client {
         {
             return Err("Core requires HTTPS except on loopback".into());
         }
+        let initial_session_id = decode_mcp_token_session_id(&token);
         Ok(Self {
             api_url: api_url.trim_end_matches('/').into(),
             token,
@@ -60,12 +81,17 @@ impl Client {
             role,
             mission_id,
             project: None,
+            client_kind: None,
+            client_label: None,
+            host_hint: None,
+            secrets_dir_override: None,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|_| "Cannot initialize HTTP client")?,
             session: Mutex::new(None),
+            resolved_session_id: Mutex::new(initial_session_id),
         })
     }
     async fn credential(&self) -> Result<String, String> {
@@ -91,6 +117,9 @@ impl Client {
             }
         }
         if credential.starts_with("mcp1.") && session.is_none() {
+            if let Some(sid) = decode_mcp_token_session_id(&credential) {
+                *self.resolved_session_id.lock().await = Some(sid);
+            }
             let response = self
                 .http
                 .get(format!("{}/api/mcp/capabilities", self.api_url))
@@ -111,11 +140,23 @@ impl Client {
                     .json()
                     .await
                     .map_err(|_| "Invalid capabilities response")?;
+                if let Some(sid) = caps["identity"]["session_id"]
+                    .as_str()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                {
+                    *self.resolved_session_id.lock().await = Some(sid);
+                }
                 let expiry = caps["limits"]["session_expires_at"]
                     .as_i64()
                     .ok_or("Missing session expiry")?;
                 *session = Some((credential.clone(), expiry));
-                if expiry > chrono::Utc::now().timestamp() + 120 {
+                // When explicit --client-label / --host-hint are passed on an
+                // existing mcp1 token, fall through to one renewal so Core updates
+                // the session's label/host hint.
+                if expiry > chrono::Utc::now().timestamp() + 120
+                    && self.client_label.is_none()
+                    && self.host_hint.is_none()
+                {
                     return Ok(credential);
                 }
             }
@@ -131,11 +172,37 @@ impl Client {
         } else {
             "/api/mcp/session"
         };
+        let payload = if scoped {
+            let mut body = serde_json::Map::new();
+            if let Some(ref label) = self.client_label {
+                body.insert("client_label".into(), json!(label));
+            }
+            if let Some(ref host) = self.host_hint {
+                body.insert("host_hint".into(), json!(host));
+            }
+            Value::Object(body)
+        } else {
+            let mut body = json!({
+                "role": self.role,
+                "mission_id": self.mission_id,
+                "project": self.project,
+            });
+            if let Some(kind) = self.client_kind {
+                body["client_kind"] = json!(kind);
+            }
+            if let Some(ref label) = self.client_label {
+                body["client_label"] = json!(label);
+            }
+            if let Some(ref host) = self.host_hint {
+                body["host_hint"] = json!(host);
+            }
+            body
+        };
         let response = self
             .http
             .post(format!("{}{path}", self.api_url))
             .bearer_auth(auth)
-            .json(&json!({"role":self.role,"mission_id":self.mission_id,"project":self.project}))
+            .json(&payload)
             .send()
             .await
             .map_err(|_| "Cannot reach Core to establish MCP session")?;
@@ -150,6 +217,13 @@ impl Client {
             .as_str()
             .ok_or("Missing session token")?
             .to_string();
+        if let Some(sid) = data["session_id"]
+            .as_str()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .or_else(|| decode_mcp_token_session_id(&token))
+        {
+            *self.resolved_session_id.lock().await = Some(sid);
+        }
         if scoped {
             if let Some(path) = &self.token_file {
                 persist_scoped_credential(path, &token)?;
@@ -193,10 +267,115 @@ impl Client {
     }
     pub async fn preflight(&self) -> Result<Value, String> {
         let v = self.request("/api/mcp/capabilities", None).await?;
+        if let Some(sid) = v["identity"]["session_id"]
+            .as_str()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        {
+            *self.resolved_session_id.lock().await = Some(sid);
+        }
         if v["contract_version"] != CONTRACT_VERSION {
             return Err("MCP contract version mismatch".into());
         }
         Ok(v)
+    }
+    async fn secrets_dir_for_session(&self) -> PathBuf {
+        if let Some(ref dir) = self.secrets_dir_override {
+            return dir.clone();
+        }
+        let session_id = *self.resolved_session_id.lock().await;
+        secrets_dir_for(self.mission_id, session_id)
+    }
+    pub async fn fetch_secret_file(
+        &self,
+        name: &str,
+        reason: Option<&str>,
+        wait_secs: u64,
+    ) -> Result<(PathBuf, String), String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Secret name cannot be empty".into());
+        }
+        let mut tool_args = json!({ "name": trimmed });
+        if let Some(r) = reason.map(str::trim).filter(|s| !s.is_empty()) {
+            tool_args["reason"] = json!(r);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+        loop {
+            let call_body = json!({
+                "name": "secret_get",
+                "arguments": tool_args,
+            });
+            let reply = self.request("/api/mcp/call", Some(&call_body)).await?;
+            if reply["ok"] != true {
+                let msg = reply["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Secret request refused by Core");
+                return Err(msg.to_string());
+            }
+            let result = reply["result"].clone();
+            if result.get("secret_delivery").is_some() {
+                let dir = self.secrets_dir_for_session().await;
+                let delivered = deliver_secret_in(&dir, result);
+                if let Some(err) = delivered.get("error").and_then(Value::as_str) {
+                    return Err(err.to_string());
+                }
+                let path_str = delivered["path"]
+                    .as_str()
+                    .ok_or("Missing delivered secret file path")?;
+                let export_line = delivered["export"]
+                    .as_str()
+                    .ok_or("Missing delivered secret export line")?
+                    .to_string();
+                return Ok((PathBuf::from(path_str), export_line));
+            }
+            if result["status"] == "pending" {
+                let req_id = result["request_id"]
+                    .as_str()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .ok_or("Core returned pending secret request without a valid request_id")?;
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err(format!(
+                        "Timed out waiting for approval of secret `{trimmed}` (request {req_id})"
+                    ));
+                }
+                while std::time::Instant::now() < deadline {
+                    let remaining = deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_secs()
+                        .clamp(1, 25);
+                    let wait_path =
+                        format!("/api/mcp/requests/secret/{req_id}/wait?timeout_secs={remaining}");
+                    let waited = self.request(&wait_path, None).await?;
+                    match waited["status"].as_str().unwrap_or("pending") {
+                        "approved" => break,
+                        "denied" => {
+                            let err = waited["error"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("Operator denied access");
+                            return Err(format!("Access to secret `{trimmed}` denied: {err}"));
+                        }
+                        "expired" => {
+                            return Err(format!("Approval request for secret `{trimmed}` expired"));
+                        }
+                        _ => {
+                            if std::time::Instant::now() >= deadline {
+                                return Err(format!(
+                                    "Timed out waiting for approval of secret `{trimmed}` (request {req_id})"
+                                ));
+                            }
+                        }
+                    }
+                }
+                // Re-call secret_get on the next loop iteration to receive secret_delivery.
+                continue;
+            }
+            return Err(format!(
+                "Unexpected response from secret_get for `{trimmed}`: {}",
+                result["status"].as_str().unwrap_or("unknown")
+            ));
+        }
     }
     pub async fn handle(&self, request: Value) -> Value {
         let id = request["id"].clone();
@@ -229,7 +408,8 @@ impl Client {
                     let payload = if failed {
                         json!({"error":reply["error"]})
                     } else {
-                        deliver_secret(reply["result"].clone())
+                        let dir = self.secrets_dir_for_session().await;
+                        deliver_secret_in(&dir, reply["result"].clone())
                     };
                     let structured = if payload.is_object() {
                         payload
@@ -252,22 +432,49 @@ impl Client {
     }
 }
 
-/// Directory for secrets handed to this mission, under a per-user base
-/// (never the shared temp dir, where another user could own a parent).
-fn secrets_dir() -> std::path::PathBuf {
-    if let Some(dir) = std::env::var_os("SANDBOXED_SECRETS_DIR") {
-        return dir.into();
+/// Directory for secrets handed to this mission or external session, under a
+/// per-user base (never the shared temp dir, where another user could own a parent).
+fn secrets_dir_for(
+    mission_id: Option<uuid::Uuid>,
+    session_id: Option<uuid::Uuid>,
+) -> std::path::PathBuf {
+    secrets_dir_with_env(
+        mission_id,
+        session_id,
+        std::env::var_os("SANDBOXED_SECRETS_DIR").map(PathBuf::from),
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var("SANDBOXED_SH_MISSION_ID")
+            .or_else(|_| std::env::var("MISSION_ID"))
+            .ok(),
+    )
+}
+
+fn secrets_dir_with_env(
+    mission_id: Option<uuid::Uuid>,
+    session_id: Option<uuid::Uuid>,
+    override_dir: Option<PathBuf>,
+    xdg_runtime_dir: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+    env_mission_id: Option<String>,
+) -> std::path::PathBuf {
+    if let Some(dir) = override_dir {
+        return dir;
     }
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(|d| std::path::PathBuf::from(d).join("paloma-secrets"))
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".paloma-secrets"))
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from(".paloma-secrets"));
-    let mission = std::env::var("SANDBOXED_SH_MISSION_ID")
-        .or_else(|_| std::env::var("MISSION_ID"))
-        .unwrap_or_else(|_| "session".into());
-    base.join(mission.replace(['/', '.'], "_"))
+    let base = xdg_runtime_dir
+        .map(|d| d.join("paloma-secrets"))
+        .or_else(|| home_dir.map(|h| h.join(".paloma-secrets")))
+        .unwrap_or_else(|| PathBuf::from(".paloma-secrets"));
+    let subdir = if let Some(mid) = mission_id {
+        mid.to_string()
+    } else if let Some(env_mid) = env_mission_id.filter(|s| !s.trim().is_empty()) {
+        env_mid
+    } else if let Some(sid) = session_id {
+        format!("session-{sid}")
+    } else {
+        "session".into()
+    };
+    base.join(subdir.replace(['/', '.'], "_"))
 }
 
 /// Create `dir` (and its parent) as 0700 and refuse anything that is a
@@ -304,10 +511,6 @@ fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 /// Core returns a secret as `secret_delivery`; write it to a 0600 file and
 /// replace it with the path, so the value never enters the agent transcript,
 /// the harness logs or Core's event store.
-fn deliver_secret(result: Value) -> Value {
-    deliver_secret_in(&secrets_dir(), result)
-}
-
 fn deliver_secret_in(dir: &std::path::Path, mut result: Value) -> Value {
     let Some(delivery) = result
         .as_object_mut()
@@ -363,12 +566,318 @@ fn deliver_secret_in(dir: &std::path::Path, mut result: Value) -> Value {
     result
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SecretCliCommand {
+    Get {
+        name: String,
+        reason: Option<String>,
+        wait_secs: u64,
+        output: SecretGetOutput,
+    },
+    Env {
+        names: Vec<String>,
+        reason: Option<String>,
+        wait_secs: u64,
+    },
+    Exec {
+        names: Vec<String>,
+        reason: Option<String>,
+        wait_secs: u64,
+        command: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretGetOutput {
+    Path,
+    Export,
+}
+
+const DEFAULT_SECRET_WAIT_SECS: u64 = 120;
+
+fn is_global_value_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--api-url"
+            | "--token-file"
+            | "--mission-id"
+            | "--profile"
+            | "--project"
+            | "--client-label"
+            | "--host-hint"
+    )
+}
+
+/// Extract any `secret <get|env|exec>` subcommand from CLI args while tolerating
+/// global `--api-url` / `--token-file` / `--client-label` / `--host-hint` flags
+/// before or after `secret`.
+fn parse_secret_subcommand(args: &[String]) -> Result<Option<SecretCliCommand>, String> {
+    let mut i = 1usize;
+    let mut secret_pos = None;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        if is_global_value_flag(a) {
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        if a == "secret" {
+            secret_pos = Some(i);
+        }
+        break;
+    }
+    let Some(pos) = secret_pos else {
+        return Ok(None);
+    };
+    let rest = &args[pos + 1..];
+    let sub = rest
+        .first()
+        .map(String::as_str)
+        .ok_or("Usage: sandboxed-mcp secret <get|env|exec> ...")?;
+    let tail = &rest[1..];
+    match sub {
+        "get" => {
+            let mut name: Option<String> = None;
+            let mut reason: Option<String> = None;
+            let mut wait_secs = DEFAULT_SECRET_WAIT_SECS;
+            let mut print_path = false;
+            let mut print_export = false;
+            let mut idx = 0usize;
+            while idx < tail.len() {
+                let arg = tail[idx].as_str();
+                if is_global_value_flag(arg) {
+                    if idx + 1 >= tail.len() {
+                        return Err(format!("Missing value for {arg}"));
+                    }
+                    idx += 2;
+                } else if arg == "--reason" {
+                    let val = tail.get(idx + 1).ok_or("Missing value for --reason")?;
+                    reason = Some(val.clone());
+                    idx += 2;
+                } else if arg == "--wait-secs" {
+                    let val = tail.get(idx + 1).ok_or("Missing value for --wait-secs")?;
+                    wait_secs = val
+                        .parse::<u64>()
+                        .map_err(|_| "Invalid integer for --wait-secs")?;
+                    idx += 2;
+                } else if arg == "--print-path" {
+                    print_path = true;
+                    idx += 1;
+                } else if arg == "--print-export" {
+                    print_export = true;
+                    idx += 1;
+                } else if arg.starts_with('-') {
+                    return Err(format!("Unknown flag for `secret get`: {arg}"));
+                } else if name.is_none() {
+                    name = Some(arg.to_string());
+                    idx += 1;
+                } else {
+                    return Err(format!(
+                        "Unexpected extra argument `{arg}` for `secret get`"
+                    ));
+                }
+            }
+            if print_path && print_export {
+                return Err("Specify at most one of --print-path or --print-export".into());
+            }
+            let name = name.ok_or("Usage: sandboxed-mcp secret get <NAME> [--reason ...] [--wait-secs 120] [--print-path | --print-export]")?;
+            let output = if print_export {
+                SecretGetOutput::Export
+            } else {
+                SecretGetOutput::Path
+            };
+            Ok(Some(SecretCliCommand::Get {
+                name,
+                reason,
+                wait_secs,
+                output,
+            }))
+        }
+        "env" => {
+            let mut names = Vec::new();
+            let mut reason: Option<String> = None;
+            let mut wait_secs = DEFAULT_SECRET_WAIT_SECS;
+            let mut idx = 0usize;
+            while idx < tail.len() {
+                let arg = tail[idx].as_str();
+                if is_global_value_flag(arg) {
+                    if idx + 1 >= tail.len() {
+                        return Err(format!("Missing value for {arg}"));
+                    }
+                    idx += 2;
+                } else if arg == "--reason" {
+                    let val = tail.get(idx + 1).ok_or("Missing value for --reason")?;
+                    reason = Some(val.clone());
+                    idx += 2;
+                } else if arg == "--wait-secs" {
+                    let val = tail.get(idx + 1).ok_or("Missing value for --wait-secs")?;
+                    wait_secs = val
+                        .parse::<u64>()
+                        .map_err(|_| "Invalid integer for --wait-secs")?;
+                    idx += 2;
+                } else if arg.starts_with('-') {
+                    return Err(format!("Unknown flag for `secret env`: {arg}"));
+                } else {
+                    names.push(arg.to_string());
+                    idx += 1;
+                }
+            }
+            if names.is_empty() {
+                return Err(
+                    "Usage: sandboxed-mcp secret env [--reason ...] [--wait-secs 120] <NAME>..."
+                        .into(),
+                );
+            }
+            Ok(Some(SecretCliCommand::Env {
+                names,
+                reason,
+                wait_secs,
+            }))
+        }
+        "exec" => {
+            let sep = tail.iter().position(|a| a == "--").ok_or(
+                "Usage: sandboxed-mcp secret exec [--reason ...] [--wait-secs 120] <NAME>... -- <COMMAND> [ARGS...]",
+            )?;
+            let before = &tail[..sep];
+            let command = tail[sep + 1..].to_vec();
+            if command.is_empty() {
+                return Err("Missing <COMMAND> after `--` in `secret exec`".into());
+            }
+            let mut names = Vec::new();
+            let mut reason: Option<String> = None;
+            let mut wait_secs = DEFAULT_SECRET_WAIT_SECS;
+            let mut idx = 0usize;
+            while idx < before.len() {
+                let arg = before[idx].as_str();
+                if is_global_value_flag(arg) {
+                    if idx + 1 >= before.len() {
+                        return Err(format!("Missing value for {arg}"));
+                    }
+                    idx += 2;
+                } else if arg == "--reason" {
+                    let val = before.get(idx + 1).ok_or("Missing value for --reason")?;
+                    reason = Some(val.clone());
+                    idx += 2;
+                } else if arg == "--wait-secs" {
+                    let val = before.get(idx + 1).ok_or("Missing value for --wait-secs")?;
+                    wait_secs = val
+                        .parse::<u64>()
+                        .map_err(|_| "Invalid integer for --wait-secs")?;
+                    idx += 2;
+                } else if arg.starts_with('-') {
+                    return Err(format!("Unknown flag for `secret exec`: {arg}"));
+                } else {
+                    names.push(arg.to_string());
+                    idx += 1;
+                }
+            }
+            if names.is_empty() {
+                return Err("Specify at least one <NAME> before `--` in `secret exec`".into());
+            }
+            Ok(Some(SecretCliCommand::Exec {
+                names,
+                reason,
+                wait_secs,
+                command,
+            }))
+        }
+        other => Err(format!(
+            "Unknown `secret` subcommand `{other}` (expected get, env, or exec)"
+        )),
+    }
+}
+
+async fn run_secret_cli(client: &Client, cmd: SecretCliCommand) -> Result<(), String> {
+    match cmd {
+        SecretCliCommand::Get {
+            name,
+            reason,
+            wait_secs,
+            output,
+        } => {
+            let (path, export_line) = client
+                .fetch_secret_file(&name, reason.as_deref(), wait_secs)
+                .await?;
+            match output {
+                SecretGetOutput::Path => println!("{}", path.display()),
+                SecretGetOutput::Export => println!("{export_line}"),
+            }
+            Ok(())
+        }
+        SecretCliCommand::Env {
+            names,
+            reason,
+            wait_secs,
+        } => {
+            let mut exports = Vec::with_capacity(names.len());
+            for name in &names {
+                let (_, export_line) = client
+                    .fetch_secret_file(name, reason.as_deref(), wait_secs)
+                    .await?;
+                exports.push(export_line);
+            }
+            for line in exports {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        SecretCliCommand::Exec {
+            names,
+            reason,
+            wait_secs,
+            command,
+        } => {
+            let mut env_pairs = Vec::with_capacity(names.len());
+            for name in &names {
+                if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || name.is_empty() {
+                    return Err(format!("Invalid environment variable name `{name}`"));
+                }
+                let (path, _) = client
+                    .fetch_secret_file(name, reason.as_deref(), wait_secs)
+                    .await?;
+                let value = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("Failed reading private secret file: {e}"))?;
+                env_pairs.push((name.clone(), value));
+            }
+            let status = std::process::Command::new(&command[0])
+                .args(&command[1..])
+                .envs(env_pairs)
+                .status()
+                .map_err(|e| format!("Failed to execute `{}`: {e}", command[0]))?;
+            if let Some(code) = status.code() {
+                if code == 0 {
+                    return Ok(());
+                }
+                std::process::exit(code);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = status.signal() {
+                    std::process::exit(128 + sig);
+                }
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
 pub async fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "launch") {
         return super::launch::run(&args[2..]).await;
     }
-    if args.iter().any(|a| a == "--version") {
+    let head_args = match args.iter().position(|a| a == "--") {
+        Some(sep) => &args[..sep],
+        None => &args[..],
+    };
+    if head_args.iter().any(|a| a == "--version") {
         println!(
             "sandboxed-mcp {} contract {}",
             env!("CARGO_PKG_VERSION"),
@@ -376,7 +885,13 @@ pub async fn run() -> Result<(), String> {
         );
         return Ok(());
     }
-    let option = |flag: &str| args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone());
+    let secret_cmd = parse_secret_subcommand(&args)?;
+    let option = |flag: &str| {
+        head_args
+            .windows(2)
+            .find(|w| w[0] == flag)
+            .map(|w| w[1].clone())
+    };
     let env = |names: &[&str]| {
         names
             .iter()
@@ -395,7 +910,7 @@ pub async fn run() -> Result<(), String> {
         }
         .into())))
     .map_err(|_| "Invalid MCP profile")?;
-    if args.iter().any(|a| a == "--print-catalog") {
+    if head_args.iter().any(|a| a == "--print-catalog") {
         println!(
             "{}",
             serde_json::to_string_pretty(&super::catalog(role)).unwrap()
@@ -424,8 +939,16 @@ pub async fn run() -> Result<(), String> {
     .unwrap_or_default();
     let mut client = Client::new(api_url, token, token_file, role, mission_id)?;
     client.project = option("--project");
+    client.client_label = option("--client-label").or_else(|| env(&["SANDBOXED_MCP_CLIENT_LABEL"]));
+    client.host_hint = option("--host-hint").or_else(|| env(&["SANDBOXED_MCP_HOST_HINT"]));
+    if mission_id.is_none() && secret_cmd.is_some() {
+        client.client_kind = Some(crate::api::approval_flow::ExternalClientKind::Cli);
+    }
     let client = Arc::new(client);
-    if args.iter().any(|a| a == "--check") {
+    if let Some(cmd) = secret_cmd {
+        return run_secret_cli(&client, cmd).await;
+    }
+    if head_args.iter().any(|a| a == "--check") {
         let value = client.preflight().await?;
         println!(
             "{}",
@@ -552,5 +1075,271 @@ mod tests {
             json!({"secret_delivery": {"name": "../x", "value": "v"}}),
         );
         assert!(!bad.to_string().contains("\"v\""));
+    }
+
+    #[test]
+    fn parse_secret_subcommands_and_session_scoped_secrets_dir() {
+        let s = |items: &[&str]| items.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_secret_subcommand(&s(&["sandboxed-mcp", "--check"])).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_secret_subcommand(&s(&[
+                "sandboxed-mcp",
+                "--api-url",
+                "http://127.0.0.1:3000",
+                "--client-label",
+                "Codex Desktop",
+                "--host-hint",
+                "thomas-mac",
+                "secret",
+                "get",
+                "OPENAI_API_KEY",
+                "--reason",
+                "run evals",
+                "--wait-secs",
+                "90",
+                "--print-export"
+            ]))
+            .unwrap(),
+            Some(SecretCliCommand::Get {
+                name: "OPENAI_API_KEY".into(),
+                reason: Some("run evals".into()),
+                wait_secs: 90,
+                output: SecretGetOutput::Export,
+            })
+        );
+        assert_eq!(
+            parse_secret_subcommand(&s(&[
+                "sandboxed-mcp",
+                "secret",
+                "env",
+                "FOO_KEY",
+                "BAR_KEY",
+                "--reason",
+                "local test"
+            ]))
+            .unwrap(),
+            Some(SecretCliCommand::Env {
+                names: vec!["FOO_KEY".into(), "BAR_KEY".into()],
+                reason: Some("local test".into()),
+                wait_secs: DEFAULT_SECRET_WAIT_SECS,
+            })
+        );
+        assert_eq!(
+            parse_secret_subcommand(&s(&[
+                "sandboxed-mcp",
+                "secret",
+                "exec",
+                "--reason",
+                "deploy check",
+                "--wait-secs",
+                "45",
+                "FOO_KEY",
+                "BAR_KEY",
+                "--",
+                "sh",
+                "-c",
+                "echo ok --version"
+            ]))
+            .unwrap(),
+            Some(SecretCliCommand::Exec {
+                names: vec!["FOO_KEY".into(), "BAR_KEY".into()],
+                reason: Some("deploy check".into()),
+                wait_secs: 45,
+                command: vec!["sh".into(), "-c".into(), "echo ok --version".into()],
+            })
+        );
+        assert!(parse_secret_subcommand(&s(&[
+            "sandboxed-mcp",
+            "secret",
+            "get",
+            "FOO",
+            "--print-path",
+            "--print-export"
+        ]))
+        .is_err());
+
+        let sid = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let mid = uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        assert_eq!(
+            secrets_dir_with_env(
+                None,
+                Some(sid),
+                None,
+                Some(PathBuf::from("/run/user/501")),
+                Some(PathBuf::from("/Users/thomas")),
+                None,
+            ),
+            PathBuf::from(
+                "/run/user/501/paloma-secrets/session-11111111-2222-3333-4444-555555555555"
+            )
+        );
+        assert_eq!(
+            secrets_dir_with_env(
+                None,
+                Some(sid),
+                None,
+                None,
+                Some(PathBuf::from("/Users/thomas")),
+                None,
+            ),
+            PathBuf::from(
+                "/Users/thomas/.paloma-secrets/session-11111111-2222-3333-4444-555555555555"
+            )
+        );
+        assert_eq!(
+            secrets_dir_with_env(
+                Some(mid),
+                Some(sid),
+                None,
+                Some(PathBuf::from("/run/user/501")),
+                None,
+                None,
+            ),
+            PathBuf::from("/run/user/501/paloma-secrets/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_secret_file_waits_for_pending_approval_and_forwards_client_hints() {
+        use axum::{
+            extract::{Path, Query},
+            routing::{get, post},
+            Json, Router,
+        };
+        use base64::Engine as _;
+        use std::collections::HashMap;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let sid = uuid::Uuid::new_v4();
+        let req_id = uuid::Uuid::new_v4();
+        let jwt_payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({"session_id": sid}).to_string());
+        let fake_mcp_token = format!("mcp1.hdr.{jwt_payload}.sig");
+
+        let secret_calls = Arc::new(AtomicUsize::new(0));
+        let wait_calls = Arc::new(AtomicUsize::new(0));
+        let session_payloads: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let app = Router::new()
+            .route(
+                "/api/mcp/session",
+                post({
+                    let session_payloads = session_payloads.clone();
+                    let tok = fake_mcp_token.clone();
+                    move |Json(body): Json<Value>| {
+                        let session_payloads = session_payloads.clone();
+                        let tok = tok.clone();
+                        async move {
+                            session_payloads.lock().await.push(body);
+                            Json(json!({
+                                "token": tok,
+                                "session_id": sid,
+                                "expires_at": chrono::Utc::now().timestamp() + 3600
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/mcp/call",
+                post({
+                    let secret_calls = secret_calls.clone();
+                    move |Json(body): Json<Value>| {
+                        let secret_calls = secret_calls.clone();
+                        async move {
+                            assert_eq!(body["name"], "secret_get");
+                            assert_eq!(body["arguments"]["name"], "OPENAI_API_KEY");
+                            assert_eq!(body["arguments"]["reason"], "local mac cli");
+                            let n = secret_calls.fetch_add(1, Ordering::SeqCst);
+                            if n == 0 {
+                                Json(json!({
+                                    "ok": true,
+                                    "result": {
+                                        "status": "pending",
+                                        "request_id": req_id,
+                                    }
+                                }))
+                            } else {
+                                Json(json!({
+                                    "ok": true,
+                                    "result": {
+                                        "status": "granted",
+                                        "secret_delivery": {
+                                            "name": "OPENAI_API_KEY",
+                                            "value": "sk-live-secret-999"
+                                        }
+                                    }
+                                }))
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/mcp/requests/secret/:id/wait",
+                get({
+                    let wait_calls = wait_calls.clone();
+                    move |Path(id): Path<uuid::Uuid>, Query(q): Query<HashMap<String, String>>| {
+                        let wait_calls = wait_calls.clone();
+                        async move {
+                            assert_eq!(id, req_id);
+                            assert!(q.contains_key("timeout_secs"));
+                            let w = wait_calls.fetch_add(1, Ordering::SeqCst);
+                            if w == 0 {
+                                Json(json!({"status": "pending", "request_id": id}))
+                            } else {
+                                Json(json!({"status": "approved", "request_id": id}))
+                            }
+                        }
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let tmp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let secrets_root = tmp.path().join("session-secrets");
+
+        let mut client =
+            Client::new(url, "owner-jwt-token".into(), None, Role::Coordinator, None).unwrap();
+        client.client_kind = Some(crate::api::approval_flow::ExternalClientKind::Cli);
+        client.client_label = Some("Mac Terminal".into());
+        client.host_hint = Some("thomas-mbp".into());
+        client.secrets_dir_override = Some(secrets_root.clone());
+
+        let (path, export_line) = client
+            .fetch_secret_file("OPENAI_API_KEY", Some("local mac cli"), 30)
+            .await
+            .unwrap();
+
+        assert_eq!(secret_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(wait_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "sk-live-secret-999"
+        );
+        assert!(export_line.contains("export OPENAI_API_KEY="));
+        assert!(!export_line.contains("sk-live-secret-999"));
+
+        let payloads = session_payloads.lock().await;
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["client_kind"], "cli");
+        assert_eq!(payloads[0]["client_label"], "Mac Terminal");
+        assert_eq!(payloads[0]["host_hint"], "thomas-mbp");
+
+        server.abort();
     }
 }

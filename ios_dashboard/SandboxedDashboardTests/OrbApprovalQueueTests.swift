@@ -118,4 +118,49 @@ final class OrbApprovalQueueTests: XCTestCase {
         XCTAssertEqual(OrbApprovalQueue.approveAllLabel([read, root]), "Approve all (2, incl. 1 critical)")
         XCTAssertEqual(OrbApprovalQueue.approveAllLabel([read]), "Approve all")
     }
+
+    func testV1AndV2SubjectDigestsMatchSharedFixture() throws {
+        let spec = try OrbSpec.json("fixtures/approvals.json")
+        let digests = try XCTUnwrap(spec["digests"] as? [[String: Any]])
+        XCTAssertFalse(digests.isEmpty)
+        for v in digests {
+            let subject = try json(try XCTUnwrap(v["subject"]))
+            let fields = try XCTUnwrap(v["fields"] as? [String])
+            XCTAssertEqual(OrbMissionAccessMonitor.canonicalSubjectId(subject), v["canonical_subject"] as? String)
+            XCTAssertEqual(
+                OrbMissionAccessMonitor.approvalDigest(
+                    kind: try XCTUnwrap(v["kind"] as? String),
+                    id: try XCTUnwrap(v["id"] as? String),
+                    subject: subject,
+                    fields: fields
+                ),
+                v["digest"] as? String
+            )
+        }
+    }
+
+    func testExternalSessionLegacyItemAndSubjectKeyPreserveIdentityWithNullMissionId() throws {
+        let raw = try json([
+            "id": "s9",
+            "status": "pending",
+            "kind": "read",
+            "mission_id": NSNull(),
+            "requester": [
+                "kind": "external_session",
+                "session_id": "c4d5e6f7-0000-4000-8000-000000000099",
+                "client_kind": "local_mcp",
+                "client_label": "claude-code",
+                "host_hint": "macbook-air",
+            ],
+            "key": "OPENAI_API_KEY",
+            "all_projects": false,
+            "reason": "need key",
+            "created_at": "2026-10-29T10:00:00Z",
+        ])
+        let ext = OrbApprovalQueue.legacyItem(kind: "secret", raw)
+        XCTAssertEqual(ext["requester_mission_id"], .null)
+        XCTAssertEqual(OrbApprovalQueue.requester(ext), "External · macbook-air (claude-code)")
+        XCTAssertEqual(OrbApprovalQueue.signingReason([ext]), "Read OPENAI_API_KEY for External · macbook-air (claude-code)")
+        XCTAssertEqual(OrbMissionAccessMonitor.subjectKey(raw), "session:c4d5e6f7-0000-4000-8000-000000000099")
+    }
 }

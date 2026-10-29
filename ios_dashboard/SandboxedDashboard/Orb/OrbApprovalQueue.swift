@@ -36,7 +36,7 @@ final class OrbApprovalQueue {
     }
 
     static func requester(_ i: OrbJSON) -> String {
-        OrbMissionAccessMonitor.mission(i["requester_title"].text, i["requester_mission_id"].text)
+        OrbMissionAccessMonitor.requester(i)
     }
 
     /// The fine print: what it unlocks and for how long, and for secrets the
@@ -159,8 +159,13 @@ final class OrbApprovalQueue {
             : [r["key"].text, r["project_id"].text, "*"].first { !$0.isEmpty } ?? "*"
         let mission = r["requester_mission_id"].text.isEmpty ? r["mission_id"].text : r["requester_mission_id"].text
         let title = r["requester_title"].text.isEmpty ? r["mission_title"] : r["requester_title"]
+        let subject = r["requester_subject"] != .null ? r["requester_subject"] : r["requester"]
         return .object([
-            "kind": .string(kind), "id": r["id"], "requester_mission_id": .string(mission), "requester_title": title,
+            "kind": .string(kind), "id": r["id"],
+            "requester_mission_id": mission.isEmpty ? .null : .string(mission),
+            "requester_title": title,
+            "requester_subject": subject,
+            "requester_label": r["requester_label"],
             "tier": .string(tier), "target": .string(target), "risk": .string(riskOf(kind: kind, tier: tier, request: r)),
             "reason": r["reason"], "created_at": r["created_at"], "digest": .string(""), "request": r, "legacy": .bool(true),
         ])
@@ -242,7 +247,7 @@ struct OrbApprovalQueueBanner: View {
                 HStack(spacing: 10) {
                     Image(systemName: critical > 0 ? "lock.trianglebadge.exclamationmark" : "checkmark.shield")
                         .foregroundStyle(critical > 0 ? OrbStyle.error : OrbStyle.warning)
-                    Text(count == 1 ? "A mission is waiting for your approval" : "\(count) requests are waiting for your approval")
+                    Text(count == 1 ? "A request is waiting for your approval" : "\(count) requests are waiting for your approval")
                         .font(.footnote.weight(.semibold))
                     Spacer()
                     Text("\(count)")

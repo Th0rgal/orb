@@ -553,6 +553,7 @@ pub(super) async fn submit_leased_remote_job(
                 project: None,
                 role: crate::control_mcp::Role::Executor,
                 mission_id: Some(mission.id),
+                ..Default::default()
             }),
         )
         .await

@@ -434,11 +434,12 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 }
             }
 
-            Card("Mission requests") {
+            Card("Secret requests") {
                 if (requests.isEmpty()) Text("No pending requests.", color = OrbStyle.textMuted, fontSize = 13.sp)
                 requests.forEach { r ->
                     val id = r["id"] as String
-                    val who = listOfNotNull(r["mission_title"] as? String, r["paloma_project"] as? String).joinToString(" · ")
+                    val actor = OrbApprovalQueue.actorLabel(r)
+                    val who = listOfNotNull(actor, (r["paloma_project"] as? String)?.takeIf { it.isNotBlank() }).joinToString(" · ")
                     Column(Modifier.padding(vertical = 6.dp)) {
                         Text(describe(r), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Text(who, color = OrbStyle.textMuted, fontSize = 12.sp)
@@ -618,7 +619,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 if (pendingAccess.isEmpty() && liveAccess.isEmpty()) Text("No requests or grants.", color = OrbStyle.textMuted, fontSize = 13.sp)
                 pendingAccess.forEach { r ->
                     val id = r["id"] as String
-                    val who = mission(r["requester_title"], r["requester_mission_id"])
+                    val who = OrbApprovalQueue.actorLabel(r)
                     val target = mission(r["target_title"], r["target_mission_id"])
                     val hours = (r["ttl_hours"] as? Number)?.toInt() ?: 24
                     Column(Modifier.padding(vertical = 6.dp)) {
@@ -656,7 +657,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(
-                                "${mission(g["requester_title"], g["requester_mission_id"])} → ${mission(g["target_title"], g["target_mission_id"])}",
+                                "${OrbApprovalQueue.actorLabel(g)} → ${mission(g["target_title"], g["target_mission_id"])}",
                                 color = Color.White, fontSize = 14.sp
                             )
                             Text("Read only · until ${g["expires_at"]}", color = OrbStyle.textMuted, fontSize = 12.sp)
@@ -679,11 +680,11 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         grantPrefs.edit().putBoolean(GRANTS_EXPANDED_KEY, showGrants).apply()
                     }) { Text("${if (showGrants) "▾" else "▸"} $summary", color = OrbStyle.textMuted, fontSize = 13.sp) }
                     if (showGrants) {
-                        // Grants of one mission are listed together so its title appears once.
-                        grants.groupBy { it["mission_id"] as? String ?: "" }.values.forEach { group ->
+                        // Grants of one mission or external session are listed together so its label appears once.
+                        grants.groupBy { OrbApprovalQueue.subjectKey(it) }.values.forEach { group ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    (group[0]["mission_title"] as? String) ?: "Mission",
+                                    OrbApprovalQueue.actorLabel(group[0]),
                                     color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 1,
                                     overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
                                 )
