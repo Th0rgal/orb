@@ -245,11 +245,31 @@ async fn source(
         .get(m.workspace_id)
         .await
         .ok_or_else(|| conflict("Source workspace missing"))?;
-    let root = m.working_directory.clone().unwrap_or_else(|| {
-        crate::workspace::mission_workspace_dir_for_workspace(&ws, m.id)
-            .to_string_lossy()
-            .into_owned()
-    });
+    let root = if let Some(explicit) = m.working_directory.clone() {
+        explicit
+    } else {
+        crate::workspace::ensure_persisted_mission_root_is_available(&ws, m.id).map_err(
+            |error| {
+                conflict(format!(
+                    "persisted mission workspace root is unavailable: {error}"
+                ))
+            },
+        )?;
+        let base = crate::workspace::mission_workspace_root_for_workspace(&ws, m.id);
+        let dir = crate::workspace::mission_workspace_dir_for_root(&base, m.id);
+        if matches!(
+            tokio::fs::symlink_metadata(&dir).await,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        ) && matches!(
+            tokio::fs::symlink_metadata(&base).await,
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink()
+        ) {
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(internal_error)?;
+        }
+        dir.to_string_lossy().into_owned()
+    };
     let root = crate::api::fs::resolve_path_for_workspace(state, m.workspace_id, &root, Some(m.id))
         .await?;
     Ok((Machine::Core, Some(root.to_string_lossy().into_owned())))
@@ -528,23 +548,56 @@ async fn capabilities(state: &AppState) -> Vec<Value> {
     }
     rows
 }
+async fn inspect_source(
+    state: &AppState,
+    control: &ControlState,
+    m: &Mission,
+    actions: &[Transfer],
+) -> Result<Machine, Error> {
+    if let Some(t) = actions.iter().rev().find(|t| t.phase == "activated") {
+        return Ok(t.destination.clone());
+    }
+    if client_placement::is_tagged(&m.project.tags) {
+        let id = control
+            .mission_store
+            .get_latest_mission_run(m.id)
+            .await
+            .map_err(internal_error)?
+            .and_then(|run| {
+                run.owner_actor_id
+                    .strip_prefix("orb-client:")
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "unknown".into());
+        return Ok(Machine::Client { id });
+    }
+    if let Some(p) = remote_grok::placement(&state.config.working_dir, &control.mission_store, m.id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Ok(Machine::Node { id: p.node_id });
+    }
+    Ok(Machine::Core)
+}
+
 pub async fn inspect(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, Error> {
     let control = control_for_user(&state, &user).await;
-    mission(&control, id).await?;
-    let actions = control
+    let m = mission(&control, id).await?;
+    let raw_actions = control
         .mission_store
         .machine_transfers(id)
         .await
         .map_err(internal_error)?;
+    let source = inspect_source(&state, &control, &m, &raw_actions).await?;
     // Clients poll this view. The archived conversation of a transfer can be
     // megabytes and is read through the file operations, never from here.
-    let actions: Vec<Value> = actions.iter().map(listed_action).collect();
+    let actions: Vec<Value> = raw_actions.iter().map(listed_action).collect();
     Ok(Json(
-        json!({"version":1,"features":["links","selection",crate::machine_transfer_archive::FEATURE],"actions":actions,"destinations":capabilities(&state).await}),
+        json!({"version":1,"source":source,"features":["links","selection",crate::machine_transfer_archive::FEATURE],"actions":actions,"destinations":capabilities(&state).await}),
     ))
 }
 
@@ -598,6 +651,66 @@ pub enum Request {
         transfer_id: Uuid,
     },
 }
+fn manifest_has_no_node_entries(action: &Transfer, manifest: &Manifest) -> bool {
+    manifest.links.is_empty()
+        && manifest
+            .files
+            .iter()
+            .all(|f| archive_context(action) && f.path == context_path(action.id))
+}
+
+fn fallback_unmaterialized_node_source(
+    action: &Transfer,
+    side: &str,
+    operation: &Operation,
+    status: StatusCode,
+    detail: &str,
+) -> Option<Result<Value, Error>> {
+    if side != "source"
+        || !matches!(action.source, Machine::Node { .. })
+        || !action
+            .source_root
+            .as_deref()
+            .is_some_and(|r| r.starts_with("mission:"))
+        || status != StatusCode::CONFLICT
+        || !(detail.contains("No such file or directory")
+            || detail.contains(crate::machine_transfer::MISSING_SOURCE_WORKSPACE))
+    {
+        return None;
+    }
+    match operation {
+        Operation::Inventory => Some(Ok(json!({
+            "rows": [],
+            "bytes": 0,
+            "files": 0,
+            "reserved": { "bytes": 0, "files": 0 },
+            "truncated": false,
+            "protected": 0,
+            "limits": {
+                "bytes": crate::machine_transfer::MAX_BYTES,
+                "files": crate::machine_transfer::MAX_FILES,
+            },
+        }))),
+        Operation::Snapshot => {
+            Some(serde_json::to_value(Manifest::default()).map_err(internal_error))
+        }
+        Operation::CheckSource => {
+            if action
+                .manifest
+                .as_ref()
+                .is_some_and(|m| manifest_has_no_node_entries(action, m))
+            {
+                Some(Ok(json!({ "unchanged": true })))
+            } else {
+                Some(Err(conflict(
+                    "Source files changed after preparation; cancel and prepare again",
+                )))
+            }
+        }
+        _ => None,
+    }
+}
+
 async fn adapter(
     state: &AppState,
     action: &Transfer,
@@ -614,17 +727,61 @@ async fn adapter(
     } else {
         &action.destination
     };
-    match machine{
-        Machine::Client{..}=>Err(conflict("Use the native Orb transfer adapter on this computer")),
-        Machine::Node{id}=>node_request(state,id,"/machine-transfer/files",Some(json!({"mission_id":action.mission_id,"transfer_id":action.id,"side":side,"source_mission_id":action.source_root.as_deref().and_then(|r|r.strip_prefix("mission:")).and_then(|r|Uuid::parse_str(r).ok()),"source_transfer":action.source_root.as_deref().and_then(|r|std::path::Path::new(r).parent()).and_then(|r|r.parent()).and_then(|r|r.file_name()).and_then(|r|r.to_str()).and_then(|r|Uuid::parse_str(r).ok()),"operation":operation}))).await,
-        Machine::Core=>{
-            let area=if side=="destination" {
-                let ws=state.workspaces.get(Uuid::nil()).await.ok_or_else(||conflict("Core workspace unavailable"))?;
-                let root=if matches!(operation,Operation::Stage{..}) {crate::workspace::prepare_mission_workspace_in(&ws,&state.mcp,action.mission_id).await.map_err(conflict)?}else{crate::workspace::mission_workspace_dir_for_workspace(&ws,action.mission_id)};
-                root.join(".transfers").join(action.id.to_string()).join(side)
-            }else{state.config.working_dir.join(".sandboxed-sh/transfers").join(action.id.to_string()).join(side)};
-            let source=action.source_root.as_ref().map(std::path::PathBuf::from);
-            tokio::task::spawn_blocking(move||crate::machine_transfer::operate(&area,source.as_deref(),operation)).await.map_err(internal_error)?.map_err(conflict)
+    match machine {
+        Machine::Client { .. } => Err(conflict(
+            "Use the native Orb transfer adapter on this computer",
+        )),
+        Machine::Node { id } => {
+            let payload = json!({"mission_id":action.mission_id,"transfer_id":action.id,"side":side,"source_mission_id":action.source_root.as_deref().and_then(|r|r.strip_prefix("mission:")).and_then(|r|Uuid::parse_str(r).ok()),"source_transfer":action.source_root.as_deref().and_then(|r|std::path::Path::new(r).parent()).and_then(|r|r.parent()).and_then(|r|r.file_name()).and_then(|r|r.to_str()).and_then(|r|Uuid::parse_str(r).ok()),"operation":&operation});
+            match node_request(state, id, "/machine-transfer/files", Some(payload)).await {
+                Ok(value) => Ok(value),
+                Err((status, detail)) => {
+                    if let Some(fallback) = fallback_unmaterialized_node_source(
+                        action, side, &operation, status, &detail,
+                    ) {
+                        fallback
+                    } else {
+                        Err((status, detail))
+                    }
+                }
+            }
+        }
+        Machine::Core => {
+            let area = if side == "destination" {
+                let ws = state
+                    .workspaces
+                    .get(Uuid::nil())
+                    .await
+                    .ok_or_else(|| conflict("Core workspace unavailable"))?;
+                let root = if matches!(operation, Operation::Stage { .. }) {
+                    crate::workspace::prepare_mission_workspace_in(
+                        &ws,
+                        &state.mcp,
+                        action.mission_id,
+                    )
+                    .await
+                    .map_err(conflict)?
+                } else {
+                    crate::workspace::mission_workspace_dir_for_workspace(&ws, action.mission_id)
+                };
+                root.join(".transfers")
+                    .join(action.id.to_string())
+                    .join(side)
+            } else {
+                state
+                    .config
+                    .working_dir
+                    .join(".sandboxed-sh/transfers")
+                    .join(action.id.to_string())
+                    .join(side)
+            };
+            let source = action.source_root.as_ref().map(std::path::PathBuf::from);
+            tokio::task::spawn_blocking(move || {
+                crate::machine_transfer::operate(&area, source.as_deref(), operation)
+            })
+            .await
+            .map_err(internal_error)?
+            .map_err(conflict)
         }
     }
 }
@@ -698,6 +855,9 @@ async fn bulk_copy(state: &Arc<AppState>, a: Transfer) -> Result<Value, Error> {
     };
     match &a.source {
         Machine::Core => {}
+        Machine::Node { .. } if manifest_has_no_node_entries(&a, &manifest) => {
+            return Err(conflict(UNSUPPORTED_OPERATION));
+        }
         Machine::Node { id } => node_supports_bulk(state, id).await?,
         Machine::Client { .. } => return Err(conflict(UNSUPPORTED_OPERATION)),
     }
@@ -1905,5 +2065,97 @@ mod portable_context_tests {
         );
         include_context_file(&a, &mut manifest).unwrap();
         assert!(include_context_file(&a, &mut manifest).is_err());
+    }
+
+    #[test]
+    fn unmaterialized_node_workspace_fallback_covers_queued_mission_and_fences_deletions() {
+        let mid = Uuid::new_v4();
+        let mut transfer = action("large history\n".repeat(12_000));
+        transfer.source = Machine::Node {
+            id: "old-agent".into(),
+        };
+        transfer.destination = Machine::Core;
+        transfer.source_root = Some(format!("mission:{mid}"));
+
+        let inv = fallback_unmaterialized_node_source(
+            &transfer,
+            "source",
+            &Operation::Inventory,
+            StatusCode::CONFLICT,
+            "No such file or directory (os error 2)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(inv["files"], 0);
+        assert_eq!(inv["bytes"], 0);
+
+        let snap = fallback_unmaterialized_node_source(
+            &transfer,
+            "source",
+            &Operation::Snapshot,
+            StatusCode::CONFLICT,
+            crate::machine_transfer::MISSING_SOURCE_WORKSPACE,
+        )
+        .unwrap()
+        .unwrap();
+        let mut manifest: Manifest = serde_json::from_value(snap).unwrap();
+        assert!(manifest.files.is_empty());
+        include_context_file(&transfer, &mut manifest).unwrap();
+        assert!(manifest_has_no_node_entries(&transfer, &manifest));
+        transfer.manifest = Some(manifest);
+
+        let checked = fallback_unmaterialized_node_source(
+            &transfer,
+            "source",
+            &Operation::CheckSource,
+            StatusCode::CONFLICT,
+            "No such file or directory (os error 2)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(checked["unchanged"], true);
+
+        // If the snapshot recorded a node-resident file and the directory later vanished,
+        // CheckSource must refuse activation rather than treating it as unchanged.
+        let mut with_node_file = transfer.clone();
+        with_node_file
+            .manifest
+            .as_mut()
+            .unwrap()
+            .files
+            .push(crate::machine_transfer::Entry {
+                path: "notes.txt".into(),
+                bytes: 5,
+                sha256: "abc".into(),
+                executable: false,
+            });
+        assert!(!manifest_has_no_node_entries(
+            &with_node_file,
+            with_node_file.manifest.as_ref().unwrap()
+        ));
+        let err = fallback_unmaterialized_node_source(
+            &with_node_file,
+            "source",
+            &Operation::CheckSource,
+            StatusCode::CONFLICT,
+            "No such file or directory (os error 2)",
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(err.1.contains("Source files changed after preparation"));
+
+        // Staged transfer checkpoints (`source_root` not starting with `mission:`) never fallback.
+        let mut from_checkpoint = transfer;
+        from_checkpoint.source_root =
+            Some("/var/lib/sandboxed-node/work/.transfers/x/destination/workspace".into());
+        assert!(fallback_unmaterialized_node_source(
+            &from_checkpoint,
+            "source",
+            &Operation::Inventory,
+            StatusCode::CONFLICT,
+            "No such file or directory (os error 2)",
+        )
+        .is_none());
     }
 }

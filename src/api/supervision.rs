@@ -1169,6 +1169,42 @@ fn is_conversation_fork(tags: &[String]) -> bool {
     tags.iter().any(|tag| tag.starts_with("fork-workspace:"))
 }
 
+fn collect_forked_parent_ids(missions: &[crate::api::mission_store::Mission]) -> HashSet<Uuid> {
+    missions
+        .iter()
+        .flat_map(|m| m.project.tags.iter())
+        .filter_map(|tag| tag.strip_prefix("fork-of:"))
+        .filter_map(|raw| Uuid::parse_str(raw).ok())
+        .collect()
+}
+
+/// Only actively orchestrating, unretired parents should receive idle-worker
+/// notifications. Archived (`Acknowledged`), `Paused`, terminal, `superseded`,
+/// or already-forked parents must never be resurrected over leftover children
+/// (sidebar-hierarchy.md invariant W1).
+fn parent_accepts_idle_worker_ping(
+    parent: &crate::api::mission_store::Mission,
+    forked_parent_ids: &HashSet<Uuid>,
+) -> bool {
+    if !matches!(
+        parent.status,
+        MissionStatus::Active
+            | MissionStatus::Pending
+            | MissionStatus::WaitingBackground
+            | MissionStatus::AwaitingUser
+    ) {
+        return false;
+    }
+    if parent.project.tags.iter().any(|tag| {
+        tag == "superseded"
+            || tag.starts_with("superseded_by:")
+            || tag.starts_with("superseded-by:")
+    }) {
+        return false;
+    }
+    !forked_parent_ids.contains(&parent.id)
+}
+
 /// True when the child crossed the idle threshold well before this process
 /// started, so the previous process had several passes to report it. A child
 /// that crossed it around the restart is reported: a rare repeat is better
@@ -1207,6 +1243,8 @@ async fn notify_parents_of_idle_children(
     // restart, and each restart used to ping the parent again.
     static STARTED: std::sync::OnceLock<chrono::DateTime<chrono::Utc>> = std::sync::OnceLock::new();
     let started = *STARTED.get_or_init(chrono::Utc::now);
+
+    let forked_parent_ids = collect_forked_parent_ids(&missions);
 
     let candidates: Vec<_> = missions
         .iter()
@@ -1271,11 +1309,11 @@ async fn notify_parents_of_idle_children(
         let Some(parent_id) = child.parent_mission_id else {
             continue;
         };
-        // Never resurrect a finished orchestration over a leftover child; a
-        // terminal boss's stale workers are garbage-collection material, not
-        // an emergency.
+        // Never resurrect a finished, archived (`Acknowledged`), paused, or
+        // superseded/forked orchestration over a leftover child; a retired
+        // boss's stale workers are garbage-collection material, not an emergency.
         match mission_store.get_mission(parent_id).await {
-            Ok(Some(parent)) if !parent.status.is_terminal() => {}
+            Ok(Some(parent)) if parent_accepts_idle_worker_ping(&parent, &forked_parent_ids) => {}
             Ok(_) => continue,
             Err(e) => {
                 tracing::warn!(
@@ -1746,5 +1784,175 @@ mod tests {
                 "{status} must not trigger a parent ping"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn idle_worker_watchdog_never_resurrects_archived_paused_superseded_or_forked_parent() {
+        use crate::api::mission_store::MissionProjectPatch;
+        let store = crate::api::mission_store::InMemoryMissionStore::new();
+        let stale_ts = (chrono::Utc::now() - chrono::Duration::seconds(3800)).to_rfc3339();
+
+        let make_stale_worker = |parent_id: Uuid, status: MissionStatus| {
+            let store = store.clone();
+            let stale_ts = stale_ts.clone();
+            async move {
+                let w = store
+                    .create_mission_with_parent(
+                        Some("worker"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        Some(parent_id),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                store.update_mission_status(w.id, status).await.unwrap();
+                store.test_set_updated_at(w.id, stale_ts).await.unwrap();
+                w
+            }
+        };
+
+        // Replay the 2026-10-29 `86d91cc3` -> `65407660` incident:
+        // 1. Archived (`Acknowledged`) parent with an idle `Acknowledged` worker.
+        let archived_parent = store
+            .create_mission(
+                Some("Orb: leaninification"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(archived_parent.id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        make_stale_worker(archived_parent.id, MissionStatus::Acknowledged).await;
+
+        // 2. Active parent that has already been forked forward (`fork-of:<id>`).
+        let forked_parent = store
+            .create_mission(Some("Pre-fork parent"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        store
+            .update_mission_status(forked_parent.id, MissionStatus::AwaitingUser)
+            .await
+            .unwrap();
+        let fork_successor = store
+            .create_mission(Some("Pre-fork parent"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                fork_successor.id,
+                MissionProjectPatch {
+                    tags: Some(vec![
+                        format!("fork-workspace:{}", forked_parent.id),
+                        format!("fork-of:{}", forked_parent.id),
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        make_stale_worker(forked_parent.id, MissionStatus::Acknowledged).await;
+
+        // 3. Paused parent and superseded parent.
+        let paused_parent = store
+            .create_mission(Some("Paused parent"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        store
+            .update_mission_status(paused_parent.id, MissionStatus::Paused)
+            .await
+            .unwrap();
+        make_stale_worker(paused_parent.id, MissionStatus::AwaitingUser).await;
+
+        let superseded_parent = store
+            .create_mission(
+                Some("Superseded parent"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(superseded_parent.id, MissionStatus::AwaitingUser)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                superseded_parent.id,
+                MissionProjectPatch {
+                    tags: Some(vec!["superseded".to_string()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        make_stale_worker(superseded_parent.id, MissionStatus::Acknowledged).await;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+        let mut notified = std::collections::HashMap::new();
+        notify_parents_of_idle_children(&store, &cmd_tx, 3600, &mut notified).await;
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "retired, archived, paused, superseded, or forked parents must never receive worker-watchdog messages"
+        );
+
+        // Positive control: a genuinely live, unretired, non-forked parent DOES get notified.
+        let live_parent = store
+            .create_mission(
+                Some("Active orchestrator"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(live_parent.id, MissionStatus::Active)
+            .await
+            .unwrap();
+        make_stale_worker(live_parent.id, MissionStatus::Acknowledged).await;
+
+        let handle = tokio::spawn(async move {
+            if let Some(ControlCommand::UserMessage {
+                target_mission_id,
+                source,
+                respond,
+                ..
+            }) = cmd_rx.recv().await
+            {
+                let _ = respond.send(UserMessageAck::Queued);
+                Some((target_mission_id, source))
+            } else {
+                None
+            }
+        });
+        notify_parents_of_idle_children(&store, &cmd_tx, 3600, &mut notified).await;
+        let received = handle.await.unwrap();
+        assert_eq!(
+            received,
+            Some((
+                Some(live_parent.id),
+                Some("idle-worker-watchdog".to_string())
+            ))
+        );
     }
 }

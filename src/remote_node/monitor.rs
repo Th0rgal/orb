@@ -457,16 +457,54 @@ pub fn select_node_auto_with_source_and_resource_reservations(
     reservations: &HashMap<String, u32>,
     disk_reservations: &HashMap<String, u64>,
 ) -> Result<String, PlacementError> {
+    select_node_auto_with_estimated_disk_and_source(
+        nodes,
+        statuses,
+        requirements,
+        0,
+        min_disk_bytes,
+        min_mem_bytes,
+        min_protocol_version,
+        source,
+        reservations,
+        disk_reservations,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Pure placement inputs stay explicit for auditability.
+pub fn select_node_auto_with_estimated_disk_and_source(
+    nodes: &[RemoteNodeConfig],
+    statuses: &HashMap<String, CachedNodeStatus>,
+    requirements: &[String],
+    estimated_job_disk_bytes: u64,
+    min_disk_bytes: u64,
+    min_mem_bytes: u64,
+    min_protocol_version: u32,
+    source: Option<SourceBundleRequirement>,
+    reservations: &HashMap<String, u32>,
+    disk_reservations: &HashMap<String, u64>,
+) -> Result<String, PlacementError> {
     let mut reasons: Vec<(String, String)> = Vec::new();
-    // (queued, specialized, load, capacity, mem_avail, id)
+    // (queued, specialized, load, capacity, soft_disk_pressure, mem_avail, disk_headroom_gib, id)
     //
     // `specialized` keeps scarce GPU runners available for inference while a
     // normal CPU runner still has an immediate slot. It is deliberately sorted
     // after `queued`: an idle GPU runner is still better than queueing behind a
     // saturated CPU-only node. Within the same tier, normalized utilization
     // lets two-slot nodes consume their second slot before one-slot nodes are
-    // overloaded.
-    let mut eligible: Vec<(bool, bool, u32, u32, u64, String)> = Vec::new();
+    // overloaded, and `soft_disk_pressure` steers away from nodes inside the
+    // 20 GiB GC hysteresis band when roomy peers have equal load.
+    struct PlacementCandidate {
+        queued: bool,
+        specialized: bool,
+        load: u32,
+        capacity: u32,
+        soft_disk_pressure: bool,
+        mem_available_bytes: u64,
+        disk_headroom_gib: u32,
+        id: String,
+    }
+    let mut eligible: Vec<PlacementCandidate> = Vec::new();
     for node in nodes {
         let cached = statuses.get(&node.id);
         let status = cached
@@ -517,19 +555,17 @@ pub fn select_node_auto_with_source_and_resource_reservations(
             continue;
         }
         let disk_reserved = disk_reservations.get(&node.id).copied().unwrap_or(0);
-        let effective_disk_available = heartbeat.disk_available_bytes.saturating_sub(disk_reserved);
-        if effective_disk_available < min_disk_bytes {
-            reasons.push((
-                node.id.clone(),
-                format!(
-                    "low disk ({} GiB effective available after {} GiB reserved, {} GiB required)",
-                    effective_disk_available / (1 << 30),
-                    disk_reserved / (1 << 30),
-                    min_disk_bytes / (1 << 30),
-                ),
-            ));
-            continue;
-        }
+        let disk_verdict = match heartbeat.check_disk_admission(
+            disk_reserved,
+            estimated_job_disk_bytes,
+            min_disk_bytes,
+        ) {
+            Ok(verdict) => verdict,
+            Err(reason) => {
+                reasons.push((node.id.clone(), reason));
+                continue;
+            }
+        };
         if heartbeat.mem_available_bytes < min_mem_bytes {
             reasons.push((
                 node.id.clone(),
@@ -562,27 +598,35 @@ pub fn select_node_auto_with_source_and_resource_reservations(
         let queued = load >= heartbeat.capacity_total;
         let specialized = labels.iter().any(|label| label == "gpu")
             && !requirements.iter().any(|requirement| requirement == "gpu");
-        eligible.push((
+        eligible.push(PlacementCandidate {
             queued,
             specialized,
             load,
-            heartbeat.capacity_total.max(1),
-            heartbeat.mem_available_bytes,
-            node.id.clone(),
-        ));
+            capacity: heartbeat.capacity_total.max(1),
+            soft_disk_pressure: disk_verdict.soft_pressure,
+            mem_available_bytes: heartbeat.mem_available_bytes,
+            disk_headroom_gib: disk_verdict.headroom_gib,
+            id: node.id.clone(),
+        });
     }
     eligible.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then(a.1.cmp(&b.1))
+        a.queued
+            .cmp(&b.queued)
+            .then(a.specialized.cmp(&b.specialized))
             // Compare load/capacity without floating point.
-            .then((a.2 as u64 * b.3 as u64).cmp(&(b.2 as u64 * a.3 as u64)))
-            .then(b.4.cmp(&a.4))
-            .then(a.5.cmp(&b.5))
+            .then(
+                (u64::from(a.load) * u64::from(b.capacity))
+                    .cmp(&(u64::from(b.load) * u64::from(a.capacity))),
+            )
+            .then(a.soft_disk_pressure.cmp(&b.soft_disk_pressure))
+            .then(b.mem_available_bytes.cmp(&a.mem_available_bytes))
+            .then(b.disk_headroom_gib.cmp(&a.disk_headroom_gib))
+            .then(a.id.cmp(&b.id))
     });
     eligible
         .into_iter()
         .next()
-        .map(|(_, _, _, _, _, id)| id)
+        .map(|candidate| candidate.id)
         .ok_or(PlacementError { reasons })
 }
 
@@ -697,12 +741,37 @@ impl FleetMonitor {
         reservations: &HashMap<String, u32>,
         disk_reservations: &HashMap<String, u64>,
     ) -> Result<String, PlacementError> {
+        self.place_auto_with_estimated_disk_and_source(
+            settings,
+            requirements,
+            0,
+            min_disk_bytes,
+            min_protocol_version,
+            source,
+            reservations,
+            disk_reservations,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_auto_with_estimated_disk_and_source(
+        &self,
+        settings: &RemoteNodeSettings,
+        requirements: &[String],
+        estimated_job_disk_bytes: u64,
+        min_disk_bytes: u64,
+        min_protocol_version: u32,
+        source: Option<SourceBundleRequirement>,
+        reservations: &HashMap<String, u32>,
+        disk_reservations: &HashMap<String, u64>,
+    ) -> Result<String, PlacementError> {
         let (nodes, mut cordoned_reasons) = self.partition_cordoned(&settings.nodes);
         let statuses = self.statuses.read().unwrap_or_else(|e| e.into_inner());
-        select_node_auto_with_source_and_resource_reservations(
+        select_node_auto_with_estimated_disk_and_source(
             &nodes,
             &statuses,
             requirements,
+            estimated_job_disk_bytes,
             min_disk_bytes,
             env_gb_bytes("REMOTE_NODE_MIN_MEM_GB", DEFAULT_MIN_MEM_GB),
             min_protocol_version,
@@ -753,6 +822,10 @@ pub struct RemoteNodeView {
     pub mem_available_bytes: Option<u64>,
     pub disk_total_bytes: Option<u64>,
     pub disk_available_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_free_disk_bytes: Option<u64>,
+    #[serde(default)]
+    pub disk_pressure_pinned: bool,
     pub cached_toolchains: Vec<String>,
     pub lean_runtime_ready: Option<bool>,
     pub source_bundle_capacity: Option<super::protocol::SourceBundleCapacity>,
@@ -805,6 +878,8 @@ impl RemoteNodeView {
             mem_available_bytes: heartbeat.map(|h| h.mem_available_bytes),
             disk_total_bytes: heartbeat.map(|h| h.disk_total_bytes),
             disk_available_bytes: heartbeat.map(|h| h.disk_available_bytes),
+            min_free_disk_bytes: heartbeat.and_then(|h| h.min_free_disk_bytes),
+            disk_pressure_pinned: heartbeat.is_some_and(|h| h.disk_pressure_pinned),
             cached_toolchains: heartbeat
                 .map(|h| h.cached_toolchains.clone())
                 .unwrap_or_default(),
@@ -1625,5 +1700,99 @@ mod tests {
         }
         assert_eq!(fleet.recent_outcomes(usize::MAX).len(), RECENT_OUTCOMES_CAP);
         assert_eq!(fleet.recent_outcomes(10).len(), 10);
+    }
+
+    #[test]
+    fn placement_honors_node_disk_floor_pinned_pressure_and_soft_hysteresis() {
+        const GIB: u64 = 1 << 30;
+        let nodes = vec![node_config("ashur"), node_config("babylon")];
+
+        // 1. Node floor (80 GiB) overrides lower Core floor (20 GiB): Ashur at 50 GiB is rejected.
+        let mut statuses = HashMap::new();
+        let mut ashur = cached_online("ashur", &["lean"], 50, 62, 6, 0, 0);
+        ashur.last_heartbeat.as_mut().unwrap().min_free_disk_bytes = Some(80 * GIB);
+        statuses.insert("ashur".to_string(), ashur);
+
+        let err = select_node_auto(
+            &[node_config("ashur")],
+            &statuses,
+            &["lean".to_string()],
+            20 * GIB,
+            8 * GIB,
+        )
+        .unwrap_err();
+        assert!(err.reasons[0].1.contains("low disk"));
+        assert!(err.reasons[0].1.contains("80 GiB required"));
+
+        // 2. Estimated job disk + node floor: 30 GiB floor + 10 GiB estimated = 40 GiB > 35 GiB free.
+        let mut statuses_est = HashMap::new();
+        let mut ashur_est = cached_online("ashur", &["lean"], 35, 62, 6, 0, 0);
+        ashur_est
+            .last_heartbeat
+            .as_mut()
+            .unwrap()
+            .min_free_disk_bytes = Some(30 * GIB);
+        statuses_est.insert("ashur".to_string(), ashur_est);
+        let est_err = select_node_auto_with_estimated_disk_and_source(
+            &[node_config("ashur")],
+            &statuses_est,
+            &["lean".to_string()],
+            10 * GIB,
+            20 * GIB,
+            8 * GIB,
+            1,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(est_err.reasons[0].1.contains("40 GiB required"));
+
+        // 3. Pinned disk pressure rejects placement even if nominal free bytes > Core floor.
+        let mut statuses_pinned = HashMap::new();
+        let mut ashur_pinned = cached_online("ashur", &["lean"], 50, 62, 6, 0, 0);
+        {
+            let hb = ashur_pinned.last_heartbeat.as_mut().unwrap();
+            hb.min_free_disk_bytes = Some(30 * GIB);
+            hb.disk_pressure_pinned = true;
+        }
+        statuses_pinned.insert("ashur".to_string(), ashur_pinned);
+        let pin_err = select_node_auto(
+            &[node_config("ashur")],
+            &statuses_pinned,
+            &["lean".to_string()],
+            20 * GIB,
+            8 * GIB,
+        )
+        .unwrap_err();
+        assert!(pin_err.reasons[0].1.contains("disk pressure pinned"));
+
+        // 4. Soft-pressure hysteresis: Ashur has MORE free RAM (62 GiB vs 31 GiB) at equal 0 load,
+        //    but sits inside the 20 GiB hysteresis band (42 GiB free vs 30 GiB floor -> 12 GiB headroom),
+        //    so auto-placement steers to roomy Babylon (280 GiB free -> 250 GiB headroom).
+        let mut statuses_hyst = HashMap::new();
+        let mut ashur_soft = cached_online("ashur", &["lean"], 42, 62, 6, 0, 0);
+        ashur_soft
+            .last_heartbeat
+            .as_mut()
+            .unwrap()
+            .min_free_disk_bytes = Some(30 * GIB);
+        let mut babylon_roomy = cached_online("babylon", &["lean"], 280, 31, 6, 0, 0);
+        babylon_roomy
+            .last_heartbeat
+            .as_mut()
+            .unwrap()
+            .min_free_disk_bytes = Some(30 * GIB);
+        statuses_hyst.insert("ashur".to_string(), ashur_soft);
+        statuses_hyst.insert("babylon".to_string(), babylon_roomy);
+        let picked = select_node_auto(
+            &nodes,
+            &statuses_hyst,
+            &["lean".to_string()],
+            20 * GIB,
+            8 * GIB,
+        )
+        .unwrap();
+        assert_eq!(picked, "babylon");
     }
 }

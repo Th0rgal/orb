@@ -87,12 +87,74 @@ pub struct NodeHeartbeat {
     /// Absent on legacy receivers; additive to v4, not a new payload protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_bundle_capacity: Option<SourceBundleCapacity>,
+    /// Node-configured free-disk floor (`SANDBOXED_NODE_MIN_FREE_GB * GiB`).
+    /// `None` on legacy nodes that predate floor advertisement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_free_disk_bytes: Option<u64>,
+    /// Set when non-reclaimable storage pins free disk below `min_free_disk_bytes`
+    /// so Core avoids dispatching onto a disk-pinned node and the node preserves
+    /// warm (`< 2h`) shared Lake caches above the emergency floor.
+    #[serde(default)]
+    pub disk_pressure_pinned: bool,
     /// Managed-auth profiles this node can inject into raw jobs (see
     /// `JobPayload::RawCommand::managed_auth`), e.g. `["grok"]` when
     /// `SANDBOXED_NODE_GROK_HOME` holds a readable `auth.json`. Empty on nodes
     /// that predate managed auth or have none configured.
     #[serde(default)]
     pub managed_auth: Vec<String>,
+}
+
+/// Width of the GC hysteresis band above the effective disk floor (`20 GiB`),
+/// matching `cache_gc_target(floor, total)` on `sandboxed-node`.
+pub const DISK_HYSTERESIS_BYTES: u64 = 20 << 30;
+
+impl NodeHeartbeat {
+    /// Evaluate disk-floor and pinned-pressure placement admission via
+    /// `orb_node_disk_admission_step`.
+    ///
+    /// When `estimated_job_disk_bytes > 0` (declarative `lean_build` jobs) and
+    /// the node advertises `min_free_disk_bytes`, `node_floor_bytes` includes
+    /// `estimated_job_disk_bytes` so Core placement matches `sandboxed-node`'s
+    /// `validate_disk_admission` (`available >= estimated + min_free_bytes`).
+    pub fn check_disk_admission(
+        &self,
+        reserved_bytes: u64,
+        estimated_job_disk_bytes: u64,
+        core_min_disk_bytes: u64,
+    ) -> Result<crate::orb_spec::NodeDiskAdmissionVerdict, String> {
+        let node_floor_bytes = self
+            .min_free_disk_bytes
+            .map(|floor| floor.saturating_add(estimated_job_disk_bytes))
+            .unwrap_or(0);
+        let verdict =
+            crate::orb_spec::node_disk_admission_step(crate::orb_spec::NodeDiskAdmissionInput {
+                free_bytes: self.disk_available_bytes,
+                reserved_bytes,
+                node_floor_bytes,
+                core_floor_bytes: core_min_disk_bytes,
+                hysteresis_bytes: DISK_HYSTERESIS_BYTES,
+                node_pinned_pressure: self.disk_pressure_pinned,
+            });
+        if verdict.admitted {
+            return Ok(verdict);
+        }
+        let effective_free = self.disk_available_bytes.saturating_sub(reserved_bytes);
+        let effective_floor = node_floor_bytes.max(core_min_disk_bytes);
+        match verdict.action {
+            crate::orb_spec::NodeDiskAdmissionAction::RejectPinnedPressure => Err(format!(
+                "disk pressure pinned ({} GiB effective available after {} GiB reserved, {} GiB node floor pinned by non-cache storage)",
+                effective_free >> 30,
+                reserved_bytes >> 30,
+                self.min_free_disk_bytes.unwrap_or(effective_floor) >> 30,
+            )),
+            _ => Err(format!(
+                "low disk ({} GiB effective available after {} GiB reserved, {} GiB required)",
+                effective_free >> 30,
+                reserved_bytes >> 30,
+                effective_floor >> 30,
+            )),
+        }
+    }
 }
 
 /// Decoded file-byte limits enforced by the receiver for each bundle mode.
@@ -883,6 +945,8 @@ mod tests {
         assert_eq!(heartbeat.cpu_total, 0);
         assert_eq!(heartbeat.mem_total_bytes, 0);
         assert_eq!(heartbeat.disk_available_bytes, 0);
+        assert_eq!(heartbeat.min_free_disk_bytes, None);
+        assert!(!heartbeat.disk_pressure_pinned);
         assert_eq!(heartbeat.active_jobs, 0);
         assert_eq!(heartbeat.queued_jobs, 0);
         assert!(heartbeat.cached_toolchains.is_empty());
@@ -912,6 +976,8 @@ mod tests {
             side_jobs: 0,
             cached_toolchains: vec![],
             source_bundle_capacity: None,
+            min_free_disk_bytes: Some(30 << 30),
+            disk_pressure_pinned: false,
             lean_runtime_ready: Some(true),
             managed_auth: Vec::new(),
         };

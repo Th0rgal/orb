@@ -330,6 +330,8 @@ mod tests {
                 side_jobs: 0,
                 cached_toolchains: vec![],
                 source_bundle_capacity: Some(crate::node::lean::source_bundle_capacity()),
+                min_free_disk_bytes: Some(10 << 30),
+                disk_pressure_pinned: false,
                 lean_runtime_ready: Some(true),
                 managed_auth: Vec::new(),
             })

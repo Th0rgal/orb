@@ -1,6 +1,7 @@
 import { api, ApiError, getMission, type Mission } from "./api";
 import { machineIdentity, nativeInvoke } from "./clientRuns";
 import { localBinding, refreshLocalAgents, rememberBinding } from "./localAgents";
+import { nodeLabel } from "./machines/nodes";
 export type Machine = { kind: "core" } | { kind: "node" | "client"; id: string };
 export interface TransferFile { path: string; bytes: number; sha256: string; executable: boolean }
 export interface TransferLink { path: string; target: string }
@@ -17,9 +18,9 @@ export interface TransferAction {
   created_at: string;
 }
 export interface Destination { machine: Machine; label: string; available: boolean; reason?: string; harnesses?: string[] }
-/** `features` is absent from a backend that predates it. */
-export interface TransferView { version: number; features?: string[]; actions: TransferAction[]; destinations: Destination[] }
-export const machineLabel = (m: Machine) => m.kind === "core" ? "Core" : m.kind === "client" ? "This computer" : m.id;
+/** `features` and `source` are absent from a backend that predates them. */
+export interface TransferView { version: number; source?: Machine; features?: string[]; actions: TransferAction[]; destinations: Destination[] }
+export const machineLabel = (m: Machine) => m.kind === "core" ? "Core" : m.kind === "client" ? "This computer" : nodeLabel(m.id);
 export const sameMachine = (a: Machine, b: Machine) => a.kind === b.kind && (a.kind === "core" || (b.kind !== "core" && a.id === b.id));
 export const activeTransfer = (a: TransferAction) => !["activated", "cancelled"].includes(a.phase);
 export async function inspectTransfer(id: string): Promise<TransferView> {

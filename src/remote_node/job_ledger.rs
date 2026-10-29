@@ -897,6 +897,9 @@ pub async fn remove(working_dir: &Path, job_id: Uuid) {
         if let Err(err) = store(working_dir, &handles).await {
             tracing::warn!(?err, "remote job ledger removal failed");
         }
+        if let Some(m) = crate::managed::global() {
+            m.notify_activity_change();
+        }
     }
 }
 

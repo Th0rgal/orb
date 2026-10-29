@@ -102,11 +102,28 @@ native-resume versus fresh-session mode.
 ## Implementation and current bounds
 
 The HTTP contract is `GET/POST /api/control/missions/:id/machine-transfer`.
-GET reports version 1, destinations and durable actions. POST accepts prepare,
-source/destination file operations, local snapshot/verification receipts,
-activate and cancel. Reopening the menu recovers a pending action. A failed
-copy keeps the source fenced until retry or **Cancel**; cancellation restores
-its availability without changing placement. Activation is idempotent.
+GET reports version 1, the mission's authoritative `source` machine, destinations
+and durable actions. POST accepts prepare, source/destination file operations,
+local snapshot/verification receipts, activate and cancel. Reopening the menu
+recovers a pending action. A failed copy keeps the source fenced until retry or
+**Cancel**; cancellation restores its availability without changing placement.
+Activation is idempotent.
+
+Unmaterialized per-mission workspaces (for example a remote or Core mission
+cancelled while still queued before its first job created `<work_root>/<id>` or
+`<ws>/workspaces/mission-<id>`) carry zero workspace files and travel cleanly
+with their portable conversation archive. Both `sandboxed-node` and Core
+materialize a missing generated mission directory on `inventory`/`snapshot`
+after verifying the parent root is a live non-symlink directory, and Core
+synthesizes the empty inventory/snapshot and unchanged empty `check_source`
+against un-upgraded leaf nodes returning missing-directory conflicts for
+`mission:<uuid>` roots (skipping `bulk_copy` archive pack when no node-resident
+files exist). Explicit user-chosen `working_directory` paths that do not exist
+still fail closed with `"Source workspace directory does not exist"`. `<ChangeMachine>`
+reads the authoritative source machine from active transfer actions, `GET
+/machine-transfer` (`view.source`), and remembered node placement so cancelling
+a queued remote job never flips the header to `Core → Core` or disables `Core`
+in the destination menu.
 
 SQLite's `machine_transfers` action journal and mission placement commit in one
 transaction. An activation reserves a terminal generation in `mission_runs`.

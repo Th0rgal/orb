@@ -160,11 +160,41 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(OrbManaged.owner(m), .mission("m1"))
         m.reap_at = "2026-10-23T12:04:10Z"; m.reap_reason = "owner_completed"
         XCTAssertEqual(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")), "Reaps in 5 min (owner completed)")
+        m.reap_at = "2026-10-23T12:15:00Z"; m.reap_reason = "working_owner_idle"
+        XCTAssertEqual(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")), "Reaps in 15 min (idle)")
+        m.reap_at = "2026-10-24T10:00:00Z"; m.deletable_at = "2026-10-24T10:00:00Z"; m.reap_reason = "awaiting_deletable_at:owner_completed"
+        XCTAssertEqual(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")), "Deletes when 24h lease ends in 22 h 00 min")
+        m.deletable_at = nil
         m.reap_at = "2026-10-23T11:59:00Z"; m.reap_reason = "owner_interrupted_idle"
         XCTAssertEqual(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")), "Reap due (owner interrupted, idle)")
         m.reap_at = "2026-10-23T13:30:00Z"; m.reap_reason = "idle_no_owner"
         XCTAssertEqual(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")), "Reaps in 1 h 30 min (idle, no owner)")
+        m.state = "stopped"
+        XCTAssertTrue(OrbManaged.isStopped(m))
+        XCTAssertTrue(OrbManaged.canResume(m, busy: false))
+        XCTAssertFalse(OrbManaged.canResume(m, busy: true))
+        XCTAssertEqual(OrbManaged.providerLabel("hetzner"), "Hetzner")
+        XCTAssertEqual(OrbManaged.providerLabel("vastai"), "Vast.ai")
+        XCTAssertEqual(OrbManaged.providerLabel("scaleway"), "Scaleway")
         m.state = "destroyed"
         XCTAssertNil(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")))
+    }
+
+    func testDecodesSharedMultiProviderResponseFixture() throws {
+        let data = try Data(contentsOf: OrbSpec.url("fixtures/managed-machines-response.json"))
+        let r = try OrbManaged.decode(data)
+        XCTAssertTrue(r.enabled)
+        XCTAssertEqual(r.provider, "boat")
+        let providers = try XCTUnwrap(r.providers)
+        XCTAssertEqual(providers.map(\.provider), ["boat", "hetzner", "vastai", "scaleway"])
+        XCTAssertEqual(providers.map(\.display_name), ["boat.dev", "Hetzner Cloud", "Vast.ai", "Scaleway"])
+        XCTAssertEqual(providers.map(\.configured), [true, true, false, false])
+        XCTAssertEqual(providers.map(\.supports_free_stop), [true, false, false, false])
+        XCTAssertEqual(providers.map(\.supports_snapshots), [true, false, false, false])
+        XCTAssertEqual(providers[1].sizes.first(where: { $0.size == "cax31" })?.arch, "arm64")
+        XCTAssertEqual(providers[2].sizes.first(where: { $0.size == "rtx4090" })?.gpu, "RTX 4090")
+        XCTAssertEqual(r.machines.count, 1)
+        XCTAssertEqual(r.machines[0].provider, "hetzner")
+        XCTAssertFalse(OrbManaged.canStop(r.machines[0], providers: providers))
     }
 }

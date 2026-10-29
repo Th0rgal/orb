@@ -804,6 +804,203 @@ pub struct MissionStatusCounts {
     pub acknowledged: usize,
 }
 
+/// Sort mode for global conversation search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationSearchSort {
+    #[default]
+    Relevance,
+    Recent,
+}
+
+/// Role filter for global conversation search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationSearchRole {
+    #[default]
+    All,
+    User,
+    Assistant,
+    Title,
+    Tool,
+}
+
+/// Indexing state reported alongside conversation search results so clients
+/// never mislabel an incomplete background backfill as "no results".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchIndexState {
+    #[default]
+    Ready,
+    Indexing,
+}
+
+/// Coverage snapshot of the user's conversation search projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchIndexCoverage {
+    pub schema_version: u32,
+    pub state: SearchIndexState,
+    pub indexed_missions: usize,
+    pub total_missions: usize,
+}
+
+/// UTF-16 code-unit highlight span within a plain-text excerpt (`[start, end)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHighlightRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Query contract for full-history conversation search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationSearchQuery {
+    pub query: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub role: ConversationSearchRole,
+    #[serde(default)]
+    pub include_tools: bool,
+    #[serde(default = "default_true_search_flag")]
+    pub include_archived: bool,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub sort: ConversationSearchSort,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub max_per_mission: Option<usize>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub mission_id: Option<Uuid>,
+}
+
+impl Default for ConversationSearchQuery {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            project: None,
+            role: ConversationSearchRole::All,
+            include_tools: false,
+            include_archived: true,
+            since: None,
+            until: None,
+            sort: ConversationSearchSort::Relevance,
+            limit: None,
+            max_per_mission: None,
+            cursor: None,
+            mission_id: None,
+        }
+    }
+}
+
+fn default_true_search_flag() -> bool {
+    true
+}
+
+/// Compact search hit representing one matching passage or conversation title.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationSearchHit {
+    pub mission_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub status: MissionStatus,
+    pub backend: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_mission_id: Option<Uuid>,
+    /// Durable passage locator (`title`, `msg:id:<id>`, `msg:bubble:<id>`,
+    /// `msg:seq:<seq>`, `turn:tools:<seq>`, `cloud:<turn>:prompt|answer`).
+    pub locator: String,
+    /// `title`, `user`, `assistant`, or `tool`.
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    pub timestamp: String,
+    pub excerpt: String,
+    #[serde(default)]
+    pub highlights: Vec<SearchHighlightRange>,
+    /// Total matching passages found in this conversation for the query.
+    pub mission_match_count: usize,
+    pub score: f64,
+}
+
+/// Paginated response for global conversation search.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConversationSearchResponse {
+    pub hits: Vec<ConversationSearchHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub coverage: SearchIndexCoverage,
+}
+
+/// Bounded context lookup parameters around a durable passage locator.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PassageContextQuery {
+    pub locator: String,
+    #[serde(default)]
+    pub sequence: Option<i64>,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    #[serde(default)]
+    pub before: Option<usize>,
+    #[serde(default)]
+    pub after: Option<usize>,
+    #[serde(default)]
+    pub query: Option<String>,
+    /// When true, also returns surrounding `StoredEvent` rows + conversational
+    /// spine so deep transcripts (>200 events) hydrate and scroll in one trip.
+    #[serde(default)]
+    pub include_events: bool,
+}
+
+/// Canonical message row returned in the right-hand preview pane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PassageContextMessage {
+    pub locator: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    pub timestamp: String,
+    pub content: String,
+    #[serde(default)]
+    pub highlights: Vec<SearchHighlightRange>,
+    pub is_target: bool,
+}
+
+/// Surrounding passage context + reconciliation status for a conversation hit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PassageContextResponse {
+    pub mission_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub status: MissionStatus,
+    pub backend: String,
+    pub updated_at: String,
+    pub locator: String,
+    /// `false` if the target passage was edited out or deleted since search.
+    pub target_found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_sequence: Option<i64>,
+    pub messages: Vec<PassageContextMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<StoredEvent>,
+}
+
 impl MissionStatusCounts {
     pub fn record(&mut self, status: crate::api::control::events::MissionStatus) {
         self.add(status, 1);
@@ -4606,6 +4803,468 @@ pub trait MissionStore: Send + Sync {
         let _ = user_id;
         Ok(String::new())
     }
+
+    /// Return current search index coverage for this user's mission store.
+    async fn search_index_coverage(&self) -> Result<SearchIndexCoverage, String> {
+        let total = self
+            .list_missions_filtered(&MissionFilter::default(), 10_000, 0)
+            .await?
+            .len();
+        Ok(SearchIndexCoverage {
+            schema_version: 1,
+            state: SearchIndexState::Ready,
+            indexed_missions: total,
+            total_missions: total,
+        })
+    }
+
+    /// Search across visible conversations and messages for this user.
+    /// SQLite overrides this with an indexed FTS5 projection; non-SQLite stores
+    /// fall back to an in-memory scan over persisted history/events.
+    async fn search_conversations(
+        &self,
+        query: &ConversationSearchQuery,
+    ) -> Result<ConversationSearchResponse, String> {
+        let trimmed = query.query.trim();
+        let coverage = self.search_index_coverage().await?;
+        if trimmed.is_empty() {
+            return Ok(ConversationSearchResponse {
+                hits: Vec::new(),
+                next_cursor: None,
+                coverage,
+            });
+        }
+        let terms: Vec<String> = trimmed
+            .split_whitespace()
+            .map(|t| t.trim_matches('"').to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if terms.is_empty() {
+            return Ok(ConversationSearchResponse {
+                hits: Vec::new(),
+                next_cursor: None,
+                coverage,
+            });
+        }
+        let missions = if let Some(mid) = query.mission_id {
+            self.get_mission(mid).await?.into_iter().collect::<Vec<_>>()
+        } else {
+            self.list_missions(2_000, 0).await?
+        };
+        let max_per_mission = query.max_per_mission.unwrap_or(2).clamp(1, 10);
+        let limit = query.limit.unwrap_or(30).clamp(1, 100);
+        let offset = query
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut all_hits = Vec::new();
+        for m in missions {
+            if m.project.tags.iter().any(|t| t == SUPERSEDED_TAG) {
+                continue;
+            }
+            if !query.include_archived && m.status == MissionStatus::Acknowledged {
+                continue;
+            }
+            if let Some(ref proj) = query.project {
+                if m.project.project.as_deref() != Some(proj.as_str()) {
+                    continue;
+                }
+            }
+            if let Some(ref since) = query.since {
+                if m.updated_at.as_str() < since.as_str() {
+                    continue;
+                }
+            }
+            if let Some(ref until) = query.until {
+                if m.updated_at.as_str() > until.as_str() {
+                    continue;
+                }
+            }
+            let mut m_hits = Vec::new();
+            if matches!(
+                query.role,
+                ConversationSearchRole::All | ConversationSearchRole::Title
+            ) {
+                let title_blob = format!(
+                    "{} {}",
+                    m.title.as_deref().unwrap_or(""),
+                    m.short_description.as_deref().unwrap_or("")
+                );
+                let lower = title_blob.to_lowercase();
+                if terms.iter().all(|t| lower.contains(t)) {
+                    let (excerpt, highlights) =
+                        build_search_excerpt_utf16(title_blob.trim(), &terms, 180);
+                    m_hits.push(ConversationSearchHit {
+                        mission_id: m.id,
+                        title: m.title.clone(),
+                        short_description: m.short_description.clone(),
+                        project: m.project.project.clone(),
+                        status: m.status,
+                        backend: m.backend.clone(),
+                        updated_at: m.updated_at.clone(),
+                        parent_mission_id: m.parent_mission_id,
+                        locator: "title".to_string(),
+                        role: "title".to_string(),
+                        sequence: None,
+                        event_id: None,
+                        timestamp: m.updated_at.clone(),
+                        excerpt,
+                        highlights,
+                        mission_match_count: 1,
+                        score: 20.0,
+                    });
+                }
+            }
+            for (idx, h) in m.history.iter().enumerate() {
+                let role_ok = match query.role {
+                    ConversationSearchRole::All => h.role == "user" || h.role == "assistant",
+                    ConversationSearchRole::User => h.role == "user",
+                    ConversationSearchRole::Assistant => h.role == "assistant",
+                    ConversationSearchRole::Title | ConversationSearchRole::Tool => false,
+                };
+                if !role_ok {
+                    continue;
+                }
+                let lower = h.content.to_lowercase();
+                if terms.iter().all(|t| lower.contains(t)) {
+                    let (excerpt, highlights) = build_search_excerpt_utf16(&h.content, &terms, 180);
+                    m_hits.push(ConversationSearchHit {
+                        mission_id: m.id,
+                        title: m.title.clone(),
+                        short_description: m.short_description.clone(),
+                        project: m.project.project.clone(),
+                        status: m.status,
+                        backend: m.backend.clone(),
+                        updated_at: m.updated_at.clone(),
+                        parent_mission_id: m.parent_mission_id,
+                        locator: format!("history:{idx}"),
+                        role: h.role.clone(),
+                        sequence: None,
+                        event_id: None,
+                        timestamp: m.updated_at.clone(),
+                        excerpt,
+                        highlights,
+                        mission_match_count: 1,
+                        score: 10.0,
+                    });
+                }
+            }
+            let total_for_mission = m_hits.len();
+            for hit in m_hits.into_iter().take(max_per_mission) {
+                all_hits.push(ConversationSearchHit {
+                    mission_match_count: total_for_mission,
+                    ..hit
+                });
+            }
+        }
+        match query.sort {
+            ConversationSearchSort::Relevance => {
+                all_hits.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| b.updated_at.cmp(&a.updated_at))
+                });
+            }
+            ConversationSearchSort::Recent => {
+                all_hits.sort_by(|a, b| {
+                    b.updated_at
+                        .cmp(&a.updated_at)
+                        .then_with(|| b.score.total_cmp(&a.score))
+                });
+            }
+        }
+        let total = all_hits.len();
+        let hits: Vec<_> = all_hits.into_iter().skip(offset).take(limit).collect();
+        let next_cursor = (offset + hits.len() < total).then(|| (offset + hits.len()).to_string());
+        Ok(ConversationSearchResponse {
+            hits,
+            next_cursor,
+            coverage,
+        })
+    }
+
+    /// Look up surrounding messages around a durable passage locator.
+    async fn get_passage_context(
+        &self,
+        mission_id: Uuid,
+        params: &PassageContextQuery,
+    ) -> Result<Option<PassageContextResponse>, String> {
+        let Some(mission) = self.get_mission(mission_id).await? else {
+            return Ok(None);
+        };
+        let terms: Vec<String> = params
+            .query
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(|t| t.trim_matches('"').to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let before = params.before.unwrap_or(2).min(10);
+        let after = params.after.unwrap_or(2).min(10);
+        let target_idx = params
+            .locator
+            .strip_prefix("history:")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&i| i < mission.history.len());
+        let (start, end, target_found) = if let Some(idx) = target_idx {
+            (
+                idx.saturating_sub(before),
+                (idx + after + 1).min(mission.history.len()),
+                true,
+            )
+        } else {
+            let len = mission.history.len();
+            (
+                len.saturating_sub(before + after + 1),
+                len,
+                params.locator == "title",
+            )
+        };
+        let messages = mission.history[start..end]
+            .iter()
+            .enumerate()
+            .map(|(off, h)| {
+                let idx = start + off;
+                let (content, highlights) = build_search_excerpt_utf16(&h.content, &terms, 1_200);
+                PassageContextMessage {
+                    locator: format!("history:{idx}"),
+                    role: h.role.clone(),
+                    sequence: None,
+                    event_id: None,
+                    timestamp: mission.updated_at.clone(),
+                    content,
+                    highlights,
+                    is_target: Some(idx) == target_idx,
+                }
+            })
+            .collect();
+        Ok(Some(PassageContextResponse {
+            mission_id: mission.id,
+            title: mission.title,
+            project: mission.project.project,
+            status: mission.status,
+            backend: mission.backend,
+            updated_at: mission.updated_at,
+            locator: params.locator.clone(),
+            target_found,
+            target_sequence: None,
+            messages,
+            events: Vec::new(),
+        }))
+    }
+}
+
+/// Collapse whitespace, center a window around the first matched term, and
+/// compute UTF-16 code-unit highlight spans (`[start, end)`) so JavaScript
+/// `String.prototype.slice`, Swift `NSString`, and Kotlin `String` index it
+/// directly without surrogate-pair or multi-byte UTF-8 drift.
+pub fn build_search_excerpt_utf16(
+    raw: &str,
+    terms: &[String],
+    max_chars: usize,
+) -> (String, Vec<SearchHighlightRange>) {
+    let collapsed = collapse_search_whitespace(raw);
+    if collapsed.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let char_indices: Vec<(usize, char)> = collapsed.char_indices().collect();
+    let total_chars = char_indices.len();
+    let window_chars = max_chars.max(32);
+
+    let first_match_byte = find_first_term_byte(&collapsed, terms);
+    let first_match_char = first_match_byte
+        .and_then(|b| char_indices.binary_search_by_key(&b, |&(idx, _)| idx).ok())
+        .unwrap_or(0);
+
+    let (start_char, end_char) = if total_chars <= window_chars {
+        (0, total_chars)
+    } else {
+        let half = window_chars / 3;
+        let mut s = first_match_char.saturating_sub(half);
+        if s + window_chars > total_chars {
+            s = total_chars - window_chars;
+        }
+        // Snap inward to word boundary when convenient so excerpts read cleanly.
+        if s > 0 {
+            for (probe, &(_, ch)) in char_indices
+                .iter()
+                .enumerate()
+                .take((s + 16).min(first_match_char))
+                .skip(s)
+            {
+                if ch.is_whitespace() {
+                    s = probe + 1;
+                    break;
+                }
+            }
+        }
+        let mut e = (s + window_chars).min(total_chars);
+        if e < total_chars {
+            for probe in ((e.saturating_sub(16))..e).rev() {
+                if char_indices[probe].1.is_whitespace() {
+                    e = probe;
+                    break;
+                }
+            }
+        }
+        (s, e)
+    };
+
+    let slice_start = char_indices[start_char].0;
+    let slice_end = if end_char < total_chars {
+        char_indices[end_char].0
+    } else {
+        collapsed.len()
+    };
+    let mut excerpt = String::new();
+    if start_char > 0 {
+        excerpt.push('…');
+    }
+    excerpt.push_str(collapsed[slice_start..slice_end].trim());
+    if end_char < total_chars {
+        excerpt.push('…');
+    }
+
+    let highlights = compute_utf16_highlights(&excerpt, terms);
+    (excerpt, highlights)
+}
+
+pub fn collapse_search_whitespace(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(4096));
+    let mut prev_ws = true;
+    for ch in raw.chars() {
+        if ch.is_whitespace() {
+            if !prev_ws {
+                out.push(' ');
+                prev_ws = true;
+            }
+        } else {
+            out.push(ch);
+            prev_ws = false;
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+fn fold_char_for_highlight(ch: char) -> char {
+    let lower = ch.to_lowercase().next().unwrap_or(ch);
+    match lower {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+        'ç' => 'c',
+        'è' | 'é' | 'ê' | 'ë' => 'e',
+        'ì' | 'í' | 'î' | 'ï' => 'i',
+        'ñ' => 'n',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
+        'ù' | 'ú' | 'û' | 'ü' => 'u',
+        'ý' | 'ÿ' => 'y',
+        other => other,
+    }
+}
+
+fn fold_string_with_utf16_map(text: &str) -> (String, Vec<usize>, Vec<usize>) {
+    let mut folded = String::with_capacity(text.len());
+    let mut byte_starts = Vec::new();
+    let mut utf16_starts = Vec::new();
+    let mut utf16_pos = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        let fc = fold_char_for_highlight(ch);
+        let start_byte = byte_idx;
+        let start_utf16 = utf16_pos;
+        for _ in 0..fc.len_utf8() {
+            byte_starts.push(start_byte);
+            utf16_starts.push(start_utf16);
+        }
+        folded.push(fc);
+        utf16_pos += ch.len_utf16();
+    }
+    byte_starts.push(text.len());
+    utf16_starts.push(utf16_pos);
+    (folded, byte_starts, utf16_starts)
+}
+
+fn find_first_term_byte(text: &str, terms: &[String]) -> Option<usize> {
+    let (folded, byte_starts, _) = fold_string_with_utf16_map(text);
+    let mut best: Option<usize> = None;
+    for term in terms {
+        let ft: String = term.chars().map(fold_char_for_highlight).collect();
+        if ft.is_empty() {
+            continue;
+        }
+        if let Some(pos) = folded.find(&ft) {
+            let orig_byte = byte_starts[pos];
+            best = Some(best.map_or(orig_byte, |b| b.min(orig_byte)));
+        }
+    }
+    best
+}
+
+pub fn compute_utf16_highlights(text: &str, terms: &[String]) -> Vec<SearchHighlightRange> {
+    if text.is_empty() || terms.is_empty() {
+        return Vec::new();
+    }
+    let (folded, _, utf16_starts) = fold_string_with_utf16_map(text);
+    let mut raw_ranges: Vec<(usize, usize)> = Vec::new();
+    for term in terms {
+        let ft: String = term.chars().map(fold_char_for_highlight).collect();
+        if ft.is_empty() {
+            continue;
+        }
+        let mut search_from = 0usize;
+        while search_from < folded.len() {
+            let Some(rel) = folded[search_from..].find(&ft) else {
+                break;
+            };
+            let match_start = search_from + rel;
+            let match_end = match_start + ft.len();
+            // Extend prefix match to full identifier/word token when query term is a prefix >= 2 chars
+            let mut extended_end = match_end;
+            if ft.chars().count() >= 2
+                && ft
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                while extended_end < folded.len() {
+                    let Some(next_ch) = folded[extended_end..].chars().next() else {
+                        break;
+                    };
+                    if next_ch.is_alphanumeric() {
+                        extended_end += next_ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let u_start = utf16_starts[match_start];
+            let u_end = utf16_starts[extended_end];
+            if u_end > u_start {
+                raw_ranges.push((u_start, u_end));
+            }
+            search_from = match_end.max(search_from + 1);
+            while search_from < folded.len() && !folded.is_char_boundary(search_from) {
+                search_from += 1;
+            }
+        }
+    }
+    if raw_ranges.is_empty() {
+        return Vec::new();
+    }
+    raw_ranges.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    let mut merged: Vec<SearchHighlightRange> = Vec::with_capacity(raw_ranges.len());
+    for (s, e) in raw_ranges {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.end {
+                last.end = last.end.max(e);
+                continue;
+            }
+        }
+        merged.push(SearchHighlightRange { start: s, end: e });
+    }
+    merged
 }
 
 /// Mission store type selection.

@@ -2,11 +2,14 @@
 //!
 //! Spec: `docs/specs/managed-vm-lifecycle.md`. The reaper and the reap-plan
 //! endpoint both call [`decide`], so what Orb shows as "reaps in X" is exactly
-//! what the reaper will do. The final destroy still passes the Lean gate
-//! (`orb_vm_step`, op `reap_check`) in `ManagedManager::reap_once`.
+//! what the reaper will do. Backed by the verified Lean stepper
+//! `orb_vm_lifecycle_step` (`lean/Orb/Kernel.lean`) plus the final destroy
+//! admission gate `orb_vm_step` (`reap_check`) in `ManagedManager::reap_once`.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
+
+use crate::orb_spec::{vm_lifecycle_step, VmLifecycleAction, VmLifecycleInput, VmOwnerClass};
 
 /// Lifecycle of a machine's owning mission, as seen by the reaper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +32,8 @@ pub enum OwnerState {
 /// Who a machine belongs to, as the reaper sees it this pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
-    /// A mission owns it; `None` when its store is not loaded (state unknown:
-    /// never destroy on the owner rule).
+    /// A mission owns it; `None` when neither its loaded nor persisted store
+    /// could resolve it (state unknown: never destroy on the owner rule).
     Mission(Option<OwnerState>),
     /// Created by a user from Orb or the API, without a mission.
     User,
@@ -38,11 +41,17 @@ pub enum Owner {
     None,
 }
 
-/// Tunables (minutes). See the spec for defaults.
+/// Tunables (minutes). See `docs/specs/managed-vm-lifecycle.md` for defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LifecyclePolicy {
     /// Idle time before an idle machine whose owner is not working is reaped.
     pub idle_minutes: i64,
+    /// Idle time before an unused worker VM owned by a `Working` parent is
+    /// reaped (`0` disables `Working`-owner idle reaping).
+    pub working_idle_minutes: i64,
+    /// Idle time after a worker VM has already completed at least one job
+    /// (`has_executed_job = true`) while its `Working` parent moves on.
+    pub post_job_working_idle_minutes: i64,
     /// Grace after the owner ended or vanished.
     pub ended_grace_minutes: i64,
     /// How long an owner may be interrupted/awaiting before its idle machine
@@ -53,8 +62,10 @@ pub struct LifecyclePolicy {
 impl Default for LifecyclePolicy {
     fn default() -> Self {
         Self {
-            idle_minutes: 30,
-            ended_grace_minutes: 5,
+            idle_minutes: 15,
+            working_idle_minutes: 15,
+            post_job_working_idle_minutes: 5,
+            ended_grace_minutes: 2,
             waiting_grace_minutes: 15,
         }
     }
@@ -65,8 +76,16 @@ impl Default for LifecyclePolicy {
 pub struct ReapFacts {
     pub now: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Optional minimum billing commitment (e.g. Scaleway Apple Silicon 24h
+    /// `deletable_at`) before which provider deletion is forbidden.
+    pub deletable_at: Option<DateTime<Utc>>,
     /// A job, lease or queued job is on the node (any mission).
     pub busy: bool,
+    /// Whether this machine has ever been observed executing a job/lease.
+    pub has_executed_job: bool,
+    /// Whether stopping the VM ends provider billing (`true` on Boat, `false`
+    /// on Hetzner, Vast.ai, and Scaleway).
+    pub supports_free_stop: bool,
     /// Last time the node was seen busy (or its creation time).
     pub idle_since: DateTime<Utc>,
     pub owner: Owner,
@@ -80,8 +99,11 @@ pub struct ReapFacts {
 pub enum ReapDecision {
     /// Nothing to do; any earlier schedule is cleared.
     Keep,
-    /// A rule applies but its grace has not run out.
+    /// A rule applies (or `deletable_at` is still in the future) and its due
+    /// time has not yet arrived.
     Schedule { reason: String, at: DateTime<Utc> },
+    /// Stop now (retaining disk without billing) with this reason.
+    Stop { reason: String },
     /// Destroy now with this `destroy_reason`.
     Destroy { reason: String },
 }
@@ -90,7 +112,9 @@ impl ReapDecision {
     pub fn reason(&self) -> Option<&str> {
         match self {
             Self::Keep => None,
-            Self::Schedule { reason, .. } | Self::Destroy { reason } => Some(reason),
+            Self::Schedule { reason, .. } | Self::Stop { reason } | Self::Destroy { reason } => {
+                Some(reason)
+            }
         }
     }
     /// True when the reason comes from the owner rule (Lean `ownerEnded`),
@@ -100,43 +124,123 @@ impl ReapDecision {
     }
 }
 
-/// The reap decision table (spec, "Decision table").
+/// The reap decision table (`docs/specs/managed-vm-lifecycle.md`), evaluated
+/// through the verified `orb_vm_lifecycle_step` Lean kernel.
 pub fn decide(f: &ReapFacts, p: &LifecyclePolicy) -> ReapDecision {
-    // 1. TTL is the hard backstop and applies even to a busy machine (boat
-    //    stops it at TTL + 5 min regardless).
-    if f.now >= f.expires_at {
-        return ReapDecision::Destroy {
-            reason: "ttl_expired".into(),
+    let ttl_expired = f.now >= f.expires_at;
+    let min_delete_pending = f.deletable_at.is_some_and(|del_at| f.now < del_at);
+    let idle_due = f.idle_since + Duration::minutes(p.idle_minutes);
+
+    if let Some((prior_cause, sched_at)) = f
+        .scheduled
+        .as_ref()
+        .and_then(|(r, at)| r.strip_prefix("awaiting_deletable_at:").map(|c| (c, *at)))
+    {
+        let verdict = vm_lifecycle_step(VmLifecycleInput {
+            ttl_expired,
+            busy: f.busy,
+            owner_class: VmOwnerClass::TerminalOrMissing,
+            grace_or_idle_elapsed: true,
+            working_idle_enabled: p.working_idle_minutes > 0,
+            supports_free_stop: f.supports_free_stop,
+            min_delete_pending,
+        });
+        return match verdict.action {
+            VmLifecycleAction::Keep => ReapDecision::Keep,
+            VmLifecycleAction::Schedule => ReapDecision::Schedule {
+                reason: format!("awaiting_deletable_at:{prior_cause}"),
+                at: f.deletable_at.unwrap_or(sched_at),
+            },
+            VmLifecycleAction::Stop => ReapDecision::Stop {
+                reason: prior_cause.to_string(),
+            },
+            VmLifecycleAction::Destroy => ReapDecision::Destroy {
+                reason: prior_cause.to_string(),
+            },
         };
     }
-    // 2. Never destroy while any job or lease is active.
-    if f.busy {
-        return ReapDecision::Keep;
-    }
-    let idle_due = f.idle_since + Duration::minutes(p.idle_minutes);
-    let (reason, due) = match f.owner {
-        Owner::Mission(None) | Owner::Mission(Some(OwnerState::Working)) => {
-            return ReapDecision::Keep
-        }
-        Owner::Mission(Some(OwnerState::Terminal { status })) => {
-            let reason = format!("owner_{status}");
-            (reason.clone(), grace_due(f, &reason, p.ended_grace_minutes))
-        }
-        Owner::Mission(Some(OwnerState::Missing)) => {
-            let reason = "owner_missing".to_string();
-            (reason.clone(), grace_due(f, &reason, p.ended_grace_minutes))
+
+    let (owner_class, base_reason, raw_due) = match f.owner {
+        Owner::Mission(None) => (VmOwnerClass::Unknown, String::new(), f.expires_at),
+        Owner::Mission(Some(OwnerState::Working)) => {
+            let mins = if f.has_executed_job {
+                p.post_job_working_idle_minutes.max(1)
+            } else {
+                p.working_idle_minutes.max(1)
+            };
+            (
+                VmOwnerClass::Working,
+                "working_owner_idle".to_string(),
+                f.idle_since + Duration::minutes(mins),
+            )
         }
         Owner::Mission(Some(OwnerState::Waiting { status, since })) => (
+            VmOwnerClass::Waiting,
             format!("owner_{status}_idle"),
             idle_due.max(since + Duration::minutes(p.waiting_grace_minutes)),
         ),
-        Owner::User => ("idle_user_owned".into(), idle_due),
-        Owner::None => ("idle_no_owner".into(), idle_due),
+        Owner::Mission(Some(OwnerState::Terminal { status })) => {
+            let reason = format!("owner_{status}");
+            let due = grace_due(f, &reason, p.ended_grace_minutes);
+            (VmOwnerClass::TerminalOrMissing, reason, due)
+        }
+        Owner::Mission(Some(OwnerState::Missing)) => {
+            let reason = "owner_missing".to_string();
+            let due = grace_due(f, &reason, p.ended_grace_minutes);
+            (VmOwnerClass::TerminalOrMissing, reason, due)
+        }
+        Owner::User => (
+            VmOwnerClass::UserOrUnowned,
+            "idle_user_owned".to_string(),
+            idle_due,
+        ),
+        Owner::None => (
+            VmOwnerClass::UserOrUnowned,
+            "idle_no_owner".to_string(),
+            idle_due,
+        ),
     };
-    if f.now >= due {
-        ReapDecision::Destroy { reason }
-    } else {
-        ReapDecision::Schedule { reason, at: due }
+
+    let verdict = vm_lifecycle_step(VmLifecycleInput {
+        ttl_expired,
+        busy: f.busy,
+        owner_class,
+        grace_or_idle_elapsed: f.now >= raw_due,
+        working_idle_enabled: p.working_idle_minutes > 0,
+        supports_free_stop: f.supports_free_stop,
+        min_delete_pending,
+    });
+
+    match verdict.action {
+        VmLifecycleAction::Keep => ReapDecision::Keep,
+        VmLifecycleAction::Schedule => {
+            if verdict.defer_for_min_lease {
+                let cause = if ttl_expired {
+                    "ttl_expired"
+                } else {
+                    base_reason.as_str()
+                };
+                ReapDecision::Schedule {
+                    reason: format!("awaiting_deletable_at:{cause}"),
+                    at: f.deletable_at.unwrap_or(raw_due),
+                }
+            } else {
+                ReapDecision::Schedule {
+                    reason: base_reason,
+                    at: raw_due,
+                }
+            }
+        }
+        VmLifecycleAction::Stop => ReapDecision::Stop {
+            reason: base_reason,
+        },
+        VmLifecycleAction::Destroy => ReapDecision::Destroy {
+            reason: if ttl_expired {
+                "ttl_expired".into()
+            } else {
+                base_reason
+            },
+        },
     }
 }
 
@@ -212,7 +316,10 @@ mod tests {
         ReapFacts {
             now: t(0),
             expires_at: t(600),
+            deletable_at: None,
             busy: false,
+            has_executed_job: false,
+            supports_free_stop: false,
             idle_since: t(-5),
             owner,
             scheduled: None,
@@ -223,8 +330,14 @@ mod tests {
         ReapDecision::Destroy { reason: r.into() }
     }
 
+    fn stop(r: &str) -> ReapDecision {
+        ReapDecision::Stop { reason: r.into() }
+    }
+
     const P: LifecyclePolicy = LifecyclePolicy {
         idle_minutes: 30,
+        working_idle_minutes: 15,
+        post_job_working_idle_minutes: 5,
         ended_grace_minutes: 5,
         waiting_grace_minutes: 60,
     };
@@ -277,14 +390,13 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_owner_releases_only_after_grace_and_idle() {
+    fn interrupted_owner_stops_on_free_stop_provider_and_destroys_on_billed_provider() {
         let waiting = |since| {
             Owner::Mission(Some(OwnerState::Waiting {
                 status: "interrupted",
                 since,
             }))
         };
-        // Interrupted 10 min ago (a deploy restart): keep, scheduled at grace end.
         let mut f = facts(waiting(t(-10)));
         assert_eq!(
             decide(&f, &P),
@@ -293,23 +405,26 @@ mod tests {
                 at: t(50)
             }
         );
-        // Interrupted 2 h ago, but the VM was busy 5 min ago: wait for idle.
         f.owner = waiting(t(-120));
         assert!(matches!(decide(&f, &P), ReapDecision::Schedule { at, .. } if at == t(25)));
-        // Interrupted 2 h ago and idle 40 min: destroy.
         f.idle_since = t(-40);
+        // Billed while stopped (Hetzner / Vast.ai / Scaleway): must destroy!
+        f.supports_free_stop = false;
         assert_eq!(decide(&f, &P), destroy("owner_interrupted_idle"));
-        // awaiting_user follows the same rule.
+        // Free stop (Boat): stops to retain disk without billing!
+        f.supports_free_stop = true;
+        assert_eq!(decide(&f, &P), stop("owner_interrupted_idle"));
         f.owner = Owner::Mission(Some(OwnerState::Waiting {
             status: "awaiting_user",
             since: t(-120),
         }));
-        assert_eq!(decide(&f, &P), destroy("owner_awaiting_user_idle"));
+        assert_eq!(decide(&f, &P), stop("owner_awaiting_user_idle"));
     }
 
     #[test]
     fn busy_lease_protects_everything_but_ttl() {
         for owner in [
+            Owner::Mission(Some(OwnerState::Working)),
             Owner::Mission(Some(OwnerState::Terminal { status: "failed" })),
             Owner::Mission(Some(OwnerState::Missing)),
             Owner::None,
@@ -330,21 +445,81 @@ mod tests {
         let mut f = facts(Owner::Mission(Some(OwnerState::Missing)));
         f.scheduled = Some(("owner_missing".into(), t(-1)));
         assert_eq!(decide(&f, &P), destroy("owner_missing"));
-        // A schedule for another reason restarts the grace.
         f.scheduled = Some(("idle_no_owner".into(), t(-1)));
         assert!(matches!(decide(&f, &P), ReapDecision::Schedule { at, .. } if at == t(5)));
     }
 
     #[test]
-    fn working_or_unknown_owner_keeps_an_idle_machine() {
-        for owner in [
-            Owner::Mission(Some(OwnerState::Working)),
-            Owner::Mission(None),
-        ] {
-            let mut f = facts(owner);
-            f.idle_since = t(-500);
-            assert_eq!(decide(&f, &P), ReapDecision::Keep);
-        }
+    fn unknown_owner_always_keeps_idle_machine() {
+        let mut f = facts(Owner::Mission(None));
+        f.idle_since = t(-500);
+        assert_eq!(decide(&f, &P), ReapDecision::Keep);
+    }
+
+    #[test]
+    fn working_owner_idle_reaps_unused_and_post_job_workers() {
+        // Coordinator spawned a worker VM via spawn_managed_machine: before first job,
+        // working_idle_minutes (15m) applies.
+        let mut f = facts(Owner::Mission(Some(OwnerState::Working)));
+        f.idle_since = t(-5);
+        assert_eq!(
+            decide(&f, &P),
+            ReapDecision::Schedule {
+                reason: "working_owner_idle".into(),
+                at: t(10),
+            }
+        );
+        f.idle_since = t(-15);
+        assert_eq!(decide(&f, &P), destroy("working_owner_idle"));
+
+        // Once the worker executed a child job and became idle, tighter
+        // post_job_working_idle_minutes (5m) releases it promptly.
+        f.has_executed_job = true;
+        f.idle_since = t(-3);
+        assert_eq!(
+            decide(&f, &P),
+            ReapDecision::Schedule {
+                reason: "working_owner_idle".into(),
+                at: t(2),
+            }
+        );
+        f.idle_since = t(-5);
+        assert_eq!(decide(&f, &P), destroy("working_owner_idle"));
+
+        // Setting working_idle_minutes = 0 disables Working-owner idle reaping.
+        let mut disabled = P;
+        disabled.working_idle_minutes = 0;
+        f.idle_since = t(-500);
+        assert_eq!(decide(&f, &disabled), ReapDecision::Keep);
+    }
+
+    #[test]
+    fn deletable_at_defers_premature_destroy_including_ttl() {
+        // Scaleway Apple Silicon 24h minimum lease: deletable_at in future defers Destroy -> Schedule.
+        let mut f = facts(Owner::Mission(Some(OwnerState::Terminal {
+            status: "completed",
+        })));
+        f.scheduled = Some(("owner_completed".into(), t(-1)));
+        f.deletable_at = Some(t(1400));
+        assert_eq!(
+            decide(&f, &P),
+            ReapDecision::Schedule {
+                reason: "awaiting_deletable_at:owner_completed".into(),
+                at: t(1400),
+            }
+        );
+        // Even TTL expiry defers the provider DELETE until deletable_at.
+        f.now = t(600);
+        assert_eq!(
+            decide(&f, &P),
+            ReapDecision::Schedule {
+                reason: "awaiting_deletable_at:ttl_expired".into(),
+                at: t(1400),
+            }
+        );
+        // Once deletable_at arrives, Destroy fires immediately.
+        f.now = t(1400);
+        assert_eq!(decide(&f, &P), destroy("ttl_expired"));
     }
 
     #[test]
@@ -373,6 +548,7 @@ mod tests {
     #[test]
     fn owner_rule_flag() {
         assert!(destroy("owner_completed").is_owner_rule());
+        assert!(!destroy("working_owner_idle").is_owner_rule());
         assert!(!destroy("idle_no_owner").is_owner_rule());
         assert!(!ReapDecision::Keep.is_owner_rule());
     }

@@ -1,14 +1,17 @@
 import { harnessName } from "./harnesses";
-import { isWorking } from "./missionStatus";
+import { isArchived, isWorking } from "./missionStatus";
 /** Missions launched by a mission are shown inside it, like files in a folder.
- * Forks are versions of one conversation, not launched work: the most recently
- * active version leads and earlier versions are listed inside it (`version`). */
+ * Forks are versions of one conversation, not launched work: the current
+ * version leads and earlier versions are listed inside it (`version`). */
 export interface NestedMission<M> { mission: M; children: NestedMission<M>[]; version?: boolean }
 
-type Linked = { id: string; parent_mission_id?: string | null; callback_parent_mission_id?: string | null; title?: string | null; tags?: readonly string[] | null };
+type Linked = { id: string; parent_mission_id?: string | null; callback_parent_mission_id?: string | null; title?: string | null; tags?: readonly string[] | null; status?: string | null };
 type Dated = { updated_at?: string | null; created_at?: string | null };
 
 const LEGACY_FORK_TITLE = /\s·\sfork$/i;
+/** Grace window so post-cancel/cleanup/metadata writes on a stopped source
+ * within 15s of fork creation never outrank the newly created fork. */
+const FORK_SETTLE_MS = 15_000;
 
 /** The conversation this one was forked from. Older forks were stored as
  * children titled "… · fork"; newer ones carry a `fork-of:` tag instead. */
@@ -30,22 +33,57 @@ export const versionLabel = (mission: { backend?: string | null; model_override?
   [mission.backend ? harnessName(mission.backend) : "", mission.model_override ?? ""].filter(Boolean).join(" · ") || "Earlier version";
 
 const activity = (mission: Dated) => Date.parse(mission.updated_at || mission.created_at || "") || 0;
+const createdAt = (mission: Dated) => Date.parse(mission.created_at || "") || 0;
+const isRetiredVersion = (mission: Omit<Linked, "id">) =>
+  isArchived(mission.status?.toLowerCase()) || hasSupersededTag(mission.tags);
 
-/** Groups the listed forks of one conversation; maps each version to its group's leader. */
+/** Groups the listed forks of one conversation; maps each version to its group's leader
+ * using the normative (unretired, live, effectiveActivity, forkDepth) rank (F1). */
 export function forkLeaders<M extends Linked & Dated>(missions: readonly M[]): Map<string, M> {
   const byId = new Map(missions.map(m => [m.id, m]));
-  const root = (mission: M) => {
+  const lineage = (mission: M): { rootId: string; depth: number; ancestors: string[] } => {
     const seen = new Set<string>();
+    const ancestors: string[] = [];
     let current = mission;
-    for (let source = forkSource(current); source && byId.has(source) && !seen.has(source); source = forkSource(current)) { seen.add(current.id); current = byId.get(source)!; }
-    return current.id;
+    for (let source = forkSource(current); source && byId.has(source) && !seen.has(source); source = forkSource(current)) {
+      seen.add(current.id);
+      current = byId.get(source)!;
+      ancestors.push(current.id);
+    }
+    return { rootId: current.id, depth: ancestors.length, ancestors };
   };
+  const info = new Map(missions.map(m => [m.id, lineage(m)]));
   const groups = new Map<string, M[]>();
-  for (const mission of missions) groups.set(root(mission), [...(groups.get(root(mission)) ?? []), mission]);
+  for (const mission of missions) {
+    const rootId = info.get(mission.id)!.rootId;
+    groups.set(rootId, [...(groups.get(rootId) ?? []), mission]);
+  }
   const leaders = new Map<string, M>();
   for (const group of groups.values()) {
     if (group.length < 2) continue;
-    const leader = group.reduce((best, m) => activity(m) > activity(best) ? m : best);
+    const effective = new Map(group.map(m => [m.id, activity(m)]));
+    for (const m of group) {
+      const created = createdAt(m);
+      if (created <= 0) continue;
+      for (const ancId of info.get(m.id)!.ancestors) {
+        const ancAct = effective.get(ancId);
+        if (ancAct !== undefined && ancAct <= created + FORK_SETTLE_MS) {
+          effective.set(ancId, Math.min(ancAct, created));
+        }
+      }
+    }
+    const rank = (m: M): [number, number, number, number] => [
+      isRetiredVersion(m) ? 0 : 1,
+      isWorking(m.status?.toLowerCase()) ? 1 : 0,
+      effective.get(m.id) ?? 0,
+      info.get(m.id)!.depth,
+    ];
+    const beats = (a: M, b: M): boolean => {
+      const ra = rank(a), rb = rank(b);
+      for (let i = 0; i < 4; i++) if (ra[i] !== rb[i]) return ra[i] > rb[i];
+      return false;
+    };
+    const leader = group.reduce((best, m) => beats(m, best) ? m : best);
     for (const mission of group) leaders.set(mission.id, leader);
   }
   return leaders;

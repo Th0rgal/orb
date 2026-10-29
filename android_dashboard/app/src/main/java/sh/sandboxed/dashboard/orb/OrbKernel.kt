@@ -659,7 +659,13 @@ object OrbKernel {
         return ((raw and 1L) != 0L) to ((raw ushr 32) and 0xFFFF_FFFFL).toInt()
     }
 
-    data class MachineActionVerdict(val isLive: Boolean, val canAct: Boolean, val meterLiveCost: Boolean)
+    data class MachineActionVerdict(
+        val isLive: Boolean,
+        val canAct: Boolean,
+        val meterLiveCost: Boolean,
+        val isStopped: Boolean = false,
+        val canResume: Boolean = false
+    )
 
     fun machineActionAdmitted(stateKind: Int, isBusy: Boolean = false, isMuted: Boolean = false): MachineActionVerdict {
         requireNative()
@@ -667,7 +673,9 @@ object OrbKernel {
         return MachineActionVerdict(
             isLive = (raw and 1) != 0,
             canAct = ((raw ushr 8) and 1) != 0,
-            meterLiveCost = ((raw ushr 16) and 1) != 0
+            meterLiveCost = ((raw ushr 16) and 1) != 0,
+            isStopped = ((raw ushr 24) and 1) != 0,
+            canResume = ((raw ushr 25) and 1) != 0
         )
     }
 

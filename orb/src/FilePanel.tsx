@@ -581,12 +581,16 @@ export function FilePanelProvider(p: {
       : (activePanel?.getBoundingClientRect().width ?? 480);
     const app = activePanel?.closest<HTMLElement>(".app");
     const conversation = !inside ? app?.querySelector<HTMLElement>(".scroll") : undefined;
+    const sideThread = !inside ? activePanel?.querySelector<HTMLElement>(".btw-thread") : undefined;
     const viewportTop = conversation?.getBoundingClientRect().top ?? 0;
-    const anchor = conversation ? Array.from(conversation.querySelectorAll<HTMLElement>(".user, .agent-turn p, .agent-turn li, .agent-turn pre, .md-view p, .md-view pre"))
-      .find(el => el.getBoundingClientRect().bottom > viewportTop + 1) : undefined;
+    const anchor = conversation && !scrollKeeper(conversation)
+      ? Array.from(conversation.querySelectorAll<HTMLElement>(".user, .agent-turn p, .agent-turn li, .agent-turn pre, .md-view p, .md-view pre"))
+          .find(el => el.getBoundingClientRect().bottom > viewportTop + 1)
+      : undefined;
     const anchorTop = anchor?.getBoundingClientRect().top;
     const initialScroll = conversation?.scrollTop ?? 0;
     const restoreAnchor = () => {
+      scrollKeeper(sideThread)?.();
       if (!conversation) return;
       // The conversation's own keeper follows the bottom or keeps its anchor.
       const keeper = scrollKeeper(conversation);
@@ -594,7 +598,6 @@ export function FilePanelProvider(p: {
       if (anchor?.isConnected && anchorTop !== undefined) conversation.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
       else conversation.scrollTop = initialScroll;
     };
-    if (conversation) conversation.dataset.panelResizing = "true";
     const sidebarWidth = app ? parseFloat(getComputedStyle(app).gridTemplateColumns) || 0 : 0;
     const maximum = Math.max(480, (app?.clientWidth ?? window.innerWidth) - sidebarWidth - 420);
     const move = (event: PointerEvent) => {
@@ -617,10 +620,7 @@ export function FilePanelProvider(p: {
       } catch {}
     };
     const end = () => {
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        restoreAnchor();
-        if (conversation) delete conversation.dataset.panelResizing;
-      }));
+      requestAnimationFrame(() => requestAnimationFrame(restoreAnchor));
       target.removeEventListener("lostpointercapture", end);
       target.removeEventListener("pointermove", move);
       target.removeEventListener("pointerup", end);

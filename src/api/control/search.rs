@@ -543,6 +543,38 @@ pub struct MissionMomentSearchResult {
     pub snippet: String,
     pub rationale: String,
     pub relevance_score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct SearchConversationMessagesHttpQuery {
+    #[serde(default)]
+    pub q: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub role: Option<crate::api::mission_store::ConversationSearchRole>,
+    #[serde(default)]
+    pub include_tools: Option<bool>,
+    #[serde(default)]
+    pub include_archived: Option<bool>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub sort: Option<crate::api::mission_store::ConversationSearchSort>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub max_per_mission: Option<usize>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub mission_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -782,6 +814,8 @@ pub async fn search_missions(
 }
 
 /// Search mission history and return the best matching moment per mission.
+/// Backed by the full-history conversation search index rather than scanning
+/// a bounded page of mission objects.
 pub async fn search_mission_moments(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -795,69 +829,106 @@ pub async fn search_mission_moments(
     let limit = params.limit.unwrap_or(10).clamp(1, 50);
     let control = control_for_user(&state, &user).await;
 
-    let mut missions: Vec<Mission> = if let Some(mission_id) = params.mission_id {
-        let Some(mission) = control
+    let search_res = control
+        .mission_store
+        .search_conversations(&crate::api::mission_store::ConversationSearchQuery {
+            query: query.to_string(),
+            role: crate::api::mission_store::ConversationSearchRole::All,
+            include_tools: false,
+            include_archived: true,
+            limit: Some(limit),
+            max_per_mission: Some(1),
+            mission_id: params.mission_id,
+            ..Default::default()
+        })
+        .await
+        .map_err(internal_error)?;
+
+    let mut results = Vec::with_capacity(search_res.hits.len());
+    for hit in search_res.hits {
+        let Some(mut mission) = control
             .mission_store
-            .get_mission(mission_id)
+            .get_mission(hit.mission_id)
             .await
             .map_err(internal_error)?
         else {
-            return Ok(Json(Vec::new()));
+            continue;
         };
-        vec![mission]
-    } else {
-        const SEARCH_PAGE_SIZE: usize = 100;
-        const SEARCH_MAX_SCAN: usize = 2_000;
-        let mut all = Vec::new();
-        let mut offset = 0usize;
-        while offset < SEARCH_MAX_SCAN {
-            let page = control
-                .mission_store
-                .list_missions(SEARCH_PAGE_SIZE, offset)
-                .await
-                .map_err(internal_error)?;
-            if page.is_empty() {
-                break;
-            }
-            let page_len = page.len();
-            all.extend(page);
-            if page_len < SEARCH_PAGE_SIZE {
-                break;
-            }
-            offset += SEARCH_PAGE_SIZE;
-        }
-        if offset >= SEARCH_MAX_SCAN {
-            tracing::warn!(
-                "Mission moment search scan hit cap ({} missions); some older missions may not be searched",
-                SEARCH_MAX_SCAN
-            );
-        }
-        all
-    };
-
-    populate_workspace_names(&state, &mut missions).await;
-
-    let mut results: Vec<MissionMomentSearchResult> = missions
-        .into_iter()
-        .filter_map(|mission| {
-            let best = best_mission_moment(&mission, query)?;
-            Some(MissionMomentSearchResult {
+        populate_workspace_names(&state, std::slice::from_mut(&mut mission)).await;
+        if let Some(best) = best_mission_moment(&mission, query) {
+            results.push(MissionMomentSearchResult {
                 mission,
                 entry_index: best.entry_index,
                 role: best.role,
                 snippet: best.snippet,
                 rationale: best.rationale,
-                relevance_score: best.relevance_score,
-            })
-        })
-        .collect();
+                relevance_score: hit.score.max(best.relevance_score),
+                locator: Some(hit.locator),
+                sequence: hit.sequence,
+            });
+        } else {
+            results.push(MissionMomentSearchResult {
+                mission,
+                entry_index: 0,
+                role: hit.role.clone(),
+                snippet: hit.excerpt,
+                rationale: format!("Matched indexed {} passage", hit.role),
+                relevance_score: hit.score,
+                locator: Some(hit.locator),
+                sequence: hit.sequence,
+            });
+        }
+    }
 
-    results.sort_by(|a, b| {
-        b.relevance_score
-            .total_cmp(&a.relevance_score)
-            .then_with(|| b.mission.updated_at.cmp(&a.mission.updated_at))
-            .then_with(|| a.entry_index.cmp(&b.entry_index))
-    });
-    results.truncate(limit);
     Ok(Json(results))
+}
+
+/// Full-history conversation search across titles, metadata, and canonical
+/// transcripts scoped to the authenticated user's mission store.
+pub async fn search_conversation_messages(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Query(params): Query<SearchConversationMessagesHttpQuery>,
+) -> Result<Json<crate::api::mission_store::ConversationSearchResponse>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let store_query = crate::api::mission_store::ConversationSearchQuery {
+        query: params.q,
+        project: params.project,
+        role: params.role.unwrap_or_default(),
+        include_tools: params.include_tools.unwrap_or(false),
+        include_archived: params.include_archived.unwrap_or(true),
+        since: params.since,
+        until: params.until,
+        sort: params.sort.unwrap_or_default(),
+        limit: params.limit,
+        max_per_mission: params.max_per_mission,
+        cursor: params.cursor,
+        mission_id: params.mission_id,
+    };
+    let response = control
+        .mission_store
+        .search_conversations(&store_query)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(response))
+}
+
+/// Bounded message-context lookup around a durable passage locator for preview
+/// and exact-message navigation into deep transcripts.
+pub async fn get_mission_passage_context(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    axum::extract::Path(mission_id): axum::extract::Path<Uuid>,
+    Query(params): Query<crate::api::mission_store::PassageContextQuery>,
+) -> Result<Json<crate::api::mission_store::PassageContextResponse>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let Some(context) = control
+        .mission_store
+        .get_passage_context(mission_id, &params)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
+    };
+    Ok(Json(context))
 }

@@ -153,6 +153,11 @@ impl SqliteMissionStore {
                 )
                 .map_err(|e| format!("Failed to insert event: {e}"))?;
             }
+            super::search_index::reconcile_mission_docs(
+                &tx,
+                &content_dir,
+                &new_mission_id.to_string(),
+            )?;
 
             // --- automations ---
             for auto in &automations {

@@ -48,7 +48,7 @@ typedef void *jobject;
 #define JNICALL
 #endif
 EOF
-  FREESTANDING_FLAGS=(-ffreestanding -fuse-ld=lld -nostdlib "-I$JNI_SHIM_DIR")
+  FREESTANDING_FLAGS=(-fuse-ld=lld "-I$JNI_SHIM_DIR")
   if [ -d "$(dirname "$BIN")/include/clang" ]; then
     FREESTANDING_FLAGS+=(-isystem "$(dirname "$BIN")/include/clang")
   fi
@@ -72,12 +72,14 @@ stamp() { cat "${SOURCES[@]}" | { sha256sum 2>/dev/null || shasum -a 256; } | cu
 abi_syms() { "$NM_BIN" -D --defined-only -j "$1" | grep -E '^(orb_|leansys_|Java_)' | sort; }
 check_page_align_16k() {
   local so="$1"
-  local aligns
+  local aligns needed
   aligns="$("$READELF_BIN" -W -l "$so" | awk '$1 == "LOAD" { print $NF }')"
   [ -n "$aligns" ] || { echo "$so: no ELF LOAD segments found" >&2; exit 1; }
   for a in $aligns; do
     [ "$a" = "0x4000" ] || { echo "$so: expected 16 KB LOAD alignment 0x4000, got $a" >&2; exit 1; }
   done
+  needed="$("$READELF_BIN" -d "$so" | awk '/\(NEEDED\)/ { print }')"
+  [ -z "$needed" ] || { echo "$so: unexpected DT_NEEDED entries (must be freestanding): $needed" >&2; exit 1; }
 }
 
 check=false
@@ -92,8 +94,9 @@ for pair in "${ABIS[@]}"; do
   if [ "$abi" = "arm64-v8a" ]; then
     arch_flags=(-march=armv8.2-a+lse+dotprod+fp16)
   fi
-  "$BIN/clang" --target="$target" ${arch_flags[@]+"${arch_flags[@]}"} ${FREESTANDING_FLAGS[@]+"${FREESTANDING_FLAGS[@]}"} -O2 -fPIC -shared \
-    -Wl,-z,max-page-size=16384 -Wl,-s -Wl,--build-id=none \
+  "$BIN/clang" --target="$target" ${arch_flags[@]+"${arch_flags[@]}"} ${FREESTANDING_FLAGS[@]+"${FREESTANDING_FLAGS[@]}"} \
+    -ffreestanding -nostdlib -O2 -fPIC -shared \
+    -Wl,-z,max-page-size=16384 -Wl,--no-undefined -Wl,-s -Wl,--build-id=none \
     -Iandroid_dashboard/app/src shared/orb-spec/cabi/orb_kernel_unboxed.c \
     android_dashboard/app/src/main/jni/orb_kernel_jni.c -o "$out/$abi/liborb_kernel.so"
   check_page_align_16k "$out/$abi/liborb_kernel.so"

@@ -1,17 +1,46 @@
 # Managed VM lifecycle
 
-Goal: no managed VM (boat.dev) keeps running in the void. Every VM has an
-owner whose lifetime governs it, and a reaper plus a reconciler enforce that.
-Code: `src/managed/lifecycle.rs` (pure decision), `src/managed/mod.rs`
-(`reap_once`, `reconcile_once`, `claim_for_mission`). Lean gate for the final
-destroy: `orb_vm_step` op `reap_check`.
+Goal: no managed VM (`boat`, `hetzner`, `vastai`, `scaleway`) keeps running in
+the void, and no agent ever needs raw cloud API keys in shell. Every VM has an
+owner whose lifetime and activity govern it, and a reaper plus a per-provider
+reconciler enforce that.
+Code: `src/managed/lifecycle.rs` (pure decision backed by
+`orb_vm_lifecycle_step`), `src/managed/mod.rs` (`reap_once`, `reconcile_once`,
+`claim_for_mission` backed by `orb_vm_claim_step`), and
+`src/api/secret_broker.rs` (`orb_compute_secret_gate`).
 
-## Ownership
+## Providers & Secret Confinement
+
+| Provider (`provider`) | Workloads | Bootstrap | `supports_free_stop` | `supports_snapshots` | Minimum lease |
+| --- | --- | --- | --- | --- | --- |
+| `boat` (default) | Fast ephemeral Linux x86\_64 workers (`small`..`xlarge`) & raw sandboxes | Provider file/exec API | Yes (14d disk retention, \$0) | Yes (named + fork) | Per-second |
+| `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx21`..`ccx33`, `cax31`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
+| `vastai` | Ephemeral CUDA GPUs (`rtx4090`, `a100`, `h100`, or explicit `gpu` filter) | Offer `onstart` -> reverse relay | No (stopped instances bill storage/GPU) | No | On-demand |
+| `scaleway` | EU Linux/GPU Instances (`DEV1-*`, `PRO2-*`, `L4-*`, `H100-*`) & Apple Silicon Mac minis (`M1-M`, `M2-M`, `M2-PRO`, `M4-M`) | Cloud-init / SSH -> reverse relay | No | No | Instances: per-minute; Apple Silicon: **24h (`deletable_at`)** |
+
+Provider credentials (`BOAT_API_KEY`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
+`SCALEWAY_SECRET_KEY`, `SCALEWAY_KEY_ID`, etc.) are resolved inside Core from
+environment variables or Bitwarden Secrets Manager (`bitwarden.rs`) and are
+classified as `CoreReserved` in `secret_broker.rs` (`orb_compute_secret_gate`):
+
+1. Agents cannot read `CoreReserved` cloud provider keys via `secret_get` or
+   `secret_request`, and `secret_list` omits them from `accessible`. Agents must
+   rent VMs through `spawn_managed_machine` or
+   `start_mission(remote_node_id="auto-managed[:provider[:size]]")`.
+2. Callers executing on untrusted `managed-*` remote nodes are denied all
+   non-allowlisted vault secrets (`orb_compute_secret_gate`).
+
+## Ownership & Lineage
 
 | Field | Meaning |
 | --- | --- |
 | `owner_mission_id` | The mission the VM serves. Its lifetime governs the VM. |
 | `requested_by_mission_id` | The mission that rented it for the owner (e.g. the caller of `start_mission(remote_node_id="auto-managed")`). Informational: it never keeps the VM alive. |
+| `root_mission_id` | Root ancestor mission of the owner tree, resolved server-side at spawn/claim. |
+| `project` | Project slug of the owning mission, used for UI attribution and snapshot scoping. |
+| `active_mission_ids` | Live worker missions currently executing remote jobs or holding leases on `node_id`. |
+| `has_executed_job` | Monotone sticky flag set once the node has executed at least one remote job/lease. |
+| `deletable_at` | Optional provider minimum-lease timestamp (e.g. Scaleway Apple Silicon 24h `deletable_at`) before which provider deletion is forbidden. |
 | `owner_kind` | `mission` or `user` (created from Orb/API without a mission). Absent = legacy row, shown as "No owner". |
 | `owner_user_id` | Tenant whose mission store holds the owner. Set from the authenticated caller, never from a body. |
 
@@ -49,27 +78,31 @@ requester comes from server-resolved lineage, never from a request body.
 
 ## Decision table
 
-Evaluated every reaper pass (30 s) for each online VM. `busy` = the node
+Evaluated every reaper pass (30 s, or immediately when a mission or remote job
+transitions) for each online VM via `orb_vm_lifecycle_step`. `busy` = the node
 reports active jobs, leases or queued jobs (any mission). `idle` = time since
-`last_busy_at`.
+`last_busy_at` (set to `now` whenever `busy` is observed, along with sticky
+`has_executed_job = true`).
 
 | # | Condition | Decision | `destroy_reason` |
 | --- | --- | --- | --- |
-| 1 | `now >= expires_at` | destroy (even if busy) | `ttl_expired` |
+| 1 | `now >= expires_at` | destroy (even if busy), or defer to `deletable_at` when `now < deletable_at` | `ttl_expired` (`awaiting_deletable_at:ttl_expired` while deferred) |
 | 2 | busy | keep, clear any schedule | |
-| 3 | owner terminal (completed, failed, not_feasible, cancelled, acknowledged, archived) | destroy after `owner_grace` from first observation | `owner_<status>` |
-| 4 | owner deleted | destroy after `owner_grace` | `owner_missing` |
-| 5 | owner interrupted / awaiting_user / blocked / paused since `t` | destroy at `max(t + waiting_grace, last_busy + idle)` | `owner_<status>_idle` |
-| 6 | owner working (pending, active, waiting_background) | keep | |
-| 7 | owner state unknown (tenant store not loaded, no tenant) | keep | |
-| 8 | user-owned | destroy when idle > `idle` | `idle_user_owned` |
-| 9 | no owner (legacy) | destroy when idle > `idle` | `idle_no_owner` |
+| 3 | owner terminal (completed, failed, not\_feasible, cancelled, acknowledged, archived) | destroy after `owner_grace` from first observation (or defer to `deletable_at`) | `owner_<status>` |
+| 4 | owner deleted | destroy after `owner_grace` (or defer to `deletable_at`) | `owner_missing` |
+| 5 | owner interrupted / awaiting\_user / blocked / paused since `t` | **stop** (`supports_free_stop == true`) or **destroy** (`false`) at `max(t + waiting_grace, last_busy + idle)` | `owner_<status>_idle` |
+| 6 | owner working (pending, active, waiting\_background) | destroy when idle > `post_job_working_idle` (`has_executed_job`) else `working_idle` (`0` = keep) | `working_owner_idle` |
+| 7 | owner state unknown (neither loaded nor persisted offline store knows tenant) | keep | |
+| 8 | user-owned | destroy when idle > `idle` (or defer to `deletable_at`) | `idle_user_owned` |
+| 9 | no owner (legacy) | destroy when idle > `idle` (or defer to `deletable_at`) | `idle_no_owner` |
 
-A rule whose due time is in the future is persisted as `reap_at` /
-`reap_reason`; clients show "Reaps in X (reason)".
+A rule whose due time is in the future (or gated by `now < deletable_at`) is
+persisted as `reap_at` / `reap_reason`; clients show "Reaps in X (reason)".
 
-Defaults (env): `SANDBOXED_MANAGED_IDLE_MINUTES` 30,
-`SANDBOXED_MANAGED_OWNER_GRACE_MINUTES` 5,
+Defaults (env): `SANDBOXED_MANAGED_IDLE_MINUTES` 15,
+`SANDBOXED_MANAGED_WORKING_IDLE_MINUTES` 15,
+`SANDBOXED_MANAGED_POST_JOB_IDLE_MINUTES` 5,
+`SANDBOXED_MANAGED_OWNER_GRACE_MINUTES` 2,
 `SANDBOXED_MANAGED_WAITING_GRACE_MINUTES` 15,
 `SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES` 60 with
 `SANDBOXED_MANAGED_AUTO_EXTEND_MINUTES` 30 (a busy VM within 10 minutes of
@@ -77,8 +110,13 @@ its TTL is extended by one chunk if its budget pool and the daily cap allow),
 `SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES` 10,
 `SANDBOXED_MANAGED_RECONCILE_SECS` 120.
 
+`owner_probe` inspects both loaded in-memory mission stores and persisted
+offline SQLite stores (`persisted_mission_store`), so a Core restart never
+leaves terminal or waiting owners permanently unknown.
+
 Owner death cascades through the tree: a descendant still running on the VM
-holds a lease, so rule 2 protects it; once nothing runs there, rule 3 applies.
+holds a lease, so rule 2 protects it; once nothing runs there, rule 3 or rule 6
+applies.
 
 ## Budgets (optional, off by default)
 
@@ -114,22 +152,32 @@ starting `orb-node` (best effort, logged): `/tmp/opencode` writable by
 `orbnode`, a git credential helper answering only `https://github.com` with
 the mission's GitHub token (the `paloma-secrets` file Core delivered, else
 `GITHUB_TOKEN`/`GH_TOKEN`; never written by the script), ssh GitHub URLs
-rewritten to https, and the orbnode rustup env when the image has it. The
-`online` ledger event records `ready_ms`, `provision_ms`, `enroll_ms` and
-`total_ms`. The image recipe adds gh, ripgrep, fd, clang/llvm/lld and an
-orbnode-owned rustup with stable and 1.93.0.
+rewritten to https, and the orbnode rustup env when the image has it. For cloud-init/onstart providers (`hetzner`, `vastai`, `scaleway`), Core generates a
+one-time `<4 KiB` enrollment script (fitting Vast.ai's `onstart` limit) that
+fetches `sandboxed-node`, `sandboxed-mcp`, and verified native harnesses
+(`opencode`, `claude`, `codex`) over streaming `GET /api/managed-machines/bootstrap-binary/:id`
+(which verifies ELF `e_machine` matches the machine's `arch`), keeps
+`/home/user/.orb/enroll.env` `0600` unprivileged-unreadable, enables `orbnode`'s
+lingering user D-Bus session (`XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS`), and
+dials back over the reverse relay (`SANDBOXED_NODE_DIAL_CORE_URL`). Marketplace
+providers (`vastai`) quote a verified offer (`quote_spawn`) enforcing CPU/RAM floors
+before budget admission so daily caps, pool reservations, and machine ledger rows use
+the real `dph_total` rate rather than catalog placeholders. Scaleway Apple Silicon
+(`M2-*`, 24h minimum lease) is rejected for Linux `worker` provisioning and omitted
+from the worker size catalog (`raw`-only with `allow_24h_commitment: true`). The
+`online` ledger event records `ready_ms`, `provision_ms`, `enroll_ms` and `total_ms`.
 
 ## Snapshots, forks, stop
 
-Code: `src/managed/snapshots.rs`. Agent guide: `skills/boat-machines/SKILL.md`.
+Code: `src/managed/snapshots.rs`. Agent guide: `skills/managed-compute/SKILL.md`.
 
 - **Named snapshots** (`snapshot_managed_machine`, `POST
-  /api/managed-machines/:id/snapshot`) are recorded in
+  /api/managed-machines/:id/snapshot`, `boat` only) are recorded in
   `.sandboxed-sh/managed_snapshots.json` with owner mission, tenant, project
   (the owner mission's), source machine and size. Delivered
   `.paloma-secrets` are deleted on the VM first; a VM holding a projected
   Antigravity sign-in cannot be saved or forked. Visible and usable only
-  within the same tenant and project. Pricing: 10 included, then $1.70/month.
+  within the same tenant and project. Pricing: 10 included, then \$1.70/month.
 - **From a snapshot**: `spawn_managed_machine(from_snapshot)` and
   `start_mission(auto-managed, managed_from_snapshot)`; `last_used_at` is
   recorded. Budget and caps apply as for any rent.
@@ -137,23 +185,33 @@ Code: `src/managed/snapshots.rs`. Agent guide: `skills/boat-machines/SKILL.md`.
   source's latest background snapshot (up to ~1 min stale), owner = caller,
   `forked_from` recorded. Provisioning deletes the copied `node.cred` and
   `managed-auth` before enrolling.
-- **Stop / resume**: stop keeps the disk (`Stopped`, unregistered, no
-  billing). The boat key has no `sandbox.resume`, so resume forks the
-  stopped sandbox and keeps the machine's id, node id, owner and pool;
-  cost of earlier runs is kept in `cost_before_resume`.
+- **Stop / resume** (`supports_free_stop == true`, `boat`): stop keeps the disk
+  (`Stopped`, unregistered, no billing). Resume forks the stopped sandbox and
+  keeps the machine's id, node id, owner and pool; cost of earlier runs is kept
+  in `cost_before_resume`. Names of `Stopped` rows stay reserved in
+  `allocate_name` so live allocations never collide with resumable machines.
 - **Reaper**: rule 5 (owner interrupted/awaiting/blocked/paused and idle)
-  stops instead of destroying (`stopped_by_reaper`), and such a machine is
-  resumed when its owner works again. A stopped machine is closed after
+  stops instead of destroying (`stopped_by_reaper`) only when
+  `provider.supports_free_stop()` is true, and destroys otherwise so stopped
+  disks/VMs never keep billing. A stopped machine is closed after
   `SANDBOXED_MANAGED_STOPPED_RETENTION_HOURS` (24) or when its owner ends.
 - **Snapshot cleanup** (each reconcile pass, dry-run aware): keep the newest
   `SANDBOXED_MANAGED_SNAPSHOT_KEEP` (2) ready snapshots per project, delete
   ones unused for `SANDBOXED_MANAGED_SNAPSHOT_UNUSED_DAYS` (14) and failed
   saves; never one a provisioning machine is being created from.
 
-## Reconciler (every `reconcile_secs`)
+## Reconciler & Crash Recovery (every `reconcile_secs`, per provider)
 
-- Provider VM with our name prefix and no live registry row (and no spawn in
-  flight for it): stop after `orphan_grace` from first sighting.
+- Every provider spawn attaches `orb-managed-<id>` atomically in the initial
+  create request (`name` + provider labels/tags) so no crash window leaves an
+  unnamed sandbox.
+- On `ManagedManager::load()`, stale `Provisioning`/`Enrolling` rows without a
+  `provider_id` left behind by a prior Core process are closed as `Failed`
+  (`core_restarted_during_provision`) so they neither consume concurrency slots
+  nor exempt crash-window orphans from reconciliation.
+- Provider VM with our name prefix/tag and no live registry row (and no spawn in
+  flight for it): destroy after `orphan_grace` from first sighting (respecting
+  `deletable_at` if present).
 - Live row whose provider VM is stopped: destroy (`stopped_by_provider`).
 - Live row whose provider VM is missing from two consecutive non-empty
   listings: mark destroyed (`provider_vanished`) without a provider call and
@@ -161,13 +219,13 @@ Code: `src/managed/snapshots.rs`. Agent guide: `skills/boat-machines/SKILL.md`.
 
 ## Dry run
 
-`managed_settings.json` `reaper_dry_run` (default true until changed; env
-`SANDBOXED_MANAGED_REAPER_DRY_RUN=0` turns it off; `PUT
-/api/managed-machines/settings` merges partial bodies). In dry run, rules 3-9
-and orphan stops are recorded (`would_reap` in the ledger once per machine and
-reason, `reap_at` on the row) but nothing is destroyed. TTL always destroys.
-`GET /api/managed-machines/reap-plan` returns the current decision for every
-live VM.
+`managed_settings.json` `reaper_dry_run` defaults to **`false`** (active
+reaping enforced out of the box; env `SANDBOXED_MANAGED_REAPER_DRY_RUN=1`
+enables dry-run; `PUT /api/managed-machines/settings` merges partial bodies).
+In dry run, rules 3-9 and orphan stops are recorded (`would_reap` in the ledger
+once per machine and reason, `reap_at` on the row) but nothing is destroyed.
+TTL always enforces. `GET /api/managed-machines/reap-plan` returns the current
+decision for every live VM.
 
 ## Invariants
 
@@ -175,19 +233,31 @@ live VM.
    one has `owner_mission_id`.
 2. No lifecycle rule destroys a busy VM; only the TTL does.
 3. A VM is never destroyed because of an owner whose state is unknown.
-4. The requester's liveness never extends a VM's life.
-5. Every destroy records exactly one `destroy_reason` from the table above (or
-   `requested`, `provisioning failed: ...`, `stopped_by_provider`,
-   `provider_vanished`).
-6. A machine of tenant A is never claimed by tenant B.
+4. The requester's liveness never extends a VM's life, and a `Working` owner's
+   idle worker VM is bounded by `working_idle` / `post_job_working_idle`.
+5. No provider `destroy` is issued while `now < deletable_at`; expiration defers
+   to `reap_at = deletable_at`.
+6. Every destroy records a canonical `destroy_reason`.
+7. A machine of tenant A is never claimed by tenant B (`orb_vm_claim_step`).
+8. Cloud provider API keys (`CoreReserved`) are never disclosed to agent tasks,
+   and untrusted `managed-*` nodes receive only allowlisted secrets
+   (`orb_compute_secret_gate`).
 
-## Proposed Lean gates (not implemented; Lean is owned elsewhere)
+## Formal Lean Kernel Gates (`lean/Orb/Kernel.lean` & `lean/Orb/Spec.lean`)
 
-- `vmReapDecision` over `(ttlExpired, busy, ownerClass, waitingElapsed,
-  idleElapsed, graceElapsed)` returning keep/schedule/destroy, with
-  corollaries for invariants 2-4.
-- `vmClaimAdmit (sameTenant, ownerNone, ownerIsRequester)`: admits iff
-  `sameTenant && (ownerNone || ownerIsRequester)` (invariant 6).
+- `orb_vm_step`: admission (`size_rank`, `max_concurrent`, `ttl_minutes`,
+  `job_mem_pct`, `daily_cap_cents`), reap safety gate, and reconcile actions.
+- `orb_vm_lifecycle_step`: full 9-rule lifecycle decision stepper (`keep`,
+  `schedule`, `stop`, `destroy`, `deferForMinLease`) covering `Working`-parent
+  idle reaping, `supportsFreeStop` partitioning, and `deletable_at` deferral
+  (Corollary 81).
+- `orb_vm_claim_step`: tenant isolation + requester lineage gate for
+  `claim_for_mission` (`vmClaimMetaGate`, Corollary 79).
+- `orb_machine_action_admitted`: cross-client UI projection gate including
+  `isLive`, `canAct`, `meterLiveCost`, `isStopped`, and `canResume`
+  (`machineActionMetaGate`, Corollary 82).
+- `orb_compute_secret_gate`: `CoreReserved` compute API key + untrusted managed
+  node secret confinement (`computeSecretMetaGate`, Corollary 80).
 
 ## Raw managed machines
 

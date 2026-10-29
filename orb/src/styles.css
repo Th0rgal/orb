@@ -2513,7 +2513,7 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-panel header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--stroke-soft); }
 .btw-panel header strong { display:block; font-weight:500; font-size:14px; color:var(--amber); }
 .btw-panel header span { display:block; color:var(--fg-3); font-size:11px; margin-top:3px; }
-.btw-thread { user-select:text; -webkit-user-select:text; cursor:auto; max-height:min(40vh,360px); overflow:auto; padding:0 16px; overscroll-behavior:contain; }
+.btw-thread { user-select:text; -webkit-user-select:text; cursor:auto; max-height:min(40vh,360px); overflow:auto; overflow-anchor:none; padding:0 16px; overscroll-behavior:contain; }
 .btw-thread article { padding:12px 0; border-bottom:1px solid var(--stroke-soft); font-size:13px; }
 .btw-question { font-weight:500; margin:0 0 10px; white-space:pre-wrap; }
 .btw-transfer,.btw-reopen { border:0; background:transparent; color:var(--fg-2); font:inherit; font-size:12px; cursor:pointer; padding:6px 0; }
@@ -4027,6 +4027,11 @@ select.orb-select-native:disabled { cursor: default; }
 }
 .managed-mission-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .managed-owner-chip { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: var(--hover-2); color: var(--fg-3); white-space: nowrap; }
+.managed-provider-chip { color: var(--blue); background: color-mix(in srgb, var(--blue) 14%, transparent); font-weight: 500; }
+.managed-project-chip { color: var(--fg-2); }
+.managed-providers { display: flex; flex-wrap: wrap; gap: 6px; }
+.managed-24h-confirm { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--amber); cursor: pointer; }
+.managed-24h-confirm input { margin-top: 2px; }
 .managed-owner-chip.managed-no-owner { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
 .managed-no-owner-reason { color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .managed-reap { color: var(--amber); }
