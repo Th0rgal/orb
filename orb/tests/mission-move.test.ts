@@ -80,6 +80,9 @@ it('sets includeDescendants on cross-project and split-subtree root moves and ex
   {id:C,from:'verity',folder:'',viaRootId:P},
  ]);
  vi.mocked(getMission).mockResolvedValue({id:P,tags:[]} as any);
+ const movedEvents:Array<{id:string;project:string;tags?:string[]}>=[];
+ const onMoved=(e:Event)=>movedEvents.push((e as CustomEvent).detail);
+ window.addEventListener('orb:mission-moved',onMoved);
  let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
  vi.mocked(api).mockImplementation(async ()=>{ await gate; return {ok:true} as any; });
  const done=moveMissions(crossPlan,'other');
@@ -88,6 +91,8 @@ it('sets includeDescendants on cross-project and split-subtree root moves and ex
  expect([...pendingMoves().keys()].sort()).toEqual([P,C,G,CB].map(m=>`mission:${m}`).sort());
  release();
  expect(await done).toEqual([]);
+ window.removeEventListener('orb:mission-moved',onMoved);
+ expect(movedEvents.map(e=>e.id)).toEqual([P,C,G,CB]);
  expect(vi.mocked(api)).toHaveBeenCalledTimes(1);
  expect(JSON.parse(vi.mocked(api).mock.calls[0][1]!.body as string)).toEqual({
   project:'other',

@@ -772,15 +772,16 @@ export function LiveProjectsSection(p: {
     };
     window.addEventListener("orb:project-created", onProjectCreated);
     const onMissionMoved = (event: Event) => {
-      const { id, project, tags } = (event as CustomEvent<{ id: string; project: string; tags: string[] }>).detail;
+      const { id, project, tags } = (event as CustomEvent<{ id: string; project: string; tags?: string[] }>).detail;
       const prior = allKnownMissions().find(m => m.id === id);
       if (!prior) return;
       // Commit the successful write before waiting for any project refresh.
       // Reads launched before this acknowledgement may still contain A.
+      const nextTags = tags ?? (prior.tags ?? []).filter(t => !t.startsWith("orb-folder:"));
       missionRevision++;
       batch(() => {
         leaveProjects(id, project);
-        const updated = mergeMission(prior, { id, project, tags }, "partial");
+        const updated = mergeMission(prior, { id, project, tags: nextTags }, "partial");
         setMissions(project, rows => [updated, ...(rows ?? []).filter(m => m.id !== id)]);
       });
     };

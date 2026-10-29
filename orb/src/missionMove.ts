@@ -30,6 +30,7 @@ async function writeMissionProject(
   version: number,
   includeDescendants = false,
   descendantIds?: readonly string[],
+  coveredChildren: readonly MovePlanStep[] = [],
 ): Promise<void> {
   const mission = await getMission(id);
   if (version !== connectionVersion()) throw new Error('Connection changed. Cut the conversation again.');
@@ -45,6 +46,11 @@ async function writeMissionProject(
     }),
   });
   window.dispatchEvent(new CustomEvent('orb:mission-moved', { detail: { id, project, tags } }));
+  for (const child of coveredChildren) {
+    window.dispatchEvent(new CustomEvent('orb:mission-moved', {
+      detail: { id: child.id, project, ...(child.tags ? { tags: child.tags } : {}) },
+    }));
+  }
 }
 
 export async function moveMission(id: string, project: string, folder: string, fromProject: string | null = null, includeDescendants = false): Promise<void> {
@@ -64,6 +70,8 @@ export type MovePlanStep = {
   includeDescendants?: boolean;
   /** Set on child projection entries persisted atomically by their root step's `include_descendants` write. */
   viaRootId?: string;
+  /** Post-move child tags (`orb-folder:*` stripped) when known from sidebar state. */
+  tags?: string[];
   /** Client-known callback descendants (`callback_parent_mission_id`) forwarded with the root write. */
   descendantIds?: string[];
 };
@@ -103,7 +111,14 @@ export function planMissionMoves(ids: readonly string[], project: string, folder
         callbackIdsByRoot.set(rootId, [...(callbackIdsByRoot.get(rootId) ?? []), m.id]);
       }
       if ((m.project ?? null) !== project) {
-        const step: MovePlanStep = { id: m.id, from: m.project ?? null, folder: '', viaRootId: rootId };
+        const childTags = m.tags ? m.tags.filter(t => !t.startsWith('orb-folder:')) : undefined;
+        const step: MovePlanStep = {
+          id: m.id,
+          from: m.project ?? null,
+          folder: '',
+          viaRootId: rootId,
+          ...(childTags ? { tags: childTags } : {}),
+        };
         childSteps.push(step);
         crossProjectByRoot.set(rootId, [...(crossProjectByRoot.get(rootId) ?? []), step]);
       }
@@ -149,7 +164,7 @@ export async function moveMissions(plan: MovePlan, project: string): Promise<{ i
     }));
     return moveBatchOptimistically(
       batch,
-      () => writeMissionProject(root.id, project, root.folder, version, !!root.includeDescendants, root.descendantIds),
+      () => writeMissionProject(root.id, project, root.folder, version, !!root.includeDescendants, root.descendantIds, children),
     );
   }));
   return results.flatMap((r, i) => {
