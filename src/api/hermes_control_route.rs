@@ -46,7 +46,9 @@ fn new_project_id() -> String {
 }
 
 fn open(path: &Path) -> Result<Connection, String> {
-    Connection::open(path).map_err(|e| e.to_string())
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(10));
+    Ok(conn)
 }
 
 fn project_id_for_slug(conn: &Connection, slug: &str) -> Result<Option<String>, String> {

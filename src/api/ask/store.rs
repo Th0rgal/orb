@@ -164,6 +164,8 @@ impl AskStore {
     pub async fn open(db_path: PathBuf) -> Result<Self, String> {
         let conn = tokio::task::spawn_blocking(move || -> Result<Connection, String> {
             let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+            conn.busy_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| e.to_string())?;
             conn.pragma_update(None, "journal_mode", "WAL")
                 .map_err(|e| e.to_string())?;
             conn.pragma_update(None, "foreign_keys", "ON")

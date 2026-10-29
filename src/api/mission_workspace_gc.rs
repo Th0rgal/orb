@@ -323,6 +323,7 @@ fn index_store_file_blocking(
     let conn =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| e.to_string())?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(10));
     let mut stmt = conn
         .prepare("SELECT id, status, updated_at, workspace_id FROM missions")
         .map_err(|e| e.to_string())?;
@@ -401,6 +402,7 @@ fn persisted_mission_store_location_blocking(
                     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                 )
                 .map_err(|err| format!("open {}: {err}", path.display()))?;
+                let _ = conn.busy_timeout(std::time::Duration::from_secs(10));
                 let mut stmt = conn
                     .prepare("SELECT status FROM missions WHERE id = ?1 LIMIT 1")
                     .map_err(|err| format!("query {}: {err}", path.display()))?;

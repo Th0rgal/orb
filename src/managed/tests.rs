@@ -3245,3 +3245,46 @@ async fn provider_enable_disable_and_encrypted_config_lifecycle() {
     assert_eq!(scw.region.as_deref(), Some("nl-ams-1"));
     assert_eq!(scw.project_id.as_deref(), Some("proj-uuid-1"));
 }
+
+#[tokio::test]
+async fn reconcile_closes_vanished_destroying_rows_even_when_list_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let online = online_machine(&m, "owner-online").await;
+    let stuck = online_machine(&m, "owner-destroying").await;
+    m.update(&stuck.id, |row| {
+        row.state = MachineState::Destroying;
+        row.destroy_reason = Some("stopped: owner_interrupted_idle".into());
+        row.error = Some("destroy failed: HTTP 403 api_key_action_forbidden".into());
+    })
+    .await;
+
+    // First pass: neither closed yet.
+    let r1 = m.reconcile_once().await.unwrap();
+    assert_eq!(r1["vanished_rows"], serde_json::json!([]));
+    assert_eq!(
+        m.get(&stuck.id).await.unwrap().state,
+        MachineState::Destroying
+    );
+    assert_eq!(m.get(&online.id).await.unwrap().state, MachineState::Online);
+
+    // Second pass with empty list: Destroying closes as vanished, Online stays protected.
+    let r2 = m.reconcile_once().await.unwrap();
+    assert_eq!(r2["vanished_rows"], serde_json::json!([stuck.id.clone()]));
+    let closed = m.get(&stuck.id).await.unwrap();
+    assert_eq!(closed.state, MachineState::Destroyed);
+    assert!(closed.ledger_closed);
+    assert_eq!(m.get(&online.id).await.unwrap().state, MachineState::Online);
+}
+
+#[test]
+fn retryable_exec_error_matches_transient_sandbox_proxy_faults() {
+    assert!(super::is_retryable_exec_error(
+        "boat POST /sandboxes/bx_123/commands -> HTTP 502 sandbox_direct_failed: Failed to execute command in sandbox"
+    ));
+    assert!(super::is_retryable_exec_error(
+        "HTTP 503 Service Unavailable"
+    ));
+    assert!(!super::is_retryable_exec_error("exit code 1"));
+    assert!(!super::is_retryable_exec_error("HTTP 403 forbidden"));
+}
