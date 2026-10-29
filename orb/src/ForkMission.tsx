@@ -112,6 +112,7 @@ export async function retryTransferArchive(sourceId: string): Promise<boolean> {
     return current?.archiveState === "archived";
   }
   putTransfer({ ...current, archiveState: "archiving", error: undefined });
+  window.dispatchEvent(new CustomEvent("orb:mission-archived", { detail: { id: sourceId } }));
   try {
     const src = await getMission(sourceId, { fresh: true });
     if (src.status !== "acknowledged" && src.status !== "archived") {

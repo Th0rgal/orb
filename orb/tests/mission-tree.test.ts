@@ -150,3 +150,53 @@ test("a tagged fork of a worker stays inside the worker's parent", () => {
   expect(roots[0].children[0].children.map(c => [c.mission.id, c.version])).toEqual([["w", true]]);
   expect(missionParent({ id: "w2", tags: ["fork-of:w"] })).toBeUndefined();
 });
+
+test("F1: unretired and live forks never nest under archived, stopped, or post-fork-settled ancestors (65407660 replay)", () => {
+  // Exact production shapes from 65407660-f9a2-440c-965f-50f6bd2589fb ("Orb: leaninification"):
+  // 86d91cc3 was archived with retained worker 9bfbb6e4, then resurrected and stalled into interrupted at 05:48:22Z;
+  // sibling fork d65744b9 completed earlier; 65407660 ran actively until 06:02:22Z.
+  const worker = { id: "9bfbb6e4", parent_mission_id: "86d91cc3", status: "completed", updated_at: "2026-10-29T05:00:00Z" };
+  const archivedRoot = { id: "86d91cc3", status: "acknowledged", created_at: "2026-10-28T23:00:00Z", updated_at: "2026-10-29T05:50:00Z" };
+  const completedSibling = { id: "d65744b9", status: "completed", tags: ["fork-of:86d91cc3"], created_at: "2026-10-29T05:05:00Z", updated_at: "2026-10-29T05:49:00Z" };
+  const activeTarget = { id: "65407660", status: "active", tags: ["fork-of:86d91cc3"], created_at: "2026-10-29T05:31:00Z", updated_at: "2026-10-29T05:31:00Z" };
+
+  const retained = missionTreeRows([archivedRoot, worker, completedSibling, activeTarget], r => r.status !== "acknowledged");
+  const step1 = nestMissions(retained);
+  expect(step1.map(r => r.mission.id)).toEqual(["65407660"]);
+  expect(step1[0].children.map(c => [c.mission.id, !!c.version])).toEqual([
+    ["86d91cc3", true],
+    ["d65744b9", true],
+  ]);
+
+  // Even when 86d91cc3 was spuriously bumped to interrupted at 05:48:22Z, live 65407660 still leads.
+  const stalledRoot = { ...archivedRoot, status: "interrupted", updated_at: "2026-10-29T05:48:22Z" };
+  expect(nestMissions([stalledRoot, worker, completedSibling, activeTarget]).map(r => r.mission.id)).toEqual(["65407660"]);
+
+  // Once 65407660 itself stops at 06:02:22Z, it still leads cleanly as the most recently active unretired version.
+  const stoppedTarget = { ...activeTarget, status: "interrupted", updated_at: "2026-10-29T06:02:22Z" };
+  expect(nestMissions([stalledRoot, worker, completedSibling, stoppedTarget]).map(r => r.mission.id)).toEqual(["65407660"]);
+});
+
+test("F1: converting Codex to OpenCode builtin/smart never lets source stop/cleanup timestamps outrank the new fork", () => {
+  const codexSource = {
+    id: "codex-src",
+    title: "Refactor parser",
+    backend: "codex",
+    model_override: "gpt-6.1-sol",
+    status: "interrupted",
+    created_at: "2026-10-29T02:00:00Z",
+    updated_at: "2026-10-29T02:25:17Z", // stopSource / cleanup landed 6s after fork creation
+  };
+  const opencodeFork = {
+    id: "opencode-fork",
+    title: "Refactor parser",
+    backend: "opencode",
+    model_override: "builtin/smart",
+    status: "interrupted",
+    tags: ["fork-of:codex-src"],
+    created_at: "2026-10-29T02:25:11Z",
+    updated_at: "2026-10-29T02:25:11Z",
+  };
+  expect(nestMissions([codexSource, opencodeFork]).map(r => r.mission.id)).toEqual(["opencode-fork"]);
+  expect(nestMissions([opencodeFork, codexSource]).map(r => r.mission.id)).toEqual(["opencode-fork"]);
+});

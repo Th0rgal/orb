@@ -88,3 +88,134 @@ for (const target of [
     await expect(page.locator(".row.agent", { hasText: "Original work" })).toHaveCount(1);
   });
 }
+
+test("converting Codex to OpenCode builtin/smart never flickers the new mission as a sub-mission on any frame", async ({ page }) => {
+  const createdTs = "2026-10-29T02:25:11.000Z";
+  const cancelledSourceTs = "2026-10-29T02:25:17.000Z"; // 6s newer than fork.created_at!
+  const source: any = {
+    id: "codex-orig",
+    title: "Migrate Lean kernel",
+    status: "active",
+    backend: "codex",
+    model_override: "gpt-6.1-sol",
+    project: "test",
+    history: [],
+    created_at: "2026-10-29T02:00:00.000Z",
+    updated_at: "2026-10-29T02:25:10.000Z",
+  };
+  const fork: any = {
+    ...source,
+    id: "opencode-fork",
+    status: "pending",
+    tags: ["fork-of:codex-orig"],
+    backend: "opencode",
+    model_override: "builtin/smart",
+    created_at: createdTs,
+    updated_at: createdTs,
+  };
+  let created = false;
+  let started = false;
+
+  await page.addInitScript(() => {
+    localStorage.setItem("orb.apiUrl", location.origin);
+    localStorage.setItem("orb.jwt", "test");
+    localStorage.setItem("orb-theme", "dark");
+    const w = window as unknown as { __forkViolations: string[] };
+    w.__forkViolations = [];
+    const check = () => {
+      const forkEl = document.querySelector('[data-tree-id="m:opencode-fork"]');
+      if (forkEl) {
+        const depth = Number(forkEl.getAttribute("data-depth") ?? "0");
+        if (depth > 1) w.__forkViolations.push(`fork rendered nested at depth=${depth}`);
+        if (forkEl.querySelector(".row-version-tag")) w.__forkViolations.push("fork rendered with earlier version badge");
+        const label = forkEl.querySelector(".row-label")?.textContent?.trim() ?? "";
+        if (label.includes("OpenCode") || label.includes("builtin/smart")) {
+          w.__forkViolations.push(`fork rendered with versionLabel "${label}"`);
+        }
+      }
+    };
+    const loop = () => { check(); requestAnimationFrame(loop); };
+    requestAnimationFrame(loop);
+    new MutationObserver(check).observe(document, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["data-depth", "data-tree-id", "class"],
+    });
+  });
+
+  await page.route("**/api/**", async route => {
+    const req = route.request(), path = new URL(req.url()).pathname;
+    if (path === "/api/model-routing/chains") return route.fulfill({ json: [{ id: "builtin/smart", name: "Smart (Default)" }] });
+    if (req.method() !== "GET") {
+      if (path.endsWith("/inbox-digest") || path.endsWith("/opened") || path.includes("/inbox-state/seen/")) {
+        return route.fulfill({ json: {} });
+      }
+      if (path === "/api/control/missions/codex-orig/cancel") {
+        source.status = "interrupted";
+        source.updated_at = cancelledSourceTs;
+        return route.fulfill({ json: {} });
+      }
+      if (path === "/api/control/missions/codex-orig/fork") {
+        created = true;
+        return route.fulfill({ json: fork });
+      }
+      if (path === "/api/control/missions/codex-orig/status") {
+        await new Promise(r => setTimeout(r, 400));
+        source.status = req.postDataJSON().status;
+        return route.fulfill({ json: source });
+      }
+      return route.fulfill({ status: 400 });
+    }
+    if (path === "/api/control/stream") {
+      const missionId = new URL(req.url()).searchParams.get("mission_id");
+      const body = missionId === "opencode-fork" && started
+        ? `event: thinking\ndata: ${JSON.stringify({ content: "Running OpenCode", done: true })}\n\n`
+        : "";
+      return route.fulfill({ contentType: "text/event-stream", body });
+    }
+    const forkedEvents = started
+      ? [
+          { id: 1, event_id: "u1", sequence: 1, event_type: "user_message", content: "Carried prompt", timestamp: "" },
+          { id: 2, event_id: "t1", sequence: 2, event_type: "thinking", content: "Running OpenCode", metadata: { done: true }, timestamp: "" },
+        ]
+      : [{ id: 1, event_id: "u1", sequence: 1, event_type: "user_message", content: "Carried prompt", timestamp: "" }];
+    const json = path === "/api/projects" ? { projects: [{ slug: "test", title: "Test" }] }
+      : path === "/api/backends" ? [{ id: "codex", name: "Codex" }, { id: "opencode", name: "OpenCode" }]
+      : path === "/api/providers/backend-models" ? { backends: { codex: [{ value: "gpt-6.1-sol", label: "GPT 6.1 Sol" }], opencode: [] } }
+      : path === "/api/control/missions" || path.endsWith("/missions") ? created ? [source, fork].filter(m => m.status !== "acknowledged") : [source]
+      : path === "/api/control/missions/codex-orig" ? source
+      : path === "/api/control/missions/opencode-fork" ? fork
+      : path === "/api/control/missions/opencode-fork/events" ? forkedEvents
+      : path.endsWith("/events") || path.endsWith("/queue") ? []
+      : path.endsWith("/crons") ? { jobs: [] }
+      : path.endsWith("/files") ? { entries: [] }
+      : path === "/api/remote-nodes" ? { nodes: [] }
+      : { job: null, runs: [] };
+    return route.fulfill(path.endsWith("/events") ? eventPage(route, Array.isArray(json) ? json : []) : { json });
+  });
+
+  await page.goto("/");
+  await page.locator(".row.project .row-main", { hasText: "Test" }).click();
+  await page.getByRole("button", { name: /Migrate Lean kernel/ }).click();
+  await page.getByRole("button", { name: "Transfer to another agent", exact: true }).click();
+  const menu = page.getByRole("menu", { name: "Transfer to another agent", exact: true });
+  await menu.getByRole("menuitem", { name: "OpenCode" }).click();
+  const models = page.getByRole("menu", { name: "Choose a model" });
+  await models.getByRole("menuitem", { name: "Smart (Default)" }).click();
+
+  // Hold destination in `destination_starting` for 800ms while pollers fire and source has a newer updated_at!
+  await expect(page.locator('[data-tree-id="m:opencode-fork"]')).toBeVisible();
+  await expect(page.locator('[data-tree-id="m:opencode-fork"]')).toHaveAttribute("data-depth", "1");
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await page.waitForTimeout(800);
+
+  started = true;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.locator('[data-tree-id="m:opencode-fork"] .row-label')).toHaveText("Migrate Lean kernel");
+  await expect(page.locator('[data-tree-id="m:codex-orig"]')).toHaveCount(0);
+
+  const violations = await page.evaluate(() => (window as unknown as { __forkViolations: string[] }).__forkViolations);
+  expect(violations).toEqual([]);
+});
