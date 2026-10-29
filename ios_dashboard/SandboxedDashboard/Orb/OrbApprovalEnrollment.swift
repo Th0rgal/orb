@@ -13,7 +13,7 @@ final class OrbApprovalEnrollmentMonitor {
     static let shared = OrbApprovalEnrollmentMonitor()
     /// Run on the Core host; Core deletes the file when a device uses it.
     static let codeCommand =
-        "ssh agent-core 'umask 077; head -c 12 /dev/urandom | base64 | tr -dc A-Za-z0-9 | tee /root/.sandboxed-sh/approval_enrollment_code; echo'"
+        "ssh agent-core 'umask 077; mkdir -p /root/.sandboxed-sh; head -c 12 /dev/urandom | base64 | tr -dc A-Za-z0-9 | tee /root/.sandboxed-sh/approval_enrollment_code; echo'"
 
     private(set) var mode = ""
     private(set) var enrolled = true
@@ -65,17 +65,15 @@ struct OrbApprovalEnrollmentBanner: View {
 
     var body: some View {
         if monitor.showsPrompt {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button { monitor.sheetRequested = true } label: {
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         Image(systemName: OrbBiometric.name == "Touch ID" ? "touchid" : "faceid")
+                            .font(.subheadline)
                             .foregroundStyle(OrbStyle.success)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Enroll this iPhone for approvals").font(.footnote.weight(.semibold))
-                            Text("Approve protected actions, like exiting Bunker Mode, with \(OrbBiometric.name).")
-                                .font(.caption).foregroundStyle(OrbStyle.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+                        Text("Enroll this iPhone for \(OrbBiometric.name) approvals")
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
                         Spacer(minLength: 0)
                     }
                     .contentShape(Rectangle())
@@ -83,17 +81,17 @@ struct OrbApprovalEnrollmentBanner: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("home.approval-enroll")
                 Button { monitor.dismiss() } label: {
-                    Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(OrbStyle.textSecondary)
-                        .frame(width: 28, height: 28)
+                    Image(systemName: "xmark").font(.caption2.weight(.semibold)).foregroundStyle(OrbStyle.textSecondary)
+                        .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dismiss")
                 .accessibilityIdentifier("home.approval-enroll.dismiss")
             }
-            .padding(.horizontal, 14).padding(.vertical, 10)
+            .padding(.horizontal, 12).padding(.vertical, 7)
             .background(OrbStyle.elevated, in: RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
             .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.borderStrong))
-            .padding(.horizontal, 12).padding(.vertical, 6)
+            .padding(.horizontal, 12).padding(.vertical, 4)
         }
     }
 }

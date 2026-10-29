@@ -12,8 +12,15 @@ struct OrbComputersSection: View {
     var body: some View {
         Section {
             if ready && computers.isEmpty {
-                Text("No computers connected. Open Orb on a Mac signed in to this account.")
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("No Mac connected")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Open Orb on Mac")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
             ForEach(computers, id: \.computerID) { computer in
                 HStack {
@@ -37,7 +44,9 @@ struct OrbComputersSection: View {
         } header: {
             Text("Computers")
         } footer: {
-            Text("Missions started here run on that computer with its local agents.")
+            if !computers.isEmpty {
+                Text("Missions started here run on that computer with its local agents.")
+            }
         }
         .sheet(item: $starting) { target in
             OrbRemoteStartSheet(computer: target.computer) { missionID in

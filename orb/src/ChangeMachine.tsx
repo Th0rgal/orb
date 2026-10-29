@@ -1,4 +1,4 @@
-import { isManagedNode, missionNode, nodeLabel } from "./machines/nodes";
+import { isManagedNode, managedFleetLabel, missionNode, nodeLabel } from "./machines/nodes";
 import { swallow } from "./log";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
@@ -213,7 +213,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     <Show when={!selected()}>
       <div class="menu-group">Change machine…</div>
       <Show when={loading()}><div class="menu-group" role="status">{destinations().length?"Updating machines…":"Checking machines…"}</div></Show>
-      <For each={ordered()}>{d => <><Show when={d === firstManaged()}><div class="menu-sep" /><div class="machine-section-label">Managed (boat.dev)</div></Show><button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? `${d.label} · ${machineLoadTitle(loadKey(d))}`} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
+      <For each={ordered()}>{d => <><Show when={d === firstManaged()}><div class="menu-sep" /><div class="machine-section-label">{managedFleetLabel(ordered().filter(managed).map(x => ({ id: x.machine.kind === "node" ? x.machine.id : undefined })))}</div></Show><button class="menu-item" role="menuitem" disabled={!d.available || sameMachine(d.machine, current())} title={d.reason ?? `${d.label} · ${machineLoadTitle(loadKey(d))}`} onClick={() => { setSelected(d); setError(""); queueMicrotask(() => root.querySelector<HTMLSelectElement>("select")?.focus()); }}>
         <span>{d.label}<Show when={d.reason}><small>{d.reason}</small></Show></span><span class="machine-transfer-end"><MachineLoadBadge machine={loadKey(d)} /><span>{sameMachine(d.machine, current()) ? "✓" : "›"}</span></span>
       </button></>}</For>
     </Show>

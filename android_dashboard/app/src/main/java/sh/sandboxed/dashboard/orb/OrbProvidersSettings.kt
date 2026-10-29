@@ -77,6 +77,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -222,6 +223,22 @@ internal fun providerQuotaStatus(provider: OrbRow, detail: OrbDict?): OrbQuotaSt
     return quotaStatus(providerQuotaWindows(detail))
 }
 
+internal data class ProviderTitleSplit(val title: String, val account: String)
+
+internal fun splitProviderDisplayName(provider: OrbRow): ProviderTitleSplit {
+    val rawName = (provider.str("name", "label", "id") ?: provider.id).trim()
+    val explicitEmail = provider.str("account_email", "email")?.trim().orEmpty()
+    val openIdx = rawName.lastIndexOf(" (")
+    if (openIdx > 0 && rawName.endsWith(")")) {
+        val prefix = rawName.substring(0, openIdx).trim()
+        val inside = rawName.substring(openIdx + 2, rawName.length - 1).trim()
+        if (prefix.isNotEmpty() && inside.isNotEmpty()) {
+            return ProviderTitleSplit(prefix, explicitEmail.ifEmpty { inside })
+        }
+    }
+    return ProviderTitleSplit(rawName, explicitEmail)
+}
+
 internal fun providerStatusSubtitle(provider: OrbRow, detail: OrbDict?): String {
     val providerType = provider.str("provider_type", "type") ?: ""
     val statusObj = provider.dict("status")
@@ -314,10 +331,14 @@ fun OrbProvidersSettingsPage(
         )
     }
 
-    suspend fun loadProvidersAndUsage() {
+    var usageRefreshJob by remember { mutableStateOf<Job?>(null) }
+
+    suspend fun loadProvidersAndUsage(forceUsage: Boolean = false) {
+        var loadedProviders = providers
         try {
             val loaded = core.fetchRows("/api/ai/providers", "providers")
             providers = loaded
+            loadedProviders = loaded
             errorBanner = null
         } catch (e: Throwable) {
             errorBanner = e.message
@@ -329,20 +350,50 @@ fun OrbProvidersSettingsPage(
             for ((k, v) in entriesDict) {
                 OrbJSON.dict(v)?.let { mutableEntries[k] = it }
             }
-            val targets = providers.filter { p ->
+            // Publish bulk usage immediately so quota colors/labels render without waiting on per-account probes.
+            usageEntries = mutableEntries.toMap()
+            val refreshTargets = loadedProviders.filter { p ->
                 val pType = p.str("provider_type") ?: ""
-                pType in setOf("kimi", "minimax", "zai") || p.bool("uses_oauth") == true
+                val tracked = pType in setOf("kimi", "minimax", "zai", "muse-code", "mistral") || p.bool("uses_oauth") == true
+                val cached = mutableEntries[p.id]
+                tracked && (forceUsage || cached == null || OrbJSON.bool(cached, "stale") == true)
             }
-            for (target in targets) {
-                val id = target.id
-                val detail = orbTry(OrbLog.Category.Network, "/api/ai/providers") {
-                    core.fetchDict("/api/ai/providers/${core.encodeComponent(id)}/usage")
-                }.getOrNull()
-                if (detail != null && detail.isNotEmpty()) {
-                    mutableEntries[id] = detail
+            val needsFollowupSnapshot = !forceUsage && mutableEntries.isNotEmpty()
+            usageRefreshJob?.cancel()
+            if (refreshTargets.isNotEmpty() || needsFollowupSnapshot) {
+                usageRefreshJob = scope.launch {
+                    val refreshedIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+                    val jobs = refreshTargets.map { target ->
+                        launch {
+                            val id = target.id
+                            val query = if (forceUsage) "?force=true" else ""
+                            val detail = orbTry(OrbLog.Category.Network, "/api/ai/providers") {
+                                core.fetchDict("/api/ai/providers/${core.encodeComponent(id)}/usage$query")
+                            }.getOrNull()
+                            if (detail != null && detail.isNotEmpty()) {
+                                refreshedIds.add(id)
+                                usageEntries = usageEntries + (id to detail)
+                            }
+                        }
+                    }
+                    jobs.forEach { it.join() }
+                    if (needsFollowupSnapshot) {
+                        // Pick up background refreshes kicked off by list_all_provider_usage for entries > REFRESH_AFTER.
+                        delay(2500)
+                        val followup = orbTry(OrbLog.Category.Network, "/api/ai/providers/usage") {
+                            core.fetchDict("/api/ai/providers/usage")
+                        }.getOrNull()
+                        val followupEntries = OrbJSON.dict(followup?.get("entries")) ?: emptyMap()
+                        val merged = usageEntries.toMutableMap()
+                        for ((k, v) in followupEntries) {
+                            if (k !in refreshedIds) {
+                                OrbJSON.dict(v)?.let { merged[k] = it }
+                            }
+                        }
+                        usageEntries = merged.toMap()
+                    }
                 }
             }
-            usageEntries = mutableEntries
         } catch (_: Throwable) {
         }
         try {
@@ -507,8 +558,15 @@ fun OrbProvidersSettingsPage(
 
     LaunchedEffect(Unit) {
         isRefreshing = true
-        loadProvidersAndUsage()
-        isRefreshing = false
+        try {
+            loadProvidersAndUsage()
+        } finally {
+            isRefreshing = false
+        }
+        while (isActive) {
+            delay(30_000)
+            loadProvidersAndUsage()
+        }
     }
 
     fun toggleProvider(provider: OrbRow) {
@@ -609,9 +667,12 @@ fun OrbProvidersSettingsPage(
                     .orbPressClickable {
                         scope.launch {
                             isRefreshing = true
-                            loadProvidersAndUsage()
-                            core.refreshAll()
-                            isRefreshing = false
+                            try {
+                                loadProvidersAndUsage(forceUsage = true)
+                                core.refreshAll()
+                            } finally {
+                                isRefreshing = false
+                            }
                         }
                     },
                 contentAlignment = Alignment.Center
@@ -630,9 +691,12 @@ fun OrbProvidersSettingsPage(
             onRefresh = {
                 scope.launch {
                     isRefreshing = true
-                    loadProvidersAndUsage()
-                    core.refreshAll()
-                    isRefreshing = false
+                    try {
+                        loadProvidersAndUsage(forceUsage = true)
+                        core.refreshAll()
+                    } finally {
+                        isRefreshing = false
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize()
@@ -691,9 +755,20 @@ fun OrbProvidersSettingsPage(
                             providers.forEachIndexed { idx, provider ->
                                 val pid = provider.id
                                 val name = provider.str("name", "label", "id") ?: pid
+                                val splitName = splitProviderDisplayName(provider)
                                 val providerType = provider.str("provider_type", "type") ?: ""
                                 val detail = usageEntries[pid]
-                                val subtitle = providerStatusSubtitle(provider, detail)
+                                val rawSubtitle = providerStatusSubtitle(provider, detail)
+                                val stateOnly = if (providerType.isNotEmpty() && rawSubtitle.startsWith("$providerType · ")) {
+                                    rawSubtitle.removePrefix("$providerType · ")
+                                } else {
+                                    rawSubtitle
+                                }
+                                val subtitle = if (splitName.account.isNotEmpty()) {
+                                    "${splitName.account} · $stateOnly"
+                                } else {
+                                    rawSubtitle
+                                }
                                 val quotaLevel = providerQuotaStatus(provider, detail)?.level ?: OrbQuotaLevel.Normal
                                 val expanded = expandedIds.contains(pid)
                                 val windows = providerQuotaWindows(detail)
@@ -707,7 +782,7 @@ fun OrbProvidersSettingsPage(
                                         .orbPressClickable {
                                             expandedIds = if (expanded) expandedIds - pid else expandedIds + pid
                                         }
-                                        .padding(horizontal = 16.dp, vertical = 13.dp),
+                                        .padding(horizontal = 16.dp, vertical = 11.dp),
                                     verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     Row(
@@ -722,13 +797,15 @@ fun OrbProvidersSettingsPage(
                                         )
                                         Column(
                                             modifier = Modifier.weight(1f),
-                                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                                            verticalArrangement = Arrangement.spacedBy(2.dp)
                                         ) {
                                             Text(
-                                                text = name,
+                                                text = splitName.title,
                                                 color = Color.White,
                                                 fontSize = 15.sp,
-                                                fontWeight = FontWeight.Medium
+                                                fontWeight = FontWeight.Medium,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
                                                 text = subtitle,

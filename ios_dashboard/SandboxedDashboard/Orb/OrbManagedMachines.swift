@@ -64,13 +64,19 @@ struct OrbManagedSize: Codable, Equatable, Sendable {
     var min_billing_hours: Int?
 }
 
-struct OrbManagedProviderInfo: Codable, Equatable, Sendable {
+struct OrbManagedProviderInfo: Codable, Equatable, Identifiable, Sendable {
     var provider: String
     var display_name: String
     var configured: Bool
+    var enabled: Bool?
+    var credential_source: String?
+    var key_hint: String?
+    var region: String?
+    var project_id: String?
     var supports_snapshots: Bool
     var supports_free_stop: Bool
     var sizes: [OrbManagedSize]
+    var id: String { provider }
 }
 
 /// One UTC day of managed spend from Core; missions/sizes highest first.
@@ -163,6 +169,51 @@ enum OrbManaged {
         case "scaleway": return "Scaleway"
         default: return provider ?? "boat.dev"
         }
+    }
+
+    static func nodeProvider(_ node: OrbJSON) -> String? {
+        let known: Set<String> = ["boat", "hetzner", "vastai", "scaleway"]
+        for item in node["labels"].items {
+            let l = item.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if l.hasPrefix("provider=") { return String(l.dropFirst("provider=".count)) }
+            if known.contains(l) { return l }
+        }
+        return nil
+    }
+
+    static func isProviderEnabled(_ p: OrbManagedProviderInfo) -> Bool {
+        p.enabled != false
+    }
+
+    static func isProviderUsable(_ p: OrbManagedProviderInfo) -> Bool {
+        p.configured && p.enabled != false
+    }
+
+    static func credentialSourceLabel(_ source: String?) -> String {
+        switch source {
+        case "settings": return "Settings"
+        case "bitwarden": return "Bitwarden"
+        case "environment": return "Environment"
+        default: return source ?? ""
+        }
+    }
+
+    static func providerStatusLine(_ p: OrbManagedProviderInfo) -> String {
+        let enabled = isProviderEnabled(p)
+        if !p.configured { return enabled ? "Not configured" : "Disabled · Not configured" }
+        let cred = [credentialSourceLabel(p.credential_source), p.key_hint ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
+        return [
+            enabled ? "Configured" : "Disabled",
+            cred,
+            p.region ?? "",
+            (p.project_id?.isEmpty == false) ? "proj \(p.project_id!)" : ""
+        ].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    static func sectionTitle(providers: [OrbManagedProviderInfo]?, machines: [OrbManagedMachine]) -> String {
+        let multiConfigured = (providers ?? []).contains { isProviderUsable($0) && $0.provider != "boat" }
+        let multiActive = machines.contains { ($0.provider ?? "boat") != "boat" && !($0.provider ?? "").isEmpty }
+        return (multiConfigured || multiActive) ? "Managed cloud" : "Managed (boat.dev)"
     }
 
     static func budgetFull(_ b: OrbManagedBudget) -> Bool {
@@ -350,7 +401,9 @@ enum OrbManaged {
         if let data = http.detail.data(using: .utf8), let body = try? JSONDecoder().decode(OrbJSON.self, from: data), !body["error"].text.isEmpty || !body["message"].text.isEmpty {
             code = body["error"].text; text = body["message"].text
         }
-        let prefix = code == "budget_exceeded" ? "Daily budget reached" : code == "quota_exceeded" ? "Machine limit reached" : ""
+        let prefix = code == "budget_exceeded" ? "Daily budget reached"
+            : code == "quota_exceeded" ? "Machine limit reached"
+            : code == "provider_disabled" ? "Provider disabled" : ""
         if !prefix.isEmpty { return text.isEmpty ? "\(prefix)." : "\(prefix): \(text)" }
         return text.isEmpty ? "Request failed (\(http.status))" : text
     }
@@ -445,13 +498,14 @@ struct OrbManagedMachinesSection: View {
                     .contextMenu { menu(machine, live: false) }
             }
         } header: {
+            let noUsable = (response.providers?.isEmpty == false) && !(response.providers ?? []).contains(where: OrbManaged.isProviderUsable)
             HStack {
-                Text("Managed machines")
+                Text(OrbManaged.sectionTitle(providers: response.providers, machines: response.machines))
                 Spacer()
                 if response.enabled, onCreate != nil {
                     Button { creating = true } label: { Label("New", systemImage: "plus") }
                         .font(.caption.weight(.semibold))
-                        .disabled(busy || OrbManaged.budgetFull(response.budget))
+                        .disabled(busy || noUsable || OrbManaged.budgetFull(response.budget))
                         .accessibilityIdentifier("managed.new")
                 }
             }
@@ -716,9 +770,9 @@ struct OrbNewManagedMachineSheet: View {
     init(response: OrbManagedMachinesResponse, onCreate: @escaping (_ provider: String?, _ size: String, _ ttl: Int, _ allow24h: Bool) -> Void) {
         self.response = response
         self.onCreate = onCreate
-        let configured = (response.providers ?? []).filter(\.configured)
-        let initProv = configured.first(where: { $0.provider == "boat" })?.provider ?? configured.first?.provider ?? "boat"
-        let initSizes = configured.first(where: { $0.provider == initProv })?.sizes ?? response.sizes
+        let usable = (response.providers ?? []).filter(OrbManaged.isProviderUsable)
+        let initProv = usable.first(where: { $0.provider == "boat" })?.provider ?? usable.first?.provider ?? "boat"
+        let initSizes = usable.first(where: { $0.provider == initProv })?.sizes ?? response.sizes
         let initSize = initSizes.first(where: { $0.size == response.budget.default_size })?.size ?? initSizes.first?.size ?? "small"
         let defTtl = response.budget.default_ttl_minutes ?? 60
         let maxTtl = response.budget.max_ttl_minutes ?? 720
@@ -727,8 +781,8 @@ struct OrbNewManagedMachineSheet: View {
         _ttl = State(initialValue: maxTtl > 0 ? min(defTtl, maxTtl) : defTtl)
     }
 
-    private var configuredProviders: [OrbManagedProviderInfo] { (response.providers ?? []).filter(\.configured) }
-    private var sizes: [OrbManagedSize] { configuredProviders.first(where: { $0.provider == provider })?.sizes ?? response.sizes }
+    private var usableProviders: [OrbManagedProviderInfo] { (response.providers ?? []).filter(OrbManaged.isProviderUsable) }
+    private var sizes: [OrbManagedSize] { usableProviders.first(where: { $0.provider == provider })?.sizes ?? response.sizes }
     private var chosen: OrbManagedSize? { sizes.first(where: { $0.size == size }) }
     private var requires24h: Bool { (chosen?.min_billing_hours ?? 0) >= 24 }
     private var effectiveMinutes: Int { max(ttl, (chosen?.min_billing_hours ?? 0) * 60) }
@@ -737,17 +791,17 @@ struct OrbNewManagedMachineSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                if configuredProviders.count > 1 {
+                if usableProviders.count > 1 {
                     Section("Provider") {
                         Picker("Provider", selection: $provider) {
-                            ForEach(configuredProviders, id: \.provider) { pr in
+                            ForEach(usableProviders, id: \.provider) { pr in
                                 Text(pr.display_name.isEmpty ? OrbManaged.providerLabel(pr.provider) : pr.display_name).tag(pr.provider)
                             }
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: provider) { _, next in
                             allow24h = false
-                            let list = configuredProviders.first(where: { $0.provider == next })?.sizes ?? response.sizes
+                            let list = usableProviders.first(where: { $0.provider == next })?.sizes ?? response.sizes
                             size = list.first?.size ?? ""
                         }
                     }
@@ -798,6 +852,162 @@ struct OrbNewManagedMachineSheet: View {
                     .disabled(chosen == nil || (requires24h && !allow24h))
                 }
             }
+        }
+    }
+}
+
+struct OrbMachineProvidersSection: View {
+    let providers: [OrbManagedProviderInfo]
+    let busyProvider: String?
+    let onToggle: (OrbManagedProviderInfo, Bool) -> Void
+    let onSave: (String, [String: OrbJSON]) async throws -> Void
+    @State private var editing: OrbManagedProviderInfo?
+
+    var body: some View {
+        Section("Machine providers") {
+            ForEach(providers) { pr in
+                let label = pr.display_name.isEmpty ? OrbManaged.providerLabel(pr.provider) : pr.display_name
+                let enabled = OrbManaged.isProviderEnabled(pr)
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(OrbManaged.isProviderUsable(pr) ? OrbStyle.success : OrbStyle.textMuted)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(label).font(.body.weight(.medium)).lineLimit(1)
+                        Text(OrbManaged.providerStatusLine(pr)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 6)
+                    Toggle(
+                        "Enable \(label)",
+                        isOn: Binding(
+                            get: { enabled },
+                            set: { next in onToggle(pr, next) }
+                        )
+                    )
+                    .labelsHidden()
+                    .disabled(busyProvider == pr.provider)
+                    Button(pr.configured ? "Configure" : "Set up") { editing = pr }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+                .padding(.vertical, 2)
+                .accessibilityIdentifier("managed.provider.\(pr.provider)")
+            }
+        }
+        .sheet(item: $editing) { pr in
+            OrbConfigureMachineProviderSheet(provider: pr) { patch in
+                try await onSave(pr.provider, patch)
+            }
+        }
+    }
+}
+
+struct OrbConfigureMachineProviderSheet: View {
+    let provider: OrbManagedProviderInfo
+    let onSave: ([String: OrbJSON]) async throws -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var apiKey = ""
+    @State private var region: String
+    @State private var projectID: String
+    @State private var saving = false
+    @State private var error = ""
+
+    init(provider: OrbManagedProviderInfo, onSave: @escaping ([String: OrbJSON]) async throws -> Void) {
+        self.provider = provider
+        self.onSave = onSave
+        _region = State(initialValue: provider.region ?? "")
+        _projectID = State(initialValue: provider.project_id ?? "")
+    }
+
+    private var label: String {
+        provider.display_name.isEmpty ? OrbManaged.providerLabel(provider.provider) : provider.display_name
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if !error.isEmpty {
+                    Section { Text(error).foregroundStyle(OrbStyle.error).font(.footnote) }
+                }
+                Section {
+                    SecureField(provider.key_hint ?? "Paste API key", text: $apiKey)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } header: {
+                    Text("API key")
+                } footer: {
+                    Text(
+                        provider.configured
+                            ? "Leave blank to keep the current \(OrbManaged.credentialSourceLabel(provider.credential_source).lowercased()) key\(provider.key_hint.map { " (\($0))" } ?? ""). Credentials are encrypted on Core."
+                            : "Credentials are encrypted on Core and never returned to clients."
+                    )
+                }
+                if provider.provider == "hetzner" {
+                    Section {
+                        TextField("fsn1", text: $region)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } header: {
+                        Text("Default location")
+                    } footer: {
+                        Text("Preferred Hetzner Cloud location (falls back across fsn1, hel1, nbg1 if unavailable).")
+                    }
+                }
+                if provider.provider == "scaleway" {
+                    Section("Scaleway settings") {
+                        TextField("Default zone (e.g. fr-par-1)", text: $region)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        TextField("Project UUID", text: $projectID)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                }
+                if provider.credential_source == "settings" {
+                    Section {
+                        Button("Remove saved key", role: .destructive) {
+                            Task { await submit(override: ["api_key": .string("")]) }
+                        }
+                        .disabled(saving)
+                    }
+                }
+            }
+            .navigationTitle("Configure \(label)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { Task { await submit(override: nil) } }
+                        .disabled(saving || (!provider.configured && apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                }
+            }
+        }
+    }
+
+    private func submit(override: [String: OrbJSON]?) async {
+        guard !saving else { return }
+        saving = true; error = ""
+        defer { saving = false }
+        var patch: [String: OrbJSON] = override ?? [:]
+        if override == nil {
+            let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedKey.isEmpty {
+                patch["api_key"] = .string(trimmedKey)
+                patch["enabled"] = .bool(true)
+            }
+            if provider.provider == "hetzner" || provider.provider == "scaleway" {
+                patch["region"] = .string(region.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            if provider.provider == "scaleway" {
+                patch["project_id"] = .string(projectID.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+        do {
+            try await onSave(patch)
+            dismiss()
+        } catch {
+            self.error = OrbManaged.message(error)
         }
     }
 }

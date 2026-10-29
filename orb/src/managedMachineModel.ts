@@ -54,9 +54,21 @@ export interface ManagedProviderInfo {
   provider: string;
   display_name: string;
   configured: boolean;
+  enabled?: boolean;
+  credential_source?: string | null;
+  key_hint?: string | null;
+  region?: string | null;
+  project_id?: string | null;
   supports_snapshots: boolean;
   supports_free_stop: boolean;
   sizes: ManagedSize[];
+}
+
+export interface ManagedProviderPatch {
+  enabled?: boolean;
+  api_key?: string;
+  region?: string;
+  project_id?: string;
 }
 
 export interface ManagedBudget {
@@ -154,6 +166,42 @@ export async function getManagedSettings(): Promise<ManagedSettings | null> {
 export const putManagedSettings = (body: ManagedSettings) =>
   api<ManagedSettings>("/api/managed-machines/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
+/** `null` when the backend predates per-provider configuration (404). */
+export async function listManagedProviders(): Promise<ManagedProviderInfo[] | null> {
+  try {
+    const r = await api<{ providers: ManagedProviderInfo[] }>("/api/managed-machines/providers", { method: "GET" });
+    return r.providers ?? [];
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 405)) return null;
+    throw error;
+  }
+}
+
+export const updateManagedProvider = (provider: string, body: ManagedProviderPatch) =>
+  api<ManagedProviderInfo>(`/api/managed-machines/providers/${encodeURIComponent(provider)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+export const isProviderEnabled = (p: Pick<ManagedProviderInfo, "enabled">): boolean => p.enabled !== false;
+export const isProviderUsable = (p: Pick<ManagedProviderInfo, "configured" | "enabled">): boolean => p.configured && p.enabled !== false;
+
+export const credentialSourceLabel = (source?: string | null): string =>
+  source === "settings" ? "Settings" : source === "bitwarden" ? "Bitwarden" : source === "environment" ? "Environment" : source || "";
+
+export function providerStatusLine(p: Pick<ManagedProviderInfo, "configured" | "enabled" | "credential_source" | "key_hint" | "region" | "project_id">): string {
+  const enabled = isProviderEnabled(p);
+  if (!p.configured) return enabled ? "Not configured" : "Disabled · Not configured";
+  const cred = [credentialSourceLabel(p.credential_source), p.key_hint ?? ""].filter(Boolean).join(" ");
+  return [
+    enabled ? "Configured" : "Disabled",
+    cred,
+    p.region ?? "",
+    p.project_id ? `proj ${p.project_id}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
 export const isLive = (m: Pick<ManagedMachine, "state">) => m.state !== "destroyed" && m.state !== "failed" && m.state !== "stopped";
 /** Stopped: disk kept, nothing billed, resumable within the retention. */
 export const isStopped = (m: Pick<ManagedMachine, "state">) => m.state === "stopped";
@@ -225,7 +273,7 @@ export const providerLabel = (provider?: string | null): string => {
 };
 
 export function managedSectionTitle(providers?: readonly ManagedProviderInfo[], machines?: readonly Pick<ManagedMachine, "provider">[]): string {
-  const multiConfigured = (providers ?? []).some(p => p.configured && p.provider !== "boat");
+  const multiConfigured = (providers ?? []).some(p => isProviderUsable(p) && p.provider !== "boat");
   const multiActive = (machines ?? []).some(m => m.provider && m.provider !== "boat");
   return multiConfigured || multiActive ? "Managed cloud" : "Managed (boat.dev)";
 }
@@ -289,7 +337,9 @@ export function managedError(error: unknown): string {
   if (!(error instanceof ApiError)) return error instanceof Error ? error.message : String(error);
   let code = "", message = "";
   try { const body = JSON.parse(error.detail); code = body?.error ?? ""; message = body?.message ?? ""; } catch { message = error.detail; }
-  const prefix = code === "budget_exceeded" ? "Daily budget reached" : code === "quota_exceeded" ? "Machine limit reached" : "";
+  const prefix = code === "budget_exceeded" ? "Daily budget reached"
+    : code === "quota_exceeded" ? "Machine limit reached"
+    : code === "provider_disabled" ? "Provider disabled" : "";
   if (prefix) return message ? `${prefix}: ${message}` : `${prefix}.`;
   return message || `Request failed (${error.status})`;
 }

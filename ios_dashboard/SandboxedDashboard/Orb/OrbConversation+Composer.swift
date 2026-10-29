@@ -539,6 +539,7 @@ extension OrbConversation {
                             lineWidth: 1
                         )
                     )
+                    .layoutPriority(1)
 
                     if let nodeBadge = selection.machinePillLabel {
                         HStack(spacing: 3.5) {

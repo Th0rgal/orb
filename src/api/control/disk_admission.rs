@@ -256,6 +256,7 @@ pub(super) fn nonterminal_missions_in_sqlite(
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let _ = connection.busy_timeout(std::time::Duration::from_secs(10));
     let mut statement = connection
         .prepare("SELECT id, status, workspace_id, COALESCE(requires_local_disk, 1) FROM missions")
         .or_else(|_| connection.prepare("SELECT id, status, workspace_id, 1 FROM missions"))
@@ -304,6 +305,7 @@ pub(super) fn migrate_legacy_ledger_placement_in_sqlite(
     }
     let mut connection = rusqlite::Connection::open(path)
         .map_err(|error| format!("open {} for placement migration: {error}", path.display()))?;
+    let _ = connection.busy_timeout(std::time::Duration::from_secs(10));
     let has_column = connection
         .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'requires_local_disk'")
         .and_then(|mut statement| statement.exists([]))

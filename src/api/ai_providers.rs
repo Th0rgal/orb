@@ -2554,15 +2554,16 @@ pub(crate) fn xai_cli_proxy_account_available() -> bool {
         || has_refreshable_cli_proxy_account_of_type("xai-", "xai")
 }
 
-/// True when CLIProxyAPI has a Google / Antigravity / Gemini credential it can
-/// serve as a fallback route.
+/// True when CLIProxyAPI has a native Google / Gemini credential it can
+/// serve as a fallback route. Antigravity credentials belong exclusively to
+/// `ProviderType::Antigravity` so `google/*` routes never silently cross over
+/// to Antigravity.
 pub(crate) fn google_cli_proxy_account_available() -> bool {
     if env_var_bool("CLAUDE_CODE_DISABLE_CLI_PROXY", false) {
         return false;
     }
 
     env_var_bool("CLI_PROXY_GEMINI_ENABLED", false)
-        || has_refreshable_cli_proxy_account_of_type("antigravity-", "antigravity")
         || has_refreshable_cli_proxy_account_of_type("gemini-", "gemini")
         || !cli_proxy_config_gemini_keys().is_empty()
 }

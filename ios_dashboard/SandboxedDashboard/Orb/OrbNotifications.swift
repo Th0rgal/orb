@@ -210,6 +210,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
 
     private var deliveredSignatures: [String: String] = [:]
     private var seededAccounts: Set<String> = []
+    private var sessionSeededAccounts: Set<String> = []
     private var didRegisterCategories = false
     private var backgroundLoopTask: Task<Void, Never>?
 
@@ -327,7 +328,8 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
     func reconcile(
         needsYou: [OrbInboxItem],
         ready: [OrbInboxItem],
-        working: [OrbInboxItem]
+        working: [OrbInboxItem],
+        fromServer: Bool = false
     ) {
         let actionable = needsYou + ready
         let unreadItems = actionable.filter(\.unread)
@@ -368,12 +370,19 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
             persistSignatures()
         }
 
-        // First sync on a fresh install/account seeds existing unread items silently so we don't spam historical missions,
-        // while still updating when an AI summary arrives or a new turn finishes.
-        let isFirstSeed = !seededAccounts.contains(account)
+        // First sync on a fresh install/account or cold foreground launch seeds existing unread items silently
+        // so we don't spam historical missions before live changes happen. Ignore empty pre-network reconciles.
+        if !fromServer && actionable.isEmpty && working.isEmpty {
+            return
+        }
+        let isForegroundColdSeed = UIApplication.shared.applicationState != .background && !sessionSeededAccounts.contains(account)
+        let isFirstSeed = !seededAccounts.contains(account) || isForegroundColdSeed
         if isFirstSeed {
-            seededAccounts.insert(account)
-            UserDefaults.standard.set(Array(seededAccounts), forKey: seededAccountsKey)
+            sessionSeededAccounts.insert(account)
+            if !seededAccounts.contains(account) {
+                seededAccounts.insert(account)
+                UserDefaults.standard.set(Array(seededAccounts), forKey: seededAccountsKey)
+            }
             for item in unreadItems {
                 if let payload = OrbNotificationPayload.build(from: item) {
                     deliveredSignatures[item.id] = payload.signature
@@ -493,7 +502,7 @@ final class OrbNotificationCenter: NSObject, @unchecked Sendable {
             projects: cachedProjects,
             eventsByMission: eventsByMission
         )
-        reconcile(needsYou: sections.needsYou, ready: sections.ready, working: sections.working)
+        reconcile(needsYou: sections.needsYou, ready: sections.ready, working: sections.working, fromServer: true)
         return true
     }
 }
