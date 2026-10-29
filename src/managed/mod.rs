@@ -3383,26 +3383,52 @@ impl ManagedManager {
                 tracing::warn!(machine = %id, %error, "managed VM provisioning script failed");
             }
             // A fork or snapshot carries the source node's credential, projected
-            // sign-in and delivered secrets: drop them so this VM enrolls fresh
-            // (its own missions request their secrets again). Any failure fails
-            // provisioning, which destroys the VM.
-            let start_cmd = format!(
-                "chmod 600 /home/user/.orb/enroll.env && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && {} && sudo systemctl restart orb-node.service",
+            // sign-in and delivered secrets: drop them once while orb-node is
+            // stopped, BEFORE starting the daemon. Keeping credential deletion
+            // separate from `systemctl restart` ensures a retry after a lost
+            // exec response cannot erase a newly enrolled `node.cred`.
+            let wipe_cmd = format!(
+                "(sudo systemctl stop orb-node.service 2>/dev/null || true) && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && {} && chmod 600 /home/user/.orb/enroll.env",
                 snapshots::SECRETS_WIPE
             );
+            let mut wipe_res = Err(String::new());
+            for attempt in 0..5 {
+                wipe_res = provider
+                    .exec(&provider_id, &wipe_cmd, 60)
+                    .await
+                    .and_then(|res| {
+                        if let Some(code) = exec_exit_code(&res).filter(|c| *c != 0) {
+                            Err(format!("exit code {code}"))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                if wipe_res.is_ok()
+                    || wipe_res
+                        .as_ref()
+                        .err()
+                        .is_none_or(|e| !is_retryable_exec_error(e))
+                {
+                    break;
+                }
+                if attempt + 1 < 5 {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+            }
+            wipe_res.map_err(|e| format!("prepare orb-node state: {e}"))?;
+
             let mut start_res = Err(String::new());
             for attempt in 0..5 {
-                start_res =
-                    provider
-                        .exec(&provider_id, &start_cmd, 120)
-                        .await
-                        .and_then(|node_started| {
-                            if let Some(code) = exec_exit_code(&node_started).filter(|c| *c != 0) {
-                                Err(format!("exit code {code}"))
-                            } else {
-                                Ok(())
-                            }
-                        });
+                start_res = provider
+                    .exec(&provider_id, "sudo systemctl restart orb-node.service", 120)
+                    .await
+                    .and_then(|node_started| {
+                        if let Some(code) = exec_exit_code(&node_started).filter(|c| *c != 0) {
+                            Err(format!("exit code {code}"))
+                        } else {
+                            Ok(())
+                        }
+                    });
                 if start_res.is_ok()
                     || start_res
                         .as_ref()

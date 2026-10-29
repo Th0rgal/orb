@@ -1616,14 +1616,22 @@ async fn provision_runs_the_script_before_starting_the_node() {
         .await
         .unwrap();
     for _ in 0..200 {
-        if fake.execs.lock().unwrap().len() >= 2 {
+        if fake.execs.lock().unwrap().len() >= 3 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let execs = fake.execs.lock().unwrap().clone();
     assert!(execs[0].contains("provision.sh"), "{execs:?}");
-    assert!(execs[1].contains("systemctl restart orb-node"), "{execs:?}");
+    assert!(
+        execs[1].contains("rm -rf /var/lib/orb-node/node.cred")
+            && !execs[1].contains("systemctl restart"),
+        "{execs:?}"
+    );
+    assert!(
+        execs[2].contains("systemctl restart orb-node") && !execs[2].contains("node.cred"),
+        "{execs:?}"
+    );
     let _ = m.destroy(&machine.id, "test").await;
 }
 

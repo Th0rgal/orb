@@ -1703,6 +1703,14 @@ pub(super) async fn settle_job_on_gone_node_by_id(
     if store.get_mission(mission_id).await?.is_none() {
         return Ok(false);
     }
+    store
+        .complete_scheduled_remote_job(
+            mission_id,
+            job_id,
+            Some(false),
+            Some(REMOTE_NODE_GONE.to_string()),
+        )
+        .await?;
     finish_remote_job_lease(store, mission_id, job_id, REMOTE_NODE_GONE).await?;
     if store
         .get_mission(mission_id)
