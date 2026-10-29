@@ -328,6 +328,8 @@ pub(crate) async fn catalog_model_options_for_state(
     merge_claude_code_models(&mut providers);
     drop(cached);
     apply_cli_proxy_catalog(&mut providers, &store_providers).await;
+    retire_superseded_claude_models(&mut providers);
+    restrict_google_api_key_models(&mut providers, &store_providers);
 
     let mut models = Vec::new();
     for provider in &providers {
@@ -2077,6 +2079,7 @@ pub async fn list_providers(
     merge_claude_code_models(&mut providers);
     drop(cached);
     retire_superseded_claude_models(&mut providers);
+    restrict_google_api_key_models(&mut providers, &store_providers);
 
     for provider in &mut providers {
         if matches!(provider.id.as_str(), "anthropic" | "openai" | "xai") {
@@ -2159,7 +2162,10 @@ pub async fn node_antigravity_models(
     crate::remote_node::RemoteNodeClient::default()
         .antigravity_models(node, &token)
         .await
-        .map(Json)
+        .map(|mut models| {
+            supplement_entitled_carbon_model(&mut models, &state.config.working_dir);
+            Json(models)
+        })
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))
 }
 
@@ -2209,6 +2215,7 @@ pub async fn list_backend_model_options(
     // `list_providers` and `validate_model_override` left retired models
     // selectable here — visibly offered, then refused on submit.
     retire_superseded_claude_models(&mut providers);
+    restrict_google_api_key_models(&mut providers, &store_providers);
 
     let mut backends: std::collections::HashMap<String, Vec<BackendModelOption>> =
         std::collections::HashMap::new();
@@ -2481,7 +2488,9 @@ async fn discover_workspace_antigravity_models(
         if models.is_empty() {
             return Err("No Antigravity models in the selected workspace");
         }
-        Ok(crate::antigravity::group_models(models))
+        let mut grouped = crate::antigravity::group_models(models);
+        supplement_entitled_carbon_model(&mut grouped, work_dir);
+        Ok(grouped)
     })
     .await;
     let _ = child.kill().await;
@@ -2489,6 +2498,72 @@ async fn discover_workspace_antigravity_models(
     result
         .map_err(|_| "Workspace model discovery timed out".to_string())?
         .map_err(str::to_string)
+}
+
+/// When a connected, eligible Antigravity account in Core's catalog offers
+/// Gemini 4 Carbon (`agy-model-high`), include `("agy-model", "Gemini 4 Carbon")`
+/// in the native picker even if the machine currently holds a higher-priority
+/// general account without Carbon: launching `agy-model` switches the machine
+/// sign-in automatically before spawn.
+fn supplement_entitled_carbon_model(
+    models: &mut Vec<(String, String)>,
+    work_dir: &std::path::Path,
+) {
+    if models.iter().any(|(id, _)| id == "agy-model") {
+        return;
+    }
+    let state = crate::model_catalog::read_state(work_dir);
+    let accounts: Vec<AIProvider> =
+        std::fs::read_to_string(work_dir.join(crate::util::AI_PROVIDERS_PATH))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+    let any_offers_carbon = accounts.iter().any(|account| {
+        if !account.enabled || account.provider_type != ProviderType::Antigravity {
+            return false;
+        }
+        if account
+            .cli_proxy_auth_file
+            .as_deref()
+            .is_some_and(crate::api::antigravity_accounts::needs_verification)
+        {
+            return false;
+        }
+        let route = crate::model_discovery::route(account);
+        let connection =
+            crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
+        state
+            .connections
+            .iter()
+            .find(|o| o.connection == connection)
+            .and_then(|o| o.last_success.as_ref())
+            .is_some_and(|s| s.models.iter().any(|m| m.id == "agy-model-high"))
+    });
+    if any_offers_carbon {
+        models.insert(0, ("agy-model".to_string(), "Gemini 4 Carbon".to_string()));
+    }
+}
+
+/// Restrict Google API-key catalogs to Gemini 4 Carbon only so non-free AI
+/// Studio models cannot be selected from pickers or `/v1/models`.
+fn restrict_google_api_key_models(providers: &mut [Provider], store: &[AIProvider]) {
+    let has_store_api_key = store
+        .iter()
+        .any(|p| p.enabled && p.provider_type == ProviderType::Google && p.api_key.is_some());
+    let has_store_oauth = store.iter().any(|p| {
+        p.enabled
+            && p.provider_type == ProviderType::Google
+            && p.api_key.is_none()
+            && p.oauth.is_some()
+    });
+    if !has_store_api_key || has_store_oauth {
+        return;
+    }
+    for provider in providers.iter_mut().filter(|p| p.id == "google") {
+        provider
+            .models
+            .retain(|m| crate::model_policy::is_google_api_key_allowed_model(&m.id));
+    }
 }
 
 /// Drop Claude models this deployment has retired.
@@ -2543,6 +2618,7 @@ pub async fn validate_model_override(
     apply_live_authoritative_provider_models(&mut providers, &store_providers, &cached, true);
     drop(cached);
     retire_superseded_claude_models(&mut providers);
+    restrict_google_api_key_models(&mut providers, &store_providers);
 
     match backend {
         "opencode" => {
@@ -3803,5 +3879,101 @@ mod tests {
                 "  (This is a warning, not a failure. Dynamic fetching covers the gap at runtime.)"
             );
         }
+    }
+
+    #[test]
+    fn google_api_key_restricts_catalog_to_carbon_and_antigravity_supplements_entitled_carbon() {
+        let google_provider = Provider {
+            id: "google".into(),
+            name: "Google".into(),
+            billing: "pay-per-token".into(),
+            description: String::new(),
+            models: vec![
+                ProviderModel {
+                    id: "gemini-4-carbon-eap".into(),
+                    name: "Gemini 4 Carbon EAP".into(),
+                    description: None,
+                },
+                ProviderModel {
+                    id: "gemini-4-argon".into(),
+                    name: "Gemini 4 Argon".into(),
+                    description: None,
+                },
+                ProviderModel {
+                    id: "gemini-3.8-flash".into(),
+                    name: "Gemini 3.8 Flash".into(),
+                    description: None,
+                },
+            ],
+        };
+        let mut google_key = AIProvider::new(ProviderType::Google, "Google API".into());
+        google_key.api_key = Some("AIza-test".into());
+        let mut providers = vec![google_provider.clone()];
+        restrict_google_api_key_models(&mut providers, &[google_key]);
+        assert_eq!(
+            providers[0]
+                .models
+                .iter()
+                .map(|m| &m.id)
+                .collect::<Vec<_>>(),
+            vec!["gemini-4-carbon-eap"]
+        );
+
+        // When an unrestricted Google OAuth account is also present in store, OAuth models remain.
+        let mut google_oauth = AIProvider::new(ProviderType::Google, "Google OAuth".into());
+        google_oauth.oauth = Some(crate::ai_providers::OAuthCredentials {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: i64::MAX,
+        });
+        let mut with_oauth = vec![google_provider];
+        restrict_google_api_key_models(&mut with_oauth, &[google_oauth]);
+        assert_eq!(with_oauth[0].models.len(), 3);
+
+        // Antigravity picker supplements Carbon when a connected account's catalog offers it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut agy = AIProvider::new(ProviderType::Antigravity, "marchand".into());
+        agy.cli_proxy_auth_file = Some("antigravity-marchand.json".into());
+        let providers_dir = dir.path().join(".sandboxed-sh");
+        std::fs::create_dir_all(&providers_dir).unwrap();
+        std::fs::write(
+            providers_dir.join("ai_providers.json"),
+            serde_json::to_vec(&vec![agy.clone()]).unwrap(),
+        )
+        .unwrap();
+        let route = crate::model_discovery::route(&agy);
+        let state = crate::model_catalog::DiscoveryState {
+            schema_version: 1,
+            connections: vec![crate::model_catalog::Observation {
+                connection: crate::model_catalog::route_key(
+                    &agy.id.to_string(),
+                    &route.base,
+                    &route.profile,
+                ),
+                provider_id: "antigravity".into(),
+                access_profile: "oauth".into(),
+                exportable: false,
+                checked_at: chrono::Utc::now(),
+                status: "discovered".into(),
+                diagnostic: None,
+                last_success: Some(crate::model_catalog::Success {
+                    observed_at: chrono::Utc::now(),
+                    completeness: crate::model_catalog::Completeness::Complete,
+                    models: vec![ProviderModel {
+                        id: "agy-model-high".into(),
+                        name: "Gemini 4 Carbon (High)".into(),
+                        description: None,
+                    }],
+                }),
+                fallback_models: vec![],
+            }],
+        };
+        crate::model_catalog::write_state(dir.path(), &state).unwrap();
+        let mut native_models = vec![("claude-opus-5-5-thinking".into(), "Claude Opus 5.5".into())];
+        supplement_entitled_carbon_model(&mut native_models, dir.path());
+        assert_eq!(
+            native_models[0],
+            ("agy-model".into(), "Gemini 4 Carbon".into())
+        );
     }
 }

@@ -1583,24 +1583,12 @@ pub struct ChainEntry {
 /// account of the requested provider is rate-limited or out of quota. An
 /// explicit table: two ids are interchangeable only when listed here.
 /// Native `google/*` routes are intentionally excluded from failing over to
-/// `antigravity` so Google EAP/benchmark chains stay pinned to native Google.
+/// `antigravity`, and `antigravity/*` routes must never spill onto paid
+/// Google API keys (`google/gemini-4-argon`).
 /// A `(provider, model)` pair.
 type ModelId = (&'static str, &'static str);
 
-const EQUIVALENT_MODELS: &[(ModelId, &[ModelId])] = &[
-    (
-        ("antigravity", "gemini-4-argon-low"),
-        &[("google", "gemini-4-argon")],
-    ),
-    (
-        ("antigravity", "gemini-4-argon-medium"),
-        &[("google", "gemini-4-argon")],
-    ),
-    (
-        ("antigravity", "gemini-4-argon-high"),
-        &[("google", "gemini-4-argon")],
-    ),
-];
+const EQUIVALENT_MODELS: &[(ModelId, &[ModelId])] = &[];
 
 /// A direct `provider/model` request followed by its equivalents on other
 /// providers, so the waterfall fails over on a 429 instead of exhausting a
@@ -2157,7 +2145,7 @@ impl ModelChainStore {
                 entries: vec![
                     ChainEntry {
                         provider_id: "google".to_string(),
-                        model_id: "gemini-4-argon-eap".to_string(),
+                        model_id: "gemini-4-carbon-eap".to_string(),
                     },
                     ChainEntry {
                         provider_id: "minimax".to_string(),
@@ -2177,9 +2165,9 @@ impl ModelChainStore {
             });
             changed = true;
         } else if let Some(chain) = chains.iter_mut().find(|c| c.id == "builtin/assistant") {
-            // Heal the stock GLM-only assistant chain that predates Hermes. Only
-            // touch the exact legacy shape so an operator-customized chain is left
-            // alone.
+            // Heal the stock GLM-only assistant chain that predates Hermes, or
+            // the retired Argon EAP default. Only touch exact stock shapes so
+            // an operator-customized chain is left alone.
             let legacy_glm_only = chain.entries.len() == 1
                 && chain.entries[0].provider_id == "zai"
                 && chain.entries[0].model_id == "glm-5.1";
@@ -2188,12 +2176,19 @@ impl ModelChainStore {
                 && chain.entries[0].model_id == "MiniMax-M3"
                 && chain.entries[1].provider_id == "cerebras"
                 && chain.entries[1].model_id == "zai-glm-4.7";
-            if legacy_glm_only || previous_stock_assistant {
+            let retired_argon_eap_stock = chain.entries.len() == 3
+                && chain.entries[0].provider_id == "google"
+                && chain.entries[0].model_id == "gemini-4-argon-eap"
+                && chain.entries[1].provider_id == "minimax"
+                && chain.entries[1].model_id == "MiniMax-M3"
+                && chain.entries[2].provider_id == "cerebras"
+                && chain.entries[2].model_id == "zai-glm-4.7";
+            if legacy_glm_only || previous_stock_assistant || retired_argon_eap_stock {
                 chain.name = "Assistant (Hermes)".to_string();
                 chain.entries = vec![
                     ChainEntry {
                         provider_id: "google".to_string(),
-                        model_id: "gemini-4-argon-eap".to_string(),
+                        model_id: "gemini-4-carbon-eap".to_string(),
                     },
                     ChainEntry {
                         provider_id: "minimax".to_string(),
@@ -2601,10 +2596,17 @@ impl ModelChainStore {
                         .cli_proxy_auth_file
                         .as_deref()
                         .is_some_and(crate::api::antigravity_accounts::needs_verification);
+                let google_api_key_disallowed = provider_type
+                    == crate::ai_providers::ProviderType::Google
+                    && account.api_key.is_some()
+                    && !crate::model_policy::is_google_api_key_allowed_model(&entry.model_id);
                 let pool_cooling =
                     health_tracker.pool_is_cooling(&entry.provider_id, account.id, &entry.model_id);
                 let cand_u32 = account_ordinals.intern(account.id);
-                let is_rejected = !is_healthy || antigravity_unverified || pool_cooling;
+                let is_rejected = !is_healthy
+                    || antigravity_unverified
+                    || pool_cooling
+                    || google_api_key_disallowed;
                 let host_admits_pool = !is_rejected
                     && bound_custom_account_id.is_none_or(|b| b == cand_u32)
                     && bound_custom_account_uuid.is_none_or(|b_uuid| b_uuid == account.id);
@@ -2637,6 +2639,14 @@ impl ModelChainStore {
                     continue;
                 }
                 if !account.has_credentials() {
+                    continue;
+                }
+                // Only Gemini 4 Carbon is free on Google API keys; block all
+                // other models on API-key Google accounts so paid spend cannot occur.
+                if provider_type == crate::ai_providers::ProviderType::Google
+                    && account.api_key.is_some()
+                    && !crate::model_policy::is_google_api_key_allowed_model(&entry.model_id)
+                {
                     continue;
                 }
                 // Legacy Antigravity files cannot serve our explicit proxy namespace.
@@ -2914,7 +2924,19 @@ impl ModelChainStore {
                             }));
                         let duplicate_proxy = duplicate_google_proxy_key
                             && sa.account_id == stable_provider_uuid("google-cli-proxy");
-                        if duplicate_oauth || duplicate_api_key || duplicate_proxy {
+                        let api_key_backed = (!sa.has_oauth && sa.api_key.is_some())
+                            || (sa.account_id == stable_provider_uuid("google-cli-proxy")
+                                && !crate::api::ai_providers::cli_proxy_config_gemini_keys()
+                                    .is_empty());
+                        let disallowed_on_api_key = api_key_backed
+                            && !crate::model_policy::is_google_api_key_allowed_model(
+                                &entry.model_id,
+                            );
+                        if duplicate_oauth
+                            || duplicate_api_key
+                            || duplicate_proxy
+                            || disallowed_on_api_key
+                        {
                             continue;
                         }
                     }
@@ -3047,6 +3069,14 @@ impl ModelChainStore {
                 if !account.has_credentials() {
                     continue;
                 }
+                // Only Gemini 4 Carbon is free on Google API keys; block all
+                // other models on API-key Google accounts so paid spend cannot occur.
+                if provider_type == crate::ai_providers::ProviderType::Google
+                    && account.api_key.is_some()
+                    && !crate::model_policy::is_google_api_key_allowed_model(&entry.model_id)
+                {
+                    continue;
+                }
                 if matches!(provider_type, crate::ai_providers::ProviderType::Custom) {
                     let matches = if entry.provider_id == "custom" {
                         account
@@ -3096,6 +3126,14 @@ impl ModelChainStore {
                 .unwrap_or(crate::ai_providers::ProviderType::Custom);
             for account in ai_providers.get_all_by_type(provider_type).await {
                 if !account.has_credentials() {
+                    continue;
+                }
+                // Only Gemini 4 Carbon is free on Google API keys; block all
+                // other models on API-key Google accounts so paid spend cannot occur.
+                if provider_type == crate::ai_providers::ProviderType::Google
+                    && account.api_key.is_some()
+                    && !crate::model_policy::is_google_api_key_allowed_model(&entry.model_id)
+                {
                     continue;
                 }
                 if let Some(key) = store_account_subscription_key(provider_type, &account) {
@@ -3172,7 +3210,7 @@ mod tests {
         );
         assert_eq!(
             chain("antigravity", "gemini-4-argon-high"),
-            ["antigravity/gemini-4-argon-high", "google/gemini-4-argon"]
+            ["antigravity/gemini-4-argon-high"]
         );
         // No fuzzy matching: an unlisted id keeps its single entry.
         assert_eq!(chain("google", "gemini-3-pro"), ["google/gemini-3-pro"]);
@@ -3621,7 +3659,7 @@ mod tests {
 
         assert_eq!(assistant.entries.len(), 3);
         assert_eq!(assistant.entries[0].provider_id, "google");
-        assert_eq!(assistant.entries[0].model_id, "gemini-4-argon-eap");
+        assert_eq!(assistant.entries[0].model_id, "gemini-4-carbon-eap");
     }
 
     fn past_ms(hours: i64) -> i64 {
@@ -3708,10 +3746,10 @@ mod tests {
         let store_id = account.id;
         let store = store_with(vec![account]).await;
         let chains = store_with_chain(
-            "argon",
+            "carbon",
             vec![ChainEntry {
                 provider_id: "google".into(),
-                model_id: "gemini-4-argon-eap".into(),
+                model_id: "gemini-4-carbon-eap".into(),
             }],
         )
         .await;
@@ -3725,7 +3763,7 @@ mod tests {
         }];
         let health = ProviderHealthTracker::new();
         let resolved = chains
-            .resolve_chain("argon", &store, &standard, &health)
+            .resolve_chain("carbon", &store, &standard, &health)
             .await;
         let direct: Vec<_> = resolved
             .iter()
@@ -3737,7 +3775,7 @@ mod tests {
             .record_entry_failure(direct[0], CooldownReason::RateLimit, None)
             .await;
         let cooling = chains
-            .resolve_chain("argon", &store, &standard, &health)
+            .resolve_chain("carbon", &store, &standard, &health)
             .await;
         assert!(
             cooling.iter().all(|entry| entry.api_key.is_none()),
@@ -3937,8 +3975,9 @@ mod tests {
             .is_empty());
         assert!(health.is_healthy(second_id).await);
 
-        // `google/gemini-4-argon` is pinned to native Google and must never
-        // silently fail over to Antigravity when Google quota is spent.
+        // `google/gemini-4-carbon-eap` is pinned to native Google and must never
+        // silently fail over to Antigravity when Google quota is spent; paid
+        // non-Carbon Google models (`gemini-4-argon`) are blocked on API keys.
         let mut google = AIProvider::new(ProviderType::Google, "gemini-cli".into());
         google.api_key = Some("fixture-key".into());
         let google_id = google.id;
@@ -3946,16 +3985,27 @@ mod tests {
         let pool_id = pool.id;
         let store = store_with(vec![google, pool]).await;
         let health = ProviderHealthTracker::new();
-        let argon = with_equivalent_fallbacks(ChainEntry {
+        let paid_argon = with_equivalent_fallbacks(ChainEntry {
             provider_id: "google".into(),
             model_id: "gemini-4-argon".into(),
         });
-        let resolved = chains.resolve_entries(&argon, &store, &[], &health).await;
+        assert!(
+            chains
+                .resolve_entries(&paid_argon, &store, &[], &health)
+                .await
+                .is_empty(),
+            "non-Carbon Google API key calls must be blocked before dispatch"
+        );
+        let carbon = with_equivalent_fallbacks(ChainEntry {
+            provider_id: "google".into(),
+            model_id: "gemini-4-carbon-eap".into(),
+        });
+        let resolved = chains.resolve_entries(&carbon, &store, &[], &health).await;
         assert_eq!(ids(resolved.clone()), vec![google_id]);
         health
             .record_entry_failure(&resolved[0], CooldownReason::QuotaExhausted, None)
             .await;
-        let after = ids(chains.resolve_entries(&argon, &store, &[], &health).await);
+        let after = ids(chains.resolve_entries(&carbon, &store, &[], &health).await);
         assert!(
             after.is_empty(),
             "native Google route fails visibly rather than switching to Antigravity: {after:?}"
@@ -4081,10 +4131,10 @@ mod tests {
 
         let store = store_with(vec![oauth]).await;
         let chains = store_with_chain(
-            "argon",
+            "carbon",
             vec![ChainEntry {
                 provider_id: "google".to_string(),
-                model_id: "gemini-4-argon-eap".to_string(),
+                model_id: "gemini-4-carbon-eap".to_string(),
             }],
         )
         .await;
@@ -4099,13 +4149,28 @@ mod tests {
         }];
 
         let resolved = chains
-            .resolve_chain("argon", &store, &standard, &ProviderHealthTracker::new())
+            .resolve_chain("carbon", &store, &standard, &ProviderHealthTracker::new())
             .await;
 
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[0].account_id, direct_id);
         assert!(resolved[0].api_key.is_some());
         assert!(resolved[1].has_oauth);
+
+        let argon_only_oauth = chains
+            .resolve_entries(
+                &[ChainEntry {
+                    provider_id: "google".to_string(),
+                    model_id: "gemini-4-argon".to_string(),
+                }],
+                &store,
+                &standard,
+                &ProviderHealthTracker::new(),
+            )
+            .await;
+        assert_eq!(argon_only_oauth.len(), 1);
+        assert!(argon_only_oauth[0].has_oauth);
+        assert!(argon_only_oauth[0].api_key.is_none());
     }
 
     #[tokio::test]
