@@ -113,17 +113,27 @@ impl BoatProvider {
             resp.text().await.unwrap_or_default()
         };
         if !status.is_success() {
-            let code = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("code")
-                        .or_else(|| v.get("error"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or_default();
+            let parsed = serde_json::from_str::<Value>(&text).ok();
+            let code = parsed
+                .as_ref()
+                .and_then(|v| v.get("code").or_else(|| v.get("error")))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let message = parsed
+                .as_ref()
+                .and_then(|v| v.get("message"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let detail = match (code, message) {
+                (Some(c), Some(m)) if c != m => format!("{c}: {m}"),
+                (Some(c), _) => c.to_string(),
+                (None, Some(m)) => m.to_string(),
+                (None, None) => String::new(),
+            };
             return Err(format!(
-                "boat {method} {path} -> HTTP {} {code}",
+                "boat {method} {path} -> HTTP {} {detail}",
                 status.as_u16()
             ));
         }

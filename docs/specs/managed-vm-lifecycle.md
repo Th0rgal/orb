@@ -14,14 +14,16 @@ Code: `src/managed/lifecycle.rs` (pure decision backed by
 | Provider (`provider`) | Workloads | Bootstrap | `supports_free_stop` | `supports_snapshots` | Minimum lease |
 | --- | --- | --- | --- | --- | --- |
 | `boat` (default) | Fast ephemeral Linux x86\_64 workers (`small`..`xlarge`) & raw sandboxes | Provider file/exec API | Yes (14d disk retention, \$0) | Yes (named + fork) | Per-second |
-| `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx21`..`ccx33`, `cax31`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
+| `hetzner` | Larger x86\_64 / ARM64 CPU & RAM instances (`cpx22`..`ccx43`, `cax31`; legacy `cpx21`..`cpx51` aliases map to `cpx22`..`cpx62` with EU location fallback `fsn1` -> `hel1` -> `nbg1`) | Cloud-init `user_data` -> reverse relay | No (stopped servers still bill) | No | Hourly / per-minute |
 | `vastai` | Ephemeral CUDA GPUs (`rtx4090`, `a100`, `h100`, or explicit `gpu` filter) | Offer `onstart` -> reverse relay | No (stopped instances bill storage/GPU) | No | On-demand |
 | `scaleway` | EU Linux/GPU Instances (`DEV1-*`, `PRO2-*`, `L4-*`, `H100-*`) & Apple Silicon Mac minis (`M1-M`, `M2-M`, `M2-PRO`, `M4-M`) | Cloud-init / SSH -> reverse relay | No | No | Instances: per-minute; Apple Silicon: **24h (`deletable_at`)** |
 
 Provider credentials (`BOAT_API_KEY`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
 `SCALEWAY_SECRET_KEY`, `SCALEWAY_KEY_ID`, etc.) are resolved inside Core from
-environment variables or Bitwarden Secrets Manager (`bitwarden.rs`) and are
-classified as `CoreReserved` in `secret_broker.rs` (`orb_compute_secret_gate`):
+operator settings (`.sandboxed-sh/managed_providers.json`, `0600`, AES-256-GCM
+via `env_crypto`), environment variables, or Bitwarden Secrets Manager
+(`bitwarden.rs`) and are classified as `CoreReserved` in `secret_broker.rs`
+(`orb_compute_secret_gate`):
 
 1. Agents cannot read `CoreReserved` cloud provider keys via `secret_get` or
    `secret_request`, and `secret_list` omits them from `accessible`. Agents must
@@ -29,6 +31,13 @@ classified as `CoreReserved` in `secret_broker.rs` (`orb_compute_secret_gate`):
    `start_mission(remote_node_id="auto-managed[:provider[:size]]")`.
 2. Callers executing on untrusted `managed-*` remote nodes are denied all
    non-allowlisted vault secrets (`orb_compute_secret_gate`).
+3. Operators can inspect, configure, and individually enable/disable each
+   provider via `GET /api/managed-machines/providers` and
+   `PUT /api/managed-machines/providers/:provider` (`disabled_providers` in
+   `managed_settings.json`). Disabling a provider refuses new `spawn`, `fork`,
+   `resume`, and sibling reuse (`409 provider_disabled`) while keeping the
+   reaper and reconciler active so any already-live VMs are still metered and
+   destroyed cleanly.
 
 ## Ownership & Lineage
 

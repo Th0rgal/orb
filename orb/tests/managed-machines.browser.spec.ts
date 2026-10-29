@@ -12,8 +12,14 @@ const iso = (offsetMin: number) => new Date(Date.now() + offsetMin * 60_000).toI
 const view = (o: Record<string, unknown>) => ({ provider: "boat", provider_id: "bx_7f3k2", image: "sandboxed-node:2026.10", size: "medium", cpu: 4, ram_gb: 8,
   state: "online", created_at: iso(-50), expires_at: iso(70), cost_usd: 0.1, usd_per_hour: 0.12, ledger_closed: false, ...o });
 
-type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light"; spend?: unknown[]; stopped?: boolean };
+type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light"; spend?: unknown[]; stopped?: boolean; withProviders?: boolean };
 async function mock(page: Page, opts: Opts = {}) {
+  const providers = opts.withProviders ? [
+    { provider: "boat", display_name: "boat.dev", configured: true, enabled: true, credential_source: "bitwarden", key_hint: "••••1234", supports_snapshots: true, supports_free_stop: true, sizes },
+    { provider: "hetzner", display_name: "Hetzner Cloud", configured: false, enabled: true, supports_snapshots: false, supports_free_stop: false, sizes: [{ size: "cpx32", cpu: 4, ram_gb: 8, disk_gb: 160, usd_per_hour: 0.062 }] },
+    { provider: "vastai", display_name: "Vast.ai", configured: false, enabled: true, supports_snapshots: false, supports_free_stop: false, sizes: [{ size: "rtx4090", cpu: 16, ram_gb: 64, disk_gb: 120, usd_per_hour: 0.45, gpu: "RTX 4090" }] },
+    { provider: "scaleway", display_name: "Scaleway", configured: false, enabled: false, supports_snapshots: false, supports_free_stop: false, sizes: [{ size: "PRO2-S", cpu: 4, ram_gb: 16, disk_gb: 80, usd_per_hour: 0.088 }] },
+  ] as Record<string, unknown>[] : undefined;
   const machines: Record<string, unknown>[] = [
     view({ id: "mm1", name: "medium-a", node_id: "managed-mm1", owner_mission_id: "4f2a9c1e-0000-4000-8000-000000000001", reason: "Lean build" }),
     view({ id: "mm0", name: "medium-b", node_id: "managed-mm0", state: "destroyed", destroyed_at: iso(-120), cost_usd: 0.37, ledger_closed: true }),
@@ -43,10 +49,36 @@ async function mock(page: Page, opts: Opts = {}) {
       return route.fulfill({ json: { antigravity_on_managed: state.settings } });
     }
     if (path === "/api/managed-machines/snapshots") return route.fulfill({ json: { snapshots } });
+    if (path === "/api/managed-machines/providers" && method === "GET") {
+      if (!providers) return route.fulfill({ status: 404, body: "" });
+      return route.fulfill({ json: { providers } });
+    }
+    if (path.startsWith("/api/managed-machines/providers/") && method === "PUT") {
+      state.calls.push(`${method} ${path} ${req.postData() ?? ""}`);
+      const id = decodeURIComponent(path.split("/").pop()!);
+      const pr = providers?.find(p => p.provider === id);
+      if (!pr) return route.fulfill({ status: 404, json: { error: "unknown_provider", message: "not found" } });
+      const body = JSON.parse(req.postData() ?? "{}");
+      if (typeof body.enabled === "boolean") pr.enabled = body.enabled;
+      if (typeof body.api_key === "string") {
+        if (body.api_key.trim()) {
+          pr.configured = true;
+          pr.credential_source = "settings";
+          pr.key_hint = `••••${body.api_key.trim().slice(-4)}`;
+        } else {
+          pr.configured = false;
+          delete pr.credential_source;
+          delete pr.key_hint;
+        }
+      }
+      if (typeof body.region === "string") pr.region = body.region || undefined;
+      if (typeof body.project_id === "string") pr.project_id = body.project_id || undefined;
+      return route.fulfill({ json: pr });
+    }
     if (path.startsWith("/api/managed-machines")) {
       state.calls.push(`${method} ${path}${req.postData() ? ` ${req.postData()}` : ""}`);
       if (opts.managed === "404") return route.fulfill({ status: 404, body: "" });
-      if (method === "GET") return route.fulfill({ json: { machines, budget, sizes, enabled: opts.managed !== "disabled", ...(opts.spend ? { daily_spend: opts.spend } : {}) } });
+      if (method === "GET") return route.fulfill({ json: { machines, budget, sizes, enabled: opts.managed !== "disabled", ...(providers ? { providers } : {}), ...(opts.spend ? { daily_spend: opts.spend } : {}) } });
       if (method === "POST" && path === "/api/managed-machines") {
         if (opts.holdCreate) await new Promise<void>(r => { state.releaseCreate = r; });
         if (opts.createError) return route.fulfill({ status: 402, json: opts.createError });
@@ -364,4 +396,46 @@ test("stopped machines resume optimistically and snapshots are listed", async ({
   await stopped.getByRole("button", { name: "Resume" }).click();
   await expect(page.locator(".managed-row", { hasText: "large-a" }).first()).toContainText("Starting…");
   expect(state.calls.some(c => c.startsWith("POST /api/managed-machines/mm9/resume"))).toBe(true);
+});
+
+test("machine providers can be configured and toggled in Machines and Settings", async ({ page }) => {
+  const state = await mock(page, { withProviders: true });
+  await openMachines(page);
+  const card = page.getByRole("region", { name: "Machine providers" });
+  await expect(card.locator(".managed-provider-row")).toHaveCount(4);
+  await expect(card.locator(".managed-provider-row[data-provider=boat]")).toContainText("Configured · Bitwarden ••••1234");
+  await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Not configured");
+  await expect(card.locator(".managed-provider-row[data-provider=scaleway]")).toContainText("Disabled · Not configured");
+
+  // Configure Hetzner Cloud with an API key and default location.
+  await card.getByRole("button", { name: "Configure Hetzner Cloud" }).click();
+  const cfg = page.getByRole("dialog", { name: "Configure Hetzner Cloud" });
+  await cfg.getByLabel("Hetzner Cloud API key").fill("hz-live-token-9876");
+  await cfg.getByLabel("Default location").fill("hel1");
+  await cfg.getByRole("button", { name: "Save" }).click();
+  await expect(cfg).toHaveCount(0);
+  await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Configured · Settings ••••9876 · hel1");
+  await expect(page.getByRole("heading", { name: "Managed cloud" })).toBeVisible();
+
+  // New managed machine dialog now offers both boat.dev and Hetzner Cloud.
+  await page.getByRole("button", { name: "New managed machine" }).click();
+  const newDialog = page.getByRole("dialog", { name: "New managed machine" });
+  await expect(newDialog.getByRole("radiogroup", { name: "Provider" }).getByRole("radio")).toHaveCount(2);
+  await page.keyboard.press("Escape");
+
+  // Disable Hetzner Cloud via switch -> hides from New managed machine provider picker.
+  const hzSwitch = card.getByRole("switch", { name: "Enable Hetzner Cloud" });
+  await expect(hzSwitch).toHaveAttribute("aria-checked", "true");
+  await hzSwitch.click();
+  await expect(hzSwitch).toHaveAttribute("aria-checked", "false");
+  expect(state.calls).toContain('PUT /api/managed-machines/providers/hetzner {"enabled":false}');
+  await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Disabled · Settings ••••9876 · hel1");
+
+  // Also visible in Settings → Agents → Local agents.
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: /Agents/ }).click();
+  await page.getByRole("tab", { name: "Local agents" }).click();
+  const settingsCard = page.getByRole("region", { name: "Machine providers" });
+  await expect(settingsCard.locator(".managed-provider-row")).toHaveCount(4);
+  await expect(settingsCard.getByRole("switch", { name: "Enable Hetzner Cloud" })).toHaveAttribute("aria-checked", "false");
 });

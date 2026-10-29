@@ -3465,46 +3465,38 @@ async fn discover_managed_providers_from_bitwarden(
         }
     };
 
-    if manager.provider_for("boat").is_none() {
+    if !manager.has_base_credential("boat") {
         if let Some(key) = read_secret(&["BOAT_API_KEY"]).await {
-            let base = std::env::var("BOAT_API_BASE")
-                .unwrap_or_else(|_| crate::managed::boat::DEFAULT_API_BASE.to_string());
-            manager.register_provider(Arc::new(crate::managed::boat::BoatProvider::new(base, key)));
+            manager.register_base_credential("boat", "bitwarden", key, None, None);
             tracing::info!("Registered managed provider 'boat' from Bitwarden vault");
         }
     }
-    if manager.provider_for("hetzner").is_none() {
+    if !manager.has_base_credential("hetzner") {
         if let Some(key) = read_secret(&["HETZNER_CLOUD_APIKEY", "HCLOUD_TOKEN"]).await {
-            let base = std::env::var("HETZNER_API_BASE")
-                .unwrap_or_else(|_| crate::managed::hetzner::DEFAULT_API_BASE.to_string());
-            manager.register_provider(Arc::new(crate::managed::hetzner::HetznerProvider::new(
-                base, key,
-            )));
+            let loc = std::env::var("HETZNER_DEFAULT_LOCATION")
+                .ok()
+                .filter(|s| !s.trim().is_empty());
+            manager.register_base_credential("hetzner", "bitwarden", key, loc, None);
             tracing::info!("Registered managed provider 'hetzner' from Bitwarden vault");
         }
     }
-    if manager.provider_for("vastai").is_none() {
+    if !manager.has_base_credential("vastai") {
         if let Some(key) = read_secret(&["VASTAI_API_KEY", "VAST_API_KEY"]).await {
-            let base = std::env::var("VASTAI_API_BASE")
-                .unwrap_or_else(|_| crate::managed::vastai::DEFAULT_API_BASE.to_string());
-            manager.register_provider(Arc::new(crate::managed::vastai::VastAiProvider::new(
-                base, key,
-            )));
+            manager.register_base_credential("vastai", "bitwarden", key, None, None);
             tracing::info!("Registered managed provider 'vastai' from Bitwarden vault");
         }
     }
-    if manager.provider_for("scaleway").is_none() {
+    if !manager.has_base_credential("scaleway") {
         if let Some(key) = read_secret(&["SCALEWAY_SECRET_KEY", "SCW_SECRET_KEY"]).await {
-            let base = std::env::var("SCALEWAY_API_BASE")
-                .unwrap_or_else(|_| crate::managed::scaleway::DEFAULT_API_BASE.to_string());
+            let zone = std::env::var("SCALEWAY_DEFAULT_ZONE")
+                .ok()
+                .filter(|s| !s.trim().is_empty());
             let project_id = std::env::var("SCALEWAY_PROJECT_ID")
                 .or_else(|_| std::env::var("SCW_DEFAULT_PROJECT_ID"))
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .or(read_secret(&["SCALEWAY_PROJECT_ID", "SCW_DEFAULT_PROJECT_ID"]).await);
-            manager.register_provider(Arc::new(crate::managed::scaleway::ScalewayProvider::new(
-                base, key, project_id,
-            )));
+            manager.register_base_credential("scaleway", "bitwarden", key, zone, project_id);
             tracing::info!("Registered managed provider 'scaleway' from Bitwarden vault");
         }
     }
