@@ -60,6 +60,20 @@ resolve_bws_secret() {
         bws_token="$(systemctl show -p Environment sandboxed-sh-prod.service 2>/dev/null \
             | tr ' ' '\n' | sed -n 's/^BWS_ACCESS_TOKEN=//p' | head -n 1 || true)"
     fi
+    if [[ -z "$bws_token" && -r /root/.sandboxed-sh/settings.json && -r /root/.sandboxed-sh/private_key ]]; then
+        bws_token="$(python3 - <<'PY' 2>/dev/null || true
+import base64, json
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+key = bytes.fromhex(open("/root/.sandboxed-sh/private_key").read().strip())
+enc = ((json.load(open("/root/.sandboxed-sh/settings.json")).get("bitwarden") or {}).get("encrypted_access_token") or "").strip()
+if enc.startswith("<encrypted") and "</encrypted>" in enc:
+    b64 = enc.split('">', 1)[1].rsplit("</encrypted>", 1)[0]
+    raw = base64.b64decode(b64)
+    sys_tok = AESGCM(key).decrypt(raw[:12], raw[12:], None).decode().strip()
+    print(sys_tok, end="")
+PY
+)"
+    fi
     [[ -n "$bws_token" ]] || return 1
     command -v bws >/dev/null 2>&1 || return 1
     BWS_ACCESS_TOKEN="$bws_token" bws secret list --output json 2>/dev/null | python3 -c '
@@ -292,13 +306,39 @@ if isinstance(data, dict):
     for section, models in list(data.items()):
         if "gemini" in section.lower() and "antigravity" not in section.lower() and isinstance(models, list):
             ids = {m.get("id") for m in models if isinstance(m, dict)}
-            template = next((m for m in models if isinstance(m, dict) and str(m.get("id", "")).startswith("gemini-")), None)
+            template = next(
+                (m for m in reversed(models) if isinstance(m, dict) and str(m.get("id", "")).startswith("gemini-4")),
+                next((m for m in models if isinstance(m, dict) and str(m.get("id", "")).startswith("gemini-")), None),
+            )
             for target_id in ("gemini-4-carbon-eap", "gemini-4-argon", "gemini-4-argon-eap"):
                 if target_id not in ids and template is not None:
                     entry = copy.deepcopy(template)
                     entry["id"] = target_id
                     if "name" in entry:
-                        entry["name"] = target_id
+                        entry["name"] = f"models/{target_id}" if str(entry["name"]).startswith("models/") else target_id
+                    if "display_name" in entry:
+                        entry["display_name"] = target_id
+                    if "description" in entry:
+                        entry["description"] = target_id
+                    models.append(entry)
+                    changed = True
+        elif section.lower() == "antigravity" and isinstance(models, list):
+            ids = {m.get("id") for m in models if isinstance(m, dict)}
+            template = next(
+                (m for m in models if isinstance(m, dict) and m.get("id") == "gemini-4-argon-high"),
+                None,
+            )
+            for target_id, desc in (
+                ("agy-model-high", "Gemini 4 Carbon (High)"),
+                ("agy-model-medium", "Gemini 4 Carbon (Medium)"),
+                ("agy-model-low", "Gemini 4 Carbon (Low)"),
+            ):
+                if target_id not in ids and template is not None:
+                    entry = copy.deepcopy(template)
+                    entry["id"] = target_id
+                    entry["name"] = target_id
+                    entry["display_name"] = "Gemini 4 Carbon"
+                    entry["description"] = desc
                     models.append(entry)
                     changed = True
 
@@ -320,6 +360,6 @@ PY
     fi
 fi
 
-# 5. Smoke-check local & public health
-curl -fsSL "https://${DOMAIN}/health" --resolve "${DOMAIN}:443:127.0.0.1" >/dev/null
+# 5. Smoke-check public TLS & health
+curl --resolve "${DOMAIN}:443:${PUBLIC_IPV4}" -fsSL "https://${DOMAIN}/health" >/dev/null
 log "Verified https://${DOMAIN}/health TLS handshake and routing!"

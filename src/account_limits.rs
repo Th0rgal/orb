@@ -316,7 +316,7 @@ pub fn parse_limit_reset_from_body(body: &[u8], now: DateTime<Utc>) -> Option<Da
 /// provider, which recover within a retry budget.
 pub fn is_usage_limit_message(message: &str) -> bool {
     let lower = message.replace('\u{2019}', "'").to_ascii_lowercase();
-    const USAGE_LIMIT_MARKERS: [&str; 17] = [
+    const USAGE_LIMIT_MARKERS: [&str; 18] = [
         "hit your limit",
         // Google Antigravity's per-login allowance.
         "individual quota reached",
@@ -334,6 +334,8 @@ pub fn is_usage_limit_message(message: &str) -> bool {
         "purchase more credits",
         "insufficient_quota",
         "exceeded your current quota",
+        // Google AI Studio monthly project spending cap.
+        "spending cap",
         "switch to another model to continue",
     ];
     if USAGE_LIMIT_MARKERS

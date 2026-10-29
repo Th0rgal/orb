@@ -518,18 +518,29 @@ where
 /// 2. If every healthy account in the group is at `5/5`, awaits the first
 ///    account in the group to release a slot (bounded by `queue_timeout`),
 ///    rotating the winner into `entry_idx`. Returns `Err(())` on queue timeout.
+fn is_google_concurrency_sibling(
+    head: &crate::provider_health::ResolvedEntry,
+    other: &crate::provider_health::ResolvedEntry,
+) -> bool {
+    if head.provider_id == other.provider_id && head.model_id == other.model_id {
+        return true;
+    }
+    let is_carbon = |e: &crate::provider_health::ResolvedEntry| {
+        let m = e.model_id.to_ascii_lowercase();
+        (e.provider_id == "google" && m.contains("gemini-4-carbon"))
+            || (e.provider_id == "antigravity" && m.starts_with("agy-model-"))
+    };
+    is_carbon(head) && is_carbon(other)
+}
+
 async fn acquire_google_group_permit(
     entries: &mut [crate::provider_health::ResolvedEntry],
     entry_idx: usize,
     queue_timeout: std::time::Duration,
 ) -> Result<(tokio::sync::OwnedSemaphorePermit, std::time::Duration), std::time::Duration> {
-    let provider_id = entries[entry_idx].provider_id.clone();
-    let model_id = entries[entry_idx].model_id.clone();
+    let head = entries[entry_idx].clone();
     let mut group_end = entry_idx + 1;
-    while group_end < entries.len()
-        && entries[group_end].provider_id == provider_id
-        && entries[group_end].model_id == model_id
-    {
+    while group_end < entries.len() && is_google_concurrency_sibling(&head, &entries[group_end]) {
         group_end += 1;
     }
 
@@ -3605,25 +3616,26 @@ async fn chat_completions_routed(
     let mut waterfall_account_ordinals = crate::provider_health::AccountOrdinalTable::new();
     let via_cloudflare = headers.contains_key("cf-ray");
     let queue_timeout = proxy_queue_timeout();
-    let mut skip_saturated_group: Option<(String, String)> = None;
+    let mut skip_saturated_head: Option<crate::provider_health::ResolvedEntry> = None;
     for entry_idx in 0..entries.len() {
-        if let Some((ref sat_provider, ref sat_model)) = skip_saturated_group {
-            if entries[entry_idx].provider_id == *sat_provider
-                && entries[entry_idx].model_id == *sat_model
-            {
+        if let Some(ref sat_head) = skip_saturated_head {
+            if is_google_concurrency_sibling(sat_head, &entries[entry_idx]) {
                 continue;
             }
-            skip_saturated_group = None;
+            skip_saturated_head = None;
         }
 
-        // For Google, acquire a per-account concurrency slot across the sibling
-        // account group (`GEMINI_API_KEY` first, `thomas.marchand44@gmail.com`
-        // second). When #1 hits max concurrency (default 5), traffic spills
-        // immediately onto #2; when both are at 5/5, callers wait in FIFO order
-        // for whichever account frees a slot first.
+        // For Google & Antigravity Carbon EAP, acquire a per-account concurrency
+        // slot across the sibling account group (`GEMINI_API_KEY` first,
+        // `thomas.marchand44@gmail.com` second). When #1 hits max concurrency
+        // (default 5), traffic spills immediately onto #2; when both are at 5/5,
+        // callers wait in FIFO order for whichever account frees a slot first.
         let entry_provider_type =
             ProviderType::from_id(&entries[entry_idx].provider_id).unwrap_or(ProviderType::Custom);
-        let mut concurrency_permit = if entry_provider_type == ProviderType::Google {
+        let mut concurrency_permit = if matches!(
+            entry_provider_type,
+            ProviderType::Google | ProviderType::Antigravity
+        ) {
             if !has_routable_proxy_credentials(
                 entry_provider_type,
                 entries[entry_idx].api_key.is_some(),
@@ -3650,10 +3662,7 @@ async fn chat_completions_routed(
                         waited_secs = waited.as_secs_f64(),
                         "Google per-account concurrency queue timed out; skipping group without cooling accounts"
                     );
-                    skip_saturated_group = Some((
-                        entries[entry_idx].provider_id.clone(),
-                        entries[entry_idx].model_id.clone(),
-                    ));
+                    skip_saturated_head = Some(entries[entry_idx].clone());
                     rate_limit_count += 1;
                     continue;
                 }
@@ -8720,6 +8729,8 @@ pub(crate) fn is_gemini_thinking_model(model: &str) -> bool {
         .unwrap_or(model)
         .to_ascii_lowercase();
     m.contains("argon")
+        || m.contains("carbon")
+        || m.starts_with("agy-model-")
         || m.starts_with("gemini-2.5")
         || m.starts_with("gemini-3")
         || m.starts_with("gemini-4")

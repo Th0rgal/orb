@@ -24,6 +24,8 @@ pub fn quota_pool(model: &str) -> &'static str {
     let m = model.to_ascii_lowercase();
     if m.contains("claude") || m.contains("gpt") {
         "claude-gpt"
+    } else if m.starts_with("agy-") {
+        "gemini-eap"
     } else {
         "gemini"
     }
