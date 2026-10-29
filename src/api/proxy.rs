@@ -466,7 +466,15 @@ pub(crate) fn google_max_concurrency() -> usize {
         .unwrap_or(5)
 }
 
-fn proxy_queue_timeout() -> std::time::Duration {
+fn proxy_queue_timeout(via_cloudflare: bool) -> std::time::Duration {
+    if via_cloudflare {
+        let secs = std::env::var("PROXY_CF_QUEUE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(30);
+        return std::time::Duration::from_secs(secs);
+    }
     let secs = std::env::var("PROXY_QUEUE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
@@ -533,10 +541,16 @@ fn is_google_concurrency_sibling(
     is_carbon(head) && is_carbon(other)
 }
 
+fn entry_has_routable_proxy_credentials(entry: &crate::provider_health::ResolvedEntry) -> bool {
+    let ptype = ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
+    has_routable_proxy_credentials(ptype, entry.api_key.is_some(), entry.has_oauth)
+}
+
 async fn acquire_google_group_permit(
     entries: &mut [crate::provider_health::ResolvedEntry],
     entry_idx: usize,
     queue_timeout: std::time::Duration,
+    is_routable: impl Fn(&crate::provider_health::ResolvedEntry) -> bool,
 ) -> Result<(tokio::sync::OwnedSemaphorePermit, std::time::Duration), std::time::Duration> {
     let head = entries[entry_idx].clone();
     let mut group_end = entry_idx + 1;
@@ -546,13 +560,7 @@ async fn acquire_google_group_permit(
 
     // Fast path: pick the highest-priority sibling account with an immediate slot.
     for candidate_idx in entry_idx..group_end {
-        let ptype = ProviderType::from_id(&entries[candidate_idx].provider_id)
-            .unwrap_or(ProviderType::Custom);
-        if !has_routable_proxy_credentials(
-            ptype,
-            entries[candidate_idx].api_key.is_some(),
-            entries[candidate_idx].has_oauth,
-        ) {
+        if !is_routable(&entries[candidate_idx]) {
             continue;
         }
         let sem = google_account_semaphore(entries[candidate_idx].account_id);
@@ -570,9 +578,7 @@ async fn acquire_google_group_permit(
     let mut waiters = Vec::new();
     for (offset, candidate) in entries[entry_idx..group_end].iter().enumerate() {
         let candidate_idx = entry_idx + offset;
-        let ptype = ProviderType::from_id(&candidate.provider_id).unwrap_or(ProviderType::Custom);
-        if !has_routable_proxy_credentials(ptype, candidate.api_key.is_some(), candidate.has_oauth)
-        {
+        if !is_routable(candidate) {
             continue;
         }
         let sem = google_account_semaphore(candidate.account_id);
@@ -1179,6 +1185,17 @@ async fn clear_proxy_cooldowns(
     match target {
         Some(account_id) => {
             state.health_tracker.clear_cooldown(account_id).await;
+            if let Some(account) = state.ai_providers.get(account_id).await {
+                if let Some(key) = crate::provider_health::store_account_subscription_key(
+                    account.provider_type,
+                    &account,
+                ) {
+                    state.health_tracker.clear_subscription_cooldown(&key).await;
+                }
+            }
+            for pool in ["gemini", "gemini-eap", "claude-gpt"] {
+                crate::account_limits::shared().clear(&format!("{account_id}:{pool}"));
+            }
             Json(serde_json::json!({
                 "cleared": true,
                 "scope": "account",
@@ -3182,6 +3199,10 @@ fn client_stream_response(
                                 "Upstream stalled before any output reached the client; re-routing transparently"
                             );
                             cell.note_transparent_retry();
+                            // Drop the stalled upstream body stream before re-routing so
+                            // any per-account concurrency permit held by `data` is
+                            // released immediately instead of deadlocking the retry.
+                            data = Body::empty().into_data_stream();
                             // Keep the client alive while the reroute waits for its
                             // own first content.
                             let mut pending = std::pin::pin!(super::proxy_timing::scope(
@@ -3615,7 +3636,7 @@ async fn chat_completions_routed(
     let mut waterfall_first_byte_locked = false;
     let mut waterfall_account_ordinals = crate::provider_health::AccountOrdinalTable::new();
     let via_cloudflare = headers.contains_key("cf-ray");
-    let queue_timeout = proxy_queue_timeout();
+    let queue_timeout = proxy_queue_timeout(via_cloudflare);
     let mut skip_saturated_head: Option<crate::provider_health::ResolvedEntry> = None;
     for entry_idx in 0..entries.len() {
         if let Some(ref sat_head) = skip_saturated_head {
@@ -3630,24 +3651,58 @@ async fn chat_completions_routed(
         // `thomas.marchand44@gmail.com` second). When #1 hits max concurrency
         // (default 5), traffic spills immediately onto #2; when both are at 5/5,
         // callers wait in FIFO order for whichever account frees a slot first.
-        let entry_provider_type =
+        let initial_provider_type =
             ProviderType::from_id(&entries[entry_idx].provider_id).unwrap_or(ProviderType::Custom);
+        let mut queue_waited = std::time::Duration::ZERO;
         let mut concurrency_permit = if matches!(
-            entry_provider_type,
+            initial_provider_type,
             ProviderType::Google | ProviderType::Antigravity
         ) {
             if !has_routable_proxy_credentials(
-                entry_provider_type,
+                initial_provider_type,
                 entries[entry_idx].api_key.is_some(),
                 entries[entry_idx].has_oauth,
             ) {
                 continue;
             }
-            match acquire_google_group_permit(&mut entries, entry_idx, queue_timeout).await {
+            match acquire_google_group_permit(
+                &mut entries,
+                entry_idx,
+                queue_timeout,
+                entry_has_routable_proxy_credentials,
+            )
+            .await
+            {
                 Ok((permit, waited)) => {
+                    queue_waited = waited;
                     if !waited.is_zero() {
                         if let Some(cell) = super::proxy_timing::current() {
                             cell.add_queue_wait(waited);
+                        }
+                        // Re-verify health after waiting in the queue: an active
+                        // call may have tripped a 429/spend-cap cooldown right
+                        // before releasing this slot.
+                        let selected = &entries[entry_idx];
+                        let sub_cooling = match selected.subscription_key.as_ref() {
+                            Some(k) => {
+                                state
+                                    .health_tracker
+                                    .any_subscription_cooldown_active(std::slice::from_ref(k))
+                                    .await
+                            }
+                            None => false,
+                        };
+                        if !state.health_tracker.is_healthy(selected.account_id).await
+                            || state.health_tracker.pool_is_cooling(
+                                &selected.provider_id,
+                                selected.account_id,
+                                &selected.model_id,
+                            )
+                            || sub_cooling
+                        {
+                            drop(permit);
+                            rate_limit_count += 1;
+                            continue;
                         }
                     }
                     Some(permit)
@@ -3697,16 +3752,25 @@ async fn chat_completions_routed(
         }
         // Gemini thinking models may think silently for a long time before
         // their first chunk; direct endpoints (e.g. orbrouter.thomas.md) get a
-        // 240s budget while Cloudflare orange-cloud requests stay under 100s.
-        let first_token_timeout = reliability::first_token_timeout_for_request(
+        // 240s budget while Cloudflare orange-cloud requests keep
+        // `queue_waited + first_token_timeout` inside the 90s budget (< 100s cliff).
+        let raw_first_token_timeout = reliability::first_token_timeout_for_request(
             &entry.provider_id,
             &entry.model_id,
             via_cloudflare,
         );
-        // Non-builtin prefixes are custom providers referenced by their
-        // sanitized name (e.g. "spark"); they all route as `Custom` through the
-        // OpenAI-compatible path using the account's `base_url`.
-        let provider_type = entry_provider_type;
+        let first_token_timeout = if via_cloudflare && !queue_waited.is_zero() {
+            raw_first_token_timeout
+                .saturating_sub(queue_waited)
+                .max(std::time::Duration::from_secs(15))
+        } else {
+            raw_first_token_timeout
+        };
+        // Recompute `provider_type` from `entry` after `acquire_google_group_permit`,
+        // which may have rotated an `antigravity/agy-model-*` Carbon EAP sibling
+        // into `entries[entry_idx]`.
+        let provider_type =
+            ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
 
         // Custom providers may work without an API key (base_url only).
         // Standard providers require credentials (API key or provider OAuth).
@@ -10737,10 +10801,14 @@ mod tests {
         let mut primary_permits = Vec::new();
         for _ in 0..cap {
             let mut entries = make_entries();
-            let (permit, waited) =
-                acquire_google_group_permit(&mut entries, 0, std::time::Duration::from_secs(1))
-                    .await
-                    .unwrap();
+            let (permit, waited) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                entry_has_routable_proxy_credentials,
+            )
+            .await
+            .unwrap();
             assert_eq!(entries[0].account_id, primary_id);
             assert!(waited.is_zero());
             primary_permits.push(permit);
@@ -10750,10 +10818,14 @@ mod tests {
         let mut secondary_permits = Vec::new();
         for _ in 0..cap {
             let mut entries = make_entries();
-            let (permit, waited) =
-                acquire_google_group_permit(&mut entries, 0, std::time::Duration::from_secs(1))
-                    .await
-                    .unwrap();
+            let (permit, waited) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                entry_has_routable_proxy_credentials,
+            )
+            .await
+            .unwrap();
             assert_eq!(entries[0].account_id, secondary_id);
             assert_eq!(entries[1].account_id, primary_id);
             assert!(waited.is_zero());
@@ -10767,12 +10839,82 @@ mod tests {
             drop(releaser);
         });
         let mut entries = make_entries();
-        let (_queued_permit, waited) =
-            acquire_google_group_permit(&mut entries, 0, std::time::Duration::from_secs(2))
-                .await
-                .unwrap();
+        let (_queued_permit, waited) = acquire_google_group_permit(
+            &mut entries,
+            0,
+            std::time::Duration::from_secs(2),
+            entry_has_routable_proxy_credentials,
+        )
+        .await
+        .unwrap();
         assert_eq!(entries[0].account_id, secondary_id);
         assert!(waited >= std::time::Duration::from_millis(15));
+    }
+
+    #[tokio::test]
+    async fn acquire_google_group_permit_rotates_cross_provider_carbon_eap_sibling() {
+        let cap = google_max_concurrency();
+        let google_id = uuid::Uuid::new_v4();
+        let agy_id = uuid::Uuid::new_v4();
+        let make_entries = || {
+            vec![
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: google_id,
+                    api_key: Some("key-primary".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "antigravity".into(),
+                    model_id: "agy-model-high".into(),
+                    account_id: agy_id,
+                    api_key: None,
+                    has_oauth: true,
+                    base_url: None,
+                    subscription_key: None,
+                },
+            ]
+        };
+        let has_cred =
+            |e: &crate::provider_health::ResolvedEntry| e.api_key.is_some() || e.has_oauth;
+
+        let mut google_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (permit, _) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                has_cred,
+            )
+            .await
+            .unwrap();
+            assert_eq!(entries[0].provider_id, "google");
+            google_permits.push(permit);
+        }
+
+        let mut entries = make_entries();
+        let (_spill_permit, waited) = acquire_google_group_permit(
+            &mut entries,
+            0,
+            std::time::Duration::from_secs(1),
+            has_cred,
+        )
+        .await
+        .unwrap();
+        assert!(waited.is_zero());
+        assert_eq!(entries[0].account_id, agy_id);
+        assert_eq!(entries[0].provider_id, "antigravity");
+        assert_eq!(entries[0].model_id, "agy-model-high");
+        assert_eq!(
+            ProviderType::from_id(&entries[0].provider_id),
+            Some(ProviderType::Antigravity)
+        );
+        assert!(proxy_queue_timeout(true) <= std::time::Duration::from_secs(30));
+        assert!(proxy_queue_timeout(false) >= std::time::Duration::from_secs(180));
     }
 
     #[test]
@@ -13848,6 +13990,8 @@ mod latency_tests {
         let tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
         let cell = TimingCell::new("builtin/smart", true);
         let account = uuid::Uuid::new_v4();
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let initial_permit = sem.clone().try_acquire_owned().unwrap();
         // First stream: role + reasoning, then silence past the idle limit.
         let stalled = crate::api::proxy_timing::scope(cell.clone(), async {
             cell.attempt_start("xai", "grok-4.7", account);
@@ -13862,15 +14006,25 @@ mod latency_tests {
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/event-stream")
-                .body(Body::from_stream(sse_error_terminated(tracked)))
+                .body(Body::from_stream(with_concurrency_permit(
+                    sse_error_terminated(tracked),
+                    Some(initial_permit),
+                )))
                 .unwrap()
         })
         .await;
         let calls = Arc::new(std::sync::Mutex::new(Vec::<Option<ExcludedEntry>>::new()));
         let seen = calls.clone();
+        let sem_for_retry = sem.clone();
         let reroute: StallRetry = Arc::new(move |exclude| {
             seen.lock().unwrap().push(exclude);
-            Box::pin(async {
+            // Stalled stream must have dropped its permit before reroute starts.
+            let retry_permit = sem_for_retry
+                .clone()
+                .try_acquire_owned()
+                .expect("stalled stream permit must be released before reroute");
+            Box::pin(async move {
+                let _hold = retry_permit;
                 // The reroute itself waits 40 s for its first content.
                 tokio::time::sleep(Duration::from_secs(40)).await;
                 sse_response(vec![(

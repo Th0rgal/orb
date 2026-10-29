@@ -573,7 +573,9 @@ impl AccountCooldowns {
     pub fn clear(&self, key: &str) -> bool {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let mut transient = self.transient.lock().unwrap_or_else(|e| e.into_inner());
-        let removed = entries.remove(key).is_some() || transient.remove(key).is_some();
+        let removed_entry = entries.remove(key).is_some();
+        let removed_transient = transient.remove(key).is_some();
+        let removed = removed_entry || removed_transient;
         if removed {
             self.persist(&entries, &transient);
         }
@@ -1381,5 +1383,32 @@ mod tests {
         ] {
             assert_eq!(remaining_quota_from_usage(&no_quota), None);
         }
+    }
+
+    #[test]
+    fn clear_removes_both_usage_limit_and_transient_mirror() {
+        assert!(is_usage_limit_message(
+            "Your project has exceeded its monthly spending cap. Please go to AI Studio at https://ai.studio/spend"
+        ));
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(COOLDOWNS_FILE);
+        let registry = AccountCooldowns::load(path.clone());
+        let key = account_key(Uuid::new_v4());
+        let now = Utc::now();
+        registry.set(&key, cooldown(now + Duration::hours(1)));
+        registry.set_transient(
+            &key,
+            TransientCooldown {
+                until: now + Duration::minutes(10),
+                provider: "google".into(),
+                reason: "quota_exhausted".into(),
+                recorded_at: now,
+            },
+        );
+        assert!(registry.clear(&key));
+        let on_disk: CooldownsFile =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!on_disk.cooldowns.contains_key(&key));
+        assert!(!on_disk.transient_cooldowns.contains_key(&key));
     }
 }
