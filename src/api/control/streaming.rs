@@ -74,39 +74,11 @@ pub(super) struct ControlWsHeartbeat {
 }
 
 pub(super) fn suffix_prefix_overlap_len(existing: &str, incoming: &str) -> usize {
-    let max_overlap = existing.chars().count().min(incoming.chars().count());
-    for overlap_chars in (1..=max_overlap).rev() {
-        let existing_start = existing
-            .char_indices()
-            .nth(existing.chars().count() - overlap_chars)
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        let incoming_end = incoming
-            .char_indices()
-            .nth(overlap_chars)
-            .map(|(idx, _)| idx)
-            .unwrap_or(incoming.len());
-        if existing[existing_start..] == incoming[..incoming_end] {
-            return incoming_end;
-        }
-    }
-    0
+    crate::orb_spec::suffix_prefix_overlap_len(existing, incoming)
 }
 
 pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: &str) {
-    if fragment.is_empty() {
-        return;
-    }
-    if buffer.is_empty() || fragment.starts_with(buffer.as_str()) {
-        *buffer = fragment.to_string();
-        return;
-    }
-    if buffer.starts_with(fragment) {
-        return;
-    }
-
-    let overlap = suffix_prefix_overlap_len(buffer, fragment);
-    buffer.push_str(&fragment[overlap..]);
+    crate::orb_spec::merge_text_stream_fragment(buffer, fragment);
 }
 
 pub(super) fn text_op_events_for_stream(
@@ -967,5 +939,84 @@ mod presentation_tests {
         .unwrap();
         assert_eq!(hint["label"].as_str().unwrap().len(), 160);
         assert!(hint.to_string().len() < 512);
+    }
+
+    fn naive_suffix_prefix_overlap_len(existing: &str, incoming: &str) -> usize {
+        let max_overlap = existing.chars().count().min(incoming.chars().count());
+        for overlap_chars in (1..=max_overlap).rev() {
+            let existing_start = existing
+                .char_indices()
+                .nth(existing.chars().count() - overlap_chars)
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            let incoming_end = incoming
+                .char_indices()
+                .nth(overlap_chars)
+                .map(|(idx, _)| idx)
+                .unwrap_or(incoming.len());
+            if existing[existing_start..] == incoming[..incoming_end] {
+                return incoming_end;
+            }
+        }
+        0
+    }
+
+    #[test]
+    fn kmp_suffix_prefix_overlap_matches_naive_across_multibyte_utf8() {
+        let alphabet: [&str; 12] = [
+            "a", "b", " ", "\n", "|", "`", "é", "€", "😀", "🧪", "中", "—",
+        ];
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || -> u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        // Explicit edge cases: empty, full overlap, partial multi-byte prefix share (😀 vs 🧪 both start with 0xF0 0x9F)
+        let explicit = [
+            ("", ""),
+            ("abc", ""),
+            ("", "abc"),
+            ("hello ", "hello world"),
+            ("foo 😀", "🧪 bar"),
+            ("é€😀", "€😀!"),
+            ("```rust\nlet x = 1 | 2;", "| 2;\n```"),
+        ];
+        for (ex, inc) in explicit {
+            assert_eq!(
+                suffix_prefix_overlap_len(ex, inc),
+                naive_suffix_prefix_overlap_len(ex, inc),
+                "ex={ex:?} inc={inc:?}"
+            );
+        }
+
+        for case_idx in 0..1_024 {
+            let len_a = (next() % 48) as usize;
+            let len_b = (next() % 32) as usize;
+            let mut a = String::new();
+            for _ in 0..len_a {
+                a.push_str(alphabet[(next() as usize) % alphabet.len()]);
+            }
+            let mut b = String::new();
+            if next() % 3 == 0 && !a.is_empty() {
+                let take_chars = ((next() as usize) % a.chars().count()) + 1;
+                let tail_start = a
+                    .char_indices()
+                    .nth(a.chars().count() - take_chars)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+                b.push_str(&a[tail_start..]);
+            }
+            for _ in 0..len_b {
+                b.push_str(alphabet[(next() as usize) % alphabet.len()]);
+            }
+            assert_eq!(
+                suffix_prefix_overlap_len(&a, &b),
+                naive_suffix_prefix_overlap_len(&a, &b),
+                "case {case_idx}"
+            );
+        }
     }
 }

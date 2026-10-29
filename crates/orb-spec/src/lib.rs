@@ -4615,6 +4615,356 @@ pub fn mesh_service_route_step(
 pub fn scroll_max_top(content: u64, viewport: u64) -> u64 {
     unsafe { orb_scroll_max_top(content, viewport) }
 }
+/// Pure $O(\min(|existing|, |incoming|))$ UTF-8 boundary-preserving KMP suffix-prefix overlap
+/// length (`incoming[..overlap] == existing[existing.len() - overlap..]`), paired with
+/// incremental fragment merging (`merge_text_stream_fragment`).
+pub fn suffix_prefix_overlap_len(existing: &str, incoming: &str) -> usize {
+    let eb = existing.as_bytes();
+    let ib = incoming.as_bytes();
+    let max_b = eb.len().min(ib.len());
+    if max_b == 0 {
+        return 0;
+    }
+    let mut start = eb.len() - max_b;
+    while !existing.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &eb[start..];
+    if tail.is_empty() {
+        return 0;
+    }
+    let pat = &ib[..tail.len()];
+    let mut pi = vec![0usize; pat.len()];
+    let mut j = 0usize;
+    for i in 1..pat.len() {
+        while j > 0 && pat[i] != pat[j] {
+            j = pi[j - 1];
+        }
+        if pat[i] == pat[j] {
+            j += 1;
+        }
+        pi[i] = j;
+    }
+    let mut matched = 0usize;
+    for &b in tail {
+        while matched > 0 && b != pat[matched] {
+            matched = pi[matched - 1];
+        }
+        if b == pat[matched] {
+            matched += 1;
+            if matched == pat.len() {
+                break;
+            }
+        }
+    }
+    while matched > 0 && !incoming.is_char_boundary(matched) {
+        matched = pi[matched - 1];
+    }
+    matched
+}
+
+/// Pure incremental stream fragment merge used by `src/api/control/streaming.rs`.
+pub fn merge_text_stream_fragment(buffer: &mut String, fragment: &str) {
+    if fragment.is_empty() {
+        return;
+    }
+    if buffer.is_empty() || fragment.starts_with(buffer.as_str()) {
+        *buffer = fragment.to_string();
+        return;
+    }
+    if buffer.starts_with(fragment) {
+        return;
+    }
+    let overlap = suffix_prefix_overlap_len(buffer, fragment);
+    buffer.push_str(&fragment[overlap..]);
+}
+
+/// Summary produced by the capability-gated stream byte scanner (`stream_simd`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamByteScanSummary {
+    pub newlines: usize,
+    pub fence_candidates: usize,
+    pub pipe_bytes: usize,
+    pub last_newline: usize,
+}
+
+/// Capability-gated stream delimiter scanner routed through `lean_sys_cabi::select_isa`
+/// and `lean_sys_cabi::verify_isa_selection` (`0` = Scalar, `1` = SSE2 / NEON, `2` = AVX2).
+pub mod stream_simd {
+    use super::{lean_sys_cabi, StreamByteScanSummary};
+
+    pub const VARIANT_SCALAR: u8 = 0;
+    pub const VARIANT_SIMD128: u8 = 1;
+    pub const VARIANT_AVX2: u8 = 2;
+    pub const MAX_VARIANT_ID: u8 = 4;
+
+    pub const MASK_BASELINE: u64 = 263;
+    pub const MASK_SIMD128: u64 = 775;
+    pub const MASK_AVX2: u64 = 799;
+
+    #[inline]
+    pub fn detect_hw_caps() -> u64 {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            let mut caps = MASK_BASELINE;
+            if std::arch::is_x86_feature_detected!("sse2") {
+                caps |= MASK_SIMD128;
+            }
+            if std::arch::is_x86_feature_detected!("avx2") {
+                caps |= MASK_AVX2;
+            }
+            caps
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                MASK_SIMD128
+            } else {
+                MASK_BASELINE
+            }
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            MASK_BASELINE
+        }
+    }
+
+    #[inline]
+    pub fn select_verified_stream_isa_with_caps(caps: u64, max_requested: u8) -> u8 {
+        if max_requested >= VARIANT_AVX2 {
+            let avx2 = lean_sys_cabi::select_isa(caps, MASK_AVX2, VARIANT_AVX2, MAX_VARIANT_ID);
+            if avx2 == VARIANT_AVX2
+                && lean_sys_cabi::verify_isa_selection(caps, MASK_AVX2, avx2, MAX_VARIANT_ID)
+            {
+                return VARIANT_AVX2;
+            }
+        }
+        if max_requested >= VARIANT_SIMD128 {
+            let simd128 =
+                lean_sys_cabi::select_isa(caps, MASK_SIMD128, VARIANT_SIMD128, MAX_VARIANT_ID);
+            if simd128 == VARIANT_SIMD128
+                && lean_sys_cabi::verify_isa_selection(caps, MASK_SIMD128, simd128, MAX_VARIANT_ID)
+            {
+                return VARIANT_SIMD128;
+            }
+        }
+        let _ = lean_sys_cabi::verify_isa_selection(
+            caps,
+            MASK_BASELINE,
+            VARIANT_SCALAR,
+            MAX_VARIANT_ID,
+        );
+        VARIANT_SCALAR
+    }
+
+    #[inline]
+    pub fn select_verified_stream_isa() -> u8 {
+        select_verified_stream_isa_with_caps(detect_hw_caps(), VARIANT_AVX2)
+    }
+
+    pub fn scan_stream_bytes_scalar(buf: &[u8]) -> StreamByteScanSummary {
+        let mut newlines = 0usize;
+        let mut fence_candidates = 0usize;
+        let mut pipe_bytes = 0usize;
+        let mut last_newline = usize::MAX;
+        let mut at_line_head = true;
+        let mut i = 0usize;
+        while i < buf.len() {
+            let b = buf[i];
+            if b == b'\n' {
+                newlines += 1;
+                last_newline = i;
+                at_line_head = true;
+            } else if b == b'|' {
+                pipe_bytes += 1;
+                at_line_head = false;
+            } else if at_line_head && b != b' ' && b != b'\t' {
+                if (b == b'`' || b == b'~')
+                    && i + 2 < buf.len()
+                    && buf[i + 1] == b
+                    && buf[i + 2] == b
+                {
+                    fence_candidates += 1;
+                }
+                at_line_head = false;
+            }
+            i += 1;
+        }
+        StreamByteScanSummary {
+            newlines,
+            fence_candidates,
+            pipe_bytes,
+            last_newline,
+        }
+    }
+
+    #[inline]
+    fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+        let len = buf.len();
+        while p < len {
+            let b = buf[p];
+            if b == b' ' || b == b'\t' {
+                p += 1;
+            } else {
+                if (b == b'`' || b == b'~') && p + 2 < len && buf[p + 1] == b && buf[p + 2] == b {
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        0
+    }
+
+    /// # Safety
+    /// Caller must ensure the current CPU supports `sse2` (for example via
+    /// `select_verified_stream_isa()` or `is_x86_feature_detected!("sse2")`).
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "sse2")]
+    pub unsafe fn scan_stream_bytes_sse2(buf: &[u8]) -> StreamByteScanSummary {
+        #[cfg(target_arch = "x86")]
+        use core::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use core::arch::x86_64::*;
+
+        let len = buf.len();
+        if len == 0 {
+            return StreamByteScanSummary {
+                newlines: 0,
+                fence_candidates: 0,
+                pipe_bytes: 0,
+                last_newline: usize::MAX,
+            };
+        }
+
+        let mut fence_candidates = check_fence_at_line_start(buf, 0);
+        let mut newlines = 0usize;
+        let mut pipe_bytes = 0usize;
+        let mut last_newline = usize::MAX;
+
+        let nl_vec = _mm_set1_epi8(b'\n' as i8);
+        let pipe_vec = _mm_set1_epi8(b'|' as i8);
+        let ptr = buf.as_ptr();
+        let mut i = 0usize;
+
+        while i + 16 <= len {
+            let chunk = unsafe { _mm_loadu_si128(ptr.add(i) as *const __m128i) };
+            let nl_mask = (_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, nl_vec)) as u32) & 0xFFFF;
+            let pipe_mask = (_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, pipe_vec)) as u32) & 0xFFFF;
+            pipe_bytes += pipe_mask.count_ones() as usize;
+            if nl_mask != 0 {
+                newlines += nl_mask.count_ones() as usize;
+                let highest_bit = 31 - nl_mask.leading_zeros() as usize;
+                last_newline = i + highest_bit;
+                let mut m = nl_mask;
+                while m != 0 {
+                    let bit = m.trailing_zeros() as usize;
+                    fence_candidates += check_fence_at_line_start(buf, i + bit + 1);
+                    m &= m - 1;
+                }
+            }
+            i += 16;
+        }
+
+        while i < len {
+            let b = buf[i];
+            if b == b'\n' {
+                newlines += 1;
+                last_newline = i;
+                fence_candidates += check_fence_at_line_start(buf, i + 1);
+            } else if b == b'|' {
+                pipe_bytes += 1;
+            }
+            i += 1;
+        }
+
+        StreamByteScanSummary {
+            newlines,
+            fence_candidates,
+            pipe_bytes,
+            last_newline,
+        }
+    }
+
+    /// # Safety
+    /// Caller must ensure the current CPU supports `avx2` (for example via
+    /// `select_verified_stream_isa()` or `is_x86_feature_detected!("avx2")`).
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn scan_stream_bytes_avx2(buf: &[u8]) -> StreamByteScanSummary {
+        #[cfg(target_arch = "x86")]
+        use core::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use core::arch::x86_64::*;
+
+        let len = buf.len();
+        if len == 0 {
+            return StreamByteScanSummary {
+                newlines: 0,
+                fence_candidates: 0,
+                pipe_bytes: 0,
+                last_newline: usize::MAX,
+            };
+        }
+
+        let mut fence_candidates = check_fence_at_line_start(buf, 0);
+        let mut newlines = 0usize;
+        let mut pipe_bytes = 0usize;
+        let mut last_newline = usize::MAX;
+
+        let nl_vec = _mm256_set1_epi8(b'\n' as i8);
+        let pipe_vec = _mm256_set1_epi8(b'|' as i8);
+        let ptr = buf.as_ptr();
+        let mut i = 0usize;
+
+        while i + 32 <= len {
+            let chunk = unsafe { _mm256_loadu_si256(ptr.add(i) as *const __m256i) };
+            let nl_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, nl_vec)) as u32;
+            let pipe_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, pipe_vec)) as u32;
+            pipe_bytes += pipe_mask.count_ones() as usize;
+            if nl_mask != 0 {
+                newlines += nl_mask.count_ones() as usize;
+                let highest_bit = 31 - nl_mask.leading_zeros() as usize;
+                last_newline = i + highest_bit;
+                let mut m = nl_mask;
+                while m != 0 {
+                    let bit = m.trailing_zeros() as usize;
+                    fence_candidates += check_fence_at_line_start(buf, i + bit + 1);
+                    m &= m - 1;
+                }
+            }
+            i += 32;
+        }
+
+        while i < len {
+            let b = buf[i];
+            if b == b'\n' {
+                newlines += 1;
+                last_newline = i;
+                fence_candidates += check_fence_at_line_start(buf, i + 1);
+            } else if b == b'|' {
+                pipe_bytes += 1;
+            }
+            i += 1;
+        }
+
+        StreamByteScanSummary {
+            newlines,
+            fence_candidates,
+            pipe_bytes,
+            last_newline,
+        }
+    }
+
+    pub fn scan_stream_bytes(buf: &[u8]) -> StreamByteScanSummary {
+        match select_verified_stream_isa() {
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            VARIANT_AVX2 => unsafe { scan_stream_bytes_avx2(buf) },
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            VARIANT_SIMD128 => unsafe { scan_stream_bytes_sse2(buf) },
+            _ => scan_stream_bytes_scalar(buf),
+        }
+    }
+}
 
 #[inline]
 pub fn scroll_clamp_top(content: u64, viewport: u64, top: u64) -> u64 {
@@ -7472,4 +7822,198 @@ mod stateful_tests {
         assert!(sb.admitted && sb.checkpoint_forced && sb.next_checkpoint == 20_000 - 4_096);
         assert!(20_000 - sb.next_checkpoint <= 4_096);
     }
+
+    #[test]
+    fn stream_simd_isa_gated_scanner_matches_scalar_across_1024_differential_inputs() {
+        let caps = stream_simd::detect_hw_caps();
+        let selected = stream_simd::select_verified_stream_isa();
+        let req_mask = match selected {
+            stream_simd::VARIANT_AVX2 => stream_simd::MASK_AVX2,
+            stream_simd::VARIANT_SIMD128 => stream_simd::MASK_SIMD128,
+            _ => stream_simd::MASK_BASELINE,
+        };
+        assert!(lean_sys_cabi::verify_isa_selection(
+            caps,
+            req_mask,
+            selected,
+            stream_simd::MAX_VARIANT_ID
+        ));
+        assert_eq!(
+            stream_simd::select_verified_stream_isa_with_caps(
+                stream_simd::MASK_BASELINE,
+                stream_simd::VARIANT_AVX2
+            ),
+            stream_simd::VARIANT_SCALAR
+        );
+        assert_eq!(
+            stream_simd::select_verified_stream_isa_with_caps(
+                stream_simd::MASK_SIMD128,
+                stream_simd::VARIANT_AVX2
+            ),
+            stream_simd::VARIANT_SIMD128
+        );
+        assert_eq!(
+            stream_simd::select_verified_stream_isa_with_caps(
+                stream_simd::MASK_AVX2,
+                stream_simd::VARIANT_AVX2
+            ),
+            stream_simd::VARIANT_AVX2
+        );
+        assert_eq!(
+            stream_simd::select_verified_stream_isa_with_caps(
+                stream_simd::MASK_AVX2,
+                stream_simd::VARIANT_SCALAR
+            ),
+            stream_simd::VARIANT_SCALAR
+        );
+
+        let mut seed: u64 = 0x517c_c1b7_2722_0a95;
+        let mut next = || -> u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let tokens: [&[u8]; 16] = [
+            b"\n",
+            b" ",
+            b"\t",
+            b"|",
+            b" | ",
+            b"`",
+            b"```",
+            b"```rust\n",
+            b"~~~",
+            b"  ```lean\n",
+            b"\t~~~\n",
+            b"abc",
+            b"\xc3\xa9",
+            b"\xe2\x82\xac",
+            b"\xf0\x9f\x98\x80",
+            b"\n\n",
+        ];
+
+        // 1,024 deterministic differential inputs covering alignment offsets 0..63,
+        // empty buffers, <16/<32 tails, exact 16/32/64B & 4KB/64KB boundaries,
+        // split fences across 16/32B lanes, and multi-byte UTF-8 sequences.
+        let mut raw = vec![0u8; 65_536 + 128];
+        for case_idx in 0..1_024usize {
+            let align_off = case_idx % 64;
+            let target_len = match case_idx {
+                0 => 0,
+                1..=65 => case_idx - 1,
+                66 => 4_096,
+                67 => 4_097,
+                68 => 65_536,
+                69 => 65_537,
+                _ => ((next() as usize) % 1024) + (case_idx % 33),
+            };
+            let slice = &mut raw[align_off..align_off + target_len];
+            let mut pos = 0usize;
+            while pos < target_len {
+                let tok = tokens[(next() as usize) % tokens.len()];
+                let take = tok.len().min(target_len - pos);
+                slice[pos..pos + take].copy_from_slice(&tok[..take]);
+                pos += take;
+            }
+
+            let expected = stream_simd::scan_stream_bytes_scalar(slice);
+            let actual = stream_simd::scan_stream_bytes(slice);
+            assert_eq!(
+                actual, expected,
+                "dispatch mismatch at case {case_idx} (len={target_len}, align={align_off})"
+            );
+
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                if std::arch::is_x86_feature_detected!("sse2") {
+                    let sse2 = unsafe { stream_simd::scan_stream_bytes_sse2(slice) };
+                    assert_eq!(sse2, expected, "SSE2 mismatch at case {case_idx}");
+                }
+                if std::arch::is_x86_feature_detected!("avx2") {
+                    let avx2 = unsafe { stream_simd::scan_stream_bytes_avx2(slice) };
+                    assert_eq!(avx2, expected, "AVX2 mismatch at case {case_idx}");
+                }
+            }
+        }
+    }
+
 }
+    fn naive_suffix_prefix_overlap_len(existing: &str, incoming: &str) -> usize {
+        let max_overlap = existing.chars().count().min(incoming.chars().count());
+        for overlap_chars in (1..=max_overlap).rev() {
+            let existing_start = existing
+                .char_indices()
+                .nth(existing.chars().count() - overlap_chars)
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            let incoming_end = incoming
+                .char_indices()
+                .nth(overlap_chars)
+                .map(|(idx, _)| idx)
+                .unwrap_or(incoming.len());
+            if existing[existing_start..] == incoming[..incoming_end] {
+                return incoming_end;
+            }
+        }
+        0
+    }
+
+    #[test]
+    fn kmp_suffix_prefix_overlap_matches_naive_across_1024_multibyte_utf8_cases() {
+        let alphabet: [&str; 12] = [
+            "a", "b", " ", "\n", "|", "`", "é", "€", "😀", "🧪", "中", "—",
+        ];
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || -> u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let explicit = [
+            ("", ""),
+            ("abc", ""),
+            ("", "abc"),
+            ("hello ", "hello world"),
+            ("foo 😀", "🧪 bar"),
+            ("é€😀", "€😀!"),
+            ("```rust\nlet x = 1 | 2;", "| 2;\n```"),
+        ];
+        for (ex, inc) in explicit {
+            assert_eq!(
+                suffix_prefix_overlap_len(ex, inc),
+                naive_suffix_prefix_overlap_len(ex, inc),
+                "ex={ex:?} inc={inc:?}"
+            );
+        }
+
+        for case_idx in 0..1_024 {
+            let len_a = (next() % 48) as usize;
+            let len_b = (next() % 32) as usize;
+            let mut a = String::new();
+            for _ in 0..len_a {
+                a.push_str(alphabet[(next() as usize) % alphabet.len()]);
+            }
+            let mut b = String::new();
+            if next() % 3 == 0 && !a.is_empty() {
+                let take_chars = ((next() as usize) % a.chars().count()) + 1;
+                let tail_start = a
+                    .char_indices()
+                    .nth(a.chars().count() - take_chars)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+                b.push_str(&a[tail_start..]);
+            }
+            for _ in 0..len_b {
+                b.push_str(alphabet[(next() as usize) % alphabet.len()]);
+            }
+            assert_eq!(
+                suffix_prefix_overlap_len(&a, &b),
+                naive_suffix_prefix_overlap_len(&a, &b),
+                "case {case_idx}"
+            );
+        }
+    }

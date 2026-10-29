@@ -19,8 +19,9 @@ export async function rememberApprovedPlan(mission:string,plan:ApprovedPlan){
 export function planSteps(items:StreamItem[],boundary?:string){
  const start=boundary?items.findIndex(i=>i.key===boundary):-1;
  if(boundary&&start<0)return [];
- for(const item of items.slice(start+1).reverse()){
-  if(item.kind==='tool'&&INCREMENTAL_TASK_TOOLS.includes(toolName(item.name)))return foldIncrementalTasks(items.slice(0,items.indexOf(item)+1));
+ for(let idx=items.length-1;idx>start;idx--){
+  const item=items[idx];
+  if(item.kind==='tool'&&INCREMENTAL_TASK_TOOLS.includes(toolName(item.name)))return foldIncrementalTasks(items.slice(0,idx+1));
   if(item.kind!=='tool'||!['TodoWrite','todowrite','update_plan','todo_write'].includes(item.name))continue;
   let args:any=item.args;
   try{if(typeof args==='string')args=JSON.parse(args);}catch{continue;}
@@ -30,23 +31,28 @@ export function planSteps(items:StreamItem[],boundary?:string){
  return [];
 }
 export function recoverPlan(items:StreamItem[]):ApprovedPlan|undefined {
- let marker:Extract<StreamItem,{kind:'user'}>|undefined;
- for(const item of items)if(item.kind==='user'&&!item.queued&&/^\s*\/plan(?:\s|$)/.test(item.text))marker=item;
- if(!marker)return;
- const later=items.slice(items.indexOf(marker)+1);
- for(const item of [...later].reverse()){
-  if(item.kind!=='tool')continue;
-  let args:any=item.args;
-  try{if(typeof args==='string')args=JSON.parse(args);}catch{continue;}
-  if(item.name==='ExitPlanMode'||(item.name==='ui_native_request'&&args?.method==='plan')){
-   const text=args?.plan??args?.params?.plan;
-   if(typeof text==='string'&&text.trim())return {requestId:item.callId,text,approvedAt:'',boundary:item.key};
+ let markerIdx = -1;
+ for (let i = 0; i < items.length; i++) {
+  const item = items[i];
+  if (item.kind === 'user' && !item.queued && /^\s*\/plan(?:\s|$)/.test(item.text)) markerIdx = i;
+ }
+ if (markerIdx < 0) return;
+ const marker = items[markerIdx] as Extract<StreamItem, {kind:'user'}>;
+ for (let i = items.length - 1; i > markerIdx; i--) {
+  const item = items[i];
+  if (item.kind !== 'tool') continue;
+  let args: any = item.args;
+  try { if (typeof args === 'string') args = JSON.parse(args); } catch { continue; }
+  if (item.name === 'ExitPlanMode' || (item.name === 'ui_native_request' && args?.method === 'plan')) {
+   const text = args?.plan ?? args?.params?.plan;
+   if (typeof text === 'string' && text.trim()) return {requestId: item.callId, text, approvedAt: '', boundary: item.key};
   }
  }
- for(const item of [...later].reverse()){
-  if(item.kind==='text'&&!item.live&&item.text.trim())return {requestId:marker.key,text:item.text,approvedAt:'',boundary:marker.key};
+ for (let i = items.length - 1; i > markerIdx; i--) {
+  const item = items[i];
+  if (item.kind === 'text' && !item.live && item.text.trim()) return {requestId: marker.key, text: item.text, approvedAt: '', boundary: marker.key};
  }
- return {requestId:marker.key,text:marker.text.replace(/^\s*\/plan\s*/,''),approvedAt:'',boundary:marker.key};
+ return {requestId: marker.key, text: marker.text.replace(/^\s*\/plan\s*/, ''), approvedAt: '', boundary: marker.key};
 }
 // Plan tracking belongs to its conversation turn. A historical /plan marker
 // must not label every later agent run as plan execution.

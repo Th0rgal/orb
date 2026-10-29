@@ -173,10 +173,11 @@ export function streamMission(
   onLagged: () => void,
   onReady?:()=>void,
   profile?: "presentation",
+  onBatch?: (evs: StreamEvent[]) => void,
 ): () => void {
   let stopped = false;
   let fragments:StreamEvent[]=[],paint:ReturnType<typeof setTimeout>|undefined;
-  const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];if(pending.length)timed('stream text',()=>batch(()=>{for(const event of pending)onEvent(event);}));};
+  const flush=()=>{clearTimeout(paint);paint=undefined;const pending=fragments;fragments=[];if(pending.length)timed('stream text',()=>batch(()=>{if(onBatch)onBatch(pending);else for(const event of pending)onEvent(event);}));};
   // Thinking deltas carry the whole thought so far; applied one by one each
   // re-renders a growing block (up to 70 ms each on a long thought). They are
   // painted together with text, once per frame.

@@ -72,6 +72,35 @@ function gfmTable(rows: string[][]): string[] {
 
 export function normalizeLoosePipeTables(src: string): string {
   if (!src.includes(" | ")) return src;
+  let hasLooseCandidate = false;
+  let scanFence: string | null = null;
+  let lineStart = 0;
+  while (lineStart <= src.length) {
+    const nl = src.indexOf("\n", lineStart);
+    const lineEnd = nl === -1 ? src.length : nl;
+    let p = lineStart;
+    while (p < lineEnd && (src.charCodeAt(p) === 32 || src.charCodeAt(p) === 9)) p++;
+    const c = p < lineEnd ? src.charCodeAt(p) : 0;
+    if ((c === 96 || c === 126) && p + 2 < lineEnd && src.charCodeAt(p + 1) === c && src.charCodeAt(p + 2) === c) {
+      let q = p + 3;
+      while (q < lineEnd && src.charCodeAt(q) === c) q++;
+      const marker = src.slice(p, q);
+      if (scanFence) {
+        if (marker[0] === scanFence[0] && marker.length >= scanFence.length) scanFence = null;
+      } else {
+        scanFence = marker;
+      }
+    } else if (!scanFence && c !== 124) {
+      const pipe = src.indexOf(" | ", p);
+      if (pipe !== -1 && pipe < lineEnd) {
+        hasLooseCandidate = true;
+        break;
+      }
+    }
+    if (nl === -1) break;
+    lineStart = nl + 1;
+  }
+  if (!hasLooseCandidate) return src;
   const lines = src.split("\n");
   const starts: number[] = [];
   for (let k = 0, off = 0; k < lines.length; off += lines[k].length + 1, k++) starts.push(off);

@@ -269,6 +269,24 @@ it("streaming keeps the identity of blocks that did not change", () => {
   expect(third.at(-1)).toMatchObject({ t: "p" });
 });
 
+it("checkpointed streaming over a giant unclosed fence scans O(N) bytes and matches parseMarkdown", () => {
+  const parse = incrementalMarkdown();
+  let full = "# Stream report\n\nIntro paragraph.\n\n```rust\n";
+  parse(full);
+  for (let i = 0; i < 256; i++) {
+    const line = `  let row_${i} = compute(a | b | c, ${i}); // ~~~ not a closing fence\n`;
+    full += line.padEnd(1023, " ") + "\n";
+    const blocks = parse(full);
+    expect(blocks.at(-1)).toMatchObject({ t: "pre", lang: "rust", open: true });
+  }
+  const totalUtf8 = new TextEncoder().encode(full).length;
+  expect(parse.scannedBytes).toBe(totalUtf8);
+  expect(parse.parsedBytes).toBeLessThanOrEqual(totalUtf8 * 2);
+  expect(parse(full)).toEqual(parseMarkdown(full));
+  full += "```\n\nSummary a | b | c\n1 | 2 | 3\n4 | 5 | 6\n";
+  expect(parse(full)).toEqual(parseMarkdown(full));
+});
+
 it("renders nested indented bullet and numbered lists instead of collapsing dashed lines onto one line", () => {
   const src = [
     "### 2.2 Assumptions That Mask a Code / Logic Edge Case",

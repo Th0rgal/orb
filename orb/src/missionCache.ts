@@ -2,7 +2,8 @@ import { createSignal } from "solid-js";
 import { connectionVersion, listQueuedMessages } from "./api";
 import { applyStreamEvent, buildTranscript, type StreamItem } from "./transcriptModel";
 import { getMissionEventPage, getMissionEventPreview, storedToStream, type StoredEvent, type StreamEvent } from "./stream";
-import { cacheDelete, cachePeek, cachePut } from "./pageCache";
+import { applyStreamEvents, buildTranscript, type StreamItem } from "./transcriptModel";
+import { getMissionEventPage, getMissionEventPreview, storedToStream, type StreamEvent } from "./stream";import { cacheDelete, cachePeek, cachePut } from "./pageCache";
 
 export type TranscriptSnap = { activity?: string; items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; detailsPending?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
 
@@ -191,7 +192,9 @@ export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
   if(page.hasMore&&(page.nextCursor===undefined||page.nextCursor>=previous.before))throw Error('Older event cursor did not advance.');
   const older=page.events.map(storedToStream).filter((e):e is StreamEvent=>e!==null);
   const stream=mergeStreamBySequence(older,previous.stream);let items=buildTranscript(stream);
-  for(const item of previous.items)if(item.kind==='user'&&item.messageId)items=applyStreamEvent(items,{type:'user_message',data:{id:item.messageId,content:item.text,queued:item.queued,receipt:item.receipt,attached:item.attached}});
+  const preservedUsers: StreamEvent[] = [];
+  for(const item of previous.items)if(item.kind==='user'&&item.messageId)preservedUsers.push({type:'user_message',data:{id:item.messageId,content:item.text,queued:item.queued,receipt:item.receipt,attached:item.attached}});
+  items = applyStreamEvents(items, preservedUsers);
   return {...previous,stream,items,before:page.nextCursor??previous.before,hasOlder:page.hasMore};
  });
 }

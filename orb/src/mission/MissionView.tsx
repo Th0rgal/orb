@@ -35,7 +35,7 @@ import { fullToolCall, streamMission, heldAfterHistory, type StreamEvent } from 
 import { localActivitiesToStreamItems } from "../workModel";
 import { Chapters } from "../Chapters";
 import { TurnRecap } from "../TurnRecap";
-import { Transcript, UserTurn, applyStreamEvent, type StreamItem } from "../Transcript";
+import { Transcript, UserTurn, applyStreamEvent, applyStreamEvents, type StreamItem } from "../Transcript";
 import { cacheRemember } from "../pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, normalizeEffort, supportedEfforts } from "../effort";
 import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscript, peekTranscriptHeight, putTranscript, putTranscriptHeight, putTranscriptItems, transcriptVersion } from "../missionCache";
@@ -417,10 +417,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
   const [refreshing, setRefreshing] = createSignal(false);
   let held: StreamEvent[] = [];
   let liveEvents:StreamEvent[]=[];
-  const applyLive = (ev: StreamEvent) => {
-    liveEvents.push(ev);
+  const applyLiveBatch = (evs: StreamEvent[]) => {
+    if (!evs.length) return;
+    liveEvents.push(...evs);
     setItems((cur) => {
-      const next = timed("reduce event", () => applyStreamEvent(cur, ev));
+      const next = timed("reduce event", () => applyStreamEvents(cur, evs));
       if (next !== cur) {
         putTranscriptItems(p.id, next);
         queueMicrotask(()=>{if(!disposed){scrollIfPinned();scroller?.dispatchEvent(new Event("orb:transcript-change",{bubbles:true}));}});
@@ -428,6 +429,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       return next;
     });
   };
+  const applyLive = (ev: StreamEvent) => applyLiveBatch([ev]);
   const resync = async (fresh = false) => {
     if(disposed||!p.id)return;
     if (replaying) { refreshAgain ||= fresh; return; }
@@ -443,10 +445,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       // Absence from a queue snapshot is not proof of delivery: the event
       // logger can lag dequeue. Keep known pending entries until their ID is
       // explicitly delivered, including while a reconnect replay is in flight.
-      let next = liveEvents.reduce((state,event)=>applyStreamEvent(state,event),snap.items);
+      const queuedUsers: StreamEvent[] = [];
       for (const item of items()) if (item.kind === "user" && item.queued && item.messageId) {
-        next = applyStreamEvent(next, { type: "user_message", data: { id: item.messageId, content: item.text, queued: true, receipt: item.receipt, attached: item.attached } });
+        queuedUsers.push({ type: "user_message", data: { id: item.messageId, content: item.text, queued: true, receipt: item.receipt, attached: item.attached } });
       }
+      let next = applyStreamEvents(snap.items, [...liveEvents, ...queuedUsers]);
       next = reuseUnchanged(items(), next);
       setItems(next);
       putTranscript(p.id, { ...snap, items: next });
@@ -457,7 +460,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       if(disposed)return;
       if(local){
         const events:StreamEvent[]=local.history.filter(row=>row.content).map((row,index)=>({type:row.role==="user"?"user_message":"assistant_message",data:{id:`local:${p.id}:${index}`,content:row.content}}));
-        setItems(events.reduce((list,event)=>applyStreamEvent(list,event),[] as StreamItem[]));setError(null);
+        setItems(applyStreamEvents([], events));setError(null);
       }else setError(e instanceof Error ? e.message : String(e));
     } finally {
       replaying = false;
@@ -467,7 +470,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       if (!hasPendingSearchTarget(p.id)) landAtBottom();
       const queued = held;
       held = [];
-      for (const ev of heldAfterHistory(history, queued)) applyLive(ev);
+      applyLiveBatch(heldAfterHistory(history, queued));
       if (refreshAgain) { refreshAgain = false; void resync(true); }
     }
   };
@@ -483,9 +486,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     olderPending=(async()=>{
       const snap=await loadOlderTranscript(p.id);
       if(disposed)return;
-      let next=heldAfterHistory(snap.stream,liveEvents).reduce((state,event)=>applyStreamEvent(state,event),snap.items);
-      for(const item of items())if(item.kind==='user'&&item.queued&&item.messageId)next=applyStreamEvent(next,{type:'user_message',data:{id:item.messageId,content:item.text,queued:true}});
-      setItems(next);
+      const queuedUsers: StreamEvent[] = [];
+      for(const item of items())if(item.kind==='user'&&item.queued&&item.messageId)queuedUsers.push({type:'user_message',data:{id:item.messageId,content:item.text,queued:true}});
+      setItems(applyStreamEvents(snap.items, [...heldAfterHistory(snap.stream,liveEvents), ...queuedUsers]));
     })().finally(()=>olderPending=undefined);
     return olderPending;
   };
@@ -546,6 +549,11 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
           return;
         }
         void resync(true).then(() => { if (!hasPendingSearchTarget(p.id)) scrollIfPinned(); });
+      },
+      undefined,
+      (evs) => {
+        if (replaying) held.push(...evs);
+        else applyLiveBatch(evs);
       },
     );
     // Slow status poll — the stream is authoritative for content, but the
@@ -689,28 +697,35 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
 
   const viewItems = createMemo(() => {
     const canonical = withInitialPrompt(items(), mission(), receipt, awaiting());
-    const known = new Set(canonical.filter(i=>i.kind==='user').map(i=>i.kind==='user'?i.messageId:undefined));
     const outbox = [...acceptedLocalMessages(p.id), ...queuedLocalMessages(p.id).filter(row=>!row.error&&(!row.waiting||row.state==='accepted'||row.state==='dispatching'))];
     const drafts=optimisticList();
-    const projected:StreamItem[]=[];
-    for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
-    for(const draft of drafts){if((!draft.waiting||draft.failed||sendError())&&!known.has(draft.id)){known.add(draft.id);projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});}}
-    const list = [...canonical,...projected];
+    let list = canonical;
+    if (outbox.length || drafts.length) {
+      const known = new Set<string | undefined>();
+      for (const i of canonical) if (i.kind === 'user') known.add(i.messageId);
+      const projected:StreamItem[]=[];
+      for(const row of outbox){if(!known.has(row.id)){known.add(row.id);projected.push({kind:'user',key:`user:${row.id}`,messageId:row.id,text:row.text});}}
+      for(const draft of drafts){if((!draft.waiting||draft.failed||sendError())&&!known.has(draft.id)){known.add(draft.id);projected.push({kind:'user',key:`user:${draft.id}`,messageId:draft.id,text:draft.text,images:draft.images});}}
+      if (projected.length) list = [...canonical, ...projected];
+    }
     const nativeTools = clientPlaced() ? localActivitiesToStreamItems(localActivities(p.id)) : [];
-    const lastUserIdx = list.reduce((last, item, idx) => item.kind === "user" && !item.queued ? idx : last, -1);
-    const hasCanonicalToolsAfterUser = list.slice(lastUserIdx + 1).some(item => item.kind === "tool");
-    const withNativeTools = nativeTools.length && !hasCanonicalToolsAfterUser
-      ? (() => {
-          const copy = [...list];
-          let insertAt = copy.length;
-          for (let i = copy.length - 1; i > lastUserIdx; i--) {
-            if (copy[i].kind === "text") insertAt = i;
-            else break;
-          }
-          copy.splice(insertAt, 0, ...nativeTools);
-          return copy;
-        })()
-      : list;
+    let withNativeTools = list;
+    if (nativeTools.length) {
+      let lastUserIdx = -1;
+      for (let i = list.length - 1; i >= 0; i--) { const it = list[i]; if (it.kind === "user" && !it.queued) { lastUserIdx = i; break; } }
+      let hasCanonicalToolsAfterUser = false;
+      for (let i = lastUserIdx + 1; i < list.length; i++) { if (list[i].kind === "tool") { hasCanonicalToolsAfterUser = true; break; } }
+      if (!hasCanonicalToolsAfterUser) {
+        const copy = [...list];
+        let insertAt = copy.length;
+        for (let i = copy.length - 1; i > lastUserIdx; i--) {
+          if (copy[i].kind === "text") insertAt = i;
+          else break;
+        }
+        copy.splice(insertAt, 0, ...nativeTools);
+        withNativeTools = copy;
+      }
+    }
     const live = localLiveText(p.id);
     // The server rewrites a local run's reply in place without re-emitting it,
     // so a transcript fetched mid-run holds a prefix of the live text.
@@ -726,9 +741,30 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     if (busy()) return withLive;
     // Terminal mission: force-close any bubble left open by a dropped
     // assistant_message finalizer.
+    if (!withLive.some((i) => i.kind === "text" && i.live)) return withLive;
     return withLive.map((i) => (i.kind === "text" && i.live ? { ...i, live: false } : i));
   });
 
+  const nonQueuedViewItems = createMemo(() => {
+    const list = viewItems();
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].kind === "user" && (list[i] as Extract<StreamItem, { kind: "user" }>).queued) {
+        return list.filter((it) => it.kind !== "user" || !it.queued);
+      }
+    }
+    return list;
+  });
+  const confirmedRemote = createMemo<Array<{id:string;content:string;attached?:boolean}>>(
+    () => clientPlaced() ? [] : items().flatMap((item) => item.kind === "user" && item.queued === true && !!item.messageId ? [{ id: item.messageId, content: item.text, attached: item.attached }] : []),
+    [],
+    { equals: (a, b) => a.length === b.length && a.every((v, i) => v.id === b[i].id && v.content === b[i].content && v.attached === b[i].attached) },
+  );
+  const deliveredRemote = createMemo<string[]>(
+    () => items().flatMap((item) => item.kind === "user" && !item.queued && item.messageId ? [item.messageId] : []),
+    [],
+    { equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]) },
+  );
+  const visibleViewItems = createMemo(() => visibleTranscript(viewItems()));
   const planProgress = createPlanProgress({get mission(){return p.id;},get items(){return viewItems();},get active(){return clientPlaced()?localRunActive(p.id):busy();}});
   createEffect(()=>p.onPlan?.(p.id,planProgress()));
   const titleContext = createMemo(() => awaiting() ? null : contextPct(estimateTokens(viewItems()), contextWindow(mission()?.backend)));
@@ -1089,7 +1125,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
             </Show>
             <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} items={viewItems().filter(i => i.kind !== "user" || !i.queued)} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
-            <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />            <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">
               <UserTurn text={row().text}/>
@@ -1103,7 +1139,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>
               <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (awaiting() && mission()?.status_message === "Model error") || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} onOpenSource={openOriginalSource()} failureInTranscript={visibleTranscript(viewItems()).some(item => item.kind === "error")} />
-            </Show>
+              <MissionFailure mission={mission()} active={busy() || localQueueActive() || working() || !!sentOverStop() || (!clientPlaced() && (remoteQueuedIds().length > 0 || items().some(i => i.kind === "user" && i.queued)))} error={clientPlaced() ? localFailure(p.id) : undefined} onResume={resume} failureInTranscript={visibleViewItems().some(item => item.kind === "error")} />            </Show>
           </Show>
 
           <NextReminder mission={p.id} busy={busy()} archived={isArchived(mission()?.status)} />
@@ -1120,8 +1156,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             onEdit={row => void queuedEdit.start(row)}
             onSendImmediate={sendRemoteImmediate}
             pending={!clientPlaced() && !sendError() ? optimisticList().filter(item => item.waiting && !item.failed).map(item => ({id:item.id,content:item.text})) : undefined}
-            confirmed={clientPlaced() ? [] : items().filter((item): item is Extract<StreamItem,{kind:"user"}> => item.kind === "user" && item.queued === true && !!item.messageId).map(item=>({id:item.messageId!,content:item.text,attached:item.attached}))}
-            delivered={items().flatMap(item => item.kind === "user" && !item.queued && item.messageId ? [item.messageId] : [])}
+            confirmed={confirmedRemote()}
+            delivered={deliveredRemote()}
             onRetract={id=>{
               endHandoff(p.id,id);
               setItems(previous=>removeUsers(previous,item=>!item.queued&&item.messageId===id));

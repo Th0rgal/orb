@@ -68,8 +68,37 @@ object OrbPipeTables {
         return if (run.length >= 3) run else null
     }
 
+    private fun hasLoosePipeOutsideFence(src: String): Boolean {
+        var scanFence: String? = null
+        var lineStart = 0
+        while (lineStart <= src.length) {
+            val nl = src.indexOf('\n', lineStart)
+            val lineEnd = if (nl == -1) src.length else nl
+            var p = lineStart
+            while (p < lineEnd && (src[p] == ' ' || src[p] == '\t')) p++
+            val c = if (p < lineEnd) src[p] else '\u0000'
+            if ((c == '`' || c == '~') && p + 2 < lineEnd && src[p + 1] == c && src[p + 2] == c) {
+                var q = p + 3
+                while (q < lineEnd && src[q] == c) q++
+                val marker = src.substring(p, q)
+                val open = scanFence
+                if (open != null) {
+                    if (marker[0] == open[0] && marker.length >= open.length) scanFence = null
+                } else {
+                    scanFence = marker
+                }
+            } else if (scanFence == null && c != '|') {
+                val pipe = src.indexOf(" | ", p)
+                if (pipe in p until lineEnd) return true
+            }
+            if (nl == -1) break
+            lineStart = nl + 1
+        }
+        return false
+    }
+
     fun normalize(src: String): String {
-        if (!src.contains(" | ")) return src
+        if (!src.contains(" | ") || !hasLoosePipeOutsideFence(src)) return src
         val lines = src.split("\n")
         val starts = IntArray(lines.size)
         for (k in 1 until lines.size) starts[k] = starts[k - 1] + lines[k - 1].length + 1
