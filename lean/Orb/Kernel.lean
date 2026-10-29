@@ -1803,4 +1803,110 @@ def verifyApproval (signed owned pending unexpired unchanged risk confirmed : UI
   if signed == 1 && owned == 1 && pending == 1 && unexpired == 1 && unchanged == 1 &&
      (risk < 2 || confirmed == 1) then 1 else 0
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 12: Worker Disk-Pressure Tiered Reclamation, Anti-Thrashing & Placement
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Node Tiered Disk-Pressure Reclamation & Anti-Thrashing Controller (`orb_node_gc_step`):
+  Evaluates node-owned storage tiers against `floorBytes` (`SANDBOXED_NODE_MIN_FREE_GB * GiB`) and
+  `emergencyFloorBytes` (`min(floorBytes / 2, 10 GiB)`), using subtraction-only deficit cascading so
+  64-bit byte counts never overflow:
+  - When `freeBytes ≥ floorBytes`: returns `action = 0 (Healthy)` (`lo32 = 0`, `graceHours = 72` in `hi32`).
+  - When `freeBytes < floorBytes`: cascades `deficit = floorBytes - freeBytes` across:
+    1. `agedScratchBytes` (confirmed-retired scratch `age ≥ 6h`) → `rem1`
+    2. `coldCacheBytes` (unlocked caches idle `≥ 2h` & stale transfer mutation builds) → `rem2`
+    3. `freshScratchBytes` (confirmed-retired scratch `age < 6h`) → `rem3`
+    4. `hotCacheBytes` (unlocked shared caches `idle < 2h`):
+       - `unrecoverable := hotCacheBytes < rem3` (`pinnedPressureBit = 4096`)
+       - `evictHot := rem3 > 0 && (!unrecoverable || (inEmergency && hotCacheBytes > 0))` (`evictHotBit = 2048`),
+         preserving warm `< 2h` shared Lake caches whenever non-cache storage pins the disk below `floorBytes`
+         above `emergencyFloorBytes`, while evicting them below `emergencyFloorBytes` to prevent `ENOSPC`.
+  - Packed `UInt64` return:
+    - `lo32 bits 0..7`: `action` (`0 = Healthy`, `1 = SweepAgedScratch`, `2 = EvictColdCaches`,
+      `3 = SweepAllRetiredScratch`, `4 = EvictHotCaches`, `5 = PinnedPreserveHot`)
+    - `bit 8 (256)`: `sweepAgedScratchBit` (`freeBytes < floorBytes`)
+    - `bit 9 (512)`: `evictColdCacheBit` (`rem1 > 0`)
+    - `bit 10 (1024)`: `sweepFreshScratchBit` (`rem2 > 0 || inEmergency`)
+    - `bit 11 (2048)`: `evictHotCacheBit`
+    - `bit 12 (4096)`: `pinnedPressureBit` (`unrecoverable`)
+    - `hi32`: `retiredGraceHours` (`72` when healthy, `6` when `sweepAged && !sweepFresh`, `0` when `sweepFresh`).
+-/
+@[inline, export orb_node_gc_step]
+def nodeGcStep
+    (freeBytes floorBytes emergencyFloorBytes : UInt64)
+    (agedScratchBytes freshScratchBytes coldCacheBytes hotCacheBytes : UInt64) : UInt64 :=
+  let underFloor : Bool := freeBytes < floorBytes
+  if !underFloor then
+    (72 : UInt64) <<< 32
+  else
+    let emerg : Bool := freeBytes < emergencyFloorBytes
+    let deficit : UInt64 := floorBytes - freeBytes
+    let rem1 : UInt64 := if agedScratchBytes >= deficit then 0 else deficit - agedScratchBytes
+    let rem2 : UInt64 := if coldCacheBytes >= rem1 then 0 else rem1 - coldCacheBytes
+    let rem3 : UInt64 := if freshScratchBytes >= rem2 then 0 else rem2 - freshScratchBytes
+    let unrecoverable : Bool := hotCacheBytes < rem3
+    let evictCold : Bool := rem1 > 0
+    let hasRem2 : Bool := rem2 > 0
+    let hasRem3 : Bool := rem3 > 0
+    let sweepFresh : Bool := if hasRem2 then true else emerg
+    let evictHot : Bool :=
+      if !hasRem3 then false
+      else if !unrecoverable then true
+      else if emerg then hotCacheBytes > 0
+      else false
+    let action : UInt32 :=
+      if unrecoverable && !evictHot then 5
+      else if evictHot then 4
+      else if sweepFresh then 3
+      else if evictCold then 2
+      else 1
+    let lo32 : UInt32 :=
+      action ||| 256 |||
+        (if evictCold then 512 else 0) |||
+        (if sweepFresh then 1024 else 0) |||
+        (if evictHot then 2048 else 0) |||
+        (if unrecoverable then 4096 else 0)
+    let graceHours : UInt32 := if sweepFresh then 0 else 6
+    lo32.toUInt64 ||| (graceHours.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Node Disk-Floor & Pinned-Pressure Placement Gate (`orb_node_disk_admission_step`):
+  - Enforces `effectiveFloor = max(nodeFloorBytes, coreFloorBytes)` against
+    `effectiveFree = satSub64(freeBytes, reservedBytes)` and rejects any node advertising
+    `nodePinnedPressure != 0`.
+  - Flags `softPressureBit` (`bit 9 = 512`) when admitted inside the GC hysteresis band
+    (`effectiveFree - effectiveFloor < hysteresisBytes`) so auto-placement prefers roomy peers
+    at equal normalized utilization.
+  - Packs clamped `headroomGiB` (`(effectiveFree - effectiveFloor) >>> 30`) in `hi32`.
+  - `lo32`:
+    - `2`: `RejectPinnedPressure` (`nodePinnedPressure != 0`)
+    - `0`: `RejectBelowFloor` (`nodePinnedPressure == 0 && effectiveFree < effectiveFloor`)
+    - `769` (`1 | 256 | 512`): `AdmitSoftPressure` (`admitted && headroomBytes < hysteresisBytes`)
+    - `257` (`1 | 256`): `AdmitComfortable` (`admitted && headroomBytes ≥ hysteresisBytes`).
+-/
+@[inline, export orb_node_disk_admission_step]
+def nodeDiskAdmissionStep
+    (freeBytes reservedBytes nodeFloorBytes coreFloorBytes hysteresisBytes : UInt64)
+    (nodePinnedPressure : UInt8) : UInt64 :=
+  let effectiveFloor : UInt64 :=
+    if nodeFloorBytes >= coreFloorBytes then nodeFloorBytes else coreFloorBytes
+  let effectiveFree : UInt64 :=
+    if freeBytes >= reservedBytes then freeBytes - reservedBytes else 0
+  let pinned : Bool := nodePinnedPressure != 0
+  let aboveFloor : Bool := effectiveFree >= effectiveFloor
+  let admitted : Bool := !pinned && aboveFloor
+  let headroomBytes : UInt64 :=
+    if admitted then effectiveFree - effectiveFloor else 0
+  let softPressure : Bool := admitted && headroomBytes < hysteresisBytes
+  let rawHeadroomGiB : UInt64 := headroomBytes >>> 30
+  let headroomGiB32 : UInt32 :=
+    if rawHeadroomGiB > 0xFFFFFFFF then 0xFFFFFFFF else rawHeadroomGiB.toUInt32
+  let lo32 : UInt32 :=
+    if pinned then 2
+    else if !aboveFloor then 0
+    else if softPressure then 769
+    else 257
+  lo32.toUInt64 ||| (headroomGiB32.toUInt64 <<< 32)
+
 end Orb.Kernel

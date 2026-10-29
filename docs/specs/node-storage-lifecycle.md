@@ -32,24 +32,52 @@ fallback command permanently prevents retirement for the entire execution.
 Dropped futures, shutdown/restart, failed reads or uncertain cleanup retain
 scratch without an expiry. A terminal job row alone is never enough.
 
-After a fixed 72-hour recovery period, the existing node GC cadence consumes retired
-receipts. It reuses Core's descriptor-relative removal, refuses symlink/root/inode
+After a 72-hour baseline recovery period when disk space is healthy, the node GC
+cadence consumes retired receipts. Under disk pressure below `SANDBOXED_NODE_MIN_FREE_GB`,
+the verified kernel controller (`orb_node_gc_step` in `lean/Orb/Kernel.lean`) accelerates
+retirement grace exclusively for **already-retired** receipts (`72h` when healthy, `6h`
+when aged retired scratch plus cold caches cover the deficit, `0h` when deeper
+reclamation or emergency `< 10 GiB` survival is required, sweeping oldest `retired_at`
+first and stopping once the recovery target is reached). Unretired receipts
+(`retired_at IS NULL`) are never swept regardless of disk pressure. Reclamation reuses
+Core's descriptor-relative removal, refuses symlink/root/inode
 replacement and mount traversal, and checks private ownership. Unlike whole-workspace
 purge, execution-private scratch permits unrelated views of the backing filesystem
 created by systemd ReadWritePaths; mounts inside scratch are still refused. Unsupported platforms
-retain scratch. A crash during removal retries the same identity; a crash after
+retain scratch and report zero reclaimable scratch bytes to the GC controller. A crash during removal retries the same identity; a crash after
 removal retries parent fsync before deleting the receipt. There is no broad /tmp scan
 or mtime-based deletion. The managed-execution trust boundary and same-uid writer
 limits of mission-workspace-purge.md also apply here. Scratch is execution-private;
 other jobs must not use it as shared storage or as a working directory.
 
-## Cache pressure and attribution
+## Cache pressure, anti-thrashing and fleet placement
 
-The existing locked checkout/Lake-cache collector starts below
-SANDBOXED_NODE_MIN_FREE_GB, then aims for that floor plus 20 GiB (capped at filesystem
-capacity), avoiding repeated threshold crossings. Admission keeps the original floor.
-Logs distinguish attempted, removed and remaining bytes/free space; measured free
-space, rather than summed directory sizes, determines recovery.
+`SANDBOXED_NODE_MIN_FREE_GB` is hot-reloadable alongside `SANDBOXED_NODE_CAPACITY` via
+`SIGHUP` or `/etc/sandboxed-node.env` mtime polling, without restarting `sandboxed-node`
+or interrupting running scopes. Each `/heartbeat` advertises `min_free_disk_bytes` and
+`disk_pressure_pinned`.
+
+Below `SANDBOXED_NODE_MIN_FREE_GB`, `orb_node_gc_step` orders reclamation across four
+node-owned tiers toward `floor + 20 GiB` (capped at filesystem capacity):
+
+1. Aged confirmed-retired scratch (`age >= 6h`)
+2. Cold unlocked caches (stale transfer mutation `.lake/build` plus checkouts and Lake
+   slots idle `>= 2h`)
+3. Fresh confirmed-retired scratch (`0h <= age < 6h`)
+4. Hot unlocked shared caches (`idle < 2h`), guarded against cache thrashing: when
+   non-cache storage pins the filesystem below `SANDBOXED_NODE_MIN_FREE_GB` (`free +
+   retired_scratch + cold_caches + hot_caches < floor`) and free space remains at or
+   above the emergency survival floor (`min(floor / 2, 10 GiB)`), hot `< 2h` caches are
+   preserved rather than destroyed every 30 minutes, and `disk_pressure_pinned = true`
+   is published on `/heartbeat`. Below the emergency survival floor, survival overrides
+   cache warmth and hot caches are evicted.
+
+Core placement (`orb_node_disk_admission_step`) enforces `effective_floor =
+max(core_min_disk_bytes, node.min_free_disk_bytes)` after subtracting in-flight burst
+reservations, rejects nodes reporting `disk_pressure_pinned`, and ranks nodes inside the
+`20 GiB` GC hysteresis band behind nodes with comfortable disk headroom at equal
+normalized utilization. Logs distinguish attempted, removed and remaining bytes/free
+space; measured free space, rather than summed directory sizes, determines recovery.
 
 The read-only storage inventory accepts a node jobs.db and full UUID mission
 folders, reports job-state counts and last completion without exposing payloads,

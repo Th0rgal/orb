@@ -4774,6 +4774,8 @@ fn compact_compute_fleet(fleet: &Value) -> Value {
                 "cpu_total": node.get("cpu_total").cloned().unwrap_or(Value::Null),
                 "mem_available_bytes": node.get("mem_available_bytes").cloned().unwrap_or(Value::Null),
                 "disk_available_bytes": node.get("disk_available_bytes").cloned().unwrap_or(Value::Null),
+                "min_free_disk_bytes": node.get("min_free_disk_bytes").cloned().unwrap_or(Value::Null),
+                "disk_pressure_pinned": node.get("disk_pressure_pinned").and_then(Value::as_bool).unwrap_or(false),
                 "cached_toolchains": node.get("cached_toolchains").cloned().unwrap_or_else(|| json!([])),
                 "lean_runtime_ready": node.get("lean_runtime_ready").cloned().unwrap_or(Value::Null),
                 "source_bundle_capacity": node.get("source_bundle_capacity").cloned().unwrap_or(Value::Null),
@@ -4789,6 +4791,7 @@ fn compact_compute_fleet(fleet: &Value) -> Value {
     let lean_nodes: Vec<&Value> = online
         .filter(|node| {
             node.get("lean_runtime_ready").and_then(Value::as_bool) != Some(false)
+                && node.get("disk_pressure_pinned").and_then(Value::as_bool) != Some(true)
                 && node
                     .get("labels")
                     .and_then(Value::as_array)
@@ -7343,6 +7346,8 @@ mod tests {
                     "cpu_total": 8,
                     "mem_available_bytes": 32_u64 << 30,
                     "disk_available_bytes": 100_u64 << 30,
+                    "min_free_disk_bytes": 30_u64 << 30,
+                    "disk_pressure_pinned": false,
                     "cached_toolchains": ["leanprover--lean4---v4.24.0"],
                     "lean_runtime_ready": true,
                     "source_bundle_capacity": {"overlay_bytes": 1048576, "complete_bytes": 8388608},
@@ -7393,7 +7398,10 @@ mod tests {
             compact["nodes"][0]["source_bundle_capacity"]["complete_bytes"],
             8388608
         );
+        assert_eq!(compact["nodes"][0]["min_free_disk_bytes"], 30_u64 << 30);
+        assert_eq!(compact["nodes"][0]["disk_pressure_pinned"], false);
         assert!(compact["nodes"][3]["source_bundle_capacity"].is_null());
+        assert!(compact["nodes"][3]["min_free_disk_bytes"].is_null());
         assert_eq!(compact["nodes"][2]["error"], "probe degraded");
         assert_eq!(compact["recent_jobs"][0]["node_id"], "cpu");
     }

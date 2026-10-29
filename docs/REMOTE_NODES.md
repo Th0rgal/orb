@@ -162,6 +162,9 @@ To rotate a node token with zero downtime:
 - `mem_total_bytes` / `mem_available_bytes`
 - `disk_total_bytes` / `disk_available_bytes` (filesystem backing the work
   dir, falling back to root)
+- `min_free_disk_bytes` / `disk_pressure_pinned` (live free-space floor from
+  `SANDBOXED_NODE_MIN_FREE_GB` and whether non-cache storage pins the node
+  below that floor; older nodes deserialize these as `0` and `false`)
 - `active_jobs` / `queued_jobs` (async job API)
 - `cached_toolchains` (Lean toolchain dirs under the node's shared elan
   cache; empty until the first `lean_build` job warms it)
@@ -250,8 +253,9 @@ behind capacity; defaults to four times `SANDBOXED_NODE_CAPACITY`).
 
 `systemctl restart sandboxed-node` retires every running job: on startup the
 node marks in-flight jobs `lost` and stops their leftover systemd scopes.
-Capacity changes therefore apply live instead. Edit
-`SANDBOXED_NODE_CAPACITY` and/or `SANDBOXED_NODE_SIDE_CAPACITY` in
+Capacity and disk-floor changes therefore apply live instead. Edit
+`SANDBOXED_NODE_CAPACITY`, `SANDBOXED_NODE_SIDE_CAPACITY`, and/or
+`SANDBOXED_NODE_MIN_FREE_GB` in
 `/etc/sandboxed-node.env` (or `SANDBOXED_NODE_ENV_FILE`), then either wait up
 to 30 s (the node polls the file's mtime) or trigger it now with any of the
 following. There is deliberately no pid file: the work directory is writable
@@ -267,15 +271,20 @@ sudo kill -HUP "$(systemctl show -p MainPID --value sandboxed-node)"
 - Shrink: running jobs keep their slots and are never interrupted; no new job
   (or `/execute`) is admitted until the running count drops under the new
   cap. Freed slots are retired as jobs finish.
-- The next `/heartbeat` reports the new `capacity_total`; Core replaces its
-  cached heartbeat on every poll, so placement uses it within one heartbeat.
+- Disk floor (`SANDBOXED_NODE_MIN_FREE_GB`): updates node-local admission and
+  wakes the cache GC controller immediately; the next `/heartbeat` advertises
+  the new `min_free_disk_bytes`.
+- The next `/heartbeat` reports the new `capacity_total` and
+  `min_free_disk_bytes`; Core replaces its cached heartbeat on every poll, so
+  placement uses both within one heartbeat.
 - A key missing from the file keeps the running value; an invalid value is
-  logged and ignored (the running capacity is kept). The default
+  logged and ignored (the running values are kept). The default
   `SANDBOXED_NODE_MAX_QUEUED` (4x capacity) and the per-job memory budget
   follow the live capacity.
 
-Only the two capacities reload. Any other env change (token, labels, bind,
-...) still needs a restart, so wait for the node to be idle.
+Only the two capacities and `SANDBOXED_NODE_MIN_FREE_GB` reload. Any other env
+change (token, labels, bind, ...) still needs a restart, so wait for the node
+to be idle.
 
 Why a restart still kills running jobs: jobs already run in their own
 `systemd-run --scope` units under the runner's user manager, so `KillMode=` on
@@ -293,16 +302,20 @@ Node env vars for lean-build jobs:
 - `SANDBOXED_NODE_ENV_ALLOWLIST` — comma-separated env keys a `lean_build`
   payload may set (default `LEAN_NUM_THREADS,LAKE_JOBS`); anything else is
   rejected before the build starts.
-- `SANDBOXED_NODE_MIN_FREE_GB` — free-space floor (default 10 GiB) for the
-  node's admission and cache GC. A build is rejected unless its declared
-  scratch estimate fits above this floor. Every 30 minutes, when the work-dir
-  filesystem drops below it, checkout dirs then lake cache slots are
-  LRU-deleted (by dir mtime) until the floor plus 20 GiB is met (capped at
-  filesystem capacity). Admission continues to use the floor. These cache
-  slots do not include mission sources, toolchains, CI or legacy /tmp trees.
-  New jobs and synchronous leases receive execution-private TMPDIR/TMP/TEMP;
-  after confirmed scope cleanup, their scratch is retained for 72 hours and
-  reclaimed on the same cadence. Process-group-only fallback executions remain
+- `SANDBOXED_NODE_MIN_FREE_GB` — hot-reloadable free-space floor (default
+  10 GiB) for the node's admission, `/heartbeat` (`min_free_disk_bytes`), and
+  tiered cache/scratch GC (`orb_node_gc_step`). A build is rejected unless its
+  declared scratch estimate fits above this floor, and Core placement enforces
+  `max(core_min_disk, node.min_free_disk_bytes)` (`orb_node_disk_admission_step`).
+  Every 30 minutes (and immediately on floor reload), when the work-dir
+  filesystem drops below the floor, the node reclaims confirmed-retired
+  `>= 6h` scratch first, then cold (`>= 2h` idle) unlocked checkouts and Lake
+  cache slots, then `< 6h` confirmed-retired scratch, and finally hot (`< 2h`)
+  caches toward `floor + 20 GiB` (capped at filesystem capacity). When
+  non-cache storage pins the node below the floor above the emergency survival
+  floor (`min(floor / 2, 10 GiB)`), hot `< 2h` caches are preserved rather than
+  thrashed every 30 minutes and `disk_pressure_pinned = true` is advertised on
+  `/heartbeat`. Process-group-only fallback executions remain permanently
   retained because escaped descendants cannot be ruled out. See [worker storage lifecycle](specs/node-storage-lifecycle.md).
 - `SANDBOXED_NODE_MAX_SOURCE_BUNDLE_BYTES` — maximum decoded size of a local
   source bundle (default 1 MiB/256 files for overlays and 32 MiB/4096 files
