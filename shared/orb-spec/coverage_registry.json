@@ -315,15 +315,15 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "5949c77312ffad00afd1b376fb0165150126b65c681ef74b12ac50bf93bc02e1"
+            "sha256": "5e9da76bcf5741f5375f4acfacce8f4d57591768122a7400381f80abc9e09b38"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "96acecf6de8a7eb7d16445f838d4571294bcaebc0a53407640602737321c6a83"
+            "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
           }
         ],
         "execution": {
@@ -390,15 +390,15 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "5949c77312ffad00afd1b376fb0165150126b65c681ef74b12ac50bf93bc02e1"
+            "sha256": "5e9da76bcf5741f5375f4acfacce8f4d57591768122a7400381f80abc9e09b38"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "96acecf6de8a7eb7d16445f838d4571294bcaebc0a53407640602737321c6a83"
+            "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
           }
         ],
         "execution": {
@@ -577,7 +577,7 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "src/api/mission_access.rs",
@@ -585,7 +585,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "96acecf6de8a7eb7d16445f838d4571294bcaebc0a53407640602737321c6a83"
+            "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
           }
         ],
         "execution": {
@@ -779,7 +779,7 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "src/remote_node/job_ledger.rs",
@@ -787,7 +787,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "96acecf6de8a7eb7d16445f838d4571294bcaebc0a53407640602737321c6a83"
+            "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
           }
         ],
         "execution": {
@@ -1429,7 +1429,7 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
@@ -1437,7 +1437,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "ad9709f3344f0ca836e2db6b17177243f29f9bce998ecdd5dd5b134769f560bd"
+            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
           }
         ],
         "execution": {
@@ -1509,7 +1509,7 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
@@ -1517,7 +1517,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "ad9709f3344f0ca836e2db6b17177243f29f9bce998ecdd5dd5b134769f560bd"
+            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
           }
         ],
         "execution": {
@@ -1584,7 +1584,7 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
@@ -1592,7 +1592,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "ad9709f3344f0ca836e2db6b17177243f29f9bce998ecdd5dd5b134769f560bd"
+            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
           }
         ],
         "execution": {
@@ -1659,7 +1659,7 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
@@ -1667,7 +1667,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "ad9709f3344f0ca836e2db6b17177243f29f9bce998ecdd5dd5b134769f560bd"
+            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
           }
         ],
         "execution": {
@@ -1797,15 +1797,15 @@
           },
           {
             "path": "src/api/control/remote_jobs.rs",
-            "sha256": "17e61215c1295e37cc6113b305358d86aa54799039869ba555e02947076294ee"
+            "sha256": "3f130ef43a66ac77ce59d787a9106c2b4c62d0b3404f1677bc6c7717e0499657"
           },
           {
             "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-            "sha256": "70e3037c1f09dc7917a590d54e9252b0ac841a85d1a7b9be62338c0d4f46c23a"
+            "sha256": "dbed7ff5a384553f7f4a861f119fab80638085626e1d2d768f7d3e2fa2d2021f"
           },
           {
             "path": "src/api/control/dispatch_admission_tests.rs",
-            "sha256": "1745d8651f1ae06b147611373ce7e129a817679891e21ddb44d9ea6cd599d7d8"
+            "sha256": "1b4ed61e0f7eaa55c6d4bd4bcd4a60607286b6c5b49d4b62e8394a06d8d53d85"
           }
         ],
         "execution": {
@@ -1885,7 +1885,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-            "sha256": "b1c231ea04589f2038db02d7e2f825928a82c658f82638033214821c0a3863a7"
+            "sha256": "8eb6531bfd7f1a83ac18e6c20115b4a9f5e95ac87bd2bcdf805d616d6609d4ec"
           },
           {
             "path": "src/api/control/fork.rs",
@@ -1962,7 +1962,7 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
@@ -1974,7 +1974,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "96acecf6de8a7eb7d16445f838d4571294bcaebc0a53407640602737321c6a83"
+            "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
           }
         ],
         "execution": {
@@ -2046,7 +2046,7 @@
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "008d8eef03e3d21cd03795b56987578f140ed3edcf0113a5064c179b9d304a3d"
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
@@ -2054,11 +2054,11 @@
           },
           {
             "path": "src/api/control/remote_jobs.rs",
-            "sha256": "17e61215c1295e37cc6113b305358d86aa54799039869ba555e02947076294ee"
+            "sha256": "3f130ef43a66ac77ce59d787a9106c2b4c62d0b3404f1677bc6c7717e0499657"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "96acecf6de8a7eb7d16445f838d4571294bcaebc0a53407640602737321c6a83"
+            "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
           }
         ],
         "execution": {

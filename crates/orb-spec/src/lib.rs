@@ -5443,7 +5443,7 @@ mod tests {
             floor_bytes: 80 * GIB,
             emergency_floor_bytes: 10 * GIB,
             aged_scratch_bytes: 2 * GIB,
-            fresh_scratch_bytes: 1 * GIB,
+            fresh_scratch_bytes: GIB,
             cold_cache_bytes: 4 * GIB,
             hot_cache_bytes: 10 * GIB,
         });
