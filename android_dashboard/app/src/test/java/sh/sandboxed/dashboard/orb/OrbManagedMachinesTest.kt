@@ -243,8 +243,19 @@ class OrbManagedMachinesTest {
         assertEquals(OrbManagedMachines.Owner.Mission("m1"), OrbManagedMachines.owner(base.copy(ownerMissionId = "m1")))
         val now = OrbManagedMachines.parseTime("2026-10-23T12:00:00Z")!!
         assertEquals("Reaps in 5 min (owner completed)", OrbManagedMachines.reapLine(base.copy(reapAt = "2026-10-23T12:04:10Z", reapReason = "owner_completed"), now))
+        assertEquals("Reaps in 15 min (idle)", OrbManagedMachines.reapLine(base.copy(reapAt = "2026-10-23T12:15:00Z", reapReason = "working_owner_idle"), now))
+        assertEquals(
+            "Deletes when 24h lease ends in 22 h 00 min",
+            OrbManagedMachines.reapLine(base.copy(reapAt = "2026-10-24T10:00:00Z", deletableAt = "2026-10-24T10:00:00Z", reapReason = "awaiting_deletable_at:owner_completed"), now)
+        )
         assertEquals("Reap due (owner interrupted, idle)", OrbManagedMachines.reapLine(base.copy(reapAt = "2026-10-23T11:59:00Z", reapReason = "owner_interrupted_idle"), now))
         assertEquals("Reaps in 1 h 30 min (idle, no owner)", OrbManagedMachines.reapLine(base.copy(reapAt = "2026-10-23T13:30:00Z", reapReason = "idle_no_owner"), now))
+        assertTrue(OrbManagedMachines.isStopped(base.copy(state = "stopped")))
+        assertTrue(OrbManagedMachines.canResume(base.copy(state = "stopped"), false))
+        assertFalse(OrbManagedMachines.canResume(base.copy(state = "stopped"), true))
+        assertEquals("Hetzner", OrbManagedMachines.providerLabel("hetzner"))
+        assertEquals("Vast.ai", OrbManagedMachines.providerLabel("vastai"))
+        assertEquals("Scaleway", OrbManagedMachines.providerLabel("scaleway"))
         assertNull(OrbManagedMachines.reapLine(base.copy(state = "destroyed", reapAt = "2026-10-23T12:04:00Z"), now))
     }
 }

@@ -32,10 +32,13 @@
 
 pub mod boat;
 pub mod budget;
+pub mod hetzner;
 pub mod lifecycle;
 pub mod raw_operations;
 pub mod relay;
+pub mod scaleway;
 pub mod snapshots;
+pub mod vastai;
 
 pub use lifecycle::{owner_state_for_status, LifecyclePolicy, Owner, OwnerState, ReapDecision};
 
@@ -68,11 +71,17 @@ pub const PROVISION_SCRIPT: &str = include_str!("orb-node-provision.sh");
 
 #[derive(Debug, Clone)]
 pub struct SpawnSpec {
+    pub machine_id: String,
     pub size: String,
     pub ttl_seconds: u64,
     pub image: Option<String>,
     pub name: String,
     pub idempotency_key: String,
+    pub bootstrap_script: Option<String>,
+    pub gpu: Option<String>,
+    pub arch: Option<String>,
+    pub max_hourly_usd: Option<f64>,
+    pub allow_24h_commitment: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +89,8 @@ pub struct ProviderMachine {
     pub provider_id: String,
     pub state: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletable_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -92,6 +103,24 @@ pub struct ProviderUsage {
 #[async_trait]
 pub trait ManagedProvider: Send + Sync {
     fn name(&self) -> &'static str;
+    fn sizes(&self) -> &[SizeSpec] {
+        &SIZES
+    }
+    fn supports_free_stop(&self) -> bool {
+        false
+    }
+    fn supports_snapshots(&self) -> bool {
+        false
+    }
+    fn uses_cloud_init_bootstrap(&self) -> bool {
+        false
+    }
+    fn is_ready_state(&self, state: &str) -> bool {
+        boat::is_ready_state(state)
+    }
+    fn is_stopped_state(&self, state: &str) -> bool {
+        boat::is_stopped_state(state)
+    }
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String>;
     async fn get(&self, provider_id: &str) -> Result<ProviderMachine, String>;
     async fn list(&self) -> Result<Vec<ProviderMachine>, String>;
@@ -236,6 +265,12 @@ pub struct ManagedSettings {
     #[serde(skip)]
     pub core_url: Option<String>,
     pub idle_minutes: u64,
+    /// Idle minutes before an unused worker VM owned by a `Working` parent is
+    /// reaped (`0` disables `Working`-owner idle reaping).
+    pub working_idle_minutes: u64,
+    /// Idle minutes after a worker VM has completed at least one job while its
+    /// `Working` parent continues elsewhere.
+    pub post_job_idle_minutes: u64,
     /// Grace after the owner mission ended or vanished.
     pub owner_grace_minutes: u64,
     /// How long an owner may be interrupted/awaiting before its idle VM goes.
@@ -259,6 +294,8 @@ impl ManagedSettings {
     pub fn policy(&self) -> LifecyclePolicy {
         LifecyclePolicy {
             idle_minutes: self.idle_minutes as i64,
+            working_idle_minutes: self.working_idle_minutes as i64,
+            post_job_working_idle_minutes: self.post_job_idle_minutes as i64,
             ended_grace_minutes: self.owner_grace_minutes as i64,
             waiting_grace_minutes: self.waiting_grace_minutes as i64,
         }
@@ -355,8 +392,11 @@ impl ManagedSettings {
                 .or_else(|| std::env::var("SANDBOXED_PUBLIC_URL").ok())
                 .map(|u| u.trim().trim_end_matches('/').to_string())
                 .filter(|u| !u.is_empty()),
-            idle_minutes: env_parse("SANDBOXED_MANAGED_IDLE_MINUTES").unwrap_or(30),
-            owner_grace_minutes: env_parse("SANDBOXED_MANAGED_OWNER_GRACE_MINUTES").unwrap_or(5),
+            idle_minutes: env_parse("SANDBOXED_MANAGED_IDLE_MINUTES").unwrap_or(15),
+            working_idle_minutes: env_parse("SANDBOXED_MANAGED_WORKING_IDLE_MINUTES").unwrap_or(15),
+            post_job_idle_minutes: env_parse("SANDBOXED_MANAGED_POST_JOB_IDLE_MINUTES")
+                .unwrap_or(5),
+            owner_grace_minutes: env_parse("SANDBOXED_MANAGED_OWNER_GRACE_MINUTES").unwrap_or(2),
             waiting_grace_minutes: env_parse("SANDBOXED_MANAGED_WAITING_GRACE_MINUTES")
                 .unwrap_or(15),
             orphan_grace_minutes: env_parse("SANDBOXED_MANAGED_ORPHAN_GRACE_MINUTES").unwrap_or(10),
@@ -526,6 +566,22 @@ pub struct ManagedMachine {
     pub prior_pool_charges: Vec<(String, f64)>,
     #[serde(default)]
     pub pool_spent_offset: f64,
+    /// Project slug of the owning mission (set server-side at spawn/claim).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Root ancestor mission ID of the owning lineage.
+    #[serde(default)]
+    pub root_mission_id: Option<String>,
+    /// Live worker mission IDs currently executing remote jobs/leases on `node_id`.
+    #[serde(default)]
+    pub active_mission_ids: Vec<String>,
+    /// Provider minimum-lease timestamp (e.g. Scaleway Apple Silicon 24h
+    /// `deletable_at`) before which provider deletion is forbidden.
+    #[serde(default)]
+    pub deletable_at: Option<DateTime<Utc>>,
+    /// Monotone sticky flag set once the node has executed at least one job.
+    #[serde(default)]
+    pub has_executed_job: bool,
 }
 
 impl ManagedMachine {
@@ -547,11 +603,13 @@ impl ManagedMachine {
     }
 
     fn estimated_cost(&self, now: DateTime<Utc>) -> f64 {
+        let min_end = self.deletable_at.unwrap_or(self.created_at);
         let end = self
             .destroyed_at
             .or(self.stopped_at)
             .unwrap_or(now)
-            .min(self.expires_at);
+            .min(self.expires_at)
+            .max(min_end.min(now));
         let start = self.run_started_at.unwrap_or(self.created_at);
         let secs = (end - start).num_seconds().max(0) as f64;
         self.cost_before_resume + secs / 3600.0 * self.usd_per_hour
@@ -561,7 +619,11 @@ impl ManagedMachine {
         if !self.state.is_live() {
             return 0.0;
         }
-        let secs = (self.expires_at - now).num_seconds().max(0) as f64;
+        let committed_end = match self.deletable_at {
+            Some(del_at) if del_at > self.expires_at => del_at,
+            _ => self.expires_at,
+        };
+        let secs = (committed_end - now).num_seconds().max(0) as f64;
         secs / 3600.0 * self.usd_per_hour
     }
 }
@@ -616,6 +678,25 @@ pub struct SpawnRequest {
     /// requester) has ended, inside its grace window, over a fresh rent.
     #[serde(default)]
     pub reuse_idle: Option<bool>,
+    /// Cloud provider (`"boat"`, `"hetzner"`, `"vastai"`, `"scaleway"`).
+    /// Defaults to `"boat"` (or the first configured provider).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Optional GPU model filter (e.g. `"RTX 4090"`, `"A100 SXM4"`, `"H100"`).
+    #[serde(default)]
+    pub gpu: Option<String>,
+    /// Optional CPU architecture (`"x86_64"` or `"arm64"`).
+    #[serde(default)]
+    pub arch: Option<String>,
+    /// Optional hourly USD ceiling for marketplace offers (e.g. Vast.ai).
+    #[serde(default)]
+    pub max_hourly_usd: Option<f64>,
+    /// Explicit confirmation required for 24h minimum-lease hardware (Scaleway Apple Silicon).
+    #[serde(default)]
+    pub allow_24h_commitment: Option<bool>,
+    /// Root ancestor mission ID resolved server-side from mission lineage.
+    #[serde(skip)]
+    pub root_mission_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -661,6 +742,13 @@ pub type OwnerProbe = Arc<
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<OwnerState>> + Send>>
         + Send
+        + Sync,
+>;
+
+pub type ActiveMissionsProbe = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = HashMap<String, Vec<String>>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -851,7 +939,11 @@ struct Persisted {
 
 pub struct ManagedManager {
     pub settings: ManagedSettings,
-    provider: Option<Arc<dyn ManagedProvider>>,
+    providers: std::sync::RwLock<HashMap<String, Arc<dyn ManagedProvider>>>,
+    default_provider_name: std::sync::RwLock<String>,
+    enabled_runtime: std::sync::atomic::AtomicBool,
+    loops_started: std::sync::atomic::AtomicBool,
+    activity_notify: tokio::sync::Notify,
     core_port: u16,
     dir: PathBuf,
     machines: Mutex<Vec<ManagedMachine>>,
@@ -862,6 +954,7 @@ pub struct ManagedManager {
     admission: Mutex<()>,
     pub relay: relay::RelayHub,
     owner_probe: std::sync::RwLock<Option<OwnerProbe>>,
+    active_missions_probe: std::sync::RwLock<Option<ActiveMissionsProbe>>,
     runtime: std::sync::RwLock<RuntimeSettings>,
     /// Reconciler memory (not persisted; a restart restarts the graces).
     reconcile_state: Mutex<ReconcileState>,
@@ -902,9 +995,9 @@ pub struct RuntimeSettings {
     pub antigravity_on_managed: bool,
     /// Lifecycle reaper in dry-run: owner/idle/orphan decisions are recorded
     /// (`would_reap` in the ledger, `reap_at` on the row) but nothing is
-    /// destroyed. TTL expiry always destroys. Default on until an operator
-    /// has reviewed `GET /api/managed-machines/reap-plan`.
-    #[serde(default = "default_true")]
+    /// destroyed. TTL expiry always destroys. Defaults to `false` (active
+    /// reaping enforced unless `SANDBOXED_MANAGED_REAPER_DRY_RUN=1`).
+    #[serde(default)]
     pub reaper_dry_run: bool,
 }
 
@@ -921,11 +1014,11 @@ impl Default for RuntimeSettings {
                     .as_deref(),
                 Some("0" | "false" | "no" | "off")
             ),
-            reaper_dry_run: !matches!(
+            reaper_dry_run: matches!(
                 std::env::var("SANDBOXED_MANAGED_REAPER_DRY_RUN")
                     .ok()
                     .as_deref(),
-                Some("0" | "false" | "no" | "off")
+                Some("1" | "true" | "yes" | "on")
             ),
         }
     }
@@ -958,7 +1051,7 @@ fn random_token() -> String {
     hex::encode(bytes)
 }
 
-fn sha256_hex(value: &str) -> String {
+pub(crate) fn sha256_hex(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
@@ -995,9 +1088,18 @@ pub struct BudgetView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ProviderCatalogEntry {
+    pub name: String,
+    pub supports_free_stop: bool,
+    pub supports_snapshots: bool,
+    pub sizes: Vec<SizeSpec>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ListView {
     pub enabled: bool,
     pub provider: String,
+    pub providers: Vec<ProviderCatalogEntry>,
     pub machines: Vec<ManagedMachine>,
     pub budget: BudgetView,
     pub sizes: Vec<SizeSpec>,
@@ -1119,9 +1221,20 @@ impl ManagedManager {
         core_port: u16,
     ) -> Self {
         let dir = working_dir.join(".sandboxed-sh");
+        let mut providers = HashMap::new();
+        let mut default_name = settings.provider.clone();
+        if let Some(p) = provider {
+            default_name = p.name().to_string();
+            providers.insert(default_name.clone(), p);
+        }
+        let enabled_runtime = settings.enabled && !providers.is_empty();
         Self {
             settings,
-            provider,
+            providers: std::sync::RwLock::new(providers),
+            default_provider_name: std::sync::RwLock::new(default_name),
+            enabled_runtime: std::sync::atomic::AtomicBool::new(enabled_runtime),
+            loops_started: std::sync::atomic::AtomicBool::new(false),
+            activity_notify: tokio::sync::Notify::new(),
             core_port,
             dir,
             machines: Mutex::new(Vec::new()),
@@ -1131,16 +1244,168 @@ impl ManagedManager {
             admission: Mutex::new(()),
             relay: relay::RelayHub::default(),
             owner_probe: std::sync::RwLock::new(None),
+            active_missions_probe: std::sync::RwLock::new(None),
             runtime: std::sync::RwLock::new(RuntimeSettings::default()),
             reconcile_state: Mutex::new(ReconcileState::default()),
             registry_authoritative: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        let explicitly_off = matches!(
+            std::env::var("SANDBOXED_MANAGED_ENABLED").ok().as_deref(),
+            Some("0" | "false" | "no" | "off")
+        );
+        if explicitly_off {
+            return false;
+        }
+        (self.settings.enabled
+            || self
+                .enabled_runtime
+                .load(std::sync::atomic::Ordering::SeqCst))
+            && self.providers.read().is_ok_and(|p| !p.is_empty())
+    }
+
+    pub fn provider_for(&self, name: &str) -> Option<Arc<dyn ManagedProvider>> {
+        let key = name.trim().to_ascii_lowercase();
+        let map = self.providers.read().ok()?;
+        if let Some(p) = map.get(&key) {
+            return Some(Arc::clone(p));
+        }
+        // In unit tests a single `FakeProvider` ("fake") backs rows whose
+        // default provider string was "boat".
+        if map.len() == 1 && (key.is_empty() || key == "boat") {
+            return map.values().next().cloned();
+        }
+        None
+    }
+
+    pub fn default_provider(&self) -> Option<Arc<dyn ManagedProvider>> {
+        let name = self
+            .default_provider_name
+            .read()
+            .ok()
+            .map(|s| s.clone())
+            .unwrap_or_else(|| "boat".into());
+        self.provider_for(&name).or_else(|| {
+            self.providers.read().ok().and_then(|m| {
+                m.get("boat")
+                    .cloned()
+                    .or_else(|| m.values().next().cloned())
+            })
+        })
+    }
+
+    pub fn provider_catalog(&self) -> Vec<ProviderCatalogEntry> {
+        let Ok(map) = self.providers.read() else {
+            return Vec::new();
+        };
+        let order = ["boat", "hetzner", "vastai", "scaleway"];
+        let mut keys: Vec<String> = map.keys().cloned().collect();
+        keys.sort_by_key(|k| order.iter().position(|o| o == k).unwrap_or(order.len() + 1));
+        keys.into_iter()
+            .filter_map(|k| {
+                let p = map.get(&k)?;
+                Some(ProviderCatalogEntry {
+                    name: p.name().to_string(),
+                    supports_free_stop: p.supports_free_stop(),
+                    supports_snapshots: p.supports_snapshots(),
+                    sizes: p.sizes().to_vec(),
+                })
+            })
+            .collect()
+    }
+
+    /// Register a cloud provider (from env or Bitwarden vault) in memory and
+    /// ensure the reaper/reconciler loops are active.
+    pub fn register_provider(self: &Arc<Self>, provider: Arc<dyn ManagedProvider>) {
+        let name = provider.name().to_string();
+        if let Ok(mut map) = self.providers.write() {
+            let prefer_default = name == "boat" || map.is_empty();
+            map.insert(name.clone(), provider);
+            if prefer_default {
+                if let Ok(mut def) = self.default_provider_name.write() {
+                    if def.is_empty() || name == "boat" || !map.contains_key(def.as_str()) {
+                        *def = name.clone();
+                    }
+                }
+            }
+        }
+        let explicitly_off = matches!(
+            std::env::var("SANDBOXED_MANAGED_ENABLED").ok().as_deref(),
+            Some("0" | "false" | "no" | "off")
+        );
+        if !explicitly_off {
+            self.enabled_runtime
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.ensure_background_loops();
+        }
+    }
+
+    pub(crate) fn ensure_background_loops(self: &Arc<Self>) {
+        if !self.is_enabled() {
+            return;
+        }
+        if self
+            .loops_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let providers: Vec<String> = self
+            .providers
+            .read()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        tracing::info!(
+            daily_cap = ?self.settings.daily_cap_usd,
+            max_concurrent = ?self.settings.max_concurrent,
+            ?providers,
+            "Managed machines reaper & reconciler active"
+        );
+        let reaper = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                    _ = reaper.activity_notify.notified() => {
+                        // Coalesce burst job/mission completions.
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+                reaper.reap_once().await;
+            }
+        });
+        let rec = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            loop {
+                match rec.reconcile_once().await {
+                    Ok(report) => tracing::debug!(%report, "managed reconcile"),
+                    Err(e) => tracing::warn!(error = %e, "managed reconcile failed"),
+                }
+                rec.cleanup_snapshots().await;
+                tokio::time::sleep(Duration::from_secs(rec.settings.reconcile_secs.max(30))).await;
+            }
+        });
+    }
+
+    /// Wake the reaper promptly after a mission ends or a remote job completes.
+    pub fn notify_activity_change(&self) {
+        self.activity_notify.notify_one();
+    }
+
     /// Install the mission-status lookup used to destroy machines whose
     /// owning mission has ended.
     pub fn set_owner_probe(&self, probe: OwnerProbe) {
         if let Ok(mut slot) = self.owner_probe.write() {
+            *slot = Some(probe);
+        }
+    }
+
+    /// Install the live active-missions lookup (`node_id -> Vec<mission_id>`).
+    pub fn set_active_missions_probe(&self, probe: ActiveMissionsProbe) {
+        if let Ok(mut slot) = self.active_missions_probe.write() {
             *slot = Some(probe);
         }
     }
@@ -1178,34 +1443,37 @@ impl ManagedManager {
             .get(id)
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
-        if !m.state.is_live() {
-            return Err(ManagedError::new("not_live", 409, "Machine is not running"));
+        let is_live = m.state.is_live();
+        let same_tenant = match (m.owner_user_id.as_deref(), tenant) {
+            (Some(owner), Some(caller)) => owner == caller,
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        if is_live && same_tenant && m.owner_mission_id.as_deref() == Some(mission_id) {
+            return Ok(m);
         }
-        // Tenant boundary: only the machine's own user may claim it. A row
-        // without a recorded tenant (legacy) belongs to the single owner.
-        if let (Some(owner), Some(caller)) = (m.owner_user_id.as_deref(), tenant) {
-            if owner != caller {
+        let owner_none = m.owner_mission_id.is_none();
+        let requester_is_current_owner = m
+            .owner_mission_id
+            .as_deref()
+            .is_some_and(|current| requested_by == Some(current));
+        let admitted = crate::orb_spec::vm_claim_admit(crate::orb_spec::VmClaimInput {
+            is_live,
+            same_tenant,
+            owner_none,
+            owner_in_lineage: requester_is_current_owner,
+        });
+        if !admitted {
+            if !is_live {
+                return Err(ManagedError::new("not_live", 409, "Machine is not running"));
+            }
+            if !same_tenant {
                 return Err(ManagedError::new(
                     "forbidden",
                     403,
                     "Managed machine belongs to another user",
                 ));
             }
-        } else if m.owner_user_id.is_some() && tenant.is_none() {
-            return Err(ManagedError::new(
-                "forbidden",
-                403,
-                "Managed machine belongs to another user",
-            ));
-        }
-        if m.owner_mission_id.as_deref() == Some(mission_id) {
-            return Ok(m);
-        }
-        let claimable = match m.owner_mission_id.as_deref() {
-            None => true,
-            Some(current) => requested_by == Some(current),
-        };
-        if !claimable {
             return Err(ManagedError::new(
                 "owned",
                 409,
@@ -1309,11 +1577,40 @@ impl ManagedManager {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let mut machines = machines;
+        let now = Utc::now();
+        let mut recovered_dirty = false;
+        // Crash recovery: any `Provisioning` or `Enrolling` row from a prior
+        // Core process has no running provisioning task in this process.
+        // Without `provider_id` it is closed immediately as `Failed`; with a
+        // `provider_id` it moves to `Destroying` so `reap_once` cleans up the
+        // half-enrolled VM instead of leaking until TTL.
+        for m in machines.machines.iter_mut() {
+            if matches!(
+                m.state,
+                MachineState::Provisioning | MachineState::Enrolling
+            ) {
+                recovered_dirty = true;
+                if m.provider_id.is_none() {
+                    m.state = MachineState::Failed;
+                    m.destroyed_at = Some(now);
+                    m.destroy_reason = Some("core_restarted_during_provision".into());
+                    m.error =
+                        Some("Core restarted before provider machine creation completed".into());
+                    m.ledger_closed = true;
+                } else {
+                    m.state = MachineState::Destroying;
+                    m.destroy_reason = Some("core_restarted_during_provision".into());
+                    m.error = Some("Core restarted while machine was enrolling".into());
+                }
+            }
+        }
         // Rows from before names existed: give live ones a name now.
         let mut live_names: Vec<String> = machines
             .machines
             .iter()
-            .filter(|m| m.state.is_live() && !m.name.is_empty())
+            .filter(|m| {
+                (m.state.is_live() || m.state == MachineState::Stopped) && !m.name.is_empty()
+            })
             .map(|m| m.name.clone())
             .collect();
         for m in machines.machines.iter_mut() {
@@ -1339,6 +1636,9 @@ impl ManagedManager {
             *self.budgets.lock().await = b;
         }
         *self.secrets.lock().await = secrets;
+        if recovered_dirty {
+            self.persist().await;
+        }
         if let Some(rt) = std::fs::read(self.runtime_path())
             .ok()
             .and_then(|b| serde_json::from_slice::<RuntimeSettings>(&b).ok())
@@ -1493,6 +1793,15 @@ impl ManagedManager {
 
     pub async fn list(&self, include_history_hours: i64) -> ListView {
         let cutoff = Utc::now() - chrono::Duration::hours(include_history_hours);
+        let active_by_node = match self
+            .active_missions_probe
+            .read()
+            .ok()
+            .and_then(|p| p.clone())
+        {
+            Some(probe) => probe().await,
+            None => HashMap::new(),
+        };
         let mut machines: Vec<_> = self
             .machines
             .lock()
@@ -1502,15 +1811,31 @@ impl ManagedManager {
                 m.state.is_live() || m.state == MachineState::Stopped || m.created_at >= cutoff
             })
             .cloned()
+            .map(|mut m| {
+                if let Some(ids) = active_by_node.get(&m.node_id) {
+                    m.active_mission_ids = ids.clone();
+                }
+                m
+            })
             .collect();
         machines.sort_by_key(|m| std::cmp::Reverse(m.created_at));
         let daily_spend = self.daily_spend(SPEND_DAYS).await;
+        let default_prov = self.default_provider();
+        let provider_name = default_prov
+            .as_ref()
+            .map(|p| p.name().to_string())
+            .unwrap_or_else(|| self.settings.provider.clone());
+        let sizes = default_prov
+            .as_ref()
+            .map(|p| p.sizes().to_vec())
+            .unwrap_or_else(|| SIZES.to_vec());
         ListView {
-            enabled: self.settings.enabled && self.provider.is_some(),
-            provider: self.settings.provider.clone(),
+            enabled: self.is_enabled(),
+            provider: provider_name,
+            providers: self.provider_catalog(),
             machines,
             budget: self.budget().await,
-            sizes: SIZES.to_vec(),
+            sizes,
             daily_spend,
         }
     }
@@ -1524,7 +1849,7 @@ impl ManagedManager {
         daily_spend(&self.machines.lock().await, days, Utc::now())
     }
 
-    /// Only operator-allowlisted images may be started.
+    /// Only operator-allowlisted images may be started on snapshot-backed providers.
     pub fn resolve_image(
         settings: &ManagedSettings,
         requested: Option<&str>,
@@ -1545,62 +1870,198 @@ impl ManagedManager {
         }
     }
 
-    /// Validate a request against size / TTL policy. Pure, so it is unit-tested.
-    pub fn plan(
+    fn resolve_cloud_image(
+        provider_name: &str,
+        size: &str,
+        requested: Option<&str>,
+    ) -> Result<String, ManagedError> {
+        if let Some(raw) = requested.map(str::trim).filter(|s| !s.is_empty()) {
+            if !raw
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+            {
+                return Err(ManagedError::new(
+                    "image_invalid",
+                    400,
+                    "Image identifier contains invalid characters",
+                ));
+            }
+            return Ok(raw.to_string());
+        }
+        Ok(match provider_name {
+            "hetzner" => "ubuntu-24.04".into(),
+            "vastai" => "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel".into(),
+            "scaleway" if scaleway::is_apple_silicon_type(size) => "macos-15".into(),
+            "scaleway" => "ubuntu_noble".into(),
+            _ => "ubuntu-24.04".into(),
+        })
+    }
+
+    /// Validate a request against size / TTL policy for a specific provider.
+    pub fn plan_for_provider(
         settings: &ManagedSettings,
+        provider_name: &str,
         req: &SpawnRequest,
     ) -> Result<(SizeSpec, u64), ManagedError> {
-        let spec = match (
-            req.size.as_deref().filter(|s| !s.trim().is_empty()),
-            req.cpu,
-            req.ram_gb,
-        ) {
-            (Some(name), cpu, ram) => {
-                let spec = size_spec(name).ok_or_else(|| {
-                    ManagedError::new(
-                        "invalid_size",
-                        400,
-                        format!("Unknown size '{name}'; use small, default, large or xlarge"),
-                    )
-                })?;
-                if cpu.is_some_and(|c| c > spec.cpu) || ram.is_some_and(|r| r > spec.ram_gb) {
+        let prov = provider_name.trim().to_ascii_lowercase();
+        let requested_size = req.size.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let check_cpu_ram = |spec: SizeSpec| -> Result<SizeSpec, ManagedError> {
+            if req.cpu.is_some_and(|c| c > spec.cpu) || req.ram_gb.is_some_and(|r| r > spec.ram_gb)
+            {
+                return Err(ManagedError::new(
+                    "invalid_size",
+                    400,
+                    format!(
+                        "Size '{}' has {} vCPU / {} GB RAM, less than requested",
+                        spec.size, spec.cpu, spec.ram_gb
+                    ),
+                ));
+            }
+            Ok(spec)
+        };
+        let find_smallest = |catalog: &[SizeSpec]| -> Option<SizeSpec> {
+            catalog.iter().copied().find(|s| {
+                req.cpu.is_none_or(|c| s.cpu >= c) && req.ram_gb.is_none_or(|r| s.ram_gb >= r)
+            })
+        };
+
+        let (spec, boat_rank_pair) = match prov.as_str() {
+            "hetzner" => {
+                let s = match (requested_size, req.cpu, req.ram_gb) {
+                    (Some(name), _, _) => hetzner::hetzner_size_spec(name, req.arch.as_deref())
+                        .ok_or_else(|| {
+                            ManagedError::new(
+                                "invalid_size",
+                                400,
+                                format!(
+                                    "Unknown Hetzner size '{name}'; use cpx21, cpx31, cpx41, cax31, cpx51 or ccx33"
+                                ),
+                            )
+                        })
+                        .and_then(check_cpu_ram)?,
+                    (None, None, None) => {
+                        hetzner::hetzner_size_spec("default", req.arch.as_deref())
+                            .unwrap_or(hetzner::HETZNER_SIZES[1])
+                    }
+                    (None, _, _) => find_smallest(&hetzner::HETZNER_SIZES).ok_or_else(|| {
+                        ManagedError::new(
+                            "invalid_size",
+                            400,
+                            "No Hetzner machine size satisfies the requested CPU/RAM",
+                        )
+                    })?,
+                };
+                (s, (0u8, 0u8))
+            }
+            "vastai" => {
+                let s = match (requested_size, req.cpu, req.ram_gb) {
+                    (Some(name), _, _) => vastai::vastai_size_spec(name)
+                        .ok_or_else(|| {
+                            ManagedError::new(
+                                "invalid_size",
+                                400,
+                                format!(
+                                    "Unknown Vast.ai GPU size '{name}'; use rtx4090, l40s, a100 or h100"
+                                ),
+                            )
+                        })
+                        .and_then(check_cpu_ram)?,
+                    (None, None, None) => vastai::VASTAI_SIZES[0],
+                    (None, _, _) => find_smallest(&vastai::VASTAI_SIZES).ok_or_else(|| {
+                        ManagedError::new(
+                            "invalid_size",
+                            400,
+                            "No Vast.ai GPU tier satisfies the requested CPU/RAM",
+                        )
+                    })?,
+                };
+                (s, (0u8, 0u8))
+            }
+            "scaleway" => {
+                let s = match (requested_size, req.cpu, req.ram_gb) {
+                    (Some(name), _, _) => scaleway::scaleway_size_spec(name)
+                        .ok_or_else(|| {
+                            ManagedError::new(
+                                "invalid_size",
+                                400,
+                                format!(
+                                    "Unknown Scaleway size '{name}'; use DEV1-M, DEV1-L, PRO2-S, PRO2-M, L4-1-24G, H100-1-80G, M2-M or M2-PRO"
+                                ),
+                            )
+                        })
+                        .and_then(check_cpu_ram)?,
+                    (None, None, None) => scaleway::SCALEWAY_SIZES[1],
+                    (None, _, _) => find_smallest(&scaleway::SCALEWAY_SIZES).ok_or_else(|| {
+                        ManagedError::new(
+                            "invalid_size",
+                            400,
+                            "No Scaleway instance size satisfies the requested CPU/RAM",
+                        )
+                    })?,
+                };
+                if scaleway::is_apple_silicon_type(s.size) && req.allow_24h_commitment != Some(true)
+                {
                     return Err(ManagedError::new(
-                        "invalid_size",
+                        "commitment_confirmation_required",
                         400,
                         format!(
-                            "Size '{}' has {} vCPU / {} GB RAM, less than requested",
-                            spec.size, spec.cpu, spec.ram_gb
+                            "Scaleway Apple Silicon '{}' carries a mandatory 24-hour minimum billing lease (deletable_at, ~${:.2} committed). Pass allow_24h_commitment: true to confirm.",
+                            s.size,
+                            s.usd_per_hour * 24.0
                         ),
                     ));
                 }
-                spec
+                (s, (0u8, 0u8))
             }
-            (None, None, None) => size_spec(&settings.default_size).unwrap_or(SIZES[0]),
-            (None, cpu, ram) => size_for(cpu, ram).ok_or_else(|| {
-                ManagedError::new(
-                    "invalid_size",
-                    400,
-                    "No machine size has that much CPU/RAM (max 16 vCPU / 32 GB)",
+            _ => {
+                let spec = match (requested_size, req.cpu, req.ram_gb) {
+                    (Some(name), _, _) => size_spec(name)
+                        .ok_or_else(|| {
+                            ManagedError::new(
+                                "invalid_size",
+                                400,
+                                format!(
+                                    "Unknown size '{name}'; use small, default, large or xlarge"
+                                ),
+                            )
+                        })
+                        .and_then(check_cpu_ram)?,
+                    (None, None, None) => size_spec(&settings.default_size).unwrap_or(SIZES[0]),
+                    (None, cpu, ram) => size_for(cpu, ram).ok_or_else(|| {
+                        ManagedError::new(
+                            "invalid_size",
+                            400,
+                            "No machine size has that much CPU/RAM (max 16 vCPU / 32 GB)",
+                        )
+                    })?,
+                };
+                if size_rank(spec.size) > size_rank(&settings.max_size) {
+                    return Err(ManagedError::new(
+                        "size_not_allowed",
+                        403,
+                        format!(
+                            "Size '{}' exceeds the allowed maximum '{}'",
+                            spec.size, settings.max_size
+                        ),
+                    ));
+                }
+                (
+                    spec,
+                    (
+                        size_rank(spec.size) as u8,
+                        size_rank(&settings.max_size) as u8,
+                    ),
                 )
-            })?,
+            }
         };
-        if size_rank(spec.size) > size_rank(&settings.max_size) {
-            return Err(ManagedError::new(
-                "size_not_allowed",
-                403,
-                format!(
-                    "Size '{}' exceeds the allowed maximum '{}'",
-                    spec.size, settings.max_size
-                ),
-            ));
-        }
+
         let ttl = req
             .ttl_minutes
             .unwrap_or(settings.default_ttl_minutes)
             .clamp(5, settings.max_ttl_minutes.max(5));
         if !crate::orb_spec::vm_spawn_admit(crate::orb_spec::VmSpawnInput {
-            size_rank: size_rank(spec.size) as u8,
-            max_size_rank: size_rank(&settings.max_size) as u8,
+            size_rank: boat_rank_pair.0,
+            max_size_rank: boat_rank_pair.1,
             secret_projected: false,
             active_count: 0,
             max_concurrent: 1,
@@ -1622,6 +2083,19 @@ impl ManagedManager {
         Ok((spec, ttl))
     }
 
+    /// Validate a request against size / TTL policy. Pure, so it is unit-tested.
+    pub fn plan(
+        settings: &ManagedSettings,
+        req: &SpawnRequest,
+    ) -> Result<(SizeSpec, u64), ManagedError> {
+        let provider_name = req
+            .provider
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&settings.provider);
+        Self::plan_for_provider(settings, provider_name, req)
+    }
+
     fn core_url_for(&self, mode: ProvisioningMode) -> Result<String, ManagedError> {
         if !mode.is_worker() {
             return Ok(String::new());
@@ -1639,20 +2113,90 @@ impl ManagedManager {
         self: &Arc<Self>,
         req: SpawnRequest,
     ) -> Result<ManagedMachine, ManagedError> {
-        if !self.settings.enabled {
+        if !self.is_enabled() {
             return Err(ManagedError::new(
                 "disabled",
                 503,
-                "Managed machines are disabled on this backend",
+                "Managed machines are disabled or no provider is configured",
             ));
         }
-        let provider = self.provider.clone().ok_or_else(|| {
-            ManagedError::new("disabled", 503, "No managed-machine provider is configured")
-        })?;
-        let (spec, ttl_minutes) = Self::plan(&self.settings, &req)?;
-        let (image, source_snapshot, fork_source, provisioning_mode) =
-            self.resolve_source(&req).await?;
+        let requested_provider = req
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let provider = if let Some(name) = requested_provider {
+            self.provider_for(name).ok_or_else(|| {
+                let configured: Vec<String> = self
+                    .provider_catalog()
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect();
+                ManagedError::new(
+                    "unknown_provider",
+                    400,
+                    format!(
+                        "Provider '{name}' is not configured; available: {}",
+                        if configured.is_empty() {
+                            "none".to_string()
+                        } else {
+                            configured.join(", ")
+                        }
+                    ),
+                )
+            })?
+        } else if let Some(of) = req.fork_of.as_deref() {
+            if let Some(src) = self.get(of).await {
+                self.provider_for(&src.provider)
+                    .or_else(|| self.default_provider())
+                    .ok_or_else(|| {
+                        ManagedError::new(
+                            "disabled",
+                            503,
+                            "No managed-machine provider is configured",
+                        )
+                    })?
+            } else {
+                self.default_provider().ok_or_else(|| {
+                    ManagedError::new("disabled", 503, "No managed-machine provider is configured")
+                })?
+            }
+        } else {
+            self.default_provider().ok_or_else(|| {
+                ManagedError::new("disabled", 503, "No managed-machine provider is configured")
+            })?
+        };
+        if (req.fork_of.is_some() || req.from_snapshot.is_some()) && !provider.supports_snapshots()
+        {
+            return Err(ManagedError::new(
+                "snapshots_unsupported",
+                400,
+                format!(
+                    "Provider '{}' does not support warm snapshots or forks; use boat or spawn fresh",
+                    provider.name()
+                ),
+            ));
+        }
+        let (spec, ttl_minutes) = Self::plan_for_provider(&self.settings, provider.name(), &req)?;
+        let (image, source_snapshot, fork_source, provisioning_mode) = if provider
+            .uses_cloud_init_bootstrap()
+            && req.fork_of.is_none()
+            && req.from_snapshot.is_none()
+        {
+            let mode = req.provisioning_mode.unwrap_or_default();
+            let img = Self::resolve_cloud_image(provider.name(), spec.size, req.image.as_deref())?;
+            (img, None, None, mode)
+        } else {
+            self.resolve_source(&req).await?
+        };
         let core_url = self.core_url_for(provisioning_mode)?;
+        let is_apple_silicon =
+            provider.name() == "scaleway" && scaleway::is_apple_silicon_type(spec.size);
+        let committed_minutes = if is_apple_silicon {
+            ttl_minutes.max(24 * 60)
+        } else {
+            ttl_minutes
+        };
 
         let machine = {
             let _guard = self.admission.lock().await;
@@ -1669,7 +2213,7 @@ impl ManagedManager {
                     ));
                 }
             }
-            let new_cost = ttl_minutes as f64 / 60.0 * spec.usd_per_hour;
+            let new_cost = committed_minutes as f64 / 60.0 * spec.usd_per_hour;
             if let Some(cap) = self
                 .settings
                 .daily_cap_usd
@@ -1687,7 +2231,42 @@ impl ManagedManager {
                     ),
                 ));
             }
-            let reserve = budget::reservation_for(ttl_minutes, spec.usd_per_hour);
+            let active_count_u32 = budget.active.min(u32::MAX as usize) as u32;
+            let max_conc_u32 = self
+                .settings
+                .max_concurrent
+                .map(|m| m.min(u32::MAX as usize) as u32)
+                .unwrap_or(active_count_u32.saturating_add(1));
+            let spent_plus_new_cents =
+                ((budget.spent_today_usd + budget.committed_usd + new_cost) * 100.0).ceil() as u64;
+            let daily_cap_cents = self
+                .settings
+                .daily_cap_usd
+                .map(|c| (c * 100.0).floor() as u64)
+                .unwrap_or(spent_plus_new_cents.saturating_add(1));
+            if !crate::orb_spec::vm_spawn_admit(crate::orb_spec::VmSpawnInput {
+                size_rank: 0,
+                max_size_rank: 0,
+                secret_projected: false,
+                active_count: active_count_u32,
+                max_concurrent: max_conc_u32,
+                ttl_minutes: ttl_minutes as u32,
+                max_ttl_minutes: self.settings.max_ttl_minutes.max(5) as u32,
+                job_mem_pct: 90,
+                spent_plus_new_cents,
+                daily_cap_cents,
+            }) {
+                return Err(ManagedError::new(
+                    "budget_exceeded",
+                    402,
+                    "Managed machine spawn rejected by kernel admission policy",
+                ));
+            }
+            let reserve = if committed_minutes > ttl_minutes {
+                new_cost
+            } else {
+                budget::reservation_for(ttl_minutes, spec.usd_per_hour)
+            };
             if let Some(sub) = req.sub_budget_usd {
                 if reserve > sub {
                     return Err(ManagedError::new(
@@ -1696,7 +2275,7 @@ impl ManagedManager {
                         format!(
                             "The child's sub-budget ${sub:.2} cannot cover this machine's reservation ${reserve:.4} ({} for {} min); use a smaller size or a larger sub-budget",
                             spec.size,
-                            ttl_minutes.min(budget::RESERVE_MINUTES as u64)
+                            committed_minutes.min(budget::RESERVE_MINUTES as u64).max(if is_apple_silicon { 24 * 60 } else { 0 })
                         ),
                     ));
                 }
@@ -1713,10 +2292,11 @@ impl ManagedManager {
                 .lock()
                 .await
                 .iter()
-                .filter(|m| m.state.is_live())
+                .filter(|m| m.state.is_live() || m.state == MachineState::Stopped)
                 .map(|m| m.name.clone())
                 .collect();
-            let name = allocate_name(spec.size, &live_names);
+            let name_prefix = spec.size.to_ascii_lowercase();
+            let name = allocate_name(&name_prefix, &live_names);
             let machine = ManagedMachine {
                 provisioning_mode,
                 name,
@@ -1772,6 +2352,14 @@ impl ManagedManager {
                 cost_before_resume: 0.0,
                 prior_pool_charges: Vec::new(),
                 pool_spent_offset: 0.0,
+                project: req.snapshot_project.clone(),
+                root_mission_id: req
+                    .root_mission_id
+                    .clone()
+                    .or_else(|| req.owner_mission_id.clone()),
+                active_mission_ids: Vec::new(),
+                deletable_at: is_apple_silicon.then(|| now + chrono::Duration::hours(24)),
+                has_executed_job: false,
             };
             self.machines.lock().await.push(machine.clone());
             self.persist().await;
@@ -1780,10 +2368,18 @@ impl ManagedManager {
         };
         self.ledger("spawn_requested", &machine);
 
+        let extras = SpawnExtras {
+            gpu: req.gpu.clone(),
+            arch: req.arch.clone(),
+            max_hourly_usd: req.max_hourly_usd,
+            allow_24h_commitment: req.allow_24h_commitment.unwrap_or(false),
+        };
         let this = Arc::clone(self);
         let id = machine.id.clone();
         let task = tokio::spawn(async move {
-            let result = this.provision(&id, provider, &core_url, ttl_minutes).await;
+            let result = this
+                .provision_with_extras(&id, provider, &core_url, ttl_minutes, extras)
+                .await;
             if let Err(error) = &result {
                 tracing::warn!(machine = %id, %error, "managed machine failed to come online");
                 let _ = this
@@ -1803,18 +2399,60 @@ impl ManagedManager {
         }
     }
 
-    async fn provision(
+    pub(super) async fn provision(
         self: &Arc<Self>,
         id: &str,
         provider: Arc<dyn ManagedProvider>,
         core_url: &str,
         ttl_minutes: u64,
     ) -> Result<ManagedMachine, String> {
+        self.provision_with_extras(id, provider, core_url, ttl_minutes, SpawnExtras::default())
+            .await
+    }
+
+    async fn provision_with_extras(
+        self: &Arc<Self>,
+        id: &str,
+        provider: Arc<dyn ManagedProvider>,
+        core_url: &str,
+        ttl_minutes: u64,
+        extras: SpawnExtras,
+    ) -> Result<ManagedMachine, String> {
         let m = self.get(id).await.ok_or("machine vanished")?;
         let started = tokio::time::Instant::now();
+        let capacity = (m.cpu / 2).max(1);
+        let job_memory = managed_job_memory_bytes(m.ram_gb);
+        // Mint the one-time enrollment token upfront so cloud-init / onstart
+        // providers can embed it in the root-only bootstrap payload without SSH.
+        let enroll_token = if m.provisioning_mode.is_worker() {
+            let tok = random_token();
+            let mut secrets = self.secrets.lock().await;
+            let entry = secrets.entry(id.to_string()).or_default();
+            entry.enroll_token_sha256 = Some(sha256_hex(&tok));
+            entry.enroll_expires_at = Some(Utc::now() + chrono::Duration::minutes(15));
+            entry.enroll_used = false;
+            Some(tok)
+        } else {
+            None
+        };
+        let bootstrap_script = match (&enroll_token, provider.uses_cloud_init_bootstrap()) {
+            (Some(tok), true) => Some(cloud_bootstrap_script(
+                core_url,
+                id,
+                &m.node_id,
+                tok,
+                capacity,
+                job_memory,
+                &m.provider,
+                &m.size,
+                &m.image,
+            )),
+            _ => None,
+        };
         // boat stops the sandbox itself at TTL + a small grace, even if Core
         // is down: the hard backstop against runaway cost.
         let spec = SpawnSpec {
+            machine_id: m.id.clone(),
             size: m.size.clone(),
             ttl_seconds: ttl_minutes * 60 + 300,
             image: Some(m.image.clone()),
@@ -1825,33 +2463,56 @@ impl ManagedManager {
             } else {
                 format!("orb-managed-{}-r{}", m.id, m.resumes)
             },
+            bootstrap_script,
+            gpu: extras.gpu,
+            arch: extras.arch,
+            max_hourly_usd: extras.max_hourly_usd,
+            allow_24h_commitment: extras.allow_24h_commitment,
         };
         let created = match m.fork_source_provider_id.clone() {
             Some(source) => provider.fork(&source, &spec).await?,
             None => provider.spawn(&spec).await?,
         };
         let provider_id = created.provider_id.clone();
+        let created_deletable_at = created.deletable_at;
         self.update(id, |m| {
             m.provider_id = Some(provider_id.clone());
             m.fork_source_provider_id = None;
+            if created_deletable_at.is_some() {
+                m.deletable_at = created_deletable_at;
+            }
         })
         .await;
         let m = self.get(id).await.ok_or("machine vanished")?;
         self.ledger("provider_created", &m);
 
         // Wait for ready.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
+        let ready_timeout = if provider.uses_cloud_init_bootstrap() {
+            300
+        } else {
+            240
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_timeout);
         loop {
             if !self.get(id).await.is_some_and(|m| m.state.is_live()) {
                 return Err("machine destroyed while provisioning".into());
             }
-            match provider.get(&provider_id).await {
-                Ok(pm) if boat::is_ready_state(&pm.state) => break,
-                Ok(pm) if pm.state == "error" => return Err("provider reported error state".into()),
-                _ => {}
+            if let Ok(pm) = provider.get(&provider_id).await {
+                if pm.deletable_at.is_some() {
+                    let del = pm.deletable_at;
+                    self.update(id, |m| m.deletable_at = del).await;
+                }
+                if provider.is_ready_state(&pm.state) {
+                    break;
+                }
+                if pm.state == "error" {
+                    return Err("provider reported error state".into());
+                }
             }
             if tokio::time::Instant::now() > deadline {
-                return Err("provider machine not ready within 240s".into());
+                return Err(format!(
+                    "provider machine not ready within {ready_timeout}s"
+                ));
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -1875,79 +2536,79 @@ impl ManagedManager {
             return Ok(machine);
         }
 
-        // One-time enrollment token, delivered as a file (never in a command
-        // line: boat keeps command history).
-        let enroll_token = random_token();
-        {
-            let mut secrets = self.secrets.lock().await;
-            let entry = secrets.entry(id.to_string()).or_default();
-            entry.enroll_token_sha256 = Some(sha256_hex(&enroll_token));
-            entry.enroll_expires_at = Some(Utc::now() + chrono::Duration::minutes(10));
-            entry.enroll_used = false;
-        }
+        let enroll_token = enroll_token.ok_or("missing enrollment token")?;
         self.update(id, |m| m.state = MachineState::Enrolling).await;
-        let capacity = (m.cpu / 2).max(1);
-        // The VM is rented for its memory: let any one job use ~90% of it
-        // instead of the static-node default (RAM split across every slot).
-        let job_memory = managed_job_memory_bytes(m.ram_gb);
-        let env = format!(
-            "SANDBOXED_NODE_DIAL_CORE_URL={core_url}\nSANDBOXED_NODE_MANAGED_ID={id}\nSANDBOXED_NODE_ENROLL_TOKEN={enroll_token}\nSANDBOXED_NODE_ID={node}\nSANDBOXED_NODE_CAPACITY={capacity}\nSANDBOXED_NODE_JOB_MEMORY_BYTES={job_memory}\nSANDBOXED_NODE_LABELS=managed,trust=managed,size={size},image={image},lean\n",
-            node = m.node_id,
-            size = m.size,
-            image = m.image,
-        );
-        let mut wrote = Err(String::new());
-        for _ in 0..5 {
-            wrote = provider
-                .write_file(&provider_id, ENROLL_ENV_PATH, &env)
-                .await;
-            if wrote.is_ok() {
-                break;
+        let (provision_ms, provisioned) = if provider.uses_cloud_init_bootstrap() {
+            // Cloud-init / onstart script already writes enroll.env, runs
+            // PROVISION_SCRIPT and starts sandboxed-node inside the guest.
+            (0u64, Ok(()))
+        } else {
+            let env = format!(
+                "SANDBOXED_NODE_DIAL_CORE_URL={core_url}\nSANDBOXED_NODE_MANAGED_ID={id}\nSANDBOXED_NODE_ENROLL_TOKEN={enroll_token}\nSANDBOXED_NODE_ID={node}\nSANDBOXED_NODE_CAPACITY={capacity}\nSANDBOXED_NODE_JOB_MEMORY_BYTES={job_memory}\nSANDBOXED_NODE_LABELS=managed,trust=managed,provider={prov},size={size},image={image},lean\n",
+                node = m.node_id,
+                prov = m.provider,
+                size = m.size,
+                image = m.image,
+            );
+            let mut wrote = Err(String::new());
+            for _ in 0..5 {
+                wrote = provider
+                    .write_file(&provider_id, ENROLL_ENV_PATH, &env)
+                    .await;
+                if wrote.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
             }
-            tokio::time::sleep(Duration::from_secs(3)).await;
-        }
-        wrote.map_err(|e| format!("write enrollment file: {e}"))?;
-        let provision_started = tokio::time::Instant::now();
-        // Image fixups are best effort: a failure is logged, never fatal.
-        let provisioned = match provider
-            .write_file(&provider_id, PROVISION_PATH, PROVISION_SCRIPT)
-            .await
-        {
-            Ok(()) => provider
-                .exec(&provider_id, &format!("sudo bash {PROVISION_PATH}"), 60)
+            wrote.map_err(|e| format!("write enrollment file: {e}"))?;
+            let provision_started = tokio::time::Instant::now();
+            // Image fixups are best effort: a failure is logged, never fatal.
+            let provisioned = match provider
+                .write_file(&provider_id, PROVISION_PATH, PROVISION_SCRIPT)
                 .await
-                .and_then(|v| match exec_exit_code(&v) {
-                    Some(code) if code != 0 => Err(format!("exit code {code}")),
-                    _ => Ok(()),
-                }),
-            Err(e) => Err(e),
+            {
+                Ok(()) => provider
+                    .exec(&provider_id, &format!("sudo bash {PROVISION_PATH}"), 60)
+                    .await
+                    .and_then(|v| match exec_exit_code(&v) {
+                        Some(code) if code != 0 => Err(format!("exit code {code}")),
+                        _ => Ok(()),
+                    }),
+                Err(e) => Err(e),
+            };
+            let provision_ms = provision_started.elapsed().as_millis() as u64;
+            if let Err(error) = &provisioned {
+                tracing::warn!(machine = %id, %error, "managed VM provisioning script failed");
+            }
+            // A fork or snapshot carries the source node's credential, projected
+            // sign-in and delivered secrets: drop them so this VM enrolls fresh
+            // (its own missions request their secrets again). Any failure fails
+            // provisioning, which destroys the VM.
+            let node_started = provider
+                .exec(
+                    &provider_id,
+                    &format!(
+                        "chmod 600 /home/user/.orb/enroll.env && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && {} && sudo systemctl restart orb-node.service",
+                        snapshots::SECRETS_WIPE
+                    ),
+                    120,
+                )
+                .await
+                .map_err(|e| format!("start orb-node: {e}"))?;
+            if let Some(code) = exec_exit_code(&node_started).filter(|c| *c != 0) {
+                return Err(format!("start orb-node: exit code {code}"));
+            }
+            (provision_ms, provisioned)
         };
-        let provision_ms = provision_started.elapsed().as_millis() as u64;
-        if let Err(error) = &provisioned {
-            tracing::warn!(machine = %id, %error, "managed VM provisioning script failed");
-        }
-        // A fork or snapshot carries the source node's credential, projected
-        // sign-in and delivered secrets: drop them so this VM enrolls fresh
-        // (its own missions request their secrets again). Any failure fails
-        // provisioning, which destroys the VM.
-        let node_started = provider
-            .exec(
-                &provider_id,
-                &format!(
-                    "chmod 600 /home/user/.orb/enroll.env && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && {} && sudo systemctl restart orb-node.service",
-                    snapshots::SECRETS_WIPE
-                ),
-                120,
-            )
-            .await
-            .map_err(|e| format!("start orb-node: {e}"))?;
-        if let Some(code) = exec_exit_code(&node_started).filter(|c| *c != 0) {
-            return Err(format!("start orb-node: exit code {code}"));
-        }
         let enroll_started = tokio::time::Instant::now();
 
         // Wait for the node to enroll and answer a heartbeat over the relay.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
+        let enroll_timeout = if provider.uses_cloud_init_bootstrap() {
+            300
+        } else {
+            240
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(enroll_timeout);
         let client = crate::remote_node::RemoteNodeClient::default();
         loop {
             if !self.get(id).await.is_some_and(|m| m.state.is_live()) {
@@ -1971,6 +2632,7 @@ impl ManagedManager {
                         let total_ms = started.elapsed().as_millis() as u64;
                         tracing::info!(
                             machine = %id,
+                            provider = %m.provider,
                             size = %m.size,
                             ready_ms,
                             provision_ms,
@@ -1995,10 +2657,34 @@ impl ManagedManager {
                 }
             }
             if tokio::time::Instant::now() > deadline {
-                return Err("node did not enroll and answer a heartbeat within 240s".into());
+                return Err(format!(
+                    "node did not enroll and answer a heartbeat within {enroll_timeout}s"
+                ));
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+    }
+
+    /// Verify an active, unused enrollment token for `/bootstrap-binary/:id`
+    /// without consuming `enroll_used` (the guest still calls `/enroll` next).
+    pub async fn verify_bootstrap_token(
+        &self,
+        machine_id: &str,
+        enroll_token: &str,
+    ) -> Option<ManagedMachine> {
+        let machine = self.get(machine_id).await?;
+        if !machine.provisioning_mode.is_worker() || !machine.state.is_live() {
+            return None;
+        }
+        let secrets = self.secrets.lock().await;
+        let entry = secrets.get(&machine.id)?;
+        let valid = !entry.enroll_used
+            && entry.enroll_expires_at.is_some_and(|exp| exp > Utc::now())
+            && entry
+                .enroll_token_sha256
+                .as_deref()
+                .is_some_and(|h| constant_time_eq(h, &sha256_hex(enroll_token)));
+        valid.then_some(machine)
     }
 
     /// Exchange a one-time enrollment token for the node credential.
@@ -2070,7 +2756,7 @@ impl ManagedManager {
         // Adds to the current deadline (never shortens it).
         let new_end =
             (m.expires_at.max(Utc::now()) + chrono::Duration::minutes(ttl as i64)).min(max_end);
-        if let (Some(p), Some(pid)) = (&self.provider, &m.provider_id) {
+        if let (Some(p), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) {
             let secs = (new_end - Utc::now()).num_seconds().max(60) as u64 + 300;
             p.extend(pid, secs)
                 .await
@@ -2097,6 +2783,40 @@ impl ManagedManager {
         reason: Option<String>,
         failed: bool,
     ) -> Result<ManagedMachine, ManagedError> {
+        let current = self
+            .get(id)
+            .await
+            .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        // Scaleway Apple Silicon 24h minimum lease (`deletable_at`): never
+        // call provider DELETE before `deletable_at`. Unregister the node &
+        // close the relay so no new work lands on it, and schedule exact
+        // deletion at `deletable_at`.
+        if !failed
+            && current.provider_id.is_some()
+            && current
+                .deletable_at
+                .is_some_and(|del_at| Utc::now() < del_at)
+        {
+            let del_at = current.deletable_at.unwrap();
+            let defer_reason = format!(
+                "awaiting_deletable_at:{}",
+                reason.as_deref().unwrap_or("requested")
+            );
+            unregister_node(&current);
+            self.relay.close(&current.id).await;
+            let m = self
+                .update(id, |m| {
+                    m.reap_at = Some(del_at);
+                    m.reap_reason = Some(defer_reason.clone());
+                    if m.destroy_reason.is_none() {
+                        m.destroy_reason = reason.clone();
+                    }
+                })
+                .await
+                .unwrap_or(current);
+            self.ledger("deferred_destroy", &m);
+            return Ok(m);
+        }
         let Some(m) = self
             .update(id, |m| {
                 if m.state.is_live() || m.state == MachineState::Stopped {
@@ -2119,7 +2839,7 @@ impl ManagedManager {
         };
         unregister_node(&m);
         self.relay.close(&m.id).await;
-        if let (Some(provider), Some(pid)) = (&self.provider, &m.provider_id) {
+        if let (Some(provider), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) {
             // Wipe a projected sign-in before the disk is retained by the
             // provider (boat keeps stopped disks for 14 days).
             if m.provisioning_mode.is_worker() && m.antigravity_projected {
@@ -2182,7 +2902,7 @@ impl ManagedManager {
 
     async fn refresh_usage(&self, id: &str) {
         let Some(m) = self.get(id).await else { return };
-        let (Some(provider), Some(pid)) = (&self.provider, &m.provider_id) else {
+        let (Some(provider), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) else {
             return;
         };
         if m.ledger_closed {
@@ -2243,10 +2963,16 @@ impl ManagedManager {
     async fn decide_for(&self, m: &ManagedMachine, now: DateTime<Utc>) -> (ReapDecision, Owner) {
         let busy = Self::node_busy(&m.node_id);
         let owner = self.owner_of(m).await;
+        let supports_free_stop = self
+            .provider_for(&m.provider)
+            .is_some_and(|p| p.supports_free_stop());
         let facts = lifecycle::ReapFacts {
             now,
             expires_at: m.expires_at,
+            deletable_at: m.deletable_at,
             busy,
+            has_executed_job: m.has_executed_job,
+            supports_free_stop,
             idle_since: if busy {
                 now
             } else {
@@ -2284,7 +3010,7 @@ impl ManagedManager {
         let now = Utc::now();
         let machines = self.machines.lock().await.clone();
         let dry_run = self.dry_run();
-        for m in machines {
+        for mut m in machines {
             match m.state {
                 MachineState::Online | MachineState::Enrolling | MachineState::Provisioning => {
                     if m.state != MachineState::Online {
@@ -2298,13 +3024,37 @@ impl ManagedManager {
                     } else {
                         let busy = Self::node_busy(&m.node_id);
                         if busy {
-                            self.update(&m.id, |m| m.last_busy_at = Some(now)).await;
+                            if let Some(updated) = self
+                                .update(&m.id, |m| {
+                                    m.last_busy_at = Some(now);
+                                    m.has_executed_job = true;
+                                })
+                                .await
+                            {
+                                m = updated;
+                            }
                             if self.auto_extend(&m, now).await {
                                 continue;
                             }
                         }
                         let (decision, _) = self.decide_for(&m, now).await;
                         match &decision {
+                            ReapDecision::Stop { reason } => {
+                                let admitted =
+                                    crate::orb_spec::vm_should_reap(crate::orb_spec::VmReapInput {
+                                        ttl_expired: false,
+                                        busy,
+                                        owner_ended: decision.is_owner_rule(),
+                                        idle_expired: !decision.is_owner_rule(),
+                                    });
+                                if admitted && !dry_run {
+                                    let _ = self.stop_inner(&m.id, reason, true).await;
+                                    continue;
+                                }
+                                if admitted {
+                                    self.note_would_reap(&m, reason, now).await;
+                                }
+                            }
                             ReapDecision::Destroy { reason } => {
                                 let ttl = reason == "ttl_expired";
                                 // Lean gate (`orb_vm_step`, reap_check).
@@ -2316,9 +3066,12 @@ impl ManagedManager {
                                         idle_expired: !ttl && !decision.is_owner_rule(),
                                     });
                                 if admitted && (ttl || !dry_run) {
-                                    // A waiting owner may resume: stop (disk
-                                    // kept, nothing billed) instead of destroy.
-                                    if snapshots::stops_instead_of_destroy(reason) {
+                                    let supports_free_stop = self
+                                        .provider_for(&m.provider)
+                                        .is_some_and(|p| p.supports_free_stop());
+                                    if supports_free_stop
+                                        && snapshots::stops_instead_of_destroy(reason)
+                                    {
                                         let _ = self.stop_inner(&m.id, reason, true).await;
                                     } else {
                                         let _ = self
@@ -2332,6 +3085,10 @@ impl ManagedManager {
                                 }
                             }
                             ReapDecision::Schedule { reason, at } => {
+                                if reason.starts_with("awaiting_deletable_at:ttl_expired") {
+                                    unregister_node(&m);
+                                    self.relay.close(&m.id).await;
+                                }
                                 if m.reap_reason.as_deref() != Some(reason)
                                     || m.reap_at != Some(*at)
                                 {
@@ -2404,61 +3161,146 @@ impl ManagedManager {
         }
     }
 
-    /// Compare provider state with the registry. Provider VMs carrying our
-    /// name prefix with no live registry row are stopped after
-    /// `orphan_grace_minutes` (dry-run: reported only). Live rows whose VM
-    /// the provider stopped, or no longer lists for two passes, are closed.
+    /// Compare provider state with the registry across all configured providers.
+    /// Provider VMs carrying our name prefix with no live registry row are
+    /// stopped after `orphan_grace_minutes` (dry-run: reported only). Live rows
+    /// whose VM the provider stopped, or no longer lists for two passes, are closed.
     pub async fn reconcile_once(&self) -> Result<Value, String> {
-        let Some(provider) = &self.provider else {
+        let providers: Vec<Arc<dyn ManagedProvider>> = self
+            .providers
+            .read()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        if providers.is_empty() {
             return Ok(serde_json::json!({"skipped": "no provider"}));
-        };
-        let remote = provider.list().await?;
+        }
         let machines = self.machines.lock().await.clone();
         let now = Utc::now();
         let dry_run = self.dry_run();
         let grace = chrono::Duration::minutes(self.settings.orphan_grace_minutes as i64);
+        let mut total_remote = 0usize;
         let mut orphans_stopped = Vec::new();
         let mut orphans_pending = Vec::new();
         let mut orphan_ids = std::collections::HashSet::new();
-        for pm in &remote {
-            if !pm.name.starts_with(SANDBOX_NAME_PREFIX) || boat::is_stopped_state(&pm.state) {
-                continue;
-            }
-            let live = machines
-                .iter()
-                .any(|m| m.provider_id.as_deref() == Some(&pm.provider_id) && m.state.is_live())
+        let mut closed = Vec::new();
+        let mut vanished = Vec::new();
+        let mut first_err: Option<String> = None;
+
+        for provider in &providers {
+            let prov_name = provider.name();
+            let remote = match provider.list().await {
+                Ok(r) => r,
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    continue;
+                }
+            };
+            total_remote += remote.len();
+            for pm in &remote {
+                if !pm.name.starts_with(SANDBOX_NAME_PREFIX) || provider.is_stopped_state(&pm.state)
+                {
+                    continue;
+                }
+                let matches_provider = |m: &ManagedMachine| {
+                    m.provider == prov_name || (providers.len() == 1 && m.provider == "boat")
+                };
+                let live = machines.iter().any(|m| {
+                    matches_provider(m)
+                        && m.provider_id.as_deref() == Some(&pm.provider_id)
+                        && m.state.is_live()
+                })
                 // A spawn in flight has a row but no provider id yet.
                 || machines.iter().any(|m| {
-                    m.provider_id.is_none()
+                    matches_provider(m)
+                        && m.provider_id.is_none()
                         && m.state.is_live()
                         && pm.name == format!("{SANDBOX_NAME_PREFIX}{}", m.id)
                 });
-            if live {
-                continue;
-            }
-            orphan_ids.insert(pm.provider_id.clone());
-            let first = *self
-                .reconcile_state
-                .lock()
-                .await
-                .orphans_seen
-                .entry(pm.provider_id.clone())
-                .or_insert(now);
-            if now - first < grace || dry_run {
-                if now - first >= grace {
-                    tracing::warn!(sandbox = %pm.provider_id, "managed reconcile (dry-run) would stop orphan sandbox");
+                if live {
+                    continue;
                 }
-                orphans_pending.push(serde_json::json!({
-                    "provider_id": pm.provider_id,
-                    "name": pm.name,
-                    "first_seen": first,
-                    "stop_at": first + grace,
-                }));
-                continue;
+                if pm.deletable_at.is_some_and(|del_at| now < del_at) {
+                    continue;
+                }
+                let orphan_key = format!("{prov_name}:{}", pm.provider_id);
+                orphan_ids.insert(orphan_key.clone());
+                let first = *self
+                    .reconcile_state
+                    .lock()
+                    .await
+                    .orphans_seen
+                    .entry(orphan_key)
+                    .or_insert(now);
+                if now - first < grace || dry_run {
+                    if now - first >= grace {
+                        tracing::warn!(provider = %prov_name, sandbox = %pm.provider_id, "managed reconcile (dry-run) would stop orphan sandbox");
+                    }
+                    orphans_pending.push(serde_json::json!({
+                        "provider": prov_name,
+                        "provider_id": pm.provider_id,
+                        "name": pm.name,
+                        "first_seen": first,
+                        "stop_at": first + grace,
+                    }));
+                    continue;
+                }
+                tracing::warn!(provider = %prov_name, sandbox = %pm.provider_id, "stopping orphan managed sandbox");
+                if provider.destroy(&pm.provider_id).await.is_ok() {
+                    orphans_stopped.push(pm.provider_id.clone());
+                }
             }
-            tracing::warn!(sandbox = %pm.provider_id, "stopping orphan managed sandbox");
-            if provider.destroy(&pm.provider_id).await.is_ok() {
-                orphans_stopped.push(pm.provider_id.clone());
+
+            for m in machines.iter().filter(|m| {
+                m.state.is_live()
+                    && (m.provider == prov_name || (providers.len() == 1 && m.provider == "boat"))
+            }) {
+                let Some(pid) = &m.provider_id else { continue };
+                match remote.iter().find(|p| &p.provider_id == pid) {
+                    Some(pm) => {
+                        self.reconcile_state
+                            .lock()
+                            .await
+                            .vanished_passes
+                            .remove(&m.id);
+                        if pm.deletable_at.is_some() && m.deletable_at != pm.deletable_at {
+                            let del = pm.deletable_at;
+                            self.update(&m.id, |row| row.deletable_at = del).await;
+                        }
+                        if provider.is_stopped_state(&pm.state) && m.state == MachineState::Online {
+                            let _ = self
+                                .destroy_inner(&m.id, Some("stopped_by_provider".into()), false)
+                                .await;
+                            closed.push(m.id.clone());
+                        }
+                    }
+                    // An empty list while we know live VMs is more likely a
+                    // provider glitch than every VM vanishing: wait for proof.
+                    None if !remote.is_empty() && m.state == MachineState::Online => {
+                        let passes = {
+                            let mut st = self.reconcile_state.lock().await;
+                            let n = st.vanished_passes.entry(m.id.clone()).or_insert(0);
+                            *n += 1;
+                            *n
+                        };
+                        if passes >= 2 {
+                            self.mark_vanished(&m.id).await;
+                            self.reconcile_state
+                                .lock()
+                                .await
+                                .vanished_passes
+                                .remove(&m.id);
+                            vanished.push(m.id.clone());
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        if total_remote == 0 {
+            if let Some(err) = first_err {
+                return Err(err);
             }
         }
         self.reconcile_state
@@ -2467,48 +3309,8 @@ impl ManagedManager {
             .orphans_seen
             .retain(|id, _| orphan_ids.contains(id));
 
-        let mut closed = Vec::new();
-        let mut vanished = Vec::new();
-        for m in machines.iter().filter(|m| m.state.is_live()) {
-            let Some(pid) = &m.provider_id else { continue };
-            match remote.iter().find(|p| &p.provider_id == pid) {
-                Some(pm) => {
-                    self.reconcile_state
-                        .lock()
-                        .await
-                        .vanished_passes
-                        .remove(&m.id);
-                    if boat::is_stopped_state(&pm.state) && m.state == MachineState::Online {
-                        let _ = self
-                            .destroy_inner(&m.id, Some("stopped_by_provider".into()), false)
-                            .await;
-                        closed.push(m.id.clone());
-                    }
-                }
-                // An empty list while we know live VMs is more likely a
-                // provider glitch than every VM vanishing: wait for proof.
-                None if !remote.is_empty() && m.state == MachineState::Online => {
-                    let passes = {
-                        let mut st = self.reconcile_state.lock().await;
-                        let n = st.vanished_passes.entry(m.id.clone()).or_insert(0);
-                        *n += 1;
-                        *n
-                    };
-                    if passes >= 2 {
-                        self.mark_vanished(&m.id).await;
-                        self.reconcile_state
-                            .lock()
-                            .await
-                            .vanished_passes
-                            .remove(&m.id);
-                        vanished.push(m.id.clone());
-                    }
-                }
-                None => {}
-            }
-        }
         Ok(serde_json::json!({
-            "provider_machines": remote.len(),
+            "provider_machines": total_remote,
             "dry_run": dry_run,
             "orphans_stopped": orphans_stopped,
             "orphans_pending": orphans_pending,
@@ -2868,6 +3670,16 @@ impl ManagedManager {
         want: &SiblingReuse<'_>,
         candidates_ok: &(dyn Fn(&str) -> bool + Sync),
     ) -> Option<ManagedMachine> {
+        self.take_idle_sibling_for_provider(None, want, candidates_ok)
+            .await
+    }
+
+    pub async fn take_idle_sibling_for_provider(
+        &self,
+        want_provider: Option<&str>,
+        want: &SiblingReuse<'_>,
+        candidates_ok: &(dyn Fn(&str) -> bool + Sync),
+    ) -> Option<ManagedMachine> {
         let SiblingReuse {
             size,
             image,
@@ -2885,6 +3697,7 @@ impl ManagedManager {
             .filter(|m| {
                 m.provisioning_mode.is_worker()
                     && m.state == MachineState::Online
+                    && want_provider.is_none_or(|p| m.provider == p)
                     && m.size == size
                     && m.image == image
                     && Utc::now() + chrono::Duration::minutes(10) < m.expires_at
@@ -2954,6 +3767,105 @@ impl ManagedManager {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct SpawnExtras {
+    gpu: Option<String>,
+    arch: Option<String>,
+    max_hourly_usd: Option<f64>,
+    allow_24h_commitment: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cloud_bootstrap_script(
+    core_url: &str,
+    machine_id: &str,
+    node_id: &str,
+    enroll_token: &str,
+    capacity: u32,
+    job_memory: u64,
+    provider: &str,
+    size: &str,
+    image: &str,
+) -> String {
+    let core_url = core_url.trim_end_matches('/');
+    format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq && apt-get install -y -qq curl ca-certificates git sudo
+  fi
+fi
+
+id -u user >/dev/null 2>&1 || useradd -m -s /bin/bash user || true
+id -u orbnode >/dev/null 2>&1 || useradd -r -m -d /var/lib/orb-node -s /bin/bash orbnode || true
+install -d -m 0755 /usr/local/bin /var/lib/orb-node /var/lib/orb-node/work
+chown -R orbnode:orbnode /var/lib/orb-node
+install -d -m 0700 -o user -g user /home/user/.orb || mkdir -p /home/user/.orb
+
+if [ ! -x /usr/local/bin/sandboxed-node ]; then
+  curl -fsSL --retry 6 --retry-delay 3 \
+    -H "Authorization: Bearer {enroll_token}" \
+    "{core_url}/api/managed-machines/bootstrap-binary/{machine_id}" \
+    -o /usr/local/bin/sandboxed-node.tmp
+  chmod 0755 /usr/local/bin/sandboxed-node.tmp
+  mv /usr/local/bin/sandboxed-node.tmp /usr/local/bin/sandboxed-node
+fi
+
+cat > /home/user/.orb/enroll.env <<'ORB_ENROLL_EOF'
+SANDBOXED_NODE_DIAL_CORE_URL={core_url}
+SANDBOXED_NODE_MANAGED_ID={machine_id}
+SANDBOXED_NODE_ENROLL_TOKEN={enroll_token}
+SANDBOXED_NODE_ID={node_id}
+SANDBOXED_NODE_CAPACITY={capacity}
+SANDBOXED_NODE_JOB_MEMORY_BYTES={job_memory}
+SANDBOXED_NODE_WORK_DIR=/var/lib/orb-node/work
+SANDBOXED_NODE_LABELS=managed,trust=managed,provider={provider},size={size},image={image},lean
+ORB_ENROLL_EOF
+chmod 0600 /home/user/.orb/enroll.env
+cp /home/user/.orb/enroll.env /var/lib/orb-node/enroll.env
+chown orbnode:orbnode /var/lib/orb-node/enroll.env
+chmod 0600 /var/lib/orb-node/enroll.env
+
+cat > /home/user/.orb/provision.sh <<'ORB_PROVISION_EOF'
+{provision_script}
+ORB_PROVISION_EOF
+bash /home/user/.orb/provision.sh || true
+rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  cat > /etc/systemd/system/orb-node.service <<'ORB_UNIT_EOF'
+[Unit]
+Description=Orb Managed Compute Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orbnode
+Group=orbnode
+WorkingDirectory=/var/lib/orb-node
+EnvironmentFile=/home/user/.orb/enroll.env
+ExecStart=/usr/local/bin/sandboxed-node
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+ORB_UNIT_EOF
+  systemctl daemon-reload
+  systemctl enable --now orb-node.service
+  systemctl restart orb-node.service
+else
+  su -s /bin/bash orbnode -c 'nohup bash -c "set -a; source /var/lib/orb-node/enroll.env; set +a; cd /var/lib/orb-node && while true; do /usr/local/bin/sandboxed-node || true; sleep 2; done" >/var/lib/orb-node/orb-node.log 2>&1 &'
+fi
+"#,
+        provision_script = PROVISION_SCRIPT
+    )
+}
+
 /// Exit code of a provider exec result, when it reports one.
 pub fn exec_exit_code(v: &Value) -> Option<i64> {
     ["exitCode", "exit_code", "code"]
@@ -2981,43 +3893,37 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8], private: bool) {
 /// Build the global manager, load the registry and start the reaper and
 /// reconciler loops. Safe to call once at startup.
 pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<ManagedManager> {
-    let provider = boat::BoatProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
-    let settings = ManagedSettings::from_env(provider.is_some());
+    let boat_provider =
+        boat::BoatProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
+    let hetzner_provider =
+        hetzner::HetznerProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
+    let vastai_provider =
+        vastai::VastAiProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
+    let scaleway_provider =
+        scaleway::ScalewayProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
+    let any_provider = boat_provider.is_some()
+        || hetzner_provider.is_some()
+        || vastai_provider.is_some()
+        || scaleway_provider.is_some();
+    let settings = ManagedSettings::from_env(any_provider);
     let manager = Arc::new(ManagedManager::new(
         settings,
-        provider,
+        boat_provider,
         working_dir,
         core_port,
     ));
+    if let Some(p) = hetzner_provider {
+        manager.register_provider(p);
+    }
+    if let Some(p) = vastai_provider {
+        manager.register_provider(p);
+    }
+    if let Some(p) = scaleway_provider {
+        manager.register_provider(p);
+    }
     manager.load().await;
     let _ = MANAGER.set(Arc::clone(&manager));
-    if manager.settings.enabled && manager.provider.is_some() {
-        tracing::info!(
-            daily_cap = ?manager.settings.daily_cap_usd,
-            max_concurrent = ?manager.settings.max_concurrent,
-            "Managed machines enabled (boat)"
-        );
-        let reaper = Arc::clone(&manager);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                reaper.reap_once().await;
-            }
-        });
-        let rec = Arc::clone(&manager);
-        tokio::spawn(async move {
-            // First pass soon after start (catches machines orphaned by a crash).
-            tokio::time::sleep(Duration::from_secs(20)).await;
-            loop {
-                match rec.reconcile_once().await {
-                    Ok(report) => tracing::debug!(%report, "managed reconcile"),
-                    Err(e) => tracing::warn!(error = %e, "managed reconcile failed"),
-                }
-                rec.cleanup_snapshots().await;
-                tokio::time::sleep(Duration::from_secs(rec.settings.reconcile_secs.max(30))).await;
-            }
-        });
-    }
+    manager.ensure_background_loops();
     manager
 }
 

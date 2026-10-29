@@ -329,14 +329,23 @@ impl ManagedManager {
         owner_mission_id: Option<&str>,
         tenant: Option<&str>,
     ) -> Result<ManagedSnapshot, ManagedError> {
-        let provider = self
-            .provider
-            .clone()
-            .ok_or_else(|| ManagedError::new("disabled", 503, "No managed-machine provider"))?;
         let m = self
             .get(id)
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        let provider = self
+            .provider_for(&m.provider)
+            .ok_or_else(|| ManagedError::new("disabled", 503, "No managed-machine provider"))?;
+        if !provider.supports_snapshots() {
+            return Err(ManagedError::new(
+                "unsupported_by_provider",
+                409,
+                format!(
+                    "Provider '{}' does not support managed snapshots",
+                    provider.name()
+                ),
+            ));
+        }
         if !matches!(m.state, MachineState::Online | MachineState::Stopped) {
             return Err(ManagedError::new(
                 "not_snapshottable",
@@ -475,7 +484,10 @@ impl ManagedManager {
                 "A machine is being created from this snapshot; retry when it is online",
             ));
         }
-        if let Some(p) = &self.provider {
+        if let Some(p) = self
+            .provider_for("boat")
+            .or_else(|| self.default_provider())
+        {
             p.delete_snapshot(&snap.name)
                 .await
                 .map_err(|e| ManagedError::new("provider_error", 502, e))?;
@@ -520,8 +532,11 @@ impl ManagedManager {
             return plan;
         }
         let mut deleted = Vec::new();
+        let snap_provider = self
+            .provider_for("boat")
+            .or_else(|| self.default_provider());
         for name in plan {
-            let ok = match &self.provider {
+            let ok = match &snap_provider {
                 Some(p) => p.delete_snapshot(&name).await.is_ok(),
                 None => true,
             };
@@ -560,10 +575,23 @@ impl ManagedManager {
                 "Only an online machine can be stopped",
             ));
         }
+        let provider_opt = self.provider_for(&m.provider);
+        if let Some(provider) = &provider_opt {
+            if !provider.supports_free_stop() {
+                return Err(ManagedError::new(
+                    "unsupported_by_provider",
+                    409,
+                    format!(
+                        "Provider '{}' continues billing stopped servers; destroy the machine instead",
+                        provider.name()
+                    ),
+                ));
+            }
+        }
         unregister_node(&m);
         self.relay.close(&m.id).await;
         let mut secrets_wiped = false;
-        if let (Some(provider), Some(pid)) = (&self.provider, &m.provider_id) {
+        if let (Some(provider), Some(pid)) = (&provider_opt, &m.provider_id) {
             if m.provisioning_mode.is_worker() {
                 self.wipe_projection(provider.as_ref(), pid, &m).await;
                 // The kept disk must not hold delivered secrets.
@@ -603,14 +631,23 @@ impl ManagedManager {
         id: &str,
         ttl_minutes: Option<u64>,
     ) -> Result<ManagedMachine, ManagedError> {
-        let provider = self
-            .provider
-            .clone()
-            .ok_or_else(|| ManagedError::new("disabled", 503, "No managed-machine provider"))?;
         let m = self
             .get(id)
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        let provider = self
+            .provider_for(&m.provider)
+            .ok_or_else(|| ManagedError::new("disabled", 503, "No managed-machine provider"))?;
+        if !provider.supports_free_stop() {
+            return Err(ManagedError::new(
+                "unsupported_by_provider",
+                409,
+                format!(
+                    "Provider '{}' does not support stop/resume",
+                    provider.name()
+                ),
+            ));
+        }
         let core_url = self.core_url_for(m.provisioning_mode)?;
         if m.state != MachineState::Stopped {
             return Err(ManagedError::new(
@@ -663,7 +700,7 @@ impl ManagedManager {
                 .lock()
                 .await
                 .iter()
-                .filter(|x| x.state.is_live())
+                .filter(|x| x.id != m.id && (x.state.is_live() || x.state == MachineState::Stopped))
                 .map(|x| x.name.clone())
                 .collect();
             let now = Utc::now();
@@ -742,7 +779,7 @@ impl ManagedManager {
                 self.ledger("destroyed", &m);
                 // Delete the disk if the key allows it; boat drops it after
                 // 14 days otherwise.
-                if let (Some(p), Some(pid)) = (&self.provider, &m.provider_id) {
+                if let (Some(p), Some(pid)) = (self.provider_for(&m.provider), &m.provider_id) {
                     let _ = p.destroy(pid).await;
                 }
             }

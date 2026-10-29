@@ -490,7 +490,8 @@ async fn authorize(
         "snapshot_managed_machine"
         | "fork_managed_machine"
         | "stop_managed_machine"
-        | "resume_managed_machine" => {
+        | "resume_managed_machine"
+        | "exec_raw_managed_machine" => {
             let id = args
                 .get("machine_id")
                 .and_then(Value::as_str)

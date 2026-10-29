@@ -594,18 +594,26 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // (REMOTE_NODE_MONITOR_SECS, default 15s, 0 disables). Only spawned when
     // remote nodes are enabled and configured.
     super::project_files::start_context_observer(config.working_dir.clone());
-    // Managed machines (boat.dev): registry, caps, reaper and reconciler.
+    // Managed machines (boat.dev, hetzner, vast.ai, scaleway): registry, caps,
+    // reaper, reconciler and Core-confined Bitwarden provider discovery.
     {
         let manager = crate::managed::start(&config.working_dir, config.port).await;
         // Destroy managed VMs as soon as their owning mission has ended.
+        // Fall back to the persisted SQLite mission store when the owner's
+        // live session has not booted in this Core process (e.g. after a restart).
         let probe_state = Arc::clone(&state);
         manager.set_owner_probe(Arc::new(move |tenant: String, id: String| {
             let st = Arc::clone(&probe_state);
             Box::pin(async move {
                 let uuid = uuid::Uuid::parse_str(&id).ok()?;
-                // Only the owner's own tenant store is authoritative; if it is
-                // not loaded the state is unknown and nothing is destroyed.
-                let store = st.control.loaded_mission_store(&tenant).await?;
+                let store = match st.control.loaded_mission_store(&tenant).await {
+                    Some(s) => s,
+                    None => super::mission_workspace_gc::persisted_mission_store(st.as_ref(), uuid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(s, _)| s)?,
+                };
                 match store.get_mission(uuid).await {
                     Ok(Some(m)) => {
                         let since = m
@@ -627,11 +635,30 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                 }
             })
         }));
+        let active_dir = config.working_dir.clone();
+        manager.set_active_missions_probe(Arc::new(move || {
+            let dir = active_dir.clone();
+            Box::pin(async move {
+                let mut by_node: HashMap<String, Vec<String>> = HashMap::new();
+                if let Ok(handles) = crate::remote_node::job_ledger::load(&dir).await {
+                    for h in handles {
+                        let list = by_node.entry(h.node_id).or_default();
+                        let mid = h.mission_id.to_string();
+                        if !list.contains(&mid) {
+                            list.push(mid);
+                        }
+                    }
+                }
+                by_node
+            })
+        }));
+        let bw_state = Arc::clone(&state);
+        let bw_manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            discover_managed_providers_from_bitwarden(bw_state, bw_manager).await;
+        });
     }
-    if config.remote_nodes.enabled
-        && (!config.remote_nodes.nodes.is_empty()
-            || crate::managed::global().is_some_and(|m| m.settings.enabled))
-    {
+    if config.remote_nodes.enabled {
         crate::remote_node::spawn_fleet_monitor(
             Arc::clone(&state.fleet),
             config.remote_nodes.clone(),
@@ -3403,6 +3430,83 @@ async fn oauth_token_refresher_loop(
         );
 
         tokio::time::sleep(check_interval).await;
+    }
+}
+
+/// Resolve Core-reserved cloud-compute provider keys (`BOAT_API_KEY`,
+/// `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`, `SCALEWAY_SECRET_KEY`) from
+/// Bitwarden Secrets Manager strictly inside Core memory, without writing them
+/// to disk, workspace env, or logs.
+async fn discover_managed_providers_from_bitwarden(
+    state: Arc<AppState>,
+    manager: Arc<crate::managed::ManagedManager>,
+) {
+    let Ok(summaries) = super::secret_broker::broker(&state)
+        .list_all(&state, false)
+        .await
+    else {
+        return;
+    };
+    let read_secret = |keys: &[&str]| {
+        let state = Arc::clone(&state);
+        let found = keys.iter().find_map(|want| {
+            summaries
+                .iter()
+                .find(|s| s.key.eq_ignore_ascii_case(want))
+                .map(|s| s.id.clone())
+        });
+        async move {
+            let id = found?;
+            super::bitwarden::get_secret(&state, &id)
+                .await
+                .ok()
+                .map(|d| d.value.trim().to_string())
+                .filter(|v| !v.is_empty())
+        }
+    };
+
+    if manager.provider_for("boat").is_none() {
+        if let Some(key) = read_secret(&["BOAT_API_KEY"]).await {
+            let base = std::env::var("BOAT_API_BASE")
+                .unwrap_or_else(|_| crate::managed::boat::DEFAULT_API_BASE.to_string());
+            manager.register_provider(Arc::new(crate::managed::boat::BoatProvider::new(base, key)));
+            tracing::info!("Registered managed provider 'boat' from Bitwarden vault");
+        }
+    }
+    if manager.provider_for("hetzner").is_none() {
+        if let Some(key) = read_secret(&["HETZNER_CLOUD_APIKEY", "HCLOUD_TOKEN"]).await {
+            let base = std::env::var("HETZNER_API_BASE")
+                .unwrap_or_else(|_| crate::managed::hetzner::DEFAULT_API_BASE.to_string());
+            manager.register_provider(Arc::new(crate::managed::hetzner::HetznerProvider::new(
+                base, key,
+            )));
+            tracing::info!("Registered managed provider 'hetzner' from Bitwarden vault");
+        }
+    }
+    if manager.provider_for("vastai").is_none() {
+        if let Some(key) = read_secret(&["VASTAI_API_KEY", "VAST_API_KEY"]).await {
+            let base = std::env::var("VASTAI_API_BASE")
+                .unwrap_or_else(|_| crate::managed::vastai::DEFAULT_API_BASE.to_string());
+            manager.register_provider(Arc::new(crate::managed::vastai::VastAiProvider::new(
+                base, key,
+            )));
+            tracing::info!("Registered managed provider 'vastai' from Bitwarden vault");
+        }
+    }
+    if manager.provider_for("scaleway").is_none() {
+        if let Some(key) = read_secret(&["SCALEWAY_SECRET_KEY", "SCW_SECRET_KEY"]).await {
+            let base = std::env::var("SCALEWAY_API_BASE")
+                .unwrap_or_else(|_| crate::managed::scaleway::DEFAULT_API_BASE.to_string());
+            let project_id = std::env::var("SCALEWAY_PROJECT_ID")
+                .or_else(|_| std::env::var("SCW_DEFAULT_PROJECT_ID"))
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or(read_secret(&["SCALEWAY_PROJECT_ID", "SCW_DEFAULT_PROJECT_ID"]).await);
+            manager.register_provider(Arc::new(crate::managed::scaleway::ScalewayProvider::new(
+                base, key, project_id,
+            )));
+            tracing::info!("Registered managed provider 'scaleway' from Bitwarden vault");
+        }
     }
 }
 

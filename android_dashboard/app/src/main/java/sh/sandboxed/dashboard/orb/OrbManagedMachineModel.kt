@@ -36,7 +36,33 @@ data class ManagedMachine(
     val ownerKind: String? = null,
     /** When the lifecycle reaper will destroy it, and the reason it will record. */
     val reapAt: String? = null,
-    val reapReason: String? = null
+    val reapReason: String? = null,
+    val provider: String? = null,
+    val project: String? = null,
+    val rootMissionId: String? = null,
+    val activeMissionIds: List<String> = emptyList(),
+    val deletableAt: String? = null,
+    val hasExecutedJob: Boolean = false
+)
+
+data class ManagedSize(
+    val size: String,
+    val cpu: Int,
+    val ramGb: Double,
+    val diskGb: Double?,
+    val usdPerHour: Double,
+    val gpu: String? = null,
+    val arch: String? = null,
+    val minBillingHours: Int? = null
+)
+
+data class ManagedProviderInfo(
+    val provider: String,
+    val displayName: String,
+    val configured: Boolean,
+    val supportsSnapshots: Boolean,
+    val supportsFreeStop: Boolean,
+    val sizes: List<ManagedSize>
 )
 
 data class ManagedBudget(
@@ -48,7 +74,9 @@ data class ManagedBudget(
     /** null = unlimited. */
     val maxConcurrent: Int?,
     val defaultTtlMinutes: Int,
-    val maxTtlMinutes: Int
+    val maxTtlMinutes: Int,
+    val defaultSize: String? = null,
+    val maxSize: String? = null
 )
 
 /** One UTC day of managed spend from Core; missions/sizes highest first. */
@@ -67,6 +95,8 @@ data class ManagedMachinesResponse(
     val provider: String?,
     val machines: List<ManagedMachine>,
     val budget: ManagedBudget,
+    val sizes: List<ManagedSize> = emptyList(),
+    val providers: List<ManagedProviderInfo> = emptyList(),
     /** Last 7 UTC days, oldest first; null on Cores that predate the spend chart. */
     val dailySpend: List<DailySpend>? = null
 )
@@ -75,8 +105,35 @@ object OrbManagedMachines {
     const val PATH = "/api/managed-machines"
     const val EXTEND_MINUTES = 60
 
+    fun parseSize(d: OrbDict): ManagedSize? {
+        val size = OrbJSON.str(d, "size") ?: return null
+        return ManagedSize(
+            size = size,
+            cpu = OrbJSON.int(d, "cpu") ?: 0,
+            ramGb = OrbJSON.double(d, "ram_gb") ?: 0.0,
+            diskGb = OrbJSON.double(d, "disk_gb"),
+            usdPerHour = OrbJSON.double(d, "usd_per_hour") ?: 0.0,
+            gpu = OrbJSON.str(d, "gpu"),
+            arch = OrbJSON.str(d, "arch"),
+            minBillingHours = OrbJSON.int(d, "min_billing_hours")
+        )
+    }
+
+    fun parseProvider(d: OrbDict): ManagedProviderInfo? {
+        val p = OrbJSON.str(d, "provider") ?: return null
+        return ManagedProviderInfo(
+            provider = p,
+            displayName = OrbJSON.str(d, "display_name") ?: providerLabel(p),
+            configured = OrbJSON.bool(d, "configured") ?: false,
+            supportsSnapshots = OrbJSON.bool(d, "supports_snapshots") ?: false,
+            supportsFreeStop = OrbJSON.bool(d, "supports_free_stop") ?: false,
+            sizes = OrbJSON.dictList(d["sizes"]).mapNotNull { parseSize(it) }
+        )
+    }
+
     fun parseMachine(d: OrbDict): ManagedMachine? {
         val id = OrbJSON.str(d, "id") ?: return null
+        val activeIds = (d["active_mission_ids"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
         return ManagedMachine(
             id = id,
             name = OrbJSON.str(d, "name"),
@@ -100,7 +157,13 @@ object OrbManagedMachines {
             requestedByMissionId = OrbJSON.str(d, "requested_by_mission_id"),
             ownerKind = OrbJSON.str(d, "owner_kind"),
             reapAt = OrbJSON.str(d, "reap_at"),
-            reapReason = OrbJSON.str(d, "reap_reason")
+            reapReason = OrbJSON.str(d, "reap_reason"),
+            provider = OrbJSON.str(d, "provider"),
+            project = OrbJSON.str(d, "project"),
+            rootMissionId = OrbJSON.str(d, "root_mission_id"),
+            activeMissionIds = activeIds,
+            deletableAt = OrbJSON.str(d, "deletable_at"),
+            hasExecutedJob = OrbJSON.bool(d, "has_executed_job") ?: false
         )
     }
 
@@ -165,8 +228,12 @@ object OrbManagedMachines {
                 active = OrbJSON.int(b, "active") ?: 0,
                 maxConcurrent = OrbJSON.int(b, "max_concurrent"),
                 defaultTtlMinutes = OrbJSON.int(b, "default_ttl_minutes") ?: 60,
-                maxTtlMinutes = OrbJSON.int(b, "max_ttl_minutes") ?: 0
+                maxTtlMinutes = OrbJSON.int(b, "max_ttl_minutes") ?: 0,
+                defaultSize = OrbJSON.str(b, "default_size"),
+                maxSize = OrbJSON.str(b, "max_size")
             ),
+            sizes = OrbJSON.dictList(d["sizes"]).mapNotNull { parseSize(it) },
+            providers = OrbJSON.dictList(d["providers"]).mapNotNull { parseProvider(it) },
             dailySpend = parseDailySpend(d["daily_spend"])
         )
     }
@@ -211,6 +278,50 @@ object OrbManagedMachines {
 
     fun canAct(m: ManagedMachine): Boolean =
         OrbKernel.machineActionAdmitted(stateKind(m.state)).canAct
+
+    fun isStopped(m: ManagedMachine): Boolean =
+        OrbKernel.machineActionAdmitted(stateKind(m.state)).isStopped
+
+    fun canResume(m: ManagedMachine, busy: Boolean = false): Boolean =
+        OrbKernel.machineActionAdmitted(stateKind(m.state), isBusy = busy).canResume
+
+    fun canStop(m: ManagedMachine, providers: List<ManagedProviderInfo> = emptyList()): Boolean {
+        if (m.state != "online") return false
+        val p = m.provider ?: "boat"
+        return providers.firstOrNull { it.provider == p }?.supportsFreeStop ?: (p == "boat")
+    }
+
+    fun providerLabel(provider: String?): String = when ((provider ?: "boat").lowercase(Locale.US)) {
+        "boat" -> "boat.dev"
+        "hetzner" -> "Hetzner"
+        "vastai" -> "Vast.ai"
+        "scaleway" -> "Scaleway"
+        else -> provider ?: "boat.dev"
+    }
+
+    fun sectionTitle(providers: List<ManagedProviderInfo>, machines: List<ManagedMachine>): String {
+        val multiConfigured = providers.any { it.configured && it.provider != "boat" }
+        val multiActive = machines.any { !it.provider.isNullOrEmpty() && it.provider != "boat" }
+        return if (multiConfigured || multiActive) "Managed cloud" else "Managed (boat.dev)"
+    }
+
+    fun ttlChoices(defaultMinutes: Int, maxMinutes: Int): List<Int> {
+        val cap = if (maxMinutes > 0) maxMinutes else 720
+        return listOf(15, 30, 60, 120, 240, 480, 720, 1440, defaultMinutes, cap)
+            .filter { it in 1..cap }
+            .distinct()
+            .sorted()
+    }
+
+    fun minutesLabel(minutes: Int): String {
+        val h = minutes / 60
+        val m = minutes % 60
+        return when {
+            h > 0 && m > 0 -> "$h h $m min"
+            h > 0 -> "$h h"
+            else -> "$m min"
+        }
+    }
 
     fun parseTime(s: String?): Long? {
         if (s.isNullOrBlank()) return null
@@ -319,7 +430,7 @@ object OrbManagedMachines {
     fun reapReasonLabel(reason: String): String = when (reason) {
         "ttl_expired" -> "TTL"
         "idle_no_owner" -> "idle, no owner"
-        "idle_user_owned" -> "idle"
+        "idle_user_owned", "working_owner_idle" -> "idle"
         "owner_missing" -> "owner deleted"
         else -> reason.replaceFirst(Regex("^owner_"), "owner ").replace(Regex("_idle$"), ", idle").replace('_', ' ')
     }
@@ -327,6 +438,13 @@ object OrbManagedMachines {
     /** "Reaps in 5 min (owner completed)", "Reap due (…)"; null when nothing is scheduled. */
     fun reapLine(m: ManagedMachine, now: Long): String? {
         if (!isLive(m)) return null
+        if (m.reapReason?.startsWith("awaiting_deletable_at:") == true) {
+            val at = parseTime(m.deletableAt ?: m.reapAt) ?: return null
+            val mins = Math.ceil((at - now) / 60_000.0).toLong()
+            if (mins <= 0) return "24h lease ended · deleting"
+            if (mins < 60) return "Deletes when 24h lease ends in $mins min"
+            return String.format(Locale.US, "Deletes when 24h lease ends in %d h %02d min", mins / 60, mins % 60)
+        }
         val at = parseTime(m.reapAt) ?: return null
         val why = m.reapReason?.let { " (${reapReasonLabel(it)})" } ?: ""
         val mins = Math.ceil((at - now) / 60_000.0).toLong()
@@ -374,7 +492,7 @@ object OrbManagedMachines {
 
     /** Machines destroyed or failed during the last 24 hours, newest first. */
     fun recentMachines(machines: List<ManagedMachine>, now: Long): List<ManagedMachine> =
-        machines.filter { !isLive(it) }
+        machines.filter { !isLive(it) && !isStopped(it) }
             .mapNotNull { m -> (parseTime(m.destroyedAt) ?: parseTime(m.createdAt))?.let { m to it } }
             .filter { now - it.second <= 86_400_000L }
             .sortedByDescending { it.second }

@@ -397,8 +397,7 @@ impl ManagedManager {
             ));
         }
         let provider = self
-            .provider
-            .clone()
+            .provider_for(&machine.provider)
             .ok_or_else(|| ManagedError::new("disabled", 503, "No managed provider"))?;
         let pid = machine.provider_id.as_deref().ok_or_else(|| {
             ManagedError::new("not_running", 409, "Machine has no provider sandbox")

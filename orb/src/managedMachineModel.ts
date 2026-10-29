@@ -21,11 +21,17 @@ export interface ManagedMachine {
   cost_usd: number;
   usd_per_hour: number;
   owner_mission_id?: string | null;
+  root_mission_id?: string | null;
+  project?: string | null;
+  active_mission_ids?: string[];
   /** Mission that rented it for the owner (e.g. a start_mission caller). */
   requested_by_mission_id?: string | null;
   /** "mission" | "user"; absent on legacy rows (shown as "No owner"). */
   owner_kind?: string | null;
   reason?: string | null;
+  /** Earliest timestamp when the provider allows deletion (e.g. Scaleway Apple Silicon 24h lease). */
+  deletable_at?: string | null;
+  has_executed_job?: boolean;
   /** When the lifecycle reaper will destroy it, and the reason it will record. */
   reap_at?: string | null;
   reap_reason?: string | null;
@@ -33,7 +39,25 @@ export interface ManagedMachine {
   ledger_closed: boolean;
 }
 
-export interface ManagedSize { size: string; cpu: number; ram_gb: number; disk_gb: number; usd_per_hour: number }
+export interface ManagedSize {
+  size: string;
+  cpu: number;
+  ram_gb: number;
+  disk_gb: number;
+  usd_per_hour: number;
+  gpu?: string | null;
+  arch?: string | null;
+  min_billing_hours?: number | null;
+}
+
+export interface ManagedProviderInfo {
+  provider: string;
+  display_name: string;
+  configured: boolean;
+  supports_snapshots: boolean;
+  supports_free_stop: boolean;
+  sizes: ManagedSize[];
+}
 
 export interface ManagedBudget {
   spent_today_usd: number;
@@ -52,9 +76,28 @@ export interface ManagedBudget {
 export interface DailySpend { day: string; usd: number; missions: { mission_id: string | null; usd: number }[]; sizes: { size: string; usd: number }[] }
 
 /** `daily_spend` is absent on Cores that predate the spend chart. */
-export interface ManagedMachinesResponse { machines: ManagedMachine[]; budget: ManagedBudget; sizes: ManagedSize[]; enabled: boolean; daily_spend?: DailySpend[] }
+export interface ManagedMachinesResponse {
+  machines: ManagedMachine[];
+  budget: ManagedBudget;
+  sizes: ManagedSize[];
+  providers?: ManagedProviderInfo[];
+  enabled: boolean;
+  daily_spend?: DailySpend[];
+}
 
-export interface CreateManagedMachine { wait?: boolean; size?: string; cpu?: number; ram_gb?: number; ttl_minutes?: number; image?: string; reason?: string }
+export interface CreateManagedMachine {
+  wait?: boolean;
+  provider?: string;
+  size?: string;
+  cpu?: number;
+  ram_gb?: number;
+  gpu?: string;
+  arch?: string;
+  allow_24h_commitment?: boolean;
+  ttl_minutes?: number;
+  image?: string;
+  reason?: string;
+}
 
 /** `null` when the backend predates managed machines (404). */
 export async function listManagedMachines(): Promise<ManagedMachinesResponse | null> {
@@ -164,8 +207,35 @@ export const stateLabel = (s: string) =>
   s === "provisioning" || s === "enrolling" ? "Starting…" : s === "online" ? "Online"
   : s === "destroying" ? "Destroying…" : s === "destroyed" ? "Destroyed" : s === "failed" ? "Failed" : s === "stopped" ? "Stopped" : s;
 
-export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: number }) =>
-  `${s.cpu} vCPU · ${s.ram_gb} GB${s.disk_gb != null ? ` · ${s.disk_gb} GB disk` : ""}`;
+export const sizeSpec = (s: Pick<ManagedSize, "cpu" | "ram_gb"> & { disk_gb?: number; gpu?: string | null; arch?: string | null }) =>
+  [
+    `${s.cpu} vCPU · ${s.ram_gb} GB`,
+    s.gpu ? s.gpu : "",
+    s.arch && s.arch !== "x86_64" ? s.arch : "",
+    s.disk_gb != null && s.disk_gb > 0 ? `${s.disk_gb} GB disk` : "",
+  ].filter(Boolean).join(" · ");
+
+export const providerLabel = (provider?: string | null): string => {
+  const key = (provider ?? "boat").toLowerCase();
+  if (key === "boat") return "boat.dev";
+  if (key === "hetzner") return "Hetzner";
+  if (key === "vastai") return "Vast.ai";
+  if (key === "scaleway") return "Scaleway";
+  return provider || "boat.dev";
+};
+
+export function managedSectionTitle(providers?: readonly ManagedProviderInfo[], machines?: readonly Pick<ManagedMachine, "provider">[]): string {
+  const multiConfigured = (providers ?? []).some(p => p.configured && p.provider !== "boat");
+  const multiActive = (machines ?? []).some(m => m.provider && m.provider !== "boat");
+  return multiConfigured || multiActive ? "Managed cloud" : "Managed (boat.dev)";
+}
+
+export function canStopMachine(m: Pick<ManagedMachine, "state" | "provider">, providers?: readonly ManagedProviderInfo[]): boolean {
+  if (m.state !== "online") return false;
+  const p = m.provider || "boat";
+  const info = providers?.find(x => x.provider === p);
+  return info ? info.supports_free_stop : p === "boat";
+}
 
 /** "$1.20 spent today of $20.00 · 1 of 3 running"; unlimited caps drop their "of …". */
 export const budgetLine = (b: ManagedBudget) =>
@@ -260,12 +330,21 @@ export function machineOwner(m: Pick<ManagedMachine, "owner_mission_id" | "owner
 /** Human text for a reap reason: "owner_completed" -> "owner completed". */
 export const reapReasonLabel = (reason: string) => ({
   ttl_expired: "TTL", idle_no_owner: "idle, no owner", idle_user_owned: "idle",
-  owner_missing: "owner deleted",
+  working_owner_idle: "idle", owner_missing: "owner deleted",
 }[reason] ?? reason.replace(/^owner_/, "owner ").replace(/_idle$/, ", idle").replace(/_/g, " "));
 
 /** "Reaps in 4 min (owner completed)", "Reap due (owner failed)"; null when nothing is scheduled. */
-export function reapLine(m: Pick<ManagedMachine, "reap_at" | "reap_reason" | "state">, now = Date.now()): string | null {
-  if (!m.reap_at || !isLive(m)) return null;
+export function reapLine(m: Pick<ManagedMachine, "reap_at" | "reap_reason" | "deletable_at" | "state">, now = Date.now()): string | null {
+  if (!isLive(m)) return null;
+  if (m.reap_reason?.startsWith("awaiting_deletable_at:")) {
+    const raw = m.deletable_at ?? m.reap_at;
+    const at = raw ? Date.parse(raw) : NaN;
+    if (!Number.isFinite(at)) return null;
+    const min = Math.ceil((at - now) / 60_000);
+    if (min <= 0) return "24h lease ended · deleting";
+    return min < 60 ? `Deletes when 24h lease ends in ${min} min` : `Deletes when 24h lease ends in ${Math.floor(min / 60)} h ${String(min % 60).padStart(2, "0")} min`;
+  }
+  if (!m.reap_at) return null;
   const at = Date.parse(m.reap_at);
   if (!Number.isFinite(at)) return null;
   const why = m.reap_reason ? ` (${reapReasonLabel(m.reap_reason)})` : "";

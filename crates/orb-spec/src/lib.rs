@@ -617,6 +617,23 @@ unsafe extern "C" {
         risk: u8,
         confirmed: u8,
     ) -> u8;
+    fn orb_vm_lifecycle_step(
+        owner_class: u8,
+        busy: u8,
+        ttl_expired: u8,
+        grace_or_idle_elapsed: u8,
+        working_idle_enabled: u8,
+        supports_free_stop: u8,
+        min_delete_pending: u8,
+    ) -> u32;
+    fn orb_vm_claim_step(is_live: u8, same_tenant: u8, owner_none: u8, owner_in_lineage: u8)
+        -> u32;
+    fn orb_compute_secret_gate(
+        is_core_reserved_compute_key: u8,
+        caller_on_managed_node: u8,
+        is_allowlisted_managed_secret: u8,
+        operator_break_glass: u8,
+    ) -> u32;
     fn orb_verify_log_window(
         off: u64,
         req: u64,
@@ -1611,6 +1628,108 @@ pub fn vm_should_reap(input: VmReapInput) -> bool {
             0,
         ) != 0
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VmOwnerClass {
+    Unknown = 0,
+    Working = 1,
+    Waiting = 2,
+    TerminalOrMissing = 3,
+    UserOrUnowned = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VmLifecycleAction {
+    Keep = 0,
+    Schedule = 1,
+    Stop = 2,
+    Destroy = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmLifecycleInput {
+    pub owner_class: VmOwnerClass,
+    pub busy: bool,
+    pub ttl_expired: bool,
+    pub grace_or_idle_elapsed: bool,
+    pub working_idle_enabled: bool,
+    pub supports_free_stop: bool,
+    pub min_delete_pending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmLifecycleVerdict {
+    pub action: VmLifecycleAction,
+    pub admitted: bool,
+    pub defer_for_min_lease: bool,
+}
+
+pub fn vm_lifecycle_step(input: VmLifecycleInput) -> VmLifecycleVerdict {
+    let raw = unsafe {
+        orb_vm_lifecycle_step(
+            input.owner_class as u8,
+            u8::from(input.busy),
+            u8::from(input.ttl_expired),
+            u8::from(input.grace_or_idle_elapsed),
+            u8::from(input.working_idle_enabled),
+            u8::from(input.supports_free_stop),
+            u8::from(input.min_delete_pending),
+        )
+    };
+    let action = match raw & 0xFF {
+        1 => VmLifecycleAction::Schedule,
+        2 => VmLifecycleAction::Stop,
+        3 => VmLifecycleAction::Destroy,
+        _ => VmLifecycleAction::Keep,
+    };
+    VmLifecycleVerdict {
+        action,
+        admitted: ((raw >> 8) & 1) != 0,
+        defer_for_min_lease: ((raw >> 16) & 1) != 0,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmClaimInput {
+    pub is_live: bool,
+    pub same_tenant: bool,
+    pub owner_none: bool,
+    pub owner_in_lineage: bool,
+}
+
+pub fn vm_claim_admit(input: VmClaimInput) -> bool {
+    let raw = unsafe {
+        orb_vm_claim_step(
+            u8::from(input.is_live),
+            u8::from(input.same_tenant),
+            u8::from(input.owner_none),
+            u8::from(input.owner_in_lineage),
+        )
+    };
+    ((raw >> 8) & 1) != 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeSecretInput {
+    pub is_core_reserved_compute_key: bool,
+    pub caller_on_managed_node: bool,
+    pub is_allowlisted_managed_secret: bool,
+    pub operator_break_glass: bool,
+}
+
+pub fn compute_secret_admit(input: ComputeSecretInput) -> bool {
+    let raw = unsafe {
+        orb_compute_secret_gate(
+            u8::from(input.is_core_reserved_compute_key),
+            u8::from(input.caller_on_managed_node),
+            u8::from(input.is_allowlisted_managed_secret),
+            u8::from(input.operator_break_glass),
+        )
+    };
+    ((raw >> 8) & 1) != 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -139,6 +139,7 @@ impl BoatProvider {
 fn spawn_body(spec: &SpawnSpec) -> Value {
     let mut body = json!({
         "type": spec.size,
+        "name": spec.name,
         "ttlSeconds": spec.ttl_seconds,
         // The account's base environment carries GitHub and agent
         // credentials; managed nodes must never receive them.
@@ -168,6 +169,7 @@ fn machine_from(v: &Value) -> Option<ProviderMachine> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        deletable_at: None,
     })
 }
 
@@ -194,6 +196,26 @@ pub fn is_stopped_state(state: &str) -> bool {
 impl ManagedProvider for BoatProvider {
     fn name(&self) -> &'static str {
         "boat"
+    }
+
+    fn sizes(&self) -> &[super::SizeSpec] {
+        &super::SIZES
+    }
+
+    fn supports_free_stop(&self) -> bool {
+        true
+    }
+
+    fn supports_snapshots(&self) -> bool {
+        true
+    }
+
+    fn is_ready_state(&self, state: &str) -> bool {
+        is_ready_state(state)
+    }
+
+    fn is_stopped_state(&self, state: &str) -> bool {
+        is_stopped_state(state)
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
@@ -338,7 +360,12 @@ impl ManagedProvider for BoatProvider {
             .call(
                 reqwest::Method::POST,
                 &format!("/sandboxes/{provider_id}/fork"),
-                Some(json!({"type": spec.size, "ttlSeconds": spec.ttl_seconds, "noEnv": true})),
+                Some(json!({
+                    "type": spec.size,
+                    "name": spec.name,
+                    "ttlSeconds": spec.ttl_seconds,
+                    "noEnv": true
+                })),
                 Some(&spec.idempotency_key),
                 Some(Duration::from_secs(120)),
             )
@@ -505,11 +532,17 @@ mod raw_image_tests {
     use super::*;
     fn spec(image: &str) -> SpawnSpec {
         SpawnSpec {
+            machine_id: "mmtest000".into(),
             size: "small".into(),
             ttl_seconds: 600,
             image: Some(image.into()),
             name: "test".into(),
             idempotency_key: "test".into(),
+            bootstrap_script: None,
+            gpu: None,
+            arch: None,
+            max_hourly_usd: None,
+            allow_24h_commitment: false,
         }
     }
     #[test]

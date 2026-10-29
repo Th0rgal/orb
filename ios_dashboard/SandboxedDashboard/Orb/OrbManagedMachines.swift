@@ -6,6 +6,7 @@ import SwiftUI
 struct OrbManagedMachine: Codable, Equatable, Identifiable, Sendable {
     var id: String
     var name: String?
+    var provider: String?
     var node_id: String?
     var size: String
     var cpu: Double
@@ -19,11 +20,16 @@ struct OrbManagedMachine: Codable, Equatable, Identifiable, Sendable {
     var cost_usd: Double
     var cost_is_metered: Bool?
     var owner_mission_id: String?
+    var root_mission_id: String?
+    var project: String?
+    var active_mission_ids: [String]?
     /// Mission that rented it for the owner (e.g. a start_mission caller).
     var requested_by_mission_id: String?
     /// "mission" | "user"; absent on legacy rows ("No owner").
     var owner_kind: String?
     var reason: String?
+    var deletable_at: String?
+    var has_executed_job: Bool?
     /// When the lifecycle reaper will destroy it, and the reason it will record.
     var reap_at: String?
     var reap_reason: String?
@@ -53,6 +59,18 @@ struct OrbManagedSize: Codable, Equatable, Sendable {
     var ram_gb: Double
     var disk_gb: Double?
     var usd_per_hour: Double
+    var gpu: String?
+    var arch: String?
+    var min_billing_hours: Int?
+}
+
+struct OrbManagedProviderInfo: Codable, Equatable, Sendable {
+    var provider: String
+    var display_name: String
+    var configured: Bool
+    var supports_snapshots: Bool
+    var supports_free_stop: Bool
+    var sizes: [OrbManagedSize]
 }
 
 /// One UTC day of managed spend from Core; missions/sizes highest first.
@@ -69,6 +87,7 @@ struct OrbDailySpend: Codable, Equatable, Identifiable, Sendable {
 struct OrbManagedMachinesResponse: Codable, Equatable, Sendable {
     var enabled: Bool
     var provider: String?
+    var providers: [OrbManagedProviderInfo]?
     var machines: [OrbManagedMachine]
     var budget: OrbManagedBudget
     var sizes: [OrbManagedSize]
@@ -119,6 +138,46 @@ enum OrbManaged {
 
     static func isLive(_ m: OrbManagedMachine) -> Bool {
         OrbKernel.machineActionAdmitted(stateKind: stateKind(m.state), isBusy: false, isMuted: false).isLive
+    }
+
+    static func isStopped(_ m: OrbManagedMachine) -> Bool {
+        OrbKernel.machineActionAdmitted(stateKind: stateKind(m.state), isBusy: false, isMuted: false).isStopped
+    }
+
+    static func canResume(_ m: OrbManagedMachine, busy: Bool = false) -> Bool {
+        OrbKernel.machineActionAdmitted(stateKind: stateKind(m.state), isBusy: busy, isMuted: false).canResume
+    }
+
+    static func canStop(_ m: OrbManagedMachine, providers: [OrbManagedProviderInfo]? = nil) -> Bool {
+        guard m.state == "online" else { return false }
+        let p = m.provider ?? "boat"
+        if let info = providers?.first(where: { $0.provider == p }) { return info.supports_free_stop }
+        return p == "boat"
+    }
+
+    static func providerLabel(_ provider: String?) -> String {
+        switch (provider ?? "boat").lowercased() {
+        case "boat": return "boat.dev"
+        case "hetzner": return "Hetzner"
+        case "vastai": return "Vast.ai"
+        case "scaleway": return "Scaleway"
+        default: return provider ?? "boat.dev"
+        }
+    }
+
+    static func budgetFull(_ b: OrbManagedBudget) -> Bool {
+        (b.max_concurrent.map { b.active >= $0 } ?? false) || (b.daily_cap_usd.map { b.spent_today_usd >= $0 } ?? false)
+    }
+
+    static func ttlChoices(defaultMinutes: Int, maxMinutes: Int) -> [Int] {
+        let cap = maxMinutes > 0 ? maxMinutes : 720
+        let raw = [15, 30, 60, 120, 240, 480, 720, 1440, defaultMinutes, cap].filter { $0 > 0 && $0 <= cap }
+        return Array(Set(raw)).sorted()
+    }
+
+    static func minutesLabel(_ minutes: Int) -> String {
+        let h = minutes / 60, m = minutes % 60
+        return h > 0 && m > 0 ? "\(h) h \(m) min" : h > 0 ? "\(h) h" : "\(m) min"
     }
 
     static func date(_ value: String?) -> Date? {
@@ -233,7 +292,7 @@ enum OrbManaged {
         switch reason {
         case "ttl_expired": return "TTL"
         case "idle_no_owner": return "idle, no owner"
-        case "idle_user_owned": return "idle"
+        case "idle_user_owned", "working_owner_idle": return "idle"
         case "owner_missing": return "owner deleted"
         default:
             var r = reason
@@ -244,7 +303,15 @@ enum OrbManaged {
     }
     /// "Reaps in 5 min (owner completed)", "Reap due (…)"; nil when nothing is scheduled.
     static func reapLine(_ m: OrbManagedMachine, now: Date = .now) -> String? {
-        guard isLive(m), let raw = m.reap_at, let at = date(raw) else { return nil }
+        guard isLive(m) else { return nil }
+        if let reason = m.reap_reason, reason.hasPrefix("awaiting_deletable_at:") {
+            guard let raw = m.deletable_at ?? m.reap_at, let at = date(raw) else { return nil }
+            let minutes = Int(ceil(at.timeIntervalSince(now) / 60))
+            if minutes <= 0 { return "24h lease ended · deleting" }
+            if minutes < 60 { return "Deletes when 24h lease ends in \(minutes) min" }
+            return "Deletes when 24h lease ends in \(minutes / 60) h " + String(format: "%02d", minutes % 60) + " min"
+        }
+        guard let raw = m.reap_at, let at = date(raw) else { return nil }
         let why = m.reap_reason.map { " (\(reapReasonLabel($0)))" } ?? ""
         let minutes = Int(ceil(at.timeIntervalSince(now) / 60))
         if minutes <= 0 { return "Reap due\(why)" }
@@ -268,7 +335,7 @@ enum OrbManaged {
     /// Machines destroyed or failed during the last 24 hours, newest first.
     static func recent(_ machines: [OrbManagedMachine], now: Date = .now) -> [OrbManagedMachine] {
         func at(_ m: OrbManagedMachine) -> Date? { date(m.destroyed_at) ?? date(m.created_at) }
-        return machines.filter { !isLive($0) }.filter { at($0).map { now.timeIntervalSince($0) <= 86_400 } ?? false }
+        return machines.filter { !isLive($0) && !isStopped($0) }.filter { at($0).map { now.timeIntervalSince($0) <= 86_400 } ?? false }
             .sorted { (at($0) ?? .distantPast) > (at($1) ?? .distantPast) }
     }
     /// Older backends answer 404/405: the section is hidden.
@@ -319,19 +386,24 @@ struct OrbManagedBadge: View {
 }
 
 /// Settings > Machines section: managed machines laid out like desktop rows,
-/// Extend (+1 h) and Destroy via swipe or long-press. No spawn UI on mobile.
+/// Extend (+1 h), Stop, Resume, Destroy and New machine sheet.
 struct OrbManagedMachinesSection: View {
     let response: OrbManagedMachinesResponse
     let fetchedAt: Date
     let busy: Bool
     let onDestroy: (OrbManagedMachine) -> Void
     let onExtend: (OrbManagedMachine) -> Void
+    var onStop: ((OrbManagedMachine) -> Void)? = nil
+    var onResume: ((OrbManagedMachine) -> Void)? = nil
+    var onCreate: ((_ provider: String?, _ size: String, _ ttl: Int, _ allow24h: Bool) -> Void)? = nil
     let onOpenMission: (String) -> Void
     @State private var destroying: OrbManagedMachine?
+    @State private var creating = false
     @State private var titles: [String: String] = [:]
 
     var body: some View {
         let live: [OrbManagedMachine] = response.machines.filter(OrbManaged.isLive)
+        let stopped: [OrbManagedMachine] = response.machines.filter(OrbManaged.isStopped)
         let recent: [OrbManagedMachine] = OrbManaged.recent(response.machines)
         Section {
             if response.enabled, let days = response.daily_spend {
@@ -339,7 +411,7 @@ struct OrbManagedMachinesSection: View {
                     .accessibilityIdentifier("managed.spend")
             }
             if !response.enabled { Text("Managed machines are disabled on this backend.").foregroundStyle(.secondary) }
-            else if live.isEmpty { Text("No managed machines running.").foregroundStyle(.secondary) }
+            else if live.isEmpty && stopped.isEmpty { Text("No managed machines running.").foregroundStyle(.secondary) }
             ForEach(live) { machine in
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     OrbManagedMachineRow(machine: machine, now: context.date, cost: OrbManaged.liveCost(machine, fetchedAt: fetchedAt, now: context.date),
@@ -347,20 +419,54 @@ struct OrbManagedMachinesSection: View {
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button("Destroy", role: .destructive) { destroying = machine }.disabled(!canAct(machine))
+                    if OrbManaged.canStop(machine, providers: response.providers), let onStop {
+                        Button("Stop") { onStop(machine) }.tint(.orange).disabled(!canAct(machine))
+                    }
                     Button("+1 h") { onExtend(machine) }.tint(.accentColor).disabled(!canAct(machine))
                 }
                 .contextMenu { menu(machine, live: true) }
                 .accessibilityIdentifier("managed.machine.\(machine.id)")
+            }
+            ForEach(stopped) { machine in
+                OrbManagedMachineRow(machine: machine, now: .now, cost: machine.cost_usd,
+                                     missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: false, onOpenMission: onOpenMission)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button("Destroy", role: .destructive) { destroying = machine }.disabled(busy)
+                        if let onResume {
+                            Button("Resume") { onResume(machine) }.tint(.accentColor).disabled(!OrbManaged.canResume(machine, busy: busy))
+                        }
+                    }
+                    .contextMenu { menu(machine, live: false) }
+                    .accessibilityIdentifier("managed.stopped.\(machine.id)")
             }
             ForEach(recent) { machine in
                 OrbManagedMachineRow(machine: machine, now: .now, cost: machine.cost_usd,
                                      missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: true, onOpenMission: onOpenMission)
                     .contextMenu { menu(machine, live: false) }
             }
-        } header: { Text("Managed machines") } footer: {
+        } header: {
+            HStack {
+                Text("Managed machines")
+                Spacer()
+                if response.enabled, onCreate != nil {
+                    Button { creating = true } label: { Label("New", systemImage: "plus") }
+                        .font(.caption.weight(.semibold))
+                        .disabled(busy || OrbManaged.budgetFull(response.budget))
+                        .accessibilityIdentifier("managed.new")
+                }
+            }
+        } footer: {
             if response.daily_spend == nil { Text(OrbManaged.budgetLine(response.budget)).accessibilityIdentifier("managed.budget") }
         }
         .task(id: missionIds) { await loadTitles() }
+        .sheet(isPresented: $creating) {
+            if let onCreate {
+                OrbNewManagedMachineSheet(response: response) { provider, size, ttl, allow24h in
+                    creating = false
+                    onCreate(provider, size, ttl, allow24h)
+                }
+            }
+        }
         .alert("Destroy machine?", isPresented: Binding(get: { destroying != nil }, set: { if !$0 { destroying = nil } }), presenting: destroying) { machine in
             Button("Destroy", role: .destructive) { onDestroy(machine) }
             Button("Cancel", role: .cancel) {}
@@ -374,13 +480,26 @@ struct OrbManagedMachinesSection: View {
         if live {
             Button("Extend 1 h", systemImage: "clock.arrow.circlepath") { onExtend(m) }.disabled(!canAct(m))
                 .accessibilityIdentifier("managed.extend")
+            if OrbManaged.canStop(m, providers: response.providers), let onStop {
+                Button("Stop", systemImage: "pause.circle") { onStop(m) }.disabled(!canAct(m))
+                    .accessibilityIdentifier("managed.stop")
+            }
             Button("Destroy", systemImage: "trash", role: .destructive) { destroying = m }.disabled(!canAct(m))
+                .accessibilityIdentifier("managed.destroy")
+        } else if OrbManaged.isStopped(m) {
+            if let onResume {
+                Button("Resume", systemImage: "play.circle") { onResume(m) }.disabled(!OrbManaged.canResume(m, busy: busy))
+                    .accessibilityIdentifier("managed.resume")
+            }
+            Button("Destroy", systemImage: "trash", role: .destructive) { destroying = m }.disabled(busy)
                 .accessibilityIdentifier("managed.destroy")
         }
         if let mission = m.owner_mission_id, !mission.isEmpty {
             Button("Open mission", systemImage: "bubble.left") { onOpenMission(mission) }
         }
         Section {
+            if let provider = m.provider, !provider.isEmpty { Text("Provider \(OrbManaged.providerLabel(provider))") }
+            if let project = m.project, !project.isEmpty { Text("Project \(project)") }
             if let reason = m.reason, !reason.isEmpty { Text(reason) }
             if let node = m.node_id, !node.isEmpty { Text("Node \(node)") }
             if let error = m.error, !error.isEmpty { Text(error) }
@@ -500,7 +619,15 @@ struct OrbManagedMachineRow: View {
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
                 .accessibilityHidden(true)
             Text(OrbManaged.title(machine)).font(.body.weight(.semibold)).lineLimit(1)
+            if let p = machine.provider, !p.isEmpty, p != "boat" {
+                Text(OrbManaged.providerLabel(p)).font(.caption2.weight(.semibold)).foregroundStyle(.tint)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.14), in: Capsule())
+            }
             Text(OrbManaged.sizeLabel(machine.size)).font(.subheadline).foregroundStyle(OrbStyle.textSecondary).lineLimit(1)
+            if let project = machine.project, !project.isEmpty {
+                Text(project).font(.caption2).foregroundStyle(OrbStyle.textSecondary).lineLimit(1)
+            }
             Spacer(minLength: 4)
             Text(status).font(.subheadline).foregroundStyle(OrbStyle.textSecondary).lineLimit(1)
         }
@@ -574,5 +701,103 @@ struct OrbManagedMachineRow: View {
         }
         .buttonStyle(.borderless)
         .accessibilityIdentifier("managed.mission")
+    }
+}
+
+struct OrbNewManagedMachineSheet: View {
+    let response: OrbManagedMachinesResponse
+    let onCreate: (_ provider: String?, _ size: String, _ ttl: Int, _ allow24h: Bool) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var provider: String
+    @State private var size: String
+    @State private var ttl: Int
+    @State private var allow24h = false
+
+    init(response: OrbManagedMachinesResponse, onCreate: @escaping (_ provider: String?, _ size: String, _ ttl: Int, _ allow24h: Bool) -> Void) {
+        self.response = response
+        self.onCreate = onCreate
+        let configured = (response.providers ?? []).filter(\.configured)
+        let initProv = configured.first(where: { $0.provider == "boat" })?.provider ?? configured.first?.provider ?? "boat"
+        let initSizes = configured.first(where: { $0.provider == initProv })?.sizes ?? response.sizes
+        let initSize = initSizes.first(where: { $0.size == response.budget.default_size })?.size ?? initSizes.first?.size ?? "small"
+        let defTtl = response.budget.default_ttl_minutes ?? 60
+        let maxTtl = response.budget.max_ttl_minutes ?? 720
+        _provider = State(initialValue: initProv)
+        _size = State(initialValue: initSize)
+        _ttl = State(initialValue: maxTtl > 0 ? min(defTtl, maxTtl) : defTtl)
+    }
+
+    private var configuredProviders: [OrbManagedProviderInfo] { (response.providers ?? []).filter(\.configured) }
+    private var sizes: [OrbManagedSize] { configuredProviders.first(where: { $0.provider == provider })?.sizes ?? response.sizes }
+    private var chosen: OrbManagedSize? { sizes.first(where: { $0.size == size }) }
+    private var requires24h: Bool { (chosen?.min_billing_hours ?? 0) >= 24 }
+    private var effectiveMinutes: Int { max(ttl, (chosen?.min_billing_hours ?? 0) * 60) }
+    private var estimate: Double { (chosen?.usd_per_hour ?? 0) * Double(effectiveMinutes) / 60.0 }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if configuredProviders.count > 1 {
+                    Section("Provider") {
+                        Picker("Provider", selection: $provider) {
+                            ForEach(configuredProviders, id: \.provider) { pr in
+                                Text(pr.display_name.isEmpty ? OrbManaged.providerLabel(pr.provider) : pr.display_name).tag(pr.provider)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: provider) { _, next in
+                            allow24h = false
+                            let list = configuredProviders.first(where: { $0.provider == next })?.sizes ?? response.sizes
+                            size = list.first?.size ?? ""
+                        }
+                    }
+                }
+                Section("Size") {
+                    ForEach(sizes, id: \.size) { s in
+                        Button {
+                            size = s.size
+                            allow24h = false
+                        } label: {
+                            HStack {
+                                Image(systemName: s.size == size ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(s.size == size ? Color.accentColor : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(OrbManaged.sizeLabel(s.size)).font(.body.weight(.medium)).foregroundStyle(.primary)
+                                    Text(OrbManaged.sizeSpec(cpu: s.cpu, ramGB: s.ram_gb, diskGB: s.disk_gb)).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(OrbManaged.usdPerHour(s.usd_per_hour)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Section("Time to live") {
+                    Picker("TTL", selection: $ttl) {
+                        ForEach(OrbManaged.ttlChoices(defaultMinutes: response.budget.default_ttl_minutes ?? 60, maxMinutes: response.budget.max_ttl_minutes ?? 720), id: \.self) { m in
+                            Text(OrbManaged.minutesLabel(m)).tag(m)
+                        }
+                    }
+                }
+                if requires24h {
+                    Section {
+                        Toggle("Confirm \(chosen?.min_billing_hours ?? 24)h minimum lease (\(OrbManaged.usd(estimate)))", isOn: $allow24h)
+                    }
+                }
+                Section {
+                    LabeledContent("Estimated cost", value: OrbManaged.usd(estimate))
+                }
+            }
+            .navigationTitle("New managed machine")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create") {
+                        onCreate(provider == "boat" ? nil : provider, size, ttl, requires24h && allow24h)
+                    }
+                    .disabled(chosen == nil || (requires24h && !allow24h))
+                }
+            }
+        }
     }
 }
