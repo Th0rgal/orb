@@ -455,7 +455,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
+          "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
         }
       ],
       "execution": {
@@ -522,7 +522,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
+          "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
         }
       ],
       "execution": {
@@ -595,7 +595,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
+          "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
         }
       ],
       "execution": {
@@ -649,11 +649,11 @@
         },
         {
           "path": "src/api/proxy.rs",
-          "sha256": "5e9da76bcf5741f5375f4acfacce8f4d57591768122a7400381f80abc9e09b38"
+          "sha256": "1f26be0eac61f6df5453af64ed7fdeec39eed75b139cd2b6c4f6ffc222a264e9"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
+          "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
         }
       ],
       "execution": {
@@ -712,11 +712,11 @@
         },
         {
           "path": "src/api/proxy.rs",
-          "sha256": "5e9da76bcf5741f5375f4acfacce8f4d57591768122a7400381f80abc9e09b38"
+          "sha256": "1f26be0eac61f6df5453af64ed7fdeec39eed75b139cd2b6c4f6ffc222a264e9"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
+          "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
         }
       ],
       "execution": {
@@ -789,7 +789,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "01659cc40098c6a4c6367b6b79ae47b8644c58b29c6f0dd5779ef25ec824b654"
+          "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
         }
       ],
       "execution": {

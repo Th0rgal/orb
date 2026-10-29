@@ -1,4 +1,5 @@
-    Finished `test` profile [unoptimized] target(s) in 0.06s
+   Compiling orb-spec v1.3.0 (/tmp/orb-work/orb/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 0.86s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-cce4852a0adf52dc)
 
 running 1 test
@@ -7,25 +8,25 @@ test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ..
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
 
    Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 3m 26s
+    Finished `test` profile [unoptimized] target(s) in 3m 25s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 1 test
 test api::privilege_broker::tests::phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3643 filtered out; finished in 0.06s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.01s
 
    Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 2m 04s
+    Finished `test` profile [unoptimized] target(s) in 1m 00s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 1 test
 test api::control::remote_jobs::boot_leftover_tests::phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3643 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.00s
 
    Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 1m 03s
+    Finished `test` profile [unoptimized] target(s) in 50.03s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 12 tests
@@ -42,10 +43,10 @@ test api::mission_access::tests::scope_hint_points_reads_to_the_tool_and_refuses
 test api::mission_access::tests::state_survives_restart ... ok
 test api::mission_access::tests::ttl_is_clamped_and_self_requests_refused ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3632 filtered out; finished in 0.06s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3637 filtered out; finished in 0.02s
 
    Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 1m 02s
+    Finished `test` profile [unoptimized] target(s) in 42.23s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 21 tests
@@ -71,32 +72,32 @@ test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_
 test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
 test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3623 filtered out; finished in 1.80s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3628 filtered out; finished in 2.76s
 
    Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 58.73s
+    Finished `test` profile [unoptimized] target(s) in 43.16s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 1 test
 test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3643 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.00s
 
    Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 58.54s
+    Finished `test` profile [unoptimized] target(s) in 31.64s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 1 test
 test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3643 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.00s
 
    Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 46.61s
+    Finished `test` profile [unoptimized] target(s) in 35.89s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 1 test
 test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3643 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3648 filtered out; finished in 0.00s
 
