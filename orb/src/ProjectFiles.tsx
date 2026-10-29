@@ -83,7 +83,7 @@ import { createProjectTree, missionFolder, type Node, type RowData } from "./tre
 import { MachineBadge, missionMachine, missionCopyId, rowDetail, ROW_TIP_ID, launchedToggle as launchedToggleView, type RowTipContent } from "./tree/missionRow";
 import { FileSkeleton } from "./Skeleton";
 import { isPartialList, mergeMission, reconcileMissionList, type Misses, resolvedParents, withHierarchy } from "./missionHierarchy";
-import { missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "./missionTree";
+import { forkLeaders, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "./missionTree";
 
 export { isMissionDeleting } from "./tree/selection";
 export { missionMachine, rowDetail, missionCopyId, type RowTipContent } from "./tree/missionRow";
@@ -781,6 +781,18 @@ export function LiveProjectsSection(p: {
     };
     window.addEventListener("orb:mission-moved", onMissionMoved);
     onCleanup(() => window.removeEventListener("orb:mission-moved", onMissionMoved));
+    const onMissionForked = (event: Event) => {
+      const { mission } = (event as CustomEvent<{ mission: Mission }>).detail ?? {};
+      const slug = mission?.project?.trim();
+      if (!mission?.id || !slug) return;
+      missionRevision++;
+      const clean = withHierarchy(mission);
+      batch(() => {
+        setMissions(slug, rows => [clean, ...(rows ?? []).filter(m => m.id !== clean.id)]);
+      });
+    };
+    window.addEventListener("orb:mission-forked", onMissionForked);
+    onCleanup(() => window.removeEventListener("orb:mission-forked", onMissionForked));
     const onArchived = (event: Event) => {
       const { id } = (event as CustomEvent<{ id: string }>).detail;
       archivedInSession.add(id);
@@ -1885,7 +1897,14 @@ export function LiveProjectsSection(p: {
     if (!mission?.project || isArchived(mission)) return "";
     const parents: string[] = [], seen = new Set([mission.id]);
     const rows = missions[mission.project] ?? [];
-    let root = mission, parent = missionParent(mission);
+    const leader = forkLeaders(rows.filter(m => !isArchived(m))).get(mission.id);
+    let root = mission;
+    if (leader && leader.id !== mission.id && !seen.has(leader.id)) {
+      seen.add(leader.id);
+      parents.push(`m:${leader.id}`);
+      root = leader;
+    }
+    let parent = missionParent(root);
     while (parent && !seen.has(parent)) {
       seen.add(parent); parents.push(`m:${parent}`);
       const ancestor = rows.find(m => m.id === parent);

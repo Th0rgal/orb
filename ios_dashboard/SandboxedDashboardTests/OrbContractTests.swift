@@ -280,4 +280,95 @@ final class OrbContractTests: XCTestCase {
         XCTAssertNil(partial.parentMissionID)
         OrbHierarchy.reset()
     }
+
+    func testForkLeaderPrefersUnretiredAndLiveAndNewlyCreatedForks() {
+        // Production incident replay (`86d91cc3` -> `65407660` / `d65744b9`):
+        // an archived or interrupted ancestor with a newer timestamp never demotes a live fork.
+        let archivedRoot = OrbRow(.object([
+            "id": .string("86d91cc3"),
+            "title": .string("Orb: leaninification"),
+            "status": .string("acknowledged"),
+            "created_at": .string("2026-10-28T23:00:00Z"),
+            "updated_at": .string("2026-10-29T05:50:00Z")
+        ]))
+        let worker = OrbRow(.object([
+            "id": .string("9bfbb6e4"),
+            "title": .string("Audit spec worker"),
+            "status": .string("completed"),
+            "parent_mission_id": .string("86d91cc3"),
+            "updated_at": .string("2026-10-29T05:00:00Z")
+        ]))
+        let completedSibling = OrbRow(.object([
+            "id": .string("d65744b9"),
+            "title": .string("Orb: leaninification"),
+            "status": .string("completed"),
+            "tags": .array([.string("fork-of:86d91cc3")]),
+            "created_at": .string("2026-10-29T05:05:00Z"),
+            "updated_at": .string("2026-10-29T05:49:00Z")
+        ]))
+        let activeFork = OrbRow(.object([
+            "id": .string("65407660"),
+            "title": .string("Orb: leaninification"),
+            "status": .string("active"),
+            "tags": .array([.string("fork-of:86d91cc3")]),
+            "created_at": .string("2026-10-29T05:31:00Z"),
+            "updated_at": .string("2026-10-29T05:31:00Z")
+        ]))
+        let retained = OrbMissionTree.treeRows([archivedRoot, worker, completedSibling, activeFork]) { $0.state != "acknowledged" }
+        let nestedActive = OrbMissionTree.nest(retained)
+        XCTAssertEqual(nestedActive.map(\.id), ["65407660"])
+
+        // Even if the ancestor was spuriously resurrected and stalled into `interrupted` at 05:48:22Z,
+        // the live fork (`65407660`) still leads, and after `65407660` stops at 06:02:22Z it stays on top.
+        let stalledRoot = OrbRow(.object([
+            "id": .string("86d91cc3"),
+            "title": .string("Orb: leaninification"),
+            "status": .string("interrupted"),
+            "created_at": .string("2026-10-28T23:00:00Z"),
+            "updated_at": .string("2026-10-29T05:48:22Z")
+        ]))
+        XCTAssertEqual(OrbMissionTree.nest([stalledRoot, worker, completedSibling, activeFork]).map(\.id), ["65407660"])
+        let stoppedFork = OrbRow(.object([
+            "id": .string("65407660"),
+            "title": .string("Orb: leaninification"),
+            "status": .string("interrupted"),
+            "tags": .array([.string("fork-of:86d91cc3")]),
+            "created_at": .string("2026-10-29T05:31:00Z"),
+            "updated_at": .string("2026-10-29T06:02:22Z")
+        ]))
+        XCTAssertEqual(OrbMissionTree.nest([stalledRoot, worker, completedSibling, stoppedFork]).map(\.id), ["65407660"])
+
+        // Harness conversion settle window: source stopped 6s after fork creation (or tied timestamp)
+        // never steals leadership from the newly created fork, regardless of array order.
+        let codexSource = OrbRow(.object([
+            "id": .string("codex-src"),
+            "title": .string("Convert me"),
+            "status": .string("interrupted"),
+            "backend": .string("codex"),
+            "created_at": .string("2026-10-29T02:00:00Z"),
+            "updated_at": .string("2026-10-29T02:25:17Z")
+        ]))
+        let opencodeFork = OrbRow(.object([
+            "id": .string("opencode-fork"),
+            "title": .string("Convert me"),
+            "status": .string("interrupted"),
+            "backend": .string("opencode"),
+            "tags": .array([.string("fork-of:codex-src")]),
+            "created_at": .string("2026-10-29T02:25:11Z"),
+            "updated_at": .string("2026-10-29T02:25:11Z")
+        ]))
+        XCTAssertEqual(OrbMissionTree.nest([codexSource, opencodeFork]).map(\.id), ["opencode-fork"])
+        XCTAssertEqual(OrbMissionTree.nest([opencodeFork, codexSource]).map(\.id), ["opencode-fork"])
+
+        // Returning to the original well after the settle window makes the original lead again.
+        let resumedSource = OrbRow(.object([
+            "id": .string("codex-src"),
+            "title": .string("Convert me"),
+            "status": .string("completed"),
+            "backend": .string("codex"),
+            "created_at": .string("2026-10-29T02:00:00Z"),
+            "updated_at": .string("2026-10-29T03:00:00Z")
+        ]))
+        XCTAssertEqual(OrbMissionTree.nest([resumedSource, opencodeFork]).map(\.id), ["codex-src"])
+    }
 }

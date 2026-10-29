@@ -119,6 +119,9 @@ pub(crate) fn schedule_mission_scope_teardown(
     if !status_triggers_teardown(&status) {
         return;
     }
+    if let Some(m) = crate::managed::global() {
+        m.notify_activity_change();
+    }
     tokio::spawn(async move {
         tokio::time::sleep(teardown_grace()).await;
         // The triggering status is only a reason to schedule a recheck. A

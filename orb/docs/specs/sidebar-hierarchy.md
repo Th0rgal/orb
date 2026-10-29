@@ -55,6 +55,38 @@ gateway restarts interrupt running `cloud_hermes` turns. For example,
 `hermes-gateway` restart. The other interrupted missions are in same-minute
 clusters, the restart pattern.
 
+### Root causes (with evidence, 2026-10-29 — fork version inversion & idle-worker resurrection)
+
+- **Fork-group leader chosen purely by raw `updated_at`.** `forkLeaders`
+  (`orb/src/missionTree.ts`, `OrbCore.swift`, `OrbCore.kt`) elected the leader
+  of a `fork-of:` group solely by `activity(m) > activity(best)`, ignoring
+  archival/supersession status, live execution status, and fork lineage depth:
+  1. During a harness transfer (for example Codex `86d91cc3` -> OpenCode
+     `builtin/smart` `65407660`), stopping or archiving the source mission (or
+     a late status/metadata event on the source within seconds of fork creation)
+     advanced `source.updated_at >= fork.updated_at`. Because `TreeView.ts`
+     auto-expands any leader that `holds` the open mission, the brand-new fork
+     appeared for ~1 s indented inside the source as an `earlier` version row
+     (`"OpenCode · builtin/smart"`) before jumping to top-level once its first
+     event updated `fork.updated_at`.
+  2. `App.onFork` updated only `App`'s activity signal and triggered an async
+     `bumpProjects()` read without synchronously inserting the new fork into
+     `ProjectFiles`'s per-project `missions[slug]` store.
+  3. On `agent-core` on 2026-10-29, archived Codex mission `86d91cc3` remained
+     retained in `visibleMissions` as parent context for its worker children
+     (`9bfbb6e4`, etc.), and a second fork `d65744b9` shared the same root
+     group. Whenever `86d91cc3` or `d65744b9` received a newer `updated_at`
+     (even in `interrupted` or `acknowledged` status), active mission `65407660`
+     (`"Orb: leaninification"`) was demoted into `versions` inside the stopped
+     mission, then jumped back to top-level when `65407660` updated at `06:02Z`.
+- **Idle-worker watchdog resurrected archived/superseded parents.** In Core
+  (`src/api/supervision.rs`), `notify_parents_of_idle_children` checked only
+  `!parent.status.is_terminal()`. Because `MissionStatus::Acknowledged`
+  (archived) and `MissionStatus::Paused` are non-terminal, parked `Acknowledged`
+  worker `9bfbb6e4` caused `[worker-watchdog]` to inject control messages into
+  archived `86d91cc3` at `03:26Z` and `05:33Z`, flipping `86d91cc3` back to
+  `Active` and then `Interrupted` (`03:41Z`, `05:48Z`).
+
 ## Invariants
 
 **H1. A mission with a parent link is never drawn at the root.** If the
@@ -90,6 +122,45 @@ parent of every row in the converged tree is the same.
 optimistic moves and archives, and an open conversation laid over its list
 row all go through `mergeMission(prev, patch, "partial")`. That call changes
 only the fields the patch names.
+
+**F1. Fork-group leadership respects retirement, liveness, and lineage.** Within
+any connected `fork-of:` group (`forkLeaders` on desktop, iOS, and Android),
+each version is ranked lexicographically by the 4-tuple
+`(unretired, live, effectiveActivity, forkDepth)`:
+
+1. `unretired` (`1` vs `0`): a version that is neither archived
+   (`acknowledged` / `archived`) nor tagged `superseded` (`superseded`,
+   `superseded_by:*`, `superseded-by:*`) always leads over a retired version,
+   even when `missionTreeRows` retains an archived parent for its workers.
+2. `live` (`1` vs `0`): a live version (`active`, `running`, `pending`,
+   `queued`, `starting`, `resuming`, `waiting_background`, `awaiting_user`)
+   always leads over a stopped version (`completed`, `interrupted`, `failed`,
+   `cancelled`, `paused`, `blocked`). A stopped version never hides a running
+   version inside `earlier`.
+3. `effectiveActivity`: `updated_at` (falling back to `created_at`), except
+   that when an ancestor version's `updated_at` falls within `FORK_SETTLE_MS`
+   (15 s) of a descendant fork's `created_at`, its `effectiveActivity` is
+   clamped to that descendant's `created_at` so post-cancel/cleanup/metadata
+   writes on the source cannot outrank the newly created fork. Deliberately
+   resuming or messaging an earlier version later still advances its
+   `effectiveActivity` past the window and makes it lead again.
+4. `forkDepth`: deeper `fork-of:` lineage breaks ties deterministically
+   regardless of list order.
+
+**F2. Optimistic fork insertion & transfer handoff.** When `onFork(next)` fires,
+Orb commits `next` into `App.missions`, `App.openMission`, and
+`ProjectFiles.missions[slug]` synchronously inside one `batch()` (via
+`orb:mission-forked`, advancing `missionRevision` to fence pre-fork list reads)
+before selecting `m:<next.id>`. When a transfer enters `running` and starts
+archiving `sourceId`, `orb:mission-archived` hides `sourceId` optimistically at
+once and rolls back via `orb:mission-archive-failed` only on server failure.
+
+**W1. Idle-worker watchdog never wakes retired parents.** Core's
+`notify_parents_of_idle_children` (`src/api/supervision.rs`) sends
+`[worker-watchdog]` notifications only when `parent.status` is one of
+`Active | Pending | WaitingBackground | AwaitingUser`, `parent` carries no
+`superseded` tag, and `parent` has not been forked forward by a conversation
+fork (`fork-of:<parent.id>`).
 
 **M1. A failed, empty or partial answer never removes rows.** A row leaves the
 list only through:

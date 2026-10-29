@@ -139,18 +139,54 @@ describe("managed row v3 and unlimited budgets", () => {
   });
 });
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { canStopMachine, managedSectionTitle, providerLabel, type ManagedMachinesResponse } from "../src/managedMachineModel";
+
 describe("ownership and reaping", () => {
   it("classifies the owner", () => {
     expect(machineOwner({ owner_mission_id: "m1", owner_kind: "mission" })).toEqual({ kind: "mission", missionId: "m1" });
     expect(machineOwner({ owner_mission_id: null, owner_kind: "user" })).toEqual({ kind: "user" });
     expect(machineOwner({ owner_mission_id: null })).toEqual({ kind: "none" });
   });
-  it("formats the scheduled reap", () => {
+  it("formats the scheduled reap and deferred 24h lease deletion", () => {
     const now = Date.parse("2026-10-23T12:00:00Z");
     expect(reapLine({ state: "online", reap_at: "2026-10-23T12:04:10Z", reap_reason: "owner_completed" }, now)).toBe("Reaps in 5 min (owner completed)");
+    expect(reapLine({ state: "online", reap_at: "2026-10-23T12:15:00Z", reap_reason: "working_owner_idle" }, now)).toBe("Reaps in 15 min (idle)");
     expect(reapLine({ state: "online", reap_at: "2026-10-23T11:59:00Z", reap_reason: "owner_interrupted_idle" }, now)).toBe("Reap due (owner interrupted, idle)");
     expect(reapLine({ state: "online", reap_at: "2026-10-23T13:30:00Z", reap_reason: "idle_no_owner" }, now)).toBe("Reaps in 1 h 30 min (idle, no owner)");
+    expect(reapLine({ state: "online", reap_at: "2026-10-24T10:00:00Z", deletable_at: "2026-10-24T10:00:00Z", reap_reason: "awaiting_deletable_at:owner_completed" }, now))
+      .toBe("Deletes when 24h lease ends in 22 h 00 min");
     expect(reapLine({ state: "destroyed", reap_at: "2026-10-23T12:04:00Z" }, now)).toBeNull();
     expect(reapLine({ state: "online", reap_at: null }, now)).toBeNull();
+  });
+  it("labels multi-provider badges, section titles, and free-stop capability", () => {
+    expect(providerLabel("boat")).toBe("boat.dev");
+    expect(providerLabel("hetzner")).toBe("Hetzner");
+    expect(providerLabel("vastai")).toBe("Vast.ai");
+    expect(providerLabel("scaleway")).toBe("Scaleway");
+    expect(managedSectionTitle([{ provider: "boat", display_name: "boat.dev", configured: true, supports_snapshots: true, supports_free_stop: true, sizes: [] }], [])).toBe("Managed (boat.dev)");
+    expect(managedSectionTitle([{ provider: "hetzner", display_name: "Hetzner", configured: true, supports_snapshots: false, supports_free_stop: false, sizes: [] }], [])).toBe("Managed cloud");
+    expect(canStopMachine({ state: "online", provider: "boat" })).toBe(true);
+    expect(canStopMachine({ state: "online", provider: "hetzner" })).toBe(false);
+    expect(canStopMachine({ state: "stopped", provider: "boat" })).toBe(false);
+  });
+  it("decodes the shared multi-provider managed-machines response fixture", () => {
+    const raw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "shared", "orb-spec", "fixtures", "managed-machines-response.json"), "utf8");
+    const resp = JSON.parse(raw) as ManagedMachinesResponse;
+    expect(resp.enabled).toBe(true);
+    expect(resp.providers?.map(p => [p.provider, p.display_name, p.configured, p.supports_free_stop, p.supports_snapshots])).toEqual([
+      ["boat", "boat.dev", true, true, true],
+      ["hetzner", "Hetzner Cloud", true, false, false],
+      ["vastai", "Vast.ai", false, false, false],
+      ["scaleway", "Scaleway", false, false, false],
+    ]);
+    expect(managedSectionTitle(resp.providers, resp.machines)).toBe("Managed cloud");
+    expect(canStopMachine(resp.machines[0]!, resp.providers)).toBe(false);
+    const vastRtx = resp.providers?.find(p => p.provider === "vastai")?.sizes.find(s => s.size === "rtx4090");
+    expect(vastRtx?.gpu).toBe("RTX 4090");
+    const cax = resp.providers?.find(p => p.provider === "hetzner")?.sizes.find(s => s.size === "cax31");
+    expect(cax?.arch).toBe("arm64");
   });
 });

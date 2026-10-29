@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { connectionVersion, listQueuedMessages } from "./api";
 import { applyStreamEvent, buildTranscript, type StreamItem } from "./transcriptModel";
-import { getMissionEventPage, getMissionEventPreview, storedToStream, type StreamEvent } from "./stream";
+import { getMissionEventPage, getMissionEventPreview, storedToStream, type StoredEvent, type StreamEvent } from "./stream";
 import { cacheDelete, cachePeek, cachePut } from "./pageCache";
 
 export type TranscriptSnap = { activity?: string; items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; detailsPending?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
@@ -238,4 +238,42 @@ export function recordPresentationActivity(id: string, label: unknown) {
  const scope=key(id), prior=peekTranscript(id);
  if(!recentlyOpened.has(scope) || !prior || active.has(scope)) return;
  saveSnapshot(scope,{...prior,activity:label.slice(0,160)});
+}
+
+/** Merge bounded passage-context events (and optional conversational spine)
+ * into the cached transcript so deep search hits (>200 events back) render and
+ * scroll without paging backward 200 rows at a time. */
+export function hydratePassageEvents(id: string, rawEvents: StoredEvent[]): Promise<TranscriptSnap> {
+  return transcriptJob(id, "older", async () => {
+    const current = peekReadyTranscript(id) ?? (await fetchTranscript(id));
+    const passageStream = rawEvents.map(storedToStream).filter((e): e is StreamEvent => e !== null);
+    let spineStream: StreamEvent[] = [];
+    let before = current.before;
+    let hasOlder = current.hasOlder;
+    if (current.hasOlder && current.before !== undefined) {
+      const minPassageSeq = rawEvents.reduce((m, e) => Math.min(m, e.sequence), Infinity);
+      if (minPassageSeq < current.before) {
+        const spinePage = await getMissionEventPage(id, { before: current.before, view: "transcript" }).catch(() => null);
+        if (spinePage) {
+          if (spinePage.events.length) {
+            spineStream = spineAnswers(spinePage.events.map(storedToStream).filter((e): e is StreamEvent => e !== null));
+          }
+          before = spinePage.nextCursor;
+          hasOlder = spinePage.hasMore;
+        }
+      }
+    }
+    const mergedOlder = mergeStreamBySequence(spineStream, passageStream);
+    const stream = mergeStreamBySequence(mergedOlder, current.stream);
+    let items = buildTranscript(stream);
+    for (const item of current.items) {
+      if (item.kind === "user" && item.messageId) {
+        items = applyStreamEvent(items, {
+          type: "user_message",
+          data: { id: item.messageId, content: item.text, queued: item.queued, receipt: item.receipt, attached: item.attached },
+        });
+      }
+    }
+    return { ...current, stream, items, before, hasOlder };
+  });
 }

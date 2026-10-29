@@ -254,6 +254,8 @@ struct DownloadSharedFileParams {
 #[derive(Debug, Deserialize)]
 struct SpawnManagedParams {
     #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
     provisioning_mode: Option<crate::managed::ProvisioningMode>,
     #[serde(default)]
     size: Option<String>,
@@ -261,6 +263,14 @@ struct SpawnManagedParams {
     cpu: Option<u32>,
     #[serde(default)]
     ram_gb: Option<u32>,
+    #[serde(default)]
+    gpu: Option<String>,
+    #[serde(default)]
+    arch: Option<String>,
+    #[serde(default)]
+    max_hourly_usd: Option<f64>,
+    #[serde(default)]
+    allow_24h_commitment: Option<bool>,
     #[serde(default)]
     ttl_minutes: Option<u64>,
     #[serde(default)]
@@ -273,6 +283,22 @@ struct SpawnManagedParams {
     /// Set by the gateway to the calling mission; never trusted from agents.
     #[serde(default)]
     owner_mission_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawManagedOperationParams {
+    machine_id: String,
+    operation: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +369,8 @@ struct StartMissionParams {
     managed_ttl_minutes: Option<u64>,
     #[serde(default)]
     managed_from_snapshot: Option<String>,
+    #[serde(default)]
+    managed_allow_24h_commitment: Option<bool>,
     /// Optional managed-machine budget (USD) for the new mission's subtree;
     /// under a parent budget it is a sub-budget carved from the parent pool.
     #[serde(default)]
@@ -1658,24 +1686,45 @@ impl AssistantMcp {
         vec![
             ToolDefinition {
                 name: "spawn_managed_machine".to_string(),
-                description: "Rent a fresh, disposable cloud VM (boat.dev, EU) and enroll it as a compute node, so you can run a subagent or heavy job on dedicated CPU/RAM instead of sharing the fleet. Use this whenever a task needs more compute than you have (parallel builds, big test suites, memory-hungry Lean/Rust/ML work, isolation from the shared nodes) or get_compute_fleet shows no free capacity. You choose the size: small = 2 vCPU / 4 GB RAM / 12 GB disk ($0.018/h, default), default = 4 vCPU / 8 GB / 50 GB ($0.036/h), large = 8 vCPU / 16 GB / 125 GB ($0.072/h), xlarge = 16 vCPU / 32 GB / 251 GB ($0.20/h); or pass cpu and/or ram_gb and the smallest fitting size is picked. The VM comes with claude, codex, opencode, gemini, agy, elan/Lean v4.35.0, turbo-lean, lean-native and certified-search, but NO credentials and no private checkouts (it is an untrusted, managed trust class: never send secrets or private-host work there). Result (via get_action) has its short `name` (e.g. small-a, large-b): start a subagent there with start_mission(remote_node_id=name, backend=..., prompt=...). Shortcut: start_mission(remote_node_id=\"auto-managed:<size>\") spawns and places in one call. All sizes run the same CPU (AMD Ryzen 9 9950X, Zen 5, AVX-512, VPCLMULQDQ): size buys cores and RAM, not CPU features, so use small or default for probes and audits. Every machine has a TTL (default 60 min, auto-extended in 30 min chunks while busy, max 720) and is destroyed a few minutes after your mission ends, 15 idle minutes after it is interrupted or waiting, or at its TTL. It is charged to your mission's budget pool if one is set (see get_budget). Call destroy_managed_machine as soon as you are done.".to_string(),
+                description: "Rent a fresh, disposable cloud VM across Core's native providers (`boat` default, `hetzner`, `vastai`, `scaleway`) and enroll it as a compute node (or raw guest), so you can run a subagent or heavy CPU/GPU/ARM64/macOS job with Core-enforced ownership, budget caps, and automatic idle reaping. NEVER fetch cloud API keys via `secret_get` to rent VMs directly. Sizes by provider: `boat` (`small` 2 vCPU/4 GB, `default` 4 vCPU/8 GB, `large` 8 vCPU/16 GB, `xlarge` 16 vCPU/32 GB on Zen 5), `hetzner` (`cpx21`, `cpx31`, `cpx41`, `cpx51` x86_64; `cax21`, `cax31`, `cax41` arm64), `vastai` (`rtx4090`, `a100`, `h100` CUDA GPUs), `scaleway` (`PRO2-S`, `PRO2-M`, `L4-1-24G`, `H100-1-80G`, and `M2-M`/`M2-L` Apple Silicon macOS with `allow_24h_commitment=true`). Or pass `cpu`, `ram_gb`, `gpu`, or `arch` and Core picks the cheapest fitting tier. Shortcut: `start_mission(remote_node_id=\"auto-managed:<provider>:<size>\")` spawns and places in one call. Every machine has a TTL (default 60 min, auto-extended while busy, max 720) and is reaped automatically after your mission ends, after 15 min idle while unused (5 min post-job), or at its TTL. Call `destroy_managed_machine` as soon as you are done.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "size": {"type": "string", "enum": ["small", "default", "large", "xlarge"], "description": "small=2 vCPU/4 GB, default=4 vCPU/8 GB, large=8 vCPU/16 GB, xlarge=16 vCPU/32 GB. Omit to use cpu/ram_gb or the default (small)."},
-                        "cpu": {"type": "integer", "minimum": 1, "maximum": 16, "description": "Minimum vCPUs needed (alternative to size)."},
-                        "ram_gb": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Minimum RAM in GB needed (alternative to size)."},
+                        "provider": {"type": "string", "enum": ["boat", "hetzner", "vastai", "scaleway"], "description": "Cloud provider (default `boat`; `hetzner` for cheap EU x86_64/arm64 Linux, `vastai` for disposable CUDA GPUs, `scaleway` for EU Linux/GPU or Apple Silicon macOS)."},
+                        "size": {"type": "string", "description": "Provider size tier (e.g. `small`/`default`/`large`/`xlarge` on boat; `cpx41`/`cax31` on hetzner; `rtx4090`/`a100`/`h100` on vastai; `PRO2-S`/`L4-1-24G`/`M2-M` on scaleway). Omit to pick from cpu/ram_gb/gpu/arch or the provider default."},
+                        "cpu": {"type": "integer", "minimum": 1, "maximum": 128, "description": "Minimum vCPUs needed (alternative to size)."},
+                        "ram_gb": {"type": "integer", "minimum": 1, "maximum": 512, "description": "Minimum RAM in GB needed (alternative to size)."},
+                        "gpu": {"type": "string", "description": "Optional GPU requirement (e.g. `rtx4090`, `l4`, `a100`, `h100`)."},
+                        "arch": {"type": "string", "enum": ["x86_64", "arm64"], "description": "Optional CPU architecture (`x86_64` or `arm64`)."},
+                        "max_hourly_usd": {"type": "number", "minimum": 0, "description": "Optional ceiling on hourly rate (USD/h) when Core selects a tier."},
+                        "allow_24h_commitment": {"type": "boolean", "description": "Explicit opt-in required for providers/tiers with a 24-hour minimum billing lease (Scaleway Apple Silicon `M2-*`)."},
                         "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Initial lifetime; auto-extended while busy (within budget). Default 60."},
-                        "image": {"type": "string", "description": "Image (named snapshot). Worker default orb-node-base; raw requires an explicit operator-allowlisted clean image."},
-                        "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM: no guest writes or Orb node; same ownership, budgets and TTL. Source forks/snapshots inherit mode."},
-                        "from_snapshot": {"type": "string", "description": "Start from one of your project's snapshots (list_managed_snapshots) with repos, toolchains and caches ready."},
+                        "image": {"type": "string", "description": "Optional image or snapshot override."},
+                        "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM (Boat): use `exec_raw_managed_machine` for bounded guest ops."},
+                        "from_snapshot": {"type": "string", "description": "Start from one of your project's Boat snapshots (`list_managed_snapshots`) with repos, toolchains and caches ready."},
                         "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
                     }
                 }),
             },
             ToolDefinition {
+                name: "exec_raw_managed_machine".to_string(),
+                description: "Run an owner-scoped, at-most-once command or file operation (`exec`, `write_file`, `read_file`) on a `provisioning_mode=\"raw\"` managed VM without SSH keys or Orb worker enrollment.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["machine_id", "operation"],
+                    "properties": {
+                        "machine_id": {"type": "string", "description": "Raw managed machine name or id."},
+                        "operation": {"type": "string", "enum": ["exec", "write_file", "read_file"]},
+                        "command": {"type": "string", "description": "Shell command for `operation=\"exec\"` (<= 64 KB)."},
+                        "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 120, "description": "Timeout in seconds for `operation=\"exec\"` (default 60)."},
+                        "path": {"type": "string", "description": "Absolute guest path (`/…`) for `write_file` or `read_file`."},
+                        "content": {"type": "string", "description": "UTF-8 file content for `write_file` (<= 64 KB)."}
+                    }
+                }),
+            },
+            ToolDefinition {
                 name: "list_managed_machines".to_string(),
-                description: "List live managed VMs (boat.dev) compactly: name, size, state, owner, expires_at, reap_at, cost so far, plus today's spend, running count and caps (null = unlimited). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
+                description: "List live managed VMs across all configured providers (`boat`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, expires_at, reap_at, deletable_at, cost so far, plus configured providers, today's spend, running count and caps. Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
                 input_schema: json!({"type": "object", "properties": {"verbose": {"type": "boolean", "description": "Full rows and history (large)."}}}),
             },
             ToolDefinition {
@@ -2793,13 +2842,11 @@ impl AssistantMcp {
         };
         let mut managed_machine = Value::Null;
         let mut managed_reused = false;
-        let auto_managed_size = params
+        let auto_managed = params
             .remote_node_id
             .as_deref()
-            .map(str::trim)
-            .filter(|r| r.to_ascii_lowercase().starts_with("auto-managed"))
-            .map(|r| r.split_once(':').map(|(_, s)| s.trim().to_string()));
-        if let Some(size) = auto_managed_size {
+            .and_then(parse_auto_managed_spec);
+        if let Some((provider, size)) = auto_managed {
             // Validate the launch (model, harness auth, caps, budget) before
             // renting: a rejected child must never cost a VM.
             let check = self
@@ -2842,12 +2889,17 @@ impl AssistantMcp {
             let spawned = self
                 .spawn_managed_machine_with(
                     SpawnManagedParams {
+                        provider,
                         // Mission placement requires an enrolled worker. Never inherit
                         // raw mode from a snapshot and rent an unusable machine.
                         provisioning_mode: Some(crate::managed::ProvisioningMode::Worker),
-                        size: size.filter(|s| !s.is_empty()),
+                        size,
                         cpu: None,
                         ram_gb: None,
+                        gpu: None,
+                        arch: None,
+                        max_hourly_usd: None,
+                        allow_24h_commitment: params.managed_allow_24h_commitment,
                         ttl_minutes: params.managed_ttl_minutes,
                         image: None,
                         reason: Some(format!("start_mission: {}", params.title)),
@@ -2992,6 +3044,7 @@ impl AssistantMcp {
                 remote_node_id: params.remote_node_id,
                 managed_ttl_minutes: None,
                 managed_from_snapshot: None,
+                managed_allow_24h_commitment: None,
                 budget_usd: None,
                 backend: Some("opencode".into()),
                 model_override: Some(model.clone()),
@@ -3481,9 +3534,14 @@ impl AssistantMcp {
                 reqwest::Method::POST,
                 "/api/managed-machines".into(),
                 Some(json!({
+                    "provider": params.provider,
                     "size": params.size,
                     "cpu": params.cpu,
                     "ram_gb": params.ram_gb,
+                    "gpu": params.gpu,
+                    "arch": params.arch,
+                    "max_hourly_usd": params.max_hourly_usd,
+                    "allow_24h_commitment": params.allow_24h_commitment.unwrap_or(false),
                     "ttl_minutes": params.ttl_minutes,
                     "image": params.image,
                     "reason": params.reason,
@@ -3500,7 +3558,7 @@ impl AssistantMcp {
             "machine": machine,
             "node_id": machine["node_id"],
             "name": machine["name"],
-            "next": if machine["provisioning_mode"] == "raw" { "Raw VM ready; no Orb node is installed. Use the owner-scoped /api/managed-machines/:id/operations REST endpoint with an idempotency key, then destroy_managed_machine when done.".to_string() } else { format!(
+            "next": if machine["provisioning_mode"] == "raw" { format!("Raw VM ready; no Orb node is installed. Use exec_raw_managed_machine(machine_id=\"{name}\", operation=...) for bounded guest ops, then destroy_managed_machine(machine_id=\"{name}\") when done.", name = machine["name"].as_str().unwrap_or_default()) } else { format!(
                 "start_mission(remote_node_id=\"{name}\", backend=..., prompt=...) runs a subagent on it (its node id {node} also works); destroy_managed_machine(machine_id=\"{name}\") when done",
                 name = machine["name"].as_str().unwrap_or_default(),
                 node = machine["node_id"].as_str().unwrap_or_default(),
@@ -4484,6 +4542,75 @@ impl AssistantMcp {
                 let owner = params.owner_mission_id.clone();
                 self.spawn_managed_machine(params, owner).await
             }
+            "exec_raw_managed_machine" => {
+                let p: RawManagedOperationParams = parse_params(arguments)?;
+                let raw_key = p
+                    .idempotency_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| "idempotency_key is required".to_string())?;
+                let idempotency_key = if raw_key.len() <= 128
+                    && raw_key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-.:".contains(&b))
+                {
+                    raw_key.to_string()
+                } else {
+                    format!("mcp:{}", crate::managed::sha256_hex(raw_key))
+                };
+                let operation = match p.operation.trim() {
+                    "exec" => {
+                        let command = p
+                            .command
+                            .filter(|c| !c.is_empty())
+                            .ok_or_else(|| "`command` is required for operation=\"exec\"".to_string())?;
+                        json!({
+                            "kind": "exec",
+                            "command": command,
+                            "timeout_secs": p.timeout_secs.unwrap_or(60),
+                        })
+                    }
+                    "write_file" => {
+                        let path = p
+                            .path
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| "`path` is required for operation=\"write_file\"".to_string())?;
+                        json!({
+                            "kind": "write_file",
+                            "path": path,
+                            "content": p.content.unwrap_or_default(),
+                        })
+                    }
+                    "read_file" => {
+                        let path = p
+                            .path
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| "`path` is required for operation=\"read_file\"".to_string())?;
+                        json!({
+                            "kind": "read_file",
+                            "path": path,
+                        })
+                    }
+                    other => {
+                        return Err(format!(
+                            "Unsupported raw operation `{other}` (expected exec, write_file, or read_file)"
+                        ))
+                    }
+                };
+                self.managed_request(
+                    reqwest::Method::POST,
+                    format!(
+                        "/api/managed-machines/{}/operations",
+                        urlencoding::encode(&p.machine_id)
+                    ),
+                    Some(json!({
+                        "idempotency_key": idempotency_key,
+                        "operation": operation,
+                    })),
+                )
+                .await
+            }
             "list_managed_machines" => {
                 let params: ListManagedParams = parse_params(arguments)?;
                 let list = self
@@ -4774,6 +4901,8 @@ fn compact_compute_fleet(fleet: &Value) -> Value {
                 "cpu_total": node.get("cpu_total").cloned().unwrap_or(Value::Null),
                 "mem_available_bytes": node.get("mem_available_bytes").cloned().unwrap_or(Value::Null),
                 "disk_available_bytes": node.get("disk_available_bytes").cloned().unwrap_or(Value::Null),
+                "min_free_disk_bytes": node.get("min_free_disk_bytes").cloned().unwrap_or(Value::Null),
+                "disk_pressure_pinned": node.get("disk_pressure_pinned").and_then(Value::as_bool).unwrap_or(false),
                 "cached_toolchains": node.get("cached_toolchains").cloned().unwrap_or_else(|| json!([])),
                 "lean_runtime_ready": node.get("lean_runtime_ready").cloned().unwrap_or(Value::Null),
                 "source_bundle_capacity": node.get("source_bundle_capacity").cloned().unwrap_or(Value::Null),
@@ -4789,6 +4918,7 @@ fn compact_compute_fleet(fleet: &Value) -> Value {
     let lean_nodes: Vec<&Value> = online
         .filter(|node| {
             node.get("lean_runtime_ready").and_then(Value::as_bool) != Some(false)
+                && node.get("disk_pressure_pinned").and_then(Value::as_bool) != Some(true)
                 && node
                     .get("labels")
                     .and_then(Value::as_array)
@@ -7343,6 +7473,8 @@ mod tests {
                     "cpu_total": 8,
                     "mem_available_bytes": 32_u64 << 30,
                     "disk_available_bytes": 100_u64 << 30,
+                    "min_free_disk_bytes": 30_u64 << 30,
+                    "disk_pressure_pinned": false,
                     "cached_toolchains": ["leanprover--lean4---v4.24.0"],
                     "lean_runtime_ready": true,
                     "source_bundle_capacity": {"overlay_bytes": 1048576, "complete_bytes": 8388608},
@@ -7393,7 +7525,10 @@ mod tests {
             compact["nodes"][0]["source_bundle_capacity"]["complete_bytes"],
             8388608
         );
+        assert_eq!(compact["nodes"][0]["min_free_disk_bytes"], 30_u64 << 30);
+        assert_eq!(compact["nodes"][0]["disk_pressure_pinned"], false);
         assert!(compact["nodes"][3]["source_bundle_capacity"].is_null());
+        assert!(compact["nodes"][3]["min_free_disk_bytes"].is_null());
         assert_eq!(compact["nodes"][2]["error"], "probe degraded");
         assert_eq!(compact["recent_jobs"][0]["node_id"], "cpu");
     }
@@ -7808,6 +7943,36 @@ mod tests {
     }
 }
 
+/// Parse `auto-managed`, `auto-managed:<size>`, `auto-managed:<provider>`, or
+/// `auto-managed:<provider>:<size>` into `(provider, size)`.
+fn parse_auto_managed_spec(raw: &str) -> Option<(Option<String>, Option<String>)> {
+    let trimmed = raw.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("auto-managed") {
+        return None;
+    }
+    let Some((_, rest)) = trimmed.split_once(':') else {
+        return Some((None, None));
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some((None, None));
+    }
+    if let Some((provider, size)) = rest.split_once(':') {
+        let p = provider.trim().to_ascii_lowercase();
+        let s = size.trim();
+        return Some((
+            (!p.is_empty()).then_some(p),
+            (!s.is_empty()).then(|| s.to_string()),
+        ));
+    }
+    let lower = rest.to_ascii_lowercase();
+    if matches!(lower.as_str(), "boat" | "hetzner" | "vastai" | "scaleway") {
+        Some((Some(lower), None))
+    } else {
+        Some((None, Some(rest.to_string())))
+    }
+}
+
 /// `list_managed_machines` summary: live machines with the fields an agent
 /// needs, plus the budget block (the full list was ~60 KB and truncated).
 fn compact_managed_list(list: &Value) -> Value {
@@ -7821,12 +7986,16 @@ fn compact_managed_list(list: &Value) -> Value {
                         "name": m["name"],
                         "id": m["id"],
                         "node_id": m["node_id"],
+                        "provider": m["provider"],
                         "size": m["size"],
                         "state": m["state"],
+                        "project": m["project"],
                         "owner_mission_id": m["owner_mission_id"],
+                        "active_mission_ids": m["active_mission_ids"],
                         "expires_at": m["expires_at"],
                         "reap_at": m["reap_at"],
                         "reap_reason": m["reap_reason"],
+                        "deletable_at": m["deletable_at"],
                         "cost_usd": m["cost_usd"],
                         "budget_pool_id": m["budget_pool_id"],
                     })
@@ -7841,6 +8010,7 @@ fn compact_managed_list(list: &Value) -> Value {
         .unwrap_or(Value::Null);
     json!({
         "enabled": list["enabled"],
+        "providers": list["providers"],
         "machines": machines,
         "budget": list["budget"],
         "spend_today_usd": today,
@@ -7856,10 +8026,11 @@ mod compact_managed_tests {
     fn compact_list_keeps_live_summary_rows_only() {
         let full = json!({
             "enabled": true,
+            "providers": [{"provider": "boat", "configured": true}],
             "machines": [
-                {"name": "small-a", "id": "mm1", "state": "online", "size": "small",
+                {"name": "small-a", "id": "mm1", "provider": "boat", "state": "online", "size": "small",
                  "cpu": 2, "error": null, "reason": "long text"},
-                {"name": "", "id": "mm0", "state": "destroyed", "size": "xlarge"}
+                {"name": "", "id": "mm0", "provider": "hetzner", "state": "destroyed", "size": "cpx41"}
             ],
             "budget": {"spent_today_usd": 0.1},
             "daily_spend": [{"day": "2026-10-23", "usd": 1.0}, {"day": "2026-10-24", "usd": 0.25}],
@@ -7868,8 +8039,37 @@ mod compact_managed_tests {
         let c = super::compact_managed_list(&full);
         assert_eq!(c["machines"].as_array().unwrap().len(), 1);
         assert_eq!(c["machines"][0]["name"], "small-a");
+        assert_eq!(c["machines"][0]["provider"], "boat");
         assert!(c["machines"][0].get("reason").is_none());
         assert_eq!(c["spend_today_usd"], 0.25);
+        assert_eq!(c["providers"][0]["provider"], "boat");
         assert!(c.get("sizes").is_none());
+    }
+
+    #[test]
+    fn parse_auto_managed_spec_handles_legacy_and_multi_provider_forms() {
+        use super::parse_auto_managed_spec;
+        assert_eq!(parse_auto_managed_spec("static-node-1"), None);
+        assert_eq!(parse_auto_managed_spec("auto-managed"), Some((None, None)));
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:large"),
+            Some((None, Some("large".into())))
+        );
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:hetzner"),
+            Some((Some("hetzner".into()), None))
+        );
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:hetzner:cpx41"),
+            Some((Some("hetzner".into()), Some("cpx41".into())))
+        );
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:vastai:rtx4090"),
+            Some((Some("vastai".into()), Some("rtx4090".into())))
+        );
+        assert_eq!(
+            parse_auto_managed_spec("auto-managed:scaleway:PRO2-S"),
+            Some((Some("scaleway".into()), Some("PRO2-S".into())))
+        );
     }
 }

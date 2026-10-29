@@ -428,6 +428,8 @@ async fn heartbeat(
         side_jobs: state.runner.side_job_count(),
         cached_toolchains: sandboxed_sh::node::cached_toolchains(&state.work_root),
         source_bundle_capacity: Some(sandboxed_sh::node::lean::source_bundle_capacity()),
+        min_free_disk_bytes: Some(state.runner.capacity().min_free_bytes()),
+        disk_pressure_pinned: sandboxed_sh::node::lean::disk_pressure_pinned(&state.work_root),
         lean_runtime_ready: Some(lean_runtime_ready),
         managed_auth: state.managed_auth.advertised(),
     }))
@@ -915,6 +917,71 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f == sandboxed_sh::machine_transfer_archive::FEATURE));
+    }
+
+    #[tokio::test]
+    async fn machine_transfer_handles_unmaterialized_queued_mission_workspace() {
+        use sandboxed_sh::machine_transfer::{Manifest, Operation};
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path().into()).await;
+        let mid = Uuid::new_v4();
+        let tid = Uuid::new_v4();
+        let root = dir.path().join(mid.to_string());
+        assert!(!root.exists());
+        let request = |operation| TransferFilesRequest {
+            mission_id: mid,
+            transfer_id: tid,
+            source_transfer: None,
+            source_mission_id: None,
+            side: "source".into(),
+            operation,
+        };
+        let inv = transfer_files(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Json(request(Operation::Inventory)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(inv["files"], 0);
+        assert_eq!(inv["bytes"], 0);
+        assert!(root.is_dir());
+
+        // Also test Snapshot directly when the directory has not been created yet.
+        std::fs::remove_dir_all(&root).unwrap();
+        let snap = transfer_files(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Json(request(Operation::Snapshot)),
+        )
+        .await
+        .unwrap()
+        .0;
+        let manifest: Manifest = serde_json::from_value(snap).unwrap();
+        assert!(manifest.files.is_empty());
+        assert_eq!(manifest.bytes, 0);
+
+        let checked = transfer_files(
+            State(state.clone()),
+            auth_headers("node-secret"),
+            Json(request(Operation::CheckSource)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(checked["unchanged"], true);
+
+        // Deleting a materialized workspace after Snapshot must still fail CheckSource.
+        std::fs::remove_dir_all(&root).unwrap();
+        let err = transfer_files(
+            State(state),
+            auth_headers("node-secret"),
+            Json(request(Operation::CheckSource)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -1714,6 +1781,26 @@ async fn transfer_files(
                 .work_root
                 .join(req.source_mission_id.unwrap_or(req.mission_id).to_string())
         });
+    if req.side == "source"
+        && req.source_transfer.is_none()
+        && matches!(
+            req.operation,
+            sandboxed_sh::machine_transfer::Operation::Inventory
+                | sandboxed_sh::machine_transfer::Operation::Snapshot
+        )
+        && matches!(
+            tokio::fs::symlink_metadata(&source).await,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        )
+        && matches!(
+            tokio::fs::symlink_metadata(&state.work_root).await,
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink()
+        )
+    {
+        tokio::fs::create_dir_all(&source)
+            .await
+            .map_err(|e| internal_error(e.into()))?;
+    }
     let value = tokio::task::spawn_blocking(move || {
         sandboxed_sh::machine_transfer::operate(&area, Some(&source), req.operation)
     })

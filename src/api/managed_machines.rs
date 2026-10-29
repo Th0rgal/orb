@@ -72,6 +72,10 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
 pub fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/managed-machines/enroll", post(enroll))
+        .route(
+            "/api/managed-machines/bootstrap-binary/:id",
+            get(bootstrap_binary),
+        )
         .route("/api/managed-machines/relay/poll", get(relay_poll))
         .route(
             "/api/managed-machines/relay/respond",
@@ -183,32 +187,54 @@ async fn spawn_for(
     if let Some(mission) = charged {
         // The mission must be the caller's: never charge (or escape to)
         // another tenant's pool.
-        if !matches!(store.get_mission(mission).await, Ok(Some(_))) {
+        let Ok(Some(mission_row)) = store.get_mission(mission).await else {
             return err(ManagedError {
                 error: "unknown_mission",
                 message: "Owner mission not found".into(),
                 status: 404,
             });
-        }
+        };
         req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission, &user.id).await;
-        req.snapshot_project = store
-            .get_mission(mission)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|m| m.project.project);
+        req.snapshot_project = mission_row.project.project.clone();
+        // Walk parent lineage (bounded) to record `root_mission_id`.
+        let mut root = mission;
+        let mut cur = mission_row.parent_mission_id;
+        for _ in 0..16 {
+            let Some(pid) = cur else { break };
+            root = pid;
+            cur = store
+                .get_mission(pid)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|m| m.parent_mission_id);
+        }
+        req.root_mission_id = Some(root.to_string());
     }
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
+    let target_provider = req
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| m.default_provider().map(|p| p.name().to_string()))
+        .unwrap_or_else(|| m.settings.provider.clone());
     if req.provisioning_mode.unwrap_or_default().is_worker()
         && req.reuse_idle == Some(true)
         && req.from_snapshot.is_none()
         && req.fork_of.is_none()
     {
-        if let (Some(parent), Ok((spec, _))) = (charged, ManagedManager::plan(&m.settings, &req)) {
-            if let Some(machine) = reuse_idle_sibling(&m, &store, &req, parent, spec.size).await {
+        if let (Some(parent), Ok((spec, _))) = (
+            charged,
+            ManagedManager::plan_for_provider(&m.settings, &target_provider, &req),
+        ) {
+            if let Some(machine) =
+                reuse_idle_sibling(&m, &store, &req, parent, &target_provider, spec.size).await
+            {
                 let mut body = serde_json::to_value(&machine).unwrap_or_default();
                 body["reused"] = json!(true);
                 return (StatusCode::OK, Json(body)).into_response();
@@ -221,7 +247,7 @@ async fn spawn_for(
     }
 }
 
-/// An idle VM of the same size/image whose owner is an ended child of
+/// An idle VM of the same provider/size/image whose owner is an ended child of
 /// `parent` (a sibling of the child about to start) and is still inside its
 /// grace window: hand it over instead of renting.
 async fn reuse_idle_sibling(
@@ -229,9 +255,26 @@ async fn reuse_idle_sibling(
     store: &Arc<dyn crate::api::mission_store::MissionStore>,
     req: &SpawnRequest,
     parent: uuid::Uuid,
+    provider: &str,
     size: &str,
 ) -> Option<crate::managed::ManagedMachine> {
-    let image = ManagedManager::resolve_image(&m.settings, req.image.as_deref()).ok()?;
+    let image = if m
+        .provider_for(provider)
+        .is_some_and(|p| p.uses_cloud_init_bootstrap())
+        && req.image.is_none()
+    {
+        match provider {
+            "hetzner" => "ubuntu-24.04".to_string(),
+            "vastai" => "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel".to_string(),
+            "scaleway" if crate::managed::scaleway::is_apple_silicon_type(size) => {
+                "macos-15".to_string()
+            }
+            "scaleway" => "ubuntu_noble".to_string(),
+            _ => "ubuntu-24.04".to_string(),
+        }
+    } else {
+        ManagedManager::resolve_image(&m.settings, req.image.as_deref()).ok()?
+    };
     let ended: std::collections::HashSet<String> = store
         .get_child_missions(parent)
         .await
@@ -250,7 +293,8 @@ async fn reuse_idle_sibling(
     }
     let parent_id = parent.to_string();
     let machine = m
-        .take_idle_sibling(
+        .take_idle_sibling_for_provider(
+            Some(provider),
             &crate::managed::SiblingReuse {
                 size,
                 image: &image,
@@ -538,6 +582,127 @@ async fn enroll(Json(body): Json<EnrollBody>) -> Response {
     }
 }
 
+#[derive(Deserialize, Default)]
+struct BootstrapBinaryQuery {
+    binary: Option<String>,
+}
+
+fn elf_arch_matches(header: &[u8], want_arm64: bool) -> bool {
+    if header.len() < 20 || &header[0..4] != b"\x7fELF" {
+        // Non-ELF (e.g. local macOS test binary or stub script): allow.
+        return true;
+    }
+    let e_machine = u16::from_le_bytes([header[18], header[19]]);
+    if want_arm64 {
+        e_machine == 183 // EM_AARCH64
+    } else {
+        e_machine == 62 // EM_X86_64
+    }
+}
+
+/// Self-authenticated bootstrap artifact download (`sandboxed-node`,
+/// `sandboxed-mcp`, and harness reconcilers) for cloud-init / onstart worker VMs
+/// (`hetzner`, `vastai`, `scaleway`) before they enroll over the relay.
+async fn bootstrap_binary(
+    Path(id): Path<String>,
+    Query(query): Query<BootstrapBinaryQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let token = crate::remote_node::bearer_token(&headers).unwrap_or_default();
+    let Some(machine) = m.verify_bootstrap_token(&id, token).await else {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    };
+    let kind = query
+        .binary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("sandboxed-node");
+    let inline_script = match kind {
+        "provision-script" => Some(crate::managed::PROVISION_SCRIPT),
+        "update-node-codex" => Some(crate::managed::UPDATE_NODE_CODEX_SCRIPT),
+        "update-node-harnesses" => Some(crate::managed::UPDATE_NODE_HARNESSES_SCRIPT),
+        _ => None,
+    };
+    if let Some(script) = inline_script {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/x-script; charset=utf-8")
+            .body(axum::body::Body::from(script))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+    let (bin_name, env_x86, env_arm64) = match kind {
+        "sandboxed-node" => (
+            "sandboxed-node",
+            "SANDBOXED_MANAGED_NODE_BINARY",
+            "SANDBOXED_MANAGED_NODE_BINARY_ARM64",
+        ),
+        "sandboxed-mcp" => (
+            "sandboxed-mcp",
+            "SANDBOXED_MANAGED_MCP_BINARY",
+            "SANDBOXED_MANAGED_MCP_BINARY_ARM64",
+        ),
+        _ => return (StatusCode::BAD_REQUEST, "unsupported bootstrap artifact").into_response(),
+    };
+    let arm64 = machine.size.eq_ignore_ascii_case("cax31")
+        || crate::managed::scaleway::is_apple_silicon_type(&machine.size);
+    let mut candidates: Vec<std::path::PathBuf> = Vec::with_capacity(4);
+    if arm64 {
+        if let Some(p) = std::env::var(env_arm64)
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+        {
+            candidates.push(std::path::PathBuf::from(p));
+        }
+    } else if let Some(p) = std::env::var(env_x86).ok().filter(|p| !p.trim().is_empty()) {
+        candidates.push(std::path::PathBuf::from(p));
+    }
+    candidates.push(std::path::PathBuf::from(format!(
+        "/usr/local/bin/{bin_name}"
+    )));
+    if let Some(sibling) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join(bin_name)))
+    {
+        candidates.push(sibling);
+    }
+
+    for path in candidates {
+        let Ok(mut file) = tokio::fs::File::open(&path).await else {
+            continue;
+        };
+        let mut hdr = [0u8; 20];
+        let n = tokio::io::AsyncReadExt::read(&mut file, &mut hdr)
+            .await
+            .unwrap_or(0);
+        if !elf_arch_matches(&hdr[..n], arm64) {
+            continue;
+        }
+        if tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(0))
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        let stream = tokio_util::io::ReaderStream::new(file);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/octet-stream")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+    let arch_label = if arm64 { "arm64" } else { "x86_64" };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("{bin_name} ({arch_label}) binary is not staged on Core"),
+    )
+        .into_response()
+}
+
 async fn node_auth(
     m: &ManagedManager,
     headers: &HeaderMap,
@@ -691,6 +856,23 @@ mod tests {
         );
         let r = super::client_destroy_reason(Some("ttl_expired\n<script>"));
         assert_eq!(r, "requested: ttl_expiredscript");
+    }
+
+    #[test]
+    fn elf_arch_guard_rejects_mismatched_elf_binaries() {
+        let mut x86_elf = [0u8; 20];
+        x86_elf[0..4].copy_from_slice(b"\x7fELF");
+        x86_elf[18..20].copy_from_slice(&62u16.to_le_bytes());
+
+        let mut arm64_elf = [0u8; 20];
+        arm64_elf[0..4].copy_from_slice(b"\x7fELF");
+        arm64_elf[18..20].copy_from_slice(&183u16.to_le_bytes());
+
+        assert!(super::elf_arch_matches(&x86_elf, false));
+        assert!(!super::elf_arch_matches(&x86_elf, true));
+        assert!(super::elf_arch_matches(&arm64_elf, true));
+        assert!(!super::elf_arch_matches(&arm64_elf, false));
+        assert!(super::elf_arch_matches(b"#!/usr/bin/env bash\n", true));
     }
 }
 

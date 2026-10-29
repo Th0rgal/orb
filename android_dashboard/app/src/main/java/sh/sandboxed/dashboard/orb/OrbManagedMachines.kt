@@ -78,6 +78,7 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
     var busyId by remember { mutableStateOf<String?>(null) }
     var confirm by remember { mutableStateOf<ManagedMachine?>(null) }
     var details by remember { mutableStateOf<ManagedMachine?>(null) }
+    var creating by remember { mutableStateOf(false) }
     var showRecent by remember { mutableStateOf(false) }
 
     suspend fun refresh() {
@@ -157,6 +158,7 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
     val d = data ?: return
     if (!d.enabled) return
     val live = d.machines.filter { OrbManagedMachines.isLive(it) }
+    val stopped = d.machines.filter { OrbManagedMachines.isStopped(it) }
     val recent = OrbManagedMachines.recentMachines(d.machines, now)
 
     // Mission titles for owner chips, fetched once per id.
@@ -181,14 +183,56 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
         )
     })
 
+    fun stop(m: ManagedMachine) = run(m, {
+        core.request("${OrbManagedMachines.PATH}/${core.encodeComponent(m.id)}/stop", method = "POST", body = emptyMap<String, Any>())
+    })
+
+    fun resume(m: ManagedMachine) = run(m, {
+        core.request("${OrbManagedMachines.PATH}/${core.encodeComponent(m.id)}/resume", method = "POST", body = emptyMap<String, Any>())
+    })
+
+    fun create(provider: String?, size: String, ttlMinutes: Int, allow24h: Boolean) {
+        if (busyId != null) return
+        busyId = "create"
+        creating = false
+        actionError = null
+        scope.launch {
+            try {
+                val body = mutableMapOf<String, Any>("size" to size, "ttl_minutes" to ttlMinutes, "wait" to false)
+                if (!provider.isNullOrEmpty() && provider != "boat") body["provider"] = provider
+                if (allow24h) body["allow_24h_commitment"] = true
+                val updated = OrbJSON.dict(core.request(OrbManagedMachines.PATH, method = "POST", body = body))
+                    ?.let { OrbManagedMachines.parseMachine(it) }
+                if (updated != null) {
+                    data = data?.let { cur -> cur.copy(machines = listOf(updated) + cur.machines.filter { it.id != updated.id }) }
+                    fetchedAt = System.currentTimeMillis()
+                }
+                refresh()
+            } catch (e: Throwable) {
+                actionError = OrbManagedMachines.errorMessage(e)
+            } finally {
+                busyId = null
+            }
+        }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = "MANAGED (BOAT.DEV)",
-            color = OrbStyle.textMuted,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.7.sp
-        )
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = OrbManagedMachines.sectionTitle(d.providers, d.machines).uppercase(java.util.Locale.US),
+                color = OrbStyle.textMuted,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.7.sp,
+                modifier = Modifier.weight(1f)
+            )
+            ManagedPill(
+                label = "+ New",
+                tint = OrbStyle.inboxBlue,
+                busy = busyId != null || OrbManagedMachines.budgetFull(d.budget),
+                onClick = { if (!OrbManagedMachines.budgetFull(d.budget)) creating = true }
+            )
+        }
         val spend = d.dailySpend
         if (spend != null) ManagedSpendChart(spend, d.budget, ManagedMissionTitles.cache)
         else Text(
@@ -215,12 +259,39 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
                     now = now,
                     busy = busyId == m.id,
                     muted = false,
+                    canStop = OrbManagedMachines.canStop(m, d.providers),
                     onExtend = { extend(m) },
+                    onStop = { stop(m) },
+                    onResume = {},
                     onDestroy = { actionError = null; confirm = m },
                     onDetails = { details = m }
                 )
                 if (idx < live.lastIndex) {
                     HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+                }
+            }
+        }
+
+        if (stopped.isNotEmpty()) {
+            Text("Stopped · disk kept, nothing billed, resumable for 24 h", color = OrbStyle.textMuted, fontSize = 12.sp)
+            ManagedCard {
+                stopped.forEachIndexed { idx, m ->
+                    ManagedMachineRow(
+                        m = m,
+                        fetchedAt = fetchedAt,
+                        now = now,
+                        busy = busyId == m.id,
+                        muted = false,
+                        canStop = false,
+                        onExtend = {},
+                        onStop = {},
+                        onResume = { resume(m) },
+                        onDestroy = { actionError = null; confirm = m },
+                        onDetails = { details = m }
+                    )
+                    if (idx < stopped.lastIndex) {
+                        HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+                    }
                 }
             }
         }
@@ -246,7 +317,7 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
                     recent.forEachIndexed { idx, m ->
                         ManagedMachineRow(
                             m = m, fetchedAt = fetchedAt, now = now, busy = false, muted = true,
-                            onExtend = {}, onDestroy = {}, onDetails = { details = m }
+                            canStop = false, onExtend = {}, onStop = {}, onResume = {}, onDestroy = {}, onDetails = { details = m }
                         )
                         if (idx < recent.lastIndex) {
                             HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
@@ -257,15 +328,25 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
         }
     }
 
+    if (creating) {
+        ManagedNewMachineDialog(
+            response = d,
+            onDismiss = { creating = false },
+            onCreate = { prov, sz, ttl, allow24h -> create(prov, sz, ttl, allow24h) }
+        )
+    }
+
     details?.let { m ->
         AlertDialog(
             onDismissRequest = { details = null },
             title = { Text(OrbManagedMachines.title(m)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OrbKeyValueLine("Provider", OrbManagedMachines.providerLabel(m.provider))
                     OrbKeyValueLine("Size", OrbManagedMachines.sizeLabel(m.size))
                     OrbKeyValueLine("State", OrbManagedMachines.stateLabel(m.state))
                     OrbKeyValueLine("Node", m.nodeId)
+                    m.project?.let { OrbKeyValueLine("Project", it) }
                     m.ownerMissionId?.let { OrbKeyValueLine("Mission", it.take(8)) }
                     m.reason?.let { Text("Reason: $it", color = OrbStyle.textSecondary, fontSize = 13.sp) }
                     m.error?.let { Text("Error: $it", color = OrbStyle.warning, fontSize = 13.sp) }
@@ -406,7 +487,10 @@ private fun ManagedMachineRow(
     now: Long,
     busy: Boolean,
     muted: Boolean,
+    canStop: Boolean,
     onExtend: () -> Unit,
+    onStop: () -> Unit,
+    onResume: () -> Unit,
     onDestroy: () -> Unit,
     onDetails: () -> Unit
 ) {
@@ -419,7 +503,9 @@ private fun ManagedMachineRow(
     val primary = if (muted) OrbStyle.textSecondary else Color.White
     val secondary = if (muted) OrbStyle.textMuted else OrbStyle.textSecondary
     val live = OrbManagedMachines.isLive(m)
+    val stopped = OrbManagedMachines.isStopped(m)
     val actionable = !muted && OrbManagedMachines.canAct(m)
+    val resumable = !muted && OrbManagedMachines.canResume(m, busy)
     val fontScale = LocalDensity.current.fontScale
 
     BoxWithConstraints(
@@ -431,7 +517,7 @@ private fun ManagedMachineRow(
         val compact = maxWidth < 340.dp || fontScale > 1.3f
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                // Line 1: dot · name · size · status.
+                // Line 1: dot · name · provider · size · status.
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(dot))
                     Text(
@@ -440,6 +526,12 @@ private fun ManagedMachineRow(
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
+                    if (!m.provider.isNullOrEmpty() && m.provider != "boat") {
+                        Text(
+                            OrbManagedMachines.providerLabel(m.provider),
+                            color = OrbStyle.inboxBlue, fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false
+                        )
+                    }
                     Text(
                         OrbManagedMachines.sizeLabel(m.size),
                         color = secondary, fontSize = 12.sp, maxLines = 1, softWrap = false
@@ -509,7 +601,12 @@ private fun ManagedMachineRow(
                     }
                 }
             }
-            if (actionable) {
+            if (stopped && !muted) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (resumable) ManagedPill("Resume", OrbStyle.inboxBlue, busy, onResume)
+                    ManagedPill("Destroy", OrbStyle.error.copy(alpha = 0.85f), busy, onDestroy, quiet = true)
+                }
+            } else if (actionable) {
                 if (compact) {
                     var open by remember { mutableStateOf(false) }
                     Box {
@@ -524,18 +621,113 @@ private fun ManagedMachineRow(
                         }
                         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                             DropdownMenuItem(text = { Text("Extend +1 h") }, onClick = { open = false; onExtend() })
+                            if (canStop) DropdownMenuItem(text = { Text("Stop") }, onClick = { open = false; onStop() })
                             DropdownMenuItem(text = { Text("Destroy", color = OrbStyle.error) }, onClick = { open = false; onDestroy() })
                         }
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                         ManagedPill("+1 h", OrbStyle.inboxBlue, busy, onExtend)
+                        if (canStop) ManagedPill("Stop", OrbStyle.textSecondary, busy, onStop, quiet = true)
                         ManagedPill("Destroy", OrbStyle.error.copy(alpha = 0.85f), busy, onDestroy, quiet = true)
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun ManagedNewMachineDialog(
+    response: ManagedMachinesResponse,
+    onDismiss: () -> Unit,
+    onCreate: (provider: String?, size: String, ttlMinutes: Int, allow24h: Boolean) -> Unit
+) {
+    val configured = response.providers.filter { it.configured }
+    val initProv = configured.firstOrNull { it.provider == "boat" }?.provider ?: configured.firstOrNull()?.provider ?: "boat"
+    var provider by remember { mutableStateOf(initProv) }
+    val sizes = configured.firstOrNull { it.provider == provider }?.sizes?.takeIf { it.isNotEmpty() } ?: response.sizes
+    var size by remember(provider) {
+        mutableStateOf(sizes.firstOrNull { it.size == response.budget.defaultSize }?.size ?: sizes.firstOrNull()?.size ?: "small")
+    }
+    val ttlChoices = OrbManagedMachines.ttlChoices(response.budget.defaultTtlMinutes, response.budget.maxTtlMinutes)
+    var ttl by remember { mutableStateOf(ttlChoices.firstOrNull { it == response.budget.defaultTtlMinutes } ?: ttlChoices.firstOrNull() ?: 60) }
+    var allow24h by remember(provider, size) { mutableStateOf(false) }
+    val chosen = sizes.firstOrNull { it.size == size }
+    val requires24h = (chosen?.minBillingHours ?: 0) >= 24
+    val effectiveMinutes = maxOf(ttl, (chosen?.minBillingHours ?: 0) * 60)
+    val estimate = (chosen?.usdPerHour ?: 0.0) * effectiveMinutes / 60.0
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New managed machine") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (configured.size > 1) {
+                    Text("Provider", color = OrbStyle.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        configured.forEach { pr ->
+                            ManagedPill(
+                                label = pr.displayName,
+                                tint = if (pr.provider == provider) OrbStyle.inboxBlue else OrbStyle.textSecondary,
+                                busy = false,
+                                quiet = pr.provider != provider,
+                                onClick = { provider = pr.provider }
+                            )
+                        }
+                    }
+                }
+                Text("Size", color = OrbStyle.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                sizes.forEach { s ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .border(1.dp, if (s.size == size) OrbStyle.inboxBlue else OrbStyle.border, RoundedCornerShape(10.dp))
+                            .orbPressClickable { size = s.size }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(OrbManagedMachines.sizeLabel(s.size), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            Text("${s.cpu} vCPU · ${s.ramGb.toInt()} GB" + (s.gpu?.let { " · $it" } ?: ""), color = OrbStyle.textSecondary, fontSize = 11.sp)
+                        }
+                        Text(OrbManagedMachines.usdPerHour(s.usdPerHour), color = OrbStyle.textSecondary, fontSize = 12.sp)
+                    }
+                }
+                Text("TTL", color = OrbStyle.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ttlChoices.take(4).forEach { m ->
+                        ManagedPill(
+                            label = OrbManagedMachines.minutesLabel(m),
+                            tint = if (m == ttl) OrbStyle.inboxBlue else OrbStyle.textSecondary,
+                            busy = false,
+                            quiet = m != ttl,
+                            onClick = { ttl = m }
+                        )
+                    }
+                }
+                if (requires24h) {
+                    Row(
+                        modifier = Modifier.orbPressClickable { allow24h = !allow24h },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(if (allow24h) "[x]" else "[ ]", color = OrbStyle.warning, fontSize = 13.sp)
+                        Text("Confirm ${chosen?.minBillingHours}h minimum lease (${OrbManagedMachines.usd(estimate)})", color = OrbStyle.warning, fontSize = 12.sp)
+                    }
+                }
+                OrbKeyValueLine("Estimated cost", OrbManagedMachines.usd(estimate))
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = chosen != null && (!requires24h || allow24h),
+                onClick = { onCreate(if (provider == "boat") null else provider, size, ttl, requires24h && allow24h) }
+            ) { Text("Create") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable

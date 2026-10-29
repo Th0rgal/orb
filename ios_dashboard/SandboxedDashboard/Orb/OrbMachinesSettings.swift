@@ -22,6 +22,18 @@ struct OrbMachinesSettings: View {
                 OrbManagedMachinesSection(response: managed, fetchedAt: managedFetchedAt, busy: managedBusy,
                                           onDestroy: { m in Task { await destroy(m) } },
                                           onExtend: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))/extend", method: "POST", body: .object(["ttl_minutes": .number(60)])) } } },
+                                          onStop: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))/stop", method: "POST", body: .object([:])) } } },
+                                          onResume: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))/resume", method: "POST", body: .object([:])) } } },
+                                          onCreate: { provider, size, ttl, allow24h in
+                                              Task {
+                                                  await managedAction {
+                                                      var body: [String: OrbJSON] = ["size": .string(size), "ttl_minutes": .number(Double(ttl)), "wait": .bool(false)]
+                                                      if let provider { body["provider"] = .string(provider) }
+                                                      if allow24h { body["allow_24h_commitment"] = .bool(true) }
+                                                      _ = try await client.call("/api/managed-machines", method: "POST", body: .object(body))
+                                                  }
+                                              }
+                                          },
                                           onOpenMission: { startedMission = $0 })
             }
             Section("Fleet") {

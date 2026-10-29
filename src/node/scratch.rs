@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 use super::JobStore;
 
-const RETENTION_HOURS: i64 = 72;
+const RETENTION_HOURS: u32 = 72;
+/// Retired-scratch age boundary separating aged (`>= 6h`) from fresh (`< 6h`) scratch under pressure.
+pub const PRESSURE_AGED_HOURS: i64 = 6;
+const MAX_MEASURE_DEPTH: usize = 16;
 
 struct Execution {
     directory: PathBuf,
@@ -137,30 +140,186 @@ pub(crate) async fn run<T>(
     result
 }
 
+/// Approximate regular-file byte usage under `path` without following symlinks.
+pub(crate) fn dir_tree_bytes_nofollow(path: &Path) -> u64 {
+    fn walk(dir: &Path, depth: usize) -> u64 {
+        if depth > MAX_MEASURE_DEPTH {
+            return 0;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(dir) else {
+            return 0;
+        };
+        if meta.file_type().is_symlink() {
+            return 0;
+        }
+        if meta.is_file() {
+            return meta.len();
+        }
+        if !meta.is_dir() {
+            return 0;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        let mut total = 0_u64;
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let child = entry.path();
+            if ft.is_file() {
+                if let Ok(m) = entry.metadata() {
+                    total = total.saturating_add(m.len());
+                }
+            } else if ft.is_dir() {
+                total = total.saturating_add(walk(&child, depth + 1));
+            }
+        }
+        total
+    }
+    walk(path, 0)
+}
+
+/// Measure reclaimable confirmed-retired scratch bytes partitioned into `(aged_bytes, fresh_bytes)`
+/// (`aged >= 6h`, `fresh < 6h`). Unretired receipts (`retired_at IS NULL`) and non-Linux hosts
+/// where descriptor-relative reclamation is unavailable report `(0, 0)`.
+pub async fn reclaimable_retired_bytes(
+    store: &JobStore,
+    work_root: &Path,
+    now: DateTime<Utc>,
+) -> anyhow::Result<(u64, u64)> {
+    measure_retired_bytes(store, work_root, now, cfg!(target_os = "linux")).await
+}
+
+async fn measure_retired_bytes(
+    store: &JobStore,
+    work_root: &Path,
+    now: DateTime<Utc>,
+    reclamation_supported: bool,
+) -> anyhow::Result<(u64, u64)> {
+    if !reclamation_supported {
+        return Ok((0, 0));
+    }
+    let receipts = store
+        .with_conn(|conn| {
+            let mut query = conn.prepare(
+                "SELECT id,directory_identity,retired_at FROM node_scratch WHERE retired_at IS NOT NULL",
+            )?;
+            let rows = query.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .await?;
+    let Ok(scratch_root) = root(work_root) else {
+        return Ok((0, 0));
+    };
+    tokio::task::spawn_blocking(move || {
+        let mut aged = 0_u64;
+        let mut fresh = 0_u64;
+        for (id_raw, directory_identity, retired_raw) in receipts {
+            let Ok(id) = Uuid::parse_str(&id_raw) else {
+                continue;
+            };
+            let Ok(retired) = DateTime::parse_from_rfc3339(&retired_raw) else {
+                continue;
+            };
+            let path = scratch_root.join(id.to_string());
+            if identity(&path).ok().as_deref() != Some(directory_identity.as_str()) {
+                continue;
+            }
+            let bytes = dir_tree_bytes_nofollow(&path);
+            if now.signed_duration_since(retired) >= chrono::Duration::hours(PRESSURE_AGED_HOURS) {
+                aged = aged.saturating_add(bytes);
+            } else {
+                fresh = fresh.saturating_add(bytes);
+            }
+        }
+        Ok((aged, fresh))
+    })
+    .await?
+}
+
 /// Called on the existing cache GC cadence, regardless of disk pressure.
 pub async fn sweep(store: &JobStore, work_root: &Path) -> anyhow::Result<()> {
     sweep_at(store, work_root, Utc::now()).await
 }
 
 async fn sweep_at(store: &JobStore, work_root: &Path, now: DateTime<Utc>) -> anyhow::Result<()> {
-    let receipts = store.with_conn(|conn| {
-        let mut query = conn.prepare("SELECT id,parent_identity,directory_identity,retired_at FROM node_scratch WHERE retired_at IS NOT NULL")?;
-        let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?;
-        rows.collect::<Result<Vec<_>, _>>()
-    }).await?;
-    for (id, parent_identity, directory_identity, retired_at) in receipts {
+    let _ = sweep_with_grace_hours(store, work_root, now, RETENTION_HOURS, None).await?;
+    Ok(())
+}
+
+/// Sweep confirmed-retired scratch receipts (`retired_at IS NOT NULL`) whose retirement age is at
+/// least `grace_hours` (`0` reclaims all confirmed-retired receipts regardless of subsecond clock
+/// skew). Unretired receipts (`retired_at IS NULL`) are never touched. When `stop_at_free_bytes`
+/// is `Some(target)`, stops early as soon as `fs2::available_space(work_root) >= target` so newer
+/// retired scratch retains its forensic grace.
+pub async fn sweep_with_grace_hours(
+    store: &JobStore,
+    work_root: &Path,
+    now: DateTime<Utc>,
+    grace_hours: u32,
+    stop_at_free_bytes: Option<u64>,
+) -> anyhow::Result<u64> {
+    if let Some(target) = stop_at_free_bytes {
+        if fs2::available_space(work_root).is_ok_and(|free| free >= target) {
+            return Ok(0);
+        }
+    }
+    let receipts = store
+        .with_conn(|conn| {
+            let mut query = conn.prepare(
+                "SELECT id,parent_identity,directory_identity,retired_at \
+                 FROM node_scratch WHERE retired_at IS NOT NULL ORDER BY retired_at ASC",
+            )?;
+            let rows = query.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .await?;
+    let mut removed = 0_u64;
+    let scratch_root = root(work_root)?;
+    for (id_raw, parent_identity, directory_identity, retired_at) in receipts {
+        let id = match Uuid::parse_str(&id_raw) {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(scratch_id = %id_raw, %error, "invalid scratch receipt id; skipping");
+                continue;
+            }
+        };
+        let retired = match DateTime::parse_from_rfc3339(&retired_at) {
+            Ok(retired) => retired,
+            Err(error) => {
+                tracing::warn!(scratch_id = %id, %error, "invalid scratch retired_at; skipping");
+                continue;
+            }
+        };
+        if grace_hours > 0
+            && now.signed_duration_since(retired) < chrono::Duration::hours(i64::from(grace_hours))
+        {
+            continue;
+        }
         let receipt = Receipt {
-            id: Uuid::parse_str(&id)?,
+            id,
             parent_identity,
             directory_identity,
             retired_at: Some(retired_at),
         };
-        let retired = DateTime::parse_from_rfc3339(receipt.retired_at.as_deref().unwrap())?;
-        if now.signed_duration_since(retired).num_hours() < RETENTION_HOURS {
-            continue;
-        }
-        let path = root(work_root)?.join(receipt.id.to_string());
-        let id = receipt.id;
+        let path = scratch_root.join(receipt.id.to_string());
         let result = tokio::task::spawn_blocking(move || remove(&path, &receipt)).await?;
         match result {
             Ok(()) => {
@@ -170,12 +329,18 @@ async fn sweep_at(store: &JobStore, work_root: &Path, now: DateTime<Utc>) -> any
                         Ok(())
                     })
                     .await?;
-                tracing::info!(scratch_id = %id, "retired node scratch removed");
+                removed += 1;
+                tracing::info!(scratch_id = %id, grace_hours, "retired node scratch removed");
+                if let Some(target) = stop_at_free_bytes {
+                    if fs2::available_space(work_root).is_ok_and(|free| free >= target) {
+                        break;
+                    }
+                }
             }
             Err(error) => tracing::warn!(scratch_id = %id, %error, "retired node scratch retained"),
         }
     }
-    Ok(())
+    Ok(removed)
 }
 
 fn remove(path: &Path, receipt: &Receipt) -> Result<(), String> {
@@ -379,5 +544,100 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 2);
+    }
+
+    #[tokio::test]
+    async fn scratch_sizing_partitions_aged_and_fresh_without_following_symlinks_or_unretired() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("external.bin"), vec![0_u8; 4096]).unwrap();
+
+        let store = JobStore::open(temp.path()).await.unwrap();
+        let mission = Uuid::new_v4();
+        let now = Utc::now();
+
+        let (aged, aged_path) = prepare(&store, temp.path(), mission, None).await.unwrap();
+        std::fs::write(aged_path.join("aged.bin"), vec![1_u8; 1024]).unwrap();
+        std::os::unix::fs::symlink(outside.path(), aged_path.join("escape")).unwrap();
+        retire(&store, aged.id, now - chrono::Duration::hours(8))
+            .await
+            .unwrap();
+
+        let (fresh, fresh_path) = prepare(&store, temp.path(), mission, None).await.unwrap();
+        std::fs::write(fresh_path.join("fresh.bin"), vec![2_u8; 512]).unwrap();
+        retire(&store, fresh.id, now - chrono::Duration::hours(1))
+            .await
+            .unwrap();
+
+        let (_unretired, unretired_path) =
+            prepare(&store, temp.path(), mission, None).await.unwrap();
+        std::fs::write(unretired_path.join("live.bin"), vec![3_u8; 8192]).unwrap();
+
+        let (replaced, replaced_path) = prepare(&store, temp.path(), mission, None).await.unwrap();
+        retire(&store, replaced.id, now - chrono::Duration::hours(12))
+            .await
+            .unwrap();
+        std::fs::rename(&replaced_path, temp.path().join("moved-aside")).unwrap();
+        std::fs::create_dir(&replaced_path).unwrap();
+        std::fs::write(replaced_path.join("foreign.bin"), vec![4_u8; 2048]).unwrap();
+
+        assert_eq!(
+            measure_retired_bytes(&store, temp.path(), now, false)
+                .await
+                .unwrap(),
+            (0, 0)
+        );
+        assert_eq!(
+            measure_retired_bytes(&store, temp.path(), now, true)
+                .await
+                .unwrap(),
+            (1024, 512)
+        );
+
+        // Even at grace_hours = 0, unretired scratch is strictly untouched.
+        let _ = sweep_with_grace_hours(&store, temp.path(), now, 0, None)
+            .await
+            .unwrap();
+        assert!(unretired_path.join("live.bin").exists());
+        assert!(outside.path().join("external.bin").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn scratch_pressure_grace_sweeps_6h_before_0h_and_never_touches_unretired() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JobStore::open(temp.path()).await.unwrap();
+        let mission = Uuid::new_v4();
+        let now = Utc::now();
+
+        let (aged, aged_path) = prepare(&store, temp.path(), mission, None).await.unwrap();
+        std::fs::write(aged_path.join("a"), b"aged").unwrap();
+        retire(&store, aged.id, now - chrono::Duration::hours(7))
+            .await
+            .unwrap();
+
+        let (fresh, fresh_path) = prepare(&store, temp.path(), mission, None).await.unwrap();
+        std::fs::write(fresh_path.join("f"), b"fresh").unwrap();
+        retire(&store, fresh.id, now - chrono::Duration::hours(2))
+            .await
+            .unwrap();
+
+        let (_live, live_path) = prepare(&store, temp.path(), mission, None).await.unwrap();
+        std::fs::write(live_path.join("l"), b"live").unwrap();
+
+        let removed_6h = sweep_with_grace_hours(&store, temp.path(), now, 6, None)
+            .await
+            .unwrap();
+        assert_eq!(removed_6h, 1);
+        assert!(!aged_path.exists());
+        assert!(fresh_path.exists());
+        assert!(live_path.exists());
+
+        let removed_0h = sweep_with_grace_hours(&store, temp.path(), now, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(removed_0h, 1);
+        assert!(!fresh_path.exists());
+        assert!(live_path.exists());
     }
 }

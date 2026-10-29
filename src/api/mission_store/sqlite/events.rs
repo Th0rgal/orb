@@ -180,6 +180,11 @@ pub(in crate::api::mission_store) fn log_event_sync(
                     "assistant_message_canonical",
                     &content,
                 );
+                let canonical_meta = serde_json::json!({
+                    "bubble_id": bubble_id,
+                    "canonical_from": "text_op",
+                    "revision": ops.iter().filter_map(|op| if let TextOp::Snapshot { revision, .. } = op { Some(*revision) } else { None }).max()
+                });
                 conn.execute(
                         "INSERT INTO mission_events
                          (mission_id, sequence, event_type, timestamp, event_id, content, content_file, metadata)
@@ -191,15 +196,21 @@ pub(in crate::api::mission_store) fn log_event_sync(
                             &bubble_id,
                             content_inline,
                             content_file,
-                            serde_json::json!({
-                                "bubble_id": bubble_id,
-                                "canonical_from": "text_op",
-                                "revision": ops.iter().filter_map(|op| if let TextOp::Snapshot { revision, .. } = op { Some(*revision) } else { None }).max()
-                            })
-                            .to_string(),
+                            canonical_meta.to_string(),
                         ],
                     )
                     .map_err(|e| e.to_string())?;
+                super::search_index::on_event_persisted(
+                    conn,
+                    mission_id,
+                    sequence,
+                    "assistant_message_canonical",
+                    &now,
+                    Some(&bubble_id),
+                    None,
+                    &content,
+                    &canonical_meta,
+                )?;
             } else {
                 let sequence: i64 = conn
                         .query_row(
@@ -460,16 +471,16 @@ pub(in crate::api::mission_store) fn log_event_sync(
         // If this event has an event_id that already exists for this mission,
         // update the existing row's metadata instead of inserting a duplicate.
         if let Some(ref eid) = event_id {
-            let existing: Option<i64> = conn
+            let existing: Option<(i64, i64)> = conn
                 .query_row(
-                    "SELECT id FROM mission_events WHERE mission_id = ?1 AND event_id = ?2",
+                    "SELECT id, sequence FROM mission_events WHERE mission_id = ?1 AND event_id = ?2",
                     params![&mid, eid],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .unwrap_or(None);
 
-            if let Some(row_id) = existing {
+            if let Some((row_id, existing_seq)) = existing {
                 let (content_inline, content_file) = SqliteMissionStore::store_content(
                     content_dir,
                     mission_id,
@@ -500,6 +511,17 @@ pub(in crate::api::mission_store) fn log_event_sync(
                         params![metadata_str, now, content_inline, content_file, row_id],
                     )
                     .map_err(|e| e.to_string())?;
+                    super::search_index::on_event_persisted(
+                        conn,
+                        mission_id,
+                        existing_seq,
+                        &event_type,
+                        &now,
+                        event_id.as_deref(),
+                        tool_name.as_deref(),
+                        &content,
+                        &metadata,
+                    )?;
                 }
                 return Ok(());
             }
@@ -528,19 +550,31 @@ pub(in crate::api::mission_store) fn log_event_sync(
                  (mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
-                    mid,
+                    &mid,
                     sequence,
-                    event_type,
-                    now,
-                    event_id,
-                    tool_call_id,
-                    tool_name,
+                    &event_type,
+                    &now,
+                    &event_id,
+                    &tool_call_id,
+                    &tool_name,
                     content_inline,
                     content_file,
                     metadata_str,
                 ],
             )
             .map_err(|e| e.to_string())?;
+
+        super::search_index::on_event_persisted(
+            conn,
+            mission_id,
+            sequence,
+            &event_type,
+            &now,
+            event_id.as_deref(),
+            tool_name.as_deref(),
+            &content,
+            &metadata,
+        )?;
 
         Ok(())
     })()

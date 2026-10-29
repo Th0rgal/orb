@@ -149,8 +149,12 @@ export function apiText(path: string, init?: RequestInit): Promise<string> {
   if (init?.method && init.method.toUpperCase() !== 'GET') invalidateReads();
   return apiRequest<string>(path, init, true);
 }
+function redactDiagnosticPath(path: string): string {
+  return path.replace(/([?&](?:q|query)=)[^&]*/gi, "$1[redacted]");
+}
+
 async function apiRequest<T>(path: string, init?: RequestInit, text = false): Promise<T> {
-  const from = performance.now(), label = `${init?.method?.toUpperCase() ?? "GET"} ${path}`;
+  const from = performance.now(), label = `${init?.method?.toUpperCase() ?? "GET"} ${redactDiagnosticPath(path)}`;
   try {
     const result = await sendRequest<T>(path, init, text);
     requestDone(label, performance.now() - from, true);
@@ -183,7 +187,7 @@ async function sendRequest<T>(path: string, init?: RequestInit, text = false): P
   } catch (error) {
     if (!isAbortError(error)) throw error;
     const reason = abortReason(init?.signal);
-    noteAbort(`${init?.method?.toUpperCase() ?? "GET"} ${path}`, reason, performance.now() - started);
+    noteAbort(`${init?.method?.toUpperCase() ?? "GET"} ${redactDiagnosticPath(path)}`, reason, performance.now() - started);
     // WebKit reports any timeout as "AbortError: Fetch is aborted". A
     // deadline gets plain words; a caller's own abort stays an AbortError.
     if (reason !== "caller-abort") throw new RequestTimeoutError();
@@ -202,7 +206,7 @@ async function sendRequest<T>(path: string, init?: RequestInit, text = false): P
     body = await res.text();
   } catch (cause) {
     if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
-    throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${path}`, { cause });
+    throw new InvalidApiResponseError(`${init?.method ?? "GET"} ${redactDiagnosticPath(path)}`, { cause });
   }
   if (connectionVersion() !== version) throw new Error("The backend changed. Try again; your draft is kept.");
   if (text) return body as T;
@@ -1498,6 +1502,145 @@ export async function listLibrarySkills(): Promise<LibrarySkillSummary[]> {
 
 export async function getLibrarySkill(name: string): Promise<LibrarySkill> {
   return api<LibrarySkill>(`/api/library/skill/${encodeURIComponent(name)}`);
+}
+
+export type ConversationSearchRole = "all" | "user" | "assistant" | "title" | "tool";
+export type ConversationSearchSort = "relevance" | "recent";
+export type SearchIndexState = "ready" | "indexing";
+
+export interface SearchIndexCoverage {
+  schema_version: number;
+  state: SearchIndexState;
+  indexed_missions: number;
+  total_missions: number;
+}
+
+export interface SearchHighlightRange {
+  start: number;
+  end: number;
+}
+
+export interface ConversationSearchHit {
+  mission_id: string;
+  title?: string | null;
+  short_description?: string | null;
+  project?: string | null;
+  status: string;
+  backend: string;
+  updated_at: string;
+  parent_mission_id?: string | null;
+  locator: string;
+  role: "title" | "user" | "assistant" | "tool" | string;
+  sequence?: number | null;
+  event_id?: string | null;
+  timestamp: string;
+  excerpt: string;
+  highlights: SearchHighlightRange[];
+  mission_match_count: number;
+  score: number;
+}
+
+export interface ConversationSearchResponse {
+  hits: ConversationSearchHit[];
+  next_cursor?: string | null;
+  coverage: SearchIndexCoverage;
+}
+
+export interface PassageContextMessage {
+  locator: string;
+  role: string;
+  sequence?: number | null;
+  event_id?: string | null;
+  timestamp: string;
+  content: string;
+  highlights: SearchHighlightRange[];
+  is_target: boolean;
+}
+
+export interface PassageContextResponse {
+  mission_id: string;
+  title?: string | null;
+  project?: string | null;
+  status: string;
+  backend: string;
+  updated_at: string;
+  locator: string;
+  target_found: boolean;
+  target_sequence?: number | null;
+  messages: PassageContextMessage[];
+  events?: Array<{
+    id: number;
+    event_id?: string | null;
+    sequence: number;
+    event_type: string;
+    timestamp: string;
+    tool_call_id?: string | null;
+    tool_name?: string | null;
+    content: string;
+    metadata?: Record<string, unknown>;
+  }>;
+}
+
+export function searchConversationMessages(
+  params: {
+    q: string;
+    project?: string | null;
+    role?: ConversationSearchRole;
+    include_tools?: boolean;
+    include_archived?: boolean;
+    since?: string | null;
+    until?: string | null;
+    sort?: ConversationSearchSort;
+    limit?: number;
+    max_per_mission?: number;
+    cursor?: string | null;
+    mission_id?: string | null;
+  },
+  signal?: AbortSignal,
+): Promise<ConversationSearchResponse> {
+  const qs = new URLSearchParams();
+  qs.set("q", params.q);
+  if (params.project) qs.set("project", params.project);
+  if (params.role && params.role !== "all") qs.set("role", params.role);
+  if (params.include_tools) qs.set("include_tools", "true");
+  if (params.include_archived !== undefined) qs.set("include_archived", String(params.include_archived));
+  if (params.since) qs.set("since", params.since);
+  if (params.until) qs.set("until", params.until);
+  if (params.sort && params.sort !== "relevance") qs.set("sort", params.sort);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.max_per_mission != null) qs.set("max_per_mission", String(params.max_per_mission));
+  if (params.cursor) qs.set("cursor", params.cursor);
+  if (params.mission_id) qs.set("mission_id", params.mission_id);
+  return api<ConversationSearchResponse>(
+    `/api/control/missions/search/messages?${qs.toString()}`,
+    signal ? { signal } : undefined,
+  );
+}
+
+export function getMissionPassageContext(
+  missionId: string,
+  params: {
+    locator: string;
+    sequence?: number | null;
+    event_id?: string | null;
+    before?: number;
+    after?: number;
+    query?: string | null;
+    include_events?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<PassageContextResponse> {
+  const qs = new URLSearchParams({ locator: params.locator });
+  if (params.sequence != null) qs.set("sequence", String(params.sequence));
+  if (params.event_id) qs.set("event_id", params.event_id);
+  if (params.before != null) qs.set("before", String(params.before));
+  if (params.after != null) qs.set("after", String(params.after));
+  if (params.query) qs.set("query", params.query);
+  if (params.include_events) qs.set("include_events", "true");
+  return api<PassageContextResponse>(
+    `/api/control/missions/${encodeURIComponent(missionId)}/messages/context?${qs.toString()}`,
+    signal ? { signal } : undefined,
+  );
 }
 
 
