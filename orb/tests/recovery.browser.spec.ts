@@ -39,5 +39,5 @@ for(const theme of ['light','dark'])test(`partial reply keeps interruption and k
  const resume=page.getByRole('button',{name:'Resume',exact:true});
  await resume.focus();
  await page.keyboard.press('Enter');
- await expect(page.getByRole('status')).toContainText('Resume requested');
+ await expect(page.getByRole('status').filter({hasText:'Resume requested'})).toBeVisible();
 });
