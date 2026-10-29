@@ -391,7 +391,7 @@ final class OrbMissionAccessMonitor {
         return OrbStyle.parseDate(r["expires_at"].text).map { $0 > Date() } ?? false
     }
 
-    private static func stripControls(_ s: String) -> String {
+    nonisolated private static func stripControls(_ s: String) -> String {
         let filtered = s.unicodeScalars.filter { scalar in
             let v = scalar.value
             return !(v <= 0x1F || (0x7F...0x9F).contains(v))
