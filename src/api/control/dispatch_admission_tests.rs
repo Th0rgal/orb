@@ -13619,7 +13619,25 @@ async fn workspace_purge_history_delete_does_not_rpc_into_locked_actor() {
 async fn workspace_purge_history_delete_ignores_unrelated_uncertain_actions() {
     let h = Harness::new().await;
     let mission = h.writer(MissionStatus::Acknowledged, None).await;
-    let other = h.writer(MissionStatus::Acknowledged, None).await;
+    let other = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("unrelated accepted action"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(other.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
     {
         let conn = h.state.projects.connection.lock().unwrap();
         crate::control_mcp::actions::init(&conn).unwrap();
