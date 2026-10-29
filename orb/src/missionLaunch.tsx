@@ -4,7 +4,7 @@ import { REMOTE_PROXY_HARNESSES } from "./harnesses";
 import { isQueued, queueWaitLabel } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { remoteContinuation } from "./remoteContinuation";
-import { ErrorNotice } from "./ErrorNotice";
+import { ErrorNotice, isNonResumableError } from "./ErrorNotice";
 import { Show } from "solid-js";
 import { ApiError, getApiUrl, type Mission, type RemoteLaunchCapability, type RemoteNodesResponse } from "./api";
 import { goalObjective, GoalTag } from "./goal";
@@ -321,14 +321,15 @@ export function LaunchStatus(p: { destination: string; mission?: Mission | null;
 }
 
 /** Failures belong after the prompt/output, using the shared red notice. */
-export function MissionFailure(p: { mission?: Mission | null; error?: string; active?: boolean; failureInTranscript?: boolean; onResume?: () => void }) {
+export function MissionFailure(p: { mission?: Mission | null; error?: string; active?: boolean; failureInTranscript?: boolean; onResume?: () => void; onOpenSource?: () => void }) {
   const phase = () => missionPhase(p.mission ?? null, false);
   const message = () => p.error || (phase().detail === "client runner"
     ? "The local run could not be completed. Retry on the computer that started it."
     : phase().detail || "The mission stopped before completion.");
-  const resumable = () => !!p.onResume && phase().label !== "Cancelled";
-  return <Show when={!p.active && !p.failureInTranscript && (p.error || phase().failed)}><ErrorNotice title={phase().failed && !["Failed", "Interrupted", "Cancelled"].includes(phase().label) ? phase().label : phase().label === "Cancelled" ? "Mission cancelled" : phase().label === "Interrupted" && !p.error ? "Mission interrupted" : "Mission failed"} error={message()}>
+  const resumable = () => !!p.onResume && phase().label !== "Cancelled" && !isNonResumableError(message(), p.mission?.backend);
+  return <Show when={!p.active && !p.failureInTranscript && (p.error || phase().failed)}><ErrorNotice backend={p.mission?.backend} title={phase().failed && !["Failed", "Interrupted", "Cancelled"].includes(phase().label) ? phase().label : phase().label === "Cancelled" ? "Mission cancelled" : phase().label === "Interrupted" && !p.error ? "Mission interrupted" : "Mission failed"} error={message()}>
     <Show when={resumable()}><button type="button" class="error-notice-link" title="Continue from where the work stopped" onClick={() => p.onResume?.()}>Resume</button></Show>
+    <Show when={p.onOpenSource}><button type="button" class="error-notice-link" onClick={() => p.onOpenSource?.()}>Open original conversation</button></Show>
   </ErrorNotice></Show>;
 }
 

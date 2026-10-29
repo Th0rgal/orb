@@ -341,7 +341,23 @@ export class TranscriptReducer {
               : reason==="server_shutdown"?"The backend restarted during this run. The conversation is preserved."
               : "The execution was interrupted before completion. Resume to continue from the saved conversation."
             : prefix&&trimmed.startsWith(prefix)&&trimmed.length>prefix.length?trimmed.slice(prefix.length).trim():text||"Mission failed";
-          this.items.push({kind:"error",key:this.key("error"),text:detail,terminal:true,cancelled:!interruption&&text.trim().toLowerCase()==="cancelled",...(interruption?{title:"Mission interrupted"}:{})});
+          const nextError:Extract<StreamItem,{kind:"error"}>={kind:"error",key:this.key("error"),text:detail,terminal:true,cancelled:!interruption&&text.trim().toLowerCase()==="cancelled",...(interruption?{title:"Mission interrupted"}:{})};
+          const nextText=detail.trim();
+          const overlaps=(row:StreamItem)=>{
+            if(row.kind!=="error")return false;
+            const prevText=row.text.trim();
+            return !!row.terminal||(!!prevText&&!!nextText&&(prevText===nextText||nextText.includes(prevText)||prevText.includes(nextText)));
+          };
+          const matching:number[]=[];
+          for(let i=this.lastUser+1;i<this.items.length;i++)if(overlaps(this.items[i]))matching.push(i);
+          if(matching.length>0){
+            const keep=matching[0];
+            const prev=this.items[keep] as Extract<StreamItem,{kind:"error"}>;
+            this.put(keep,{...nextError,key:prev.key});
+            for(let j=matching.length-1;j>=1;j--)this.removeAt(matching[j]);
+          }else{
+            this.items.push(nextError);
+          }
           return;
         }
         const at=typeof d.at==="string"?{at:d.at}:{};
@@ -406,9 +422,21 @@ export class TranscriptReducer {
           if(terminal?.kind==="error" && status==="interrupted") {
             this.put(terminalIndex,{...terminal,title:"Mission interrupted",text:summary==="Cancelled by user"?"The execution was interrupted before completion. Resume to continue from the saved conversation.":summary});
           }
-          const alreadyShown = terminalIndex>=0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && item.text.trim() === summary);
-          if (!alreadyShown) {
-            this.items.push({ kind: "error", key: this.key("error"), text: summary, terminal: true });
+          const genericSummary = summary === "Model error" || summary === "Task execution failed unexpectedly" || /^Remote node ['"].+['"] finished$/i.test(summary);
+          let priorErrorIndex = -1;
+          if (terminalIndex < 0 && genericSummary) {
+            for (let i = this.items.length - 1; i > lastUser; i--) {
+              if (this.items[i].kind === "error" && (this.items[i] as Extract<StreamItem, { kind: "error" }>).text.trim()) { priorErrorIndex = i; break; }
+            }
+          }
+          if (priorErrorIndex >= 0) {
+            const prior = this.items[priorErrorIndex] as Extract<StreamItem, { kind: "error" }>;
+            this.put(priorErrorIndex, { ...prior, terminal: true });
+          } else {
+            const alreadyShown = terminalIndex >= 0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && item.text.trim() === summary);
+            if (!alreadyShown) {
+              this.items.push({ kind: "error", key: this.key("error"), text: summary, terminal: true });
+            }
           }
         }
         return;
