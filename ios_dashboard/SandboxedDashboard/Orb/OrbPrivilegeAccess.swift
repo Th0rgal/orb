@@ -567,7 +567,7 @@ struct OrbPrivilegeAccessList: View {
                 Text("\(OrbMissionAccessMonitor.requester(g)) → \(OrbMissionAccessMonitor.target(g))")
                     .font(.subheadline)
                     .lineLimit(1)
-                Text("Read only · \(OrbMissionAccessList.left(g["expires_at"].text))")
+                Text("\(g["scope"].text == "control" ? "Control" : "Read only") · \(OrbMissionAccessList.left(g["expires_at"].text))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

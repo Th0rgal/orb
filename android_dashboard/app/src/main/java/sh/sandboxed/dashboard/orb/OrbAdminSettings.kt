@@ -562,26 +562,35 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 }.orEmpty()
             )
         }
-        val parsedEntries = entriesText.value.lines()
+        val nonBlankLines = entriesText.value.lines()
             .map { it.trim() }
-            .filter { '/' in it }
-            .map { line ->
-                val p = line.substringBefore('/').trim()
-                val m = line.substringAfter('/').trim()
-                p to m
+            .filter { it.isNotEmpty() }
+        val invalidLines = nonBlankLines.filter { line ->
+            '/' !in line || line.substringBefore('/').trim().isEmpty() || line.substringAfter('/').trim().isEmpty()
+        }
+        val parsedEntries = if (invalidLines.isEmpty()) {
+            nonBlankLines.map { line ->
+                line.substringBefore('/').trim() to line.substringAfter('/').trim()
             }
-            .filter { it.first.isNotEmpty() && it.second.isNotEmpty() }
+        } else {
+            emptyList()
+        }
 
         AlertDialog(
-            onDismissRequest = { showEditor = false },
+            onDismissRequest = { if (!busy) showEditor = false },
             containerColor = OrbStyle.elevated,
             title = { Text(if (existing != null) "Edit chain" else "New chain", color = Color.White) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(
                         value = chainId,
-                        onValueChange = { if (existing == null) chainId = it },
-                        enabled = existing == null,
+                        onValueChange = {
+                            if (existing == null) {
+                                chainId = it
+                                editorError = null
+                            }
+                        },
+                        enabled = existing == null && !busy,
                         singleLine = true,
                         label = { Text("Chain ID (e.g. builtin/smart)") },
                         modifier = Modifier.fillMaxWidth()
@@ -589,13 +598,18 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     OutlinedTextField(
                         value = chainName,
                         onValueChange = { chainName = it },
+                        enabled = !busy,
                         singleLine = true,
                         label = { Text("Name") },
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
                         value = entriesText.value,
-                        onValueChange = { entriesText.value = it },
+                        onValueChange = {
+                            entriesText.value = it
+                            editorError = null
+                        },
+                        enabled = !busy,
                         label = { Text("Entries (provider/model per line)") },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp)
                     )
@@ -603,12 +617,14 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         Text("Strip <think> blocks", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
                         Switch(checked = stripThinking, onCheckedChange = { stripThinking = it }, enabled = !busy)
                     }
-                    editorError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
+                    val validationError = editorError
+                        ?: invalidLines.firstOrNull()?.let { "Each non-empty line must be provider/model (invalid: $it)." }
+                    validationError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
                 }
             },
             confirmButton = {
                 TextButton(
-                    enabled = chainId.isNotBlank() && parsedEntries.isNotEmpty() && !busy,
+                    enabled = chainId.isNotBlank() && nonBlankLines.isNotEmpty() && invalidLines.isEmpty() && !busy,
                     onClick = {
                         val trimmedId = chainId.trim()
                         if (existing == null && chains.any { it.id.equals(trimmedId, ignoreCase = true) }) {
@@ -617,7 +633,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         }
                         val body = mapOf(
                             "id" to trimmedId,
-                            "name" to chainName.trim(),
+                            "name" to chainName.trim().ifEmpty { trimmedId },
                             "strip_thinking" to stripThinking,
                             "entries" to parsedEntries.map { mapOf("provider_id" to it.first, "model_id" to it.second) }
                         )

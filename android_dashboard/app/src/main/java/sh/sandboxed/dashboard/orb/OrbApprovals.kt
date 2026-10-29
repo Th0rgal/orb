@@ -282,11 +282,15 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             privilegeCommands = OrbJSON.dictList(privSnap["command_audit"])
             bunkerIncidents = OrbJSON.dictList(privSnap["bunker_incidents"])
             val snapBunker = (privSnap["bunker_state"] as? Number)?.toInt() ?: 0
-            val meshSnap = runCatching { dictOf(core.request("/api/mesh/status")) }.getOrDefault(emptyMap())
-            val mBunker = (meshSnap["bunker_state"] as? Number)?.toInt() ?: 0
-            bunkerState = maxOf(snapBunker, mBunker)
-            meshEpoch = (meshSnap["epoch"] as? Number)?.toInt()
-            meshVerified = meshSnap["formal_verified"] == true
+            val meshSnap = runCatching { dictOf(core.request("/api/mesh/status")) }.getOrNull()
+            if (meshSnap != null) {
+                val mBunker = (meshSnap["bunker_state"] as? Number)?.toInt() ?: 0
+                bunkerState = maxOf(snapBunker, mBunker)
+                meshEpoch = (meshSnap["epoch"] as? Number)?.toInt()
+                meshVerified = meshSnap["formal_verified"] == true
+            } else {
+                bunkerState = snapBunker
+            }
         } catch (_: Throwable) {
         }
         // A Core that predates /api/approvals answers 404: the per-kind lists
@@ -306,9 +310,6 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             queue = next
         }
         try {
-            val broker = dictOf(core.request("/api/bitwarden/broker"))
-            requests = OrbJSON.dictList(broker["requests"]).filter { it["status"] == "pending" }
-            grants = OrbJSON.dictList(broker["grants"])
             val d = dictOf(core.request("/api/approvals/devices"))
             devices = OrbJSON.dictList(d["devices"])
             mode = OrbJSON.str(d, "mode") ?: ""
@@ -316,14 +317,20 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             val match = devices.firstOrNull { mine != null && it["public_key"] == mine }
             activity?.let { OrbApprovalKey.setDeviceId(it, baseURL, match?.get("id") as? String) }
             enrolledHere = match != null
+            error = null
+        } catch (e: Throwable) {
+            error = e.message
+        }
+        try {
+            val broker = dictOf(core.request("/api/bitwarden/broker"))
+            requests = OrbJSON.dictList(broker["requests"]).filter { it["status"] == "pending" }
+            grants = OrbJSON.dictList(broker["grants"])
             if (projects.isEmpty()) {
                 projects = (core.request("/api/bitwarden/projects") as? List<*>).orEmpty()
                     .mapNotNull { it as? Map<*, *> }
                     .associate { (it["id"] as? String ?: "") to (it["name"] as? String ?: "") }
             }
-            error = null
-        } catch (e: Throwable) {
-            error = e.message
+        } catch (_: Throwable) {
         }
     }
 
@@ -674,8 +681,9 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                         "${missionName(g["requester_title"], g["requester_mission_id"])} → ${missionName(g["target_title"], g["target_mission_id"])}",
                                         color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                                     )
+                                    val accessScope = if ((g["scope"] as? String) == "control") "Control" else "Read only"
                                     Text(
-                                        "Read only · " + (grantMinutesLeft(g["expires_at"] as? String)?.let { "${formatMinutes(it)} left" } ?: ""),
+                                        "$accessScope · " + (grantMinutesLeft(g["expires_at"] as? String)?.let { "${formatMinutes(it)} left" } ?: ""),
                                         color = OrbStyle.textMuted, fontSize = 12.sp
                                     )
                                 }
