@@ -33,6 +33,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
  const known=(key:string)=>sizes.get(key)??estimates.get(key)??300;
  const [revision,setRevision]=createSignal(0),[viewport,setViewport]=createSignal({top:0,height:800,up:false});
  const [pinned,setPinned]=createSignal(new Set<string>());
+ const revealed=new Map<string,number>();
  let firstKey:string|undefined;
  const layout=createMemo(()=>timed("turns layout",()=>{
   revision();let top=0;
@@ -55,7 +56,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
   // shows the gap spacer for a frame. The total mounted span is unchanged.
   const top=(box?.top??0)-rect.top;
   setViewport(old=>({top,height:scroller?.clientHeight||innerHeight||800,up:top<old.top-1||(top<=old.top+1&&old.up)}));
-  const selection=getSelection(),next=new Set<string>();
+  const selection=getSelection(),next=new Set<string>(revealed.keys());
   for(const [key,node]of nodes){
    if(node.contains(document.activeElement)||node.querySelector('.editing,.fork-context[open]'))next.add(key);
    if(selection&&!selection.isCollapsed&&selection.rangeCount){try{if(selection.getRangeAt(0).intersectsNode(node))next.add(key);}catch{}}
@@ -147,9 +148,21 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
    prepare:signal=>p.prepare?.(signal)??Promise.resolve(),
    async reveal(hit){
     const row=layout().find(row=>row.item.key===hit.key);if(!row)return;
-    setPinned(prev=>new Set([...prev,hit.key]));
-    await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
-    const node=nodes.get(hit.key);markScrollIntent(scroller);node?.scrollIntoView({block:'center'});update();return node;
+    revealed.set(hit.key,(revealed.get(hit.key)??0)+1);
+    setPinned(prev=>prev.has(hit.key)?prev:new Set([...prev,hit.key]));
+    try{
+     await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
+     let node=nodes.get(hit.key);markScrollIntent(scroller);node?.scrollIntoView({block:'center'});update();
+     await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
+     node=nodes.get(hit.key);markScrollIntent(scroller);node?.scrollIntoView({block:'center'});update();
+     return node;
+    }finally{
+     requestAnimationFrame(()=>{
+      const count=(revealed.get(hit.key)??1)-1;
+      if(count<=0)revealed.delete(hit.key);else revealed.set(hit.key,count);
+      if(root.isConnected)schedule();
+     });
+    }
    },
   });update();
   requestAnimationFrame(()=>{rendered=true;});
