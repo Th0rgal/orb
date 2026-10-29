@@ -329,7 +329,11 @@ pub(crate) async fn catalog_model_options_for_state(
     drop(cached);
     apply_cli_proxy_catalog(&mut providers, &store_providers).await;
     retire_superseded_claude_models(&mut providers);
-    restrict_google_api_key_models(&mut providers, &store_providers);
+    restrict_google_api_key_models(
+        &mut providers,
+        &store_providers,
+        state.config.working_dir.as_path(),
+    );
 
     let mut models = Vec::new();
     for provider in &providers {
@@ -2079,7 +2083,11 @@ pub async fn list_providers(
     merge_claude_code_models(&mut providers);
     drop(cached);
     retire_superseded_claude_models(&mut providers);
-    restrict_google_api_key_models(&mut providers, &store_providers);
+    restrict_google_api_key_models(
+        &mut providers,
+        &store_providers,
+        state.config.working_dir.as_path(),
+    );
 
     for provider in &mut providers {
         if matches!(provider.id.as_str(), "anthropic" | "openai" | "xai") {
@@ -2215,7 +2223,11 @@ pub async fn list_backend_model_options(
     // `list_providers` and `validate_model_override` left retired models
     // selectable here — visibly offered, then refused on submit.
     retire_superseded_claude_models(&mut providers);
-    restrict_google_api_key_models(&mut providers, &store_providers);
+    restrict_google_api_key_models(
+        &mut providers,
+        &store_providers,
+        state.config.working_dir.as_path(),
+    );
 
     let mut backends: std::collections::HashMap<String, Vec<BackendModelOption>> =
         std::collections::HashMap::new();
@@ -2545,18 +2557,39 @@ fn supplement_entitled_carbon_model(
 }
 
 /// Restrict Google API-key catalogs to Gemini 4 Carbon only so non-free AI
-/// Studio models cannot be selected from pickers or `/v1/models`.
-fn restrict_google_api_key_models(providers: &mut [Provider], store: &[AIProvider]) {
-    let has_store_api_key = store
+/// Studio models cannot be selected from pickers or `/v1/models` when no
+/// Google OAuth subscription account is connected.
+fn restrict_google_api_key_models(
+    providers: &mut [Provider],
+    store: &[AIProvider],
+    work_dir: &Path,
+) {
+    let standard = crate::api::ai_providers::read_standard_accounts(work_dir);
+    restrict_google_api_key_models_with_standard(providers, store, &standard);
+}
+
+fn restrict_google_api_key_models_with_standard(
+    providers: &mut [Provider],
+    store: &[AIProvider],
+    standard: &[crate::provider_health::StandardAccount],
+) {
+    let has_api_key = store
         .iter()
-        .any(|p| p.enabled && p.provider_type == ProviderType::Google && p.api_key.is_some());
-    let has_store_oauth = store.iter().any(|p| {
+        .any(|p| p.enabled && p.provider_type == ProviderType::Google && p.api_key.is_some())
+        || standard
+            .iter()
+            .any(crate::provider_health::is_google_api_key_standard_account);
+    let has_oauth = store.iter().any(|p| {
         p.enabled
             && p.provider_type == ProviderType::Google
             && p.api_key.is_none()
             && p.oauth.is_some()
+    }) || standard.iter().any(|sa| {
+        sa.provider_type == ProviderType::Google
+            && sa.has_oauth
+            && !crate::provider_health::is_google_api_key_standard_account(sa)
     });
-    if !has_store_api_key || has_store_oauth {
+    if !has_api_key || has_oauth {
         return;
     }
     for provider in providers.iter_mut().filter(|p| p.id == "google") {
@@ -2618,7 +2651,11 @@ pub async fn validate_model_override(
     apply_live_authoritative_provider_models(&mut providers, &store_providers, &cached, true);
     drop(cached);
     retire_superseded_claude_models(&mut providers);
-    restrict_google_api_key_models(&mut providers, &store_providers);
+    restrict_google_api_key_models(
+        &mut providers,
+        &store_providers,
+        state.config.working_dir.as_path(),
+    );
 
     match backend {
         "opencode" => {
@@ -3909,9 +3946,54 @@ mod tests {
         let mut google_key = AIProvider::new(ProviderType::Google, "Google API".into());
         google_key.api_key = Some("AIza-test".into());
         let mut providers = vec![google_provider.clone()];
-        restrict_google_api_key_models(&mut providers, &[google_key]);
+        restrict_google_api_key_models_with_standard(
+            &mut providers,
+            std::slice::from_ref(&google_key),
+            &[],
+        );
         assert_eq!(
             providers[0]
+                .models
+                .iter()
+                .map(|m| &m.id)
+                .collect::<Vec<_>>(),
+            vec!["gemini-4-carbon-eap"]
+        );
+
+        // Standard Google OAuth (e.g. OpenCode auth.json) alongside an API key preserves OAuth models.
+        let standard_google_oauth = crate::provider_health::StandardAccount {
+            account_id: crate::provider_health::stable_provider_uuid("google"),
+            provider_type: ProviderType::Google,
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            oauth_expires_at: Some(i64::MAX),
+        };
+        let mut with_standard_oauth = vec![google_provider.clone()];
+        restrict_google_api_key_models_with_standard(
+            &mut with_standard_oauth,
+            std::slice::from_ref(&google_key),
+            &[standard_google_oauth],
+        );
+        assert_eq!(with_standard_oauth[0].models.len(), 3);
+
+        // Standard Google API key (GEMINI_API_KEY) without OAuth also restricts to Carbon.
+        let standard_google_key = crate::provider_health::StandardAccount {
+            account_id: crate::provider_health::stable_provider_uuid("google-env-api-key"),
+            provider_type: ProviderType::Google,
+            api_key: Some("AIza-env".into()),
+            has_oauth: false,
+            base_url: None,
+            oauth_expires_at: None,
+        };
+        let mut with_standard_key = vec![google_provider.clone()];
+        restrict_google_api_key_models_with_standard(
+            &mut with_standard_key,
+            &[],
+            &[standard_google_key],
+        );
+        assert_eq!(
+            with_standard_key[0]
                 .models
                 .iter()
                 .map(|m| &m.id)
@@ -3927,7 +4009,11 @@ mod tests {
             expires_at: i64::MAX,
         });
         let mut with_oauth = vec![google_provider];
-        restrict_google_api_key_models(&mut with_oauth, &[google_oauth]);
+        restrict_google_api_key_models_with_standard(
+            &mut with_oauth,
+            &[google_key, google_oauth],
+            &[],
+        );
         assert_eq!(with_oauth[0].models.len(), 3);
 
         // Antigravity picker supplements Carbon when a connected account's catalog offers it.

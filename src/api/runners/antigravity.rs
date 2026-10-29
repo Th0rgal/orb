@@ -128,7 +128,7 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     if let Some(home) = projectable_home(ctx.workspace) {
         crate::api::antigravity_native::install_in_home_for_model(
             &home,
-            Some(ctx.work_dir),
+            Some(ctx.app_working_dir),
             ctx.model,
         );
     }

@@ -2924,11 +2924,7 @@ impl ModelChainStore {
                             }));
                         let duplicate_proxy = duplicate_google_proxy_key
                             && sa.account_id == stable_provider_uuid("google-cli-proxy");
-                        let api_key_backed = (!sa.has_oauth && sa.api_key.is_some())
-                            || (sa.account_id == stable_provider_uuid("google-cli-proxy")
-                                && !crate::api::ai_providers::cli_proxy_config_gemini_keys()
-                                    .is_empty());
-                        let disallowed_on_api_key = api_key_backed
+                        let disallowed_on_api_key = is_google_api_key_standard_account(sa)
                             && !crate::model_policy::is_google_api_key_allowed_model(
                                 &entry.model_id,
                             );
@@ -3098,6 +3094,8 @@ impl ModelChainStore {
                     && !(duplicate_google_proxy_key
                         && account.account_id == stable_provider_uuid("google-cli-proxy"))
                     && (account.api_key.is_some() || account.has_oauth)
+                    && (!is_google_api_key_standard_account(account)
+                        || crate::model_policy::is_google_api_key_allowed_model(&entry.model_id))
                 {
                     ids.insert(account.account_id);
                 }
@@ -3105,6 +3103,8 @@ impl ModelChainStore {
             if matches!(provider_type, crate::ai_providers::ProviderType::Google)
                 && !duplicate_google_proxy_key
                 && crate::api::ai_providers::google_cli_proxy_account_available()
+                && (crate::api::ai_providers::cli_proxy_config_gemini_keys().is_empty()
+                    || crate::model_policy::is_google_api_key_allowed_model(&entry.model_id))
             {
                 ids.insert(stable_provider_uuid("google-cli-proxy"));
             }
@@ -3158,6 +3158,13 @@ impl ModelChainStore {
 ///   fallback when no fresh OAuth token exists.
 /// - **Anthropic** (and everything else): a real API key wins over OAuth, so
 ///   the proxy sends `x-api-key`-style auth when the operator configured one.
+pub(crate) fn is_google_api_key_standard_account(sa: &StandardAccount) -> bool {
+    sa.provider_type == crate::ai_providers::ProviderType::Google
+        && ((!sa.has_oauth && sa.api_key.is_some())
+            || (sa.account_id == stable_provider_uuid("google-cli-proxy")
+                && !crate::api::ai_providers::cli_proxy_config_gemini_keys().is_empty()))
+}
+
 pub(crate) fn preferred_store_credential(
     provider_type: crate::ai_providers::ProviderType,
     api_key: Option<&str>,
