@@ -11,6 +11,7 @@ import type { DraftImage } from "./imageAttachments";
 import { uploadToken, type UploadedFile } from "./uploads";
 import { Portal } from 'solid-js/web';
 import { useSidePanel } from './FilePanel';
+import { createPinnedScroll } from './mission/pinnedScroll';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { connectionVersion } from './api';
 import { readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion } from './sideQuestionStorage';
@@ -54,19 +55,16 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  // Set while this panel itself is launching/answering a question.
  let asking=false;
  let launchAbort:AbortController|undefined;
- let scroll:HTMLDivElement|undefined;
+ const pin=createPinnedScroll({key:()=>(open()?loadedKey():'')});
  // Sending explicitly returns to the latest turn, even after reading older replies.
- const revealSentQuestion=()=>{
-  const current=key();
-  requestAnimationFrame(()=>{if(current===key()&&scroll)scroll.scrollTop=scroll.scrollHeight;});
- };
- // The thread opens at its end, like the conversation, and follows new
- // text only while the reader is near the end.
+ const revealSentQuestion=()=>pin.pin();
+ // The thread opens at its end, like the main conversation, and follows
+ // streaming and resizes through the shared pinned-scroll owner.
  let shown='';
  createEffect(()=>{answer();history();busy();btwActivities(p.mission).length;const now=open()?loadedKey():'';const opened=now!==shown;shown=now;
-  if(!scroll)return;const toEnd=()=>{if(scroll)scroll.scrollTop=scroll.scrollHeight;};
-  if(opened)requestAnimationFrame(toEnd);
-  else if(scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<120)queueMicrotask(toEnd);});
+  if(!now)return;
+  if(opened)pin.pin();
+  else queueMicrotask(pin.scrollIfPinned);});
  const [storageError,setStorageError]=createSignal(false);
  const [pendingAttachments,setPendingAttachments]=createSignal<SideAttachment[]>([]);
  // Questions asked while the side agent answers wait here and are sent in
@@ -273,7 +271,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   <Show when={!side&&!open()&&(history().length||busy()||error())}><button class="btw-reopen" onClick={reveal}>Side questions {busy()?'· Answering…':`· ${history().length}`}</button></Show>
   <Show when={open()}><Portal mount={side ? side.target() : inline}><section class="btw-panel" aria-label="Side questions">
    <header><div><strong>Side question</strong></div><div class="btw-actions"><button class="icon-btn" aria-label="Close side questions" onClick={()=>{setOpen(false);side?.hide();}}><Ic.CloseIcon size={16}/></button></div></header>
-   <div class="btw-thread" ref={scroll}>
+   <div class="btw-thread" ref={pin.ref} onScroll={pin.onScroll}>
     <For each={turns}>{exchange=>{
      const content=()=>remoteLog(exchange.answer);
      return <article data-side-turn={exchange.id}>
