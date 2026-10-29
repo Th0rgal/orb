@@ -44,6 +44,7 @@ fn missing_extra_duplicate_nontext_and_imported_symbols_fail() {
         .map(|name| format!("_{name} T 0 1\n"))
         .collect::<String>();
     symbols::verify_listing(&apple, true).unwrap();
+    symbols::verify_listing(&format!("\norb_kernel_unboxed.o:\n{apple}"), true).unwrap();
     assert!(symbols::verify_listing(&apple, false).is_err());
 }
 

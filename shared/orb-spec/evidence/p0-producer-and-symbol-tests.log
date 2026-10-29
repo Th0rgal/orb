@@ -1,15 +1,109 @@
-   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 2m 04s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-project-transfer)
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `normalize_string_patch` is never used
+   --> src/api/control/mission_create.rs:259:15
+    |
+259 | pub(super) fn normalize_string_patch(value: Option<Option<String>>) -> ...
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:1661:10
+     |
+1661 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+
+warning: `sandboxed_sh` (lib test) generated 5 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 29.11s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3643 filtered out; finished in 0.69s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3630 filtered out; finished in 0.14s
 
-   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 57.55s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/fix-project-transfer)
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `normalize_string_patch` is never used
+   --> src/api/control/mission_create.rs:259:15
+    |
+259 | pub(super) fn normalize_string_patch(value: Option<Option<String>>) -> ...
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:1661:10
+     |
+1661 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+
+warning: `sandboxed_sh` (lib test) generated 5 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 26.85s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -27,15 +121,18 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3630 filtered out; finished in 0.13s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3617 filtered out; finished in 0.11s
 
-   Compiling orb-spec v1.3.0 (/tmp/orb-work/orb/crates/orb-spec)
-    Finished `test` profile [unoptimized] target(s) in 0.42s
-     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-80ea7278ce92855a)
+   Compiling serde_core v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling memchr v2.8.0
+   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/fix-project-transfer/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 3.20s
+     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-182c0985b80e13af)
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.09s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s
 

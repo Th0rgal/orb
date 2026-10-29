@@ -292,6 +292,144 @@ pub async fn update_mission_origin(
     Ok(Json(mission))
 }
 
+fn map_dispatch_recovery_error(error: String) -> (StatusCode, String) {
+    if error.contains("dispatch_recovery_required") {
+        (StatusCode::CONFLICT, error)
+    } else {
+        internal_error(error)
+    }
+}
+
+fn normalize_project_patch(patch: Option<Option<String>>) -> Option<Option<String>> {
+    normalize_string_patch(patch).map(|inner| {
+        inner.map(|raw| {
+            let canonical = crate::api::projects_overview::canonicalize_project_slug(&raw);
+            if canonical != raw {
+                tracing::info!(
+                    from = %raw,
+                    to = %canonical,
+                    "canonicalized mission project patch via routes.json alias"
+                );
+            }
+            canonical
+        })
+    })
+}
+
+struct ResolvedEditTags {
+    tags: Option<Vec<String>>,
+    effective_tags: Vec<String>,
+    could_change_writer_status: bool,
+    becomes_writer: bool,
+}
+
+async fn resolve_project_edit_tags(
+    mission_store: &Arc<dyn MissionStore>,
+    current: &Mission,
+    req: &UpdateMissionProjectRequest,
+    effective_intent: Option<&str>,
+) -> Result<ResolvedEditTags, (StatusCode, String)> {
+    let non_tag_writer_inputs_changed =
+        req.github_pr.is_some() || req.writer.is_some() || req.intent.is_some();
+    let mut tags: Option<Vec<String>> = req.tags.as_ref().map(|tags| {
+        tags.iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    });
+    if tags
+        .as_deref()
+        .is_some_and(contains_internal_disk_reservation_tag)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "disk-reservation-v1 tags are reserved internal admission state".to_string(),
+        ));
+    }
+    let mut effective_tags = tags.clone().unwrap_or_else(|| current.project.tags.clone());
+    // Compatibility: old releases persisted leases in project tags. A
+    // project edit may not drop or replace one of those records while the
+    // migration reader still reconstructs it.
+    let durable_reservation_tags: Vec<String> = current
+        .project
+        .tags
+        .iter()
+        .filter(|tag| tag.starts_with(DISK_RESERVATION_TAG_PREFIX))
+        .cloned()
+        .collect();
+    for reservation in &durable_reservation_tags {
+        if !effective_tags.iter().any(|tag| tag == reservation) {
+            effective_tags.push(reservation.clone());
+        }
+    }
+    if tags.is_some() {
+        tags = Some(effective_tags.clone());
+    }
+    // Pure sidebar folder edits (`orb-folder:*` only) do not alter writer
+    // capability, so they must not inject `"pr-writer"` or re-arbitrate foreign
+    // PR writer leases.
+    let could_change_writer_status = writer_status_inputs_changed(
+        non_tag_writer_inputs_changed,
+        &effective_tags,
+        &current.project.tags,
+    );
+    let deferred_goal = mission_store
+        .get_deferred_goal(current.id)
+        .await
+        .map_err(internal_error)?;
+    let initial_prompt = mission_store
+        .get_initial_user_message(current.id)
+        .await
+        .map_err(internal_error)?;
+    let initial_prompt_requests_writer = requested_pr_writer(
+        req.writer,
+        Some(&effective_tags),
+        effective_intent,
+        initial_prompt.as_deref(),
+    );
+    let deferred_goal_requests_writer = deferred_goal.as_deref().is_some_and(|goal| {
+        requested_pr_writer(
+            req.writer,
+            Some(&effective_tags),
+            effective_intent,
+            Some(goal),
+        )
+    });
+    // Writer capability governs tracks even when PR metadata is absent.
+    // Explicit promotion must replace a read-only tag before lease_mode sees it,
+    // while pure project/folder moves keep capability tags untouched.
+    let becomes_writer = initial_prompt_requests_writer || deferred_goal_requests_writer;
+    if could_change_writer_status {
+        if becomes_writer {
+            effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
+            effective_tags.push("pr-writer".to_string());
+            tags = Some(effective_tags.clone());
+        } else if req.writer == Some(false) {
+            effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
+            effective_tags.push("pr-readonly".to_string());
+            tags = Some(effective_tags.clone());
+        }
+    }
+    Ok(ResolvedEditTags {
+        tags,
+        effective_tags,
+        could_change_writer_status,
+        becomes_writer,
+    })
+}
+
+fn non_tag_project_eq(
+    a: &crate::api::mission_store::MissionProject,
+    b: &crate::api::mission_store::MissionProject,
+) -> bool {
+    a.project == b.project
+        && a.track == b.track
+        && a.intent == b.intent
+        && a.github_pr == b.github_pr
+        && a.desired_state == b.desired_state
+        && a.next_check_at == b.next_check_at
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PriorTrackLease {
     slug: String,
@@ -305,10 +443,21 @@ struct MovedMissionSnapshot {
     title: Option<String>,
     before: crate::api::mission_store::MissionProject,
     prior_track_lease: Option<PriorTrackLease>,
+    /// Tags added by this subtree transfer (removed on rollback).
+    #[serde(default)]
+    undo_tag_remove: Vec<String>,
+    /// Tags removed by this subtree transfer (re-added on rollback).
+    #[serde(default)]
+    undo_tag_add: Vec<String>,
 }
 
 impl MovedMissionSnapshot {
-    fn capture(state: &Arc<AppState>, mission: &Mission) -> Result<Self, (StatusCode, String)> {
+    fn capture(
+        state: &Arc<AppState>,
+        mission: &Mission,
+        undo_tag_remove: Vec<String>,
+        undo_tag_add: Vec<String>,
+    ) -> Result<Self, (StatusCode, String)> {
         let attempt = mission.id.to_string();
         let prior_track_lease = state
             .projects
@@ -326,6 +475,8 @@ impl MovedMissionSnapshot {
             title: mission.title.clone(),
             before: mission.project.clone(),
             prior_track_lease,
+            undo_tag_remove,
+            undo_tag_add,
         })
     }
 }
@@ -380,32 +531,42 @@ async fn rollback_moved_missions(
         }
 
         match store.get_mission(snap.id).await {
-            Ok(Some(cur)) if cur.project != snap.before => {
-                let patch = crate::api::mission_store::MissionProjectPatch {
-                    preserve_updated_at: true,
-                    title: None,
-                    project: Some(snap.before.project.clone()),
-                    track: Some(snap.before.track.clone()),
-                    intent: Some(snap.before.intent.clone()),
-                    github_pr: Some(snap.before.github_pr.clone()),
-                    tags: None,
-                    tag_patch: Some(crate::api::mission_store::MissionTagPatch::between(
-                        &cur.project.tags,
-                        &snap.before.tags,
-                    )),
-                    desired_state: Some(snap.before.desired_state.clone()),
-                    next_check_at: Some(snap.before.next_check_at.clone()),
-                };
-                if let Err(rollback_err) = store.update_mission_project(snap.id, patch).await {
-                    tracing::error!(
-                        mission_id = %snap.id,
-                        %rollback_err,
-                        "Subtree project transfer metadata rollback failed"
-                    );
-                    first_error.get_or_insert(rollback_err);
+            Ok(Some(cur)) => {
+                let tag_rollback_needed = snap
+                    .undo_tag_remove
+                    .iter()
+                    .any(|t| cur.project.tags.contains(t))
+                    || snap
+                        .undo_tag_add
+                        .iter()
+                        .any(|t| !cur.project.tags.contains(t));
+                if !non_tag_project_eq(&cur.project, &snap.before) || tag_rollback_needed {
+                    let patch = crate::api::mission_store::MissionProjectPatch {
+                        preserve_updated_at: true,
+                        title: None,
+                        project: Some(snap.before.project.clone()),
+                        track: Some(snap.before.track.clone()),
+                        intent: Some(snap.before.intent.clone()),
+                        github_pr: Some(snap.before.github_pr.clone()),
+                        tags: None,
+                        tag_patch: Some(crate::api::mission_store::MissionTagPatch {
+                            remove: snap.undo_tag_remove.clone(),
+                            add: snap.undo_tag_add.clone(),
+                        }),
+                        desired_state: Some(snap.before.desired_state.clone()),
+                        next_check_at: Some(snap.before.next_check_at.clone()),
+                    };
+                    if let Err(rollback_err) = store.update_mission_project(snap.id, patch).await {
+                        tracing::error!(
+                            mission_id = %snap.id,
+                            %rollback_err,
+                            "Subtree project transfer metadata rollback failed"
+                        );
+                        first_error.get_or_insert(rollback_err);
+                    }
                 }
             }
-            Ok(_) => {}
+            Ok(None) => {}
             Err(rollback_err) => {
                 tracing::error!(
                     mission_id = %snap.id,
@@ -504,13 +665,7 @@ where
     let control = control_for_user(&state, &user).await;
     recover_subtree_project_edits_in_store(&state, &control.mission_store)
         .await
-        .map_err(|error| {
-            if error.contains("dispatch_recovery_required") {
-                (StatusCode::CONFLICT, error)
-            } else {
-                internal_error(error)
-            }
-        })?;
+        .map_err(map_dispatch_recovery_error)?;
     let include_descendants = std::mem::take(&mut req.include_descendants);
     let extra_descendants = std::mem::take(&mut req.descendant_ids);
     if !include_descendants {
@@ -524,6 +679,26 @@ where
         .await;
     }
 
+    if control
+        .mission_store
+        .get_mission(id)
+        .await
+        .map_err(internal_error)?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, format!("Mission {} not found", id)));
+    }
+    let descendant_ids =
+        collect_launched_descendant_ids(&control.mission_store, id, &extra_descendants).await?;
+    // Reconcile any interrupted individual `mission_dispatch_admissions`
+    // receipts on the root and every descendant BEFORE capturing rollback
+    // snapshots so a stale provisional lease is never captured as prior state.
+    for mid in std::iter::once(id).chain(descendant_ids.iter().copied()) {
+        dispatch_admission::recover_dispatch_single(&state, &control.mission_store, mid)
+            .await
+            .map_err(map_dispatch_recovery_error)?;
+    }
+
     let explicit_project_patch = req.project.is_some();
     let root_current = control
         .mission_store
@@ -531,18 +706,55 @@ where
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
-    let root_snap = MovedMissionSnapshot::capture(&state, &root_current)?;
-    let descendant_ids =
-        collect_launched_descendant_ids(&control.mission_store, id, &extra_descendants).await?;
+    let planned_root_intent = normalize_string_patch(req.intent.clone())
+        .unwrap_or_else(|| root_current.project.intent.clone());
+    let resolved_root_tags = resolve_project_edit_tags(
+        &control.mission_store,
+        &root_current,
+        &req,
+        planned_root_intent.as_deref(),
+    )
+    .await?;
+    let root_forward_tags = crate::api::mission_store::MissionTagPatch::between(
+        &root_current.project.tags,
+        &resolved_root_tags.effective_tags,
+    );
+    let root_snap = MovedMissionSnapshot::capture(
+        &state,
+        &root_current,
+        root_forward_tags.add,
+        root_forward_tags.remove,
+    )?;
+
+    let planned_target_project = normalize_project_patch(req.project.clone())
+        .unwrap_or_else(|| root_current.project.project.clone());
+    let children_may_move = planned_target_project.is_some() || explicit_project_patch;
     let mut planned_snapshots = vec![root_snap];
-    for &child_id in &descendant_ids {
-        if let Some(child) = control
-            .mission_store
-            .get_mission(child_id)
-            .await
-            .map_err(internal_error)?
-        {
-            planned_snapshots.push(MovedMissionSnapshot::capture(&state, &child)?);
+    if children_may_move {
+        for &child_id in &descendant_ids {
+            if let Some(child) = control
+                .mission_store
+                .get_mission(child_id)
+                .await
+                .map_err(internal_error)?
+            {
+                if child.project.project == planned_target_project {
+                    continue;
+                }
+                let removed_folders: Vec<String> = child
+                    .project
+                    .tags
+                    .iter()
+                    .filter(|t| t.starts_with("orb-folder:"))
+                    .cloned()
+                    .collect();
+                planned_snapshots.push(MovedMissionSnapshot::capture(
+                    &state,
+                    &child,
+                    Vec::new(),
+                    removed_folders,
+                )?);
+            }
         }
     }
     let root_key = id.to_string();
@@ -596,18 +808,26 @@ where
             if child.project.project == target_project {
                 continue;
             }
-            let child_snap = match MovedMissionSnapshot::capture(&state, &child) {
-                Ok(snap) => snap,
-                Err(err) => {
-                    if rollback_moved_missions(&state, &control.mission_store, &moved)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = state.projects.clear_subtree_project_edit(&root_key);
+            let removed_folders: Vec<String> = child
+                .project
+                .tags
+                .iter()
+                .filter(|t| t.starts_with("orb-folder:"))
+                .cloned()
+                .collect();
+            let child_snap =
+                match MovedMissionSnapshot::capture(&state, &child, Vec::new(), removed_folders) {
+                    Ok(snap) => snap,
+                    Err(err) => {
+                        if rollback_moved_missions(&state, &control.mission_store, &moved)
+                            .await
+                            .is_ok()
+                        {
+                            let _ = state.projects.clear_subtree_project_edit(&root_key);
+                        }
+                        return Err(err);
                     }
-                    return Err(err);
-                }
-            };
+                };
             // Omit internal `disk-reservation-v1:` tags from the synthetic
             // request body so admission validation does not reject legacy
             // rows; `update_mission_project_locked` re-attaches them from
@@ -672,13 +892,7 @@ pub(super) async fn update_mission_project_locked(
     let control = control_for_user(&state, &user).await;
     dispatch_admission::recover_dispatch_single(&state, &control.mission_store, id)
         .await
-        .map_err(|error| {
-            if error.contains("dispatch_recovery_required") {
-                (StatusCode::CONFLICT, error)
-            } else {
-                internal_error(error)
-            }
-        })?;
+        .map_err(map_dispatch_recovery_error)?;
     let current = control
         .mission_store
         .get_mission(id)
@@ -686,127 +900,30 @@ pub(super) async fn update_mission_project_locked(
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
 
-    let non_tag_writer_inputs_changed =
-        req.github_pr.is_some() || req.writer.is_some() || req.intent.is_some();
-
-    // Normalize: blank string patches clear the field; tags are trimmed.
-    let normalize = |patch: Option<Option<String>>| -> Option<Option<String>> {
-        patch.map(|inner| {
-            inner.and_then(|s| {
-                let t = s.trim().to_string();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t)
-                }
-            })
-        })
-    };
-    let project = normalize(req.project).map(|inner| {
-        inner.map(|raw| {
-            let canonical = crate::api::projects_overview::canonicalize_project_slug(&raw);
-            if canonical != raw {
-                tracing::info!(
-                    from = %raw,
-                    to = %canonical,
-                    "canonicalized mission project patch via routes.json alias"
-                );
-            }
-            canonical
-        })
-    });
-    let track = normalize(req.track);
-    let intent = normalize(req.intent);
-    let github_pr = normalize(req.github_pr);
-    let desired_state = normalize(req.desired_state);
-    let next_check_at = normalize(req.next_check_at);
-    let mut tags: Option<Vec<String>> = req.tags.map(|tags| {
-        tags.into_iter()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect()
-    });
-    if tags
-        .as_deref()
-        .is_some_and(contains_internal_disk_reservation_tag)
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "disk-reservation-v1 tags are reserved internal admission state".to_string(),
-        ));
-    }
+    let project = normalize_project_patch(req.project.clone());
+    let track = normalize_string_patch(req.track.clone());
+    let intent = normalize_string_patch(req.intent.clone());
+    let github_pr = normalize_string_patch(req.github_pr.clone());
+    let desired_state = normalize_string_patch(req.desired_state.clone());
+    let next_check_at = normalize_string_patch(req.next_check_at.clone());
 
     let effective_string = |patch: &Option<Option<String>>, current: &Option<String>| {
         patch.clone().unwrap_or_else(|| current.clone())
     };
     let effective_github_pr = effective_string(&github_pr, &current.project.github_pr);
     let effective_intent = effective_string(&intent, &current.project.intent);
-    let mut effective_tags = tags.clone().unwrap_or_else(|| current.project.tags.clone());
-    // Compatibility: old releases persisted leases in project tags.  A
-    // project edit may not drop or replace one of those records while the
-    // migration reader still reconstructs it.
-    let durable_reservation_tags: Vec<String> = current
-        .project
-        .tags
-        .iter()
-        .filter(|tag| tag.starts_with(DISK_RESERVATION_TAG_PREFIX))
-        .cloned()
-        .collect();
-    for reservation in &durable_reservation_tags {
-        if !effective_tags.iter().any(|tag| tag == reservation) {
-            effective_tags.push(reservation.clone());
-        }
-    }
-    if tags.is_some() {
-        tags = Some(effective_tags.clone());
-    }
-    // Pure sidebar folder edits (`orb-folder:*` only) do not alter writer
-    // capability, so they must not inject `"pr-writer"` or re-arbitrate foreign
-    // PR writer leases.
-    let could_change_writer_status = writer_status_inputs_changed(
-        non_tag_writer_inputs_changed,
-        &effective_tags,
-        &current.project.tags,
-    );
-    let deferred_goal = control
-        .mission_store
-        .get_deferred_goal(id)
-        .await
-        .map_err(internal_error)?;
-    let initial_prompt = control
-        .mission_store
-        .get_initial_user_message(id)
-        .await
-        .map_err(internal_error)?;
-    let initial_prompt_requests_writer = requested_pr_writer(
-        req.writer,
-        Some(&effective_tags),
+    let ResolvedEditTags {
+        tags,
+        effective_tags,
+        could_change_writer_status,
+        becomes_writer,
+    } = resolve_project_edit_tags(
+        &control.mission_store,
+        &current,
+        &req,
         effective_intent.as_deref(),
-        initial_prompt.as_deref(),
-    );
-    let deferred_goal_requests_writer = deferred_goal.as_deref().is_some_and(|goal| {
-        requested_pr_writer(
-            req.writer,
-            Some(&effective_tags),
-            effective_intent.as_deref(),
-            Some(goal),
-        )
-    });
-    // Writer capability governs tracks even when PR metadata is absent.
-    // Explicit promotion must replace a read-only tag before lease_mode sees it,
-    // while pure project/folder moves keep capability tags untouched.
-    let becomes_writer = initial_prompt_requests_writer || deferred_goal_requests_writer;
-    if could_change_writer_status {
-        if becomes_writer {
-            effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
-            effective_tags.push("pr-writer".to_string());
-            tags = Some(effective_tags.clone());
-        } else if req.writer == Some(false) {
-            effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
-            effective_tags.push("pr-readonly".to_string());
-            tags = Some(effective_tags.clone());
-        }
-    }
+    )
+    .await?;
 
     let writer_guard = if becomes_writer && could_change_writer_status {
         Some(

@@ -65,11 +65,11 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-          "sha256": "dbed7ff5a384553f7f4a861f119fab80638085626e1d2d768f7d3e2fa2d2021f"
+          "sha256": "0fd810eb4c97bd9389da3e586499e7291d93a3c8f2d296b7bb13e95f0cbae15e"
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "1b4ed61e0f7eaa55c6d4bd4bcd4a60607286b6c5b49d4b62e8394a06d8d53d85"
+          "sha256": "b7cdd6bf5f9e3a7327f81921e334fd2adfc4ab4506c174559ff4645d8d522717"
         }
       ],
       "execution": {

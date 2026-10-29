@@ -13751,6 +13751,41 @@ async fn project_move_with_include_descendants_rolls_back_subtree_on_descendant_
             Some("test-parent-lease"),
         ))
         .unwrap();
+    // Plant an uncommitted individual `project-edit` receipt with a provisional
+    // lease on `stale-provisional`: subtree transfer must recover it before
+    // capturing `prior_track_lease` so rollback restores `lido`, not `stale-provisional`.
+    let parent_stored = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale_after = parent_stored.project.clone();
+    stale_after.project = Some("stale-provisional".into());
+    h.state
+        .projects
+        .absorb_track("stale-provisional", &parent_track, Some("parent"), None)
+        .unwrap();
+    let stale_lease_req = super::super::track_leases::lease_request(
+        "stale-provisional",
+        &parent_track,
+        &parent.id.to_string(),
+        "writer",
+        Some("test-stale-provisional-lease"),
+    );
+    h.state
+        .projects
+        .begin_dispatch_admission(
+            &parent.id.to_string(),
+            &json!({
+                "phase": "project-edit",
+                "before": {"project": parent_stored.project},
+                "after": {"project": stale_after},
+            }),
+            Some(&stale_lease_req),
+        )
+        .unwrap();
 
     // First child: completed, moves cleanly before the conflicting sibling.
     let child_ok = h
@@ -14032,13 +14067,17 @@ async fn project_move_with_include_descendants_recovers_after_mid_subtree_crash(
                 "slug": "lido",
                 "track": parent_track,
                 "mode": "writer",
-            }
+            },
+            "undo_tag_remove": ["orb-folder:Audits"],
+            "undo_tag_add": ["orb-folder:BeforeCrash"],
         },
         {
             "id": child.id,
             "title": child_before.title,
             "before": child_before.project,
-            "prior_track_lease": null
+            "prior_track_lease": null,
+            "undo_tag_remove": [],
+            "undo_tag_add": [],
         }
     ]);
     h.state
@@ -14057,13 +14096,31 @@ async fn project_move_with_include_descendants_recovers_after_mid_subtree_crash(
             None,
         )
         .unwrap();
+    // Simulate concurrent server-owned `worker-initialized-v1` tags arriving
+    // after snapshot capture on both root and child: rollback must reverse only
+    // transfer-owned tag deltas and preserve `worker-initialized-v1`.
     h.control
         .mission_store
         .update_mission_project(
             parent.id,
             MissionProjectPatch {
                 project: Some(Some("verity".into())),
-                tags: Some(vec!["pr-writer".into(), "orb-folder:Audits".into()]),
+                tags: Some(vec![
+                    "pr-writer".into(),
+                    "orb-folder:Audits".into(),
+                    "worker-initialized-v1".into(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child.id,
+            MissionProjectPatch {
+                tags: Some(vec!["pr-readonly".into(), "worker-initialized-v1".into()]),
                 ..Default::default()
             },
         )
@@ -14093,10 +14150,18 @@ async fn project_move_with_include_descendants_recovers_after_mid_subtree_crash(
         p_recovered.project.tags,
         vec![
             "pr-writer".to_string(),
-            "orb-folder:BeforeCrash".to_string()
+            "worker-initialized-v1".to_string(),
+            "orb-folder:BeforeCrash".to_string(),
         ]
     );
     assert_eq!(c_recovered.project.project.as_deref(), Some("lido"));
+    assert_eq!(
+        c_recovered.project.tags,
+        vec![
+            "pr-readonly".to_string(),
+            "worker-initialized-v1".to_string(),
+        ]
+    );
     let leases: Vec<_> = h
         .state
         .projects
