@@ -739,7 +739,8 @@ pub(crate) async fn run_codex_turn_with_rotation(
     }
     let mut speed_scope = None;
     let default_model = crate::api::control::resolve_codex_default_model();
-    let requested_model = Some(requested_model.unwrap_or(&default_model));
+    let selected_model = requested_model.unwrap_or(&default_model);
+    let requested_model = Some(selected_model);
     let accelerated_pool = if service_tier != crate::codex_speed::Tier::Standard
         || crate::api::oauth_owner::codex_via_cli_proxy().is_some()
     {
@@ -764,7 +765,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
             };
             let (scope, scoped_endpoint) = match crate::api::control::speed_proxy::register(
                 &base,
-                requested_model.unwrap(),
+                selected_model,
                 service_tier,
                 mission_id,
                 endpoint,
@@ -778,7 +779,7 @@ pub(crate) async fn run_codex_turn_with_rotation(
             pool.extend(
                 crate::api::control::speed::eligible_accounts(
                     app_working_dir,
-                    requested_model.unwrap(),
+                    selected_model,
                     service_tier,
                 )
                 .await

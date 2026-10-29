@@ -1015,6 +1015,8 @@ impl UsageSource {
 /// One routed `/v1` request, as written by the proxy.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProxyUsageRecord {
+    /// Server observation before forwarding the response, even if storage is asynchronous.
+    pub observed_at: Option<String>,
     /// Normalized model id (see `crate::cost::normalized_model`).
     pub model: String,
     /// Provider type the request was served by (e.g. "google").

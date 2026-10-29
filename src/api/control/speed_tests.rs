@@ -123,7 +123,7 @@ fn codex_scope_binds_caller_model_tier_and_revokes_at_turn_end() {
         assert_eq!(
             speed_proxy::prepare_request(&headers, &wrong, "core-secret")
                 .unwrap_err()
-                .status(),
+                .0,
             StatusCode::BAD_REQUEST
         );
         let wrong_tier = Bytes::from(
@@ -136,7 +136,7 @@ fn codex_scope_binds_caller_model_tier_and_revokes_at_turn_end() {
         assert_eq!(
             speed_proxy::prepare_request(&headers, &wrong_tier, "core-secret")
                 .unwrap_err()
-                .status(),
+                .0,
             StatusCode::BAD_REQUEST
         );
         let body = Bytes::from_static(br#"{"model":"gpt-6.1-sol","input":[]}"#);
@@ -155,7 +155,7 @@ fn codex_scope_binds_caller_model_tier_and_revokes_at_turn_end() {
         assert_eq!(
             speed_proxy::prepare_request(&headers, &stateful, "core-secret")
                 .unwrap_err()
-                .status(),
+                .0,
             StatusCode::BAD_REQUEST
         );
         drop(guard);
@@ -163,7 +163,7 @@ fn codex_scope_binds_caller_model_tier_and_revokes_at_turn_end() {
         assert_eq!(
             speed_proxy::prepare_request(&headers, &body, "core-secret")
                 .unwrap_err()
-                .status(),
+                .0,
             StatusCode::UNAUTHORIZED
         );
     }

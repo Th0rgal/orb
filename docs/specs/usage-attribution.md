@@ -122,3 +122,11 @@ account, forge another mission, or keep working after turn revocation. The
 previous separate rotation transport is removed. Native Responses failures
 now write attempt receipts and fallback events; completed streams settle their
 outcome only when the stream ends.
+
+When a native mission first adopts account-bound proxy routing, its earlier
+harness usage remains visible. New proxy observations are timestamped before
+forwarding the response, not when an asynchronous storage task eventually runs;
+the later harness completion is then suppressed without erasing pre-transition
+history. Legacy unbound missions retain their existing aggregation. A subsequent
+switch back to direct inference still needs per-turn provenance to distinguish
+mixed routes; this change does not infer that missing history.

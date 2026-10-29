@@ -13925,14 +13925,17 @@ async fn native_proxy_uses_core_account_order_and_bound_usage() {
     let h = Harness::new().await;
     let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let captured = calls.clone();
+    let reject_all = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reject = reject_all.clone();
     let app = axum::Router::new().route("/v1/responses", axum::routing::post(move |headers: HeaderMap, body: Bytes| {
         let captured = captured.clone();
+        let reject = reject.clone();
         async move {
             let key = headers["authorization"].to_str().unwrap().to_string();
             captured.lock().unwrap().push(key.clone());
             let request: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(request["model"], "gpt-6-astra");
-            if key == "Bearer first-fixture" {
+            if key == "Bearer first-fixture" || reject.load(std::sync::atomic::Ordering::Relaxed) {
                 return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":{"code":"turn_rate_limit_exceeded","message":"capacity"}}))).into_response();
             }
             (StatusCode::OK, Json(json!({"id":"fixture","output":[],"usage":{"input_tokens":10,"output_tokens":4}}))).into_response()
@@ -14030,6 +14033,46 @@ async fn native_proxy_uses_core_account_order_and_bound_usage() {
         calls.lock().unwrap().len(),
         2,
         "subscription capability spent API credits"
+    );
+    reject_all.store(true, std::sync::atomic::Ordering::Relaxed);
+    h.state.health_tracker.clear_cooldown(ids[0]).await;
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", "Bearer test-only".parse().unwrap());
+    let exhausted = crate::api::proxy::responses(
+        State(h.state.clone()),
+        headers,
+        Bytes::from_static(br#"{"model":"gpt-6-astra","input":[],"stream":false}"#),
+    )
+    .await;
+    assert_eq!(exhausted.status(), StatusCode::TOO_MANY_REQUESTS);
+    let outcomes = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let rows = control
+                .mission_store
+                .get_proxy_outcomes(None)
+                .await
+                .unwrap();
+            if rows.len() == 4 {
+                break rows;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("native outcomes persisted");
+    assert_eq!(outcomes.iter().filter(|r| !r.superseded).count(), 2);
+    assert!(outcomes
+        .iter()
+        .any(|r| !r.superseded && r.http_status == Some(429) && r.account_id == Some(ids[1])));
+    assert_eq!(
+        control
+            .mission_store
+            .get_usage_records(None)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "failed requests cannot invent token usage"
     );
     server.abort();
 }

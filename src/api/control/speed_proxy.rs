@@ -91,29 +91,29 @@ pub(super) fn prepare_request(
     headers: &HeaderMap,
     body: &Bytes,
     secret: &str,
-) -> Result<(HeaderMap, Bytes, CancellationToken), Response> {
+) -> Result<(HeaderMap, Bytes, CancellationToken), (StatusCode, &'static str)> {
     let Some(scope) = selection(headers) else {
-        return Err(refusal(
+        return Err((
             StatusCode::UNAUTHORIZED,
             "Codex capability expired; resume the mission before retrying.",
         ));
     };
     let mut request: serde_json::Value = match serde_json::from_slice(body) {
         Ok(value) => value,
-        Err(_) => return Err(refusal(StatusCode::BAD_REQUEST, "Invalid Codex request")),
+        Err(_) => return Err((StatusCode::BAD_REQUEST, "Invalid Codex request")),
     };
     if request
         .get("previous_response_id")
         .is_some_and(|value| !value.is_null())
     {
-        return Err(refusal(StatusCode::BAD_REQUEST,"Codex must replay conversation input on this subscription route; previous_response_id is unsupported."));
+        return Err((StatusCode::BAD_REQUEST,"Codex must replay conversation input on this subscription route; previous_response_id is unsupported."));
     }
     if request["model"].as_str() != Some(&scope.model)
         || request
             .get("service_tier")
             .is_some_and(|value| !value.is_null() && value.as_str() != Some(scope.tier.wire()))
     {
-        return Err(refusal(StatusCode::BAD_REQUEST,"Codex did not apply the selected model and speed. No request was sent to a subscription."));
+        return Err((StatusCode::BAD_REQUEST,"Codex did not apply the selected model and speed. No request was sent to a subscription."));
     }
     // The custom-provider CLI can omit service_tier. This revocable capability
     // already binds the operator-selected tier; transport owns its wire value.
@@ -123,7 +123,7 @@ pub(super) fn prepare_request(
         header::AUTHORIZATION,
         format!("Bearer {secret}")
             .parse()
-            .map_err(|_| refusal(StatusCode::SERVICE_UNAVAILABLE, "Core routing unavailable"))?,
+            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Core routing unavailable"))?,
     );
     trusted.insert(
         "x-sandboxed-mission-id",
@@ -152,7 +152,7 @@ pub async fn responses(
 ) -> Response {
     let (trusted, body, cancel) = match prepare_request(&headers, &body, &state.proxy_secret) {
         Ok(prepared) => prepared,
-        Err(response) => return response,
+        Err((status, message)) => return refusal(status, message),
     };
     let response = tokio::select! {
         _ = cancel.cancelled() => return refusal(StatusCode::CONFLICT, "Codex turn stopped"),

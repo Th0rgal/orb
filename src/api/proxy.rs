@@ -1707,6 +1707,7 @@ fn tokens_with_body_cache(input: u64, output: u64, body: &[u8]) -> ProxyTokens {
 /// Ledger fields that come from the resolved route.
 #[derive(Debug, Clone)]
 struct ProxyUsageTarget {
+    observed_at: String,
     model: String,
     provider: Option<String>,
     account_id: Option<uuid::Uuid>,
@@ -1719,6 +1720,7 @@ fn proxy_usage_target(
     attribution: &UsageAttribution,
 ) -> ProxyUsageTarget {
     ProxyUsageTarget {
+        observed_at: chrono::Utc::now().to_rfc3339(),
         model: proxy_usage_model(entry),
         provider: Some(entry.provider_id.clone()),
         account_id: Some(entry.account_id),
@@ -1741,6 +1743,7 @@ fn proxy_usage_record(
     };
     let cost_cents = crate::cost::cost_cents_from_usage(&model, &usage);
     crate::api::mission_store::ProxyUsageRecord {
+        observed_at: Some(target.observed_at.clone()),
         model,
         provider: target.provider.clone(),
         account_id: target.account_id,
@@ -2109,6 +2112,7 @@ async fn native_protocol_proxy(
     }
 
     let outcome = OutcomeCtx::new(&chain_id, is_stream);
+    let mut native_failures = Vec::new();
     let mut supported_entries = 0usize;
     let mut last_upstream_error: Option<(StatusCode, HeaderMap, bytes::Bytes)> = None;
     let native_chain_length = (entries.len() as u32).max(1);
@@ -2306,11 +2310,12 @@ async fn native_protocol_proxy(
             {
                 Ok(model) => Some(model),
                 Err(error) => {
+                    record_native_failures(&state, &outcome, native_failures, true);
                     return error_response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         error,
                         "account_binding_unavailable",
-                    )
+                    );
                 }
             }
         } else {
@@ -2423,16 +2428,18 @@ async fn native_protocol_proxy(
                     .health_tracker
                     .record_entry_failure(entry, reason, None)
                     .await;
-                record_native_failure(
-                    &state,
-                    &outcome,
-                    entry,
-                    entry_idx,
-                    entries.len(),
-                    reason,
-                    None,
-                )
-                .await;
+                native_failures.push(
+                    record_native_failure(
+                        &state,
+                        &outcome,
+                        entry,
+                        entry_idx,
+                        entries.len(),
+                        reason,
+                        None,
+                    )
+                    .await,
+                );
                 continue;
             }
         };
@@ -2448,16 +2455,18 @@ async fn native_protocol_proxy(
                 .health_tracker
                 .record_entry_failure(entry, CooldownReason::AuthError, None)
                 .await;
-            record_native_failure(
-                &state,
-                &outcome,
-                entry,
-                entry_idx,
-                entries.len(),
-                CooldownReason::AuthError,
-                Some(status.as_u16()),
-            )
-            .await;
+            native_failures.push(
+                record_native_failure(
+                    &state,
+                    &outcome,
+                    entry,
+                    entry_idx,
+                    entries.len(),
+                    CooldownReason::AuthError,
+                    Some(status.as_u16()),
+                )
+                .await,
+            );
             continue;
         }
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
@@ -2498,20 +2507,28 @@ async fn native_protocol_proxy(
                         .await;
                 }
             }
-            record_native_failure(
-                &state,
-                &outcome,
-                entry,
-                entry_idx,
-                entries.len(),
-                reason,
-                Some(status.as_u16()),
-            )
-            .await;
+            native_failures.push(
+                record_native_failure(
+                    &state,
+                    &outcome,
+                    entry,
+                    entry_idx,
+                    entries.len(),
+                    reason,
+                    Some(status.as_u16()),
+                )
+                .await,
+            );
             last_upstream_error = Some((status, response_headers, response_body));
             continue;
         }
         let response_headers = upstream.headers().clone();
+        record_native_failures(
+            &state,
+            &outcome,
+            std::mem::take(&mut native_failures),
+            false,
+        );
         if is_stream && status.is_success() {
             let liveness_mission_id = liveness_mission(&attribution);
             let upstream_stream = upstream.bytes_stream().map(|item| {
@@ -2599,6 +2616,7 @@ async fn native_protocol_proxy(
         return response;
     }
 
+    record_native_failures(&state, &outcome, native_failures, true);
     if let Some((status, response_headers, response_body)) = last_upstream_error {
         return preserved_upstream_error_response(status, &response_headers, response_body);
     }
@@ -3160,6 +3178,7 @@ async fn chat_completions_routed(
             super::grok_tool_bridge::handle_chat_completion(&state.config.working_dir, &body).await;
         if let Some(usage) = handled.usage {
             let target = ProxyUsageTarget {
+                observed_at: chrono::Utc::now().to_rfc3339(),
                 provider: crate::api::usage_summary::infer_provider_for_model(&usage.model),
                 model: usage.model,
                 account_id: None,
@@ -9154,17 +9173,14 @@ async fn record_native_failure(
     length: usize,
     reason: CooldownReason,
     http: Option<u16>,
-) {
-    record_proxy_outcomes(
-        state,
-        vec![outcome.record(
-            Some(entry),
-            attempt_status(reason, http),
-            http,
-            None,
-            index as u32,
-            true,
-        )],
+) -> crate::api::mission_store::ProxyOutcomeRecord {
+    let row = outcome.record(
+        Some(entry),
+        attempt_status(reason, http),
+        http,
+        None,
+        index as u32,
+        true,
     );
     state
         .health_tracker
@@ -9182,6 +9198,22 @@ async fn record_native_failure(
             chain_length: length as u32,
         })
         .await;
+    row
+}
+
+fn record_native_failures(
+    state: &Arc<super::routes::AppState>,
+    outcome: &OutcomeCtx,
+    mut rows: Vec<crate::api::mission_store::ProxyOutcomeRecord>,
+    exhausted: bool,
+) {
+    if exhausted {
+        if let Some(last) = rows.last_mut() {
+            last.superseded = false;
+            last.total_ms = outcome.started.elapsed().as_millis() as u64;
+        }
+    }
+    record_proxy_outcomes(state, rows);
 }
 
 /// Outcome bookkeeping for one `/v1/chat/completions` request.
