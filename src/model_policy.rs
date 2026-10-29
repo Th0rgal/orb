@@ -127,6 +127,26 @@ pub fn retired_model_message(model: &str, replacement: &str) -> String {
     )
 }
 
+/// Whether `model` may execute against a Google API key (`GEMINI_API_KEY` / AI Studio).
+///
+/// Only Gemini 4 Carbon (`gemini-4-carbon-eap`, `gemini-4-carbon`) is free on
+/// Google API keys; every other model (`gemini-4-argon*`, `gemini-3*`,
+/// `gemini-2*`, `agy-demo`, etc.) is billed and strictly disabled on API-key
+/// routes so paid spend can never occur accidentally.
+pub fn is_google_api_key_allowed_model(model: &str) -> bool {
+    let (_, id) = split_provider(model.trim());
+    let id = id.trim().to_ascii_lowercase();
+    id == "gemini-4-carbon" || id.starts_with("gemini-4-carbon-")
+}
+
+/// Rejection text when a non-Carbon model is sent to a Google API key route.
+pub fn google_api_key_disallowed_message(model: &str) -> String {
+    format!(
+        "Model '{model}' is disabled on Google API key routes (only Gemini 4 Carbon \
+         `gemini-4-carbon-eap` is permitted on Google API keys)."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +250,34 @@ mod tests {
         assert!(message.contains("claude-opus-4-1"));
         assert!(message.contains(CURRENT_CLAUDE_OPUS));
         assert!(message.contains(CURRENT_CLAUDE_FABLE));
+    }
+
+    #[test]
+    fn google_api_key_allows_only_gemini_4_carbon() {
+        for allowed in [
+            "gemini-4-carbon-eap",
+            "google/gemini-4-carbon-eap",
+            "gemini/gemini-4-carbon-eap",
+            "gemini-4-carbon",
+            "google/gemini-4-carbon",
+            "GEMINI-4-CARBON-EAP",
+        ] {
+            assert!(is_google_api_key_allowed_model(allowed), "{allowed}");
+        }
+        for blocked in [
+            "gemini-4-argon",
+            "gemini-4-argon-eap",
+            "google/gemini-4-argon",
+            "google/gemini-4-argon-eap",
+            "agy-demo",
+            "gemini-3.8-flash",
+            "gemini-3.1-pro-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "",
+        ] {
+            assert!(!is_google_api_key_allowed_model(blocked), "{blocked}");
+        }
     }
 }

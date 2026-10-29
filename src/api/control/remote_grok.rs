@@ -172,9 +172,16 @@ pub(crate) async fn require_node_managed_auth(
         return Ok(());
     };
     if profile == "antigravity" {
-        // One Google sign-in: hand the node the routing login first. Older
+        let requested_model = match plan {
+            RemoteHarnessPlan::Antigravity { model, .. } => model.as_deref(),
+            _ => None,
+        };
+        // Hand the node the login suited to the requested model (switching to
+        // the only account offering Gemini 4 Carbon when requested). Older
         // nodes and nodes keeping their own sign-in fall back to the heartbeat.
-        match crate::api::antigravity_native::sync_node(state, node_id).await {
+        match crate::api::antigravity_native::sync_node_for_model(state, node_id, requested_model)
+            .await
+        {
             Ok(crate::api::antigravity_native::NodeSync::Ready) => {
                 let client = RemoteNodeClient::default();
                 remote_node::probe_node(&state.fleet, &client, node).await;

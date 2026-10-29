@@ -22,6 +22,46 @@ pub fn args(model: Option<&str>, session: Option<&str>, prompt: &str) -> Vec<Str
     args_with_effort(model, None, session, prompt)
 }
 
+pub fn normalize_model_and_effort<'a>(
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let raw = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.strip_prefix("antigravity/").unwrap_or(s));
+    let explicit_effort = effort.map(str::trim).filter(|s| !s.is_empty());
+    let (normalized_model, variant_effort, requires_default_high) = match raw {
+        Some("agy-model" | "gemini-4-carbon" | "gemini-4-carbon-eap") => {
+            (Some("agy-model"), None, true)
+        }
+        Some(id)
+            if id
+                .strip_prefix("agy-model-")
+                .or_else(|| id.strip_prefix("gemini-4-carbon-"))
+                .is_some_and(|level| matches!(level, "low" | "medium" | "high")) =>
+        {
+            let level = id
+                .strip_prefix("agy-model-")
+                .or_else(|| id.strip_prefix("gemini-4-carbon-"));
+            (Some("agy-model"), level, true)
+        }
+        Some("agy-demo") => (Some("agy-demo"), None, true),
+        Some(id)
+            if id
+                .strip_prefix("agy-demo-")
+                .is_some_and(|level| matches!(level, "low" | "medium" | "high")) =>
+        {
+            (Some("agy-demo"), id.strip_prefix("agy-demo-"), true)
+        }
+        other => (other, None, false),
+    };
+    let effective_effort = explicit_effort
+        .or(variant_effort)
+        .or_else(|| requires_default_high.then_some("high"));
+    (normalized_model, effective_effort)
+}
+
 pub fn args_with_effort(
     model: Option<&str>,
     effort: Option<&str>,
@@ -33,23 +73,12 @@ pub fn args_with_effort(
         "stream-json".into(),
         "--dangerously-skip-permissions".into(),
     ];
-    let variant_effort = model
-        .and_then(|id| id.strip_prefix("agy-demo-"))
-        .filter(|level| matches!(*level, "low" | "medium" | "high"));
-    let model = if variant_effort.is_some() {
-        Some("agy-demo")
-    } else {
-        model
-    };
-    if let Some(model) = model.filter(|s| !s.is_empty()) {
+    let (model, effort) = normalize_model_and_effort(model, effort);
+    if let Some(model) = model {
         args.extend(["--model".into(), model.into()]);
     }
-    // agy-demo no longer supplies its own effort default. Preserve explicit choices.
-    if let Some(effort) = effort
-        .filter(|s| !s.is_empty())
-        .or(variant_effort)
-        .or_else(|| (model == Some("agy-demo")).then_some("high"))
-    {
+    // agy-model (Carbon) and agy-demo (Argon) require an explicit effort flag.
+    if let Some(effort) = effort {
         args.extend(["--effort".into(), effort.into()]);
     }
     if let Some(session) = session.filter(|s| !s.is_empty()) {
@@ -1371,16 +1400,23 @@ pub fn models_in_home(
     Ok(models)
 }
 
-/// Argon's discovered variants are one model with a separate effort control.
+/// Carbon (`agy-model-*`) and Argon (`agy-demo-*`) discovered variants are
+/// each one base model with a separate effort control.
 pub fn group_models(models: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut seen = HashSet::new();
     models
         .into_iter()
         .filter_map(|(id, label)| {
-            let variant = id
-                .strip_prefix("agy-demo-")
-                .filter(|level| matches!(*level, "low" | "medium" | "high"));
-            let (id, label) = if let Some(level) = variant {
+            let grouped = id
+                .strip_prefix("agy-model-")
+                .filter(|level| matches!(*level, "low" | "medium" | "high"))
+                .map(|level| ("agy-model", level))
+                .or_else(|| {
+                    id.strip_prefix("agy-demo-")
+                        .filter(|level| matches!(*level, "low" | "medium" | "high"))
+                        .map(|level| ("agy-demo", level))
+                });
+            let (id, label) = if let Some((base, level)) = grouped {
                 let suffix = format!(
                     " ({})",
                     match level {
@@ -1390,7 +1426,7 @@ pub fn group_models(models: Vec<(String, String)>) -> Vec<(String, String)> {
                     }
                 );
                 (
-                    "agy-demo".to_string(),
+                    base.to_string(),
                     label.strip_suffix(&suffix).unwrap_or(&label).to_string(),
                 )
             } else {
@@ -1530,6 +1566,27 @@ mod tests {
         assert!(args.windows(2).any(|v| v == ["--effort", "high"]));
         let args = args_with_effort(Some("agy-demo-low"), None, None, "continue");
         assert!(args.windows(2).any(|v| v == ["--effort", "low"]));
+
+        let carbon_models = group_models(vec![
+            ("agy-model-low".into(), "Gemini 4 Carbon (Low)".into()),
+            ("agy-model-medium".into(), "Gemini 4 Carbon (Medium)".into()),
+            ("agy-model-high".into(), "Gemini 4 Carbon (High)".into()),
+        ]);
+        assert_eq!(
+            carbon_models,
+            vec![("agy-model".into(), "Gemini 4 Carbon".into())]
+        );
+        for alias in ["agy-model", "gemini-4-carbon", "gemini-4-carbon-eap"] {
+            let args = args_with_effort(Some(alias), None, None, "ping");
+            assert!(args.windows(2).any(|v| v == ["--model", "agy-model"]));
+            assert!(args.windows(2).any(|v| v == ["--effort", "high"]));
+        }
+        let args = args_with_effort(Some("agy-model-medium"), None, None, "ping");
+        assert!(args.windows(2).any(|v| v == ["--model", "agy-model"]));
+        assert!(args.windows(2).any(|v| v == ["--effort", "medium"]));
+        let args = args_with_effort(Some("gemini-4-carbon-low"), Some("high"), None, "ping");
+        assert!(args.windows(2).any(|v| v == ["--model", "agy-model"]));
+        assert!(args.windows(2).any(|v| v == ["--effort", "high"]));
     }
     #[test]
     fn thinking_usage_is_per_turn_and_duplicate_steps_are_idempotent() {
