@@ -37,9 +37,10 @@ struct OrbMachinesSettings: View {
                                           onOpenMission: { startedMission = $0 })
             }
             Section("Fleet") {
-                if loading && nodes.isEmpty { ProgressView() }
-                if fleetReady && nodes.isEmpty { Text("No remote nodes registered.").foregroundStyle(.secondary) }
-                ForEach(nodes, id: \.selfID) { node in
+                let fleetNodes = managed == nil ? nodes : nodes.filter { !OrbManaged.isManagedNode($0) }
+                if loading && fleetNodes.isEmpty { ProgressView() }
+                if fleetReady && fleetNodes.isEmpty { Text("No static fleet nodes registered.").foregroundStyle(.secondary) }
+                ForEach(fleetNodes, id: \.selfID) { node in
                     DisclosureGroup {
                         LabeledContent("Status", value: node["status"].text)
                         LabeledContent("Active jobs", value: node["active_jobs"].display.isEmpty ? "Unavailable" : node["active_jobs"].display)

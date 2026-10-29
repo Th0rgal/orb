@@ -150,19 +150,51 @@ struct SetupSheet: View {
         .presentationDragIndicator(allowsDismissal ? .visible : .hidden)
     }
 
+    private var isConnectedSession: Bool {
+        embedded && api.isConfigured && (api.isAuthenticated || !api.authRequired) && !api.authSessionExpired
+    }
+
     private var form: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 20) {
+                if isConnectedSession {
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(OrbStyle.success)
+                            .frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Connected")
+                                .font(.subheadline.weight(.semibold))
+                            Text(api.baseURL)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        if api.authRequired {
+                            Button("Sign out", role: .destructive) {
+                                api.logout()
+                                api.connectionGeneration += 1
+                                onComplete()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .accessibilityIdentifier("account.sign-out")
+                        }
+                    }
+                    .padding(14)
+                    .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
+                }
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Server URL").font(.subheadline).foregroundStyle(.secondary)
+                    Text(isConnectedSession ? "Switch server" : "Server URL").font(.subheadline).foregroundStyle(.secondary)
                     TextField("https://your-server.com", text: $serverURL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                         .accessibilityIdentifier("server-url")
-                        .padding(16)
+                        .padding(14)
                         .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
                 }
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Sign in").font(.subheadline).foregroundStyle(.secondary)
+                    Text(isConnectedSession ? "Re-authenticate (optional)" : "Sign in").font(.subheadline).foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 16) {
                         if api.authMode == .multiUser {
                             TextField("Username", text: $username).textContentType(.username)
@@ -171,7 +203,7 @@ struct SetupSheet: View {
                         }
                         SecureField("Password", text: $password).textContentType(.password)
                             .accessibilityIdentifier("server-password")
-                    }.padding(16)
+                    }.padding(14)
                         .background(OrbStyle.surface, in: RoundedRectangle(cornerRadius: 14))
                 }
                 if let errorMessage { Text(errorMessage).font(.subheadline).foregroundStyle(.red) }

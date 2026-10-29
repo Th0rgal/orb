@@ -1,0 +1,77 @@
+{
+  "description": "Shared UI compaction & sanitization rules for Orb mobile clients (iOS OrbActivityCompaction & Android OrbActivityCompaction): privilege command pre/post coalescing, consecutive error ring deduplication, mission-access grant deduplication, human cooldown formatting, Inbox pipe-table preview stripping, placeholder assistant turn suppression, and canonical UUID check for inbox-state/seen.",
+  "privilege_commands": [
+    {
+      "name": "pairs_exit_with_matching_pre_exec_and_keeps_inflight",
+      "input": [
+        { "id": "c4", "target_host": "dgx-spark", "command": "[pre-exec] nvidia-smi", "exit_code": null, "at": "2026-10-29T12:04:00Z" },
+        { "id": "c3", "target_host": "dgx-spark", "command": "docker ps --filter name=hindsight", "exit_code": 0, "at": "2026-10-29T12:03:00Z" },
+        { "id": "c2", "target_host": "dgx-spark", "command": "[pre-exec] docker ps --filter name=hindsight", "exit_code": null, "at": "2026-10-29T12:02:59Z" },
+        { "id": "c1", "target_host": "dgx-spark", "command": "psql -c SELECT 1", "exit_code": 1, "at": "2026-10-29T12:01:00Z" },
+        { "id": "c0", "target_host": "dgx-spark", "command": "[pre-exec] psql -c SELECT 1", "exit_code": null, "at": "2026-10-29T12:00:59Z" }
+      ],
+      "expected": [
+        { "id": "c4", "status": "RUN", "host": "dgx-spark", "command": "nvidia-smi" },
+        { "id": "c3", "status": "EXIT 0", "host": "dgx-spark", "command": "docker ps --filter name=hindsight" },
+        { "id": "c1", "status": "EXIT 1", "host": "dgx-spark", "command": "psql -c SELECT 1" }
+      ]
+    }
+  ],
+  "error_coalescing": [
+    {
+      "name": "collapses_consecutive_identical_errors",
+      "input": [
+        { "category": "network", "summary": "HTTP 400", "detail": "PUT /api/control/inbox-state/seen/9304baf4", "at": 300 },
+        { "category": "network", "summary": "HTTP 400", "detail": "PUT /api/control/inbox-state/seen/9304baf4", "at": 200 },
+        { "category": "network", "summary": "HTTP 400", "detail": "PUT /api/control/inbox-state/seen/9304baf4", "at": 100 },
+        { "category": "sse", "summary": "EOF", "detail": "stream closed", "at": 50 }
+      ],
+      "expected": [
+        { "category": "network", "summary": "HTTP 400", "count": 3, "at": 300 },
+        { "category": "sse", "summary": "EOF", "count": 1, "at": 50 }
+      ]
+    }
+  ],
+  "grant_deduplication": [
+    {
+      "name": "keeps_latest_expiry_per_requester_target_scope",
+      "input": [
+        { "id": "g1", "requester_mission_id": "m-req", "target_mission_id": "m-tgt", "scope": "inspect", "expires_at": "2026-10-29T14:00:00Z" },
+        { "id": "g2", "requester_mission_id": "m-req", "target_mission_id": "m-tgt", "scope": "inspect", "expires_at": "2026-10-29T16:00:00Z" },
+        { "id": "g3", "requester_mission_id": "m-req", "target_mission_id": "m-tgt", "scope": "control", "expires_at": "2026-10-29T15:00:00Z" }
+      ],
+      "expected_ids": ["g2", "g3"]
+    }
+  ],
+  "cooldown_format": [
+    { "seconds": 45, "expected": "45s" },
+    { "seconds": 261, "expected": "4m 21s" },
+    { "seconds": 3600, "expected": "1h" },
+    { "seconds": 321181, "expected": "3d 17h" }
+  ],
+  "inbox_preview": [
+    {
+      "name": "strips_pipe_table_separators_and_formats_cells",
+      "input": "Status at 12:40 UTC:\n| Run | Status |\n|---|---|\n| Argon cascade | p03 done, running |\n| Argon pilot | 40/50 valid |",
+      "expected": "Status at 12:40 UTC: Run · Status · Argon cascade · p03 done, running · Argon pilot · 40/50 valid"
+    },
+    {
+      "name": "inline_collapsed_pipe_table",
+      "input": "Status at 12:40 UTC: | Run | Status | |---|---| | Argon cascade | p03 done |",
+      "expected": "Status at 12:40 UTC: Run · Status · Argon cascade · p03 done"
+    }
+  ],
+  "placeholder_turns": [
+    { "text": ".", "expected": true },
+    { "text": "  ... \n", "expected": true },
+    { "text": "…", "expected": true },
+    { "text": "Done.", "expected": false },
+    { "text": "", "expected": true }
+  ],
+  "canonical_uuid": [
+    { "id": "9304baf4", "expected": false },
+    { "id": "hermes:main", "expected": false },
+    { "id": "9304baf4-1551-41de-b005-c81ea5a79315", "expected": true },
+    { "id": "9304BAF4-1551-41DE-B005-C81EA5A79315", "expected": true }
+  ]
+}

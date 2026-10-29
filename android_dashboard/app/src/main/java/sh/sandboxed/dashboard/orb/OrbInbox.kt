@@ -114,7 +114,14 @@ object OrbSharedInboxState {
         if (scope == current) return
         scope = current; seen.clear(); revisions.clear(); outbox.clear()
         OrbInboxSettings.bindAccount(current)
-        OrbJSON.dict(OrbJSON.parse(persistence?.getString(diskKey(), null) ?: "{}"))?.forEach { (path, body) -> if (body != null) outbox[path] = body }
+        OrbJSON.dict(OrbJSON.parse(persistence?.getString(diskKey(), null) ?: "{}"))?.forEach { (path, body) ->
+            if (body == null) return@forEach
+            if (path.startsWith("seen/")) {
+                val decoded = java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8")
+                if (!OrbActivityCompaction.isCanonicalUUID(decoded)) return@forEach
+            }
+            outbox[path] = body
+        }
         for ((path, body) in outbox) if (path.startsWith("seen/")) {
             val stamp = (body as? Map<*, *>)?.get("stamp") as? Number
             if (stamp != null) seen[java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8")] = stamp.toLong()
@@ -146,7 +153,8 @@ object OrbSharedInboxState {
                 core.request("/api/control/inbox-state/$path", method = "PUT", body = body)
                 if (expected == account() && outbox[path] == body) { outbox.remove(path); persistOutbox() }
             }.onFailure { error ->
-                if ((error as? OrbError)?.status == 404 && path.startsWith("seen/") && expected == account() && outbox[path] == body) { outbox.remove(path); persistOutbox() }
+                val st = (error as? OrbError)?.status
+                if ((st == 404 || st == 400) && path.startsWith("seen/") && expected == account() && outbox[path] == body) { outbox.remove(path); persistOutbox() }
             }
             pending--
         }
@@ -154,6 +162,7 @@ object OrbSharedInboxState {
     fun writeSeen(id: String, stamp: Long) {
         ensureScope()
         seen[id] = stamp
+        if (!OrbActivityCompaction.isCanonicalUUID(id)) return
         write("seen/" + OrbCore.shared.encodeComponent(id), mapOf("stamp" to stamp))
     }
     fun writePreferences() {
@@ -1528,8 +1537,11 @@ fun OrbInboxView(
         OrbInboxModel.workingMissions(projects, missions)
     }
 
-    LaunchedEffect(allItems, workingMissions, OrbNotifications.notificationsEnabled) {
-        OrbNotifications.reconcile(allItems, workingMissions)
+    val hasLoaded by core.hasLoadedSuccessfully.collectAsState()
+    LaunchedEffect(hasLoaded, allItems, workingMissions, OrbNotifications.notificationsEnabled) {
+        if (hasLoaded) {
+            OrbNotifications.reconcile(allItems, workingMissions)
+        }
     }
 
     val listState = rememberLazyListState()
@@ -1758,10 +1770,6 @@ fun OrbInboxView(
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("Include autonomous agents", fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.weight(1f))
                             androidx.compose.material3.Switch(checked = OrbInboxSettings.includeAutonomous, onCheckedChange = { OrbInboxSettings.update(newIncludeAutonomous = it) }, modifier = Modifier.testTag("inbox.includeAutonomous"))
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Notifications (AI summary & blockers)", fontSize = 12.sp, color = OrbStyle.textSecondary, modifier = Modifier.weight(1f))
-                            androidx.compose.material3.Switch(checked = OrbNotifications.notificationsEnabled, onCheckedChange = { OrbNotifications.setEnabled(it) }, modifier = Modifier.testTag("inbox.notificationsEnabled"))
                         }
                         // Minimalist filter bar + inline working pill + Read all
                         Row(
@@ -2523,14 +2531,19 @@ private fun OrbInboxCard(
 
             // Keep summary capped at 3 lines when peekTurns will render below, avoiding duplicate walls of text.
             if (item.summary.isNotEmpty()) {
-                Text(
-                    text = item.summary,
-                    color = OrbStyle.textSecondary,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                    maxLines = if (isPeeked && nonDuplicatePeekTurns.isEmpty()) Int.MAX_VALUE else 3,
-                    overflow = TextOverflow.Ellipsis
-                )
+                val previewText = remember(item.summary, isPeeked) {
+                    if (isPeeked) item.summary else OrbActivityCompaction.cleanInboxPreview(item.summary)
+                }
+                if (previewText.isNotEmpty()) {
+                    Text(
+                        text = previewText,
+                        color = OrbStyle.textSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        maxLines = if (isPeeked && nonDuplicatePeekTurns.isEmpty()) Int.MAX_VALUE else 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             // Work receipt chip
