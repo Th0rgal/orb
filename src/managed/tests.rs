@@ -433,6 +433,7 @@ async fn boat_e2e_provider_round_trip() {
         arch: None,
         max_hourly_usd: None,
         preferred_offer_id: None,
+        exclude_offer_ids: Vec::new(),
         ttl_seconds: 900,
         image: None,
         name: tag.clone(),
@@ -2705,6 +2706,7 @@ async fn scaleway_provider_spawn_rejects_apple_silicon_worker_before_network() {
         arch: Some("arm64".into()),
         max_hourly_usd: None,
         preferred_offer_id: None,
+        exclude_offer_ids: Vec::new(),
         allow_24h_commitment: true,
         provisioning_mode: ProvisioningMode::Worker,
     };
@@ -2825,6 +2827,125 @@ async fn vastai_quote_admits_real_offer_rate_and_enforces_cpu_ram_floors() {
     assert!((spawned.usd_per_hour - 0.68).abs() < 1e-6);
     assert_eq!(spawned.cpu, 20);
     assert_eq!(spawned.ram_gb, 63);
+    srv.abort();
+}
+
+#[tokio::test]
+async fn vastai_fallback_reconciles_machine_resources_and_regenerates_bootstrap() {
+    use axum::{
+        extract::Path,
+        http::StatusCode,
+        routing::{post, put},
+        Json, Router,
+    };
+
+    let captured_9003_onstart: Arc<tokio::sync::Mutex<Option<String>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let captured_route = Arc::clone(&captured_9003_onstart);
+
+    let app = Router::new()
+        .route(
+            "/bundles/",
+            post(|| async {
+                Json(serde_json::json!({
+                    "offers": [
+                        // Preferred offer 9002: 64 vCPU / 256 GB RAM @ $0.68/h (sniped on PUT)
+                        {"id": 9002, "dph_total": 0.68, "cpu_cores_effective": 64.0, "cpu_ram": 262144.0},
+                        // Replacement offer 9003: 20 vCPU / 64 GB RAM @ $0.55/h
+                        {"id": 9003, "dph_total": 0.55, "cpu_cores_effective": 20.0, "cpu_ram": 65536.0}
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/asks/:offer_id/",
+            put(move |Path(offer_id): Path<String>, Json(body): Json<Value>| {
+                let captured_route = Arc::clone(&captured_route);
+                async move {
+                    if offer_id == "9002" {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(serde_json::json!({"error": "offer 9002 already rented"})),
+                        );
+                    }
+                    assert_eq!(offer_id, "9003");
+                    let onstart = body
+                        .get("onstart")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    *captured_route.lock().await = Some(onstart);
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({"success": true, "new_contract": 999002})),
+                    )
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = settings();
+    cfg.daily_cap_usd = Some(5.0);
+    let vast: Arc<dyn ManagedProvider> = Arc::new(vastai::VastAiProvider::new(
+        format!("http://{addr}"),
+        "vast-test-key",
+    ));
+    let mgr = Arc::new(ManagedManager::new(cfg, Some(vast), dir.path(), 3000));
+    let spawned = mgr
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            ttl_minutes: Some(60),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Wait briefly for the spawned background provision task to hit PUT /asks/9002/ -> fallback PUT /asks/9003/.
+    for _ in 0..50 {
+        if mgr
+            .get(&spawned.id)
+            .await
+            .and_then(|m| m.provider_id)
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let reconciled = mgr.get(&spawned.id).await.unwrap();
+    assert_eq!(reconciled.provider_id.as_deref(), Some("999002"));
+    assert_eq!(reconciled.cpu, 20, "must reconcile CPU down from 64 to 20");
+    assert_eq!(
+        reconciled.ram_gb, 64,
+        "must reconcile RAM down from 256 to 64"
+    );
+    assert!((reconciled.usd_per_hour - 0.55).abs() < 1e-6);
+
+    let onstart = captured_9003_onstart
+        .lock()
+        .await
+        .clone()
+        .expect("onstart sent to 9003");
+    assert!(
+        onstart.contains("SANDBOXED_NODE_CAPACITY=10\n"),
+        "regenerated bootstrap must advertise 10 slots (not 32): {onstart}"
+    );
+    assert!(
+        onstart.contains(&format!(
+            "SANDBOXED_NODE_JOB_MEMORY_BYTES={}\n",
+            managed_job_memory_bytes(64)
+        )),
+        "regenerated bootstrap must cap job memory to 64 GB RAM (not 256 GB): {onstart}"
+    );
     srv.abort();
 }
 

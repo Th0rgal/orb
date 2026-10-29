@@ -87,6 +87,7 @@ pub struct SpawnSpec {
     pub arch: Option<String>,
     pub max_hourly_usd: Option<f64>,
     pub preferred_offer_id: Option<String>,
+    pub exclude_offer_ids: Vec<String>,
     pub allow_24h_commitment: bool,
     pub provisioning_mode: ProvisioningMode,
 }
@@ -2357,6 +2358,7 @@ impl ManagedManager {
                 arch: req.arch.clone(),
                 max_hourly_usd: req.max_hourly_usd,
                 preferred_offer_id: None,
+                exclude_offer_ids: Vec::new(),
                 allow_24h_commitment: req.allow_24h_commitment.unwrap_or(false),
                 provisioning_mode,
             };
@@ -2603,10 +2605,8 @@ impl ManagedManager {
         ttl_minutes: u64,
         extras: SpawnExtras,
     ) -> Result<ManagedMachine, String> {
-        let m = self.get(id).await.ok_or("machine vanished")?;
+        let mut m = self.get(id).await.ok_or("machine vanished")?;
         let started = tokio::time::Instant::now();
-        let capacity = (m.cpu / 2).max(1);
-        let job_memory = managed_job_memory_bytes(m.ram_gb);
         // Mint the one-time enrollment token upfront so cloud-init / onstart
         // providers can embed it in the root-only bootstrap payload without SSH.
         let enroll_token = if m.provisioning_mode.is_worker() {
@@ -2620,47 +2620,120 @@ impl ManagedManager {
         } else {
             None
         };
-        let bootstrap_script = match (&enroll_token, provider.uses_cloud_init_bootstrap()) {
-            (Some(tok), true) => Some(cloud_bootstrap_script(
-                core_url,
-                id,
-                &m.node_id,
-                tok,
-                capacity,
-                job_memory,
-                &m.provider,
-                &m.size,
-                &m.image,
-            )),
-            _ => None,
-        };
-        // boat stops the sandbox itself at TTL + a small grace, even if Core
-        // is down: the hard backstop against runaway cost.
-        let spec = SpawnSpec {
-            machine_id: m.id.clone(),
-            size: m.size.clone(),
-            cpu: extras.min_cpu.unwrap_or(m.cpu),
-            ram_gb: extras.min_ram_gb.unwrap_or(m.ram_gb),
-            ttl_seconds: ttl_minutes * 60 + 300,
-            image: Some(m.image.clone()),
-            name: format!("{SANDBOX_NAME_PREFIX}{}", m.id),
-            // A resume provisions the same machine id again.
-            idempotency_key: if m.resumes == 0 {
-                format!("orb-managed-{}", m.id)
-            } else {
-                format!("orb-managed-{}-r{}", m.id, m.resumes)
-            },
-            bootstrap_script,
-            gpu: extras.gpu,
-            arch: extras.arch,
-            max_hourly_usd: extras.max_hourly_usd,
-            preferred_offer_id: extras.preferred_offer_id,
-            allow_24h_commitment: extras.allow_24h_commitment,
-            provisioning_mode: m.provisioning_mode,
+        let build_spec = |m: &ManagedMachine,
+                          preferred_offer_id: Option<String>,
+                          exclude_offer_ids: Vec<String>| {
+            let capacity = (m.cpu / 2).max(1);
+            let job_memory = managed_job_memory_bytes(m.ram_gb);
+            let bootstrap_script = match (&enroll_token, provider.uses_cloud_init_bootstrap()) {
+                (Some(tok), true) => Some(cloud_bootstrap_script(
+                    core_url,
+                    id,
+                    &m.node_id,
+                    tok,
+                    capacity,
+                    job_memory,
+                    &m.provider,
+                    &m.size,
+                    &m.image,
+                )),
+                _ => None,
+            };
+            // boat stops the sandbox itself at TTL + a small grace, even if Core
+            // is down: the hard backstop against runaway cost.
+            SpawnSpec {
+                machine_id: m.id.clone(),
+                size: m.size.clone(),
+                cpu: m.cpu,
+                ram_gb: m.ram_gb,
+                ttl_seconds: ttl_minutes * 60 + 300,
+                image: Some(m.image.clone()),
+                name: format!("{SANDBOX_NAME_PREFIX}{}", m.id),
+                // A resume provisions the same machine id again.
+                idempotency_key: if m.resumes == 0 {
+                    format!("orb-managed-{}", m.id)
+                } else {
+                    format!("orb-managed-{}-r{}", m.id, m.resumes)
+                },
+                bootstrap_script,
+                gpu: extras.gpu.clone(),
+                arch: extras.arch.clone(),
+                max_hourly_usd: extras.max_hourly_usd,
+                preferred_offer_id,
+                exclude_offer_ids,
+                allow_24h_commitment: extras.allow_24h_commitment,
+                provisioning_mode: m.provisioning_mode,
+            }
         };
         let created = match m.fork_source_provider_id.clone() {
-            Some(source) => provider.fork(&source, &spec).await?,
-            None => provider.spawn(&spec).await?,
+            Some(source) => {
+                let spec = build_spec(&m, extras.preferred_offer_id.clone(), Vec::new());
+                provider.fork(&source, &spec).await?
+            }
+            None => {
+                let mut current_offer = extras.preferred_offer_id.clone();
+                let mut excluded = Vec::new();
+                let admitted_rate = m.usd_per_hour;
+                loop {
+                    let spec = build_spec(&m, current_offer.clone(), excluded.clone());
+                    match provider.spawn(&spec).await {
+                        Ok(created) => break created,
+                        Err(first_err) => {
+                            let Some(failed_offer) = current_offer.take() else {
+                                return Err(first_err);
+                            };
+                            if excluded.len() >= 2 {
+                                return Err(first_err);
+                            }
+                            excluded.push(failed_offer);
+                            if !self.get(id).await.is_some_and(|cur| cur.state.is_live()) {
+                                return Err("machine destroyed while provisioning".into());
+                            }
+                            let requote_spec = SpawnSpec {
+                                cpu: extras.min_cpu.unwrap_or(m.cpu),
+                                ram_gb: extras.min_ram_gb.unwrap_or(m.ram_gb),
+                                bootstrap_script: None,
+                                preferred_offer_id: None,
+                                exclude_offer_ids: excluded.clone(),
+                                max_hourly_usd: Some(
+                                    extras
+                                        .max_hourly_usd
+                                        .map_or(admitted_rate, |cap| cap.min(admitted_rate)),
+                                ),
+                                ..spec
+                            };
+                            let Some(next_quote) = provider
+                                .quote_spawn(&requote_spec)
+                                .await
+                                .map_err(|re_err| {
+                                    format!("{first_err}; replacement quote failed: {re_err}")
+                                })?
+                            else {
+                                return Err(first_err);
+                            };
+                            let Some(next_offer) = next_quote
+                                .offer_id
+                                .clone()
+                                .filter(|o| !excluded.contains(o))
+                            else {
+                                return Err(first_err);
+                            };
+                            if next_quote.usd_per_hour > admitted_rate + 1e-9 {
+                                return Err(first_err);
+                            }
+                            m = self
+                                .update(id, |row| {
+                                    row.cpu = next_quote.cpu;
+                                    row.ram_gb = next_quote.ram_gb;
+                                    row.usd_per_hour = next_quote.usd_per_hour;
+                                })
+                                .await
+                                .ok_or("machine vanished")?;
+                            current_offer = Some(next_offer);
+                        }
+                    }
+                }
+            }
         };
         let provider_id = created.provider_id.clone();
         let created_deletable_at = created.deletable_at;
@@ -2732,6 +2805,8 @@ impl ManagedManager {
             // PROVISION_SCRIPT and starts sandboxed-node inside the guest.
             (0u64, Ok(()))
         } else {
+            let capacity = (m.cpu / 2).max(1);
+            let job_memory = managed_job_memory_bytes(m.ram_gb);
             let env = format!(
                 "SANDBOXED_NODE_DIAL_CORE_URL={core_url}\nSANDBOXED_NODE_MANAGED_ID={id}\nSANDBOXED_NODE_ENROLL_TOKEN={enroll_token}\nSANDBOXED_NODE_ID={node}\nSANDBOXED_NODE_CAPACITY={capacity}\nSANDBOXED_NODE_JOB_MEMORY_BYTES={job_memory}\nSANDBOXED_NODE_LABELS=managed,trust=managed,provider={prov},size={size},image={image},lean\n",
                 node = m.node_id,

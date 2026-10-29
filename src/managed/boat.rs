@@ -545,6 +545,7 @@ mod raw_image_tests {
             arch: None,
             max_hourly_usd: None,
             preferred_offer_id: None,
+            exclude_offer_ids: Vec::new(),
             allow_24h_commitment: false,
             provisioning_mode: crate::managed::ProvisioningMode::Worker,
         }
