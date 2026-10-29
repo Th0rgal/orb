@@ -54,40 +54,62 @@ fn project_patches_only_arbitrate_the_writer_lease_when_they_could_change_it() {
 
     // Retagging metadata cannot make a mission a writer, so it must not be
     // gated on someone else's lease.
-    assert!(!patch_can_change_writer_status(&parse(
-        r#"{"project":"verity","track":"phase1d/core-c3"}"#
-    )));
-    assert!(!patch_can_change_writer_status(&parse(r#"{}"#)));
-    assert!(!patch_can_change_writer_status(&parse(
-        r#"{"desired_state":"green","next_check_at":"2026-08-05T00:00:00Z"}"#
-    )));
+    assert!(!patch_can_change_writer_status(
+        &parse(r#"{"project":"verity","track":"phase1d/core-c3"}"#),
+        &[],
+    ));
+    assert!(!patch_can_change_writer_status(&parse(r#"{}"#), &[]));
+    assert!(!patch_can_change_writer_status(
+        &parse(r#"{"desired_state":"green","next_check_at":"2026-08-05T00:00:00Z"}"#),
+        &[],
+    ));
+    assert!(!patch_can_change_writer_status(
+        &parse(r#"{"project":"verity","tags":["orb-folder:audits"]}"#),
+        &[],
+    ));
+    assert!(!patch_can_change_writer_status(
+        &parse(r#"{"tags":["pr-writer","orb-folder:new"]}"#),
+        &["pr-writer".into(), "orb-folder:old".into()],
+    ));
 
     // Anything `becomes_writer` is derived from still arbitrates.
-    assert!(patch_can_change_writer_status(&parse(
-        r#"{"github_pr":"https://github.com/o/r/pull/1"}"#
-    )));
-    assert!(patch_can_change_writer_status(&parse(r#"{"writer":true}"#)));
-    assert!(patch_can_change_writer_status(&parse(
-        r#"{"writer":false}"#
-    )));
-    assert!(patch_can_change_writer_status(&parse(
-        r#"{"intent":"implementation"}"#
-    )));
-    assert!(patch_can_change_writer_status(&parse(
-        r#"{"tags":["pr-writer"]}"#
-    )));
+    assert!(patch_can_change_writer_status(
+        &parse(r#"{"github_pr":"https://github.com/o/r/pull/1"}"#),
+        &[],
+    ));
+    assert!(patch_can_change_writer_status(
+        &parse(r#"{"writer":true}"#),
+        &[]
+    ));
+    assert!(patch_can_change_writer_status(
+        &parse(r#"{"writer":false}"#),
+        &[],
+    ));
+    assert!(patch_can_change_writer_status(
+        &parse(r#"{"intent":"implementation"}"#),
+        &[],
+    ));
+    assert!(patch_can_change_writer_status(
+        &parse(r#"{"tags":["pr-writer"]}"#),
+        &[],
+    ));
 
     // An explicit null is a clear, not an absence: dropping the PR or the
     // intent changes writer status just as much as setting one.
-    assert!(patch_can_change_writer_status(&parse(
-        r#"{"github_pr":null}"#
-    )));
-    assert!(patch_can_change_writer_status(&parse(r#"{"intent":null}"#)));
+    assert!(patch_can_change_writer_status(
+        &parse(r#"{"github_pr":null}"#),
+        &[],
+    ));
+    assert!(patch_can_change_writer_status(
+        &parse(r#"{"intent":null}"#),
+        &[],
+    ));
 
     // A patch that mixes both still arbitrates.
-    assert!(patch_can_change_writer_status(&parse(
-        r#"{"project":"verity","writer":true}"#
-    )));
+    assert!(patch_can_change_writer_status(
+        &parse(r#"{"project":"verity","writer":true}"#),
+        &[],
+    ));
 }
 
 #[tokio::test]

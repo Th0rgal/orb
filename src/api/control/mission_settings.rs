@@ -42,15 +42,39 @@ fn folder_only_tag_diff(a: &[String], b: &[String]) -> bool {
 /// Whether this patch could change the mission's PR-writer status.
 ///
 /// `becomes_writer` is derived entirely from `github_pr`, `writer`, `intent`
-/// and `tags`. A patch carrying none of them leaves writer status exactly as it
-/// was, so there is no transition to arbitrate — and re-running the lease check
-/// anyway can only reject an edit over a state the mission was already in.
+/// and non-folder `tags`. A patch carrying none of them (or only changing
+/// `orb-folder:*` sidebar tags) leaves writer status exactly as it was, so
+/// there is no transition to arbitrate — and re-running the lease check anyway
+/// can only reject an edit over a state the mission was already in.
 ///
 /// That is not hypothetical: retagging a mission's project returned 409 forever
 /// whenever some *other* mission held the writer lease for the PR this one
 /// happens to reference, which made 32 missions permanently unmaintainable.
-pub(super) fn patch_can_change_writer_status(req: &UpdateMissionProjectRequest) -> bool {
-    req.github_pr.is_some() || req.writer.is_some() || req.intent.is_some() || req.tags.is_some()
+fn writer_status_inputs_changed(
+    non_tag_writer_inputs_changed: bool,
+    effective_tags: &[String],
+    current_tags: &[String],
+) -> bool {
+    non_tag_writer_inputs_changed || !folder_only_tag_diff(effective_tags, current_tags)
+}
+
+#[cfg(test)]
+pub(super) fn patch_can_change_writer_status(
+    req: &UpdateMissionProjectRequest,
+    current_tags: &[String],
+) -> bool {
+    let normalized_tags: Option<Vec<String>> = req.tags.as_ref().map(|tags| {
+        tags.iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    });
+    let effective = normalized_tags.as_deref().unwrap_or(current_tags);
+    writer_status_inputs_changed(
+        req.github_pr.is_some() || req.writer.is_some() || req.intent.is_some(),
+        effective,
+        current_tags,
+    )
 }
 
 /// Set or update project tagging metadata for a mission.
@@ -128,20 +152,127 @@ pub async fn update_mission_origin(
     Ok(Json(mission))
 }
 
+struct MovedMissionSnapshot {
+    id: Uuid,
+    title: Option<String>,
+    before: crate::api::mission_store::MissionProject,
+    prior_track_lease: Option<super::super::projects_store::TrackLease>,
+}
+
+impl MovedMissionSnapshot {
+    fn capture(state: &Arc<AppState>, mission: &Mission) -> Result<Self, (StatusCode, String)> {
+        let attempt = mission.id.to_string();
+        let prior_track_lease = state
+            .projects
+            .live_leases(None)
+            .map_err(internal_error)?
+            .into_iter()
+            .rfind(|l| l.attempt_id == attempt && l.mutation_domain == "track");
+        Ok(Self {
+            id: mission.id,
+            title: mission.title.clone(),
+            before: mission.project.clone(),
+            prior_track_lease,
+        })
+    }
+}
+
+async fn rollback_moved_missions(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+    moved: Vec<MovedMissionSnapshot>,
+) {
+    for snap in moved.into_iter().rev() {
+        let attempt = snap.id.to_string();
+        if let Some(prior) = &snap.prior_track_lease {
+            let still_matches = state
+                .projects
+                .live_leases(None)
+                .ok()
+                .and_then(|leases| {
+                    leases
+                        .into_iter()
+                        .rfind(|l| l.attempt_id == attempt && l.mutation_domain == "track")
+                })
+                .is_some_and(|l| {
+                    l.slug == prior.slug && l.track == prior.track && l.mode == prior.mode
+                });
+            if !still_matches {
+                let pr = super::super::track_leases::pr_number(snap.before.github_pr.as_deref());
+                if let Err(rollback_err) = state.projects.move_track_lease(
+                    None,
+                    &prior.slug,
+                    &prior.track,
+                    &attempt,
+                    &prior.mode,
+                    snap.title.as_deref(),
+                    pr,
+                ) {
+                    tracing::error!(
+                        mission_id = %snap.id,
+                        %rollback_err,
+                        "Subtree project transfer lease rollback failed"
+                    );
+                }
+            }
+        } else if let Err(rollback_err) = state.projects.release_leases_for_attempt(&attempt) {
+            tracing::error!(
+                mission_id = %snap.id,
+                %rollback_err,
+                "Subtree project transfer lease release rollback failed"
+            );
+        }
+
+        match store.get_mission(snap.id).await {
+            Ok(Some(cur)) if cur.project != snap.before => {
+                let patch = crate::api::mission_store::MissionProjectPatch {
+                    preserve_updated_at: true,
+                    title: None,
+                    project: Some(snap.before.project.clone()),
+                    track: Some(snap.before.track.clone()),
+                    intent: Some(snap.before.intent.clone()),
+                    github_pr: Some(snap.before.github_pr.clone()),
+                    tags: None,
+                    tag_patch: Some(crate::api::mission_store::MissionTagPatch::between(
+                        &cur.project.tags,
+                        &snap.before.tags,
+                    )),
+                    desired_state: Some(snap.before.desired_state.clone()),
+                    next_check_at: Some(snap.before.next_check_at.clone()),
+                };
+                if let Err(rollback_err) = store.update_mission_project(snap.id, patch).await {
+                    tracing::error!(
+                        mission_id = %snap.id,
+                        %rollback_err,
+                        "Subtree project transfer metadata rollback failed"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(rollback_err) => {
+                tracing::error!(
+                    mission_id = %snap.id,
+                    %rollback_err,
+                    "Subtree project transfer rollback mission read failed"
+                );
+            }
+        }
+    }
+}
+
 pub async fn update_mission_project(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
-    Json(mut req): Json<UpdateMissionProjectRequest>,
+    Json(req): Json<UpdateMissionProjectRequest>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
-    let include_descendants = std::mem::take(&mut req.include_descendants);
     let control = control_for_user(&state, &user).await;
     let (respond, result) = oneshot::channel();
     control
         .cmd_tx
         .send(ControlCommand::UpdateProject {
             mission_id: id,
-            user: user.clone(),
+            user,
             request: req,
             respond,
         })
@@ -150,55 +281,114 @@ pub async fn update_mission_project(
     #[cfg(test)]
     dispatch_admission_tests::notify_wait(id, "project");
     let updated = result.await.map_err(recv_failed)??;
-    if include_descendants {
-        if let Some(target_slug) = updated.project.project.clone() {
-            let descendants = collect_child_mission_ids(&control.mission_store, id).await?;
-            for child_id in descendants {
-                let Some(child) = control
-                    .mission_store
-                    .get_mission(child_id)
-                    .await
-                    .map_err(internal_error)?
-                else {
-                    continue;
-                };
-                if child.project.project.as_deref() == Some(target_slug.as_str()) {
-                    continue;
+    Ok(Json(updated))
+}
+
+pub(super) async fn update_mission_project_subtree_locked<F>(
+    is_actor_busy: &F,
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(mut req): Json<UpdateMissionProjectRequest>,
+) -> Result<Json<Mission>, (StatusCode, String)>
+where
+    F: Fn(Uuid) -> bool,
+{
+    let include_descendants = std::mem::take(&mut req.include_descendants);
+    if !include_descendants {
+        return update_mission_project_locked(
+            is_actor_busy(id),
+            State(state),
+            Extension(user),
+            Path(id),
+            Json(req),
+        )
+        .await;
+    }
+
+    let explicit_project_patch = req.project.is_some();
+    let control = control_for_user(&state, &user).await;
+    let root_current = control
+        .mission_store
+        .get_mission(id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
+    let root_snap = MovedMissionSnapshot::capture(&state, &root_current)?;
+
+    let Json(updated) = update_mission_project_locked(
+        is_actor_busy(id),
+        State(state.clone()),
+        Extension(user.clone()),
+        Path(id),
+        Json(req),
+    )
+    .await?;
+
+    if updated.project.project.is_some() || explicit_project_patch {
+        let target_project = updated.project.project.clone();
+        let mut moved = vec![root_snap];
+        let descendants = match collect_child_mission_ids(&control.mission_store, id).await {
+            Ok(ids) => ids,
+            Err(err) => {
+                rollback_moved_missions(&state, &control.mission_store, moved).await;
+                return Err(err);
+            }
+        };
+        for child_id in descendants {
+            let child = match control.mission_store.get_mission(child_id).await {
+                Ok(Some(child)) => child,
+                Ok(None) => continue,
+                Err(err) => {
+                    rollback_moved_missions(&state, &control.mission_store, moved).await;
+                    return Err(internal_error(err));
                 }
-                let child_tags: Vec<String> = child
-                    .project
-                    .tags
-                    .iter()
-                    .filter(|t| !t.starts_with("orb-folder:"))
-                    .cloned()
-                    .collect();
-                let (child_respond, child_result) = oneshot::channel();
-                control
-                    .cmd_tx
-                    .send(ControlCommand::UpdateProject {
-                        mission_id: child_id,
-                        user: user.clone(),
-                        request: UpdateMissionProjectRequest {
-                            project: Some(Some(target_slug.clone())),
-                            track: None,
-                            intent: None,
-                            github_pr: None,
-                            writer: None,
-                            tags: Some(child_tags),
-                            desired_state: None,
-                            next_check_at: None,
-                            include_descendants: false,
-                        },
-                        respond: child_respond,
-                    })
-                    .await
-                    .map_err(session_unavailable)?;
-                #[cfg(test)]
-                dispatch_admission_tests::notify_wait(child_id, "project");
-                child_result.await.map_err(recv_failed)??;
+            };
+            if child.project.project == target_project {
+                continue;
+            }
+            let child_snap = match MovedMissionSnapshot::capture(&state, &child) {
+                Ok(snap) => snap,
+                Err(err) => {
+                    rollback_moved_missions(&state, &control.mission_store, moved).await;
+                    return Err(err);
+                }
+            };
+            let child_tags: Vec<String> = child
+                .project
+                .tags
+                .iter()
+                .filter(|t| !t.starts_with("orb-folder:"))
+                .cloned()
+                .collect();
+            match update_mission_project_locked(
+                is_actor_busy(child_id),
+                State(state.clone()),
+                Extension(user.clone()),
+                Path(child_id),
+                Json(UpdateMissionProjectRequest {
+                    project: Some(target_project.clone()),
+                    track: None,
+                    intent: None,
+                    github_pr: None,
+                    writer: None,
+                    tags: Some(child_tags),
+                    desired_state: None,
+                    next_check_at: None,
+                    include_descendants: false,
+                }),
+            )
+            .await
+            {
+                Ok(_) => moved.push(child_snap),
+                Err(err) => {
+                    rollback_moved_missions(&state, &control.mission_store, moved).await;
+                    return Err(err);
+                }
             }
         }
     }
+
     Ok(Json(updated))
 }
 
@@ -303,8 +493,11 @@ pub(super) async fn update_mission_project_locked(
     // Pure sidebar folder edits (`orb-folder:*` only) do not alter writer
     // capability, so they must not inject `"pr-writer"` or re-arbitrate foreign
     // PR writer leases.
-    let could_change_writer_status = non_tag_writer_inputs_changed
-        || !folder_only_tag_diff(&effective_tags, &current.project.tags);
+    let could_change_writer_status = writer_status_inputs_changed(
+        non_tag_writer_inputs_changed,
+        &effective_tags,
+        &current.project.tags,
+    );
     let deferred_goal = control
         .mission_store
         .get_deferred_goal(id)

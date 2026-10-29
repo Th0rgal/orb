@@ -319,8 +319,12 @@ acting on `mp:<slug>:<missionId>` opens/targets `<missionId>`.
   never block each other or live workers.
 - Root cross-project moves pass `include_descendants: true` so Core also moves
   any paged-out, archived, or unexpanded `parent_mission_id` descendants on the
-  server (stripping child `orb-folder:*` tags while keeping capability and
-  hierarchy tags).
+  server under the same `DISPATCH_ADMISSION` and durable admission lock
+  (stripping child `orb-folder:*` tags while keeping capability and hierarchy
+  tags). If any descendant transfer fails (for example, a live writer conflict
+  on a destination track), Core rolls back the root and every preceding
+  descendant's `MissionProject` metadata and track leases before returning the
+  error so subtrees are never left split across projects.
 
 **P2. Single sidebar transfer pipeline across menu, clipboard, and drag.**
 Context-menu `Move` / `Move here` (available on projects, folders, and rows

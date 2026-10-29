@@ -13457,6 +13457,225 @@ async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_c
 }
 
 #[tokio::test]
+async fn project_move_with_include_descendants_rolls_back_subtree_on_descendant_conflict() {
+    let h = Harness::new().await;
+    // Active parent on its own generated track in `lido`.
+    let parent = h.writer(MissionStatus::Active, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&parent.id.to_string())
+        .unwrap();
+    let parent_track = super::super::track_leases::generated_track_key(&parent.id.to_string());
+    h.control
+        .mission_store
+        .update_mission_project(
+            parent.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some(parent_track.clone())),
+                tags: Some(vec!["pr-writer".into(), "orb-folder:RootOrig".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", &parent_track, Some("parent"), None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&super::super::track_leases::lease_request(
+            "lido",
+            &parent_track,
+            &parent.id.to_string(),
+            "writer",
+            Some("test-parent-lease"),
+        ))
+        .unwrap();
+
+    // First child: completed, moves cleanly before the conflicting sibling.
+    let child_ok = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker-ok"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child_ok.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some("wave-ok".into())),
+                tags: Some(vec!["pr-writer".into(), "orb-folder:ChildOrig".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(child_ok.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+
+    // Second child: active writer on `contested-track` in `lido`.
+    let child_conflict = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker-conflict"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child_conflict.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some("contested-track".into())),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(child_conflict.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", "contested-track", Some("contested"), None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&super::super::track_leases::lease_request(
+            "lido",
+            "contested-track",
+            &child_conflict.id.to_string(),
+            "writer",
+            Some("test-child-conflict-lease"),
+        ))
+        .unwrap();
+
+    // Another live mission already owns `contested-track` in destination `verity`.
+    let blocker = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("blocker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(blocker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("verity", "contested-track", Some("contested"), None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&super::super::track_leases::lease_request(
+            "verity",
+            "contested-track",
+            &blocker.id.to_string(),
+            "writer",
+            Some("test-blocker-lease"),
+        ))
+        .unwrap();
+
+    let (status, body) = patch_project(
+        &h,
+        parent.id,
+        json!({"project":"verity", "tags":["pr-writer","orb-folder:Audits"], "include_descendants": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    // Root and preceding sibling must be rolled back to `lido` with original tags and leases.
+    let p_after = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let ok_after = h
+        .control
+        .mission_store
+        .get_mission(child_ok.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let conflict_after = h
+        .control
+        .mission_store
+        .get_mission(child_conflict.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p_after.project.project.as_deref(), Some("lido"));
+    assert_eq!(
+        p_after.project.tags,
+        vec!["pr-writer".to_string(), "orb-folder:RootOrig".to_string()]
+    );
+    assert_eq!(ok_after.project.project.as_deref(), Some("lido"));
+    assert_eq!(
+        ok_after.project.tags,
+        vec!["pr-writer".to_string(), "orb-folder:ChildOrig".to_string()]
+    );
+    assert_eq!(conflict_after.project.project.as_deref(), Some("lido"));
+
+    let parent_leases: Vec<_> = h
+        .state
+        .projects
+        .live_leases(None)
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.attempt_id == parent.id.to_string())
+        .collect();
+    assert_eq!(parent_leases.len(), 1);
+    assert_eq!(parent_leases[0].slug, "lido");
+    assert_eq!(parent_leases[0].track, parent_track);
+}
+
+#[tokio::test]
 async fn auto_managed_launch_is_validated_before_any_vm_is_rented() {
     // Boat review 2026-10-24: four VMs were rented and destroyed because the
     // child launch failed after the VM existed (REMOTE_MODEL_REQUIRED,
