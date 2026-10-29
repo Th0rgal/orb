@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Full public-export scalar conformance. Missing/failed engines yield INCOMPLETE, never PASS.
+"""Full public-export scalar, host-adapter, loop/alias/RC and mutation-kill conformance.
 
-This harness does not establish P1 acceptance. Receipts are hashes, not signatures.
-It executes inputs through actual imported Lean definitions and compiled C/WASM.
-Host-adapter, loop/alias/RC and device coverage remain unestablished.
+Missing/failed engines, adapters or qualifications yield INCOMPLETE/FAIL, never PASS.
+This harness executes inputs through actual imported Lean definitions, compiled
+C/WASM, the production `crates/orb-spec` Rust wrappers, and the shipped Android JNI
+`.so`. Receipts are hashes, not signatures. Physical iPhone/Pixel devices remain
+`BLOCKED_PHYSICAL_DEVICE`.
 """
 import argparse
 import ctypes
@@ -20,12 +22,18 @@ import sys
 import platform
 import time
 from gen_kernel_bindings import load_manifest
+from gen_orb_kernel_unboxed import extract
 
 ROOT = Path(__file__).resolve().parents[1]
 ORB = ROOT
 COMMANDS = []
 EXECUTABLES = {}
 REQUIRED_ENGINES = ("stock_lean", "stock_extracted_c", "vendored_native_c", "rust_abi", "wasm", "lnir")
+REQUIRED_ADAPTERS = ("rust_orb_spec", "jni_x86_64", "projection_invariants")
+MUTATION_FAMILIES = (
+    "mission_merge_hierarchy", "transcript_reducer_streaming", "durable_outbox_queue_leases",
+    "provider_attempt_lifecycle", "authorization", "scheduling_resources", "incremental_parsing_scroll",
+)
 
 
 def canonical_hash(value):
@@ -121,6 +129,29 @@ def record_engine(report, values, partial_values, name, action, cases):
         report["engines"][name] = {"status": "BLOCKED", "reason": str(error), "observed_rows": len(observed)}
 
 
+def qualifications_complete(report):
+    adapters = report.get("host_adapters")
+    if not isinstance(adapters, dict) or any(
+        adapters.get(name, {}).get("status") != "PASS" for name in REQUIRED_ADAPTERS
+    ):
+        return False
+    lar = report.get("loop_alias_rc")
+    if not isinstance(lar, dict) or lar.get("status") != "PASS" or lar.get("live_objects") != 0:
+        return False
+    families = report.get("mutation_families")
+    if not isinstance(families, dict) or any(
+        families.get(fam, {}).get("killed", 0) < 3 or families.get(fam, {}).get("status") != "PASS"
+        for fam in MUTATION_FAMILIES
+    ):
+        return False
+    checks = report.get("mutation_checks")
+    if not isinstance(checks, dict) or any(
+        not isinstance(v, dict) or v.get("status") != "KILLED" for v in checks.values()
+    ):
+        return False
+    return report.get("total_domain_mutants_killed", 0) >= 21
+
+
 def summarize(report, values, partial_values, cases, qualification_failed=False):
     report["mismatches"] = []
     if "stock_lean" in values:
@@ -135,8 +166,14 @@ def summarize(report, values, partial_values, cases, qualification_failed=False)
     report["missing_engines"] = [name for name in REQUIRED_ENGINES if name not in values]
     report["comparisons"] = sum(len(rows) for name, rows in {**partial_values, **values}.items()
                                 if name != "stock_lean") if "stock_lean" in values else 0
-    report["status"] = "FAIL" if report["mismatches"] or qualification_failed else "INCOMPLETE"
-    return 1 if report["status"] == "FAIL" else 2
+    if report["mismatches"] or qualification_failed:
+        report["status"] = "FAIL"
+        return 1
+    if not report["missing_engines"] and not partial_values and qualifications_complete(report):
+        report["status"] = "PASS"
+        return 0
+    report["status"] = "INCOMPLETE"
+    return 2
 
 
 def digest(path):
@@ -250,28 +287,91 @@ class QualificationFailure(ValueError):
     pass
 
 
-def qualify_mutant(reference, baseline, mutant, cases, target):
-    expected = {c["id"] for c in cases if c["symbol"] == target}
+def qualify_mutant(reference, baseline, mutant, cases, target, witness_case_ids=None):
+    target_ids = {c["id"] for c in cases if c["symbol"] == target}
     try:
-        if not expected or compare_rows(reference, baseline, cases):
+        if not target_ids or compare_rows(reference, baseline, cases):
             raise QualificationFailure("mutation baseline is missing or disagrees with stock")
         actual = set(compare_rows(baseline, mutant, cases))
     except ValueError as error:
         raise QualificationFailure(str(error)) from error
-    if actual != expected or any(mutant[i] != baseline[i] ^ 1 for i in expected):
-        raise QualificationFailure("mutation effect escaped or differs from its intended case set/bit flip")
+    if witness_case_ids is None:
+        if actual != target_ids or any(mutant[i] != baseline[i] ^ 1 for i in target_ids):
+            raise QualificationFailure("mutation effect escaped or differs from its intended case set/bit flip")
+    else:
+        required = set(witness_case_ids)
+        if not required or not actual or not (actual <= target_ids) or not (required <= actual):
+            raise QualificationFailure("domain mutant survived witness or escaped target export")
     return sorted(actual)
 
 
-def record_mutant(checks, name, reference, baseline, action, cases, target):
+def record_mutant(checks, name, reference, baseline, action, cases, target, witness_case_ids=None, meta=None):
     """Called only after build/reference prerequisites; any bad result fails qualification."""
     try:
-        killed = qualify_mutant(reference, baseline, action(), cases, target)
-        checks[name] = {"status": "KILLED", "case_ids": killed}
+        killed = qualify_mutant(reference, baseline, action(), cases, target, witness_case_ids)
+        checks[name] = {"status": "KILLED", "case_ids": killed, **(meta or {})}
         return False
     except Exception as error:
-        checks[name] = {"status": "FAIL", "reason": str(error)}
+        checks[name] = {"status": "FAIL", "reason": str(error), **(meta or {})}
         return True
+
+
+DOMAIN_MUTANTS = (
+    ("m01", "orb_mut_m01", "mission_merge_hierarchy", "orb_mission_control_step",
+     "Orb.MutantSuite.kill_m01_missionControl_archivedRevive", [1, 0, 1, 0, 0, 0, 0, 0, 0]),
+    ("m02", "orb_mut_m02", "mission_merge_hierarchy", "orb_sidebar_merge_step",
+     "Orb.MutantSuite.kill_m02_sidebarMerge_duplicateRow", [7, 7, 100, 200, 0, 0]),
+    ("m03", "orb_mut_m03", "mission_merge_hierarchy", "orb_fork_home_step",
+     "Orb.MutantSuite.kill_m03_forkHome_overrideHomeLeak", [1, 1, 0, 1, 1, 0, 1]),
+    ("m04", "orb_mut_m04", "transcript_reducer_streaming", "orb_transcript_reduce_step",
+     "Orb.MutantSuite.kill_m04_transcriptReduce_staleSeqAccepted", [42, 42, 0, 5, 0]),
+    ("m05", "orb_mut_m05", "transcript_reducer_streaming", "orb_cursor_page_step",
+     "Orb.MutantSuite.kill_m05_cursorPage_inclusiveBoundary", [10, 20, 10, 1, 1, 0, 5]),
+    ("m06", "orb_mut_m06", "transcript_reducer_streaming", "orb_agent_event_normalize_step",
+     "Orb.MutantSuite.kill_m06_agentEventNormalize_duplicateAdmitted", [0, 3, 1, 1, 1, 1, 64, 1024]),
+    ("m07", "orb_mut_m07", "durable_outbox_queue_leases", "orb_queue_step",
+     "Orb.MutantSuite.kill_m07_queueStep_prematureConsume", [0, 0]),
+    ("m08", "orb_mut_m08", "durable_outbox_queue_leases", "orb_verify_remote_outbox",
+     "Orb.MutantSuite.kill_m08_verifyRemoteOutbox_supersededAdmitted", [0, 0, 1, 0, 1, 1, 0, 0, 0]),
+    ("m09", "orb_mut_m09", "durable_outbox_queue_leases", "orb_verify_lease_mode",
+     "Orb.MutantSuite.kill_m09_verifyLeaseMode_readonlyOverridden", [1, 1, 0, 1]),
+    ("m10", "orb_mut_m10", "provider_attempt_lifecycle", "orb_provider_pool_step",
+     "Orb.MutantSuite.kill_m10_providerPool_firstByteFailover", [0, 0, 7, 0, 1, 1, 0, 3, 100, 0]),
+    ("m11", "orb_mut_m11", "provider_attempt_lifecycle", "orb_proxy_step",
+     "Orb.MutantSuite.kill_m11_proxyStep_retryAfterCommit", [1, 0, 1, 0, 3]),
+    ("m12", "orb_mut_m12", "provider_attempt_lifecycle", "orb_breaker_step",
+     "Orb.MutantSuite.kill_m12_breakerStep_transientPoisonsSub", [4, 1, 3]),
+    ("m13", "orb_mut_m13", "authorization", "orb_privilege_step",
+     "Orb.MutantSuite.kill_m13_privilegeStep_scopeEscalation", [1, 1, 1, 2, 0, 0, 0, 100, 200, 200]),
+    ("m14", "orb_mut_m14", "authorization", "orb_privd_command_step",
+     "Orb.MutantSuite.kill_m14_privdCommand_metacharBypass", [1, 0, 1, 0, 1, 0, 0, 0]),
+    ("m15", "orb_mut_m15", "authorization", "orb_verify_approval",
+     "Orb.MutantSuite.kill_m15_verifyApproval_criticalUnconfirmed", [1, 1, 1, 1, 1, 2, 0]),
+    ("m16", "orb_mut_m16", "scheduling_resources", "orb_verify_board_slots",
+     "Orb.MutantSuite.kill_m16_verifyBoardSlots_stealsBossSlot", [4, 1, 3]),
+    ("m17", "orb_mut_m17", "scheduling_resources", "orb_schedule_step",
+     "Orb.MutantSuite.kill_m17_scheduleStep_fireWhileBusy", [1, 1, 0, 0, 1, 1, 10, 20, 30]),
+    ("m18", "orb_mut_m18", "scheduling_resources", "orb_route_argmin_step",
+     "Orb.MutantSuite.kill_m18_routeArgmin_inadmissibleSelected", [1, 2, 50, 9, 10, 0]),
+    ("m19", "orb_mut_m19", "incremental_parsing_scroll", "orb_stream_fence_step",
+     "Orb.MutantSuite.kill_m19_streamFence_mismatchedMarkerCloses", [1, 3, 2, 3]),
+    ("m20", "orb_mut_m20", "incremental_parsing_scroll", "orb_stream_commit_step",
+     "Orb.MutantSuite.kill_m20_streamCommit_commitsInsideOpenFence", [0, 1, 3, 1, 0, 0, 0, 10, 4]),
+    ("m21", "orb_mut_m21", "incremental_parsing_scroll", "orb_scroll_epoch_step",
+     "Orb.MutantSuite.kill_m21_scrollEpoch_doubleCorrectionInEpoch", [5, 5, 1, 1, 0, 480, 320]),
+)
+
+
+LOOP_ALIAS_RC_PROBES = (
+    ("lar_bounded_loop8", 3), ("lar_tuple_loop8", 3), ("lar_rc_exclusive_reuse", 2),
+    ("lar_rc_shared_alias", 2), ("lar_rc_branch_drop", 3), ("lar_ite_tuple_proj", 4),
+    ("lar_loop_rc_hybrid", 3),
+)
+LOOP_ALIAS_RC_VECTORS = (
+    [0, 0, 0, 0], [1, 1, 1, 1], [4, 42, 7, 19],
+    [8, 0xFFFFFFFFFFFFFFFF, 0x123456789ABCDEF0, 0x0F0F0F0F0F0F0F0F],
+    [3, 17, 255, 65535], [7, 999999937, 2654435761, 13],
+)
 
 
 def export_map(path, namespace):
@@ -301,20 +401,21 @@ def main(argv=None):
     ENV = conformance_environment(OUT, os.environ)
     COMMANDS.clear()
     EXECUTABLES.clear()
-    for name in ("cc", "node", "rustc", "ar", "git"):
+    for name in ("cc", "node", "rustc", "cargo", "ar", "git"):
         candidate = shutil.which(name)
         if candidate:
             EXECUTABLES[name] = str(Path(candidate).resolve())
     # Proxy shims are not the compiler binary named by their symlink.
-    if Path(EXECUTABLES.get("rustc", "")).name == "rustup":
-        EXECUTABLES["rustc"] = run([EXECUTABLES["rustc"], "which", "rustc"]).strip()
+    for rust_tool in ("rustc", "cargo"):
+        if Path(EXECUTABLES.get(rust_tool, "")).name == "rustup":
+            EXECUTABLES[rust_tool] = run([EXECUTABLES[rust_tool], "which", rust_tool]).strip()
     # Unwind subprocess ownership on durable-job termination as well as timeout.
     signal.signal(signal.SIGTERM, terminate)
     manifest = load_manifest(ORB / "shared/orb-spec/kernel_abi.json")
     # `internal` also marks six public-prefix steppers not exposed to mobile.
     # The roadmap includes those steppers; exclude only the compiler helper.
     functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
-    if len(functions) != 112 or len(manifest["functions"]) != 113:
+    if len(functions) != 117 or len(manifest["functions"]) != 118:
         raise ValueError("public export inventory changed; qualify the new surface explicitly")
     if run(["git", "rev-parse", "HEAD"], SYS).strip() != "077775ba387f1eeb2976cb8763b4633b8d5ce313":
         raise ValueError("unexpected LeanSys revision")
@@ -335,19 +436,42 @@ def main(argv=None):
                 cap = (1 << bits[p["type"]]) - 1
                 args.append([0, 1, 2, 3, cap, cap - 1, rng.randrange(cap + 1), rng.randrange(cap + 1)][kind])
             cases.append({"id": len(cases), "symbol": f["name"], "args": args})
+    witness_cases = {}
+    for mut_id, _, _, target_sym, _, witness_args in DOMAIN_MUTANTS:
+        existing = [c["id"] for c in cases if c["symbol"] == target_sym and c["args"] == witness_args]
+        if not existing:
+            cid = len(cases)
+            cases.append({"id": cid, "symbol": target_sym, "args": list(witness_args)})
+            existing = [cid]
+        witness_cases[mut_id] = existing
     (OUT / "cases.json").write_text(json.dumps(cases) + "\n")
     (OUT / "cases.txt").write_text("".join(f"{c['id']}:{c['symbol']}:" + ",".join(map(str, c['args'])) + "\n" for c in cases))
-    report = {"status": "INCOMPLETE", "public_exports": 112, "cases": len(cases),
+    report = {"status": "INCOMPLETE", "public_exports": 117, "cases": len(cases),
               "heads": {"orb": run(["git", "rev-parse", "HEAD"], ORB).strip(),
                         "turbo": run(["git", "rev-parse", "HEAD"], TURBO).strip()},
               "sources": {str(p): digest(p) for p, _ in sources},
-              "engines": {}, "blockers": ["Host-adapter and loop/alias/RC conformance unestablished",
-                  "Physical iPhone13 mini and Pixel8 BLOCKED_PHYSICAL_DEVICE",
-                  "Only two scalar backend mutations are exercised; full engine/harness and per-family mutation qualification remains open"]}
-    report["sources"][str(ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c")] = digest(ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c")
-    report["sources"][str(ORB / "shared/orb-spec/kernel_abi.json")] = digest(ORB / "shared/orb-spec/kernel_abi.json")
-    report["sources"][str(Path(__file__))] = digest(__file__)
-    report["sources"][str(Path(__file__).with_name("gen_kernel_bindings.py"))] = digest(Path(__file__).with_name("gen_kernel_bindings.py"))
+              "engines": {}, "host_adapters": {}, "loop_alias_rc": {},
+              "mutation_families": {}, "total_domain_mutants_killed": 0,
+              "device_status": {
+                  "iphone_13_mini_physical": "BLOCKED_PHYSICAL_DEVICE",
+                  "pixel_8_physical": "BLOCKED_PHYSICAL_DEVICE",
+              },
+              "blockers": ["Physical iPhone13 mini and Pixel8 BLOCKED_PHYSICAL_DEVICE"]}
+    for tracked in (
+        ORB / "shared/orb-spec/cabi/orb_kernel_unboxed.c",
+        ORB / "shared/orb-spec/kernel_abi.json",
+        ORB / "lean/Orb/MutantSuite.lean",
+        ORB / "scripts/conformance_loop_alias_rc.lean",
+        ORB / "crates/orb-spec/src/lib.rs",
+        ORB / "crates/orb-spec/examples/conformance_runner.rs",
+        ORB / "crates/orb-spec/tests/shared_fixtures.rs",
+        ORB / "shared/orb-spec/fixtures/projection-invariants.json",
+        ORB / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so",
+        Path(__file__),
+        Path(__file__).with_name("gen_kernel_bindings.py"),
+        Path(__file__).with_name("gen_orb_kernel_unboxed.py"),
+    ):
+        report["sources"][str(tracked)] = digest(tracked)
     report["repositories"] = {}
     for name, path in (("orb", ORB), ("turbo", TURBO), ("lean_sys", SYS)):
         dirty = run(["git", "status", "--porcelain=v1", "--untracked-files=all"], path)
@@ -365,7 +489,7 @@ def main(argv=None):
     report["tools"] = {}
     for name, path in [(n, TOOLS / n) for n in ("lean", "leanc", "clang", "ld.lld")] + [
         (n, TURBO / "lean/.lake/build/bin" / n) for n in ("lean-native", "lean-native-core")
-    ] + [("python", Path(sys.executable))] + [(n, Path(shutil.which(n) or n)) for n in ("cc", "node", "rustc", "ar")]:
+    ] + [("python", Path(sys.executable))] + [(n, Path(shutil.which(n) or n)) for n in ("cc", "node", "rustc", "cargo", "ar")]:
         path = Path(EXECUTABLES.get(name, str(path))).resolve()
         report["tools"][name] = {"path": str(path), "sha256": digest(path) if path.is_file() else None}
         if path.is_file():
@@ -498,8 +622,167 @@ for (const c of cases) {
     for name, action in [("stock_lean", stock), ("stock_extracted_c", stock_c),
                          ("vendored_native_c", native), ("rust_abi", rust_abi), ("wasm", wasm), ("lnir", lnir)]:
         engine(name, action)
-    report["mutation_checks"] = {}
     qualification_failed = False
+
+    # 1. Production host-adapter conformance: crates/orb-spec, shared fixtures & Android JNI x86_64.
+    try:
+        if "stock_lean" not in values:
+            raise RuntimeError("stock_lean unavailable for host-adapter conformance")
+        cargo_target = OUT / "cargo-target"
+        run(["cargo", "build", "--locked", "--manifest-path", ORB / "crates/orb-spec/Cargo.toml",
+             "--target-dir", cargo_target, "--example", "conformance_runner"])
+        runner_bin = cargo_target / "debug/examples/conformance_runner"
+        rust_host_rows = parse_rows(run([runner_bin, OUT / "cases.txt"], role="execution"))
+        rust_mismatches = compare_rows(values["stock_lean"], rust_host_rows, cases)
+        if rust_mismatches:
+            qualification_failed = True
+            report["host_adapters"]["rust_orb_spec"] = {"status": "FAIL", "mismatches": rust_mismatches}
+        else:
+            report["host_adapters"]["rust_orb_spec"] = {"status": "PASS", "rows": len(rust_host_rows), "exports": 117}
+    except Exception as error:
+        report["host_adapters"]["rust_orb_spec"] = {"status": "BLOCKED", "reason": str(error)}
+        qualification_failed |= isinstance(error, (RowFailure, ValueError))
+
+    try:
+        cargo_target = OUT / "cargo-target"
+        fixture_out = run(["cargo", "test", "--locked", "--manifest-path", ORB / "crates/orb-spec/Cargo.toml",
+                           "--target-dir", cargo_target, "--test", "shared_fixtures"], role="execution")
+        proj_json = json.loads((ORB / "shared/orb-spec/fixtures/projection-invariants.json").read_text())
+        fixture_total = sum(len(v) for v in proj_json.values() if isinstance(v, list))
+        report["host_adapters"]["projection_invariants"] = {
+            "status": "PASS", "fixture_cases": fixture_total, "summary": fixture_out.strip().splitlines()[-1]
+        }
+    except Exception as error:
+        report["host_adapters"]["projection_invariants"] = {"status": "FAIL", "reason": str(error)}
+        qualification_failed = True
+
+    try:
+        if "stock_lean" not in values:
+            raise RuntimeError("stock_lean unavailable for JNI conformance")
+        jni_so = ORB / "android_dashboard/app/src/main/jniLibs/x86_64/liborb_kernel.so"
+        jni_funcs = [f for f in functions if f.get("jni")]
+        jni_cases = [c for c in cases if any(f["name"] == c["symbol"] for f in jni_funcs)]
+        (OUT / "jni-cases.json").write_text(json.dumps(jni_cases) + "\n")
+        jni_script = OUT / "jni-runner.py"
+        jni_script.write_text('''import ctypes, json, resource, sys
+from pathlib import Path
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+lib = ctypes.CDLL(sys.argv[1])
+manifest = json.loads(Path(sys.argv[2]).read_text())
+prefix = "Java_" + manifest["jni"]["class"].replace(".", "_") + "_"
+arg_t = {"uint8_t": ctypes.c_int32, "uint32_t": ctypes.c_int32, "uint64_t": ctypes.c_int64}
+ret_t = {"jbyte": ctypes.c_int8, "jint": ctypes.c_int32, "jlong": ctypes.c_int64}
+masks = {"uint8_t": 0xFF, "uint32_t": 0xFFFFFFFF, "uint64_t": 0xFFFFFFFFFFFFFFFF}
+def s_val(v, b):
+    m = (1 << b) - 1
+    x = v & m
+    return x - (1 << b) if x >= (1 << (b - 1)) else x
+specs = {}
+for f in manifest["functions"]:
+    j = f.get("jni")
+    if not j:
+        continue
+    fn = getattr(lib, prefix + j["method"])
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + [arg_t[p["type"]] for p in f["params"]]
+    fn.restype = ret_t[j["ret"]]
+    specs[f["name"]] = (f, fn)
+for c in json.loads(Path(sys.argv[3]).read_text()):
+    f, fn = specs[c["symbol"]]
+    jargs = [s_val(v, 64 if p["type"] == "uint64_t" else 32) for v, p in zip(c["args"], f["params"])]
+    res = fn(None, None, *jargs) & masks[f["ret"]]
+    print(f"{c['id']}:{res}", flush=True)
+''')
+        jni_rows = parse_rows(run([sys.executable, jni_script, jni_so,
+                                   ORB / "shared/orb-spec/kernel_abi.json", OUT / "jni-cases.json"], role="execution"))
+        jni_ref = {c["id"]: values["stock_lean"][c["id"]] for c in jni_cases}
+        jni_mismatches = compare_rows(jni_ref, jni_rows, jni_cases)
+        if jni_mismatches:
+            qualification_failed = True
+            report["host_adapters"]["jni_x86_64"] = {"status": "FAIL", "mismatches": jni_mismatches}
+        else:
+            report["host_adapters"]["jni_x86_64"] = {
+                "status": "PASS", "jni_exports": len(jni_funcs), "rows": len(jni_rows)
+            }
+    except Exception as error:
+        report["host_adapters"]["jni_x86_64"] = {"status": "BLOCKED", "reason": str(error)}
+        qualification_failed |= isinstance(error, (RowFailure, ValueError))
+
+    # 2. Loop, tuple-projection, branch-join & reference-counting 3-way conformance.
+    try:
+        lar_dir = OUT / "loop_alias_rc"
+        lar_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ORB / "scripts/conformance_loop_alias_rc.lean", lar_dir / "LoopAliasRc.lean")
+        lar_cases = []
+        for sym, arity in LOOP_ALIAS_RC_PROBES:
+            for vec in LOOP_ALIAS_RC_VECTORS:
+                lar_cases.append({"id": len(lar_cases), "symbol": sym, "args": vec[:arity]})
+        (lar_dir / "lar_cases.txt").write_text(
+            "".join(f"{c['id']}:{c['symbol']}:" + ",".join(map(str, c["args"])) + "\n" for c in lar_cases)
+        )
+        lar_dispatch = ["import LoopAliasRc", "def dispatch (name : String) (args : List UInt64) : UInt64 :=", "  match name with"]
+        for sym, arity in LOOP_ALIAS_RC_PROBES:
+            lar_dispatch.append(f'  | "{sym}" => probe_{sym} ' + " ".join(f"args[{i}]!" for i in range(arity)))
+        lar_dispatch.append('  | _ => panic! "unknown lar export"')
+        lar_runner = '''\ndef main (args : List String) : IO Unit := do
+  let contents ← IO.FS.readFile args[0]!
+  for line in contents.splitOn "\\n" do
+    if !line.isEmpty then
+      let fields := line.splitOn ":"
+      let xs := (fields[2]!.splitOn ",").map (fun s => UInt64.ofNat s.toNat!)
+      IO.println s!"{fields[0]!}:{(dispatch fields[1]! xs).toNat}"
+'''
+        (lar_dir / "LarOracle.lean").write_text("\n".join(lar_dispatch) + lar_runner)
+        lar_env = {**ENV, "LEAN_PATH": str(lar_dir)}
+        run([TOOLS / "lean", "-DwarningAsError=true", "LoopAliasRc.lean", "-o", "LoopAliasRc.olean", "-c", "LoopAliasRc.c"],
+            lar_dir, env=lar_env)
+        lar_stock = parse_rows(run([TOOLS / "lean", "--run", "LarOracle.lean", "lar_cases.txt"],
+                                   lar_dir, env=lar_env, role="execution"))
+        run([TOOLS / "lean", "LarOracle.lean", "-c", "LarOracle.c"], lar_dir, env=lar_env)
+        run([TOOLS / "leanc", "-O2", "LarOracle.c", "LoopAliasRc.c", "-o", "lar-stock-c"], lar_dir, env=lar_env)
+        lar_c = parse_rows(run([lar_dir / "lar-stock-c", "lar_cases.txt"], lar_dir, env=lar_env, role="execution"))
+        run([TURBO / "lean/.lake/build/bin/lean-native", "emit-lnir", "--wire", lar_dir / "LoopAliasRc.lean",
+             "-o", lar_dir / "lar.lnir"], lar_dir, env=lar_env)
+        lar_lnir, lar_lnir_opt, max_live_objects = {}, {}, 0
+        core_bin = TURBO / "lean/.lake/build/bin/lean-native-core"
+        for c in lar_cases:
+            binding = f"probe_{c['symbol']}:" + ",".join(map(str, c["args"]))
+            for dest, extra in ((lar_lnir, []), (lar_lnir_opt, ["--opt"])):
+                raw = run([core_bin, "eval-lnir", "--lnir", lar_dir / "lar.lnir",
+                           "--args", binding, "--batch-json", *extra], lar_dir, env=lar_env, role="execution")
+                rows = json.loads(raw)
+                if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+                    raise ValueError("LAR LNIR request must return exactly one object row")
+                dest[c["id"]] = lnir_result(rows[0], c)
+                live = rows[0].get("live_objects")
+                if type(live) is not int or live < 0:
+                    raise ValueError(f"invalid live_objects in LAR LNIR receipt: {live!r}")
+                max_live_objects = max(max_live_objects, live)
+        tv_json = json.loads(run([core_bin, "validate-tv", "--lnir", lar_dir / "lar.lnir", "--json"], lar_dir, env=lar_env))
+        lar_mismatches = (
+            compare_rows(lar_stock, lar_c, lar_cases)
+            + compare_rows(lar_stock, lar_lnir, lar_cases)
+            + compare_rows(lar_stock, lar_lnir_opt, lar_cases)
+        )
+        wire_text = (lar_dir / "lar.lnir").read_text()
+        ir_ops = {op: wire_text.count(op) for op in ("C_inc", "C_dec", "E_ctor", "E_cgeto", "E_isexcl", "E_mktup", "E_projtup", "C_ite")}
+        if lar_mismatches or max_live_objects != 0 or not tv_json.get("allPassed") or any(v == 0 for v in ir_ops.values()):
+            qualification_failed = True
+            report["loop_alias_rc"] = {
+                "status": "FAIL", "mismatches": lar_mismatches, "live_objects": max_live_objects,
+                "tv_all_passed": tv_json.get("allPassed"), "ir_ops": ir_ops,
+            }
+        else:
+            report["loop_alias_rc"] = {
+                "status": "PASS", "probes": len(LOOP_ALIAS_RC_PROBES), "cases": len(lar_cases),
+                "engines": ["stock_lean", "stock_extracted_c", "lnir", "lnir_opt"],
+                "live_objects": max_live_objects, "tv_all_passed": True, "ir_ops": ir_ops,
+            }
+    except Exception as error:
+        report["loop_alias_rc"] = {"status": "BLOCKED", "reason": str(error)}
+        qualification_failed |= isinstance(error, (RowFailure, ValueError))
+
+    # 3. Scalar bit-flip & 21 Lean-witnessed domain mutants across all 7 roadmap families.
+    report["mutation_checks"] = {}
     try:
         # Rename the real target, then interpose a bit-flipping forwarding shim.
         # This mutates executed backend code, never an expected answer.
@@ -522,6 +805,57 @@ for (const c of cases) {
         run([TOOLS / "ld.lld", "-flavor", "wasm", "--no-entry", "--export-all", OUT / "mutant.wasm.o", OUT / "shim.wasm.o", "-o", OUT / "mutant.wasm"])
         qualification_failed |= record_mutant(report["mutation_checks"], "wasm_scalar", values["stock_lean"], values["wasm"],
             lambda: wasm_rows(OUT / "mutant.wasm"), cases, target["name"])
+
+        # Compile Lean-verified domain mutants (`Orb.MutantSuite`, 0 sorryAx) to unboxed C/WASM shims.
+        mut_dir = OUT / "domain_mutants"
+        mut_dir.mkdir(parents=True, exist_ok=True)
+        (OUT / "Orb").mkdir(parents=True, exist_ok=True)
+        run([TOOLS / "lean", "-DwarningAsError=true", "-DautoImplicit=false", "Orb/MutantSuite.lean",
+             "-o", OUT / "Orb/MutantSuite.olean", "-c", mut_dir / "MutantSuite.c"], ORB / "lean")
+        extracted_mutants = dict(extract((mut_dir / "MutantSuite.c").read_text()))
+        header_lines = [line for line in source.read_text().splitlines()
+                        if line.startswith("#include ") or line.startswith("#define ")]
+        include_dir = str(ORB / "shared/orb-spec/cabi")
+        family_counts = {fam: {"total": 0, "killed": 0, "mutants": []} for fam in MUTATION_FAMILIES}
+        total_domain_killed = 0
+        for mut_id, mut_export, family, target_sym, theorem_ref, _ in DOMAIN_MUTANTS:
+            family_counts[family]["total"] += 1
+            if mut_export not in extracted_mutants:
+                raise QualificationFailure(f"missing extracted C body for {mut_export}")
+            mut_body = re.sub(r"\b" + re.escape(mut_export) + r"\b", target_sym, extracted_mutants[mut_export], count=1)
+            mut_shim = mut_dir / f"{mut_id}.c"
+            mut_shim.write_text("\n".join(header_lines) + "\n" + mut_body + "\n")
+            redefine = f"-D{target_sym}=__orig_{mut_id}_{target_sym}"
+            run(["cc", "-O2", "-fPIC", "-I", include_dir, redefine, "-c", source, "-o", mut_dir / f"{mut_id}.base.o"])
+            run(["cc", "-O2", "-fPIC", "-I", include_dir, "-c", mut_shim, "-o", mut_dir / f"{mut_id}.shim.o"])
+            mut_so = mut_dir / f"{mut_id}.so"
+            run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC",
+                 mut_dir / f"{mut_id}.base.o", mut_dir / f"{mut_id}.shim.o", "-o", mut_so])
+            meta = {"family": family, "target": target_sym, "lean_theorem": theorem_ref}
+            c_fail = record_mutant(
+                report["mutation_checks"], f"{mut_id}_native", values["stock_lean"], values["vendored_native_c"],
+                lambda p=mut_so: native_library(p), cases, target_sym, witness_cases[mut_id], meta
+            )
+            run([TOOLS / "clang", "--target=wasm32", "-O2", "-ffreestanding", "-isystem", TOOLS.parent / "include/clang",
+                 "-I", include_dir, redefine, "-c", source, "-o", mut_dir / f"{mut_id}.base.wasm.o"])
+            run([TOOLS / "clang", "--target=wasm32", "-O2", "-ffreestanding", "-isystem", TOOLS.parent / "include/clang",
+                 "-I", include_dir, "-c", mut_shim, "-o", mut_dir / f"{mut_id}.shim.wasm.o"])
+            mut_wasm = mut_dir / f"{mut_id}.wasm"
+            run([TOOLS / "ld.lld", "-flavor", "wasm", "--no-entry", "--export-all",
+                 mut_dir / f"{mut_id}.base.wasm.o", mut_dir / f"{mut_id}.shim.wasm.o", "-o", mut_wasm])
+            w_fail = record_mutant(
+                report["mutation_checks"], f"{mut_id}_wasm", values["stock_lean"], values["wasm"],
+                lambda p=mut_wasm: wasm_rows(p), cases, target_sym, witness_cases[mut_id], meta
+            )
+            qualification_failed |= (c_fail or w_fail)
+            if not (c_fail or w_fail):
+                family_counts[family]["killed"] += 1
+                family_counts[family]["mutants"].append(mut_id)
+                total_domain_killed += 1
+        for fam, info in family_counts.items():
+            info["status"] = "PASS" if info["killed"] >= 3 and info["killed"] == info["total"] else "FAIL"
+        report["mutation_families"] = family_counts
+        report["total_domain_mutants_killed"] = total_domain_killed
     except Exception as e:
         report["mutation_checks"]["failure"] = str(e)
         qualification_failed |= isinstance(e, QualificationFailure)
@@ -536,7 +870,10 @@ for (const c of cases) {
     report["case_receipts_sha256"] = digest(OUT / "case-receipts.jsonl")
     report["case_receipts_signed"] = False
     (OUT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({k: report[k] for k in ("status", "public_exports", "cases", "engines", "blockers")}, indent=2))
+    print(json.dumps({k: report[k] for k in (
+        "status", "public_exports", "cases", "engines", "host_adapters",
+        "loop_alias_rc", "total_domain_mutants_killed", "device_status", "blockers"
+    )}, indent=2))
     print("comparisons:", report["comparisons"], "observed mismatches:", len(report["mismatches"]))
     return exit_code  # Unqualified coverage never yields acceptance.
 

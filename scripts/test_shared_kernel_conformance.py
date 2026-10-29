@@ -286,6 +286,54 @@ class Harness(unittest.TestCase):
             self.assertEqual(records[-2]["exit_code"], -6)
             self.assertEqual(records[-1]["exit_code"], -9)
 
+    def test_domain_mutant_inventory_and_witness_qualification(self):
+        self.assertEqual(len(conformance.DOMAIN_MUTANTS), 21)
+        by_family = {}
+        for _, _, fam, _, _, _ in conformance.DOMAIN_MUTANTS:
+            by_family[fam] = by_family.get(fam, 0) + 1
+        self.assertEqual(set(by_family), set(conformance.MUTATION_FAMILIES))
+        self.assertTrue(all(v >= 3 for v in by_family.values()))
+        cases = [{"id": 0, "symbol": "target", "args": [0]},
+                 {"id": 1, "symbol": "target", "args": [1]},
+                 {"id": 2, "symbol": "other", "args": [0]}]
+        baseline = {0: 10, 1: 20, 2: 30}
+        killed = {0: 10, 1: 99, 2: 30}
+        self.assertEqual(conformance.qualify_mutant(baseline, baseline, killed, cases, "target", [1]), [1])
+        for bad in ({0: 10, 1: 20, 2: 30}, {0: 10, 1: 99, 2: 31}, {0: 99, 1: 20, 2: 30}):
+            with self.assertRaises(conformance.QualificationFailure):
+                conformance.qualify_mutant(baseline, baseline, bad, cases, "target", [1])
+
+    def test_pass_requires_all_six_engines_adapters_lar_and_21_mutants(self):
+        values = {eng: self.reference for eng in conformance.REQUIRED_ENGINES}
+        base_report = {
+            "engines": {},
+            "blockers": [],
+            "host_adapters": {k: {"status": "PASS"} for k in conformance.REQUIRED_ADAPTERS},
+            "loop_alias_rc": {"status": "PASS", "live_objects": 0},
+            "mutation_families": {f: {"status": "PASS", "killed": 3, "total": 3} for f in conformance.MUTATION_FAMILIES},
+            "mutation_checks": {"m01_native": {"status": "KILLED"}},
+            "total_domain_mutants_killed": 21,
+        }
+        report = copy.deepcopy(base_report)
+        self.assertEqual(conformance.summarize(report, values, {}, self.cases), 0)
+        self.assertEqual(report["status"], "PASS")
+        # Missing any engine -> INCOMPLETE (2)
+        incomplete_values = {k: v for k, v in values.items() if k != "lnir"}
+        r_missing = copy.deepcopy(base_report)
+        self.assertEqual(conformance.summarize(r_missing, incomplete_values, {}, self.cases), 2)
+        # Non-zero live_objects (RC leak) -> INCOMPLETE (2)
+        r_leak = copy.deepcopy(base_report)
+        r_leak["loop_alias_rc"]["live_objects"] = 1
+        self.assertEqual(conformance.summarize(r_leak, values, {}, self.cases), 2)
+        # Missing adapter -> INCOMPLETE (2)
+        r_adapter = copy.deepcopy(base_report)
+        r_adapter["host_adapters"]["jni_x86_64"]["status"] = "BLOCKED"
+        self.assertEqual(conformance.summarize(r_adapter, values, {}, self.cases), 2)
+        # Fewer than 3 killed mutants in a family -> INCOMPLETE (2)
+        r_mut = copy.deepcopy(base_report)
+        r_mut["mutation_families"]["authorization"]["killed"] = 2
+        self.assertEqual(conformance.summarize(r_mut, values, {}, self.cases), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

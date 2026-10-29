@@ -58,25 +58,20 @@ identity are excluded as ambiguous, with the engine explicitly blocked. Extra ID
 cannot discard valid observations. Once a built mutant is invoked, malformed,
 missing or duplicate results, crashes and timeouts fail qualification (exit 1);
 unavailable build/reference prerequisites remain incomplete (exit 2).
-Otherwise the harness exits 2 (`INCOMPLETE`),
-even when all scalar observations agree: existing production host adapters,
-loop/alias/reference-counting cases, per-family mutation qualification and target
-qualification are not implemented here. Generated Rust ABI calls do not exercise
-the existing Rust host wrappers. Do not wrap exit 2 into a passing conformance gate.
-
-The harness compiles native and WASM mutants that flip the low result bit of one
-real forwarding export, executes them, and requires the comparator to detect all
-eight affected cases, with exactly the intended low-bit flip and no unrelated
-changes relative to an agreeing unmutated backend. This qualifies two bounded
-mutation experiments only.
-Adversarial harness tests reject dropped/extra/duplicate rows, swapped identities,
-changed unequal values, and malformed LNIR response values. Hash tests show
-payload changes alter the digest; they do not implement authenticated receipt
-ingestion or detect identity substitution independent of values. Actual missing
-commands and nonzero exits preserve failures. Real native abort/hang, SIGTERM and
-child/grandchild timeout tests check supervision and interruption receipts.
-This does not satisfy the roadmap's full engine-mutation or three-mutants-per-family
-acceptance requirements.
+The harness exits `0` (`PASS`) only when all six required scalar engines
+(`stock_lean`, `stock_extracted_c`, `vendored_native_c`, `rust_abi`, `wasm`,
+`lnir`) complete every public-export and witness case with zero mismatches, all
+production host adapters (`rust_orb_spec` via `crates/orb-spec`,
+`projection_invariants` shared fixtures, and `jni_x86_64` via the shipped
+`liborb_kernel.so`) agree with `stock_lean`, the 3-way loop/alias/RC corpus
+(`scripts/conformance_loop_alias_rc.lean`) agrees across `stock_lean`,
+`stock_extracted_c`, `lnir`, and `lnir --opt` with `live_objects == 0` and
+passing `validate-tv`, and all 21 Lean-witnessed domain mutants (`lean/Orb/MutantSuite.lean`,
+3 per family across all 7 roadmap families) plus the low-bit scalar shims are
+killed in both native C and WebAssembly. Otherwise any missing engine or
+unqualified stage exits `2` (`INCOMPLETE`) and any mismatch or surviving mutant
+exits `1` (`FAIL`). Physical iPhone 13 mini and Pixel 8 hardware remain
+explicitly recorded as `BLOCKED_PHYSICAL_DEVICE`.
 
 The initial workspace run executed all 896 cases in stock Lean, extracted C,
 vendored native C, generated Rust ABI and WASM with zero observed mismatches.
