@@ -610,6 +610,7 @@ pub(super) async fn control_actor_loop(
     let mut running: Option<tokio::task::JoinHandle<(Uuid, String, crate::agents::AgentResult)>> =
         None;
     let mut running_cancel: Option<CancellationToken> = None;
+    let mut running_interrupt_reason: Option<TerminalReason> = None;
     // Track which mission the main `running` task is actually working on.
     // This is different from `current_mission` which can change when user creates a new mission.
     let mut running_mission_id: Option<Uuid> = None;
@@ -2623,6 +2624,7 @@ pub(super) async fn control_actor_loop(
                                         // Per-message agent overrides mission agent
                                         let agent_override = per_msg_agent.or(mission_agent);
                                         running_cancel = Some(cancel.clone());
+                                        running_interrupt_reason = None;
                                         running_mission_id = mission_id;
                                         running_backend_id = backend_id.clone();
                                         // Reset activity tracking when new task starts
@@ -3459,6 +3461,32 @@ pub(super) async fn control_actor_loop(
                                         }
                                     }
                                 }
+                                if min_idle.is_some() {
+                                    // Supervision interrupts one execution; it is not a user
+                                    // Stop and must not revoke follow-ups or cancel children.
+                                    let run = if let Some(runner) = parallel_runners.get_mut(&mission_id) {
+                                        runner.interrupt_stalled();
+                                        runner.durable_run.clone()
+                                    } else if running_mission_id == Some(mission_id) {
+                                        if !running_cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                                            running_interrupt_reason = Some(TerminalReason::Stalled);
+                                        }
+                                        if let Some(token) = &running_cancel { token.cancel(); }
+                                        runner_force_clear_deadline = Some(tokio::time::Instant::now() + RUNNER_FORCE_CLEAR_GRACE);
+                                        running_run.clone()
+                                    } else {
+                                        let _ = respond.send(Ok(CancelMissionOutcome::NoRunner));
+                                        continue;
+                                    };
+                                    if let Some(run) = run {
+                                        let _ = mission_store.heartbeat_mission_run(run.run_id, run.generation, MissionExecutionState::Stopping, None).await;
+                                    }
+                                    let _ = respond.send(Ok(CancelMissionOutcome::Cancelled));
+                                    continue;
+                                }
+                                if running_mission_id == Some(mission_id) {
+                                    running_interrupt_reason = None;
+                                }
                                 // The actor already holds DISPATCH_ADMISSION. Fence
                                 // durable follow-ups before stopping the current run,
                                 // so a timer snapshot cannot restart an explicit Stop.
@@ -3470,6 +3498,15 @@ pub(super) async fn control_actor_loop(
                                     if let Err(error) = cleared {
                                         let _ = respond.send(Err(format!("Failed to cancel remote follow-ups: {error}")));
                                         continue;
+                                    }
+                                }
+                                usage_limit_wait::update_remote_wait(&config.working_dir, mission_id, |_| None).await;
+                                if let Ok(Some(mission)) = mission_store.get_mission(mission_id).await {
+                                    if usage_limit_wait::is_waiting_remote(&mission) {
+                                        if let Err(error) = mission_store.update_mission_status_with_reason(mission_id, MissionStatus::Interrupted, Some("cancelled")).await {
+                                            let _ = respond.send(Err(error));
+                                            continue;
+                                        }
                                     }
                                 }
                                 if let Err(error) = continuations::stop_for_mission(&mission_store, mission_id).await {
@@ -4267,6 +4304,7 @@ pub(super) async fn control_actor_loop(
                                                 let mission_config_profile = mission.config_profile.clone();
                                                 let pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
                                                 running_cancel = Some(cancel.clone());
+                                                running_interrupt_reason = None;
                                                 // Capture which mission this task is working on (the resumed mission)
                                                 running_mission_id = Some(mission_id);
                                                 running_backend_id = backend_id.clone();
@@ -4931,6 +4969,7 @@ pub(super) async fn control_actor_loop(
                             let mut completed_usage_limit_wait = false;
                             match res {
                                 Ok((_mid, user_msg, mut agent_result)) => {
+                                    super::super::mission_runner::apply_interruption_reason(&mut agent_result, running_interrupt_reason.take());
                                     maybe_recover_soft_llm_error(&mut agent_result);
                                     // Every account is at its usage limit: the mission
                                     // waits for the reset instead of failing, and the
@@ -5308,7 +5347,7 @@ pub(super) async fn control_actor_loop(
                                 }
                                 let suppress_finished_automation = matches!(
                                     completed_terminal_reason,
-                                    Some(TerminalReason::NativeGoalStopped | TerminalReason::CodexContinuityRequired | TerminalReason::NativeContinuityRequired)
+                                    Some(TerminalReason::NativeGoalStopped | TerminalReason::CodexContinuityRequired | TerminalReason::NativeContinuityRequired | TerminalReason::Stalled)
                                         | Some(TerminalReason::AuthError)
                                         | Some(TerminalReason::RateLimited)
                                         | Some(TerminalReason::CapacityLimited)
@@ -5552,6 +5591,7 @@ pub(super) async fn control_actor_loop(
                             let tree_ref = Arc::clone(&current_tree);
                             let progress_ref = Arc::clone(&progress);
                             running_cancel = Some(cancel.clone());
+                            running_interrupt_reason = None;
                             // Use the mission ID that was captured when message was queued.
                             // This prevents races where current_mission changes between
                             // queueing and execution.
@@ -5792,7 +5832,15 @@ pub(super) async fn control_actor_loop(
                                     mission_id = %mission_id,
                                     "Force-aborting stuck parallel runner after cancellation grace period"
                                 );
-                                let kill_reason = cancel_timeout_interrupt_reason();
+                                let stalled = runner.take_interruption_reason() == Some(TerminalReason::Stalled);
+                                let kill_reason = if stalled && !super::super::routes::is_shutdown_initiated() { "stalled" } else { cancel_timeout_interrupt_reason() };
+                                if stalled {
+                                    // Termination is now confirmed. Preserve queued messages
+                                    // in the actor's durable queue before retiring this runner.
+                                    while let Some(message) = runner.queue.pop_front() {
+                                        queue.push_back((message.id, message.content, message.agent, Some(*mission_id), message.source));
+                                    }
+                                }
                                 runner
                                     .finish_durable_run(
                                         &mission_store,
@@ -5997,7 +6045,7 @@ pub(super) async fn control_actor_loop(
                                     // capacity) to avoid noisy retry loops.
                                     let suppress_finished_automation = matches!(
                                         result.terminal_reason,
-                                        Some(TerminalReason::NativeGoalStopped | TerminalReason::CodexContinuityRequired | TerminalReason::NativeContinuityRequired)
+                                        Some(TerminalReason::NativeGoalStopped | TerminalReason::CodexContinuityRequired | TerminalReason::NativeContinuityRequired | TerminalReason::Stalled)
                                             | Some(TerminalReason::AuthError)
                                             | Some(TerminalReason::RateLimited)
                                             | Some(TerminalReason::CapacityLimited)
@@ -6528,6 +6576,7 @@ pub(super) async fn control_actor_loop(
                         continuations::bind_turn(&mission_store, stuck_mid, running_message_id, std::mem::take(&mut running_execution_ids)).await;
                         running = None;
                         runner_force_abort_requested = false;
+                        let kill_reason = if running_interrupt_reason.take() == Some(TerminalReason::Stalled) && !super::super::routes::is_shutdown_initiated() { "stalled" } else { cancel_timeout_interrupt_reason() };
                         running_cancel = None;
                         running_mission_id = None;
                         running_backend_id = None;
@@ -6540,7 +6589,7 @@ pub(super) async fn control_actor_loop(
                                 .finish_mission_run(
                                     run.run_id,
                                     run.generation,
-                                    Some(cancel_timeout_interrupt_reason()),
+                                    Some(kill_reason),
                                 )
                                 .await;
                         }
@@ -6554,7 +6603,7 @@ pub(super) async fn control_actor_loop(
                                 .update_mission_status_with_reason(
                                     mid,
                                     MissionStatus::Interrupted,
-                                    Some(cancel_timeout_interrupt_reason()),
+                                    Some(kill_reason),
                                 )
                                 .await
                             {

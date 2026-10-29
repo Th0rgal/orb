@@ -1276,6 +1276,14 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
     mission_id: Uuid,
     wait: usage_limit_wait::RemoteWait,
 ) {
+    let admission = DISPATCH_ADMISSION.lock().await;
+    if usage_limit_wait::remote_wait(&state.config.working_dir, mission_id)
+        .await
+        .as_ref()
+        != Some(&wait)
+    {
+        return;
+    }
     let working_dir = state.config.working_dir.clone();
     let mut owner = None;
     for (user_id, session) in state.control.all_sessions_with_users().await {
@@ -1290,7 +1298,14 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
     };
     // Resumed, cancelled or replaced by the operator in the meantime.
     if !usage_limit_wait::is_waiting_remote(&mission) {
-        usage_limit_wait::update_remote_wait(&working_dir, mission_id, |_| None).await;
+        usage_limit_wait::update_remote_wait(&working_dir, mission_id, |current| {
+            if current.as_ref() == Some(&wait) {
+                None
+            } else {
+                current
+            }
+        })
+        .await;
         return;
     }
     if mission
@@ -1314,6 +1329,7 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
         }
         return;
     }
+    drop(admission);
     let started = match remote_grok::placement(&working_dir, &control.mission_store, mission_id)
         .await
     {
@@ -1353,14 +1369,8 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
             .await
             {
                 Ok(verdict) if verdict.emit_dispatch_effect && !verdict.archived_next => {
-                    remote_grok::continue_on_node(
-                        state,
-                        &control,
-                        "usage-limit-replay",
-                        mission_id,
-                        placement,
-                        content,
-                        None,
+                    remote_grok::continue_recovery_on_node(
+                        state, &control, mission_id, placement, content, &wait,
                     )
                     .await
                     .map(|_| ())
@@ -1385,6 +1395,9 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
         Ok(()) => {
             tracing::info!(%mission_id, limit = %wait.limit, "remote mission replayed after its usage limit");
             usage_limit_wait::update_remote_wait(&working_dir, mission_id, |previous| {
+                if previous.as_ref() != Some(&wait) {
+                    return previous;
+                }
                 previous.map(|previous| usage_limit_wait::RemoteWait {
                     resume_at: None,
                     replays: previous.replays + 1,
@@ -1397,6 +1410,23 @@ pub(super) async fn replay_remote_mission_after_usage_limit(
         }
         Err(error) => error,
     };
+    let _admission = DISPATCH_ADMISSION.lock().await;
+    let current = control
+        .mission_store
+        .get_mission(mission_id)
+        .await
+        .ok()
+        .flatten();
+    if !current
+        .as_ref()
+        .is_some_and(usage_limit_wait::is_waiting_remote)
+        || usage_limit_wait::remote_wait(&working_dir, mission_id)
+            .await
+            .as_ref()
+            != Some(&wait)
+    {
+        return;
+    }
     match usage_limit_wait::after_replay_failure(
         &wait,
         status.is_server_error(),

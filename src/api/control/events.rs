@@ -602,6 +602,7 @@ pub enum ControlCommand {
 pub enum CancelMissionOutcome {
     Cancelled,
     SkippedRecentlyActive,
+    NoRunner,
 }
 
 // ==================== Mission Types ====================

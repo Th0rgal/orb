@@ -613,7 +613,7 @@ pub(super) fn mission_status_summary_for_terminal_reason(reason: TerminalReason)
         TerminalReason::NativeContinuityRequired => {
             Some("Native session requires reconciliation before resume".into())
         }
-        TerminalReason::Cancelled => Some("Cancelled by user".to_string()),
+        TerminalReason::Cancelled => Some("Execution interrupted".to_string()),
         TerminalReason::ServerShutdown => {
             Some("Paused for server restart — click Resume to continue".to_string())
         }

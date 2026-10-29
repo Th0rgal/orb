@@ -764,10 +764,37 @@ pub async fn delete_mission(
     let _durable = dispatch_admission::durable_lock(&state.config)
         .await
         .map_err(internal_error)?;
-    {
+    // Deleting a boss cascades to its board records. Preserve those receipts
+    // too. Board-local keys are scoped by the action issuer, not compared
+    // across boards (common keys such as "build" are unrelated).
+    let mut board_task_ids = HashSet::new();
+    for id in &ids_to_delete {
+        for task in control
+            .mission_store
+            .list_board_tasks(*id)
+            .await
+            .map_err(internal_error)?
+        {
+            board_task_ids.insert(task.id.to_string());
+        }
+    }
+    let replacements = {
         let conn = state.projects.connection.lock().map_err(internal_error)?;
-        workspace_purge::require_no_accepted_actions(&conn)
+        crate::control_mcp::actions::require_history_deletable(
+            &conn,
+            &user.id,
+            &ids_to_delete,
+            &board_task_ids,
+        )
+        .map_err(|e| (StatusCode::CONFLICT, e))?
+    };
+    for (action_id, prior_id) in replacements {
+        let lineage = mission_create::replacement_parent_lineage(&control.mission_store, prior_id)
+            .await
             .map_err(|e| (StatusCode::CONFLICT, e))?;
+        if lineage.iter().any(|id| ids_to_delete.contains(id)) {
+            return Err((StatusCode::CONFLICT, format!("Accepted MCP action {action_id} inherits this replacement parent; settle it before deleting")));
+        }
     }
     // Descendant creation is admission-serialized. Recompute after acquiring
     // the fence and reject if the validated deletion set changed while waiting.

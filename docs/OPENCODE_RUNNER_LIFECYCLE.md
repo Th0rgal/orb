@@ -1,5 +1,23 @@
 # OpenCode runner lifecycle
 
+## Prompt transport
+
+Core writes the complete prompt to the mission workspace and redirects that
+file onto OpenCode's stdin **inside** the `script` PTY wrapper. OpenCode reads
+non-TTY stdin through EOF; stdout keeps its existing terminal behavior. Prompt
+contents never become a command-line argument, and shell syntax, Unicode and
+trailing newlines remain intact. A missing prompt file fails before launch.
+
+Regression: a Codex-to-OpenCode transfer on 2026-10-29 failed before inference
+with `Argument list too long`. The old `"$(cat prompt-file)"` transport expanded
+the history into one argument and still hit the OS argument limit. Core emitted
+both the generic `LlmError` status summary (`Model error`) and the concrete
+failed-launch response; these were two presentations of the same failure.
+Replay a transfer larger than Linux's per-argument limit and verify exact stdin
+bytes, bounded command size and failure without launch when the file is missing.
+
+## Turn lifecycle
+
 A tool-call step is progress, not a completed turn. Stdout JSON and SSE use
 one parser: `step_finish` with `tool-calls` does not complete the turn, even
 after hundreds of steps. Existing inactivity and repeated-provider-error

@@ -1,12 +1,14 @@
 import {createSignal} from 'solid-js';
 import {render} from 'solid-js/web';
 import {LaunchStatus, MissionFailure} from '../src/missionLaunch';
-import {UserTurn} from '../src/Transcript';
+import {UserTurn,Transcript,buildTranscript} from '../src/Transcript';
 import type {Mission} from '../src/api';
 import '../src/styles.css';
 document.documentElement.dataset.theme=new URLSearchParams(location.search).get('theme') ?? 'dark';
 const scenario=new URLSearchParams(location.search).get('scenario');
-const initial=(scenario==='reconnecting'
+const initial=(scenario==='interrupted'
+ ? {id:'recovery',status:'interrupted',terminal_reason:'cancelled'}
+ : scenario==='reconnecting'
  ? {id:'recovery',status:'active',remote_job:{node_id:'ashur',job_id:'existing',phase:'reconnecting',node_state:'running'}}
  : scenario==='policy'
  ? {id:'recovery',status:'failed',terminal_reason:'remote_provider_policy'}
@@ -15,7 +17,13 @@ function Preview(){
  const [mission,setMission]=createSignal(initial);
  return <main style={{padding:'16px','max-width':'800px',margin:'60px auto'}}>
   <LaunchStatus destination="old-agent" mission={mission()} activity onResume={()=>setMission({...initial,status:'active',remote_job:{node_state:'running'}} as Mission)} onCancelRecovery={()=>setMission({...initial,status:'paused'})}/>
-  <MissionFailure mission={mission()}/>
+  <MissionFailure mission={mission()} failureInTranscript={scenario==='interrupted'}/>
+  {scenario==='interrupted' && <Transcript items={buildTranscript([
+   {type:'text_delta',data:{content:'I will proceed to Round 3 once the test completes.'}},
+   {type:'assistant_message',data:{content:'I will proceed to Round 3 once the test completes.',success:false,completion_evidence:{terminal_reason:'Cancelled'}}},
+   {type:'mission_status_changed',data:{status:'interrupted',summary:'Cancelled by user'}}
+  ])} onResume={()=>setMission({...initial,status:'active'})}/>}
+  {scenario==='interrupted' && mission().status==='active' && <p role="status">Resume requested</p>}
   <UserTurn text="[Automatic recovery] Antigravity transient upstream error stopped your previous turn. Resume your work where it stopped, and check the state of anything you had started before continuing. Do not redo finished work."/>
   <p>The agent continues in the same conversation after the provider connection recovers.</p>
  </main>;
