@@ -479,6 +479,19 @@ fn transient_cooldown_max() -> std::time::Duration {
     )
 }
 
+/// Cap on a timeout backoff (`PROVIDER_TIMEOUT_COOLDOWN_MAX_SECS`, default 15 s).
+/// Slow reasoning calls or transient upstream timeouts get only a brief pause
+/// instead of parking the account for a full minute.
+fn timeout_cooldown_max() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var("PROVIDER_TIMEOUT_COOLDOWN_MAX_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(15),
+    )
+}
+
 /// Most transient-failure timestamps kept per account.
 const MAX_TRANSIENT_SAMPLES: usize = 64;
 
@@ -647,6 +660,7 @@ pub struct AccountHealthSnapshot {
     pub provider_id: Option<String>,
     pub is_healthy: bool,
     pub cooldown_remaining_secs: Option<f64>,
+    pub cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
     pub consecutive_failures: u32,
     pub last_failure_reason: Option<String>,
     pub last_failure_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1014,12 +1028,16 @@ impl ProviderHealthTracker {
                 );
                 return std::time::Duration::ZERO;
             }
-            let cooldown = transient_cooldown(
+            let mut cooldown = transient_cooldown(
                 self.backoff_config.base_delay,
                 self.backoff_config.multiplier,
                 streak - threshold,
             );
+            if matches!(reason, CooldownReason::Timeout) {
+                cooldown = cooldown.min(timeout_cooldown_max());
+            }
             health.cooldown_until = Some(now + cooldown);
+            let provider_id = health.provider_id.clone().unwrap_or_default();
             tracing::warn!(
                 account_id = %account_id,
                 reason = %reason,
@@ -1027,6 +1045,19 @@ impl ProviderHealthTracker {
                 cooldown_secs = cooldown.as_secs_f64(),
                 "Repeated transient upstream failures; short account cooldown"
             );
+            drop(accounts);
+            let now_utc = chrono::Utc::now();
+            if let Ok(delta) = chrono::Duration::from_std(cooldown) {
+                self.limits.set_transient(
+                    &crate::account_limits::account_key(account_id),
+                    crate::account_limits::TransientCooldown {
+                        until: now_utc + delta,
+                        provider: provider_id,
+                        reason: reason.to_string(),
+                        recorded_at: now_utc,
+                    },
+                );
+            }
             return cooldown;
         }
 
@@ -1105,6 +1136,18 @@ impl ProviderHealthTracker {
             );
         }
         drop(accounts);
+        let now_utc = chrono::Utc::now();
+        if let Ok(delta) = chrono::Duration::from_std(cooldown) {
+            self.limits.set_transient(
+                &crate::account_limits::account_key(account_id),
+                crate::account_limits::TransientCooldown {
+                    until: now_utc + delta,
+                    provider: provider_id.clone(),
+                    reason: reason.to_string(),
+                    recorded_at: now_utc,
+                },
+            );
+        }
 
         // Propagate the cooldown to the shared subscription, if known. Auth
         // errors stay account-local — a revoked token on one record doesn't
@@ -1364,20 +1407,22 @@ impl ProviderHealthTracker {
     ) -> AccountHealthSnapshot {
         // The longer of the in-memory cooldown and the usage-limit one.
         let remaining = health.remaining_cooldown().max(limit_remaining);
-        let state = account_state(remaining.is_some(), health.last_failure_reason);
-        let next_probe_at = remaining
-            .filter(|_| {
-                health
-                    .last_failure_reason
-                    .is_some_and(CooldownReason::is_account_error)
-            })
+        let now_utc = chrono::Utc::now();
+        let cooldown_until = remaining
             .and_then(|d| chrono::Duration::from_std(d).ok())
-            .map(|d| chrono::Utc::now() + d);
+            .map(|d| now_utc + d);
+        let state = account_state(remaining.is_some(), health.last_failure_reason);
+        let next_probe_at = cooldown_until.filter(|_| {
+            health
+                .last_failure_reason
+                .is_some_and(CooldownReason::is_account_error)
+        });
         AccountHealthSnapshot {
             account_id,
             provider_id: health.provider_id.clone(),
             is_healthy: remaining.is_none(),
             cooldown_remaining_secs: remaining.map(|d| d.as_secs_f64()),
+            cooldown_until,
             consecutive_failures: health.consecutive_failures,
             last_failure_reason: health.last_failure_reason.as_ref().map(|r| r.to_string()),
             last_failure_at: health.last_failure_at,
@@ -1430,6 +1475,7 @@ impl ProviderHealthTracker {
                         .filter(|provider| !provider.is_empty()),
                     is_healthy: limit_remaining.is_none(),
                     cooldown_remaining_secs: limit_remaining.map(|d| d.as_secs_f64()),
+                    cooldown_until: limit.as_ref().map(|cooldown| cooldown.until),
                     consecutive_failures: 0,
                     last_failure_reason: parked_reason.map(|r| r.to_string()),
                     last_failure_at: limit.as_ref().map(|cooldown| cooldown.recorded_at),
@@ -1487,6 +1533,29 @@ impl ProviderHealthTracker {
         if let Some(health) = accounts.get_mut(&account_id) {
             health.cooldown_until = None;
             health.consecutive_failures = 0;
+            health.transient_failures.clear();
+        }
+    }
+
+    /// Clear all active in-memory and usage-limit cooldowns across tracked accounts.
+    pub async fn clear_all_cooldowns(&self) {
+        let now = chrono::Utc::now();
+        for (key, _) in self.limits.all_active_at(now) {
+            self.limits.clear(&key);
+        }
+        self.limits.clear_all_transient();
+        {
+            let mut accounts = self.accounts.write().await;
+            for health in accounts.values_mut() {
+                health.cooldown_until = None;
+                health.consecutive_failures = 0;
+                health.transient_failures.clear();
+            }
+        }
+        let mut subs = self.subscription_cooldowns.write().await;
+        for entry in subs.values_mut() {
+            entry.cooldown_until = None;
+            entry.consecutive_failures = 0;
         }
     }
 }
@@ -1513,14 +1582,12 @@ pub struct ChainEntry {
 /// The same model served by another provider, tried in order when every
 /// account of the requested provider is rate-limited or out of quota. An
 /// explicit table: two ids are interchangeable only when listed here.
+/// Native `google/*` routes are intentionally excluded from failing over to
+/// `antigravity` so Google EAP/benchmark chains stay pinned to native Google.
 /// A `(provider, model)` pair.
 type ModelId = (&'static str, &'static str);
 
 const EQUIVALENT_MODELS: &[(ModelId, &[ModelId])] = &[
-    (
-        ("google", "gemini-4-argon"),
-        &[("antigravity", "gemini-4-argon-medium")],
-    ),
     (
         ("antigravity", "gemini-4-argon-low"),
         &[("google", "gemini-4-argon")],
@@ -2937,10 +3004,18 @@ impl ModelChainStore {
                 }
 
                 // A direct Gemini API key is the primary route regardless of
-                // account-store quota ordering. OAuth-only Google and
-                // Antigravity entries are CLIProxyAPI fallbacks and must not
-                // jump ahead of a standard/env API key.
-                resolved[resolved_start..].sort_by_key(|candidate| candidate.api_key.is_none());
+                // account-store quota ordering. OAuth-only Google entries are
+                // CLIProxyAPI / OAuth fallbacks and stay second behind a direct
+                // API key; within each tier, prefer fewer active inflight calls.
+                resolved[resolved_start..].sort_by_key(|candidate| {
+                    (
+                        candidate.api_key.is_none(),
+                        crate::api::proxy_timing::inflight_for_account(
+                            &candidate.provider_id,
+                            candidate.account_id,
+                        ),
+                    )
+                });
             }
         }
 
@@ -3080,7 +3155,7 @@ pub type SharedModelChainStore = Arc<ModelChainStore>;
 mod tests {
 
     #[test]
-    fn rate_limited_google_argon_fails_over_to_antigravity() {
+    fn google_argon_stays_pinned_to_native_google() {
         let chain = |provider: &str, model: &str| {
             with_equivalent_fallbacks(ChainEntry {
                 provider_id: provider.into(),
@@ -3090,9 +3165,10 @@ mod tests {
             .map(|e| format!("{}/{}", e.provider_id, e.model_id))
             .collect::<Vec<_>>()
         };
+        assert_eq!(chain("google", "gemini-4-argon"), ["google/gemini-4-argon"]);
         assert_eq!(
-            chain("google", "gemini-4-argon"),
-            ["google/gemini-4-argon", "antigravity/gemini-4-argon-medium"]
+            chain("google", "gemini-4-carbon-eap"),
+            ["google/gemini-4-carbon-eap"]
         );
         assert_eq!(
             chain("antigravity", "gemini-4-argon-high"),
@@ -3861,9 +3937,8 @@ mod tests {
             .is_empty());
         assert!(health.is_healthy(second_id).await);
 
-        // `google/gemini-4-argon` on a Gemini CLI login whose quota is spent
-        // (prod, 2026-10-27: 429 on a single-entry chain, retried forever)
-        // fails over to the Antigravity pool instead of exhausting.
+        // `google/gemini-4-argon` is pinned to native Google and must never
+        // silently fail over to Antigravity when Google quota is spent.
         let mut google = AIProvider::new(ProviderType::Google, "gemini-cli".into());
         google.api_key = Some("fixture-key".into());
         let google_id = google.id;
@@ -3876,22 +3951,22 @@ mod tests {
             model_id: "gemini-4-argon".into(),
         });
         let resolved = chains.resolve_entries(&argon, &store, &[], &health).await;
-        assert_eq!(resolved[0].account_id, google_id);
-        let failover = resolved.last().unwrap();
-        assert_eq!(failover.account_id, pool_id);
-        assert_eq!(failover.model_id, "gemini-4-argon-medium");
+        assert_eq!(ids(resolved.clone()), vec![google_id]);
         health
             .record_entry_failure(&resolved[0], CooldownReason::QuotaExhausted, None)
             .await;
         let after = ids(chains.resolve_entries(&argon, &store, &[], &health).await);
         assert!(
-            !after.contains(&google_id) && after.contains(&pool_id),
-            "the 429-parked Google login is skipped, Antigravity answers: {after:?}"
+            after.is_empty(),
+            "native Google route fails visibly rather than switching to Antigravity: {after:?}"
         );
-        // Antigravity's Gemini pool spent too: the limit is on the pool, and
-        // the proxy reads it there to answer with a usage limit.
+        // Antigravity's Gemini pool limit is recorded per pool, not account-wide.
+        let agy_argon = [ChainEntry {
+            provider_id: "antigravity".into(),
+            model_id: "gemini-4-argon-medium".into(),
+        }];
         let pool_entry = chains
-            .resolve_entries(&argon, &store, &[], &health)
+            .resolve_entries(&agy_argon, &store, &[], &health)
             .await
             .into_iter()
             .find(|e| e.account_id == pool_id)
