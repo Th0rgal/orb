@@ -112,8 +112,14 @@ preparing -> source_stopped -> destination_starting -> running
   the menu without collapsing layout height or losing focus ownership.
 - While both `source` and `destination` exist in the sidebar (`fork-of:`),
   `nestMissions` groups them under one conversation row with `earlier` version
-  disclosure; navigating to an earlier version (`Open original conversation`)
-  automatically expands its leader row in `ProjectFiles.tsx`.
+  disclosure (`orb/docs/specs/sidebar-hierarchy.md` invariants **F1** and
+  **F2**): `onFork(destination)` commits `destination` into `ProjectFiles`
+  synchronously on frame 0, `destination` leads immediately without ever
+  flickering as a sub-mission (`version`) under `source` while `source` stops
+  or archives, and `retryTransferArchive` hides `source` optimistically at the
+  start of archiving (rolling back on failure); navigating to an earlier version
+  (`Open original conversation`) automatically expands its leader row in
+  `ProjectFiles.tsx`.
 - Startup JS stays below `orb/scripts/check-bundle.mjs`'s `1150 kB` budget,
   transfer/failure transitions incur zero layout jumps, and main-thread work per
   transition stays under interactive frame budgets.

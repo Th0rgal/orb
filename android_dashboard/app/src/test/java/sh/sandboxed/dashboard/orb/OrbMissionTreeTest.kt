@@ -78,4 +78,71 @@ class OrbMissionTreeTest {
         assertEquals(null, OrbMissionTree.parentId(partial))
         OrbMissionTree.resetHierarchy()
     }
+
+    @Test
+    fun forkLeaderPrefersUnretiredAndLiveAndNewlyCreatedForks() {
+        val archivedRoot = m(
+            "86d91cc3",
+            "status" to "acknowledged",
+            "created_at" to "2026-10-28T23:00:00Z",
+            "updated_at" to "2026-10-29T05:50:00Z",
+        )
+        val worker = m("9bfbb6e4", "parent_mission_id" to "86d91cc3", "updated_at" to "2026-10-29T05:00:00Z")
+        val completedSibling = m(
+            "d65744b9",
+            "status" to "completed",
+            "tags" to listOf("fork-of:86d91cc3"),
+            "created_at" to "2026-10-29T05:05:00Z",
+            "updated_at" to "2026-10-29T05:49:00Z",
+        )
+        val activeFork = m(
+            "65407660",
+            "status" to "active",
+            "tags" to listOf("fork-of:86d91cc3"),
+            "created_at" to "2026-10-29T05:31:00Z",
+            "updated_at" to "2026-10-29T05:31:00Z",
+        )
+        assertEquals(listOf("65407660"), OrbMissionTree.nest(listOf(archivedRoot, worker, completedSibling, activeFork)).map { it.id })
+
+        val stalledRoot = m(
+            "86d91cc3",
+            "status" to "interrupted",
+            "created_at" to "2026-10-28T23:00:00Z",
+            "updated_at" to "2026-10-29T05:48:22Z",
+        )
+        assertEquals(listOf("65407660"), OrbMissionTree.nest(listOf(stalledRoot, worker, completedSibling, activeFork)).map { it.id })
+
+        val stoppedFork = m(
+            "65407660",
+            "status" to "interrupted",
+            "tags" to listOf("fork-of:86d91cc3"),
+            "created_at" to "2026-10-29T05:31:00Z",
+            "updated_at" to "2026-10-29T06:02:22Z",
+        )
+        assertEquals(listOf("65407660"), OrbMissionTree.nest(listOf(stalledRoot, worker, completedSibling, stoppedFork)).map { it.id })
+
+        val codexSource = m(
+            "codex-src",
+            "status" to "interrupted",
+            "created_at" to "2026-10-29T02:00:00Z",
+            "updated_at" to "2026-10-29T02:25:17Z",
+        )
+        val opencodeFork = m(
+            "opencode-fork",
+            "status" to "interrupted",
+            "tags" to listOf("fork-of:codex-src"),
+            "created_at" to "2026-10-29T02:25:11Z",
+            "updated_at" to "2026-10-29T02:25:11Z",
+        )
+        assertEquals(listOf("opencode-fork"), OrbMissionTree.nest(listOf(codexSource, opencodeFork)).map { it.id })
+        assertEquals(listOf("opencode-fork"), OrbMissionTree.nest(listOf(opencodeFork, codexSource)).map { it.id })
+
+        val resumedSource = m(
+            "codex-src",
+            "status" to "completed",
+            "created_at" to "2026-10-29T02:00:00Z",
+            "updated_at" to "2026-10-29T03:00:00Z",
+        )
+        assertEquals(listOf("codex-src"), OrbMissionTree.nest(listOf(resumedSource, opencodeFork)).map { it.id })
+    }
 }

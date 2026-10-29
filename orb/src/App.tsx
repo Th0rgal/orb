@@ -903,6 +903,16 @@ export default function App() {
     window.removeEventListener("keydown", onKey);
   });
 
+  const commitFork = (m: Mission) => {
+    batch(() => {
+      setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]);
+      setOpenMission(m);
+      window.dispatchEvent(new CustomEvent("orb:mission-forked", { detail: { mission: m } }));
+      bumpProjects();
+      open(`m:${m.id}`);
+    });
+  };
+
   const startResize = (e: PointerEvent) => {
     e.preventDefault();
     document.body.classList.add("resizing");
@@ -982,7 +992,7 @@ export default function App() {
                     harnessChoices={harnessChoices()}
                     forkChoices={mission => harnessChoices(mission.remote_node_id ?? "core")}
                     onForkOpen={mission => void refreshNodeAntigravityModels(mission.remote_node_id ?? "core")}
-                    onFork={m => { setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]); bumpProjects(); open(`m:${m.id}`); }}
+                    onFork={commitFork}
                     selected={selected}
                     onDeleted={ids => {
                       const idSet = new Set(ids);
@@ -1397,8 +1407,8 @@ export default function App() {
           </Match>
           <Match when={currentMissionId() || (selected()===null && launchPreview())}>
             <Show when={currentMissionId() ? launchedViewKeys.get(currentMissionId()!) || currentMissionId() : launchViewKey()} keyed>{viewKey =>
-              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id) ?? lookupMissionById(id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/></MissionLookupContext.Provider>}>
-                <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={setOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={m=>{setMissions(ms=>[m,...ms.filter(x=>x.id!==m.id)]);bumpProjects();open(`m:${m.id}`);}}/>
+              <Show when={viewKey===launchViewKey()} fallback={<MissionLookupContext.Provider value={id=>missions().find(m=>m.id===id) ?? lookupMissionById(id)}><MissionView id={currentMissionId()!} initial={missions().find(m=>m.id===currentMissionId())} onMission={setOpenMission} onPlan={(id,data)=>setPreviewPlan({id,data})} onContext={(id,pct)=>setPreviewContext({id,pct})} onFork={commitFork}/></MissionLookupContext.Provider>}>
+                <NativeMissionView id={currentMissionId() || ''} initial={missions().find(m=>m.id===currentMissionId())} launch={launchPreview()??undefined} launchError={createError()??undefined} onRetryLaunch={()=>retryLaunch?.()} onMission={setOpenMission} onContext={(id,pct)=>setPreviewContext({id,pct})} onPlan={(id,data)=>setPreviewPlan({id,data})} onFork={commitFork}/>
               </Show>
             }</Show>
           </Match>

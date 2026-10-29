@@ -781,6 +781,18 @@ export function LiveProjectsSection(p: {
     };
     window.addEventListener("orb:mission-moved", onMissionMoved);
     onCleanup(() => window.removeEventListener("orb:mission-moved", onMissionMoved));
+    const onMissionForked = (event: Event) => {
+      const { mission } = (event as CustomEvent<{ mission: Mission }>).detail ?? {};
+      const slug = mission?.project?.trim();
+      if (!mission?.id || !slug) return;
+      missionRevision++;
+      const clean = withHierarchy(mission);
+      batch(() => {
+        setMissions(slug, rows => [clean, ...(rows ?? []).filter(m => m.id !== clean.id)]);
+      });
+    };
+    window.addEventListener("orb:mission-forked", onMissionForked);
+    onCleanup(() => window.removeEventListener("orb:mission-forked", onMissionForked));
     const onArchived = (event: Event) => {
       const { id } = (event as CustomEvent<{ id: string }>).detail;
       archivedInSession.add(id);
