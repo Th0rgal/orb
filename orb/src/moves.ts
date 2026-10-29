@@ -4,7 +4,7 @@
  * once wherever lists are read through `withMovedMissions` / `movedMission` /
  * `filesMovedAway` / `filesMovedInto`. List refreshes that still carry the
  * old place cannot snap it back. An entry clears when the server reports the
- * new place, `MOVE_CONFIRM_MS` after the request succeeded, or at once when
+ * new place is committed by its owner, `MOVE_CONFIRM_MS` after success, or when
  * it failed (the item returns and an error toast explains why).
  */
 import { createSignal } from "solid-js";
@@ -54,8 +54,8 @@ export function movedMission<T extends Placed>(mission: T): T {
   const move = pending().get(key);
   if (!move) return mission;
   if ((mission.project ?? null) === move.toProject && folderOf(mission.tags) === move.path) {
-    // The server reports the new place: stop overriding.
-    if (move.acceptedAt !== undefined) queueMicrotask(() => clearIf(key, move));
+    // A projected row may be read again. Rendering is not acknowledgement;
+    // only the owner may settle the move after committing canonical placement.
     return mission;
   }
   return { ...mission, project: move.toProject, tags: withFolder(mission.tags, move.path) };

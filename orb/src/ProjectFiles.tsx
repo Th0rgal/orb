@@ -1,4 +1,4 @@
-import { fileMoveKey, missionMoveKey, previewMove, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
+import { fileMoveKey, missionMoveKey, previewMove, movedMission, missionsMovedInto, moveOptimistically, movingOutOf, pendingMoves as pendingPlaceMoves, settleMove, withMovedMissions } from "./moves";
 import { renameOptimistically } from "./renames";
 import { isArchivable, isReopenable, isRunning, isLive, isWorking, presentedStatus } from "./missionStatus";
 import { swallow } from "./log";
@@ -150,7 +150,7 @@ export function LiveProjectsSection(p: {
   const LIVE = new Set(["active", "pending", "queued", "awaiting_user", "resuming", "running", "starting", "blocked", "paused", "waiting_background"]);
   const visibleMissions = (slug: string) => {
     // Pending moves: rows leave their old project and appear in the new one at once.
-    const own = (missions[slug] ?? []).filter(m => !movingOutOf(m.id, slug));
+    const own = (missions[slug] ?? []).filter(m => !movingOutOf(m.id, slug) && (!m.project || m.project === slug));
     const arriving = pendingPlaceMoves().size ? missionsMovedInto(slug, [...Object.values(missions).flat(), ...(p.activityMissions ?? [])]).filter(m => !own.some(o => o.id === m.id)) : [];
     const rows = withMovedMissions([...arriving, ...own]).map(withHierarchy);
     const current = currentMission();
@@ -162,10 +162,11 @@ export function LiveProjectsSection(p: {
         : [withHierarchy(current), ...rows])
       : rows;
     const shown = new Set(withCurrent.map(r => r.id));
-    const extraArchived = archivedMissions().filter(m => (m.project ?? "") === slug && !shown.has(m.id));
+    const listedIds = new Set(Object.values(missions).flat().map(m => m.id));
+    const extraArchived = withMovedMissions(archivedMissions()).filter(m => (m.project ?? "") === slug && !shown.has(m.id) && !listedIds.has(m.id));
     // Parents the resolver fetched by id (paged out of this project's list) are listed as context.
     for (const m of [...withCurrent, ...extraArchived]) shown.add(m.id);
-    const fetchedParents = resolvedParents<Mission>().filter(m => (m.project ?? "") === slug && !shown.has(m.id));
+    const fetchedParents = withMovedMissions(resolvedParents<Mission>()).filter(m => (m.project ?? "") === slug && !shown.has(m.id) && !listedIds.has(m.id));
     const allRows = [...withCurrent, ...extraArchived, ...fetchedParents];
     const byId = new Map(allRows.map(m => [m.id, m]));
     const selectedId = p.selected()?.startsWith("m:") ? p.selected()!.slice(2) : undefined;
@@ -765,6 +766,21 @@ export function LiveProjectsSection(p: {
       void loadDir(detail.slug, "");
     };
     window.addEventListener("orb:project-created", onProjectCreated);
+    const onMissionMoved = (event: Event) => {
+      const { id, project, tags } = (event as CustomEvent<{ id: string; project: string; tags: string[] }>).detail;
+      const prior = allKnownMissions().find(m => m.id === id);
+      if (!prior) return;
+      // Commit the successful write before waiting for any project refresh.
+      // Reads launched before this acknowledgement may still contain A.
+      missionRevision++;
+      batch(() => {
+        leaveProjects(id, project);
+        const updated = mergeMission(prior, { id, project, tags }, "partial");
+        setMissions(project, rows => [updated, ...(rows ?? []).filter(m => m.id !== id)]);
+      });
+    };
+    window.addEventListener("orb:mission-moved", onMissionMoved);
+    onCleanup(() => window.removeEventListener("orb:mission-moved", onMissionMoved));
     const onArchived = (event: Event) => {
       const { id } = (event as CustomEvent<{ id: string }>).detail;
       archivedInSession.add(id);
@@ -1828,10 +1844,17 @@ export function LiveProjectsSection(p: {
     const selected = p.selected();
     if (!selected?.startsWith("m:")) return undefined;
     const id = selected.slice(2);
-    return (p.currentMission?.id === id ? p.currentMission : undefined)
+    const listed = Object.values(missions).flat().find(m => m.id === id);
+    const current = (p.currentMission?.id === id ? p.currentMission : undefined)
       ?? p.activityMissions?.find(m => m.id === id)
-      ?? Object.values(missions).flat().find(m => m.id === id)
-      ?? archivedMissions().find(m => m.id === id);
+      ?? listed ?? archivedMissions().find(m => m.id === id);
+    if (!current) return undefined;
+    // Project listings own placement; the open detail owns live status/content.
+    // Its older project/folder must not reinsert a conversation we just moved.
+    return movedMission(listed ? { ...current, project: listed.project, tags: [
+      ...(current.tags ?? []).filter(tag => !tag.startsWith("orb-folder:")),
+      ...(listed.tags ?? []).filter(tag => tag.startsWith("orb-folder:")),
+    ] } : current);
   });
   // Observe identity/location, not every polling update. This also runs when a
   // restored conversation's metadata arrives after the initial selection.
