@@ -13700,6 +13700,183 @@ async fn project_move_with_include_descendants_rolls_back_subtree_on_descendant_
     assert_eq!(parent_leases.len(), 1);
     assert_eq!(parent_leases[0].slug, "lido");
     assert_eq!(parent_leases[0].track, parent_track);
+    assert!(h.state.projects.subtree_project_edits().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn project_move_with_include_descendants_recovers_after_mid_subtree_crash() {
+    let h = Harness::new().await;
+    let parent = h.writer(MissionStatus::Active, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&parent.id.to_string())
+        .unwrap();
+    let parent_track = super::super::track_leases::generated_track_key(&parent.id.to_string());
+    h.control
+        .mission_store
+        .update_mission_project(
+            parent.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some(parent_track.clone())),
+                tags: Some(vec!["pr-writer".into(), "orb-folder:BeforeCrash".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", &parent_track, Some("parent"), None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&super::super::track_leases::lease_request(
+            "lido",
+            &parent_track,
+            &parent.id.to_string(),
+            "writer",
+            Some("pre-crash-parent"),
+        ))
+        .unwrap();
+
+    let child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some("wave-crash".into())),
+                tags: Some(vec!["pr-readonly".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(child.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+
+    // Persist the pre-crash subtree receipt, then simulate a crash right after
+    // the root committed to `verity` (metadata + lease moved, child still in `lido`).
+    let parent_before = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let child_before = h
+        .control
+        .mission_store
+        .get_mission(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let receipt = json!([
+        {
+            "id": parent.id,
+            "title": parent_before.title,
+            "before": parent_before.project,
+            "prior_track_lease": {
+                "slug": "lido",
+                "track": parent_track,
+                "mode": "writer",
+            }
+        },
+        {
+            "id": child.id,
+            "title": child_before.title,
+            "before": child_before.project,
+            "prior_track_lease": null
+        }
+    ]);
+    h.state
+        .projects
+        .save_subtree_project_edit(&parent.id.to_string(), &receipt)
+        .unwrap();
+    h.state
+        .projects
+        .move_track_lease(
+            Some(("lido", &parent_track)),
+            "verity",
+            &parent_track,
+            &parent.id.to_string(),
+            "writer",
+            parent_before.title.as_deref(),
+            None,
+        )
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            parent.id,
+            MissionProjectPatch {
+                project: Some(Some("verity".into())),
+                tags: Some(vec!["pr-writer".into(), "orb-folder:Audits".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Startup/periodic `recover_sweep` rolls back the partially committed subtree and clears the journal.
+    dispatch_admission::recover_sweep(&h.state).await.unwrap();
+    assert!(h.state.projects.subtree_project_edits().unwrap().is_empty());
+
+    let p_recovered = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let c_recovered = h
+        .control
+        .mission_store
+        .get_mission(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p_recovered.project.project.as_deref(), Some("lido"));
+    assert_eq!(
+        p_recovered.project.tags,
+        vec![
+            "pr-writer".to_string(),
+            "orb-folder:BeforeCrash".to_string()
+        ]
+    );
+    assert_eq!(c_recovered.project.project.as_deref(), Some("lido"));
+    let leases: Vec<_> = h
+        .state
+        .projects
+        .live_leases(None)
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.attempt_id == parent.id.to_string())
+        .collect();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].slug, "lido");
+    assert_eq!(leases[0].track, parent_track);
 }
 
 #[tokio::test]

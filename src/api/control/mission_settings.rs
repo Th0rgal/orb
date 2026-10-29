@@ -259,11 +259,19 @@ pub async fn update_mission_origin(
     Ok(Json(mission))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PriorTrackLease {
+    slug: String,
+    track: String,
+    mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MovedMissionSnapshot {
     id: Uuid,
     title: Option<String>,
     before: crate::api::mission_store::MissionProject,
-    prior_track_lease: Option<super::super::projects_store::TrackLease>,
+    prior_track_lease: Option<PriorTrackLease>,
 }
 
 impl MovedMissionSnapshot {
@@ -274,7 +282,12 @@ impl MovedMissionSnapshot {
             .live_leases(None)
             .map_err(internal_error)?
             .into_iter()
-            .rfind(|l| l.attempt_id == attempt && l.mutation_domain == "track");
+            .rfind(|l| l.attempt_id == attempt && l.mutation_domain == "track")
+            .map(|l| PriorTrackLease {
+                slug: l.slug,
+                track: l.track,
+                mode: l.mode,
+            });
         Ok(Self {
             id: mission.id,
             title: mission.title.clone(),
@@ -287,9 +300,10 @@ impl MovedMissionSnapshot {
 async fn rollback_moved_missions(
     state: &Arc<AppState>,
     store: &Arc<dyn MissionStore>,
-    moved: Vec<MovedMissionSnapshot>,
-) {
-    for snap in moved.into_iter().rev() {
+    moved: &[MovedMissionSnapshot],
+) -> Result<(), String> {
+    let mut first_error: Option<String> = None;
+    for snap in moved.iter().rev() {
         let attempt = snap.id.to_string();
         if let Some(prior) = &snap.prior_track_lease {
             let still_matches = state
@@ -320,6 +334,7 @@ async fn rollback_moved_missions(
                         %rollback_err,
                         "Subtree project transfer lease rollback failed"
                     );
+                    first_error.get_or_insert_with(|| rollback_err.to_string());
                 }
             }
         } else if let Err(rollback_err) = state.projects.release_leases_for_attempt(&attempt) {
@@ -328,6 +343,7 @@ async fn rollback_moved_missions(
                 %rollback_err,
                 "Subtree project transfer lease release rollback failed"
             );
+            first_error.get_or_insert(rollback_err);
         }
 
         match store.get_mission(snap.id).await {
@@ -353,6 +369,7 @@ async fn rollback_moved_missions(
                         %rollback_err,
                         "Subtree project transfer metadata rollback failed"
                     );
+                    first_error.get_or_insert(rollback_err);
                 }
             }
             Ok(_) => {}
@@ -362,9 +379,59 @@ async fn rollback_moved_missions(
                     %rollback_err,
                     "Subtree project transfer rollback mission read failed"
                 );
+                first_error.get_or_insert(rollback_err);
             }
         }
     }
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+pub(super) async fn recover_subtree_project_edit_entry(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+    root_key: &str,
+    receipt: serde_json::Value,
+) -> Result<(), String> {
+    let snapshots: Vec<MovedMissionSnapshot> =
+        serde_json::from_value(receipt).map_err(|e| e.to_string())?;
+    for snap in &snapshots {
+        dispatch_admission::recover_dispatch_single(state, store, snap.id).await?;
+    }
+    rollback_moved_missions(state, store, &snapshots).await?;
+    state.projects.clear_subtree_project_edit(root_key)
+}
+
+pub(super) async fn recover_subtree_project_edits_for_mission(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+) -> Result<(), String> {
+    for (root_key, receipt) in state.projects.subtree_project_edits()? {
+        let snapshots: Vec<MovedMissionSnapshot> =
+            serde_json::from_value(receipt.clone()).map_err(|e| e.to_string())?;
+        if snapshots.iter().any(|snap| snap.id == mission_id) {
+            recover_subtree_project_edit_entry(state, store, &root_key, receipt).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn recover_subtree_project_edits_in_store(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+) -> Result<(), String> {
+    for (root_key, receipt) in state.projects.subtree_project_edits()? {
+        let Ok(root_id) = Uuid::parse_str(&root_key) else {
+            continue;
+        };
+        if store.get_mission(root_id).await?.is_some() {
+            recover_subtree_project_edit_entry(state, store, &root_key, receipt).await?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn update_mission_project(
@@ -401,6 +468,16 @@ pub(super) async fn update_mission_project_subtree_locked<F>(
 where
     F: Fn(Uuid) -> bool,
 {
+    let control = control_for_user(&state, &user).await;
+    recover_subtree_project_edits_in_store(&state, &control.mission_store)
+        .await
+        .map_err(|error| {
+            if error.contains("dispatch_recovery_required") {
+                (StatusCode::CONFLICT, error)
+            } else {
+                internal_error(error)
+            }
+        })?;
     let include_descendants = std::mem::take(&mut req.include_descendants);
     let extra_descendants = std::mem::take(&mut req.descendant_ids);
     if !include_descendants {
@@ -415,7 +492,6 @@ where
     }
 
     let explicit_project_patch = req.project.is_some();
-    let control = control_for_user(&state, &user).await;
     let root_current = control
         .mission_store
         .get_mission(id)
@@ -423,35 +499,64 @@ where
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
     let root_snap = MovedMissionSnapshot::capture(&state, &root_current)?;
+    let descendant_ids =
+        collect_launched_descendant_ids(&control.mission_store, id, &extra_descendants).await?;
+    let mut planned_snapshots = vec![root_snap];
+    for &child_id in &descendant_ids {
+        if let Some(child) = control
+            .mission_store
+            .get_mission(child_id)
+            .await
+            .map_err(internal_error)?
+        {
+            planned_snapshots.push(MovedMissionSnapshot::capture(&state, &child)?);
+        }
+    }
+    let root_key = id.to_string();
+    let receipt_json =
+        serde_json::to_value(&planned_snapshots).map_err(|e| internal_error(e.to_string()))?;
+    state
+        .projects
+        .save_subtree_project_edit(&root_key, &receipt_json)
+        .map_err(internal_error)?;
 
-    let Json(updated) = update_mission_project_locked(
+    let updated = match update_mission_project_locked(
         is_actor_busy(id),
         State(state.clone()),
         Extension(user.clone()),
         Path(id),
         Json(req),
     )
-    .await?;
+    .await
+    {
+        Ok(Json(updated)) => updated,
+        Err(err) => {
+            if rollback_moved_missions(&state, &control.mission_store, &planned_snapshots[..1])
+                .await
+                .is_ok()
+            {
+                let _ = state.projects.clear_subtree_project_edit(&root_key);
+            }
+            return Err(err);
+        }
+    };
+    #[cfg(test)]
+    dispatch_admission_tests::crash_checkpoint("subtree_project_edit_after_root");
 
     if updated.project.project.is_some() || explicit_project_patch {
         let target_project = updated.project.project.clone();
-        let mut moved = vec![root_snap];
-        let descendants =
-            match collect_launched_descendant_ids(&control.mission_store, id, &extra_descendants)
-                .await
-            {
-                Ok(ids) => ids,
-                Err(err) => {
-                    rollback_moved_missions(&state, &control.mission_store, moved).await;
-                    return Err(err);
-                }
-            };
-        for child_id in descendants {
+        let mut moved = vec![planned_snapshots[0].clone()];
+        for child_id in descendant_ids {
             let child = match control.mission_store.get_mission(child_id).await {
                 Ok(Some(child)) => child,
                 Ok(None) => continue,
                 Err(err) => {
-                    rollback_moved_missions(&state, &control.mission_store, moved).await;
+                    if rollback_moved_missions(&state, &control.mission_store, &moved)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = state.projects.clear_subtree_project_edit(&root_key);
+                    }
                     return Err(internal_error(err));
                 }
             };
@@ -461,7 +566,12 @@ where
             let child_snap = match MovedMissionSnapshot::capture(&state, &child) {
                 Ok(snap) => snap,
                 Err(err) => {
-                    rollback_moved_missions(&state, &control.mission_store, moved).await;
+                    if rollback_moved_missions(&state, &control.mission_store, &moved)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = state.projects.clear_subtree_project_edit(&root_key);
+                    }
                     return Err(err);
                 }
             };
@@ -494,13 +604,22 @@ where
             {
                 Ok(_) => moved.push(child_snap),
                 Err(err) => {
-                    rollback_moved_missions(&state, &control.mission_store, moved).await;
+                    if rollback_moved_missions(&state, &control.mission_store, &moved)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = state.projects.clear_subtree_project_edit(&root_key);
+                    }
                     return Err(err);
                 }
             }
         }
     }
 
+    state
+        .projects
+        .clear_subtree_project_edit(&root_key)
+        .map_err(internal_error)?;
     Ok(Json(updated))
 }
 
@@ -512,7 +631,7 @@ pub(super) async fn update_mission_project_locked(
     Json(req): Json<UpdateMissionProjectRequest>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
-    dispatch_admission::recover_dispatch(&state, &control.mission_store, id)
+    dispatch_admission::recover_dispatch_single(&state, &control.mission_store, id)
         .await
         .map_err(|error| {
             if error.contains("dispatch_recovery_required") {

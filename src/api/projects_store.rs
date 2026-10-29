@@ -306,6 +306,13 @@ CREATE TABLE IF NOT EXISTS mission_dispatch_admissions (
     receipt TEXT NOT NULL
 );
 
+-- Crash-recovery journal for multi-mission (`include_descendants`) project
+-- transfers. Retained until every descendant commits or compensation finishes.
+CREATE TABLE IF NOT EXISTS subtree_project_edits (
+    root_id TEXT PRIMARY KEY,
+    receipt TEXT NOT NULL
+);
+
 -- One row per (source, content hash, parser): the importer is idempotent.
 CREATE TABLE IF NOT EXISTS project_imports (
     slug            TEXT NOT NULL,
@@ -3576,6 +3583,50 @@ impl ProjectsStore {
             )
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn save_subtree_project_edit(
+        &self,
+        root_id: &str,
+        receipt: &serde_json::Value,
+    ) -> Result<(), String> {
+        self.lock()?
+            .execute(
+                "INSERT INTO subtree_project_edits(root_id, receipt) VALUES (?1, ?2) \
+                 ON CONFLICT(root_id) DO UPDATE SET receipt = excluded.receipt",
+                params![root_id, receipt.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_subtree_project_edit(&self, root_id: &str) -> Result<(), String> {
+        self.lock()?
+            .execute(
+                "DELETE FROM subtree_project_edits WHERE root_id = ?1",
+                params![root_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn subtree_project_edits(&self) -> Result<Vec<(String, serde_json::Value)>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT root_id, receipt FROM subtree_project_edits")
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (root_id, raw) = row.map_err(|e| e.to_string())?;
+            let value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            out.push((root_id, value));
+        }
+        Ok(out)
     }
 
     /// Commit a provisional acquisition, retaining exactly its lease. A null
