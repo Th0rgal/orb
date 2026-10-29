@@ -86,11 +86,16 @@ node --test scripts/check-bundle.test.mjs
 pnpm check:bundle
 pnpm exec playwright install chromium
 pnpm exec playwright test --config=playwright.kernel.config.ts
-ORB_KERNEL_PREVIEW=1 pnpm exec playwright test --config=playwright.kernel.config.ts --grep 'kernel failure prevents App import'
+ORB_KERNEL_PREVIEW=1 pnpm exec playwright test --config=playwright.kernel.config.ts
 ```
 
-The preview command checks startup/retry through the real production bundle;
-the fixture adapter test uses the development server's source module imports.
+The preview command checks startup/retry and mounted WASM-backed projections
+(Inbox relative time, transcript narration folding, stale task-card state, GFM
+pipe-table and rich-tag scanners, and Anthropic usage-limit badges) through the
+real production bundle; the direct fixture adapter test uses the development
+server's source module imports and skips under preview mode. CI sets
+`ORB_KERNEL_BROWSERS=chromium,webkit` after installing WebKit host packages;
+local execution defaults to `chromium`.
 Both modes require visible application-owned UI after retry. Bundle-layout tests
 retain synthetic shared-chunk keys and reject budget/static-lazy dependency drift.
 Scripts injected into built HTML must belong to the counted manifest graph;

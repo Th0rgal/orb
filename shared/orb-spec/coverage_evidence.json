@@ -3,12 +3,22 @@
   "entries": {
     "orb_mission_control_step": {
       "status": "partial",
-      "claim": "Local tests compare store archive state and dispatch admission, reject stored closure through the actual submission producer before node contact or job publication, and preserve divergence when an archived caller contradicts a live store.",
+      "claim": "Local tests compare store archive state and exact MissionControlAction codes against independent host expectations, detect EffectMismatch even when boolean admission/rejection agrees, reject stored closure through the submission producer before node contact or job publication, and preserve divergence when an archived caller contradicts a live store.",
       "links": [
         {
           "kind": "theorem",
           "path": "lean/Orb/Spec.lean",
           "symbol": "archived_mission_never_revives"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "resume_codex_requires_verified_lineage"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "missionControlStep_actionCode_eq_expected"
         },
         {
           "kind": "host_observer",
@@ -47,24 +57,24 @@
         },
         {
           "path": "src/api/control/fork.rs",
-          "sha256": "73fdee77cf29e866d8b84d8eed012d59b04ad3cc5a9865eadd15dcd277039adc"
+          "sha256": "c82c0b759bc90032518d10f976be1944d6a690286e5c184215e1caae351b1f85"
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "2b3a20d6f733d39fb5684facb18a4c28022d3127b2269b4fc5e4dfdbb753b89f"
+          "sha256": "78d8675bece42bdac4a78100b5b76bc3ed469a7ebab776afdf781505f0d4fcb3"
         },
         {
           "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-          "sha256": "95d64af81d1fa70db6e59ac7ea6727cea19f24b59864f92725c972e0cc940933"
+          "sha256": "c1604e2c2c9ebca8aae2529834e86ac4c9996e2802d65fb41ebf3cba2d26f7fc"
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "d16b70d98a7c096806f07b3b8944ef6d57711da94bc7326a33f46cee7829264e"
+          "sha256": "b20c464cb8100ca627aaf7305d7c87430914991fb30ce84da94d92a324e42323"
         }
       ],
       "execution": {
         "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-        "command": "cargo test --locked -j 1 --lib remote_submission_rejects_closed_snapshots_and_records_host_observations -- --test-threads=1 && cargo test --locked -j 1 --lib api::control::fork::tests:: -- --test-threads=1",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_submission_rejects_closed_snapshots_and_records_host_observations -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::fork::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --test artifact_symbols",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -74,15 +84,15 @@
         "No native mobile or WASM target execution is established by this receipt."
       ],
       "blockers": [
-        "Host effects cover dispatch admission only, not action identity or actual process execution.",
-        "Snapshot-to-store races and caller evidence freshness are not proved.",
-        "The linked theorem proves a scalar archived-input property; no end-to-end refinement certificate exists.",
+        "Shadow comparison checks exact pre-dispatch MissionControlAction codes against independent host expectations, not post-dispatch remote node process execution.",
+        "Snapshot-to-store races and caller evidence freshness across concurrent mutations are not proved.",
+        "The linked theorems prove scalar step properties; no end-to-end multi-step crash/queue refinement certificate exists yet.",
         "An archived caller with a live stored snapshot produces a recorded divergence; the monotone scalar archive model does not refine reverse snapshots."
       ]
     },
     "orb_fork_home_step": {
       "status": "partial",
-      "claim": "Local tests detect synthetic HOME poststate divergence; production preflight without execution evidence is counted as unobserved.",
+      "claim": "Local tests detect synthetic HOME poststate and effect divergences; production preflight without execution evidence is counted as unobserved.",
       "links": [
         {
           "kind": "theorem",
@@ -121,11 +131,11 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-          "sha256": "27694360938e2d3359ed6278b42090d949100f3d85e1f81da35c922dc4eda1e4"
+          "sha256": "b1c231ea04589f2038db02d7e2f825928a82c658f82638033214821c0a3863a7"
         },
         {
           "path": "src/api/control/fork.rs",
-          "sha256": "73fdee77cf29e866d8b84d8eed012d59b04ad3cc5a9865eadd15dcd277039adc"
+          "sha256": "c82c0b759bc90032518d10f976be1944d6a690286e5c184215e1caae351b1f85"
         }
       ],
       "execution": {
@@ -143,6 +153,659 @@
         "Remote HOME poststate has not been observed; no production ExactMatch claim.",
         "Synthetic injection tests do not qualify remote execution or device behavior.",
         "The linked theorem concerns the scalar word, not the remote shell or filesystem."
+      ]
+    },
+    "orb_wire_validate_frame": {
+      "status": "partial",
+      "claim": "Local OrbWire codec tests exercise total frame validation, boundary perturbations, no-partial-mutation on small output buffers, and 10,000 malformed-frame fuzz inputs without panic.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "wire_frame_total_and_record_roundtrip"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "encode_into"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "decode"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "orb_wire_roundtrip_and_failure_no_partial_mutation"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "orb_wire_enumerative_boundary_perturbations_rejected"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "orb_wire_fuzz_10000_malformed_frames_never_panics"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "ad9709f3344f0ca836e2db6b17177243f29f9bce998ecdd5dd5b134769f560bd"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "OrbWire frames are currently exercised in orb-spec shadow/codec tests rather than authoritative production IPC or cross-client wire traffic.",
+        "Scalar header validation does not prove Rust slice indexing or byte-order serialization correctness."
+      ]
+    },
+    "orb_wire_pack_record": {
+      "status": "partial",
+      "claim": "Local OrbWire codec tests verify 64-bit record word packing/unpacking round-trips and arena slice offset bounds.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "wire_frame_total_and_record_roundtrip"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "wire_pack_record"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "encode_into"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "orb_wire_roundtrip_and_failure_no_partial_mutation"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "ad9709f3344f0ca836e2db6b17177243f29f9bce998ecdd5dd5b134769f560bd"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Record packing is exercised in orb-spec codec tests; authoritative P4 state-machine arena cutover remains open.",
+        "The theorem covers scalar bit-packing, not full variable-length payload decoding."
+      ]
+    },
+    "orb_wire_schema_migrate_step": {
+      "status": "partial",
+      "claim": "Local OrbWire tests verify consecutive-version schema migration admission and rejection of version skips, downgrades, and budget overflows.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "wire_schema_migrate_requires_consecutive_version"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "can_migrate_to"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "orb_wire_roundtrip_and_failure_no_partial_mutation"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "ad9709f3344f0ca836e2db6b17177243f29f9bce998ecdd5dd5b134769f560bd"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Schema migration is not yet wired to persistent SQLite or cross-client payload migrations.",
+        "The scalar version-step check does not prove payload semantic preservation across schema versions."
+      ]
+    },
+    "orb_effect_admissible": {
+      "status": "partial",
+      "claim": "Local shadow-runner tests verify batch effect admissibility preconditions for leased job launch and verified session resume, rejecting unleased effects.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "effect_admissible_blocks_unleased_or_unverified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "verify_effect_batch_admissible"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "shadow_runner_classifies_exact_matches_and_known_legacy_bugs"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "ad9709f3344f0ca836e2db6b17177243f29f9bce998ecdd5dd5b134769f560bd"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Effect admissibility checks caller-supplied boolean flags in orb-spec; production side-effect executors do not yet enforce a universal effect-token capability.",
+        "Freshness of lease and idempotency flags across TOCTOU windows remains unproved."
+      ]
+    },
+    "orb_privd_command_step": {
+      "status": "partial",
+      "claim": "Local privilege-broker and orb-spec tests exercise command grammar, symlink/path traversal, unsafe environment scrubbing, and scope non-escalation with zero shadow divergences.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "privd_rejects_metacharacters_traversal_unsafe_env_and_escalation"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/privilege_broker.rs",
+          "symbol": "evaluate_privd_command_confinement"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/privilege_broker.rs",
+          "symbol": "phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "phase5_privd_command_and_ssh_identity_confinement_replays"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+        },
+        {
+          "path": "src/api/privilege_broker.rs",
+          "sha256": "a98f8c8259b52175b8b0fd94a1ff34ceb761f7ab795b17235b42311aebf75c38"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "sha256": "3dcf3d91feba1890411b79cfc97db35ba68e888903962627f2d662a89026e971"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Tokenization, path canonicalization, and symlink inspection happen in Rust before scalar flags reach Lean; TOCTOU filesystem races between check and exec are not formally proved.",
+        "Remote fleet SSH ForcedCommand enforcement is not exercised end-to-end by this local unit receipt."
+      ]
+    },
+    "orb_ssh_identity_step": {
+      "status": "partial",
+      "claim": "Local remote-job confinement tests verify control-plane SSH key non-leakage on worker/container targets, symlinked parent rejection, cyber-program allowlisting, and Codex goal budget fencing with zero shadow divergences.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "ssh_identity_never_leaks_control_plane_secrets_and_enforces_codex_gate"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/remote_jobs.rs",
+          "symbol": "evaluate_remote_ssh_and_codex_confinement"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/remote_jobs.rs",
+          "symbol": "phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "phase5_privd_command_and_ssh_identity_confinement_replays"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+        },
+        {
+          "path": "src/api/control/remote_jobs.rs",
+          "sha256": "78d8675bece42bdac4a78100b5b76bc3ed469a7ebab776afdf781505f0d4fcb3"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "sha256": "3dcf3d91feba1890411b79cfc97db35ba68e888903962627f2d662a89026e971"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Environment map inspection and symlink metadata checks are performed by host Rust code; Lean decides over the extracted booleans.",
+        "Actual remote container/VM environment isolation is not proved by local unit execution."
+      ]
+    },
+    "orb_access_step": {
+      "status": "partial",
+      "claim": "Local cross-mission access tests verify zero target-title or existence oracle disclosure prior to live owner approval, read-only tool gating, and immediate hiding upon revocation.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "access_pre_grant_non_disclosure"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/mission_access.rs",
+          "symbol": "grant_for_tool"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/mission_access.rs",
+          "symbol": "agent_view"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/mission_access.rs",
+          "symbol": "agent_sees_nothing_of_the_target_before_a_live_grant"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/mission_access.rs",
+          "symbol": "an_approved_grant_never_allows_control"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/mission_access.rs",
+          "symbol": "read_allowed_only_after_approval"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "src/api/mission_access.rs",
+          "sha256": "320f108471c5e07830e3d4ab196daa5140c5cd1d4919d77f93a587b2d43cd3e4"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "sha256": "3dcf3d91feba1890411b79cfc97db35ba68e888903962627f2d662a89026e971"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Owner identity, mission lineage, and wall-clock grant expiry booleans are computed by Rust before calling orb_access_step.",
+        "Timing side channels across storage lookups are outside the scalar non-disclosure theorem."
+      ]
+    },
+    "orb_stream_deadlines": {
+      "status": "partial",
+      "claim": "Local proxy SSE latency tests verify keepalive emission only at complete SSE event boundaries and independent client-gap timing.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "stream_deadlines_clock_isolation"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/proxy.rs",
+          "symbol": "client_stream_response"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/proxy.rs",
+          "symbol": "keepalives_fill_long_pauses_between_events_only"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "src/api/proxy.rs",
+          "sha256": "cc340925f17ad6446f3040788c6d7ec275ff41af12dacc7248b675c8072577ec"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "sha256": "3dcf3d91feba1890411b79cfc97db35ba68e888903962627f2d662a89026e971"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Tokio timer scheduling and SSE byte-tail boundary detection are implemented in Rust; Lean evaluates scalar elapsed/deadline inputs.",
+        "Full multi-chunk stream liveness under backpressure is not covered by the single-step scalar theorem."
+      ]
+    },
+    "orb_proxy_step": {
+      "status": "partial",
+      "claim": "Local proxy stall tests verify transparent rerouting when upstream stalls before committed output and sticky-fence error surfacing without reroute once output is committed.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "proxy_committed_fence_forbids_reroute"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/proxy.rs",
+          "symbol": "client_stream_response"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/proxy.rs",
+          "symbol": "stall_before_output_is_rerouted_transparently"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/proxy.rs",
+          "symbol": "stall_after_output_is_surfaced_not_retried"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "src/api/proxy.rs",
+          "sha256": "cc340925f17ad6446f3040788c6d7ec275ff41af12dacc7248b675c8072577ec"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "sha256": "3dcf3d91feba1890411b79cfc97db35ba68e888903962627f2d662a89026e971"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "SSE JSON chunk classification (sse_chunk_commits_output) runs in Rust before passing chunk_commits to orb_proxy_step.",
+        "Multi-attempt provider pool state across retries is not yet unified into a single proved state-machine trace."
+      ]
+    },
+    "orb_job_ledger_step": {
+      "status": "partial",
+      "claim": "Local remote job-ledger tests verify that newer validations suppress stale terminal wakes, prevent superseded handles from holding wait leases, and defer wakes under tentative submissions.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "job_ledger_newer_supersedes_wait_lease"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/remote_node/job_ledger.rs",
+          "symbol": "current_remote_build_wait_handle"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/remote_node/job_ledger.rs",
+          "symbol": "terminal_wake_disposition"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/remote_node/job_ledger.rs",
+          "symbol": "newer_validation_suppresses_stale_terminal_wake"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/remote_node/job_ledger.rs",
+          "symbol": "newer_terminal_validation_prevents_old_handle_from_owning_wait_lease"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/remote_node/job_ledger.rs",
+          "symbol": "newer_tentative_submission_defers_without_suppressing_wake"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "21c0c7b2d2609f289f6186a5b66b6f978ea7e53667435161654089ff48eac3d3"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0f94b174a67aef7b440d72dc315da2eaa0938a08b8410f32d835f605bd6f6746"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "949033062df8e77a5fd3fc1fb9125adcff7c6beacebace1bd138e0833d5fee83"
+        },
+        {
+          "path": "src/remote_node/job_ledger.rs",
+          "sha256": "7b44931c54536555c12b5b4840b207a002063f6c47261ababe5dab30d6c379fc"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "sha256": "3dcf3d91feba1890411b79cfc97db35ba68e888903962627f2d662a89026e971"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Submission-sequence ordering and SQLite/JSON persistence are maintained by Rust; orb_job_ledger_step decides over derived boolean predicates.",
+        "Crash-atomic equivalence between JSON receipts and the SQL mirror is tested locally, not formally proved."
       ]
     }
   }

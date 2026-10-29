@@ -47,6 +47,9 @@ def validate(data: dict) -> None:
         if name in seen:
             raise ManifestError(f"duplicate symbol {name}")
         seen.add(name)
+        model = fn.get("model")
+        if model is not None and (not isinstance(model, str) or not re.match(r"^[A-Z]\w*(?:\.[A-Za-z_]\w*)+$", model)):
+            raise ManifestError(f"{name}: bad model {model!r}")
         if fn["ret"] not in C_TYPES:
             raise ManifestError(f"{name}: unsupported return type {fn['ret']}")
         pnames = [p["name"] for p in fn["params"]]

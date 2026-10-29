@@ -1,5 +1,7 @@
 package sh.sandboxed.dashboard.orb
 
+import kotlinx.coroutines.sync.withLock
+
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
@@ -247,7 +249,6 @@ object OrbTimelineBuilder {
             pendingWork.clear()
         }
 
-        val eventUserTexts = mutableListOf<Pair<String, String?>>()
         val streamItems = mutableListOf<OrbStreamItem>()
         val assistantTexts = mutableMapOf<String, String>()
         if (events.isNotEmpty()) {
@@ -273,13 +274,6 @@ object OrbTimelineBuilder {
                     else -> streamItems.add(OrbStreamItem.Other(itemKey))
                 }
                 when {
-                    type == "user_message" || type == "user" -> {
-                        val text = OrbJSON.str(data, "content", "text", "message")
-                            ?: ev.str("content", "text", "message") ?: ""
-                        if (text.isNotEmpty()) {
-                            eventUserTexts.add(text to ev.str("created_at", "timestamp"))
-                        }
-                    }
                     type.contains("think") || type == "reasoning" -> {
                         val text = OrbJSON.str(data, "thinking", "content", "text", "summary")
                             ?: ev.str("thinking", "content", "text") ?: "Thinking…"
@@ -303,10 +297,10 @@ object OrbTimelineBuilder {
 
         // Deduplicate consecutive identical/retry assistant messages (matching iOS history logic)
         val deduplicatedMessages = mutableListOf<OrbRow>()
-        for (msg in messages.flatMap { OrbForkContext.expand(it) }) {
+        for (msg in OrbConversationHistory.visible(OrbConversationHistory.merge(messages, events)).flatMap { OrbForkContext.expand(it) }) {
             val role = (msg.str("role", "sender", "author") ?: "assistant").lowercase()
             val text = (msg.str("content", "text", "message") ?: "").trim()
-            if ((role == "assistant" || role == "agent") && deduplicatedMessages.isNotEmpty()) {
+            if (msg.int("sequence") == null && (role == "assistant" || role == "agent") && deduplicatedMessages.isNotEmpty()) {
                 val prev = deduplicatedMessages.last()
                 val prevRole = (prev.str("role", "sender", "author") ?: "assistant").lowercase()
                 val prevText = (prev.str("content", "text", "message") ?: "").trim()
@@ -350,33 +344,6 @@ object OrbTimelineBuilder {
                         lastAssistantTurnIndex = turns.size
                         turns.add(OrbTurn.Assistant("a-$idx-${msg.id}", text, ts))
                     }
-                }
-            }
-        }
-
-        // Include any user_message events that haven't landed in mission.history yet
-        for ((evIdx, pair) in eventUserTexts.withIndex()) {
-            val (uText, uTs) = pair
-            val alreadyInHistory = deduplicatedMessages.any {
-                val r = (it.str("role", "sender", "author") ?: "").lowercase()
-                (r == "user" || r == "operator" || r == "human") && (it.str("content", "text", "message")?.trim() == uText.trim())
-            }
-            if (OrbForkContext.parse(uText) != null) {
-                val carried = OrbForkContext.expand(OrbRow("event-context-$evIdx", mapOf("role" to "user", "content" to uText)))
-                for (entry in carried) {
-                    val content = entry.str("content") ?: continue
-                    val role = entry.str("role")
-                    if (deduplicatedMessages.any { it.str("role") == role && it.str("content") == content }) continue
-                    if (role == "user") turns.add(OrbTurn.User(entry.id, content, uTs))
-                    else turns.add(OrbTurn.Assistant(entry.id, content, uTs))
-                }
-                continue
-            }
-            if (!alreadyInHistory) {
-                if (isControllerWake(uText)) {
-                    turns.add(OrbTurn.Wake("wake-ev-$evIdx", uText, uTs))
-                } else {
-                    turns.add(OrbTurn.User("u-ev-$evIdx", uText, uTs))
                 }
             }
         }
@@ -662,7 +629,9 @@ fun OrbConversationPage(
         }
     }
 
-    suspend fun loadHistory(targetId: String) {
+    val historyLoadMutex = remember(missionId) { kotlinx.coroutines.sync.Mutex() }
+    suspend fun loadHistory(targetId: String) = historyLoadMutex.withLock {
+        val account = OrbDisk.currentScope()
         var anyFetchOk = false
         try {
             val idsToLoad = if (chainIds.size > 1) chainIds.takeLast(3) else listOf(targetId)
@@ -672,7 +641,7 @@ fun OrbConversationPage(
             kotlinx.coroutines.coroutineScope {
                 val jobs = idsToLoad.map { cid ->
                     async(Dispatchers.IO) {
-                        val existingForCid = if (cid == targetId) events else OrbReadCache.loadRows("mission_events_$cid")
+                        val existingForCid = OrbConversationHistory.forMission(if (cid == targetId) events else OrbReadCache.loadRows("mission_events_$cid"), cid)
                         val lastSeq = existingForCid.lastOrNull()?.int("sequence", "seq")
                         val detailDef = async {
                             orbTry(OrbLog.Category.Network, "/api/control/missions") { core.fetchDict("/api/control/missions/${core.encodeComponent(cid)}") }.getOrNull()
@@ -685,9 +654,24 @@ fun OrbConversationPage(
                         val eventsDef = async {
                             orbTry(OrbLog.Category.Network, "core.fetchRows") { core.fetchRows(evPath, "events") }.getOrDefault(emptyList())
                         }
+                        val savedHistory = OrbConversationHistory.forMission(OrbReadCache.loadRows("mission_msgs_$cid"), cid)
+                        val conversationCursor = savedHistory.takeIf { it.isNotEmpty() && it.all { row -> row.int("sequence") != null } }?.maxOf { it.int("sequence")!! }
+                        val conversationSuffix = conversationCursor?.let { "&since_seq=$it" } ?: ""
+                        val conversationDef = async {
+                            orbTry(OrbLog.Category.Network, "conversation messages") {
+                                core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?types=user_message,assistant_message,assistant_message_canonical&limit=400$conversationSuffix", "events")
+                            }.getOrNull()
+                        }
                         val detail = detailDef.await()
                         if (detail != null) anyFetchOk = true
-                        val histRows = if (detail != null) {
+                        val conversation = conversationDef.await()
+                        if (conversation != null) anyFetchOk = true
+                        if (account != OrbDisk.currentScope()) throw kotlinx.coroutines.CancellationException()
+                        val histRows = if (!conversation.isNullOrEmpty()) {
+                            OrbConversationHistory.merge(if (conversationCursor == null) emptyList() else savedHistory, conversation)
+                        } else if (conversationCursor != null) {
+                            savedHistory
+                        } else if (detail != null) {
                             OrbRow(cid, detail).rows("history")
                         } else {
                             allMissions.firstOrNull { it.id == cid }?.rows("history") ?: emptyList()
@@ -710,6 +694,7 @@ fun OrbConversationPage(
                 }
                 for (job in jobs) {
                     val (cid, hRows, eRows) = job.await()
+                    if (account != OrbDisk.currentScope()) throw kotlinx.coroutines.CancellationException()
                     if (hRows.isNotEmpty()) {
                         OrbReadCache.saveRows("mission_msgs_$cid", hRows)
                         allMsgs.addAll(hRows)
@@ -731,7 +716,8 @@ fun OrbConversationPage(
             }
             liveRow?.let { OrbMissionUnreadStore.markSeen(it) }
         } catch (t: Throwable) {
-            if (t !is kotlinx.coroutines.CancellationException) OrbLog.w(OrbLog.Category.Network, "conversation history load failed", t)
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            OrbLog.w(OrbLog.Category.Network, "conversation history load failed", t)
         }
         // Surface a failed first load instead of a silent empty screen; later polls
         // keep failing quietly while cached turns are on screen.
@@ -760,7 +746,7 @@ fun OrbConversationPage(
                                 val delta = OrbJSON.rawStr(parsed, "delta", "text", "content") ?: ""
                                 live.append(delta)
                             }
-                            evType == "assistant_message" || evType == "mission_completed" || evType == "turn_complete" -> {
+                            evType == "assistant_message" || evType == "assistant_message_canonical" || evType == "mission_completed" || evType == "turn_complete" -> {
                                 scope.launch(Dispatchers.Main) {
                                     live.clear()
                                     loadHistory(missionId)

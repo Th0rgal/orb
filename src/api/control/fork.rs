@@ -35,15 +35,16 @@ pub fn control_shadow_snapshot() -> ControlShadowSnapshot {
 }
 
 /// Run `mission_control_step` (`orb_mission_control_step`) in lockstep with the independent
-/// host observation (`host_archived_before`, `host_archived_after`, `host_admits`)
+/// host observation (`host_archived_before`, `host_archived_after`, `host_action_code`)
 /// via `RefinementSimulation::observe_step` and record the comparison in `CONTROL_SHADOW_RING`.
-/// Never feeds Lean's own `verdict.archived_next` back as `legacy_after` (no circular comparison),
-/// and recovers from mutex poison via `unwrap_or_else(|p| p.into_inner())` rather than faking `ExactMatch`.
+/// Never feeds Lean's own `verdict.archived_next` back as `legacy_after` or `verdict.action` back
+/// as `host_action_code` (no circular comparison), and recovers from mutex poison via
+/// `unwrap_or_else(|p| p.into_inner())` rather than faking `ExactMatch`.
 pub(super) fn observe_mission_control_shadow_state_in_ring<const CAP: usize>(
     input: crate::orb_spec::MissionControlStepInput,
     host_archived_before: bool,
     host_archived_after: bool,
-    host_admits: bool,
+    host_action_code: u8,
     ring: &mut crate::orb_spec::shadow::ShadowDivergenceRing<CAP>,
 ) -> (
     crate::orb_spec::MissionControlStepVerdict,
@@ -64,16 +65,11 @@ pub(super) fn observe_mission_control_shadow_state_in_ring<const CAP: usize>(
             let mut ev_eff = *ev;
             ev_eff.is_archived = *s || ev.is_archived;
             let v = crate::orb_spec::mission_control_step(ev_eff);
-            let effs = if v.emit_dispatch_effect {
-                vec![1u8]
-            } else {
-                Vec::new()
-            };
-            (v.archived_next, effs)
+            (v.archived_next, vec![v.action as u8])
         },
         classify_known_legacy_bug: |_, _, _, _| None,
     };
-    let host_effects = if host_admits { vec![1u8] } else { Vec::new() };
+    let host_effects = vec![host_action_code];
     let ctx = crate::orb_spec::shadow::EventContext {
         now_ms: 0,
         fresh_nonce: input.active_track_writers as u64,
@@ -96,7 +92,7 @@ pub(super) fn observe_mission_control_shadow(
     input: crate::orb_spec::MissionControlStepInput,
     host_archived_before: bool,
     host_archived_after: bool,
-    host_admits: bool,
+    host_action_code: u8,
 ) -> crate::orb_spec::MissionControlStepVerdict {
     let mut ring = CONTROL_SHADOW_RING
         .lock()
@@ -105,7 +101,7 @@ pub(super) fn observe_mission_control_shadow(
         input,
         host_archived_before,
         host_archived_after,
-        host_admits,
+        host_action_code,
         &mut ring,
     )
     .0
@@ -1312,7 +1308,7 @@ mod tests {
                 None,
                 &[],
                 None,
-                false,
+                crate::orb_spec::MissionControlAction::RejectArchived as u8,
             )
             .await
             .unwrap();
@@ -1368,7 +1364,7 @@ mod tests {
             None,
             &[],
             None,
-            true,
+            crate::orb_spec::MissionControlAction::DispatchFreshTurn as u8,
         )
         .await
         .unwrap();
@@ -1392,7 +1388,7 @@ mod tests {
             Some("thread-1"),
             &events_no_rollout,
             Some("recovered history + prompt"),
-            true,
+            crate::orb_spec::MissionControlAction::SeedFallbackFreshSession as u8,
         )
         .await
         .unwrap();
@@ -1412,7 +1408,7 @@ mod tests {
             Some("thread-1"),
             &events_no_rollout,
             None,
-            false,
+            crate::orb_spec::MissionControlAction::RejectUnverifiedResume as u8,
         )
         .await
         .unwrap();
@@ -1439,7 +1435,7 @@ mod tests {
             Some("thread-1"),
             &events_with_rollout,
             Some("recovered history"),
-            true,
+            crate::orb_spec::MissionControlAction::ResumeVerifiedSession as u8,
         )
         .await
         .unwrap();
@@ -1459,7 +1455,7 @@ mod tests {
             Some("thread-1"),
             &events_with_rollout,
             Some("recovered history"),
-            false,
+            crate::orb_spec::MissionControlAction::RejectTrackWriterConflict as u8,
         )
         .await
         .unwrap();
@@ -1480,7 +1476,7 @@ mod tests {
             None,
             &[],
             None,
-            false,
+            crate::orb_spec::MissionControlAction::DedupeDeliveredMessage as u8,
         )
         .await
         .unwrap();
@@ -1523,7 +1519,7 @@ mod tests {
             Some("thread-1"),
             &events_with_rollout,
             Some("recovered history"),
-            false,
+            crate::orb_spec::MissionControlAction::RejectArchived as u8,
         )
         .await
         .unwrap();
@@ -1547,7 +1543,7 @@ mod tests {
             Some("thread-1"),
             &events_with_rollout,
             Some("recovered history"),
-            true,
+            crate::orb_spec::MissionControlAction::ResumeVerifiedSession as u8,
         )
         .await
         .unwrap();
@@ -1641,7 +1637,7 @@ mod tests {
     fn shadow_state_observation_detects_independent_host_poststate_and_effect_divergences() {
         let mut ring = crate::orb_spec::shadow::ShadowDivergenceRing::<16>::new();
 
-        // 1. Mission control exact match when independent host archive state and admit effect match Lean
+        // 1. Mission control exact match when independent host archive state and action code match Lean
         let mc_input = crate::orb_spec::MissionControlStepInput {
             is_archived: true,
             active_track_writers: 0,
@@ -1654,14 +1650,22 @@ mod tests {
             has_fallback_prompt: true,
         };
         let (_, k_mc_ok) = super::observe_mission_control_shadow_state_in_ring(
-            mc_input, true, true, false, &mut ring,
+            mc_input,
+            true,
+            true,
+            crate::orb_spec::MissionControlAction::RejectArchived as u8,
+            &mut ring,
         );
         assert_eq!(k_mc_ok, crate::orb_spec::shadow::DivergenceKind::ExactMatch);
         assert_eq!(ring.unexpected_divergences, 0);
 
         // 2. Mission control poststate divergence: host unarchives an archived mission (`host_archived_after = false`)
         let (_, k_mc_state_div) = super::observe_mission_control_shadow_state_in_ring(
-            mc_input, true, false, false, &mut ring,
+            mc_input,
+            true,
+            false,
+            crate::orb_spec::MissionControlAction::RejectArchived as u8,
+            &mut ring,
         );
         assert_eq!(
             k_mc_state_div,
@@ -1669,17 +1673,83 @@ mod tests {
         );
         assert_eq!(ring.unexpected_divergences, 1);
 
-        // 3. Mission control effect divergence: host admits dispatch on an archived mission (`host_admits = true`)
+        // 3. Mission control effect divergence: host admits dispatch on an archived mission (`DispatchFreshTurn`)
         let (_, k_mc_eff_div) = super::observe_mission_control_shadow_state_in_ring(
-            mc_input, true, true, true, &mut ring,
+            mc_input,
+            true,
+            true,
+            crate::orb_spec::MissionControlAction::DispatchFreshTurn as u8,
+            &mut ring,
         );
         assert_eq!(
             k_mc_eff_div,
-            crate::orb_spec::shadow::DivergenceKind::LeanBug
+            crate::orb_spec::shadow::DivergenceKind::EffectMismatch
         );
         assert_eq!(ring.unexpected_divergences, 2);
 
-        // 4. Fork home exact match: host preserves job HOME (`host_overrides_home_after = false`)
+        // 4. Same boolean admission (`emit_dispatch_effect = true`), wrong action code:
+        //    host picks `DispatchFreshTurn` (1) when Lean expects `SeedFallbackFreshSession` (3)
+        let mc_codex_fallback = crate::orb_spec::MissionControlStepInput {
+            is_archived: false,
+            active_track_writers: 0,
+            has_lease: true,
+            msg_already_delivered: false,
+            is_resume: true,
+            session_created: true,
+            lineage_verified: true,
+            rollout_exists: false,
+            has_fallback_prompt: true,
+        };
+        let (v_fallback, k_admit_mismatch) = super::observe_mission_control_shadow_state_in_ring(
+            mc_codex_fallback,
+            false,
+            false,
+            crate::orb_spec::MissionControlAction::DispatchFreshTurn as u8,
+            &mut ring,
+        );
+        assert_eq!(
+            v_fallback.action,
+            crate::orb_spec::MissionControlAction::SeedFallbackFreshSession
+        );
+        assert!(v_fallback.emit_dispatch_effect);
+        assert_eq!(
+            k_admit_mismatch,
+            crate::orb_spec::shadow::DivergenceKind::EffectMismatch
+        );
+        assert_eq!(ring.unexpected_divergences, 3);
+
+        // 5. Same boolean rejection (`emit_dispatch_effect = false`), wrong rejection code:
+        //    host picks `DedupeDeliveredMessage` (4) when Lean expects `RejectTrackWriterConflict` (5)
+        let mc_lease_conflict = crate::orb_spec::MissionControlStepInput {
+            is_archived: false,
+            active_track_writers: 1,
+            has_lease: false,
+            msg_already_delivered: false,
+            is_resume: false,
+            session_created: false,
+            lineage_verified: false,
+            rollout_exists: false,
+            has_fallback_prompt: false,
+        };
+        let (v_conflict, k_reject_mismatch) = super::observe_mission_control_shadow_state_in_ring(
+            mc_lease_conflict,
+            false,
+            false,
+            crate::orb_spec::MissionControlAction::DedupeDeliveredMessage as u8,
+            &mut ring,
+        );
+        assert_eq!(
+            v_conflict.action,
+            crate::orb_spec::MissionControlAction::RejectTrackWriterConflict
+        );
+        assert!(!v_conflict.emit_dispatch_effect);
+        assert_eq!(
+            k_reject_mismatch,
+            crate::orb_spec::shadow::DivergenceKind::EffectMismatch
+        );
+        assert_eq!(ring.unexpected_divergences, 4);
+
+        // 6. Fork home exact match: host preserves job HOME (`host_overrides_home_after = false`)
         let fh_input = crate::orb_spec::ForkHomeStepInput {
             is_fork_or_side: true,
             source_exists: true,
@@ -1692,25 +1762,25 @@ mod tests {
         let (_, k_fh_ok) =
             super::observe_fork_home_shadow_state_in_ring(fh_input, true, false, true, &mut ring);
         assert_eq!(k_fh_ok, crate::orb_spec::shadow::DivergenceKind::ExactMatch);
-        assert_eq!(ring.unexpected_divergences, 2);
+        assert_eq!(ring.unexpected_divergences, 4);
 
-        // 5. Fork home poststate divergence (#1302 bug): host overrides job HOME (`host_overrides_home_after = true`)
+        // 7. Fork home poststate divergence (#1302 bug): host overrides job HOME (`host_overrides_home_after = true`)
         let (_, k_fh_state_div) =
             super::observe_fork_home_shadow_state_in_ring(fh_input, true, true, true, &mut ring);
         assert_eq!(
             k_fh_state_div,
             crate::orb_spec::shadow::DivergenceKind::LeanBug
         );
-        assert_eq!(ring.unexpected_divergences, 3);
+        assert_eq!(ring.unexpected_divergences, 5);
 
-        // 6. Fork home effect divergence: host rejects valid fork (`host_admits = false`)
+        // 8. Fork home effect divergence: host rejects valid fork (`host_admits = false`)
         let (_, k_fh_eff_div) =
             super::observe_fork_home_shadow_state_in_ring(fh_input, true, false, false, &mut ring);
         assert_eq!(
             k_fh_eff_div,
-            crate::orb_spec::shadow::DivergenceKind::LeanBug
+            crate::orb_spec::shadow::DivergenceKind::EffectMismatch
         );
-        assert_eq!(ring.unexpected_divergences, 4);
+        assert_eq!(ring.unexpected_divergences, 6);
     }
 }
 
