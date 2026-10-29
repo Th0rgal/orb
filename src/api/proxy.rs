@@ -456,14 +456,14 @@ static KIMI_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
 /// Per-account concurrency semaphores for Google Gemini accounts.
 /// Opening 15+ concurrent reasoning calls on one Google account causes upstream
 /// stalls/timeouts; capping each Google account (`PROXY_GOOGLE_MAX_CONCURRENCY`,
-/// default 5) keeps latency healthy, spills burst traffic onto the secondary
+/// default 10) keeps latency healthy, spills burst traffic onto the secondary
 /// Google account immediately, and queues excess callers cleanly in FIFO order.
 pub(crate) fn google_max_concurrency() -> usize {
     std::env::var("PROXY_GOOGLE_MAX_CONCURRENCY")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(5)
+        .unwrap_or(10)
 }
 
 fn proxy_queue_timeout(via_cloudflare: bool) -> std::time::Duration {
@@ -3840,6 +3840,25 @@ async fn chat_completions_routed(
             ProviderType::Antigravity | ProviderType::MuseCode
         ) && entry.has_oauth
             && super::oauth_owner::management_enabled();
+        let is_google_api_key_entry = provider_type == ProviderType::Google
+            && ((!entry.has_oauth && entry.api_key.is_some())
+                || (entry.account_id
+                    == crate::provider_health::stable_provider_uuid("google-cli-proxy")
+                    && !crate::api::ai_providers::cli_proxy_config_gemini_keys().is_empty()));
+        if is_google_api_key_entry
+            && !crate::model_policy::is_google_api_key_allowed_model(&entry.model_id)
+        {
+            let msg = crate::model_policy::google_api_key_disallowed_message(&entry.model_id);
+            tracing::warn!(
+                provider = %entry.provider_id,
+                model = %entry.model_id,
+                account_id = %entry.account_id,
+                "Blocked non-Carbon model on Google API key route"
+            );
+            transport_validation_errors.push(msg);
+            client_error_count += 1;
+            continue;
+        }
         let use_google_api_adapter = provider_type == ProviderType::Google
             && !entry.has_oauth
             && entry.api_key.is_some()
