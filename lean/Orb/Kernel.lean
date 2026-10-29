@@ -625,11 +625,23 @@ def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaL
   - the principal is `hermes`, `orb_ui` or `script` and claims exactly its own kind.
 -/
 @[inline] def attributionInScope (principalKind claimedKind sameMission isDescendant : UInt8) : Bool :=
-  claimedKind == 0 ||
-  (principalKind == 5 && (claimedKind == 1 || claimedKind == 2 || claimedKind == 5)) ||
-  ((principalKind == 1 || principalKind == 2) &&
-    ((claimedKind == 1 && sameMission == 1) || (claimedKind == 2 && isDescendant == 1))) ||
-  ((principalKind == 3 || principalKind == 4 || principalKind == 6) && claimedKind == principalKind)
+  if claimedKind == 0 then true
+  else if principalKind == 5 then
+    if claimedKind == 1 then true
+    else if claimedKind == 2 then true
+    else claimedKind == 5
+  else if principalKind == 1 then
+    if claimedKind == 1 then sameMission == 1
+    else if claimedKind == 2 then isDescendant == 1
+    else false
+  else if principalKind == 2 then
+    if claimedKind == 1 then sameMission == 1
+    else if claimedKind == 2 then isDescendant == 1
+    else false
+  else if principalKind == 3 then claimedKind == 3
+  else if principalKind == 4 then claimedKind == 4
+  else if principalKind == 6 then claimedKind == 6
+  else false
 
 /-- Principal kind clamped to the closed enum (`> 6` is `unknown`). -/
 @[inline] def attributionPrincipal (principalKind : UInt8) : UInt8 :=
@@ -637,9 +649,10 @@ def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaL
 
 /-- Final caller kind: the claim when in scope (and non-empty), the principal's own kind otherwise. -/
 @[inline] def attributionKind (principalKind claimedKind sameMission isDescendant : UInt8) : UInt8 :=
-  if attributionInScope (attributionPrincipal principalKind) claimedKind sameMission isDescendant then
-    (if claimedKind == 0 then attributionPrincipal principalKind else claimedKind)
-  else attributionPrincipal principalKind
+  let p := attributionPrincipal principalKind
+  if attributionInScope p claimedKind sameMission isDescendant then
+    (if claimedKind == 0 then p else claimedKind)
+  else p
 
 /--
   Unboxed C-ABI Usage Attribution Stepper (`orb_attribution_step`):
@@ -649,9 +662,10 @@ def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaL
 -/
 @[inline, export orb_attribution_step]
 def attributionStep (principalKind claimedKind sameMission isDescendant : UInt8) : UInt32 :=
-  (attributionKind principalKind claimedKind sameMission isDescendant).toUInt32 |||
-    (if attributionInScope (attributionPrincipal principalKind) claimedKind sameMission isDescendant
-     then 256 else 0)
+  let p := attributionPrincipal principalKind
+  if attributionInScope p claimedKind sameMission isDescendant then
+    (if claimedKind == 0 then p else claimedKind).toUInt32 ||| 256
+  else p.toUInt32
 
 /--
   Native recurring schedule step (`orb_schedule_step`, `docs/specs/agent-schedules.md`).

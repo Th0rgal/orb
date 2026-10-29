@@ -1,6 +1,24 @@
-   Compiling sandboxed_sh v1.3.0 (/srv/sandboxed-storage/host-missions/workspaces/mission-86d91cc3/worktrees/orb-p0)
-    Finished `test` profile [unoptimized] target(s) in 33.83s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-039103718ef5ac93)
+warning: unused `axum::Json` that must be used
+     --> src/api/control/dispatch_admission_tests.rs:14789:5
+      |
+14789 | /     cancel_mission(
+14790 | |         State(h.state.clone()),
+14791 | |         Extension(h.user.clone()),
+14792 | |         Path(mission.id),
+14793 | |     )
+14794 | |     .await
+14795 | |     .unwrap();
+      | |_____________^
+      |
+      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+      |
+14789 |     let _ = cancel_mission(
+      |     +++++++
+
+warning: `sandboxed_sh` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -18,5 +36,5 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3563 filtered out; finished in 0.35s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3582 filtered out; finished in 0.14s
 

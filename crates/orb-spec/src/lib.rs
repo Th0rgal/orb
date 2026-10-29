@@ -4,7 +4,7 @@
 pub mod shadow;
 
 pub mod lean_sys_cabi {
-    //! Zero-dependency typed Rust bindings to the 21 formally verified unboxed C-ABI
+    //! Zero-dependency typed Rust bindings to the 32 formally verified unboxed C-ABI
     //! safety gates in `LeanSys/Spec.lean` (`0 import Lean`, `0 sorryAx`), linked from
     //! `shared/orb-spec/cabi/orb_kernel_unboxed.c`.
 
@@ -173,6 +173,44 @@ pub mod lean_sys_cabi {
             required_mask: u64,
             selected_variant_id: u8,
             max_variant_id: u8,
+        ) -> u8;
+        pub fn leansys_verify_par_chunk(
+            chunk_start: u64,
+            chunk_end: u64,
+            total_len: u64,
+            min_grain: u64,
+        ) -> u8;
+        pub fn leansys_verify_arena_disjoint(
+            off_a: u64,
+            len_a: u64,
+            off_b: u64,
+            len_b: u64,
+            arena_cap: u64,
+        ) -> u8;
+        pub fn leansys_verify_snapshot_visibility(
+            entry_seq: u64,
+            max_snapshot_seq: u64,
+            is_tombstone: u8,
+        ) -> u8;
+        pub fn leansys_verify_http_route_match(
+            method_match: u8,
+            path_match: u8,
+            route_idx: u32,
+            route_count: u32,
+        ) -> u8;
+        pub fn leansys_verify_counterexample_triage(
+            has_violation: u8,
+            has_missing_hyp_hint: u8,
+            ref_disagrees_with_candidate: u8,
+            triage_class: u8,
+        ) -> u8;
+        pub fn leansys_verify_dag_wave_step(
+            in_degree_sum: u64,
+            wave_size: u64,
+            completed_tasks: u64,
+            total_tasks: u64,
+            active_workers: u64,
+            max_workers: u64,
         ) -> u8;
     }
 
@@ -576,6 +614,94 @@ pub mod lean_sys_cabi {
                 required_mask,
                 selected_variant_id,
                 max_variant_id,
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_par_chunk(
+        chunk_start: u64,
+        chunk_end: u64,
+        total_len: u64,
+        min_grain: u64,
+    ) -> bool {
+        unsafe { leansys_verify_par_chunk(chunk_start, chunk_end, total_len, min_grain) == 1 }
+    }
+
+    #[inline]
+    pub fn verify_arena_disjoint(
+        off_a: u64,
+        len_a: u64,
+        off_b: u64,
+        len_b: u64,
+        arena_cap: u64,
+    ) -> bool {
+        unsafe { leansys_verify_arena_disjoint(off_a, len_a, off_b, len_b, arena_cap) == 1 }
+    }
+
+    #[inline]
+    pub fn verify_snapshot_visibility(
+        entry_seq: u64,
+        max_snapshot_seq: u64,
+        is_tombstone: bool,
+    ) -> bool {
+        unsafe {
+            leansys_verify_snapshot_visibility(entry_seq, max_snapshot_seq, u8::from(is_tombstone))
+                == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_http_route_match(
+        method_match: bool,
+        path_match: bool,
+        route_idx: u32,
+        route_count: u32,
+    ) -> bool {
+        unsafe {
+            leansys_verify_http_route_match(
+                u8::from(method_match),
+                u8::from(path_match),
+                route_idx,
+                route_count,
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_counterexample_triage(
+        has_violation: bool,
+        has_missing_hyp_hint: bool,
+        ref_disagrees_with_candidate: bool,
+        triage_class: u8,
+    ) -> bool {
+        unsafe {
+            leansys_verify_counterexample_triage(
+                u8::from(has_violation),
+                u8::from(has_missing_hyp_hint),
+                u8::from(ref_disagrees_with_candidate),
+                triage_class,
+            ) == 1
+        }
+    }
+
+    #[inline]
+    pub fn verify_dag_wave_step(
+        in_degree_sum: u64,
+        wave_size: u64,
+        completed_tasks: u64,
+        total_tasks: u64,
+        active_workers: u64,
+        max_workers: u64,
+    ) -> bool {
+        unsafe {
+            leansys_verify_dag_wave_step(
+                in_degree_sum,
+                wave_size,
+                completed_tasks,
+                total_tasks,
+                active_workers,
+                max_workers,
             ) == 1
         }
     }
@@ -1017,6 +1143,81 @@ unsafe extern "C" {
         hysteresis_bytes: u64,
         node_pinned_pressure: u8,
     ) -> u64;
+    fn orb_scroll_max_top(content: u64, viewport: u64) -> u64;
+    fn orb_scroll_clamp_top(content: u64, viewport: u64, top: u64) -> u64;
+    fn orb_scroll_gap(content: u64, viewport: u64, top: u64) -> u64;
+    fn orb_scroll_layout_step(pinned: u8, content: u64, viewport: u64, top: u64) -> u64;
+    fn orb_scroll_user_step(content: u64, viewport: u64, top: u64, threshold: u64) -> u8;
+    fn orb_scroll_jump_step(content: u64, viewport: u64) -> u64;
+    fn orb_scroll_correct(pinned: u8, content: u64, viewport: u64, top: u64) -> u64;
+    fn orb_scroll_shows_jump(
+        pinned: u8,
+        content: u64,
+        viewport: u64,
+        top: u64,
+        pill_threshold: u64,
+    ) -> u8;
+    fn orb_stream_coalescer_step(
+        op: u8,
+        shown_len: u32,
+        pending_len: u32,
+        delta_len: u32,
+    ) -> u64;
+    fn orb_stream_fence_step(
+        open_kind: u8,
+        open_count: u32,
+        marker_kind: u8,
+        marker_count: u32,
+    ) -> u64;
+    fn orb_stream_commit_step(
+        tick: u8,
+        open_kind: u8,
+        open_count: u32,
+        line_blank: u8,
+        line_tick: u8,
+        marker_kind: u8,
+        marker_count: u32,
+        pos: u32,
+        commit: u32,
+    ) -> u64;
+    fn orb_stream_token_cost_step(prev_cost: u64, new_advance: u64, tail_bytes: u64) -> u64;
+    fn orb_mission_state_classify(state_id: u8) -> u8;
+    fn orb_mission_sort_rank(state_id: u8) -> u8;
+    fn orb_mission_flags(state_id: u8) -> u32;
+    fn orb_mission_inbox_section(state_id: u8) -> u8;
+    fn orb_connection_issue_classify(
+        is_unreachable: u8,
+        is_using_default: u8,
+        is_private_addr: u8,
+        default_reachable: u8,
+        has_external_proxy: u8,
+    ) -> u32;
+    fn orb_worked_duration_bucket(seconds: u64) -> u64;
+    fn orb_turn_outcome_step(
+        prev_outcome: u8,
+        prev_failed: u8,
+        event_kind: u8,
+        is_narration: u8,
+        is_success_false: u8,
+        is_text_non_empty: u8,
+    ) -> u32;
+    fn orb_numeric_cell_scan(
+        non_empty: u8,
+        has_leading_digit_or_sign: u8,
+        has_digit: u8,
+        all_allowed_chars: u8,
+    ) -> u8;
+    fn orb_file_ref_line_span(start_line: u32, end_line: u32, total_lines: u32) -> u64;
+    fn orb_machine_action_admitted(state_kind: u8, is_busy: u8, is_muted: u8) -> u32;
+    fn orb_send_flow_step(
+        is_busy: u8,
+        has_non_empty_text: u8,
+        can_queue: u8,
+        awaiting_ack: u8,
+        is_draining: u8,
+        pending_count: u8,
+        http_status: u32,
+    ) -> u32;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4313,6 +4514,623 @@ pub fn mesh_service_route_step(
     }
 }
 
+#[inline]
+pub fn scroll_max_top(content: u64, viewport: u64) -> u64 {
+    unsafe { orb_scroll_max_top(content, viewport) }
+}
+
+#[inline]
+pub fn scroll_clamp_top(content: u64, viewport: u64, top: u64) -> u64 {
+    unsafe { orb_scroll_clamp_top(content, viewport, top) }
+}
+
+#[inline]
+pub fn scroll_gap(content: u64, viewport: u64, top: u64) -> u64 {
+    unsafe { orb_scroll_gap(content, viewport, top) }
+}
+
+#[inline]
+pub fn scroll_layout_step(pinned: bool, content: u64, viewport: u64, top: u64) -> u64 {
+    unsafe { orb_scroll_layout_step(u8::from(pinned), content, viewport, top) }
+}
+
+#[inline]
+pub fn scroll_user_step(content: u64, viewport: u64, top: u64, threshold: u64) -> bool {
+    unsafe { orb_scroll_user_step(content, viewport, top, threshold) == 1 }
+}
+
+#[inline]
+pub fn scroll_jump_step(content: u64, viewport: u64) -> u64 {
+    unsafe { orb_scroll_jump_step(content, viewport) }
+}
+
+#[inline]
+pub fn scroll_correct(pinned: bool, content: u64, viewport: u64, top: u64) -> u64 {
+    unsafe { orb_scroll_correct(u8::from(pinned), content, viewport, top) }
+}
+
+#[inline]
+pub fn scroll_shows_jump(
+    pinned: bool,
+    content: u64,
+    viewport: u64,
+    top: u64,
+    pill_threshold: u64,
+) -> bool {
+    unsafe { orb_scroll_shows_jump(u8::from(pinned), content, viewport, top, pill_threshold) == 1 }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamCoalescerVerdict {
+    pub next_shown_len: u32,
+    pub next_pending_len: u32,
+    pub did_render: bool,
+    pub raw: u64,
+}
+
+#[inline]
+pub fn stream_coalescer_step(
+    op: u8,
+    shown_len: u32,
+    pending_len: u32,
+    delta_len: u32,
+) -> StreamCoalescerVerdict {
+    let raw = unsafe { orb_stream_coalescer_step(op, shown_len, pending_len, delta_len) };
+    StreamCoalescerVerdict {
+        next_shown_len: raw as u32,
+        next_pending_len: ((raw >> 32) & 0x7FFF_FFFF) as u32,
+        did_render: (raw >> 63) != 0,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamFenceVerdict {
+    pub next_fence_kind: u8,
+    pub next_fence_count: u32,
+    pub raw: u64,
+}
+
+#[inline]
+pub fn stream_fence_step(
+    open_kind: u8,
+    open_count: u32,
+    marker_kind: u8,
+    marker_count: u32,
+) -> StreamFenceVerdict {
+    let raw = unsafe { orb_stream_fence_step(open_kind, open_count, marker_kind, marker_count) };
+    StreamFenceVerdict {
+        next_fence_kind: (raw & 0xFF) as u8,
+        next_fence_count: (raw >> 32) as u32,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamCommitVerdict {
+    pub next_tick: bool,
+    pub next_fence_kind: u8,
+    pub commits: bool,
+    pub next_commit: u32,
+    pub raw: u64,
+}
+
+#[inline]
+pub fn stream_commit_step(
+    tick: bool,
+    open_kind: u8,
+    open_count: u32,
+    line_blank: bool,
+    line_tick: bool,
+    marker_kind: u8,
+    marker_count: u32,
+    pos: u32,
+    commit: u32,
+) -> StreamCommitVerdict {
+    let raw = unsafe {
+        orb_stream_commit_step(
+            u8::from(tick),
+            open_kind,
+            open_count,
+            u8::from(line_blank),
+            u8::from(line_tick),
+            marker_kind,
+            marker_count,
+            pos,
+            commit,
+        )
+    };
+    StreamCommitVerdict {
+        next_tick: (raw & 1) != 0,
+        next_fence_kind: ((raw >> 8) & 0xFF) as u8,
+        commits: ((raw >> 16) & 1) != 0,
+        next_commit: (raw >> 32) as u32,
+        raw,
+    }
+}
+
+#[inline]
+pub fn stream_token_cost_step(prev_cost: u64, new_advance: u64, tail_bytes: u64) -> u64 {
+    unsafe { orb_stream_token_cost_step(prev_cost, new_advance, tail_bytes) }
+}
+
+#[inline]
+pub fn mission_state_classify(state_id: u8) -> u8 {
+    unsafe { orb_mission_state_classify(state_id) }
+}
+
+#[inline]
+pub fn mission_sort_rank(state_id: u8) -> u8 {
+    unsafe { orb_mission_sort_rank(state_id) }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionFlagsVerdict {
+    pub is_active: bool,
+    pub is_terminal: bool,
+    pub needs_attention: bool,
+    pub awaits_review: bool,
+    pub can_retry: bool,
+    pub is_problem: bool,
+    pub is_success: bool,
+    pub can_reopen: bool,
+    pub raw: u32,
+}
+
+#[inline]
+pub fn mission_flags(state_id: u8) -> MissionFlagsVerdict {
+    let raw = unsafe { orb_mission_flags(state_id) };
+    MissionFlagsVerdict {
+        is_active: (raw & 1) != 0,
+        is_terminal: (raw & 2) != 0,
+        needs_attention: (raw & 4) != 0,
+        awaits_review: (raw & 8) != 0,
+        can_retry: (raw & 16) != 0,
+        is_problem: (raw & 32) != 0,
+        is_success: (raw & 64) != 0,
+        can_reopen: (raw & 128) != 0,
+        raw,
+    }
+}
+
+#[inline]
+pub fn mission_inbox_section(state_id: u8) -> u8 {
+    unsafe { orb_mission_inbox_section(state_id) }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionIssueVerdict {
+    pub show_issue: bool,
+    pub offer_use_default: bool,
+    pub recommend_default: bool,
+    pub should_probe_default: bool,
+    pub message_kind: u8,
+    pub raw: u32,
+}
+
+#[inline]
+pub fn connection_issue_classify(
+    is_unreachable: bool,
+    is_using_default: bool,
+    is_private_addr: bool,
+    default_reachable: bool,
+    has_external_proxy: bool,
+) -> ConnectionIssueVerdict {
+    let raw = unsafe {
+        orb_connection_issue_classify(
+            u8::from(is_unreachable),
+            u8::from(is_using_default),
+            u8::from(is_private_addr),
+            u8::from(default_reachable),
+            u8::from(has_external_proxy),
+        )
+    };
+    ConnectionIssueVerdict {
+        show_issue: (raw & 1) != 0,
+        offer_use_default: (raw & 256) != 0,
+        recommend_default: (raw & 65536) != 0,
+        should_probe_default: (raw & 16_777_216) != 0,
+        message_kind: ((raw >> 28) & 0xF) as u8,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkedDurationVerdict {
+    pub unit: u8,
+    pub secondary: u8,
+    pub primary: u32,
+    pub raw: u64,
+}
+
+#[inline]
+pub fn worked_duration_bucket(seconds: u64) -> WorkedDurationVerdict {
+    let raw = unsafe { orb_worked_duration_bucket(seconds) };
+    WorkedDurationVerdict {
+        unit: (raw & 0xFF) as u8,
+        secondary: ((raw >> 8) & 0xFF) as u8,
+        primary: (raw >> 32) as u32,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnOutcomeVerdict {
+    pub next_outcome_finished: bool,
+    pub next_todos_failed: bool,
+    pub raw: u32,
+}
+
+#[inline]
+pub fn turn_outcome_step(
+    prev_outcome_finished: bool,
+    prev_failed: bool,
+    event_kind: u8,
+    is_narration: bool,
+    is_success_false: bool,
+    is_text_non_empty: bool,
+) -> TurnOutcomeVerdict {
+    let raw = unsafe {
+        orb_turn_outcome_step(
+            u8::from(prev_outcome_finished),
+            u8::from(prev_failed),
+            event_kind,
+            u8::from(is_narration),
+            u8::from(is_success_false),
+            u8::from(is_text_non_empty),
+        )
+    };
+    TurnOutcomeVerdict {
+        next_outcome_finished: (raw & 1) != 0,
+        next_todos_failed: (raw & 256) != 0,
+        raw,
+    }
+}
+
+#[inline]
+pub fn numeric_cell_scan(
+    non_empty: bool,
+    has_leading_digit_or_sign: bool,
+    has_digit: bool,
+    all_allowed_chars: bool,
+) -> bool {
+    unsafe {
+        orb_numeric_cell_scan(
+            u8::from(non_empty),
+            u8::from(has_leading_digit_or_sign),
+            u8::from(has_digit),
+            u8::from(all_allowed_chars),
+        ) == 1
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileRefLineSpanVerdict {
+    pub admitted: bool,
+    pub span_line_count: u32,
+    pub raw: u64,
+}
+
+#[inline]
+pub fn file_ref_line_span(
+    start_line: u32,
+    end_line: u32,
+    total_lines: u32,
+) -> FileRefLineSpanVerdict {
+    let raw = unsafe { orb_file_ref_line_span(start_line, end_line, total_lines) };
+    FileRefLineSpanVerdict {
+        admitted: (raw & 1) != 0,
+        span_line_count: (raw >> 32) as u32,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineActionVerdict {
+    pub is_live: bool,
+    pub can_act: bool,
+    pub meter_live_cost: bool,
+    pub is_stopped: bool,
+    pub can_resume: bool,
+    pub raw: u32,
+}
+
+#[inline]
+pub fn machine_action_admitted(
+    state_kind: u8,
+    is_busy: bool,
+    is_muted: bool,
+) -> MachineActionVerdict {
+    let raw = unsafe { orb_machine_action_admitted(state_kind, u8::from(is_busy), u8::from(is_muted)) };
+    MachineActionVerdict {
+        is_live: (raw & 1) != 0,
+        can_act: (raw & 256) != 0,
+        meter_live_cost: (raw & 65536) != 0,
+        is_stopped: (raw & 16_777_216) != 0,
+        can_resume: (raw & 33_554_432) != 0,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendFlowVerdict {
+    pub tap_action: u8,
+    pub can_drain: bool,
+    pub edit_outcome: u8,
+    pub raw: u32,
+}
+
+#[inline]
+pub fn send_flow_step(
+    is_busy: bool,
+    has_non_empty_text: bool,
+    can_queue: bool,
+    awaiting_ack: bool,
+    is_draining: bool,
+    pending_count: u8,
+    http_status: u32,
+) -> SendFlowVerdict {
+    let raw = unsafe {
+        orb_send_flow_step(
+            u8::from(is_busy),
+            u8::from(has_non_empty_text),
+            u8::from(can_queue),
+            u8::from(awaiting_ack),
+            u8::from(is_draining),
+            pending_count,
+            http_status,
+        )
+    };
+    SendFlowVerdict {
+        tap_action: (raw & 0xFF) as u8,
+        can_drain: (raw & 256) != 0,
+        edit_outcome: ((raw >> 16) & 0xFF) as u8,
+        raw,
+    }
+}
+
+pub mod raw_cabi {
+    #[inline] pub fn orb_verify_writer_reuse(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8) -> u8 { unsafe { super::orb_verify_writer_reuse(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_verify_lease_mode(a0: u8, a1: u8, a2: u8, a3: u8) -> u8 { unsafe { super::orb_verify_lease_mode(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_verify_track_hold(a0: u8, a1: u8, a2: u8, a3: u8) -> u8 { unsafe { super::orb_verify_track_hold(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_verify_repo_disjoint(a0: u8, a1: u8, a2: u8) -> u8 { unsafe { super::orb_verify_repo_disjoint(a0, a1, a2) } }
+    #[inline] pub fn orb_verify_remote_outbox(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u8, a8: u8) -> u8 { unsafe { super::orb_verify_remote_outbox(a0, a1, a2, a3, a4, a5, a6, a7, a8) } }
+    #[inline] pub fn orb_verify_board_slots(a0: u32, a1: u32, a2: u32) -> u8 { unsafe { super::orb_verify_board_slots(a0, a1, a2) } }
+    #[inline] pub fn orb_verify_board_retry(a0: u32, a1: u32, a2: u8, a3: u8, a4: u8) -> u8 { unsafe { super::orb_verify_board_retry(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_verify_job_transition(a0: u8, a1: u8) -> u8 { unsafe { super::orb_verify_job_transition(a0, a1) } }
+    #[inline] pub fn orb_verify_bundle_budget(a0: u8, a1: u64, a2: u64, a3: u64, a4: u64) -> u8 { unsafe { super::orb_verify_bundle_budget(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_verify_token_rotation(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8) -> u8 { unsafe { super::orb_verify_token_rotation(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_verify_approval(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8) -> u8 { unsafe { super::orb_verify_approval(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_verify_log_window(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u8 { unsafe { super::orb_verify_log_window(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_mix64_word(a0: u64, a1: u64) -> u64 { unsafe { super::orb_mix64_word(a0, a1) } }
+    #[inline] pub fn orb_proxy_step(a0: u8, a1: u8, a2: u8, a3: u32, a4: u32) -> u32 { unsafe { super::orb_proxy_step(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_stream_deadlines(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u8, a6: u8, a7: u8) -> u32 { unsafe { super::orb_stream_deadlines(a0, a1, a2, a3, a4, a5, a6, a7) } }
+    #[inline] pub fn orb_breaker_step(a0: u8, a1: u32, a2: u32) -> u32 { unsafe { super::orb_breaker_step(a0, a1, a2) } }
+    #[inline] pub fn orb_mission_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32) -> u8 { unsafe { super::orb_mission_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) } }
+    #[inline] pub fn orb_reconcile_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u8, a8: u8, a9: u8, a10: u8, a11: u8, a12: u8) -> u8 { unsafe { super::orb_reconcile_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12) } }
+    #[inline] pub fn orb_queue_step(a0: u8, a1: u8) -> u32 { unsafe { super::orb_queue_step(a0, a1) } }
+    #[inline] pub fn orb_vm_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u8, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u64, a14: u64) -> u8 { unsafe { super::orb_vm_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14) } }
+    #[inline] pub fn orb_access_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8) -> u32 { unsafe { super::orb_access_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_workfold_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8) -> u32 { unsafe { super::orb_workfold_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_taskcard_step(a0: u8, a1: u8, a2: u8) -> u8 { unsafe { super::orb_taskcard_step(a0, a1, a2) } }
+    #[inline] pub fn orb_sidebar_visibility(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8) -> u32 { unsafe { super::orb_sidebar_visibility(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_admission_step(a0: u8, a1: u8, a2: u8, a3: u64, a4: u64) -> u32 { unsafe { super::orb_admission_step(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_account_cooldown_secs(a0: u64, a1: u64, a2: u32) -> u64 { unsafe { super::orb_account_cooldown_secs(a0, a1, a2) } }
+    #[inline] pub fn orb_cost_cents_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64, a7: u64) -> u64 { unsafe { super::orb_cost_cents_step(a0, a1, a2, a3, a4, a5, a6, a7) } }
+    #[inline] pub fn orb_stream_loop_step(a0: u8, a1: u8, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u64, a8: u64) -> u8 { unsafe { super::orb_stream_loop_step(a0, a1, a2, a3, a4, a5, a6, a7, a8) } }
+    #[inline] pub fn orb_job_ledger_step(a0: u8, a1: u8, a2: u8, a3: u8) -> u32 { unsafe { super::orb_job_ledger_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_proc_liveness_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u32, a5: u64, a6: u64) -> u8 { unsafe { super::orb_proc_liveness_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_pr_gate_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u8, a8: u8, a9: u8) -> u8 { unsafe { super::orb_pr_gate_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) } }
+    #[inline] pub fn orb_turn_summary_step(a0: u8, a1: u8, a2: u8, a3: u8) -> u32 { unsafe { super::orb_turn_summary_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_usage_limit_status(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u64) -> u64 { unsafe { super::orb_usage_limit_status(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_relative_time_bucket(a0: u64) -> u64 { unsafe { super::orb_relative_time_bucket(a0) } }
+    #[inline] pub fn orb_transcript_patch_step(a0: u32, a1: u32, a2: u8, a3: u32) -> u64 { unsafe { super::orb_transcript_patch_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_attribution_step(a0: u8, a1: u8, a2: u8, a3: u8) -> u32 { unsafe { super::orb_attribution_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_schedule_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u64, a7: u64, a8: u64) -> u8 { unsafe { super::orb_schedule_step(a0, a1, a2, a3, a4, a5, a6, a7, a8) } }
+    #[inline] pub fn orb_stats_settle_step(a0: u64, a1: u64, a2: u8) -> u64 { unsafe { super::orb_stats_settle_step(a0, a1, a2) } }
+    #[inline] pub fn orb_privilege_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u64, a8: u64, a9: u64) -> u32 { unsafe { super::orb_privilege_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) } }
+    #[inline] pub fn orb_bunker_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8) -> u32 { unsafe { super::orb_bunker_step(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_deploy_gate_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u32) -> u8 { unsafe { super::orb_deploy_gate_step(a0, a1, a2, a3, a4, a5, a6, a7) } }
+    #[inline] pub fn orb_scroll_max_top(a0: u64, a1: u64) -> u64 { unsafe { super::orb_scroll_max_top(a0, a1) } }
+    #[inline] pub fn orb_scroll_clamp_top(a0: u64, a1: u64, a2: u64) -> u64 { unsafe { super::orb_scroll_clamp_top(a0, a1, a2) } }
+    #[inline] pub fn orb_scroll_gap(a0: u64, a1: u64, a2: u64) -> u64 { unsafe { super::orb_scroll_gap(a0, a1, a2) } }
+    #[inline] pub fn orb_scroll_layout_step(a0: u8, a1: u64, a2: u64, a3: u64) -> u64 { unsafe { super::orb_scroll_layout_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_scroll_user_step(a0: u64, a1: u64, a2: u64, a3: u64) -> u8 { unsafe { super::orb_scroll_user_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_scroll_jump_step(a0: u64, a1: u64) -> u64 { unsafe { super::orb_scroll_jump_step(a0, a1) } }
+    #[inline] pub fn orb_scroll_correct(a0: u8, a1: u64, a2: u64, a3: u64) -> u64 { unsafe { super::orb_scroll_correct(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_scroll_shows_jump(a0: u8, a1: u64, a2: u64, a3: u64, a4: u64) -> u8 { unsafe { super::orb_scroll_shows_jump(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_stream_coalescer_step(a0: u8, a1: u32, a2: u32, a3: u32) -> u64 { unsafe { super::orb_stream_coalescer_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_stream_fence_step(a0: u8, a1: u32, a2: u8, a3: u32) -> u64 { unsafe { super::orb_stream_fence_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_stream_commit_step(a0: u8, a1: u8, a2: u32, a3: u8, a4: u8, a5: u8, a6: u32, a7: u32, a8: u32) -> u64 { unsafe { super::orb_stream_commit_step(a0, a1, a2, a3, a4, a5, a6, a7, a8) } }
+    #[inline] pub fn orb_stream_token_cost_step(a0: u64, a1: u64, a2: u64) -> u64 { unsafe { super::orb_stream_token_cost_step(a0, a1, a2) } }
+    #[inline] pub fn orb_mission_state_classify(a0: u8) -> u8 { unsafe { super::orb_mission_state_classify(a0) } }
+    #[inline] pub fn orb_mission_sort_rank(a0: u8) -> u8 { unsafe { super::orb_mission_sort_rank(a0) } }
+    #[inline] pub fn orb_mission_flags(a0: u8) -> u32 { unsafe { super::orb_mission_flags(a0) } }
+    #[inline] pub fn orb_mission_inbox_section(a0: u8) -> u8 { unsafe { super::orb_mission_inbox_section(a0) } }
+    #[inline] pub fn orb_connection_issue_classify(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8) -> u32 { unsafe { super::orb_connection_issue_classify(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_worked_duration_bucket(a0: u64) -> u64 { unsafe { super::orb_worked_duration_bucket(a0) } }
+    #[inline] pub fn orb_turn_outcome_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8) -> u32 { unsafe { super::orb_turn_outcome_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_numeric_cell_scan(a0: u8, a1: u8, a2: u8, a3: u8) -> u8 { unsafe { super::orb_numeric_cell_scan(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_file_ref_line_span(a0: u32, a1: u32, a2: u32) -> u64 { unsafe { super::orb_file_ref_line_span(a0, a1, a2) } }
+    #[inline] pub fn orb_machine_action_admitted(a0: u8, a1: u8, a2: u8) -> u32 { unsafe { super::orb_machine_action_admitted(a0, a1, a2) } }
+    #[inline] pub fn orb_send_flow_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u32) -> u32 { unsafe { super::orb_send_flow_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_wire_validate_frame(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32) -> u8 { unsafe { super::orb_wire_validate_frame(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) } }
+    #[inline] pub fn orb_wire_pack_record(a0: u8, a1: u8, a2: u32, a3: u32) -> u64 { unsafe { super::orb_wire_pack_record(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_wire_schema_migrate_step(a0: u32, a1: u32, a2: u32, a3: u64, a4: u64) -> u8 { unsafe { super::orb_wire_schema_migrate_step(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_effect_admissible(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u8, a8: u8, a9: u8, a10: u8, a11: u8) -> u8 { unsafe { super::orb_effect_admissible(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11) } }
+    #[inline] pub fn orb_provider_pool_step(a0: u8, a1: u32, a2: u32, a3: u8, a4: u8, a5: u8, a6: u32, a7: u32, a8: u64, a9: u64) -> u64 { unsafe { super::orb_provider_pool_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) } }
+    #[inline] pub fn orb_route_argmin_step(a0: u8, a1: u32, a2: u64, a3: u32, a4: u64, a5: u8) -> u64 { unsafe { super::orb_route_argmin_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_mission_control_step(a0: u8, a1: u32, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u8, a8: u8) -> u64 { unsafe { super::orb_mission_control_step(a0, a1, a2, a3, a4, a5, a6, a7, a8) } }
+    #[inline] pub fn orb_fork_home_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8) -> u64 { unsafe { super::orb_fork_home_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_privd_command_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8, a7: u8) -> u64 { unsafe { super::orb_privd_command_step(a0, a1, a2, a3, a4, a5, a6, a7) } }
+    #[inline] pub fn orb_ssh_identity_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8) -> u64 { unsafe { super::orb_ssh_identity_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_agent_event_normalize_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u32, a5: u32, a6: u32, a7: u32) -> u64 { unsafe { super::orb_agent_event_normalize_step(a0, a1, a2, a3, a4, a5, a6, a7) } }
+    #[inline] pub fn orb_transcript_reduce_step(a0: u64, a1: u64, a2: u8, a3: u8, a4: u8) -> u64 { unsafe { super::orb_transcript_reduce_step(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn orb_cursor_page_step(a0: u64, a1: u64, a2: u64, a3: u32, a4: u32, a5: u32, a6: u32) -> u64 { unsafe { super::orb_cursor_page_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_sidebar_merge_step(a0: u32, a1: u32, a2: u64, a3: u64, a4: u8, a5: u8) -> u64 { unsafe { super::orb_sidebar_merge_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_scroll_epoch_step(a0: u32, a1: u32, a2: u8, a3: u8, a4: u8, a5: u32, a6: u32) -> u64 { unsafe { super::orb_scroll_epoch_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_client_parity_step(a0: u8, a1: u32, a2: u32, a3: u32, a4: u32, a5: u8) -> u64 { unsafe { super::orb_client_parity_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_vm_lifecycle_step(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8, a6: u8) -> u32 { unsafe { super::orb_vm_lifecycle_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_vm_claim_step(a0: u8, a1: u8, a2: u8, a3: u8) -> u32 { unsafe { super::orb_vm_claim_step(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_compute_secret_gate(a0: u8, a1: u8, a2: u8, a3: u8) -> u32 { unsafe { super::orb_compute_secret_gate(a0, a1, a2, a3) } }
+    #[inline] pub fn orb_node_gc_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 { unsafe { super::orb_node_gc_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_node_disk_admission_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u8) -> u64 { unsafe { super::orb_node_disk_admission_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_verify_slice_bounds(a0: u64, a1: u64, a2: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_slice_bounds(a0, a1, a2) } }
+    #[inline] pub fn leansys_verify_wal_frame(a0: u32, a1: u32, a2: u64, a3: u64, a4: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_wal_frame(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn leansys_verify_cas_digest(a0: u64, a1: u64, a2: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_cas_digest(a0, a1, a2) } }
+    #[inline] pub fn leansys_check_http_bounds(a0: u32, a1: u64, a2: u64, a3: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_check_http_bounds(a0, a1, a2, a3) } }
+    #[inline] pub fn leansys_verify_jsonl_tape(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u32) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_jsonl_tape(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_verify_ring_cursor(a0: u64, a1: u64, a2: u64, a3: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_ring_cursor(a0, a1, a2, a3) } }
+    #[inline] pub fn leansys_verify_sst_block(a0: u32, a1: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_sst_block(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_verify_poll_interest(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_poll_interest(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_verify_rlimit_budget(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_rlimit_budget(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_mix64_word(a0: u64, a1: u64) -> u64 { unsafe { super::lean_sys_cabi::leansys_mix64_word(a0, a1) } }
+    #[inline] pub fn leansys_verify_composite_key_order(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_composite_key_order(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_verify_token_auth(a0: u8, a1: u8, a2: u8, a3: u8, a4: u64, a5: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_token_auth(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_verify_log_window(a0: u64, a1: u64, a2: u64, a3: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_log_window(a0, a1, a2, a3) } }
+    #[inline] pub fn leansys_verify_jsonrpc_frame(a0: u8, a1: u8, a2: u32, a3: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_jsonrpc_frame(a0, a1, a2, a3) } }
+    #[inline] pub fn leansys_gate_admit(a0: u8, a1: u8, a2: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_gate_admit(a0, a1, a2) } }
+    #[inline] pub fn leansys_verify_mmap_seqlock(a0: u32, a1: u32, a2: u32, a3: u64, a4: u64, a5: u64, a6: u64, a7: u64, a8: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_mmap_seqlock(a0, a1, a2, a3, a4, a5, a6, a7, a8) } }
+    #[inline] pub fn leansys_verify_proc_stat_fields(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_proc_stat_fields(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn leansys_sse_frame_scan(a0: u64, a1: u64, a2: u64, a3: u8, a4: u8, a5: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_sse_frame_scan(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_gfm_pipe_scan(a0: u64, a1: u64, a2: u64, a3: u32, a4: u32, a5: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_gfm_pipe_scan(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_tag_scan(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_tag_scan(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_transcript_index(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 { unsafe { super::lean_sys_cabi::leansys_transcript_index(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn leansys_verify_par_chunk(a0: u64, a1: u64, a2: u64, a3: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_par_chunk(a0, a1, a2, a3) } }
+    #[inline] pub fn leansys_verify_arena_disjoint(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_arena_disjoint(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn leansys_verify_snapshot_visibility(a0: u64, a1: u64, a2: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_snapshot_visibility(a0, a1, a2) } }
+    #[inline] pub fn leansys_verify_http_route_match(a0: u8, a1: u8, a2: u32, a3: u32) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_http_route_match(a0, a1, a2, a3) } }
+    #[inline] pub fn leansys_verify_counterexample_triage(a0: u8, a1: u8, a2: u8, a3: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_counterexample_triage(a0, a1, a2, a3) } }
+    #[inline] pub fn leansys_verify_dag_wave_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_dag_wave_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_verify_ios_jetsam_budget(a0: u64, a1: u64, a2: u64, a3: u64, a4: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_ios_jetsam_budget(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn leansys_verify_worker_budget(a0: u64, a1: u64, a2: u64, a3: u64, a4: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_worker_budget(a0, a1, a2, a3, a4) } }
+    #[inline] pub fn leansys_verify_page_aligned_buffer(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_page_aligned_buffer(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn leansys_select_isa(a0: u64, a1: u64, a2: u8, a3: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_select_isa(a0, a1, a2, a3) } }
+    #[inline] pub fn leansys_verify_isa_selection(a0: u64, a1: u64, a2: u8, a3: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_isa_selection(a0, a1, a2, a3) } }
+    pub fn call_u64(symbol: &str, args: &[u64]) -> Option<u64> {
+        Some(match symbol {
+            "orb_verify_writer_reuse" if args.len() == 6 => orb_verify_writer_reuse(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8) as u64,
+            "orb_verify_lease_mode" if args.len() == 4 => orb_verify_lease_mode(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "orb_verify_track_hold" if args.len() == 4 => orb_verify_track_hold(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "orb_verify_repo_disjoint" if args.len() == 3 => orb_verify_repo_disjoint(args[0] as u8, args[1] as u8, args[2] as u8) as u64,
+            "orb_verify_remote_outbox" if args.len() == 9 => orb_verify_remote_outbox(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u8, args[8] as u8) as u64,
+            "orb_verify_board_slots" if args.len() == 3 => orb_verify_board_slots(args[0] as u32, args[1] as u32, args[2] as u32) as u64,
+            "orb_verify_board_retry" if args.len() == 5 => orb_verify_board_retry(args[0] as u32, args[1] as u32, args[2] as u8, args[3] as u8, args[4] as u8) as u64,
+            "orb_verify_job_transition" if args.len() == 2 => orb_verify_job_transition(args[0] as u8, args[1] as u8) as u64,
+            "orb_verify_bundle_budget" if args.len() == 5 => orb_verify_bundle_budget(args[0] as u8, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64) as u64,
+            "orb_verify_token_rotation" if args.len() == 5 => orb_verify_token_rotation(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8) as u64,
+            "orb_verify_approval" if args.len() == 7 => orb_verify_approval(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8) as u64,
+            "orb_verify_log_window" if args.len() == 6 => orb_verify_log_window(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u64) as u64,
+            "orb_mix64_word" if args.len() == 2 => orb_mix64_word(args[0] as u64, args[1] as u64) as u64,
+            "orb_proxy_step" if args.len() == 5 => orb_proxy_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u32, args[4] as u32) as u64,
+            "orb_stream_deadlines" if args.len() == 8 => orb_stream_deadlines(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u8, args[6] as u8, args[7] as u8) as u64,
+            "orb_breaker_step" if args.len() == 3 => orb_breaker_step(args[0] as u8, args[1] as u32, args[2] as u32) as u64,
+            "orb_mission_step" if args.len() == 10 => orb_mission_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u32, args[6] as u32, args[7] as u32, args[8] as u32, args[9] as u32) as u64,
+            "orb_reconcile_step" if args.len() == 13 => orb_reconcile_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u8, args[8] as u8, args[9] as u8, args[10] as u8, args[11] as u8, args[12] as u8) as u64,
+            "orb_queue_step" if args.len() == 2 => orb_queue_step(args[0] as u8, args[1] as u8) as u64,
+            "orb_vm_step" if args.len() == 15 => orb_vm_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u8, args[8] as u32, args[9] as u32, args[10] as u32, args[11] as u32, args[12] as u32, args[13] as u64, args[14] as u64) as u64,
+            "orb_access_step" if args.len() == 6 => orb_access_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8) as u64,
+            "orb_workfold_step" if args.len() == 6 => orb_workfold_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8) as u64,
+            "orb_taskcard_step" if args.len() == 3 => orb_taskcard_step(args[0] as u8, args[1] as u8, args[2] as u8) as u64,
+            "orb_sidebar_visibility" if args.len() == 6 => orb_sidebar_visibility(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8) as u64,
+            "orb_admission_step" if args.len() == 5 => orb_admission_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u64, args[4] as u64) as u64,
+            "orb_account_cooldown_secs" if args.len() == 3 => orb_account_cooldown_secs(args[0] as u64, args[1] as u64, args[2] as u32) as u64,
+            "orb_cost_cents_step" if args.len() == 8 => orb_cost_cents_step(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u64, args[6] as u64, args[7] as u64) as u64,
+            "orb_stream_loop_step" if args.len() == 9 => orb_stream_loop_step(args[0] as u8, args[1] as u8, args[2] as u32, args[3] as u32, args[4] as u32, args[5] as u32, args[6] as u32, args[7] as u64, args[8] as u64) as u64,
+            "orb_job_ledger_step" if args.len() == 4 => orb_job_ledger_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "orb_proc_liveness_step" if args.len() == 7 => orb_proc_liveness_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u32, args[5] as u64, args[6] as u64) as u64,
+            "orb_pr_gate_step" if args.len() == 10 => orb_pr_gate_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u8, args[8] as u8, args[9] as u8) as u64,
+            "orb_turn_summary_step" if args.len() == 4 => orb_turn_summary_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "orb_usage_limit_status" if args.len() == 6 => orb_usage_limit_status(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u64) as u64,
+            "orb_relative_time_bucket" if args.len() == 1 => orb_relative_time_bucket(args[0] as u64) as u64,
+            "orb_transcript_patch_step" if args.len() == 4 => orb_transcript_patch_step(args[0] as u32, args[1] as u32, args[2] as u8, args[3] as u32) as u64,
+            "orb_attribution_step" if args.len() == 4 => orb_attribution_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "orb_schedule_step" if args.len() == 9 => orb_schedule_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u64, args[7] as u64, args[8] as u64) as u64,
+            "orb_stats_settle_step" if args.len() == 3 => orb_stats_settle_step(args[0] as u64, args[1] as u64, args[2] as u8) as u64,
+            "orb_privilege_step" if args.len() == 10 => orb_privilege_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u64, args[8] as u64, args[9] as u64) as u64,
+            "orb_bunker_step" if args.len() == 5 => orb_bunker_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8) as u64,
+            "orb_deploy_gate_step" if args.len() == 8 => orb_deploy_gate_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u32) as u64,
+            "orb_scroll_max_top" if args.len() == 2 => orb_scroll_max_top(args[0] as u64, args[1] as u64) as u64,
+            "orb_scroll_clamp_top" if args.len() == 3 => orb_scroll_clamp_top(args[0] as u64, args[1] as u64, args[2] as u64) as u64,
+            "orb_scroll_gap" if args.len() == 3 => orb_scroll_gap(args[0] as u64, args[1] as u64, args[2] as u64) as u64,
+            "orb_scroll_layout_step" if args.len() == 4 => orb_scroll_layout_step(args[0] as u8, args[1] as u64, args[2] as u64, args[3] as u64) as u64,
+            "orb_scroll_user_step" if args.len() == 4 => orb_scroll_user_step(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64) as u64,
+            "orb_scroll_jump_step" if args.len() == 2 => orb_scroll_jump_step(args[0] as u64, args[1] as u64) as u64,
+            "orb_scroll_correct" if args.len() == 4 => orb_scroll_correct(args[0] as u8, args[1] as u64, args[2] as u64, args[3] as u64) as u64,
+            "orb_scroll_shows_jump" if args.len() == 5 => orb_scroll_shows_jump(args[0] as u8, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64) as u64,
+            "orb_stream_coalescer_step" if args.len() == 4 => orb_stream_coalescer_step(args[0] as u8, args[1] as u32, args[2] as u32, args[3] as u32) as u64,
+            "orb_stream_fence_step" if args.len() == 4 => orb_stream_fence_step(args[0] as u8, args[1] as u32, args[2] as u8, args[3] as u32) as u64,
+            "orb_stream_commit_step" if args.len() == 9 => orb_stream_commit_step(args[0] as u8, args[1] as u8, args[2] as u32, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u32, args[7] as u32, args[8] as u32) as u64,
+            "orb_stream_token_cost_step" if args.len() == 3 => orb_stream_token_cost_step(args[0] as u64, args[1] as u64, args[2] as u64) as u64,
+            "orb_mission_state_classify" if args.len() == 1 => orb_mission_state_classify(args[0] as u8) as u64,
+            "orb_mission_sort_rank" if args.len() == 1 => orb_mission_sort_rank(args[0] as u8) as u64,
+            "orb_mission_flags" if args.len() == 1 => orb_mission_flags(args[0] as u8) as u64,
+            "orb_mission_inbox_section" if args.len() == 1 => orb_mission_inbox_section(args[0] as u8) as u64,
+            "orb_connection_issue_classify" if args.len() == 5 => orb_connection_issue_classify(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8) as u64,
+            "orb_worked_duration_bucket" if args.len() == 1 => orb_worked_duration_bucket(args[0] as u64) as u64,
+            "orb_turn_outcome_step" if args.len() == 6 => orb_turn_outcome_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8) as u64,
+            "orb_numeric_cell_scan" if args.len() == 4 => orb_numeric_cell_scan(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "orb_file_ref_line_span" if args.len() == 3 => orb_file_ref_line_span(args[0] as u32, args[1] as u32, args[2] as u32) as u64,
+            "orb_machine_action_admitted" if args.len() == 3 => orb_machine_action_admitted(args[0] as u8, args[1] as u8, args[2] as u8) as u64,
+            "orb_send_flow_step" if args.len() == 7 => orb_send_flow_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u32) as u64,
+            "orb_wire_validate_frame" if args.len() == 11 => orb_wire_validate_frame(args[0] as u32, args[1] as u32, args[2] as u32, args[3] as u32, args[4] as u32, args[5] as u32, args[6] as u32, args[7] as u32, args[8] as u32, args[9] as u32, args[10] as u32) as u64,
+            "orb_wire_pack_record" if args.len() == 4 => orb_wire_pack_record(args[0] as u8, args[1] as u8, args[2] as u32, args[3] as u32) as u64,
+            "orb_wire_schema_migrate_step" if args.len() == 5 => orb_wire_schema_migrate_step(args[0] as u32, args[1] as u32, args[2] as u32, args[3] as u64, args[4] as u64) as u64,
+            "orb_effect_admissible" if args.len() == 12 => orb_effect_admissible(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u8, args[8] as u8, args[9] as u8, args[10] as u8, args[11] as u8) as u64,
+            "orb_provider_pool_step" if args.len() == 10 => orb_provider_pool_step(args[0] as u8, args[1] as u32, args[2] as u32, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u32, args[7] as u32, args[8] as u64, args[9] as u64) as u64,
+            "orb_route_argmin_step" if args.len() == 6 => orb_route_argmin_step(args[0] as u8, args[1] as u32, args[2] as u64, args[3] as u32, args[4] as u64, args[5] as u8) as u64,
+            "orb_mission_control_step" if args.len() == 9 => orb_mission_control_step(args[0] as u8, args[1] as u32, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u8, args[8] as u8) as u64,
+            "orb_fork_home_step" if args.len() == 7 => orb_fork_home_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8) as u64,
+            "orb_privd_command_step" if args.len() == 8 => orb_privd_command_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u8) as u64,
+            "orb_ssh_identity_step" if args.len() == 7 => orb_ssh_identity_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8) as u64,
+            "orb_agent_event_normalize_step" if args.len() == 8 => orb_agent_event_normalize_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u32, args[5] as u32, args[6] as u32, args[7] as u32) as u64,
+            "orb_transcript_reduce_step" if args.len() == 5 => orb_transcript_reduce_step(args[0] as u64, args[1] as u64, args[2] as u8, args[3] as u8, args[4] as u8) as u64,
+            "orb_cursor_page_step" if args.len() == 7 => orb_cursor_page_step(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u32, args[4] as u32, args[5] as u32, args[6] as u32) as u64,
+            "orb_sidebar_merge_step" if args.len() == 6 => orb_sidebar_merge_step(args[0] as u32, args[1] as u32, args[2] as u64, args[3] as u64, args[4] as u8, args[5] as u8) as u64,
+            "orb_scroll_epoch_step" if args.len() == 7 => orb_scroll_epoch_step(args[0] as u32, args[1] as u32, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u32, args[6] as u32) as u64,
+            "orb_client_parity_step" if args.len() == 6 => orb_client_parity_step(args[0] as u8, args[1] as u32, args[2] as u32, args[3] as u32, args[4] as u32, args[5] as u8) as u64,
+            "orb_vm_lifecycle_step" if args.len() == 7 => orb_vm_lifecycle_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8) as u64,
+            "orb_vm_claim_step" if args.len() == 4 => orb_vm_claim_step(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "orb_compute_secret_gate" if args.len() == 4 => orb_compute_secret_gate(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "orb_node_gc_step" if args.len() == 7 => orb_node_gc_step(args[0], args[1], args[2], args[3], args[4], args[5], args[6]),
+            "orb_node_disk_admission_step" if args.len() == 6 => orb_node_disk_admission_step(args[0], args[1], args[2], args[3], args[4], args[5] as u8),
+            "leansys_verify_slice_bounds" if args.len() == 3 => leansys_verify_slice_bounds(args[0] as u64, args[1] as u64, args[2] as u64) as u64,
+            "leansys_verify_wal_frame" if args.len() == 5 => leansys_verify_wal_frame(args[0] as u32, args[1] as u32, args[2] as u64, args[3] as u64, args[4] as u64) as u64,
+            "leansys_verify_cas_digest" if args.len() == 3 => leansys_verify_cas_digest(args[0] as u64, args[1] as u64, args[2] as u8) as u64,
+            "leansys_check_http_bounds" if args.len() == 4 => leansys_check_http_bounds(args[0] as u32, args[1] as u64, args[2] as u64, args[3] as u8) as u64,
+            "leansys_verify_jsonl_tape" if args.len() == 6 => leansys_verify_jsonl_tape(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u32) as u64,
+            "leansys_verify_ring_cursor" if args.len() == 4 => leansys_verify_ring_cursor(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64) as u64,
+            "leansys_verify_sst_block" if args.len() == 6 => leansys_verify_sst_block(args[0] as u32, args[1] as u32, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u64) as u64,
+            "leansys_verify_poll_interest" if args.len() == 6 => leansys_verify_poll_interest(args[0] as u32, args[1] as u32, args[2] as u32, args[3] as u32, args[4] as u32, args[5] as u32) as u64,
+            "leansys_verify_rlimit_budget" if args.len() == 6 => leansys_verify_rlimit_budget(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u64) as u64,
+            "leansys_mix64_word" if args.len() == 2 => leansys_mix64_word(args[0] as u64, args[1] as u64) as u64,
+            "leansys_verify_composite_key_order" if args.len() == 6 => leansys_verify_composite_key_order(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u64) as u64,
+            "leansys_verify_token_auth" if args.len() == 6 => leansys_verify_token_auth(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8, args[4] as u64, args[5] as u64) as u64,
+            "leansys_verify_log_window" if args.len() == 4 => leansys_verify_log_window(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64) as u64,
+            "leansys_verify_jsonrpc_frame" if args.len() == 4 => leansys_verify_jsonrpc_frame(args[0] as u8, args[1] as u8, args[2] as u32, args[3] as u64) as u64,
+            "leansys_gate_admit" if args.len() == 3 => leansys_gate_admit(args[0] as u8, args[1] as u8, args[2] as u8) as u64,
+            "leansys_verify_mmap_seqlock" if args.len() == 9 => leansys_verify_mmap_seqlock(args[0] as u32, args[1] as u32, args[2] as u32, args[3] as u64, args[4] as u64, args[5] as u64, args[6] as u64, args[7] as u64, args[8] as u64) as u64,
+            "leansys_verify_proc_stat_fields" if args.len() == 5 => leansys_verify_proc_stat_fields(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64) as u64,
+            "leansys_sse_frame_scan" if args.len() == 6 => leansys_sse_frame_scan(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u8, args[4] as u8, args[5] as u8) as u64,
+            "leansys_gfm_pipe_scan" if args.len() == 6 => leansys_gfm_pipe_scan(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u32, args[4] as u32, args[5] as u8) as u64,
+            "leansys_tag_scan" if args.len() == 6 => leansys_tag_scan(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u8) as u64,
+            "leansys_transcript_index" if args.len() == 5 => leansys_transcript_index(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64) as u64,
+            "leansys_verify_par_chunk" if args.len() == 4 => leansys_verify_par_chunk(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64) as u64,
+            "leansys_verify_arena_disjoint" if args.len() == 5 => leansys_verify_arena_disjoint(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64) as u64,
+            "leansys_verify_snapshot_visibility" if args.len() == 3 => leansys_verify_snapshot_visibility(args[0] as u64, args[1] as u64, args[2] as u8) as u64,
+            "leansys_verify_http_route_match" if args.len() == 4 => leansys_verify_http_route_match(args[0] as u8, args[1] as u8, args[2] as u32, args[3] as u32) as u64,
+            "leansys_verify_counterexample_triage" if args.len() == 4 => leansys_verify_counterexample_triage(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
+            "leansys_verify_dag_wave_step" if args.len() == 6 => leansys_verify_dag_wave_step(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u64) as u64,
+            "leansys_verify_ios_jetsam_budget" if args.len() == 5 => leansys_verify_ios_jetsam_budget(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u8) as u64,
+            "leansys_verify_worker_budget" if args.len() == 5 => leansys_verify_worker_budget(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u8) as u64,
+            "leansys_verify_page_aligned_buffer" if args.len() == 6 => leansys_verify_page_aligned_buffer(args[0] as u64, args[1] as u64, args[2] as u64, args[3] as u64, args[4] as u64, args[5] as u64) as u64,
+            "leansys_select_isa" if args.len() == 4 => leansys_select_isa(args[0] as u64, args[1] as u64, args[2] as u8, args[3] as u8) as u64,
+            "leansys_verify_isa_selection" if args.len() == 4 => leansys_verify_isa_selection(args[0] as u64, args[1] as u64, args[2] as u8, args[3] as u8) as u64,
+            _ => return None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod privilege_bunker_deploy_tests {
     use super::*;
@@ -5542,5 +6360,83 @@ mod tests {
         assert!(comfortable.admitted);
         assert!(!comfortable.soft_pressure);
         assert_eq!(comfortable.headroom_gib, 250);
+
+    }
+    #[test]
+    fn mobile_and_leansys_extensions_roundtrip_via_cabi() {
+        assert_eq!(scroll_max_top(1000, 400), 600);
+        assert_eq!(scroll_clamp_top(1000, 400, 900), 600);
+        assert_eq!(scroll_gap(1000, 400, 550), 50);
+        assert_eq!(scroll_layout_step(true, 1000, 400, 100), 600);
+        assert!(scroll_user_step(1000, 400, 580, 24));
+        assert_eq!(scroll_jump_step(1000, 400), 600);
+        assert_eq!(scroll_correct(false, 1000, 400, 900), 600);
+        assert!(scroll_shows_jump(false, 1000, 400, 100, 40));
+
+        let coal = stream_coalescer_step(1, 10, 5, 0);
+        assert!(coal.did_render);
+        assert_eq!(coal.next_shown_len, 15);
+        assert_eq!(coal.next_pending_len, 0);
+
+        let fence = stream_fence_step(0, 0, 1, 3);
+        assert_eq!(fence.next_fence_kind, 1);
+        assert_eq!(fence.next_fence_count, 3);
+
+        let commit = stream_commit_step(false, 0, 0, true, false, 0, 0, 4, 0);
+        assert!(commit.commits);
+        assert_eq!(commit.next_commit, 5);
+        assert_eq!(stream_token_cost_step(10, 20, 5), 35);
+
+        assert_eq!(mission_state_classify(0), 3);
+        assert_eq!(mission_sort_rank(11), 0);
+        let flags = mission_flags(17);
+        assert!(flags.is_terminal && flags.can_retry && flags.is_problem);
+        assert_eq!(mission_inbox_section(25), 2);
+
+        let conn = connection_issue_classify(true, false, true, true, false);
+        assert!(conn.show_issue && conn.recommend_default && conn.should_probe_default);
+        assert_eq!(conn.message_kind, 2);
+
+        let dur = worked_duration_bucket(3660);
+        assert_eq!((dur.unit, dur.primary, dur.secondary), (2, 1, 1));
+
+        let out = turn_outcome_step(false, false, 2, false, false, true);
+        assert!(out.next_outcome_finished && !out.next_todos_failed);
+        assert!(numeric_cell_scan(true, true, true, true));
+
+        let span = file_ref_line_span(10, 12, 100);
+        assert!(span.admitted);
+        assert_eq!(span.span_line_count, 3);
+
+        let mach = machine_action_admitted(2, false, false);
+        assert!(mach.is_live && mach.can_act && mach.meter_live_cost);
+
+        let send = send_flow_step(false, true, true, false, false, 1, 200);
+        assert_eq!(send.tap_action, 1);
+        assert!(send.can_drain);
+        assert_eq!(send.edit_outcome, 1);
+
+        assert!(lean_sys_cabi::verify_par_chunk(0, 64, 256, 64));
+        assert!(lean_sys_cabi::verify_arena_disjoint(0, 128, 128, 128, 256));
+        assert!(lean_sys_cabi::verify_snapshot_visibility(2, 5, false));
+        assert!(lean_sys_cabi::verify_http_route_match(true, true, 0, 4));
+        assert!(lean_sys_cabi::verify_counterexample_triage(true, true, false, 1));
+        assert!(lean_sys_cabi::verify_dag_wave_step(0, 4, 8, 16, 4, 4));
+
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../shared/orb-spec/kernel_abi.json"
+        ))
+        .unwrap();
+        let mut count = 0usize;
+        for f in manifest["functions"].as_array().unwrap() {
+            let name = f["name"].as_str().unwrap();
+            if name.starts_with("orb_") || name.starts_with("leansys_") {
+                let arity = f["params"].as_array().unwrap().len();
+                let args = vec![0u64; arity];
+                assert!(raw_cabi::call_u64(name, &args).is_some(), "missing {name}");
+                count += 1;
+            }
+        }
+        assert_eq!(count, 117);
     }
 }

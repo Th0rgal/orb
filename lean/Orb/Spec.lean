@@ -874,50 +874,6 @@ theorem attributionPrincipal_le_six (p : UInt8) : attributionPrincipal p ≤ 6 :
   · assumption
   · decide
 
-/-- A non-empty in-scope claim is a valid kind and requires a credential binding. -/
-theorem attributionInScope_claim (p c s d : UInt8)
-    (h : attributionInScope (attributionPrincipal p) c s d = true) (hc : c ≠ 0) :
-    c ≤ 6 ∧ attributionPrincipal p ≠ 0 := by
-  have hp := attributionPrincipal_le_six p
-  generalize attributionPrincipal p = q at h hp ⊢
-  simp only [attributionInScope, Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at h
-  simp only [UInt8.le_iff_toNat_le, ← UInt8.toNat_inj, UInt8.reduceToNat, ne_eq] at *
-  omega
-
-/-- Totality: every usage event maps to exactly one kind of the closed enum `0..6`. -/
-theorem attribution_kind_le_six (p c s d : UInt8) : attributionKind p c s d ≤ 6 := by
-  unfold attributionKind; split
-  · split
-    · exact attributionPrincipal_le_six p
-    · next h hc => exact (attributionInScope_claim p c s d h (by simpa using hc)).1
-  · exact attributionPrincipal_le_six p
-
-/-- `unknown` (`0`) is returned iff no credential binding exists, whatever the client claims. -/
-theorem attribution_kind_unknown_iff (p c s d : UInt8) :
-    attributionKind p c s d = 0 ↔ attributionPrincipal p = 0 := by
-  unfold attributionKind; split
-  · split
-    · exact Iff.rfl
-    · next h hc =>
-      have := attributionInScope_claim p c s d h (by simpa using hc)
-      exact ⟨fun h0 => absurd h0 (by simpa using hc), fun h0 => absurd h0 this.2⟩
-  · exact Iff.rfl
-
-/-- The packed C-ABI word decodes to `(kind, accepted)` exactly as `src/api/usage_attribution.rs` reads it. -/
-theorem attribution_step_decodes (p c s d : UInt8) :
-    (attributionStep p c s d &&& 0xFF) = (attributionKind p c s d).toUInt32 ∧
-    ((attributionStep p c s d >>> 8) &&& 1) =
-      (if attributionInScope (attributionPrincipal p) c s d then 1 else 0) := by
-  have hk := attribution_kind_le_six p c s d
-  unfold attributionStep
-  generalize attributionKind p c s d = k at hk ⊢
-  have hn : k.toNat ≤ 6 := by simpa [UInt8.le_iff_toNat_le] using hk
-  have hk' : k = k.toNat.toUInt8 := by simp
-  rw [hk']
-  generalize k.toNat = n at hn
-  split <;> (match n, hn with
-    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ => decide)
-
 structure AttributionClaim where
   principalKind : UInt8
   claimedKind   : UInt8
@@ -936,7 +892,102 @@ def AttributionClaim.InScope (x : AttributionClaim) : Prop :=
 theorem attributionInScope_iff (x : AttributionClaim) :
     attributionInScope (attributionPrincipal x.principalKind) x.claimedKind x.sameMission x.isDescendant = true ↔
       x.InScope := by
-  simp [attributionInScope, AttributionClaim.InScope, or_assoc]
+  rcases x with ⟨pk, c, s, d⟩
+  unfold attributionInScope AttributionClaim.InScope
+  dsimp only
+  generalize attributionPrincipal pk = p
+  by_cases hc0 : c = 0
+  · subst hc0; simp
+  · have hc0b : (c == 0) = false := beq_false_of_ne hc0
+    simp only [hc0b, Bool.false_eq_true, ite_false]
+    by_cases hp5 : p = 5
+    · subst hp5
+      by_cases hc1 : c = 1
+      · subst hc1; simp
+      · by_cases hc2 : c = 2
+        · subst hc2; simp
+        · simp [hc0, hc1, hc2]
+    · by_cases hp1 : p = 1
+      · subst hp1
+        by_cases hc1 : c = 1
+        · subst hc1; simp [hc0]
+        · by_cases hc2 : c = 2
+          · subst hc2; simp [hc0]
+          · simp [hc0, hc1, hc2]
+      · by_cases hp2 : p = 2
+        · subst hp2
+          by_cases hc1 : c = 1
+          · subst hc1; simp [hc0]
+          · by_cases hc2 : c = 2
+            · subst hc2; simp [hc0]
+            · simp [hc0, hc1, hc2]
+        · by_cases hp3 : p = 3
+          · subst hp3; simp [hc0]
+          · by_cases hp4 : p = 4
+            · subst hp4; simp [hc0]
+            · by_cases hp6 : p = 6
+              · subst hp6; simp [hc0]
+              · simp [hc0, hp5, hp1, hp2, hp3, hp4, hp6]
+
+/-- A non-empty in-scope claim is a valid kind and requires a credential binding. -/
+theorem attributionInScope_claim (p c s d : UInt8)
+    (h : attributionInScope (attributionPrincipal p) c s d = true) (hc : c ≠ 0) :
+    c ≤ 6 ∧ attributionPrincipal p ≠ 0 := by
+  have hx : AttributionClaim.InScope ⟨p, c, s, d⟩ :=
+    (attributionInScope_iff ⟨p, c, s, d⟩).mp h
+  unfold AttributionClaim.InScope at hx
+  dsimp only at hx
+  rcases hx with rfl | ⟨hp, rfl | rfl | rfl⟩ | ⟨hp | hp, ⟨rfl, _⟩ | ⟨rfl, _⟩⟩ | ⟨hp | hp | hp, rfl⟩
+  · exact absurd rfl hc
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+
+/-- Totality: every usage event maps to exactly one kind of the closed enum `0..6`. -/
+theorem attribution_kind_le_six (p c s d : UInt8) : attributionKind p c s d ≤ 6 := by
+  unfold attributionKind; dsimp only; split
+  · split
+    · exact attributionPrincipal_le_six p
+    · next h hc => exact (attributionInScope_claim p c s d h (by simpa using hc)).1
+  · exact attributionPrincipal_le_six p
+
+/-- `unknown` (`0`) is returned iff no credential binding exists, whatever the client claims. -/
+theorem attribution_kind_unknown_iff (p c s d : UInt8) :
+    attributionKind p c s d = 0 ↔ attributionPrincipal p = 0 := by
+  unfold attributionKind; dsimp only; split
+  · split
+    · exact Iff.rfl
+    · next h hc =>
+      have := attributionInScope_claim p c s d h (by simpa using hc)
+      exact ⟨fun h0 => absurd h0 (by simpa using hc), fun h0 => absurd h0 this.2⟩
+  · exact Iff.rfl
+
+/-- The packed C-ABI word decodes to `(kind, accepted)` exactly as `src/api/usage_attribution.rs` reads it. -/
+theorem attribution_step_decodes (p c s d : UInt8) :
+    (attributionStep p c s d &&& 0xFF) = (attributionKind p c s d).toUInt32 ∧
+    ((attributionStep p c s d >>> 8) &&& 1) =
+      (if attributionInScope (attributionPrincipal p) c s d then 1 else 0) := by
+  have h_eq : attributionStep p c s d =
+      ((attributionKind p c s d).toUInt32 |||
+        (if attributionInScope (attributionPrincipal p) c s d then 256 else 0)) := by
+    unfold attributionStep attributionKind; dsimp only
+    split <;> simp
+  rw [h_eq]
+  have hk := attribution_kind_le_six p c s d
+  generalize attributionKind p c s d = k at hk ⊢
+  have hn : k.toNat ≤ 6 := by simpa [UInt8.le_iff_toNat_le] using hk
+  have hk' : k = k.toNat.toUInt8 := by simp
+  rw [hk']
+  generalize k.toNat = n at hn
+  split <;> (match n, hn with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ => decide)
 
 /-- `MetaGateSpec` for the acceptance bit: a hint is accepted iff it stays inside the principal's scope. -/
 def attributionMetaGate : MetaGateSpec AttributionClaim AttributionClaim.InScope where
