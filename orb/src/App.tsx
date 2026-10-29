@@ -54,7 +54,7 @@ import { ProviderLogo } from "./ProviderLogo";
 import { SessionPreview, type SessionPreviewData } from "./SessionPreview";
 import { RoutingSettings, confirmLeaveRouting } from "./RoutingSettings";
 import { MACHINES, Machines } from "./Machines";
-import { isManagedNode, nodeSize } from "./machines/nodes";
+import { isManagedNode, managedFleetLabel, nodeSize } from "./machines/nodes";
 const Providers=lazy(()=>import("./Providers").then(module=>({default:module.Providers})));
 import { PopupMenu, type MenuEntry } from "./Menu";
 import { mdSource, toggleMdSource } from "./Markdown";
@@ -1303,7 +1303,7 @@ export default function App() {
                           </For>
                           <Show when={sortedNodes().some(isManagedNode)}>
                             <div class="menu-sep" />
-                            <div class="machine-section-label machine-managed-label">Managed (boat.dev)</div>
+                            <div class="machine-section-label machine-managed-label">{managedFleetLabel(sortedNodes())}</div>
                             <For each={sortedNodes().filter(isManagedNode)}>
                             {(n) => (
                               <button

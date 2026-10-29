@@ -62,7 +62,12 @@ data class ManagedProviderInfo(
     val configured: Boolean,
     val supportsSnapshots: Boolean,
     val supportsFreeStop: Boolean,
-    val sizes: List<ManagedSize>
+    val sizes: List<ManagedSize>,
+    val enabled: Boolean = true,
+    val credentialSource: String? = null,
+    val keyHint: String? = null,
+    val region: String? = null,
+    val projectId: String? = null
 )
 
 data class ManagedBudget(
@@ -127,7 +132,12 @@ object OrbManagedMachines {
             configured = OrbJSON.bool(d, "configured") ?: false,
             supportsSnapshots = OrbJSON.bool(d, "supports_snapshots") ?: false,
             supportsFreeStop = OrbJSON.bool(d, "supports_free_stop") ?: false,
-            sizes = OrbJSON.dictList(d["sizes"]).mapNotNull { parseSize(it) }
+            sizes = OrbJSON.dictList(d["sizes"]).mapNotNull { parseSize(it) },
+            enabled = OrbJSON.bool(d, "enabled") ?: true,
+            credentialSource = OrbJSON.str(d, "credential_source"),
+            keyHint = OrbJSON.str(d, "key_hint"),
+            region = OrbJSON.str(d, "region"),
+            projectId = OrbJSON.str(d, "project_id")
         )
     }
 
@@ -248,6 +258,40 @@ object OrbManagedMachines {
     fun nodeLabels(node: OrbRow): List<String> =
         (node.raw["labels"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
 
+    fun nodeProvider(labels: List<String>?): String? {
+        val known = setOf("boat", "hetzner", "vastai", "scaleway")
+        for (raw in labels.orEmpty()) {
+            val l = raw.trim().lowercase(Locale.US)
+            if (l.startsWith("provider=")) return l.removePrefix("provider=")
+            if (l in known) return l
+        }
+        return null
+    }
+
+    fun isProviderEnabled(p: ManagedProviderInfo): Boolean = p.enabled
+
+    fun isProviderUsable(p: ManagedProviderInfo): Boolean = p.configured && p.enabled
+
+    fun credentialSourceLabel(source: String?): String = when (source) {
+        "settings" -> "Settings"
+        "bitwarden" -> "Bitwarden"
+        "environment" -> "Environment"
+        else -> source.orEmpty()
+    }
+
+    fun providerStatusLine(p: ManagedProviderInfo): String {
+        if (!p.configured) return if (p.enabled) "Not configured" else "Disabled · Not configured"
+        val cred = listOf(credentialSourceLabel(p.credentialSource), p.keyHint.orEmpty())
+            .filter { it.isNotEmpty() }
+            .joinToString(" ")
+        return listOf(
+            if (p.enabled) "Configured" else "Disabled",
+            cred,
+            p.region.orEmpty(),
+            if (!p.projectId.isNullOrEmpty()) "proj ${p.projectId}" else ""
+        ).filter { it.isNotEmpty() }.joinToString(" · ")
+    }
+
     /** Row title: the machine's name, falling back to its id. */
     fun title(m: ManagedMachine): String = m.name ?: m.id
 
@@ -300,7 +344,7 @@ object OrbManagedMachines {
     }
 
     fun sectionTitle(providers: List<ManagedProviderInfo>, machines: List<ManagedMachine>): String {
-        val multiConfigured = providers.any { it.configured && it.provider != "boat" }
+        val multiConfigured = providers.any { isProviderUsable(it) && it.provider != "boat" }
         val multiActive = machines.any { !it.provider.isNullOrEmpty() && it.provider != "boat" }
         return if (multiConfigured || multiActive) "Managed cloud" else "Managed (boat.dev)"
     }
@@ -507,6 +551,7 @@ object OrbManagedMachines {
         val prefix = when (code) {
             "budget_exceeded" -> "Daily budget reached"
             "quota_exceeded" -> "Machine limit reached"
+            "provider_disabled" -> "Provider disabled"
             else -> ""
         }
         if (prefix.isNotEmpty()) return if (message.isNotEmpty()) "$prefix: $message" else "$prefix."

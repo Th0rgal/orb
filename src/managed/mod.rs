@@ -944,6 +944,7 @@ fn register_node(machine: &ManagedMachine, core_port: u16, token: &str) {
         labels: Some(vec![
             "managed".into(),
             "trust=managed".into(),
+            format!("provider={}", machine.provider),
             format!("size={}", machine.size),
             format!("image={}", machine.image),
         ]),
@@ -973,9 +974,74 @@ struct Persisted {
     machines: Vec<ManagedMachine>,
 }
 
+pub const CANONICAL_PROVIDERS: [&str; 4] = ["boat", "hetzner", "vastai", "scaleway"];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderMeta {
+    pub credential_source: Option<String>,
+    pub key_hint: Option<String>,
+    pub region: Option<String>,
+    pub project_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct BaseProviderCredential {
+    source: String,
+    api_key: String,
+    region: Option<String>,
+    project_id: Option<String>,
+}
+
+impl std::fmt::Debug for BaseProviderCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BaseProviderCredential")
+            .field("source", &self.source)
+            .field("region", &self.region)
+            .field("project_id", &self.project_id)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct StoredProviderEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encrypted_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProviderUpdateRequest {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+pub fn mask_key_hint(secret: &str) -> String {
+    let chars: Vec<char> = secret.trim().chars().collect();
+    if chars.len() <= 6 {
+        "••••••••".to_string()
+    } else {
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("••••{tail}")
+    }
+}
+
 pub struct ManagedManager {
     pub settings: ManagedSettings,
     providers: std::sync::RwLock<HashMap<String, Arc<dyn ManagedProvider>>>,
+    provider_meta: std::sync::RwLock<HashMap<String, ProviderMeta>>,
+    base_credentials: std::sync::RwLock<HashMap<String, BaseProviderCredential>>,
+    stored_providers: std::sync::RwLock<HashMap<String, StoredProviderEntry>>,
     default_provider_name: std::sync::RwLock<String>,
     enabled_runtime: std::sync::atomic::AtomicBool,
     loops_started: std::sync::atomic::AtomicBool,
@@ -1035,6 +1101,11 @@ pub struct RuntimeSettings {
     /// reaping enforced unless `SANDBOXED_MANAGED_REAPER_DRY_RUN=1`).
     #[serde(default)]
     pub reaper_dry_run: bool,
+    /// Cloud providers explicitly disabled by the operator (e.g. `"hetzner"`).
+    /// Disabled providers refuse new spawns/resumes/forks while still reaping
+    /// and reconciling any already-live machines.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub disabled_providers: std::collections::BTreeSet<String>,
 }
 
 fn default_true() -> bool {
@@ -1056,6 +1127,7 @@ impl Default for RuntimeSettings {
                     .as_deref(),
                 Some("1" | "true" | "yes" | "on")
             ),
+            disabled_providers: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -1128,8 +1200,17 @@ pub struct ProviderCatalogEntry {
     pub provider: String,
     pub display_name: String,
     pub configured: bool,
+    pub enabled: bool,
     pub supports_free_stop: bool,
     pub supports_snapshots: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub sizes: Vec<SizeSpec>,
 }
 
@@ -1262,6 +1343,8 @@ pub fn daily_spend(machines: &[ManagedMachine], days: u32, now: DateTime<Utc>) -
         .collect()
 }
 
+type BuiltCloudProvider = (Arc<dyn ManagedProvider>, Option<String>, Option<String>);
+
 impl ManagedManager {
     pub fn new(
         settings: ManagedSettings,
@@ -1280,6 +1363,9 @@ impl ManagedManager {
         Self {
             settings,
             providers: std::sync::RwLock::new(providers),
+            provider_meta: std::sync::RwLock::new(HashMap::new()),
+            base_credentials: std::sync::RwLock::new(HashMap::new()),
+            stored_providers: std::sync::RwLock::new(HashMap::new()),
             default_provider_name: std::sync::RwLock::new(default_name),
             enabled_runtime: std::sync::atomic::AtomicBool::new(enabled_runtime),
             loops_started: std::sync::atomic::AtomicBool::new(false),
@@ -1315,6 +1401,11 @@ impl ManagedManager {
             && self.providers.read().is_ok_and(|p| !p.is_empty())
     }
 
+    pub fn is_provider_enabled(&self, name: &str) -> bool {
+        let key = name.trim().to_ascii_lowercase();
+        !self.runtime_settings().disabled_providers.contains(&key)
+    }
+
     pub fn provider_for(&self, name: &str) -> Option<Arc<dyn ManagedProvider>> {
         let key = name.trim().to_ascii_lowercase();
         let map = self.providers.read().ok()?;
@@ -1336,19 +1427,42 @@ impl ManagedManager {
             .ok()
             .map(|s| s.clone())
             .unwrap_or_else(|| "boat".into());
-        self.provider_for(&name).or_else(|| {
-            self.providers.read().ok().and_then(|m| {
-                m.get("boat")
-                    .cloned()
-                    .or_else(|| m.values().next().cloned())
-            })
-        })
+        if self.is_provider_enabled(&name) {
+            if let Some(p) = self
+                .provider_for(&name)
+                .filter(|p| self.is_provider_enabled(p.name()))
+            {
+                return Some(p);
+            }
+        }
+        let map = self.providers.read().ok()?;
+        for id in CANONICAL_PROVIDERS {
+            if self.is_provider_enabled(id) {
+                if let Some(p) = map.get(id) {
+                    return Some(Arc::clone(p));
+                }
+            }
+        }
+        map.values()
+            .find(|p| self.is_provider_enabled(p.name()))
+            .cloned()
     }
 
     pub fn provider_catalog(&self) -> Vec<ProviderCatalogEntry> {
         let Ok(map) = self.providers.read() else {
             return Vec::new();
         };
+        let metas = self
+            .provider_meta
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let stored = self
+            .stored_providers
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let disabled = self.runtime_settings().disabled_providers;
         let canonical: [(&str, bool, bool, &[SizeSpec]); 4] = [
             ("boat", true, true, &SIZES),
             ("hetzner", false, false, &hetzner::HETZNER_SIZES),
@@ -1357,13 +1471,21 @@ impl ManagedManager {
         ];
         let mut out = Vec::with_capacity(canonical.len() + 1);
         for (id, free_stop, snapshots, fallback_sizes) in canonical {
+            let enabled = !disabled.contains(id);
+            let meta = metas.get(id);
+            let st = stored.get(id);
             if let Some(p) = map.get(id) {
                 out.push(ProviderCatalogEntry {
                     provider: id.to_string(),
                     display_name: provider_display_name(id).to_string(),
                     configured: true,
+                    enabled,
                     supports_free_stop: p.supports_free_stop(),
                     supports_snapshots: p.supports_snapshots(),
+                    credential_source: meta.and_then(|m| m.credential_source.clone()),
+                    key_hint: meta.and_then(|m| m.key_hint.clone()),
+                    region: meta.and_then(|m| m.region.clone()),
+                    project_id: meta.and_then(|m| m.project_id.clone()),
                     sizes: p.sizes().to_vec(),
                 });
             } else {
@@ -1371,8 +1493,13 @@ impl ManagedManager {
                     provider: id.to_string(),
                     display_name: provider_display_name(id).to_string(),
                     configured: false,
+                    enabled,
                     supports_free_stop: free_stop,
                     supports_snapshots: snapshots,
+                    credential_source: None,
+                    key_hint: None,
+                    region: st.and_then(|s| s.region.clone()),
+                    project_id: st.and_then(|s| s.project_id.clone()),
                     sizes: fallback_sizes.to_vec(),
                 });
             }
@@ -1384,12 +1511,19 @@ impl ManagedManager {
         extras.sort();
         for key in extras {
             if let Some(p) = map.get(key) {
+                let id = p.name();
+                let meta = metas.get(id);
                 out.push(ProviderCatalogEntry {
-                    provider: p.name().to_string(),
-                    display_name: provider_display_name(p.name()).to_string(),
+                    provider: id.to_string(),
+                    display_name: provider_display_name(id).to_string(),
                     configured: true,
+                    enabled: !disabled.contains(id),
                     supports_free_stop: p.supports_free_stop(),
                     supports_snapshots: p.supports_snapshots(),
+                    credential_source: meta.and_then(|m| m.credential_source.clone()),
+                    key_hint: meta.and_then(|m| m.key_hint.clone()),
+                    region: meta.and_then(|m| m.region.clone()),
+                    project_id: meta.and_then(|m| m.project_id.clone()),
                     sizes: p.sizes().to_vec(),
                 });
             }
@@ -1397,10 +1531,23 @@ impl ManagedManager {
         out
     }
 
-    /// Register a cloud provider (from env or Bitwarden vault) in memory and
-    /// ensure the reaper/reconciler loops are active.
+    /// Register a cloud provider (from env, Bitwarden vault, or unit test) in
+    /// memory and ensure the reaper/reconciler loops are active.
     pub fn register_provider(self: &Arc<Self>, provider: Arc<dyn ManagedProvider>) {
+        self.register_provider_with_meta(provider, None);
+    }
+
+    fn insert_provider_and_meta(
+        &self,
+        provider: Arc<dyn ManagedProvider>,
+        meta: Option<ProviderMeta>,
+    ) {
         let name = provider.name().to_string();
+        if let Some(m) = meta {
+            if let Ok(mut metas) = self.provider_meta.write() {
+                metas.insert(name.clone(), m);
+            }
+        }
         if let Ok(mut map) = self.providers.write() {
             let prefer_default = name == "boat" || map.is_empty();
             map.insert(name.clone(), provider);
@@ -1419,8 +1566,338 @@ impl ManagedManager {
         if !explicitly_off {
             self.enabled_runtime
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    pub fn register_provider_with_meta(
+        self: &Arc<Self>,
+        provider: Arc<dyn ManagedProvider>,
+        meta: Option<ProviderMeta>,
+    ) {
+        self.insert_provider_and_meta(provider, meta);
+        self.ensure_background_loops();
+    }
+
+    pub fn has_base_credential(&self, provider: &str) -> bool {
+        let id = provider.trim().to_ascii_lowercase();
+        self.base_credentials
+            .read()
+            .is_ok_and(|m| m.contains_key(&id))
+    }
+
+    /// Register a startup credential (`"environment"` or `"bitwarden"`) and
+    /// reconcile it with any operator-saved `"settings"` override.
+    pub fn register_base_credential(
+        self: &Arc<Self>,
+        provider: &str,
+        source: &str,
+        api_key: impl Into<String>,
+        region: Option<String>,
+        project_id: Option<String>,
+    ) {
+        let id = provider.trim().to_ascii_lowercase();
+        let api_key = api_key.into().trim().to_string();
+        if api_key.is_empty() {
+            return;
+        }
+        if let Ok(mut base) = self.base_credentials.write() {
+            base.insert(
+                id.clone(),
+                BaseProviderCredential {
+                    source: source.to_string(),
+                    api_key,
+                    region: region
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                    project_id: project_id
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                },
+            );
+        }
+        self.sync_provider_from_sources(&id);
+        self.ensure_background_loops();
+    }
+
+    fn providers_config_path(&self) -> PathBuf {
+        self.dir.join("managed_providers.json")
+    }
+
+    fn encryption_key(&self) -> Result<[u8; 32], String> {
+        if let Ok(Some(key)) = crate::library::env_crypto::load_private_key_from_env() {
+            return Ok(key);
+        }
+        let key_path = self.dir.join("private_key");
+        if let Ok(contents) = std::fs::read_to_string(&key_path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                if let Ok(key) = crate::library::env_crypto::parse_key_hex(trimmed) {
+                    return Ok(key);
+                }
+            }
+        }
+        let key = crate::library::env_crypto::generate_private_key();
+        let hex_key = hex::encode(key);
+        let _ = std::fs::create_dir_all(&self.dir);
+        write_atomic(&key_path, hex_key.as_bytes(), true);
+        Ok(key)
+    }
+
+    fn build_cloud_provider(
+        id: &str,
+        api_key: &str,
+        region: Option<&str>,
+        project_id: Option<&str>,
+    ) -> Option<BuiltCloudProvider> {
+        match id {
+            "boat" => {
+                let base = std::env::var("BOAT_API_BASE")
+                    .unwrap_or_else(|_| boat::DEFAULT_API_BASE.to_string());
+                Some((Arc::new(boat::BoatProvider::new(base, api_key)), None, None))
+            }
+            "hetzner" => {
+                let base = std::env::var("HETZNER_API_BASE")
+                    .unwrap_or_else(|_| hetzner::DEFAULT_API_BASE.to_string());
+                let p = hetzner::HetznerProvider::with_location(
+                    base,
+                    api_key,
+                    region.map(str::to_string),
+                );
+                let loc = Some(p.default_location().to_string());
+                Some((Arc::new(p), loc, None))
+            }
+            "vastai" => {
+                let base = std::env::var("VASTAI_API_BASE")
+                    .unwrap_or_else(|_| vastai::DEFAULT_API_BASE.to_string());
+                Some((
+                    Arc::new(vastai::VastAiProvider::new(base, api_key)),
+                    None,
+                    None,
+                ))
+            }
+            "scaleway" => {
+                let base = std::env::var("SCALEWAY_API_BASE")
+                    .unwrap_or_else(|_| scaleway::DEFAULT_API_BASE.to_string());
+                let p = scaleway::ScalewayProvider::with_config(
+                    base,
+                    api_key,
+                    project_id.map(str::to_string),
+                    region.map(str::to_string),
+                );
+                let zone = Some(p.default_zone().to_string());
+                let proj = p.configured_project_id().map(str::to_string);
+                Some((Arc::new(p), zone, proj))
+            }
+            _ => None,
+        }
+    }
+
+    fn sync_provider_from_sources(&self, id: &str) {
+        let stored = self
+            .stored_providers
+            .read()
+            .ok()
+            .and_then(|m| m.get(id).cloned());
+        let base = self
+            .base_credentials
+            .read()
+            .ok()
+            .and_then(|m| m.get(id).cloned());
+
+        let settings_key = stored
+            .as_ref()
+            .and_then(|s| s.encrypted_api_key.as_deref())
+            .and_then(|enc| {
+                let key = self.encryption_key().ok()?;
+                crate::library::env_crypto::decrypt_value(&key, enc)
+                    .ok()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            });
+
+        let (effective_key, cred_source, key_hint) = if let Some(k) = settings_key {
+            let hint = stored
+                .as_ref()
+                .and_then(|s| s.key_hint.clone())
+                .unwrap_or_else(|| mask_key_hint(&k));
+            (Some(k), Some("settings".to_string()), Some(hint))
+        } else if let Some(b) = &base {
+            (
+                Some(b.api_key.clone()),
+                Some(b.source.clone()),
+                Some(mask_key_hint(&b.api_key)),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        let region = stored
+            .as_ref()
+            .and_then(|s| s.region.clone())
+            .or_else(|| base.as_ref().and_then(|b| b.region.clone()));
+        let project_id = stored
+            .as_ref()
+            .and_then(|s| s.project_id.clone())
+            .or_else(|| base.as_ref().and_then(|b| b.project_id.clone()));
+
+        if let Some(api_key) = effective_key {
+            if let Some((provider, resolved_region, resolved_project)) =
+                Self::build_cloud_provider(id, &api_key, region.as_deref(), project_id.as_deref())
+            {
+                self.insert_provider_and_meta(
+                    provider,
+                    Some(ProviderMeta {
+                        credential_source: cred_source,
+                        key_hint,
+                        region: resolved_region,
+                        project_id: resolved_project,
+                    }),
+                );
+            }
+        } else {
+            if let Ok(mut map) = self.providers.write() {
+                map.remove(id);
+                if let Ok(mut def) = self.default_provider_name.write() {
+                    if def.as_str() == id {
+                        *def = map
+                            .get("boat")
+                            .map(|p| p.name().to_string())
+                            .or_else(|| map.keys().next().cloned())
+                            .unwrap_or_else(|| "boat".into());
+                    }
+                }
+            }
+            if let Ok(mut metas) = self.provider_meta.write() {
+                metas.remove(id);
+            }
+        }
+    }
+
+    pub fn load_stored_providers(&self) {
+        if let Some(parsed) = std::fs::read(self.providers_config_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<HashMap<String, StoredProviderEntry>>(&b).ok())
+        {
+            if let Ok(mut slot) = self.stored_providers.write() {
+                *slot = parsed;
+            }
+        }
+        for id in CANONICAL_PROVIDERS {
+            let should_sync = self
+                .stored_providers
+                .read()
+                .is_ok_and(|m| m.contains_key(id))
+                || self.has_base_credential(id);
+            if should_sync {
+                self.sync_provider_from_sources(id);
+            }
+        }
+    }
+
+    fn persist_stored_providers(&self) {
+        let Ok(map) = self.stored_providers.read() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&self.dir);
+        write_atomic(
+            &self.providers_config_path(),
+            &serde_json::to_vec_pretty(&*map).unwrap_or_default(),
+            true,
+        );
+    }
+
+    /// Update a provider's enable/disable state and/or encrypted credentials &
+    /// regional settings at runtime without restarting Core.
+    pub fn update_provider_config(
+        self: &Arc<Self>,
+        provider: &str,
+        patch: ProviderUpdateRequest,
+    ) -> Result<ProviderCatalogEntry, ManagedError> {
+        let id = provider.trim().to_ascii_lowercase();
+        if !CANONICAL_PROVIDERS.contains(&id.as_str()) {
+            return Err(ManagedError::new(
+                "unknown_provider",
+                400,
+                format!(
+                    "Unknown provider '{provider}'; supported: {}",
+                    CANONICAL_PROVIDERS.join(", ")
+                ),
+            ));
+        }
+
+        if let Some(enabled) = patch.enabled {
+            let mut rt = self.runtime_settings();
+            if enabled {
+                rt.disabled_providers.remove(&id);
+            } else {
+                rt.disabled_providers.insert(id.clone());
+            }
+            self.set_runtime_settings(rt);
+        }
+
+        let mut changed_stored = false;
+        let mut entry = self
+            .stored_providers
+            .read()
+            .ok()
+            .and_then(|m| m.get(&id).cloned())
+            .unwrap_or_default();
+
+        if let Some(raw_key) = patch.api_key {
+            let trimmed = raw_key.trim();
+            if trimmed.is_empty() {
+                entry.encrypted_api_key = None;
+                entry.key_hint = None;
+            } else {
+                let enc_key = self
+                    .encryption_key()
+                    .map_err(|e| ManagedError::new("crypto_error", 500, e))?;
+                let encrypted = crate::library::env_crypto::encrypt_value(&enc_key, trimmed)
+                    .map_err(|e| ManagedError::new("crypto_error", 500, e.to_string()))?;
+                entry.encrypted_api_key = Some(encrypted);
+                entry.key_hint = Some(mask_key_hint(trimmed));
+            }
+            changed_stored = true;
+        }
+        if let Some(raw_region) = patch.region {
+            let trimmed = raw_region.trim();
+            entry.region = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+            changed_stored = true;
+        }
+        if let Some(raw_proj) = patch.project_id {
+            let trimmed = raw_proj.trim();
+            entry.project_id = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+            changed_stored = true;
+        }
+
+        if changed_stored {
+            if let Ok(mut slot) = self.stored_providers.write() {
+                let is_empty = entry.encrypted_api_key.is_none()
+                    && entry.region.is_none()
+                    && entry.project_id.is_none();
+                if is_empty {
+                    slot.remove(&id);
+                } else {
+                    slot.insert(id.clone(), entry);
+                }
+            }
+            self.persist_stored_providers();
+            self.sync_provider_from_sources(&id);
             self.ensure_background_loops();
         }
+
+        self.provider_catalog()
+            .into_iter()
+            .find(|p| p.provider == id)
+            .ok_or_else(|| ManagedError::new("unknown_provider", 404, "Provider not found"))
     }
 
     pub(crate) fn ensure_background_loops(self: &Arc<Self>) {
@@ -1728,6 +2205,7 @@ impl ManagedManager {
                 *r = rt;
             }
         }
+        self.load_stored_providers();
     }
 
     async fn persist(&self) {
@@ -2049,7 +2527,7 @@ impl ManagedManager {
                                 "invalid_size",
                                 400,
                                 format!(
-                                    "Unknown Hetzner size '{name}'; use cpx21, cpx31, cpx41, cax31, cpx51 or ccx33"
+                                    "Unknown Hetzner size '{name}'; use cpx22, cpx32, cpx42, cax31, cpx52, cpx62, ccx33 or ccx43"
                                 ),
                             )
                         })
@@ -2268,8 +2746,9 @@ impl ManagedManager {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let any_configured = self.providers.read().is_ok_and(|p| !p.is_empty());
         let provider = if let Some(name) = requested_provider {
-            self.provider_for(name).ok_or_else(|| {
+            let p = self.provider_for(name).ok_or_else(|| {
                 let configured: Vec<String> = self
                     .provider_catalog()
                     .into_iter()
@@ -2288,10 +2767,22 @@ impl ManagedManager {
                         }
                     ),
                 )
-            })?
+            })?;
+            if !self.is_provider_enabled(p.name()) {
+                return Err(ManagedError::new(
+                    "provider_disabled",
+                    409,
+                    format!(
+                        "Provider '{}' is disabled in Settings",
+                        provider_display_name(p.name())
+                    ),
+                ));
+            }
+            p
         } else if let Some(of) = req.fork_of.as_deref() {
             if let Some(src) = self.get(of).await {
-                self.provider_for(&src.provider)
+                let p = self
+                    .provider_for(&src.provider)
                     .or_else(|| self.default_provider())
                     .ok_or_else(|| {
                         ManagedError::new(
@@ -2299,15 +2790,46 @@ impl ManagedManager {
                             503,
                             "No managed-machine provider is configured",
                         )
-                    })?
+                    })?;
+                if !self.is_provider_enabled(p.name()) {
+                    return Err(ManagedError::new(
+                        "provider_disabled",
+                        409,
+                        format!(
+                            "Provider '{}' is disabled in Settings",
+                            provider_display_name(p.name())
+                        ),
+                    ));
+                }
+                p
             } else {
                 self.default_provider().ok_or_else(|| {
-                    ManagedError::new("disabled", 503, "No managed-machine provider is configured")
+                    if any_configured {
+                        ManagedError::new(
+                            "provider_disabled",
+                            409,
+                            "All configured machine providers are disabled in Settings",
+                        )
+                    } else {
+                        ManagedError::new(
+                            "disabled",
+                            503,
+                            "No managed-machine provider is configured",
+                        )
+                    }
                 })?
             }
         } else {
             self.default_provider().ok_or_else(|| {
-                ManagedError::new("disabled", 503, "No managed-machine provider is configured")
+                if any_configured {
+                    ManagedError::new(
+                        "provider_disabled",
+                        409,
+                        "All configured machine providers are disabled in Settings",
+                    )
+                } else {
+                    ManagedError::new("disabled", 503, "No managed-machine provider is configured")
+                }
             })?
         };
         if (req.fork_of.is_some() || req.from_snapshot.is_some()) && !provider.supports_snapshots()
@@ -4155,33 +4677,59 @@ fn write_atomic(path: &std::path::Path, bytes: &[u8], private: bool) {
 /// Build the global manager, load the registry and start the reaper and
 /// reconciler loops. Safe to call once at startup.
 pub async fn start(working_dir: &std::path::Path, core_port: u16) -> Arc<ManagedManager> {
-    let boat_provider =
-        boat::BoatProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
-    let hetzner_provider =
-        hetzner::HetznerProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
-    let vastai_provider =
-        vastai::VastAiProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
-    let scaleway_provider =
-        scaleway::ScalewayProvider::from_env().map(|p| Arc::new(p) as Arc<dyn ManagedProvider>);
-    let any_provider = boat_provider.is_some()
-        || hetzner_provider.is_some()
-        || vastai_provider.is_some()
-        || scaleway_provider.is_some();
+    let take_env = |keys: &[&str]| -> Option<String> {
+        let val = keys.iter().find_map(|k| {
+            std::env::var(k)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        });
+        for k in keys {
+            std::env::remove_var(k);
+        }
+        val
+    };
+    let boat_key = take_env(&["BOAT_API_KEY"]);
+    let hetzner_key = take_env(&["HETZNER_CLOUD_APIKEY", "HCLOUD_TOKEN"]);
+    let vastai_key = take_env(&["VASTAI_API_KEY", "VAST_API_KEY"]);
+    let scaleway_key = take_env(&["SCALEWAY_SECRET_KEY", "SCW_SECRET_KEY"]);
+    std::env::remove_var("SCALEWAY_KEY_ID");
+    std::env::remove_var("SCW_ACCESS_KEY");
+
+    let hetzner_loc = std::env::var("HETZNER_DEFAULT_LOCATION")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let scaleway_zone = std::env::var("SCALEWAY_DEFAULT_ZONE")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let scaleway_proj = std::env::var("SCALEWAY_PROJECT_ID")
+        .or_else(|_| std::env::var("SCW_DEFAULT_PROJECT_ID"))
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
+    let any_provider = boat_key.is_some()
+        || hetzner_key.is_some()
+        || vastai_key.is_some()
+        || scaleway_key.is_some();
     let settings = ManagedSettings::from_env(any_provider);
-    let manager = Arc::new(ManagedManager::new(
-        settings,
-        boat_provider,
-        working_dir,
-        core_port,
-    ));
-    if let Some(p) = hetzner_provider {
-        manager.register_provider(p);
+    let manager = Arc::new(ManagedManager::new(settings, None, working_dir, core_port));
+    if let Some(key) = boat_key {
+        manager.register_base_credential("boat", "environment", key, None, None);
     }
-    if let Some(p) = vastai_provider {
-        manager.register_provider(p);
+    if let Some(key) = hetzner_key {
+        manager.register_base_credential("hetzner", "environment", key, hetzner_loc, None);
     }
-    if let Some(p) = scaleway_provider {
-        manager.register_provider(p);
+    if let Some(key) = vastai_key {
+        manager.register_base_credential("vastai", "environment", key, None, None);
+    }
+    if let Some(key) = scaleway_key {
+        manager.register_base_credential(
+            "scaleway",
+            "environment",
+            key,
+            scaleway_zone,
+            scaleway_proj,
+        );
     }
     manager.load().await;
     let _ = MANAGER.set(Arc::clone(&manager));

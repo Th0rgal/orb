@@ -2,6 +2,7 @@ import { HARNESS_IDS, harnessName } from "./harnesses";
 import { cloudAccounts, cloudNames, type CloudAccount } from "./cloudAgentApi";
 import { ErrorToast } from "./toast";
 import { ExecutionSettings } from "./ExecutionSettings";
+import { MachineProvidersCard } from "./ManagedMachines";
 import { Select } from "./Select";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createEffect, createSignal, on, onMount, type JSX } from "solid-js";
@@ -301,6 +302,7 @@ export function LocalAgentsSettings() {
       <div class="s-inner">
         <LocalAgentsCard />
         <Show when={isConnected()}>
+          <MachineProvidersCard inSettings />
           <section class="s-sec">
             <h3>Concurrency</h3>
             <details class="s-card execution-disclosure" onToggle={e => { if (e.currentTarget.open) setExecutionMounted(true); }}>

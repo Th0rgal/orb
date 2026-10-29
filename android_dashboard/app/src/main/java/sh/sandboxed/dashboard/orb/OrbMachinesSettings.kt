@@ -72,6 +72,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -294,8 +295,18 @@ fun OrbMachinesSettingsPage(
                                                     overflow = TextOverflow.Ellipsis,
                                                     modifier = Modifier.weight(1f, fill = false)
                                                 )
-                                                if (OrbManagedMachines.isManagedNode(nodeId, OrbManagedMachines.nodeLabels(node))) {
+                                                val nodeLabels = OrbManagedMachines.nodeLabels(node)
+                                                if (OrbManagedMachines.isManagedNode(nodeId, nodeLabels)) {
                                                     OrbManagedBadge()
+                                                    val nodeProv = OrbManagedMachines.nodeProvider(nodeLabels)
+                                                    if (!nodeProv.isNullOrEmpty() && nodeProv != "boat") {
+                                                        Text(
+                                                            text = OrbManagedMachines.providerLabel(nodeProv),
+                                                            color = OrbStyle.inboxBlue,
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Medium
+                                                        )
+                                                    }
                                                 }
                                             }
                                             Text(
@@ -410,6 +421,7 @@ internal fun OrbKeyValueLine(label: String, value: String) {
 internal fun OrbMiniField(
     label: String,
     value: String,
+    secret: Boolean = false,
     onValueChange: (String) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -428,6 +440,7 @@ internal fun OrbMiniField(
                 textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                 cursorBrush = SolidColor(Color.White),
                 singleLine = true,
+                visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
                 modifier = Modifier.fillMaxWidth()
             )
         }
