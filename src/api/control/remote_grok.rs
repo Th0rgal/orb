@@ -2963,7 +2963,7 @@ pub(crate) async fn continue_on_node(
     message_id: Option<Uuid>,
 ) -> Result<Mission, (StatusCode, String)> {
     continue_inner(
-        state, control, user_id, mission_id, placement, content, message_id, false,
+        state, control, user_id, mission_id, placement, content, message_id, false, None,
     )
     .await
 }
@@ -2985,6 +2985,31 @@ pub(super) async fn deliver_queued(
         None,
         Some(id),
         true,
+        None,
+    )
+    .await
+}
+
+/// Replay only the exact durable wait observed by the timer. The check runs
+/// under the same admission lock as manual Resume and Stop.
+pub(super) async fn continue_recovery_on_node(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    mission_id: Uuid,
+    placement: RemotePlacement,
+    content: Option<String>,
+    wait: &super::usage_limit_wait::RemoteWait,
+) -> Result<Mission, (StatusCode, String)> {
+    continue_inner(
+        state,
+        control,
+        "usage-limit-replay",
+        mission_id,
+        placement,
+        content,
+        None,
+        false,
+        Some(wait),
     )
     .await
 }
@@ -2999,6 +3024,7 @@ async fn continue_inner(
     mut content: Option<String>,
     message_id: Option<Uuid>,
     queued: bool,
+    recovery: Option<&super::usage_limit_wait::RemoteWait>,
 ) -> Result<Mission, (StatusCode, String)> {
     // Node I/O may time out. Never hold global admission while observing a
     // previously submitted job; its queue identity is revalidated below.
@@ -3051,6 +3077,20 @@ async fn continue_inner(
         .await
         .map_err(internal)?
         .ok_or((StatusCode::CONFLICT, "Remote placement disappeared".into()))?;
+    if let Some(expected) = recovery {
+        if !super::usage_limit_wait::is_waiting_remote(&mission)
+            || expected.failed_job_id != Some(placement.job_id)
+            || super::usage_limit_wait::remote_wait(&state.config.working_dir, mission_id)
+                .await
+                .as_ref()
+                != Some(expected)
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "Scheduled recovery was superseded".into(),
+            ));
+        }
+    }
     if queued {
         let entry = super::remote_queue::validate(
             &state.projects,

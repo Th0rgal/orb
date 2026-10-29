@@ -25,6 +25,8 @@
 //! Note: The agent has **full system access**. It can read/write any file, execute any command,
 //! and search anywhere on the machine. The `WORKING_DIR` is just the default for relative paths.
 
+pub const DEFAULT_PORT: u16 = 3000;
+
 use serde::Deserialize;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -439,7 +441,7 @@ impl Config {
         let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
 
         let port = std::env::var("PORT")
-            .unwrap_or_else(|_| "3000".to_string())
+            .unwrap_or_else(|_| DEFAULT_PORT.to_string())
             .parse()
             .map_err(|e| ConfigError::InvalidValue("PORT".to_string(), format!("{}", e)))?;
 
@@ -698,7 +700,7 @@ impl Config {
             default_model: None,
             working_dir,
             host: "127.0.0.1".to_string(),
-            port: 3000,
+            port: DEFAULT_PORT,
             max_iterations: 50,
             stale_mission_hours: 2,
             max_parallel_missions: 1,

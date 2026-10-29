@@ -1608,10 +1608,46 @@ impl ProxyTokens {
     }
 }
 
+/// A clean socket EOF is not evidence of native protocol completion.
+#[derive(Debug, Clone, Copy)]
+struct NativeStreamState {
+    protocol: NativeProtocol,
+    completed: bool,
+    errored: bool,
+}
+
+impl NativeStreamState {
+    fn observe(&mut self, kind: &str, value: Option<&serde_json::Value>) {
+        if kind == "error" || value.is_some_and(|v| v.get("error").is_some_and(|e| !e.is_null())) {
+            self.errored = true;
+        }
+        match (self.protocol, kind) {
+            (NativeProtocol::Responses, "response.failed" | "response.incomplete") => {
+                self.errored = true
+            }
+            (NativeProtocol::Responses, "response.completed") if value.is_some() => {
+                self.completed = true;
+                if value
+                    .and_then(|v| v.pointer("/response/status"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|status| status != "completed")
+                {
+                    self.errored = true;
+                }
+            }
+            (NativeProtocol::AnthropicMessages, "message_stop") if value.is_some() => {
+                self.completed = true
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Accumulates usage across SSE events or one JSON body. Values are maxed,
 /// not summed: providers repeat cumulative counts across events.
 #[derive(Debug, Clone, Copy, Default)]
 struct UsageAccumulator {
+    native: Option<NativeStreamState>,
     input: u64,
     output: u64,
     cache_creation: u64,
@@ -1707,9 +1743,11 @@ fn tokens_with_body_cache(input: u64, output: u64, body: &[u8]) -> ProxyTokens {
 /// Ledger fields that come from the resolved route.
 #[derive(Debug, Clone)]
 struct ProxyUsageTarget {
+    observed_at: String,
     model: String,
     provider: Option<String>,
     account_id: Option<uuid::Uuid>,
+    account_bound: bool,
     attribution: UsageAttribution,
 }
 
@@ -1718,9 +1756,12 @@ fn proxy_usage_target(
     attribution: &UsageAttribution,
 ) -> ProxyUsageTarget {
     ProxyUsageTarget {
+        observed_at: chrono::Utc::now().to_rfc3339(),
         model: proxy_usage_model(entry),
         provider: Some(entry.provider_id.clone()),
         account_id: Some(entry.account_id),
+        // Codex OAuth is pinned before dispatch; API credentials select an account directly.
+        account_bound: entry.provider_id == "openai" || entry.api_key.is_some(),
         attribution: attribution.clone(),
     }
 }
@@ -1738,9 +1779,11 @@ fn proxy_usage_record(
     };
     let cost_cents = crate::cost::cost_cents_from_usage(&model, &usage);
     crate::api::mission_store::ProxyUsageRecord {
+        observed_at: Some(target.observed_at.clone()),
         model,
         provider: target.provider.clone(),
         account_id: target.account_id,
+        account_bound: target.account_bound,
         api_key_id: target.attribution.api_key_id,
         api_key_name: target.attribution.api_key_name.clone(),
         mission_id: target.attribution.mission_id,
@@ -1839,7 +1882,7 @@ fn native_request_requires_server_state(protocol: NativeProtocol, body: &[u8]) -
     }
 }
 
-async fn responses(
+pub(crate) async fn responses(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
     body: bytes::Bytes,
@@ -2104,6 +2147,8 @@ async fn native_protocol_proxy(
         }
     }
 
+    let outcome = OutcomeCtx::new(&chain_id, is_stream);
+    let mut native_failures = Vec::new();
     let mut supported_entries = 0usize;
     let mut last_upstream_error: Option<(StatusCode, HeaderMap, bytes::Bytes)> = None;
     let native_chain_length = (entries.len() as u32).max(1);
@@ -2145,49 +2190,18 @@ async fn native_protocol_proxy(
             let mut request = parsed_body.clone();
             request["service_tier"] = serde_json::json!(tier.wire());
             body = bytes::Bytes::from(serde_json::to_vec(&request).expect("request serialization"));
-            if super::oauth_owner::codex_via_cli_proxy().is_some() {
-                let accounts = super::control::speed::eligible_proxy_accounts(
-                    &state.config.working_dir,
-                    &requested_model,
-                    tier,
-                )
-                .await;
-                let Some(account) = accounts
-                    .iter()
-                    .find(|account| account.provider_id == entry.account_id)
-                else {
-                    continue;
-                };
-                let prefix = match super::control::speed::proxy_prefix(
-                    &state.config.working_dir,
-                    account,
-                    &requested_model,
-                )
-                .await
-                {
-                    Ok(prefix) => prefix,
-                    Err(error) => {
-                        return error_response(
-                            StatusCode::BAD_REQUEST,
-                            error,
-                            "unsupported_service_tier",
-                        )
-                    }
-                };
-                request["model"] = serde_json::json!(format!(
-                    "{prefix}/{}",
-                    requested_model
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&requested_model)
-                ));
-                body = bytes::Bytes::from(
-                    serde_json::to_vec(&request).expect("request serialization"),
-                );
-            }
         }
         let provider_type =
             ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
+        // A local Codex OAuth capability cannot expand into API-key billing.
+        if internal_secret
+            && headers
+                .get("x-sandboxed-codex-subscription-only")
+                .is_some_and(|v| v == "true")
+            && (provider_type != ProviderType::OpenAI || entry.api_key.is_some())
+        {
+            continue;
+        }
         if !native_protocol_supported(
             protocol,
             provider_type,
@@ -2322,14 +2336,28 @@ async fn native_protocol_proxy(
         {
             return error_response(StatusCode::BAD_REQUEST, "This route cannot guarantee the selected cyber program and model. Use a direct OpenAI route or choose Automatic explicitly.".into(), "unsupported_access_program");
         }
-        let routed_model = if speed_tier.is_some() && via_cli_proxy {
-            serde_json::from_slice::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|value| value["model"].as_str().map(str::to_owned))
+        let pinned_model = if via_cli_proxy && provider_type == ProviderType::OpenAI {
+            match super::cli_proxy_routing::qualified_model(
+                &state.config.working_dir,
+                entry.account_id,
+                &entry.model_id,
+            )
+            .await
+            {
+                Ok(model) => Some(model),
+                Err(error) => {
+                    record_native_failures(&state, &outcome, native_failures, true);
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        error,
+                        "account_binding_unavailable",
+                    );
+                }
+            }
         } else {
             None
         };
-        let rewrite_model_id = if let Some(model) = routed_model.as_deref() {
+        let rewrite_model_id = if let Some(model) = pinned_model.as_deref() {
             model
         } else if via_cli_proxy && provider_type == ProviderType::Xai {
             cli_proxy_xai_model_id(&entry.model_id)
@@ -2436,6 +2464,18 @@ async fn native_protocol_proxy(
                     .health_tracker
                     .record_entry_failure(entry, reason, None)
                     .await;
+                native_failures.push(
+                    record_native_failure(
+                        &state,
+                        &outcome,
+                        entry,
+                        entry_idx,
+                        entries.len(),
+                        reason,
+                        None,
+                    )
+                    .await,
+                );
                 continue;
             }
         };
@@ -2451,6 +2491,18 @@ async fn native_protocol_proxy(
                 .health_tracker
                 .record_entry_failure(entry, CooldownReason::AuthError, None)
                 .await;
+            native_failures.push(
+                record_native_failure(
+                    &state,
+                    &outcome,
+                    entry,
+                    entry_idx,
+                    entries.len(),
+                    CooldownReason::AuthError,
+                    Some(status.as_u16()),
+                )
+                .await,
+            );
             continue;
         }
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
@@ -2491,10 +2543,28 @@ async fn native_protocol_proxy(
                         .await;
                 }
             }
+            native_failures.push(
+                record_native_failure(
+                    &state,
+                    &outcome,
+                    entry,
+                    entry_idx,
+                    entries.len(),
+                    reason,
+                    Some(status.as_u16()),
+                )
+                .await,
+            );
             last_upstream_error = Some((status, response_headers, response_body));
             continue;
         }
         let response_headers = upstream.headers().clone();
+        record_native_failures(
+            &state,
+            &outcome,
+            std::mem::take(&mut native_failures),
+            false,
+        );
         if is_stream && status.is_success() {
             let liveness_mission_id = liveness_mission(&attribution);
             let upstream_stream = upstream.bytes_stream().map(|item| {
@@ -2513,7 +2583,19 @@ async fn native_protocol_proxy(
                     proxy_usage_target(entry, &attribution),
                 )),
                 liveness_mission_id,
-                None,
+                Some(proxy_outcome_sink(
+                    state.clone(),
+                    outcome.record(
+                        Some(entry),
+                        reliability::OutcomeStatus::Ok,
+                        Some(status.as_u16()),
+                        None,
+                        entry_idx as u32,
+                        false,
+                    ),
+                    outcome.started,
+                )),
+                Some(protocol),
             );
             let mut response = (status, Body::from_stream(tracked_stream)).into_response();
             for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
@@ -2537,6 +2619,21 @@ async fn native_protocol_proxy(
                 );
             }
         };
+        record_proxy_outcomes(
+            &state,
+            vec![outcome.record(
+                Some(entry),
+                if status.is_success() {
+                    reliability::OutcomeStatus::Ok
+                } else {
+                    reliability::OutcomeStatus::ClientError
+                },
+                Some(status.as_u16()),
+                None,
+                entry_idx as u32,
+                false,
+            )],
+        );
         if status.is_success() {
             state.health_tracker.record_entry_success(entry).await;
             if let Some(tokens) = native_response_usage(&response_body) {
@@ -2556,6 +2653,7 @@ async fn native_protocol_proxy(
         return response;
     }
 
+    record_native_failures(&state, &outcome, native_failures, true);
     if let Some((status, response_headers, response_body)) = last_upstream_error {
         return preserved_upstream_error_response(status, &response_headers, response_body);
     }
@@ -3117,9 +3215,11 @@ async fn chat_completions_routed(
             super::grok_tool_bridge::handle_chat_completion(&state.config.working_dir, &body).await;
         if let Some(usage) = handled.usage {
             let target = ProxyUsageTarget {
+                observed_at: chrono::Utc::now().to_rfc3339(),
                 provider: crate::api::usage_summary::infer_provider_for_model(&usage.model),
                 model: usage.model,
                 account_id: None,
+                account_bound: false,
                 attribution: attribution.clone(),
             };
             let tokens = ProxyTokens {
@@ -3406,7 +3506,23 @@ async fn chat_completions_routed(
                 build_cli_proxy_headers(),
             )
         } else if use_openai_oauth_cli_proxy_adapter {
-            let upstream_body = match rewrite_model(&body, &entry.model_id) {
+            let model = match super::cli_proxy_routing::qualified_model(
+                &state.config.working_dir,
+                entry.account_id,
+                &entry.model_id,
+            )
+            .await
+            {
+                Ok(model) => model,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        error,
+                        "account_binding_unavailable",
+                    )
+                }
+            };
+            let upstream_body = match rewrite_model(&body, &model) {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::error!("Failed to rewrite model in request body: {}", e);
@@ -4009,6 +4125,7 @@ async fn chat_completions_routed(
                     )),
                     liveness_mission_id,
                     outcome_sink,
+                    None,
                 );
 
                 let success_provider = entry.provider_id.clone();
@@ -4366,6 +4483,7 @@ async fn chat_completions_routed(
                             )),
                             liveness_mission_id,
                             outcome_sink,
+                            None,
                         );
 
                         let success_provider = entry.provider_id.clone();
@@ -5082,6 +5200,7 @@ async fn chat_completions_routed(
                         )),
                         liveness_mission_id,
                         outcome_sink,
+                        None,
                     );
 
                     return (
@@ -6845,25 +6964,39 @@ fn observe_sse_event(event: &[u8], acc: &mut UsageAccumulator) {
     let Ok(text) = std::str::from_utf8(event) else {
         return;
     };
-    for line in text.lines() {
-        let Some(data) = line.trim_end_matches('\r').strip_prefix("data: ") else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-            continue;
-        };
-        for usage in [
-            value.get("usage"),
-            value.pointer("/response/usage"),
-            value.pointer("/message/usage"),
-            value.pointer("/delta/usage"),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if acc.observe(usage) {
-                return;
-            }
+    let kind = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("event:").map(str::trim))
+        .next_back()
+        .unwrap_or("");
+    if let Some(native) = acc.native.as_mut() {
+        native.observe(kind, None);
+    }
+    let data = text
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("data:")
+                .map(|data| data.strip_prefix(' ').unwrap_or(data))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return;
+    };
+    if let Some(native) = acc.native.as_mut() {
+        native.observe(value["type"].as_str().unwrap_or(kind), Some(&value));
+    }
+    for usage in [
+        value.get("usage"),
+        value.pointer("/response/usage"),
+        value.pointer("/message/usage"),
+        value.pointer("/delta/usage"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if acc.observe(usage) {
+            break;
         }
     }
 }
@@ -6913,6 +7046,7 @@ fn track_stream_health(
     usage_sink: Option<Box<dyn FnOnce(ProxyTokens) + Send>>,
     liveness_mission_id: Option<uuid::Uuid>,
     outcome_sink: Option<StreamEndSink>,
+    native_protocol: Option<NativeProtocol>,
 ) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     // Built once the first content chunk was peeked: that is this attempt's
     // time to first content. The cell rides along until the stream ends.
@@ -6937,7 +7071,10 @@ fn track_stream_health(
         let mut errored = false;
         let mut received_any = false;
         let mut idle_timeout = false;
-        let mut usage = UsageAccumulator::default();
+        let mut usage = UsageAccumulator {
+            native: native_protocol.map(|protocol| NativeStreamState { protocol, completed: false, errored: false }),
+            ..Default::default()
+        };
         let mut sse_buffer = Vec::new();
         // Wait budget for the next translated item; raw upstream bytes that
         // the translator swallowed (keepalives, thought-only chunks) extend it.
@@ -6990,9 +7127,10 @@ fn track_stream_health(
                 }
             }
         }
-        if !sse_buffer.is_empty() {
+        if !sse_buffer.is_empty() && native_protocol.is_none() {
             observe_sse_event(&sse_buffer, &mut usage);
         }
+        errored |= usage.native.is_some_and(|native| native.errored || !native.completed);
         let tokens = usage.tokens();
         if let Some(cell) = &timing {
             cell.set_tokens(usage.input, tokens.output, tokens.cache_read, usage.reasoning);
@@ -9083,6 +9221,58 @@ async fn resend_stream(
         .ok()?
         .ok()?;
     response.status().is_success().then_some(response)
+}
+
+/// Durable native-protocol attempt evidence uses the same ledger as chat.
+async fn record_native_failure(
+    state: &Arc<super::routes::AppState>,
+    outcome: &OutcomeCtx,
+    entry: &crate::provider_health::ResolvedEntry,
+    index: usize,
+    length: usize,
+    reason: CooldownReason,
+    http: Option<u16>,
+) -> crate::api::mission_store::ProxyOutcomeRecord {
+    let row = outcome.record(
+        Some(entry),
+        attempt_status(reason, http),
+        http,
+        None,
+        index as u32,
+        true,
+    );
+    state
+        .health_tracker
+        .record_fallback_event(crate::provider_health::FallbackEvent {
+            timestamp: chrono::Utc::now(),
+            chain_id: outcome.chain_id.clone(),
+            from_provider: entry.provider_id.clone(),
+            from_model: entry.model_id.clone(),
+            from_account_id: entry.account_id,
+            reason,
+            cooldown_secs: None,
+            to_provider: None,
+            latency_ms: None,
+            attempt_number: index as u32 + 1,
+            chain_length: length as u32,
+        })
+        .await;
+    row
+}
+
+fn record_native_failures(
+    state: &Arc<super::routes::AppState>,
+    outcome: &OutcomeCtx,
+    mut rows: Vec<crate::api::mission_store::ProxyOutcomeRecord>,
+    exhausted: bool,
+) {
+    if exhausted {
+        if let Some(last) = rows.last_mut() {
+            last.superseded = false;
+            last.total_ms = outcome.started.elapsed().as_millis() as u64;
+        }
+    }
+    record_proxy_outcomes(state, rows);
 }
 
 /// Outcome bookkeeping for one `/v1/chat/completions` request.
@@ -12159,6 +12349,7 @@ mod tests {
             None,
             None,
             sink(seen.clone()),
+            None,
         );
         let _: Vec<_> = tracked.collect().await;
         let failing = futures::stream::iter(vec![
@@ -12174,12 +12365,44 @@ mod tests {
             None,
             None,
             sink(seen.clone()),
+            None,
         );
         let _: Vec<_> = tracked.collect().await;
         assert_eq!(
             *seen.lock().unwrap(),
             vec![StreamEnd::Completed, StreamEnd::Errored]
         );
+    }
+
+    #[tokio::test]
+    async fn native_stream_outcomes_require_successful_terminal_events() {
+        use NativeProtocol::{AnthropicMessages, Responses};
+        for (protocol, wire, success) in [
+            (Responses, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n", true),
+            (Responses, "event: response.completed\r\ndata:{\r\ndata: \"response\":{\"status\":\"completed\"}}\r\n\r\n", true),
+            (Responses, "data: {\"type\":\"response.failed\"}\n\n", false),
+            (Responses, "data: {\"type\":\"response.incomplete\"}\n\n", false),
+            (Responses, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n", false),
+            (Responses, ": keepalive\n\n", false),
+            (Responses, "data: {\"type\":\"response.completed\"}", false),
+            (Responses, "event: response.completed\ndata: {\n\n", false),
+            (Responses, "data: {\"type\":\"message_stop\"}\n\n", false),
+            (AnthropicMessages, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", true),
+            (AnthropicMessages, "event: error\ndata: {\"error\":{\"type\":\"overloaded_error\"}}\n\n", false),
+            (AnthropicMessages, "data: {\"type\":\"content_block_delta\"}\n\n", false),
+            (AnthropicMessages, "data: {\"type\":\"message_stop\"}\n\nevent: error\ndata: {}\n\n", false),
+        ] {
+            let tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
+            let account = uuid::Uuid::new_v4();
+            let observed = Arc::new(std::sync::Mutex::new(None));
+            let captured = observed.clone();
+            let chunks = wire.as_bytes().chunks(2).map(bytes::Bytes::copy_from_slice).map(Ok::<_,std::io::Error>).collect::<Vec<_>>();
+            let tracked = track_stream_health(futures::stream::iter(chunks), tracker.clone(), account, None, None, None, None, Some(Box::new(move |end| *captured.lock().unwrap() = Some(end))), Some(protocol));
+            let output = tracked.collect::<Vec<_>>().await.into_iter().flat_map(|chunk| chunk.unwrap().to_vec()).collect::<Vec<_>>();
+            assert_eq!(output, wire.as_bytes(), "native bytes must remain unchanged");
+            assert_eq!(*observed.lock().unwrap(), Some(if success { StreamEnd::Completed } else { StreamEnd::Errored }), "{protocol:?}: {wire}");
+            assert_eq!(tracker.get_health(account).await.last_failure_reason.is_none(), success);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -12201,6 +12424,7 @@ mod tests {
             inner,
             tracker.clone(),
             account_id,
+            None,
             None,
             None,
             None,
@@ -12253,6 +12477,7 @@ mod tests {
             inner,
             tracker.clone(),
             account_id,
+            None,
             None,
             None,
             None,
@@ -13058,7 +13283,7 @@ mod latency_tests {
                 Err(std::io::Error::other("upstream reset")),
             ]);
             let tracked =
-                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None);
+                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None, None);
             let _ = tracked.collect::<Vec<_>>().await;
         })
         .await;
@@ -13204,6 +13429,7 @@ mod latency_tests {
                 None,
                 None,
                 None,
+                None,
             );
             tracked.collect::<Vec<_>>().await
         })
@@ -13231,7 +13457,7 @@ mod latency_tests {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             };
             let tracked =
-                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None);
+                track_stream_health(inner, tracker.clone(), account, None, None, None, None, None, None);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/event-stream")
@@ -13289,6 +13515,7 @@ mod latency_tests {
                 inner,
                 tracker.clone(),
                 account,
+                None,
                 None,
                 None,
                 None,

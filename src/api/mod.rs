@@ -31,6 +31,7 @@ pub mod capabilities;
 pub mod claudecode;
 pub mod cli_proxy_accounts;
 pub mod cli_proxy_login;
+pub(crate) mod cli_proxy_routing;
 pub mod cloud_agents;
 pub mod codex_usage;
 mod console;

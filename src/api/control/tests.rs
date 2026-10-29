@@ -2602,7 +2602,7 @@ async fn cleanup_stale_active_missions_once_closes_untagged_stale_mission() {
     let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
     tokio::spawn(async move {
         if let Some(ControlCommand::CancelMission { respond, .. }) = cmd_rx.recv().await {
-            let _ = respond.send(Ok(CancelMissionOutcome::Cancelled));
+            let _ = respond.send(Ok(CancelMissionOutcome::NoRunner));
         }
     });
     cleanup_stale_active_missions_once(&store, 2, &events_tx, &cmd_tx).await;

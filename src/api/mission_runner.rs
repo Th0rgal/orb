@@ -289,6 +289,17 @@ pub(crate) fn refuse_retired_model(mission_id: Uuid, model: &str) -> Option<Agen
     ))
 }
 
+pub(crate) fn apply_interruption_reason(result: &mut AgentResult, reason: Option<TerminalReason>) {
+    // A shutdown or native error has its own evidence. Only refine the generic
+    // cancellation emitted after Core's inactivity interruption.
+    if result.terminal_reason == Some(TerminalReason::Cancelled) {
+        if let Some(reason) = reason {
+            result.terminal_reason = Some(reason);
+            result.terminal_evidence = Some("Core interrupted the execution after its inactivity deadline; no user Stop was requested".into());
+        }
+    }
+}
+
 /// Build the synthetic `AgentResult::failure` produced when a turn is
 /// cancelled. If the process has begun a graceful shutdown, return a
 /// friendlier "paused for restart" message and a `ServerShutdown` reason
@@ -656,11 +667,14 @@ pub(super) fn localhost_api_base_url_from_env() -> Option<String> {
 /// private-network containers, where the host is only reachable via the
 /// veth gateway address (see `Workspace::host_ip_from_workspace`).
 pub(crate) fn workspace_api_base_url(workspace: &Workspace) -> Option<String> {
-    let port = std::env::var("PORT").ok()?;
-    let port = port.trim();
-    if port.is_empty() {
-        return None;
-    }
+    workspace_api_base_url_with_port(workspace, std::env::var("PORT").ok().as_deref())
+}
+
+fn workspace_api_base_url_with_port(workspace: &Workspace, port: Option<&str>) -> Option<String> {
+    let port = match port {
+        None => crate::config::DEFAULT_PORT,
+        Some(port) => port.trim().parse::<u16>().ok()?,
+    };
     Some(format!(
         "http://{}:{}",
         workspace.host_ip_from_workspace(),
@@ -3280,6 +3294,7 @@ pub struct MissionRunner {
     /// Once cancellation is requested, this runner must drain its current
     /// handle and be removed without starting queued or automated follow-ups.
     cancellation_requested: bool,
+    interruption_reason: Option<TerminalReason>,
 
     /// Absolute deadline after which a cancelled runner is force-aborted if
     /// its harness ignores the cancellation token. Parallel runners own their
@@ -3338,6 +3353,7 @@ impl MissionRunner {
             durable_run: None,
             session_store: None,
             cancellation_requested: false,
+            interruption_reason: None,
             cancellation_force_clear_deadline: None,
             force_abort_requested: false,
         }
@@ -3477,6 +3493,7 @@ impl MissionRunner {
 
     /// Cancel the current execution.
     pub fn cancel(&mut self) {
+        self.interruption_reason = None;
         self.cancellation_requested = true;
         self.cancellation_force_clear_deadline
             .get_or_insert_with(|| Instant::now() + RUNNER_FORCE_CLEAR_GRACE);
@@ -3484,6 +3501,25 @@ impl MissionRunner {
         if let Some(token) = &self.cancel_token {
             token.cancel();
         }
+    }
+
+    /// Interrupt this execution for inactivity without revoking queued work.
+    /// A later explicit Stop still clears the queue and overrides this cause.
+    pub fn interrupt_stalled(&mut self) {
+        if self.cancellation_requested && self.interruption_reason.is_none() {
+            return; // An explicit Stop already owns termination.
+        }
+        self.interruption_reason = Some(TerminalReason::Stalled);
+        self.cancellation_requested = true;
+        self.cancellation_force_clear_deadline
+            .get_or_insert_with(|| Instant::now() + RUNNER_FORCE_CLEAR_GRACE);
+        if let Some(token) = &self.cancel_token {
+            token.cancel();
+        }
+    }
+
+    pub fn take_interruption_reason(&mut self) -> Option<TerminalReason> {
+        self.interruption_reason.take()
     }
 
     /// Force-abort a cancelled turn once its grace period expires.
@@ -3737,7 +3773,12 @@ impl MissionRunner {
             // hint while queued or carry it into the next turn.
             self.reset_turn_tool_calls();
             match handle.await {
-                Ok(result) => {
+                Ok(mut result) => {
+                    let interruption = self.interruption_reason.take();
+                    apply_interruption_reason(&mut result.2, interruption);
+                    if interruption.is_some() {
+                        self.cancellation_requested = false;
+                    }
                     self.touch(); // Update last activity
                     self.state = MissionRunState::Queued; // Ready for next message
 
@@ -7862,7 +7903,7 @@ pub(crate) async fn resolve_command_path_in_workspace(
     }
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('\'');
     for ch in value.chars() {
@@ -14684,6 +14725,30 @@ mod tests {
     }
 
     #[test]
+    fn workspace_api_base_url_uses_the_configured_default_port() {
+        let workspace = crate::workspace::Workspace::default_host("/tmp/fixture".into());
+        assert_eq!(
+            super::workspace_api_base_url_with_port(&workspace, None),
+            Some(format!(
+                "http://127.0.0.1:{}",
+                crate::config::Config::new("/tmp/fixture".into()).port
+            ))
+        );
+        assert_eq!(
+            super::workspace_api_base_url_with_port(&workspace, Some("3002")).as_deref(),
+            Some("http://127.0.0.1:3002")
+        );
+        assert_eq!(
+            super::workspace_api_base_url_with_port(&workspace, Some("")),
+            None
+        );
+        assert_eq!(
+            super::workspace_api_base_url_with_port(&workspace, Some("invalid")),
+            None
+        );
+    }
+
+    #[test]
     fn localhost_api_base_url_formats_non_blank_port() {
         assert_eq!(localhost_api_base_url(Some("")), None);
         assert_eq!(
@@ -14848,6 +14913,60 @@ mod tests {
             runner.inflight_message().map(|message| message.id),
             Some(message_id),
             "preparing another delivery must not overwrite the durable inflight marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_stall_keeps_followups_and_reports_its_cause_after_native_cancel() {
+        let mut runner = MissionRunner::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            Some("codex".into()),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        let followup = Uuid::new_v4();
+        runner.queue_message(followup, "existing work".into(), None, None);
+        runner.running_handle = Some(tokio::spawn(async {
+            (
+                Uuid::new_v4(),
+                "original prompt".into(),
+                AgentResult::failure("Partial output", 0)
+                    .with_terminal_reason(TerminalReason::Cancelled),
+            )
+        }));
+        runner.interrupt_stalled();
+        assert_eq!(runner.queue.front().unwrap().id, followup);
+        let result = loop {
+            if let Some(result) = runner.poll_completion().await {
+                break result.2;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(result.terminal_reason, Some(TerminalReason::Stalled));
+        assert_eq!(result.output, "Partial output");
+        assert!(!runner.cancellation_requested());
+        assert_eq!(runner.queue.front().unwrap().id, followup);
+        runner.interrupt_stalled();
+        runner.cancel();
+        assert!(runner.queue.is_empty());
+        assert_eq!(runner.interruption_reason, None);
+        runner.interrupt_stalled();
+        assert_eq!(
+            runner.interruption_reason, None,
+            "a stale watchdog cannot override Stop"
+        );
+        let mut shutdown = AgentResult::failure("shutdown", 0)
+            .with_terminal_reason(TerminalReason::ServerShutdown);
+        super::apply_interruption_reason(&mut shutdown, Some(TerminalReason::Stalled));
+        assert_eq!(
+            shutdown.terminal_reason,
+            Some(TerminalReason::ServerShutdown)
         );
     }
 
