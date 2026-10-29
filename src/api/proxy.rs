@@ -1710,6 +1710,7 @@ struct ProxyUsageTarget {
     model: String,
     provider: Option<String>,
     account_id: Option<uuid::Uuid>,
+    account_bound: bool,
     attribution: UsageAttribution,
 }
 
@@ -1721,6 +1722,8 @@ fn proxy_usage_target(
         model: proxy_usage_model(entry),
         provider: Some(entry.provider_id.clone()),
         account_id: Some(entry.account_id),
+        // Codex OAuth is pinned before dispatch; API credentials select an account directly.
+        account_bound: entry.provider_id == "openai" || entry.api_key.is_some(),
         attribution: attribution.clone(),
     }
 }
@@ -1741,6 +1744,7 @@ fn proxy_usage_record(
         model,
         provider: target.provider.clone(),
         account_id: target.account_id,
+        account_bound: target.account_bound,
         api_key_id: target.attribution.api_key_id,
         api_key_name: target.attribution.api_key_name.clone(),
         mission_id: target.attribution.mission_id,
@@ -1839,7 +1843,7 @@ fn native_request_requires_server_state(protocol: NativeProtocol, body: &[u8]) -
     }
 }
 
-async fn responses(
+pub(crate) async fn responses(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
     body: bytes::Bytes,
@@ -2104,6 +2108,7 @@ async fn native_protocol_proxy(
         }
     }
 
+    let outcome = OutcomeCtx::new(&chain_id, is_stream);
     let mut supported_entries = 0usize;
     let mut last_upstream_error: Option<(StatusCode, HeaderMap, bytes::Bytes)> = None;
     let native_chain_length = (entries.len() as u32).max(1);
@@ -2145,49 +2150,18 @@ async fn native_protocol_proxy(
             let mut request = parsed_body.clone();
             request["service_tier"] = serde_json::json!(tier.wire());
             body = bytes::Bytes::from(serde_json::to_vec(&request).expect("request serialization"));
-            if super::oauth_owner::codex_via_cli_proxy().is_some() {
-                let accounts = super::control::speed::eligible_proxy_accounts(
-                    &state.config.working_dir,
-                    &requested_model,
-                    tier,
-                )
-                .await;
-                let Some(account) = accounts
-                    .iter()
-                    .find(|account| account.provider_id == entry.account_id)
-                else {
-                    continue;
-                };
-                let prefix = match super::control::speed::proxy_prefix(
-                    &state.config.working_dir,
-                    account,
-                    &requested_model,
-                )
-                .await
-                {
-                    Ok(prefix) => prefix,
-                    Err(error) => {
-                        return error_response(
-                            StatusCode::BAD_REQUEST,
-                            error,
-                            "unsupported_service_tier",
-                        )
-                    }
-                };
-                request["model"] = serde_json::json!(format!(
-                    "{prefix}/{}",
-                    requested_model
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&requested_model)
-                ));
-                body = bytes::Bytes::from(
-                    serde_json::to_vec(&request).expect("request serialization"),
-                );
-            }
         }
         let provider_type =
             ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
+        // A local Codex OAuth capability cannot expand into API-key billing.
+        if internal_secret
+            && headers
+                .get("x-sandboxed-codex-subscription-only")
+                .is_some_and(|v| v == "true")
+            && (provider_type != ProviderType::OpenAI || entry.api_key.is_some())
+        {
+            continue;
+        }
         if !native_protocol_supported(
             protocol,
             provider_type,
@@ -2322,14 +2296,27 @@ async fn native_protocol_proxy(
         {
             return error_response(StatusCode::BAD_REQUEST, "This route cannot guarantee the selected cyber program and model. Use a direct OpenAI route or choose Automatic explicitly.".into(), "unsupported_access_program");
         }
-        let routed_model = if speed_tier.is_some() && via_cli_proxy {
-            serde_json::from_slice::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|value| value["model"].as_str().map(str::to_owned))
+        let pinned_model = if via_cli_proxy && provider_type == ProviderType::OpenAI {
+            match super::cli_proxy_routing::qualified_model(
+                &state.config.working_dir,
+                entry.account_id,
+                &entry.model_id,
+            )
+            .await
+            {
+                Ok(model) => Some(model),
+                Err(error) => {
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        error,
+                        "account_binding_unavailable",
+                    )
+                }
+            }
         } else {
             None
         };
-        let rewrite_model_id = if let Some(model) = routed_model.as_deref() {
+        let rewrite_model_id = if let Some(model) = pinned_model.as_deref() {
             model
         } else if via_cli_proxy && provider_type == ProviderType::Xai {
             cli_proxy_xai_model_id(&entry.model_id)
@@ -2436,6 +2423,16 @@ async fn native_protocol_proxy(
                     .health_tracker
                     .record_entry_failure(entry, reason, None)
                     .await;
+                record_native_failure(
+                    &state,
+                    &outcome,
+                    entry,
+                    entry_idx,
+                    entries.len(),
+                    reason,
+                    None,
+                )
+                .await;
                 continue;
             }
         };
@@ -2451,6 +2448,16 @@ async fn native_protocol_proxy(
                 .health_tracker
                 .record_entry_failure(entry, CooldownReason::AuthError, None)
                 .await;
+            record_native_failure(
+                &state,
+                &outcome,
+                entry,
+                entry_idx,
+                entries.len(),
+                CooldownReason::AuthError,
+                Some(status.as_u16()),
+            )
+            .await;
             continue;
         }
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
@@ -2491,6 +2498,16 @@ async fn native_protocol_proxy(
                         .await;
                 }
             }
+            record_native_failure(
+                &state,
+                &outcome,
+                entry,
+                entry_idx,
+                entries.len(),
+                reason,
+                Some(status.as_u16()),
+            )
+            .await;
             last_upstream_error = Some((status, response_headers, response_body));
             continue;
         }
@@ -2513,7 +2530,18 @@ async fn native_protocol_proxy(
                     proxy_usage_target(entry, &attribution),
                 )),
                 liveness_mission_id,
-                None,
+                Some(proxy_outcome_sink(
+                    state.clone(),
+                    outcome.record(
+                        Some(entry),
+                        reliability::OutcomeStatus::Ok,
+                        Some(status.as_u16()),
+                        None,
+                        entry_idx as u32,
+                        false,
+                    ),
+                    outcome.started,
+                )),
             );
             let mut response = (status, Body::from_stream(tracked_stream)).into_response();
             for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
@@ -2537,6 +2565,21 @@ async fn native_protocol_proxy(
                 );
             }
         };
+        record_proxy_outcomes(
+            &state,
+            vec![outcome.record(
+                Some(entry),
+                if status.is_success() {
+                    reliability::OutcomeStatus::Ok
+                } else {
+                    reliability::OutcomeStatus::ClientError
+                },
+                Some(status.as_u16()),
+                None,
+                entry_idx as u32,
+                false,
+            )],
+        );
         if status.is_success() {
             state.health_tracker.record_entry_success(entry).await;
             if let Some(tokens) = native_response_usage(&response_body) {
@@ -3120,6 +3163,7 @@ async fn chat_completions_routed(
                 provider: crate::api::usage_summary::infer_provider_for_model(&usage.model),
                 model: usage.model,
                 account_id: None,
+                account_bound: false,
                 attribution: attribution.clone(),
             };
             let tokens = ProxyTokens {
@@ -3406,7 +3450,23 @@ async fn chat_completions_routed(
                 build_cli_proxy_headers(),
             )
         } else if use_openai_oauth_cli_proxy_adapter {
-            let upstream_body = match rewrite_model(&body, &entry.model_id) {
+            let model = match super::cli_proxy_routing::qualified_model(
+                &state.config.working_dir,
+                entry.account_id,
+                &entry.model_id,
+            )
+            .await
+            {
+                Ok(model) => model,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        error,
+                        "account_binding_unavailable",
+                    )
+                }
+            };
+            let upstream_body = match rewrite_model(&body, &model) {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::error!("Failed to rewrite model in request body: {}", e);
@@ -9083,6 +9143,45 @@ async fn resend_stream(
         .ok()?
         .ok()?;
     response.status().is_success().then_some(response)
+}
+
+/// Durable native-protocol attempt evidence uses the same ledger as chat.
+async fn record_native_failure(
+    state: &Arc<super::routes::AppState>,
+    outcome: &OutcomeCtx,
+    entry: &crate::provider_health::ResolvedEntry,
+    index: usize,
+    length: usize,
+    reason: CooldownReason,
+    http: Option<u16>,
+) {
+    record_proxy_outcomes(
+        state,
+        vec![outcome.record(
+            Some(entry),
+            attempt_status(reason, http),
+            http,
+            None,
+            index as u32,
+            true,
+        )],
+    );
+    state
+        .health_tracker
+        .record_fallback_event(crate::provider_health::FallbackEvent {
+            timestamp: chrono::Utc::now(),
+            chain_id: outcome.chain_id.clone(),
+            from_provider: entry.provider_id.clone(),
+            from_model: entry.model_id.clone(),
+            from_account_id: entry.account_id,
+            reason,
+            cooldown_secs: None,
+            to_provider: None,
+            latency_ms: None,
+            attempt_number: index as u32 + 1,
+            chain_length: length as u32,
+        })
+        .await;
 }
 
 /// Outcome bookkeeping for one `/v1/chat/completions` request.

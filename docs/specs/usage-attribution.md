@@ -88,3 +88,37 @@ covered by the Rust test `proxied_missions_are_not_double_counted_from_harness_e
   `caller_kind` filter, alongside the existing key / mission / model breakdowns.
 - Orb desktop Settings → Usage: group by caller, root mission or Core purpose, filter by
   caller, and an Hour / Day toggle. iOS and Android have no usage view yet (gap).
+
+## Account binding (2026-10-29)
+
+Core owns account priority and pre-stream failover. A Codex OAuth attempt sent
+through CLIProxyAPI must use a dedicated, uniquely registered account/model
+route, at every speed and for both Responses and Chat Completions. A missing,
+disabled, ambiguous or unregistered binding fails closed before inference;
+it must never fall back to the bare model or the proxy's independent pool.
+Other accounts, including credentials not registered with Core, cannot share
+the dedicated route. Prefix provisioning must preserve existing bare routes
+so active missions are not interrupted. OAuth refresh still belongs to the proxy.
+
+`account_id` in the stored legacy ledger is the *selected* account, not proof
+of upstream identity. New `account_bound` receipts distinguish requests with an
+account-bound dispatch from historical/unbound requests. Summary `by_account`
+contains only bound identities (unbound requests use the unknown bucket);
+`by_selected_account` retains the original selections for diagnosis. This is
+routing evidence, not an OpenAI billing receipt. No historical row is upgraded
+merely because the routing implementation has been fixed.
+
+Required regressions: selecting the second UUID still targets that account;
+ordinary and accelerated requests use the same binding implementation; missing
+or duplicate routes cannot send inference; disconnected accounts are rejected;
+legacy and bound ledger rows conserve tokens but never share a verified account
+bucket. Quota failures must retain the selected account and model scope; a
+fresh weekly gauge is not evidence that a per-model/capacity rejection may be
+ignored. No quota reset or service restart is allowed merely to clear a warning.
+
+Local Codex (including accelerated tiers) uses a revocable model/tier/mission
+capability that forwards to this same Core route. It cannot select an API-key
+account, forge another mission, or keep working after turn revocation. The
+previous separate rotation transport is removed. Native Responses failures
+now write attempt receipts and fallback events; completed streams settle their
+outcome only when the stream ends.

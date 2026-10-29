@@ -566,6 +566,7 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
             account_id: None,
+            account_bound: false,
             input_tokens: 1000,
             output_tokens: 100,
             cache_creation_tokens: 0,

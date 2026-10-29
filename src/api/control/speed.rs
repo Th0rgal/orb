@@ -2,6 +2,9 @@
 //! authorizes falling back to API billing or an opaque proxy account pool.
 use super::*;
 use crate::api::ai_providers::CodexOAuthAccount;
+#[cfg(test)]
+use crate::api::cli_proxy_routing::catalog_prefix;
+use crate::api::cli_proxy_routing::{proxy_accounts, proxy_prefix, ProxyAccountRoute};
 use crate::codex_speed::Tier;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -122,7 +125,7 @@ async fn validate_selection(
             .map_err(|error| error.1)?;
         let version = client.version().await.map_err(|error| error.1)?;
         if !proxy_supports_speed(&version) {
-            return Err("Update CLIProxyAPI to 8.0.26 or later before enabling accelerated speed; older transports may silently discard Ultrafast.".into());
+            return Err("Update CLIProxyAPI to 8.0.26 or later before routing; older transports may silently discard Ultrafast.".into());
         }
         let eligible = eligible_proxy_accounts(root, model, tier).await;
         if eligible.is_empty() {
@@ -250,77 +253,7 @@ mod tests {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ProxySpeedAccount {
-    pub provider_id: Uuid,
-    pub file: String,
-    pub auth_index: String,
-    pub prefix: Option<String>,
-}
-
-async fn proxy_accounts(root: &std::path::Path) -> Result<Vec<ProxySpeedAccount>, String> {
-    let client = super::super::cli_proxy_login::ManagementClient::configured().map_err(|e| e.1)?;
-    let files = client
-        .request(reqwest::Method::GET, "/auth-files", None)
-        .await
-        .map_err(|e| e.1)?;
-    let providers =
-        crate::ai_providers::AIProviderStore::new(root.join(crate::util::AI_PROVIDERS_PATH))
-            .await
-            .list()
-            .await;
-    let mut accounts: Vec<ProxySpeedAccount> = files["files"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|file| {
-            if file
-                .get("provider")
-                .or_else(|| file.get("type"))
-                .and_then(|v| v.as_str())
-                != Some("codex")
-                || file["disabled"] == true
-            {
-                return None;
-            }
-            let name = file["name"].as_str()?;
-            let provider = providers.iter().find(|p| {
-                p.enabled
-                    && p.provider_type == crate::ProviderType::OpenAI
-                    && p.cli_proxy_auth_file.as_deref() == Some(name)
-            })?;
-            Some(ProxySpeedAccount {
-                provider_id: provider.id,
-                file: name.into(),
-                auth_index: file["auth_index"].as_str()?.into(),
-                prefix: file["prefix"]
-                    .as_str()
-                    .filter(|p| !p.is_empty())
-                    .map(str::to_string),
-            })
-        })
-        .collect();
-    for account in &mut accounts {
-        if account.prefix.is_some() {
-            continue;
-        }
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("name", &account.file)
-            .finish();
-        let models = client
-            .request(
-                reqwest::Method::GET,
-                &format!("/auth-files/models?{query}"),
-                None,
-            )
-            .await
-            .map_err(|error| error.1)?;
-        account.prefix = catalog_prefix(&models)?;
-    }
-    Ok(accounts)
-}
-
-async fn proxy_support(account: &ProxySpeedAccount, model: &str) -> Support {
+async fn proxy_support(account: &ProxyAccountRoute, model: &str) -> Support {
     let model = model.rsplit('/').next().unwrap_or(model);
     let key = (account.provider_id, model.to_string());
     if let Some((at, value)) = CACHE.lock().await.get(&key) {
@@ -350,7 +283,7 @@ pub(crate) async fn eligible_proxy_accounts(
     root: &std::path::Path,
     model: &str,
     tier: Tier,
-) -> Vec<ProxySpeedAccount> {
+) -> Vec<ProxyAccountRoute> {
     if !tier.supports_model(model) {
         return Vec::new();
     }
@@ -362,70 +295,6 @@ pub(crate) async fn eligible_proxy_accounts(
         }
     }
     allowed
-}
-
-/// Prefix namespaces pin the proxy's account selection while retaining the
-/// original bare model routes. OAuth refresh remains entirely in CLIProxyAPI.
-pub(crate) async fn proxy_prefix(
-    root: &std::path::Path,
-    account: &ProxySpeedAccount,
-    model: &str,
-) -> Result<String, String> {
-    static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _guard = GATE.lock().await;
-    let all = proxy_accounts(root).await?;
-    let current = all
-        .iter()
-        .find(|a| a.provider_id == account.provider_id)
-        .ok_or("Subscription account was disconnected")?;
-    let prefix = current
-        .prefix
-        .clone()
-        .unwrap_or_else(|| format!("orb-codex-{}", account.provider_id.simple()));
-    if all.iter().any(|other| {
-        other.provider_id != account.provider_id && other.prefix.as_deref() == Some(&prefix)
-    }) {
-        return Err("Subscription routing prefix is shared with another account; configure a unique prefix before enabling this speed.".into());
-    }
-    let client = super::super::cli_proxy_login::ManagementClient::configured().map_err(|e| e.1)?;
-    if current.prefix.is_none()
-        && client
-            .request(reqwest::Method::GET, "/config", None)
-            .await
-            .map_err(|e| e.1)?["force-model-prefix"]
-            == true
-    {
-        return Err("Dedicated speed routing would remove existing bare model routes. Configure backward-compatible CLIProxyAPI routing first.".into());
-    }
-    if current.prefix.is_none() {
-        client
-            .request(
-                reqwest::Method::PATCH,
-                "/auth-files/fields",
-                Some(serde_json::json!({"name":account.file,"prefix":prefix})),
-            )
-            .await
-            .map_err(|e| e.1)?;
-    }
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("name", &account.file)
-        .finish();
-    let catalog = client
-        .request(
-            reqwest::Method::GET,
-            &format!("/auth-files/models?{query}"),
-            None,
-        )
-        .await
-        .map_err(|e| e.1)?;
-    let qualified = format!("{prefix}/{}", model.rsplit('/').next().unwrap_or(model));
-    if !catalog["models"]
-        .as_array()
-        .is_some_and(|models| models.iter().any(|m| m["id"].as_str() == Some(&qualified)))
-    {
-        return Err("The proxy has not registered this account's dedicated model route. Update or refresh CLIProxyAPI before starting.".into());
-    }
-    Ok(prefix)
 }
 
 pub(crate) async fn eligible_account_ids(
@@ -456,21 +325,4 @@ fn proxy_supports_speed(version: &str) -> bool {
         .map(|part| part.parse().ok())
         .collect();
     parts.is_some_and(|parts| parts.len() == 3 && parts.as_slice() >= [8, 0, 26].as_slice())
-}
-fn catalog_prefix(catalog: &serde_json::Value) -> Result<Option<String>, String> {
-    let prefixes: std::collections::HashSet<&str> = catalog["models"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|model| {
-            model["id"]
-                .as_str()?
-                .rsplit_once('/')
-                .map(|(prefix, _)| prefix)
-        })
-        .collect();
-    if prefixes.len() > 1 {
-        return Err("This account exposes multiple routing prefixes; configure a unique account prefix before enabling accelerated speed.".into());
-    }
-    Ok(prefixes.into_iter().next().map(str::to_owned))
 }

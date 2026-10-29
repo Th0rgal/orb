@@ -50,6 +50,15 @@ pub(crate) struct ManagementClient {
     http: reqwest::Client,
 }
 impl ManagementClient {
+    #[cfg(test)]
+    pub(crate) fn for_test(base: String) -> Self {
+        Self {
+            base,
+            key: "fixture-management".into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
     pub(crate) fn configured() -> Result<Self, ApiError> {
         let key = super::oauth_owner::management_key().ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
