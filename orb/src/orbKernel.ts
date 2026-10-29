@@ -1,126 +1,74 @@
-export type WorkfoldVerdict = { foldItem: boolean; foldHasToolNext: boolean };
+// Host input encoding and presentation over generated scalar ABI adapters.
+import { kernelAbi as kernel } from "./orbKernelAbi";
 
-export function orbWorkfoldStep(
-  itemKind: number,
-  isCumulative: boolean,
-  isNonEmpty: boolean,
-  toolAhead: boolean,
-  nextIsTool: boolean,
-  foldHasTool: boolean,
-): WorkfoldVerdict {
-  let raw = 0;
-  if (itemKind === 3) {
-    raw = 257;
-  } else if (itemKind === 1) {
-    raw = foldHasTool ? 257 : 1;
-  } else if (itemKind === 2) {
-    if (!isCumulative && isNonEmpty && toolAhead && (foldHasTool || nextIsTool)) {
-      raw = foldHasTool ? 257 : 1;
-    }
-  }
-  return {
-    foldItem: (raw & 1) !== 0,
-    foldHasToolNext: ((raw >> 8) & 1) !== 0,
-  };
+export type WorkfoldVerdict = { foldItem: boolean; foldHasToolNext: boolean };
+export type TranscriptPatchState = { len: number; seq: number };
+const b8 = (value: boolean) => value ? 1 : 0;
+const enum8 = (value: number) => Number.isInteger(value) && value >= 0 && value <= 255 ? value : 255;
+const sat8 = (value: number) => Math.max(0, Math.min(255, Number.isFinite(value) ? Math.round(value) : 255));
+const sat32 = (value: number) => Number.isFinite(value) ? Math.max(0, Math.min(0xffff_ffff, Math.floor(value))) : 0;
+function seconds(value: number): bigint {
+  if (!Number.isFinite(value)) throw new RangeError("Time must be finite");
+  const whole = Math.max(0, Math.floor(value));
+  if (!Number.isSafeInteger(whole)) throw new RangeError("Time is outside the exact integer range");
+  return BigInt(whole);
+}
+const byte = (raw: bigint, shift: bigint) => Number((raw >> shift) & 255n);
+
+export function orbWorkfoldStep(itemKind: number, isCumulative: boolean, isNonEmpty: boolean, toolAhead: boolean,
+  nextIsTool: boolean, foldHasTool: boolean): WorkfoldVerdict {
+  const raw = kernel.orb_workfold_step(enum8(itemKind), b8(isCumulative), b8(isNonEmpty), b8(toolAhead), b8(nextIsTool), b8(foldHasTool));
+  return { foldItem: (raw & 1) !== 0, foldHasToolNext: ((raw >> 8) & 1) !== 0 };
 }
 
-export function orbTaskcardStep(
-  turnEnded: boolean,
-  allClosed: boolean,
-  turnOutcomeFinished: boolean,
-): "live" | "done" | "stale" | "stopped" {
-  const code = !turnEnded ? 0 : allClosed ? 1 : turnOutcomeFinished ? 2 : 3;
-  return code === 0 ? "live" : code === 1 ? "done" : code === 2 ? "stale" : "stopped";
+export function orbTaskcardStep(turnEnded: boolean, allClosed: boolean, turnOutcomeFinished: boolean): "live" | "done" | "stale" | "stopped" {
+  const code = kernel.orb_taskcard_step(b8(turnEnded), b8(allClosed), b8(turnOutcomeFinished));
+  return (["live", "done", "stale", "stopped"] as const)[code];
 }
 
 export function orbRelativeTimeString(elapsedSecs: number): string {
-  const s = Math.max(0, Math.floor(elapsedSecs));
-  let unit = 0;
-  let value = 0;
-  if (s < 45) {
-    unit = 0;
-    value = 0;
-  } else if (s < 3600) {
-    unit = 1;
-    value = Math.max(1, Math.floor(s / 60));
-  } else if (s < 86_400) {
-    unit = 2;
-    value = Math.floor(s / 3600);
-  } else if (s < 604_800) {
-    unit = 3;
-    value = Math.floor(s / 86_400);
-  } else {
-    unit = 4;
-    value = Math.floor(s / 604_800);
-  }
-  return unit === 0 ? "now" : unit === 1 ? `${value}m` : unit === 2 ? `${value}h` : unit === 3 ? `${value}d` : `${value}w`;
+  const raw = kernel.orb_relative_time_bucket(seconds(elapsedSecs));
+  const unit = byte(raw, 0n), value = Number((raw >> 8n) & 0xffff_ffffn);
+  return unit === 0 ? "now" : `${value}${["", "m", "h", "d", "w"][unit]}`;
 }
 
-export function orbUsageLimitBadge(
-  status: string,
-  claim: string,
-  hasUtilization: boolean,
-  utilizationPct: number,
-  hasReset: boolean,
-  resetRemSecs: number,
-): { tone: "warning" | "error"; label: string } | null {
+export function orbUsageLimitBadge(status: string, claim: string, hasUtilization: boolean, utilizationPct: number,
+  hasReset: boolean, resetRemSecs: number): { tone: "warning" | "error"; label: string } | null {
   const statusKind = !status || status === "allowed" || status === "ok" ? 0 : status === "allowed_warning" ? 1 : status === "rejected" ? 2 : 3;
-  const claimKind =
-    claim === "five_hour" ? 1 : claim === "seven_day" ? 2 : claim === "seven_day_opus" ? 3 : claim === "seven_day_sonnet" ? 4 : 0;
-  if (statusKind === 0) return null;
-  if (statusKind === 1) {
-    const winLabel =
-      claimKind === 1 ? "5h" : claimKind === 2 ? "weekly" : claimKind === 3 ? "weekly Opus" : claimKind === 4 ? "weekly Sonnet" : null;
-    if (!winLabel) return { tone: "warning", label: "Approaching limit" };
-    const showPct = (claimKind === 1 || claimKind === 2) && hasUtilization && utilizationPct >= 0 && utilizationPct <= 100;
-    const pct = showPct ? ` ${Math.round(utilizationPct)}%` : "";
-    return { tone: "warning", label: `Approaching limit · ${winLabel}${pct}` };
+  const claimKind = ["", "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"].indexOf(claim);
+  const resetPresent = hasReset && Number.isFinite(resetRemSecs) && Number.isSafeInteger(Math.floor(resetRemSecs));
+  const raw = kernel.orb_usage_limit_status(statusKind, Math.max(0, claimKind),
+    b8(hasUtilization && Number.isFinite(utilizationPct) && utilizationPct >= 0 && utilizationPct <= 100), sat8(utilizationPct),
+    b8(resetPresent), seconds(resetPresent ? resetRemSecs : 0));
+  const tone = byte(raw, 0n);
+  if (tone === 0) return null;
+  if (tone === 1) {
+    const label = ["", "5h", "weekly", "weekly Opus", "weekly Sonnet"][byte(raw, 8n)];
+    const pct = byte(raw, 16n) ? ` ${byte(raw, 24n)}%` : "";
+    return { tone: "warning", label: label ? `Approaching limit · ${label}${pct}` : "Approaching limit" };
   }
-  if (statusKind === 2) {
-    const rem = Math.floor(resetRemSecs);
-    if (!hasReset || !(rem > 0)) return { tone: "error", label: "Limit reached" };
-    const mins = Math.floor(rem / 60);
-    const hrs = Math.floor(rem / 3600);
-    const days = Math.floor(rem / 86_400);
-    const span = mins < 60 ? `${Math.max(1, mins)}m` : hrs < 48 ? `${hrs}h` : `${days}d`;
-    return { tone: "error", label: `Limit reached · resets in ${span}` };
+  if (tone === 2) {
+    const unit = byte(raw, 32n), value = Number((raw >> 40n) & 0xff_ffffn);
+    return { tone: "error", label: unit ? `Limit reached · resets in ${value}${["", "m", "h", "d"][unit]}` : "Limit reached" };
   }
   return { tone: "warning", label: "Limit status unknown" };
 }
 
-const U32_MAX = 0xffff_ffff;
-const satAdd32 = (a: number, b: number) => Math.min(U32_MAX, a + b);
-
-export type TranscriptPatchState = { len: number; seq: number };
-
 export function orbTranscriptPatchStep(state: TranscriptPatchState, eventKind: number, deltaLen: number): TranscriptPatchState {
-  if (eventKind < 0 || eventKind > 2) return state;
-  const len = eventKind === 2 ? 0 : eventKind === 1 ? (deltaLen > 0 ? deltaLen : state.len) : satAdd32(state.len, deltaLen);
-  return { len, seq: satAdd32(state.seq, 1) };
+  const raw = kernel.orb_transcript_patch_step(state.len, state.seq, enum8(eventKind), sat32(deltaLen));
+  return { len: Number(raw & 0xffff_ffffn), seq: Number(raw >> 32n) };
 }
 
-const subsliceOk = (off: number, len: number, cap: number) =>
-  Number.isInteger(off) && Number.isInteger(len) && Number.isInteger(cap) && off >= 0 && len >= 0 && off <= cap && len <= cap - off;
-
-export function leansysGfmPipeRowAdmitted(
-  rowOff: number,
-  rowLen: number,
-  bufLen: number,
-  colCount: number,
-  sepCols: number,
-  unterminatedEscape: boolean,
-): boolean {
-  return rowLen > 0 && subsliceOk(rowOff, rowLen, bufLen) && colCount >= 1 && colCount <= 64 && sepCols === colCount && !unterminatedEscape;
+// Coordinates must be exactly representable before crossing the UInt64 boundary.
+const coordinates = (...values: number[]) => values.every(value => Number.isSafeInteger(value) && value >= 0);
+export function leansysGfmPipeRowAdmitted(rowOff: number, rowLen: number, bufLen: number, colCount: number,
+  sepCols: number, unterminatedEscape: boolean): boolean {
+  if (!coordinates(rowOff, rowLen, bufLen, colCount, sepCols) || colCount > 0xffff_ffff || sepCols > 0xffff_ffff) return false;
+  return kernel.leansys_gfm_pipe_scan(BigInt(rowOff), BigInt(rowLen), BigInt(bufLen), colCount, sepCols, b8(unterminatedEscape)) !== 0;
 }
 
-export function leansysRichTagAdmitted(
-  tagOff: number,
-  tagLen: number,
-  attrOff: number,
-  attrLen: number,
-  bufLen: number,
-  tagKind: number,
-): boolean {
-  return tagLen > 0 && subsliceOk(tagOff, tagLen, bufLen) && tagOff <= attrOff && subsliceOk(attrOff - tagOff, attrLen, tagLen)
-    && tagKind >= 1 && tagKind <= 3;
+export function leansysRichTagAdmitted(tagOff: number, tagLen: number, attrOff: number, attrLen: number,
+  bufLen: number, tagKind: number): boolean {
+  if (!coordinates(tagOff, tagLen, attrOff, attrLen, bufLen, tagKind) || tagKind > 255) return false;
+  return kernel.leansys_tag_scan(BigInt(tagOff), BigInt(tagLen), BigInt(attrOff), BigInt(attrLen), BigInt(bufLen), tagKind) !== 0;
 }
