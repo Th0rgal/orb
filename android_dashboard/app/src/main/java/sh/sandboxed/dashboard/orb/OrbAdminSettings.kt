@@ -109,6 +109,9 @@ object OrbAdminFormatting {
         return markdown.substring(end + 4).trim()
     }
 
+    fun normalizeSkillName(raw: String): String =
+        raw.trim().lowercase().replace(Regex("[^a-z0-9-_]+"), "-").trim('-')
+
     fun hermesRuntime(runtime: OrbDict?): List<Pair<String, String>> {
         if (runtime == null) return listOf("Status" to "Unavailable")
         val rows = mutableListOf<Pair<String, String>>()
@@ -551,6 +554,7 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
         var chainId by remember(existing) { mutableStateOf(existing?.id.orEmpty()) }
         var chainName by remember(existing) { mutableStateOf(existing?.str("name").orEmpty()) }
         var stripThinking by remember(existing) { mutableStateOf(existing?.bool("strip_thinking") == true) }
+        var editorError by remember(existing) { mutableStateOf<String?>(null) }
         val entriesText = remember(existing) {
             mutableStateOf(
                 existing?.rows("entries")?.joinToString("\n") {
@@ -597,32 +601,47 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Strip <think> blocks", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                        Switch(checked = stripThinking, onCheckedChange = { stripThinking = it })
+                        Switch(checked = stripThinking, onCheckedChange = { stripThinking = it }, enabled = !busy)
                     }
+                    editorError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
                 }
             },
             confirmButton = {
                 TextButton(
                     enabled = chainId.isNotBlank() && parsedEntries.isNotEmpty() && !busy,
                     onClick = {
+                        val trimmedId = chainId.trim()
+                        if (existing == null && chains.any { it.id.equals(trimmedId, ignoreCase = true) }) {
+                            editorError = "\"$trimmedId\" already exists."
+                            return@TextButton
+                        }
                         val body = mapOf(
-                            "id" to chainId.trim(),
+                            "id" to trimmedId,
                             "name" to chainName.trim(),
                             "strip_thinking" to stripThinking,
                             "entries" to parsedEntries.map { mapOf("provider_id" to it.first, "model_id" to it.second) }
                         )
-                        showEditor = false
-                        runAct {
-                            if (existing != null) {
-                                core.request("/api/model-routing/chains/${core.encodeComponent(chainId.trim())}", "PUT", body = body)
-                            } else {
-                                core.request("/api/model-routing/chains", "POST", body = body)
+                        busy = true
+                        editorError = null
+                        scope.launch {
+                            try {
+                                if (existing != null) {
+                                    core.request("/api/model-routing/chains/${core.encodeComponent(trimmedId)}", "PUT", body = body)
+                                } else {
+                                    core.request("/api/model-routing/chains", "POST", body = body)
+                                }
+                                load()
+                                showEditor = false
+                            } catch (e: Throwable) {
+                                editorError = e.message
+                            } finally {
+                                busy = false
                             }
                         }
                     }
-                ) { Text("Save") }
+                ) { Text(if (busy) "Saving…" else "Save") }
             },
-            dismissButton = { TextButton(onClick = { showEditor = false }) { Text("Cancel") } }
+            dismissButton = { TextButton(enabled = !busy, onClick = { showEditor = false }) { Text("Cancel") } }
         )
     }
 
@@ -937,6 +956,8 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var pulling by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var createBusy by remember { mutableStateOf(false) }
+    var createError by remember { mutableStateOf<String?>(null) }
     var newName by remember { mutableStateOf("") }
     var openedSkill by remember { mutableStateOf<String?>(null) }
 
@@ -1006,6 +1027,7 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     }
                     OrbAdminCircleAction(Icons.Default.Add, "New skill") {
                         newName = ""
+                        createError = null
                         creating = true
                     }
                 }
@@ -1100,39 +1122,68 @@ fun OrbSkillsSettingsPage(core: OrbCore, onBack: () -> Unit) {
 
     if (creating) {
         AlertDialog(
-            onDismissRequest = { creating = false },
+            onDismissRequest = { if (!createBusy) creating = false },
             containerColor = OrbStyle.elevated,
             title = { Text("New Library skill", color = Color.White) },
             text = {
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    singleLine = true,
-                    label = { Text("skill-name") },
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = {
+                            newName = it
+                            createError = null
+                        },
+                        enabled = !createBusy,
+                        singleLine = true,
+                        label = { Text("skill-name") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    createError?.let { Text(it, color = OrbStyle.error, fontSize = 12.sp) }
+                }
             },
             confirmButton = {
                 TextButton(
-                    enabled = newName.isNotBlank(),
+                    enabled = newName.isNotBlank() && !createBusy,
                     onClick = {
-                        val slug = newName.trim().lowercase().replace(" ", "-")
-                        creating = false
-                        newName = ""
-                        val template = "---\nname: $slug\ndescription: Describe when to use this skill.\n---\n\n# $slug\n"
+                        val slug = OrbAdminFormatting.normalizeSkillName(newName)
+                        if (slug.isEmpty()) {
+                            createError = "Enter a skill name such as lean-prover."
+                            return@TextButton
+                        }
+                        if (skills.any { it.id.equals(slug, ignoreCase = true) }) {
+                            createError = "\"$slug\" already exists in the Library."
+                            return@TextButton
+                        }
+                        createBusy = true
+                        createError = null
+                        val template = "---\nname: $slug\ndescription: \"Describe when $slug should be used.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n---\n\n# $slug\n\n## When to use\n\n- \n\n## Instructions\n\n- \n"
                         scope.launch {
                             try {
+                                val latest = OrbJSON.dictList(core.request("/api/library/skill"))
+                                    .map { OrbRow(it, (it["name"] as? String).orEmpty()) }
+                                    .sortedBy { it.id }
+                                skills = latest
+                                if (latest.any { it.id.equals(slug, ignoreCase = true) }) {
+                                    createError = "\"$slug\" already exists in the Library."
+                                    return@launch
+                                }
                                 core.request("/api/library/skill/${core.encodeComponent(slug)}", "PUT", body = mapOf("content" to template))
                                 commitAndPush("skill: create $slug")
                                 load()
+                                creating = false
+                                newName = ""
                             } catch (e: Throwable) {
-                                error = e.message
+                                createError = e.message
+                            } finally {
+                                createBusy = false
                             }
                         }
                     }
-                ) { Text("Create") }
+                ) { Text(if (createBusy) "Creating…" else "Create") }
             },
-            dismissButton = { TextButton(onClick = { creating = false }) { Text("Cancel") } }
+            dismissButton = {
+                TextButton(enabled = !createBusy, onClick = { creating = false }) { Text("Cancel") }
+            }
         )
     }
 }

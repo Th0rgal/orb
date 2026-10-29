@@ -543,12 +543,32 @@ struct OrbSkillsSettings: View {
         catch is CancellationError {} catch { self.error = "Couldn’t pull the Library: \(error.localizedDescription)" }
     }
 
+    static func normalizeSkillName(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9-_]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
     private func create() async {
-        let name = newName.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: " ", with: "-")
+        let name = Self.normalizeSkillName(newName)
         newName = ""
-        guard !name.isEmpty else { return }
-        let template = "---\nname: \(name)\ndescription: Describe when to use this skill.\n---\n\n# \(name)\n"
+        guard !name.isEmpty else {
+            self.error = "Enter a skill name such as lean-prover."
+            return
+        }
+        if skills.contains(where: { $0.skillName.caseInsensitiveCompare(name) == .orderedSame }) {
+            self.error = "\"\(name)\" already exists in the Library."
+            return
+        }
+        let template = "---\nname: \(name)\ndescription: \"Describe when \(name) should be used.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n---\n\n# \(name)\n\n## When to use\n\n- \n\n## Instructions\n\n- \n"
         do {
+            let latest = try await client.call("/api/library/skill").items.sorted { $0.skillName < $1.skillName }
+            skills = latest
+            if latest.contains(where: { $0.skillName.caseInsensitiveCompare(name) == .orderedSame }) {
+                self.error = "\"\(name)\" already exists in the Library."
+                return
+            }
             _ = try await client.callText("/api/library/skill/\(OrbCore.escape(name))", method: "PUT", body: .object(["content": .string(template)]))
             try await OrbSkillEditor.commitAndPush("skill: create \(name)", client: client)
             await load()
