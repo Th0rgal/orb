@@ -13409,7 +13409,11 @@ async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_c
     for (id, tags) in [
         (
             child.id,
-            vec!["pr-writer".to_string(), "orb-folder:Old".to_string()],
+            vec![
+                "pr-writer".to_string(),
+                "orb-folder:Old".to_string(),
+                "disk-reservation-v1:legacy-lease".to_string(),
+            ],
         ),
         (grandchild.id, vec!["pr-readonly".to_string()]),
         (forked_sibling.id, vec![format!("fork-of:{}", parent.id)]),
@@ -13476,7 +13480,13 @@ async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_c
         .tags
         .contains(&"orb-folder:Audits".to_string()));
     assert_eq!(c_after.project.project.as_deref(), Some("verity"));
-    assert_eq!(c_after.project.tags, vec!["pr-writer".to_string()]);
+    assert_eq!(
+        c_after.project.tags,
+        vec![
+            "pr-writer".to_string(),
+            "disk-reservation-v1:legacy-lease".to_string(),
+        ]
+    );
     assert_eq!(g_after.project.project.as_deref(), Some("verity"));
     assert_eq!(g_after.project.tags, vec!["pr-readonly".to_string()]);
     // Independent forked conversations are versions, not launched sub-missions.
@@ -13877,6 +13887,168 @@ async fn project_move_with_include_descendants_recovers_after_mid_subtree_crash(
     assert_eq!(leases.len(), 1);
     assert_eq!(leases[0].slug, "lido");
     assert_eq!(leases[0].track, parent_track);
+}
+
+#[tokio::test]
+async fn project_move_with_include_descendants_discovers_unloaded_callback_subtree() {
+    if isolated_track_http_test(
+        "project_move_with_include_descendants_discovers_unloaded_callback_subtree",
+    ) {
+        return;
+    }
+    let h = Harness::new().await;
+    let parent = h.writer(MissionStatus::Completed, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&parent.id.to_string())
+        .unwrap();
+
+    let worker = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let callback_child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("callback follow-up"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_mission_origin(callback_child.id, "hermes", Some("cb-unloaded"))
+        .await
+        .unwrap();
+    let callback_grandchild = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("callback sub-worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(callback_child.id),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let hermes_db = h.state.config.working_dir.join("hermes-state.db");
+    {
+        let conn = rusqlite::Connection::open(&hermes_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions(id TEXT, source TEXT, origin_json TEXT);
+             CREATE TABLE messages(session_id TEXT, role TEXT, content TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES('cb-unloaded','webhook','{\"chat_id\":\"webhook:mission-complete:w1\"}')",
+            [],
+        )
+        .unwrap();
+        let prompt = format!(
+            "A sandboxed.sh mission changed status: worker (id: {}, status: completed).",
+            worker.id
+        );
+        conn.execute(
+            "INSERT INTO messages VALUES('cb-unloaded','user',?1)",
+            [&prompt],
+        )
+        .unwrap();
+    }
+    std::env::set_var("HERMES_STATE_DB", &hermes_db);
+
+    for (id, tags) in [
+        (worker.id, vec!["pr-readonly".to_string()]),
+        (
+            callback_child.id,
+            vec![
+                "pr-readonly".to_string(),
+                "orb-folder:StaleCallback".to_string(),
+            ],
+        ),
+        (callback_grandchild.id, vec!["pr-readonly".to_string()]),
+    ] {
+        h.control
+            .mission_store
+            .update_mission_project(
+                id,
+                MissionProjectPatch {
+                    project: Some(Some("lido".into())),
+                    track: Some(Some("wave-cb".into())),
+                    tags: Some(tags),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        h.control
+            .mission_store
+            .update_mission_status(id, MissionStatus::Completed)
+            .await
+            .unwrap();
+    }
+
+    // Omit `descendant_ids` completely: Core must discover the unloaded Hermes
+    // callback child (and its launched worker) directly from the store.
+    let (status, body) = patch_project(
+        &h,
+        parent.id,
+        json!({"project":"verity", "tags":["pr-writer"], "include_descendants": true}),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+
+    for id in [
+        parent.id,
+        worker.id,
+        callback_child.id,
+        callback_grandchild.id,
+    ] {
+        let after = h
+            .control
+            .mission_store
+            .get_mission(id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.project.project.as_deref(), Some("verity"), "id={id}");
+    }
+    let cb_after = h
+        .control
+        .mission_store
+        .get_mission(callback_child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cb_after.project.tags, vec!["pr-readonly".to_string()]);
 }
 
 #[tokio::test]

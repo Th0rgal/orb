@@ -31,8 +31,8 @@ pub struct UpdateMissionProjectRequest {
     #[serde(default)]
     pub include_descendants: bool,
     /// Optional client-known callback children (`callback_parent_mission_id`)
-    /// to verify via `callback_parent::links` and include in the atomic
-    /// subtree transfer alongside `parent_mission_id` descendants.
+    /// to verify via `callback_parent::links` alongside server-discovered
+    /// Hermes callback roots in the atomic subtree transfer.
     #[serde(default)]
     pub descendant_ids: Vec<Uuid>,
 }
@@ -62,9 +62,10 @@ async fn collect_launched_descendant_ids(
     let mut stack = vec![root_id];
     let mut out = Vec::new();
 
+    let mut seen_candidates = HashSet::from([root_id]);
     let mut candidate_missions = Vec::new();
     for &cid in extra_candidates {
-        if cid == root_id {
+        if !seen_candidates.insert(cid) {
             continue;
         }
         if let Some(m) = mission_store
@@ -79,6 +80,33 @@ async fn collect_launched_descendant_ids(
             {
                 candidate_missions.push(m);
             }
+        }
+    }
+    // Discover Hermes webhook callback roots directly from the store as well so
+    // archived or paged-out callback descendants (and workers beneath them)
+    // move atomically even when the client has not loaded them.
+    if super::super::projects_overview::hermes_state_db_path().is_some() {
+        const PAGE: usize = 500;
+        let mut offset = 0usize;
+        loop {
+            let page = mission_store
+                .list_missions(PAGE, offset)
+                .await
+                .map_err(internal_error)?;
+            let page_len = page.len();
+            for m in page {
+                if m.parent_mission_id.is_none()
+                    && m.origin.as_deref() == Some("hermes")
+                    && m.origin_session_id.is_some()
+                    && seen_candidates.insert(m.id)
+                {
+                    candidate_missions.push(m);
+                }
+            }
+            if page_len < PAGE {
+                break;
+            }
+            offset += page_len;
         }
     }
     let callback_links = if candidate_missions.is_empty() {
@@ -124,7 +152,12 @@ async fn collect_launched_descendant_ids(
             let parent = m
                 .parent_mission_id
                 .filter(|&pid| !is_fork_of_parent(m, pid))
-                .or_else(|| callback_links.get(&m.id).copied());
+                .or_else(|| {
+                    callback_links
+                        .get(&m.id)
+                        .copied()
+                        .filter(|&pid| !is_fork_of_parent(m, pid))
+                });
             if parent.is_some_and(|p| visited.contains(&p)) && visited.insert(m.id) {
                 out.push(m.id);
                 stack.push(m.id);
@@ -575,11 +608,17 @@ where
                     return Err(err);
                 }
             };
+            // Omit internal `disk-reservation-v1:` tags from the synthetic
+            // request body so admission validation does not reject legacy
+            // rows; `update_mission_project_locked` re-attaches them from
+            // `current.project.tags` automatically.
             let child_tags: Vec<String> = child
                 .project
                 .tags
                 .iter()
-                .filter(|t| !t.starts_with("orb-folder:"))
+                .filter(|t| {
+                    !t.starts_with("orb-folder:") && !t.starts_with(DISK_RESERVATION_TAG_PREFIX)
+                })
                 .cloned()
                 .collect();
             match update_mission_project_locked(
