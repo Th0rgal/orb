@@ -92,7 +92,8 @@ fn policy(name: &str) -> Option<(Role, bool)> {
         | "delete_managed_snapshot"
         | "fork_managed_machine"
         | "stop_managed_machine"
-        | "resume_managed_machine" => (Executor, true),
+        | "resume_managed_machine"
+        | "exec_raw_managed_machine" => (Executor, true),
         "schedule_wakeup"
         | "schedule_job_wakeup"
         | "ask_mission"
@@ -229,9 +230,10 @@ pub fn registry() -> Vec<Tool> {
                 "duplicate MCP tool"
             );
             if definition.name == "start_mission" {
-                definition.input_schema["properties"]["remote_node_id"] = json!({"type":"string","description":"Native node placement: a registered node id, \"auto\" for the fleet scheduler (least-loaded eligible static node), a managed machine's name (\"small-a\", from spawn_managed_machine) or its node id, or \"auto-managed\" / \"auto-managed:<small|default|large|xlarge>\" to rent a boat.dev VM of that size for this child (validated before renting; an idle VM of the same size left by an ended sibling is reused; default small; the child owns it and it is destroyed shortly after the child ends, or at its TTL; call destroy_managed_machine to release it earlier). Omit to inherit the parent's node and workspace. A child placed elsewhere starts in that node's default workspace and must clone what it needs; managed VMs hold no credentials or private checkouts."});
+                definition.input_schema["properties"]["remote_node_id"] = json!({"type":"string","description":"Native node placement: a registered node id, \"auto\" for the fleet scheduler (least-loaded eligible static node), a managed machine's name (\"small-a\", from spawn_managed_machine) or its node id, or \"auto-managed\" / \"auto-managed:<size>\" / \"auto-managed:<boat|hetzner|vastai|scaleway>:<size>\" (e.g. \"auto-managed:large\", \"auto-managed:hetzner:cpx41\", \"auto-managed:vastai:rtx4090\", \"auto-managed:scaleway:PRO2-S\") to rent a disposable cloud VM for this child (validated before renting; an idle sibling VM of the same provider and size is reused; default boat small; the child owns it and it is destroyed after the child ends, after 15 min idle, or at its TTL; call destroy_managed_machine to release it earlier). Never call external cloud APIs directly via secret_get — always rent through Core. Omit to inherit the parent's node and workspace."});
                 definition.input_schema["properties"]["managed_ttl_minutes"] = json!({"type":"integer","minimum":5,"maximum":720,"description":"Only with remote_node_id auto-managed: initial machine TTL in minutes (default 60, auto-extended while busy)."});
-                definition.input_schema["properties"]["managed_from_snapshot"] = json!({"type":"string","description":"Only with remote_node_id auto-managed: start the child's VM from this project snapshot (list_managed_snapshots) instead of the base image, so repos, toolchains and build caches are already there."});
+                definition.input_schema["properties"]["managed_from_snapshot"] = json!({"type":"string","description":"Only with remote_node_id auto-managed (boat): start the child's VM from this project snapshot (list_managed_snapshots) instead of the base image, so repos, toolchains and build caches are already there."});
+                definition.input_schema["properties"]["managed_allow_24h_commitment"] = json!({"type":"boolean","description":"Only with remote_node_id auto-managed:scaleway:<M2-*> (Apple Silicon): explicitly authorize the 24-hour minimum lease commitment."});
                 definition.input_schema["properties"]["budget_usd"] = json!({"type":"number","minimum":0,"description":"Optional managed-VM budget (USD) for the child and its descendants. Under your own budget pool it is a sub-budget carved from it and must not exceed its remaining amount (see get_budget). Omit to let the child share your pool."});
                 definition.description="Launch one native or cloud mission. Native launches select a backend/workspace/model; cloud launches select cloud.provider/account and optional repository/model. Discover cloud availability with list_cloud_accounts and list_cloud_models. Every role can use owner cloud accounts within quotas. Core supplies the parent identity for executors. Pass project/track and acceptance criteria for governed work; reviewers use writer=false. For a review or second opinion from another model, call consult_model instead. Mission completion and accepted project evidence remain separate.".into();
             }

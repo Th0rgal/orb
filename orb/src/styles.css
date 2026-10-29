@@ -4027,6 +4027,11 @@ select.orb-select-native:disabled { cursor: default; }
 }
 .managed-mission-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .managed-owner-chip { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: var(--hover-2); color: var(--fg-3); white-space: nowrap; }
+.managed-provider-chip { color: var(--blue); background: color-mix(in srgb, var(--blue) 14%, transparent); font-weight: 500; }
+.managed-project-chip { color: var(--fg-2); }
+.managed-providers { display: flex; flex-wrap: wrap; gap: 6px; }
+.managed-24h-confirm { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--amber); cursor: pointer; }
+.managed-24h-confirm input { margin-top: 2px; }
 .managed-owner-chip.managed-no-owner { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }
 .managed-no-owner-reason { color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .managed-reap { color: var(--amber); }

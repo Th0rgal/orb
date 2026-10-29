@@ -292,6 +292,84 @@
       ]
     },
     {
+      "name": "orb_vm_lifecycle_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "ownerClass",
+          "type": "uint8_t"
+        },
+        {
+          "name": "busy",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ttlExpired",
+          "type": "uint8_t"
+        },
+        {
+          "name": "graceOrIdleElapsed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "workingIdleEnabled",
+          "type": "uint8_t"
+        },
+        {
+          "name": "supportsFreeStop",
+          "type": "uint8_t"
+        },
+        {
+          "name": "minDeletePending",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "orb_vm_claim_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "isLive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sameTenant",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ownerNone",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ownerInLineage",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "orb_compute_secret_gate",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "isCoreReservedComputeKey",
+          "type": "uint8_t"
+        },
+        {
+          "name": "callerOnManagedNode",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isAllowlistedManagedSecret",
+          "type": "uint8_t"
+        },
+        {
+          "name": "operatorBreakGlass",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
       "name": "orb_verify_log_window",
       "ret": "uint8_t",
       "params": [

@@ -35,6 +35,15 @@ internal func orb_verify_token_rotation(_ presentedNonEmpty: UInt8, _ matchCurre
 @_silgen_name("orb_verify_approval")
 internal func orb_verify_approval(_ signed: UInt8, _ owned: UInt8, _ pending: UInt8, _ unexpired: UInt8, _ unchanged: UInt8, _ risk: UInt8, _ confirmed: UInt8) -> UInt8
 
+@_silgen_name("orb_vm_lifecycle_step")
+internal func orb_vm_lifecycle_step(_ ownerClass: UInt8, _ busy: UInt8, _ ttlExpired: UInt8, _ graceOrIdleElapsed: UInt8, _ workingIdleEnabled: UInt8, _ supportsFreeStop: UInt8, _ minDeletePending: UInt8) -> UInt32
+
+@_silgen_name("orb_vm_claim_step")
+internal func orb_vm_claim_step(_ isLive: UInt8, _ sameTenant: UInt8, _ ownerNone: UInt8, _ ownerInLineage: UInt8) -> UInt32
+
+@_silgen_name("orb_compute_secret_gate")
+internal func orb_compute_secret_gate(_ isCoreReservedComputeKey: UInt8, _ callerOnManagedNode: UInt8, _ isAllowlistedManagedSecret: UInt8, _ operatorBreakGlass: UInt8) -> UInt32
+
 @_silgen_name("orb_verify_log_window")
 internal func orb_verify_log_window(_ offset: UInt64, _ reqLen: UInt64, _ maxChunk: UInt64, _ hardCap: UInt64, _ fileSize: UInt64, _ actualLen: UInt64) -> UInt8
 
@@ -651,9 +660,9 @@ enum OrbKernel {
         return ((raw & 1) != 0, Int((raw >> 32) & 0xFFFF_FFFF))
     }
 
-    static func machineActionAdmitted(stateKind: Int, isBusy: Bool, isMuted: Bool) -> (isLive: Bool, canAct: Bool, meterLiveCost: Bool) {
+    static func machineActionAdmitted(stateKind: Int, isBusy: Bool, isMuted: Bool) -> (isLive: Bool, canAct: Bool, meterLiveCost: Bool, isStopped: Bool, canResume: Bool) {
         let raw = orb_machine_action_admitted(satU8(stateKind), b8(isBusy), b8(isMuted))
-        return ((raw & 1) != 0, ((raw >> 8) & 1) != 0, ((raw >> 16) & 1) != 0)
+        return ((raw & 1) != 0, ((raw >> 8) & 1) != 0, ((raw >> 16) & 1) != 0, ((raw >> 24) & 1) != 0, ((raw >> 25) & 1) != 0)
     }
 
     static func sendFlowStep(

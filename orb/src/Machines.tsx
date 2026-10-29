@@ -188,7 +188,7 @@ function MachinesPage() {
           )}
         </For>
       </div>
-      <ManagedMachines onDestroyed={dropNodes} />
+      <ManagedMachines nodes={nodes()} onDestroyed={dropNodes} />
 
       <AgentSoftware external={staticMachines()} />
       <div class="key-bar">

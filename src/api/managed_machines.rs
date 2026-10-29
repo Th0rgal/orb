@@ -72,6 +72,10 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
 pub fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/managed-machines/enroll", post(enroll))
+        .route(
+            "/api/managed-machines/bootstrap-binary/:id",
+            get(bootstrap_binary),
+        )
         .route("/api/managed-machines/relay/poll", get(relay_poll))
         .route(
             "/api/managed-machines/relay/respond",
@@ -183,32 +187,54 @@ async fn spawn_for(
     if let Some(mission) = charged {
         // The mission must be the caller's: never charge (or escape to)
         // another tenant's pool.
-        if !matches!(store.get_mission(mission).await, Ok(Some(_))) {
+        let Ok(Some(mission_row)) = store.get_mission(mission).await else {
             return err(ManagedError {
                 error: "unknown_mission",
                 message: "Owner mission not found".into(),
                 status: 404,
             });
-        }
+        };
         req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission, &user.id).await;
-        req.snapshot_project = store
-            .get_mission(mission)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|m| m.project.project);
+        req.snapshot_project = mission_row.project.project.clone();
+        // Walk parent lineage (bounded) to record `root_mission_id`.
+        let mut root = mission;
+        let mut cur = mission_row.parent_mission_id;
+        for _ in 0..16 {
+            let Some(pid) = cur else { break };
+            root = pid;
+            cur = store
+                .get_mission(pid)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|m| m.parent_mission_id);
+        }
+        req.root_mission_id = Some(root.to_string());
     }
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
     };
+    let target_provider = req
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| m.default_provider().map(|p| p.name().to_string()))
+        .unwrap_or_else(|| m.settings.provider.clone());
     if req.provisioning_mode.unwrap_or_default().is_worker()
         && req.reuse_idle == Some(true)
         && req.from_snapshot.is_none()
         && req.fork_of.is_none()
     {
-        if let (Some(parent), Ok((spec, _))) = (charged, ManagedManager::plan(&m.settings, &req)) {
-            if let Some(machine) = reuse_idle_sibling(&m, &store, &req, parent, spec.size).await {
+        if let (Some(parent), Ok((spec, _))) = (
+            charged,
+            ManagedManager::plan_for_provider(&m.settings, &target_provider, &req),
+        ) {
+            if let Some(machine) =
+                reuse_idle_sibling(&m, &store, &req, parent, &target_provider, spec.size).await
+            {
                 let mut body = serde_json::to_value(&machine).unwrap_or_default();
                 body["reused"] = json!(true);
                 return (StatusCode::OK, Json(body)).into_response();
@@ -221,7 +247,7 @@ async fn spawn_for(
     }
 }
 
-/// An idle VM of the same size/image whose owner is an ended child of
+/// An idle VM of the same provider/size/image whose owner is an ended child of
 /// `parent` (a sibling of the child about to start) and is still inside its
 /// grace window: hand it over instead of renting.
 async fn reuse_idle_sibling(
@@ -229,9 +255,26 @@ async fn reuse_idle_sibling(
     store: &Arc<dyn crate::api::mission_store::MissionStore>,
     req: &SpawnRequest,
     parent: uuid::Uuid,
+    provider: &str,
     size: &str,
 ) -> Option<crate::managed::ManagedMachine> {
-    let image = ManagedManager::resolve_image(&m.settings, req.image.as_deref()).ok()?;
+    let image = if m
+        .provider_for(provider)
+        .is_some_and(|p| p.uses_cloud_init_bootstrap())
+        && req.image.is_none()
+    {
+        match provider {
+            "hetzner" => "ubuntu-24.04".to_string(),
+            "vastai" => "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel".to_string(),
+            "scaleway" if crate::managed::scaleway::is_apple_silicon_type(size) => {
+                "macos-15".to_string()
+            }
+            "scaleway" => "ubuntu_noble".to_string(),
+            _ => "ubuntu-24.04".to_string(),
+        }
+    } else {
+        ManagedManager::resolve_image(&m.settings, req.image.as_deref()).ok()?
+    };
     let ended: std::collections::HashSet<String> = store
         .get_child_missions(parent)
         .await
@@ -250,7 +293,8 @@ async fn reuse_idle_sibling(
     }
     let parent_id = parent.to_string();
     let machine = m
-        .take_idle_sibling(
+        .take_idle_sibling_for_provider(
+            Some(provider),
             &crate::managed::SiblingReuse {
                 size,
                 image: &image,
@@ -535,6 +579,64 @@ async fn enroll(Json(body): Json<EnrollBody>) -> Response {
             Json(json!({"node_id": node_id, "node_token": node_token})).into_response()
         }
         Err(e) => err(e),
+    }
+}
+
+/// Self-authenticated `sandboxed-node` binary download for cloud-init / onstart
+/// worker VMs (`hetzner`, `vastai`, `scaleway`) before they enroll over the relay.
+async fn bootstrap_binary(Path(id): Path<String>, headers: HeaderMap) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let token = crate::remote_node::bearer_token(&headers).unwrap_or_default();
+    let Some(machine) = m.verify_bootstrap_token(&id, token).await else {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    };
+    let arm64 = machine.size.eq_ignore_ascii_case("cax31")
+        || crate::managed::scaleway::is_apple_silicon_type(&machine.size);
+    let candidate = if arm64 {
+        std::env::var("SANDBOXED_MANAGED_NODE_BINARY_ARM64")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .map(std::path::PathBuf::from)
+    } else {
+        None
+    }
+    .or_else(|| {
+        std::env::var("SANDBOXED_MANAGED_NODE_BINARY")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .map(std::path::PathBuf::from)
+    })
+    .or_else(|| {
+        let std_path = std::path::PathBuf::from("/usr/local/bin/sandboxed-node");
+        std_path.exists().then_some(std_path)
+    })
+    .or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join("sandboxed-node")))
+            .filter(|p| p.exists())
+    });
+    let Some(bin_path) = candidate else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sandboxed-node binary is not staged on Core",
+        )
+            .into_response();
+    };
+    match tokio::fs::read(&bin_path).await {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/octet-stream")
+            .body(axum::body::Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to read sandboxed-node binary",
+        )
+            .into_response(),
     }
 }
 

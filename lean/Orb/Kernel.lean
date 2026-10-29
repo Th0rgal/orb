@@ -1103,14 +1103,18 @@ def fileRefLineSpan (startLine endLine totalLines : UInt32) : UInt64 :=
   Unboxed C-ABI Managed Machine Action Gate (`orb_machine_action_admitted`):
   `stateKind`: `0 = provisioning`, `1 = enrolling`, `2 = online`, `3 = destroying`,
   `4 = destroyed`, `5 = failed`, `6 = stopped`.
-  Packs `bit 0 = isLive`, `bit 8 = canAct`, `bit 16 = meterLiveCost`.
+  Packs `bit 0 = isLive`, `bit 8 = canAct`, `bit 16 = meterLiveCost`,
+  `bit 24 = isStopped`, `bit 25 = canResume`.
 -/
 @[inline, export orb_machine_action_admitted]
 def machineActionAdmitted (stateKind isBusy isMuted : UInt8) : UInt32 :=
+  let idleUnmuted : Bool := isBusy == 0 && isMuted == 0
   let isLive : UInt32 := if stateKind ≤ 3 then 1 else 0
-  let canAct : UInt32 := if stateKind ≤ 2 && isBusy == 0 && isMuted == 0 then 256 else 0
+  let canAct : UInt32 := if stateKind ≤ 2 && idleUnmuted then 256 else 0
   let meterCost : UInt32 := if stateKind ≤ 2 then 65536 else 0
-  isLive ||| canAct ||| meterCost
+  let isStopped : UInt32 := if stateKind == 6 then 16777216 else 0
+  let canResume : UInt32 := if stateKind == 6 && idleUnmuted then 33554432 else 0
+  isLive ||| canAct ||| meterCost ||| isStopped ||| canResume
 
 /--
   Unboxed C-ABI Send Flow & Queue Edit Stepper (`orb_send_flow_step`):
@@ -1908,5 +1912,85 @@ def nodeDiskAdmissionStep
     else if softPressure then 769
     else 257
   lo32.toUInt64 ||| (headroomGiB32.toUInt64 <<< 32)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Wave 13: Multi-Provider Managed Compute Governance & Secret Confinement
+-- ═══════════════════════════════════════════════════════════════════════════
+
+/--
+  Unboxed C-ABI Managed VM Lifecycle, Working-Idle & Minimum-Commitment Stepper (`orb_vm_lifecycle_step`):
+  `ownerClass`: `0 = unknown`, `1 = working`, `2 = waiting`, `3 = terminal_or_missing`, `4 = user_or_unowned`.
+  Packs:
+  - `bits 0..7 = action`: `0 = keep`, `1 = schedule`, `2 = stop`, `3 = destroy`
+  - `bit 8 (256) = admitted`: `1` iff `action == 2 || action == 3`
+  - `bit 16 (65536) = deferForMinLease`: `1` iff destroy is deferred because `minDeletePending == 1`
+    (e.g. Scaleway Apple Silicon 24-hour `deletable_at` minimum commitment).
+-/
+@[inline, export orb_vm_lifecycle_step]
+def vmLifecycleStep
+    (ownerClass busy ttlExpired graceOrIdleElapsed workingIdleEnabled supportsFreeStop minDeletePending : UInt8) : UInt32 :=
+  if ttlExpired == 1 then
+    if minDeletePending == 1 then 65537 else 259
+  else if busy == 1 then
+    0
+  else if ownerClass == 0 then
+    0
+  else if ownerClass == 1 then
+    if workingIdleEnabled == 0 then
+      0
+    else if graceOrIdleElapsed == 0 then
+      1
+    else if minDeletePending == 1 then
+      65537
+    else
+      259
+  else if ownerClass == 2 then
+    if graceOrIdleElapsed == 0 then
+      1
+    else if supportsFreeStop == 1 then
+      258
+    else if minDeletePending == 1 then
+      65537
+    else
+      259
+  else
+    if graceOrIdleElapsed == 0 then
+      1
+    else if minDeletePending == 1 then
+      65537
+    else
+      259
+
+/--
+  Unboxed C-ABI Managed VM Lineage Claim & Tenant Isolation Gate (`orb_vm_claim_step`):
+  Admits (`257 = 1 ||| 256`) iff the machine is live (`isLive == 1`), belongs to the same tenant
+  (`sameTenant == 1`), and is either unowned (`ownerNone == 1`) or currently owned by the authorized
+  requester/lineage (`ownerInLineage == 1`); otherwise rejects (`512`).
+-/
+@[inline, export orb_vm_claim_step]
+def vmClaimStep (isLive sameTenant ownerNone ownerInLineage : UInt8) : UInt32 :=
+  if isLive == 1 && sameTenant == 1 && (ownerNone == 1 || ownerInLineage == 1) then
+    257
+  else
+    512
+
+/--
+  Unboxed C-ABI Cloud Compute Secret Confinement & Untrusted Managed-Node Gate (`orb_compute_secret_gate`):
+  - Core-reserved cloud provider API keys (`isCoreReservedComputeKey == 1`, e.g. `BOAT_API_KEY`,
+    `HETZNER_CLOUD_APIKEY`, `SCALEWAY_SECRET_KEY`, `VASTAI_API_KEY`) are rejected (`512`) unless an
+    explicit operator break-glass override is active (`operatorBreakGlass == 1`).
+  - Missions executing on untrusted external managed nodes (`callerOnManagedNode == 1`) are rejected (`512`)
+    for any secret outside the explicit managed-node allowlist (`isAllowlistedManagedSecret == 0`).
+  - Otherwise admits (`257`).
+-/
+@[inline, export orb_compute_secret_gate]
+def computeSecretGate
+    (isCoreReservedComputeKey callerOnManagedNode isAllowlistedManagedSecret operatorBreakGlass : UInt8) : UInt32 :=
+  if isCoreReservedComputeKey == 1 && operatorBreakGlass == 0 then
+    512
+  else if callerOnManagedNode == 1 && isAllowlistedManagedSecret == 0 then
+    512
+  else
+    257
 
 end Orb.Kernel
