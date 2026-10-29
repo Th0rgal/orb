@@ -24,6 +24,9 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 ### Essential environment variables
 
 Copy `.env.example` to `.env` and configure the values below. The full file contains additional optional settings.
+Docker Compose loads this optional `.env` file into the `sandboxed-sh` container.
+After changing it, run `docker compose up -d` to recreate the container with
+the new values.
 
 #### Authentication
 
@@ -47,10 +50,15 @@ Copy `.env.example` to `.env` and configure the values below. The full file cont
 | Variable | Default | Description |
 |---|---|---|
 | `HOST` | `0.0.0.0` | Bind address for the backend |
-| `PORT` | `3000` | Backend listen port (inside the container) |
+| `PORT` | `3000` | Backend listen port inside the container; Caddy forwards API requests to this port |
 | `WORKING_DIR` | `/root` | Root directory for workspaces |
 | `MAX_ITERATIONS` | `50` | Max tool-call iterations per mission |
 | `MAX_PARALLEL_MISSIONS` | `1` | Number of missions that can run concurrently |
+
+`PORT` does not change the address you open in your browser: Compose publishes
+host port 3000 to Caddy's port 80. To use a different host port, edit the
+`ports` mapping in `docker-compose.yml` (for example, `"8080:80"`) and open
+`http://localhost:8080`.
 
 ### Enabling container workspaces
 
