@@ -3840,9 +3840,12 @@ async fn chat_completions_routed(
             ProviderType::Antigravity | ProviderType::MuseCode
         ) && entry.has_oauth
             && super::oauth_owner::management_enabled();
-        if provider_type == ProviderType::Google
-            && !entry.has_oauth
-            && entry.api_key.is_some()
+        let is_google_api_key_entry = provider_type == ProviderType::Google
+            && ((!entry.has_oauth && entry.api_key.is_some())
+                || (entry.account_id
+                    == crate::provider_health::stable_provider_uuid("google-cli-proxy")
+                    && !crate::api::ai_providers::cli_proxy_config_gemini_keys().is_empty()));
+        if is_google_api_key_entry
             && !crate::model_policy::is_google_api_key_allowed_model(&entry.model_id)
         {
             let msg = crate::model_policy::google_api_key_disallowed_message(&entry.model_id);

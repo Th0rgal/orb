@@ -3003,6 +3003,8 @@ impl ModelChainStore {
                 if !configured_google_oauth
                     && !duplicate_google_proxy_key
                     && crate::api::ai_providers::google_cli_proxy_account_available()
+                    && (crate::api::ai_providers::cli_proxy_config_gemini_keys().is_empty()
+                        || crate::model_policy::is_google_api_key_allowed_model(&entry.model_id))
                 {
                     let cli_proxy_account_id = stable_provider_uuid("google-cli-proxy");
                     if !seen_account_ids.contains(&cli_proxy_account_id)
@@ -5383,5 +5385,72 @@ mod tests {
         );
         assert!(verdict_aa.emit_dispatch_effect);
         assert_eq!(dispatched_aa, Some(uuid_a));
+    }
+
+    #[tokio::test]
+    async fn synthetic_google_cli_proxy_fallback_blocks_non_carbon_when_gemini_api_key_configured()
+    {
+        struct EnvReset;
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                std::env::remove_var("CLI_PROXY_CONFIG_PATH");
+            }
+        }
+        let _reset = EnvReset;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg_path,
+            "gemini-api-key:\n  - api-key: \"proxy-google-key-b\"\n",
+        )
+        .unwrap();
+        std::env::set_var("CLI_PROXY_CONFIG_PATH", &cfg_path);
+
+        let store = store_with(vec![]).await;
+        let chains = store_with_chain("unused", vec![]).await;
+        // Standard account has a DIFFERENT API key A (`duplicate_google_proxy_key` is false),
+        // exercising the exact synthetic `google-cli-proxy` fallback path in `resolve_entries`.
+        let standard = vec![StandardAccount {
+            account_id: stable_provider_uuid("google"),
+            provider_type: ProviderType::Google,
+            api_key: Some("auth-json-google-key-a".into()),
+            has_oauth: false,
+            base_url: None,
+            oauth_expires_at: None,
+        }];
+        let health = ProviderHealthTracker::new();
+
+        let argon = [ChainEntry {
+            provider_id: "google".into(),
+            model_id: "gemini-4-argon".into(),
+        }];
+        assert!(
+            chains
+                .resolve_entries(&argon, &store, &standard, &health)
+                .await
+                .is_empty(),
+            "neither key A nor synthetic google-cli-proxy key B may serve non-Carbon models"
+        );
+        assert!(
+            chains
+                .configured_account_ids(&argon, &store, &standard)
+                .await
+                .is_empty(),
+            "configured_account_ids must also exclude both API-key routes for non-Carbon models"
+        );
+
+        let carbon = [ChainEntry {
+            provider_id: "google".into(),
+            model_id: "gemini-4-carbon-eap".into(),
+        }];
+        let resolved = chains
+            .resolve_entries(&carbon, &store, &standard, &health)
+            .await;
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].account_id, stable_provider_uuid("google"));
+        assert_eq!(
+            resolved[1].account_id,
+            stable_provider_uuid("google-cli-proxy")
+        );
     }
 }
