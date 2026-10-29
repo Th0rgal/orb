@@ -37,10 +37,12 @@ it("derives the optimistic view and the mode line", () => {
   expect(usedFraction(own(4).pool!)).toBeCloseTo(0.4);
 });
 
+const pendingStats = () => new Promise<never>(() => {});
+
 it("turns the budget on optimistically and keeps the server's answer", async () => {
   let resolve!: (v: MissionBudget) => void;
   render(() => <MissionSettings missionId="m1" title="Snark" onClose={() => {}}
-    load={async () => base()} save={() => new Promise(r => { resolve = r; })} />);
+    load={async () => base()} save={() => new Promise(r => { resolve = r; })} loadStats={pendingStats} />);
   const toggle = await screen.findByRole("switch", { name: "Spending budget" });
   expect(toggle.getAttribute("aria-checked")).toBe("false");
   fireEvent.click(toggle);
@@ -55,6 +57,7 @@ it("rolls back a refused change with an inline error and Retry", async () => {
   let calls = 0;
   render(() => <MissionSettings missionId="m1" title="Child" onClose={() => {}}
     load={async () => own(2, { max_grant_usd: 10 })}
+    loadStats={pendingStats}
     save={async (_id, amount) => { calls++; if (calls === 1) throw new Error("sub_budget_exceeds_pool: parent has $1 left"); return own(amount!, { max_grant_usd: 10 }); }} />);
   const input = await screen.findByLabelText("Amount (USD)") as HTMLInputElement;
   fireEvent.input(input, { target: { value: "3" } });
@@ -69,6 +72,7 @@ it("rolls back a refused change with an inline error and Retry", async () => {
 
 it("lists pooled and sub-budget subagents", async () => {
   render(() => <MissionSettings missionId="m1" title="Root" onClose={() => {}} titleOf={id => ({ c1: "Probe", c2: "Audit" } as Record<string, string>)[id]}
+    loadStats={pendingStats}
     load={async () => own(10, { children: [
       { mission_id: "c1", mode: "pooled", budget_usd: null, spent_usd: 0.12, reserved_usd: 0 },
       { mission_id: "c2", mode: "sub_budget", budget_usd: 1, spent_usd: 0.3, reserved_usd: 0.1 },
