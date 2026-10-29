@@ -78,35 +78,48 @@ fun OrbUsageSettingsPage(core: OrbCore, onBack: () -> Unit) {
         error?.let { Text(it, color = OrbStyle.warning, fontSize = 12.sp) }
         Text("Spend over the last 7 days", color = OrbStyle.textSecondary, fontSize = 12.sp)
         val days = summary?.let(::usageDays) ?: List(7) { UsageDay("$it", "", 0.0) }
+        val totalSpend = days.sumOf { it.usd }
         val max = days.maxOfOrNull { it.usd }?.takeIf { it > 0 } ?: 1.0
         // Fixed height so nothing jumps when the data arrives.
-        Row(
-            modifier = Modifier.fillMaxWidth().height(140.dp).clip(RoundedCornerShape(12.dp)).background(OrbStyle.surface).padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.Bottom
-        ) {
-            days.forEach { d ->
-                Column(modifier = Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Bottom, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(
-                        modifier = Modifier.fillMaxWidth().fillMaxHeight((d.usd / max).toFloat().coerceIn(0.02f, 0.85f))
-                            .clip(RoundedCornerShape(3.dp)).background(if (summary == null) OrbStyle.card else OrbStyle.inboxBlue)
-                            .semantics { contentDescription = "${d.label}: $${"%.2f".format(d.usd)}" }
-                    )
-                    Text(d.label, color = OrbStyle.textMuted, fontSize = 9.sp, maxLines = 1)
+        if (summary != null && (days.isEmpty() || totalSpend <= 0.0)) {
+            Box(
+                modifier = Modifier.fillMaxWidth().height(92.dp).clip(RoundedCornerShape(12.dp)).background(OrbStyle.surface).padding(16.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Text("No spend recorded in this window.", color = OrbStyle.textMuted, fontSize = 13.sp)
+            }
+        } else {
+            val skeletonHeights = listOf(0.32f, 0.55f, 0.24f, 0.72f, 0.44f, 0.62f, 0.38f)
+            Row(
+                modifier = Modifier.fillMaxWidth().height(140.dp).clip(RoundedCornerShape(12.dp)).background(OrbStyle.surface).padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                days.forEachIndexed { idx, d ->
+                    val frac = if (summary == null) skeletonHeights[idx % skeletonHeights.size] else (d.usd / max).toFloat().coerceIn(0.02f, 0.85f)
+                    Column(modifier = Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Bottom, horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().fillMaxHeight(frac)
+                                .clip(RoundedCornerShape(3.dp)).background(if (summary == null) OrbStyle.card else OrbStyle.inboxBlue)
+                                .semantics { contentDescription = "${d.label}: $${"%.2f".format(d.usd)}" }
+                        )
+                        Text(d.label, color = OrbStyle.textMuted, fontSize = 9.sp, maxLines = 1)
+                    }
                 }
             }
         }
-        Text("Top missions", color = OrbStyle.textSecondary, fontSize = 12.sp)
         val top = summary?.let { usageTopMissions(it) }.orEmpty()
-        if (summary != null && top.isEmpty()) Text("No usage in this window.", color = OrbStyle.textMuted, fontSize = 13.sp)
-        Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(OrbStyle.surface)) {
-            top.forEach { m ->
-                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(m.name, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${m.requests} requests", color = OrbStyle.textMuted, fontSize = 11.sp)
+        if (top.isNotEmpty()) {
+            Text("Top missions", color = OrbStyle.textSecondary, fontSize = 12.sp)
+            Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(OrbStyle.surface)) {
+                top.forEach { m ->
+                    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(m.name, color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${m.requests} requests", color = OrbStyle.textMuted, fontSize = 11.sp)
+                        }
+                        Text("$${"%.2f".format(m.usd)}", color = Color.White, fontSize = 14.sp)
                     }
-                    Text("$${"%.2f".format(m.usd)}", color = Color.White, fontSize = 14.sp)
                 }
             }
         }

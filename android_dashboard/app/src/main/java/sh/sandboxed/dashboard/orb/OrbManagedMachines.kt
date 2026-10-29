@@ -69,7 +69,11 @@ import kotlinx.coroutines.launch
  * `reloadKey` changes whenever the page pulls to refresh.
  */
 @Composable
-fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
+fun OrbManagedMachinesBlock(
+    core: OrbCore,
+    reloadKey: Int,
+    onActiveChanged: (Boolean) -> Unit = {}
+) {
     val scope = rememberCoroutineScope()
     var data by remember { mutableStateOf<ManagedMachinesResponse?>(null) }
     var fetchedAt by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -158,6 +162,8 @@ fun OrbManagedMachinesBlock(core: OrbCore, reloadKey: Int) {
         }
     }
 
+    val isActiveManaged = data?.enabled == true
+    LaunchedEffect(isActiveManaged) { onActiveChanged(isActiveManaged) }
     val d = data ?: return
     if (!d.enabled && d.providers.isEmpty()) return
 

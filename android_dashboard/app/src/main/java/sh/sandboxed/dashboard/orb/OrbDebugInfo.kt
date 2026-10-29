@@ -22,8 +22,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
@@ -105,6 +110,26 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
         }
     }
     val rows = OrbDiagnostics.build(context, endpoint, core.token, lastRefresh, errors, backendVersion)
+    val channelRows = rows.filter { it.first.startsWith("Channel ") }
+    val summaryRows = rows.filterNot {
+        it.first == "Notification permission" || it.first == "In-app notifications" || it.first.startsWith("Channel ")
+    }
+    val (permitted, channels) = remember(context) { OrbNotifications.diagnostics(context) }
+    var showChannels by remember { mutableStateOf(false) }
+    var selectedError by remember { mutableStateOf<OrbActivityCompaction.CoalescedError?>(null) }
+
+    val coalescedErrors = remember(errors) {
+        OrbActivityCompaction.coalesceErrors(
+            errors.asReversed().map { e ->
+                OrbActivityCompaction.ErrorInput(
+                    category = "${e.level.name.first()} ${e.category.tag}",
+                    summary = e.message,
+                    detail = e.detail ?: "",
+                    at = e.atEpochMs
+                )
+            }
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -146,10 +171,43 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            rows.forEach { (k, v) ->
+            summaryRows.forEach { (k, v) ->
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(k, color = OrbStyle.textMuted, fontSize = 13.sp, modifier = Modifier.weight(0.45f))
-                    Text(v, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(0.55f))
+                    Text(k, color = OrbStyle.textMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(0.42f))
+                    Text(v, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(0.58f))
+                }
+            }
+            val enabledCount = channels.count { it.enabled }
+            val notifSummary = (if (permitted) "Granted" else "Denied") +
+                " · " + (if (OrbNotifications.notificationsEnabled) "In-app on" else "In-app off") +
+                " · $enabledCount/${channels.size} channels"
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .orbPressClickable { showChannels = !showChannels },
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Notifications", color = OrbStyle.textMuted, fontSize = 13.sp, modifier = Modifier.weight(0.42f))
+                Row(modifier = Modifier.weight(0.58f), verticalAlignment = Alignment.CenterVertically) {
+                    Text(notifSummary, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    Icon(
+                        imageVector = if (showChannels) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = OrbStyle.textMuted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+            if (showChannels) {
+                channelRows.forEach { (k, v) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(start = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(k.removePrefix("Channel "), color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(0.45f))
+                        Text(v, color = OrbStyle.textSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(0.55f))
+                    }
                 }
             }
         }
@@ -172,22 +230,86 @@ fun OrbDebugInfoPage(core: OrbCore, onBack: () -> Unit) {
         }
 
         Text("Recent errors", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        if (errors.isEmpty()) {
+        if (coalescedErrors.isEmpty()) {
             Text("None since the app started.", color = OrbStyle.textMuted, fontSize = 13.sp)
         } else {
-            errors.asReversed().forEach { entry ->
-                Text(
-                    entry.format(),
-                    color = if (entry.level == OrbLog.Level.Error) OrbStyle.error else OrbStyle.textSecondary,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+            coalescedErrors.forEach { entry ->
+                val isErr = entry.category.startsWith("E ")
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
                         .background(OrbStyle.card)
-                        .padding(10.dp)
-                )
+                        .orbPressClickable { selectedError = entry }
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "${entry.category}: ${entry.summary}",
+                            color = if (isErr) OrbStyle.error else OrbStyle.textPrimary,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (entry.count > 1) {
+                            Text(
+                                text = "×${entry.count}",
+                                color = OrbStyle.warning,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(OrbStyle.surface)
+                                    .padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    val secondLine = entry.detail.lineSequence().firstOrNull()?.trim().orEmpty()
+                    if (secondLine.isNotEmpty()) {
+                        Text(
+                            text = secondLine,
+                            color = OrbStyle.textMuted,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
             }
         }
+    }
+
+    selectedError?.let { err ->
+        val fullText = buildString {
+            append(Instant.ofEpochMilli(err.at)).append(' ').append(err.category).append(": ").append(err.summary)
+            if (err.count > 1) append(" (×").append(err.count).append(')')
+            if (err.detail.isNotBlank()) append("\n\n").append(err.detail)
+        }
+        AlertDialog(
+            onDismissRequest = { selectedError = null },
+            containerColor = OrbStyle.elevated,
+            title = { Text("Error detail", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+            text = {
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(fullText, color = OrbStyle.textSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    cm?.setPrimaryClip(ClipData.newPlainText("Orb error", fullText))
+                    Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                    selectedError = null
+                }) { Text("Copy") }
+            },
+            dismissButton = {
+                TextButton(onClick = { selectedError = null }) { Text("Close") }
+            }
+        )
     }
 }

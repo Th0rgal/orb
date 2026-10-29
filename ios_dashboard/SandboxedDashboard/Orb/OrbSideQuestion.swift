@@ -27,7 +27,12 @@ struct OrbBtwSettingsView: View {
                 Picker("Harness", selection: $harness) {
                     ForEach(OrbBtwConfig.harnesses, id: \.0) { Text($0.1).tag($0.0) }
                 }
-                TextField("Model", text: $model).textInputAutocapitalization(.never).autocorrectionDisabled()
+                LabeledContent("Model") {
+                    TextField("builtin/smart", text: $model)
+                        .multilineTextAlignment(.trailing)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
             } footer: {
                 Text("An independent agent in the main agent's folder, with the normal harness tools and permissions. Files are shared with the main agent.")
             }
