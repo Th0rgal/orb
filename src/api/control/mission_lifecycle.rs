@@ -778,7 +778,7 @@ pub async fn delete_mission(
             board_task_ids.insert(task.id.to_string());
         }
     }
-    {
+    let replacements = {
         let conn = state.projects.connection.lock().map_err(internal_error)?;
         crate::control_mcp::actions::require_history_deletable(
             &conn,
@@ -786,7 +786,15 @@ pub async fn delete_mission(
             &ids_to_delete,
             &board_task_ids,
         )
-        .map_err(|e| (StatusCode::CONFLICT, e))?;
+        .map_err(|e| (StatusCode::CONFLICT, e))?
+    };
+    for (action_id, prior_id) in replacements {
+        let lineage = mission_create::replacement_parent_lineage(&control.mission_store, prior_id)
+            .await
+            .map_err(|e| (StatusCode::CONFLICT, e))?;
+        if lineage.iter().any(|id| ids_to_delete.contains(id)) {
+            return Err((StatusCode::CONFLICT, format!("Accepted MCP action {action_id} inherits this replacement parent; settle it before deleting")));
+        }
     }
     // Descendant creation is admission-serialized. Recompute after acquiring
     // the fence and reject if the validated deletion set changed while waiting.

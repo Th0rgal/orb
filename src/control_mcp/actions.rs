@@ -185,13 +185,13 @@ pub(crate) fn require_history_deletable(
     owner: &str,
     mission_ids: &std::collections::HashSet<Uuid>,
     board_task_ids: &std::collections::HashSet<String>,
-) -> Result<(), String> {
+) -> Result<Vec<(String, Uuid)>, String> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_actions_v1')",
         [], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     if !exists || mission_ids.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(
         "SELECT id,tool,state,principal,arguments FROM mcp_actions_v1 WHERE owner=?1 AND state IN ('queued','dispatching','reconciliation_required') ORDER BY created_at,id",
@@ -207,6 +207,7 @@ pub(crate) fn require_history_deletable(
             ))
         })
         .map_err(|e| e.to_string())?;
+    let mut replacements = Vec::new();
     for row in rows {
         let (id, tool, state, principal, arguments) = row.map_err(|e| e.to_string())?;
         let disjoint = (|| {
@@ -241,6 +242,11 @@ pub(crate) fn require_history_deletable(
                 // New children depend on their issuer/parent and superseded
                 // mission, not every historical mission in the project.
                 "start_mission" | "consult_model" => {
+                    if let Some(prior) = args.get("supersedes_mission_id").and_then(Value::as_str) {
+                        // The caller resolves inherited successor lineage under
+                        // admission, after releasing the SQLite mutex.
+                        replacements.push((id.clone(), Uuid::parse_str(prior).ok()?));
+                    }
                     // Creation also infers lineage from Hermes' per-mission
                     // session. Reuse its parser so deletion cannot orphan an
                     // accepted launch from an unbound operator session.
@@ -292,7 +298,7 @@ pub(crate) fn require_history_deletable(
             ));
         }
     }
-    Ok(())
+    Ok(replacements)
 }
 
 pub fn recover(conn: &Connection) -> Result<usize, String> {

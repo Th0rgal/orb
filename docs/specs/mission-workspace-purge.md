@@ -112,7 +112,9 @@ Conversation deletion checks accepted actions against the full deletion set
 (including descendants), under the same admission fence. It retains issuer,
 parent (including the existing `orb_<uuid>` origin-session inference), superseded
 and explicit target missions for queued, dispatching and
-uncertain actions. Unrelated actions with audited dependencies do not block
+uncertain actions. Replacement launches also retain their inherited successor
+parent, resolved with the same helper used by mission creation; failed store
+reads or an overlong successor chain refuse deletion. Unrelated actions with audited dependencies do not block
 history deletion; malformed/legacy targets and unaudited tools fail closed.
 Board acceptance only records a settled verdict, but its task UUID blocks
 deletion of the boss whose deletion would cascade to that task. Task keys are
