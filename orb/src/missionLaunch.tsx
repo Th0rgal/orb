@@ -253,6 +253,8 @@ export function missionPhase(mission: Mission | null, activity: boolean): {label
         ? mission?.tags?.includes("placement:client")
           ? "The backend restarted and marked this conversation interrupted. This does not confirm that the agent on your computer stopped."
           : "The backend restarted during this run. The conversation is preserved; send a follow-up to continue if it does not resume."
+        : reason === "stalled" || reason === "watchdog_stalled" ? "Core stopped this execution after no progress was detected. Resume to inspect existing work and continue."
+        : reason === "cancelled" ? "The execution was interrupted before completion. Resume to continue from the saved conversation."
         : reason === "orphan_no_runner" ? "The backend could not find an active runner."
         : ["operator_cancelled_detached_run", "remote_job_cancelled"].includes(reason ?? "") ? "The run was stopped. Send a follow-up or click Resume to continue."
         : mission?.status_message ?? reason?.replaceAll("_", " ") ?? "The mission stopped before completion." };

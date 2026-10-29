@@ -30,3 +30,14 @@ for(const [scenario,label] of [['reconnecting','Reconnecting'],['policy','Blocke
  await expect(page.getByRole('button',{name:'Resume now'})).toHaveCount(0);
  expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
+
+for(const theme of ['light','dark'])test(`partial reply keeps interruption and keyboard Resume visible in ${theme}`,async({page})=>{
+ await page.goto(`/tests/recovery.html?scenario=interrupted&theme=${theme}`);
+ await expect(page.getByText('I will proceed to Round 3 once the test completes.',{exact:true})).toHaveCount(1);
+ await expect(page.getByText('Mission interrupted',{exact:true})).toBeVisible();
+ await expect(page.getByText('Cancelled by user',{exact:true})).toHaveCount(0);
+ const resume=page.getByRole('button',{name:'Resume',exact:true});
+ await resume.focus();
+ await page.keyboard.press('Enter');
+ await expect(page.getByRole('status').filter({hasText:'Resume requested'})).toBeVisible();
+});
