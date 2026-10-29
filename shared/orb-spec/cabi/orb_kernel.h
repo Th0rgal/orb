@@ -15,9 +15,6 @@ uint8_t orb_verify_job_transition(uint8_t, uint8_t);
 uint8_t orb_verify_bundle_budget(uint8_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t orb_verify_token_rotation(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 uint8_t orb_verify_approval(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
-uint32_t orb_vm_lifecycle_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
-uint32_t orb_vm_claim_step(uint8_t, uint8_t, uint8_t, uint8_t);
-uint32_t orb_compute_secret_gate(uint8_t, uint8_t, uint8_t, uint8_t);
 uint8_t orb_verify_log_window(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t orb_mix64_word(uint64_t, uint64_t);
 uint32_t orb_proxy_step(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t);
@@ -88,8 +85,15 @@ uint64_t orb_cursor_page_step(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, 
 uint64_t orb_sidebar_merge_step(uint32_t, uint32_t, uint64_t, uint64_t, uint8_t, uint8_t);
 uint64_t orb_scroll_epoch_step(uint32_t, uint32_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t);
 uint64_t orb_client_parity_step(uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint8_t);
-uint64_t orb_node_gc_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-uint64_t orb_node_disk_admission_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
+uint64_t orb_wire_apply_patch_step(uint64_t, uint64_t, uint8_t, uint32_t, uint8_t, uint32_t);
+uint64_t orb_wire_machine_step(uint32_t, uint64_t, uint64_t, uint8_t, uint8_t, uint32_t, uint32_t);
+uint64_t orb_hierarchy_merge_step(uint64_t, uint64_t, uint64_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_transcript_fold_step(uint64_t, uint64_t, uint32_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_outbox_crash_reconcile_step(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t);
+uint64_t orb_provider_attempt_step(uint32_t, uint32_t, uint32_t, uint32_t, uint8_t, uint8_t, uint64_t, uint64_t, uint64_t, uint8_t);
+uint32_t orb_auth_toctou_execute_step(uint8_t, uint8_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_resource_ledger_step(uint8_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_stream_bounded_commit_step(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 uint8_t leansys_verify_slice_bounds(uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_wal_frame(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_verify_cas_digest(uint64_t, uint64_t, uint8_t);
@@ -122,6 +126,11 @@ uint8_t leansys_verify_worker_budget(uint64_t, uint64_t, uint64_t, uint64_t, uin
 uint8_t leansys_verify_page_aligned_buffer(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_select_isa(uint64_t, uint64_t, uint8_t, uint8_t);
 uint8_t leansys_verify_isa_selection(uint64_t, uint64_t, uint8_t, uint8_t);
+uint32_t orb_vm_lifecycle_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+uint32_t orb_vm_claim_step(uint8_t, uint8_t, uint8_t, uint8_t);
+uint32_t orb_compute_secret_gate(uint8_t, uint8_t, uint8_t, uint8_t);
+uint64_t orb_node_gc_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t orb_node_disk_admission_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
 #ifdef __cplusplus
 }
 #endif

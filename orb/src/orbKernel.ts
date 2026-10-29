@@ -72,3 +72,172 @@ export function leansysRichTagAdmitted(tagOff: number, tagLen: number, attrOff: 
   if (!coordinates(tagOff, tagLen, attrOff, attrLen, bufLen, tagKind) || tagKind > 255) return false;
   return kernel.leansys_tag_scan(BigInt(tagOff), BigInt(tagLen), BigInt(attrOff), BigInt(attrLen), BigInt(bufLen), tagKind) !== 0;
 }
+
+const u64 = (value: bigint | number): bigint =>
+  typeof value === "bigint" ? BigInt.asUintN(64, value) : seconds(value);
+
+export type FieldPresence = 0 | 1 | 2;
+
+export function orbWireApplyPatchStep(currentRev: bigint | number, incomingRev: bigint | number,
+  currentVal: number | null, presence: number, incomingVal: number): {
+  actionCode: number; admitted: boolean; nextVal: number | null;
+} {
+  const raw = kernel.orb_wire_apply_patch_step(u64(currentRev), u64(incomingRev), b8(currentVal !== null),
+    sat32(currentVal ?? 0), enum8(presence), sat32(incomingVal));
+  const lo32 = Number(raw & 0xffff_ffffn), hi32 = Number((raw >> 32n) & 0xffff_ffffn);
+  return {
+    actionCode: lo32 & 0xff,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    nextVal: ((lo32 >> 9) & 1) !== 0 ? hi32 : null,
+  };
+}
+
+export function orbWireMachineStep(schemaId: number, stateRev: bigint | number, eventSeq: bigint | number,
+  effectKind: number, effectAdmitted: boolean, outCap: number, requiredOutBytes: number): {
+  actionCode: number; admitted: boolean; emitEffect: boolean; nextRev32: number;
+} {
+  const raw = kernel.orb_wire_machine_step(sat32(schemaId), u64(stateRev), u64(eventSeq),
+    enum8(effectKind), b8(effectAdmitted), sat32(outCap), sat32(requiredOutBytes));
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    actionCode: lo32 & 0xff,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    emitEffect: ((lo32 >> 9) & 1) !== 0,
+    nextRev32: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbHierarchyMergeStep(input: {
+  currentEpoch: bigint | number; incomingEpoch: bigint | number; archiveEpoch: bigint | number;
+  curArchived: boolean; curSuperseded: boolean; isPartialPatch: boolean;
+  parentPresence: number; curParentOrd: number; incParentOrd: number;
+  incArchive: boolean; incUnarchive: boolean; incSupersede: boolean;
+}): {
+  actionCode: number; admitted: boolean; nextArchived: boolean;
+  nextSuperseded: boolean; unarchived: boolean; nextParentOrd: number;
+} {
+  const raw = kernel.orb_hierarchy_merge_step(
+    u64(input.currentEpoch), u64(input.incomingEpoch), u64(input.archiveEpoch),
+    b8(input.curArchived), b8(input.curSuperseded), b8(input.isPartialPatch),
+    enum8(input.parentPresence), sat32(input.curParentOrd), sat32(input.incParentOrd),
+    b8(input.incArchive), b8(input.incUnarchive), b8(input.incSupersede));
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    actionCode: lo32 & 0xff,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    nextArchived: ((lo32 >> 9) & 1) !== 0,
+    nextSuperseded: ((lo32 >> 10) & 1) !== 0,
+    unarchived: ((lo32 >> 11) & 1) !== 0,
+    nextParentOrd: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbTranscriptFoldStep(lastAppliedSeq: bigint | number, incomingSeq: bigint | number,
+  entryCount: number, thinkingOpen: boolean, normalizedAction: number, isReplayFromLog: boolean): {
+  actionCode: number; admitted: boolean; thinkingOpenNext: boolean;
+  closedPreviousThinking: boolean; gapBuffered: boolean; nextEntryCount: number;
+} {
+  const raw = kernel.orb_transcript_fold_step(u64(lastAppliedSeq), u64(incomingSeq), sat32(entryCount),
+    b8(thinkingOpen), enum8(normalizedAction), b8(isReplayFromLog));
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    actionCode: lo32 & 0xff,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    thinkingOpenNext: ((lo32 >> 9) & 1) !== 0,
+    closedPreviousThinking: ((lo32 >> 10) & 1) !== 0,
+    gapBuffered: ((lo32 >> 11) & 1) !== 0,
+    nextEntryCount: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbOutboxCrashReconcileStep(durableQueued: number, durableAcked: number,
+  volatileInFlight: number, leaseBootEpoch: bigint | number, nodeBootEpoch: bigint | number,
+  volatileLeaseOwner: number, reqOwner: number): {
+  actionCode: number; admitted: boolean; crashReconciled: boolean;
+  hasSingleWriter: boolean; unackedDepth: number;
+} {
+  const raw = kernel.orb_outbox_crash_reconcile_step(sat32(durableQueued), sat32(durableAcked),
+    sat32(volatileInFlight), u64(leaseBootEpoch), u64(nodeBootEpoch),
+    sat32(volatileLeaseOwner), sat32(reqOwner));
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    actionCode: lo32 & 0xff,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    crashReconciled: ((lo32 >> 9) & 1) !== 0,
+    hasSingleWriter: ((lo32 >> 10) & 1) !== 0,
+    unackedDepth: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbProviderAttemptStep(input: {
+  pinnedAccountId: number; candidateAccountId: number; attemptsUsed: number; retryBudget: number;
+  firstByteCommitted: boolean; failureKind: number; upstreamNowEpoch: bigint | number;
+  cooldownUntilEpoch: bigint | number; upstreamDeadline: bigint | number; authValid: boolean;
+}): {
+  actionCode: number; admitted: boolean; firstByteLockedNext: boolean; nextAttemptsUsed: number;
+} {
+  const raw = kernel.orb_provider_attempt_step(
+    sat32(input.pinnedAccountId), sat32(input.candidateAccountId),
+    sat32(input.attemptsUsed), sat32(input.retryBudget),
+    b8(input.firstByteCommitted), enum8(input.failureKind),
+    u64(input.upstreamNowEpoch), u64(input.cooldownUntilEpoch), u64(input.upstreamDeadline),
+    b8(input.authValid));
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    actionCode: lo32 & 0xff,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    firstByteLockedNext: ((lo32 >> 9) & 1) !== 0,
+    nextAttemptsUsed: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}
+
+export function orbAuthToctouExecuteStep(input: {
+  principalKind: number; bunkerState: number; observedTargetId: number; execTargetId: number;
+  observedLeaseEpoch: bigint | number; liveLeaseEpoch: bigint | number;
+  nowTick: bigint | number; expiryTick: bigint | number;
+  observedDigest: bigint | number; execDigest: bigint | number;
+}): { admitted: boolean; failClosed: boolean; reasonCode: number } {
+  const raw = kernel.orb_auth_toctou_execute_step(
+    enum8(input.principalKind), enum8(input.bunkerState),
+    sat32(input.observedTargetId), sat32(input.execTargetId),
+    u64(input.observedLeaseEpoch), u64(input.liveLeaseEpoch),
+    u64(input.nowTick), u64(input.expiryTick),
+    u64(input.observedDigest), u64(input.execDigest));
+  return {
+    admitted: ((raw >>> 8) & 1) !== 0,
+    failClosed: ((raw >>> 9) & 1) !== 0,
+    reasonCode: raw & 0xff,
+  };
+}
+
+export function orbResourceLedgerStep(input: {
+  opKind: number; reservedSlots: number; activeSlots: number; maxSlots: number;
+  spentCents: bigint | number; costDeltaCents: bigint | number; budgetCents: bigint | number;
+  nowTick: bigint | number; ttlExpiryTick: bigint | number;
+}): { stateValid: boolean; admitted: boolean; nextReservedSlots: number; nextActiveSlots: number } {
+  const raw = kernel.orb_resource_ledger_step(
+    enum8(input.opKind), sat32(input.reservedSlots), sat32(input.activeSlots), sat32(input.maxSlots),
+    u64(input.spentCents), u64(input.costDeltaCents), u64(input.budgetCents),
+    u64(input.nowTick), u64(input.ttlExpiryTick));
+  const lo32 = Number(raw & 0xffff_ffffn), hi32 = Number((raw >> 32n) & 0xffff_ffffn);
+  return {
+    stateValid: lo32 !== 0,
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    nextReservedSlots: hi32 & 0xffff,
+    nextActiveSlots: (hi32 >>> 16) & 0xffff,
+  };
+}
+
+export function orbStreamBoundedCommitStep(prevLen: number, prevCommit: number, prevCheckpoint: number,
+  newLen: number, rawCommit: number, maxOpenTailBytes: number): {
+  admitted: boolean; checkpointForced: boolean; nextCheckpoint: number;
+} {
+  const raw = kernel.orb_stream_bounded_commit_step(sat32(prevLen), sat32(prevCommit),
+    sat32(prevCheckpoint), sat32(newLen), sat32(rawCommit), sat32(maxOpenTailBytes));
+  const lo32 = Number(raw & 0xffff_ffffn);
+  return {
+    admitted: ((lo32 >> 8) & 1) !== 0,
+    checkpointForced: ((lo32 >> 9) & 1) !== 0,
+    nextCheckpoint: Number((raw >> 32n) & 0xffff_ffffn),
+  };
+}

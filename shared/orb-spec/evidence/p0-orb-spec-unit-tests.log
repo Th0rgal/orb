@@ -1,8 +1,7 @@
-   Compiling orb-spec v1.3.0 (/var/lib/orb-node/work/329eb50e-9d35-4980-b4c0-6981af1d39d4/recover-orb/crates/orb-spec)
-    Finished `test` profile [unoptimized] target(s) in 1.00s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-cce4852a0adf52dc)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-3a60fa9db1975f4a)
 
-running 31 tests
+running 34 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
 test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
 test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
@@ -16,6 +15,8 @@ test shadow::tests::phase4_cursor_pagination_and_sidebar_merge_replays ... ok
 test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
 test shadow::tests::phase6_scroll_epoch_and_client_parity_replays ... ok
 test shadow::tests::shadow_runner_classifies_exact_matches_and_known_legacy_bugs ... ok
+test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
+test stateful_tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 test stats_settle_tests::settle_adds_once_ignores_replays_and_saturates ... ok
 test tests::approval_gate_needs_every_condition_and_confirms_critical ... ok
 test tests::attribution_step_rejects_forged_hints_and_never_returns_empty ... ok
@@ -33,7 +34,8 @@ test tests::tier1_admission_cooldown_cost_and_stream_loop_match_kernel ... ok
 test tests::tier1_ledger_liveness_and_pr_gate_match_kernel ... ok
 test tests::turn_summary_usage_limit_relative_time_and_transcript_patch_match_fixtures ... ok
 test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gates ... ok
+test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
 test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
-test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 

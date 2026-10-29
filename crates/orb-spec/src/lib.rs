@@ -1218,7 +1218,104 @@ unsafe extern "C" {
         pending_count: u8,
         http_status: u32,
     ) -> u32;
+// ═══════════════════════════════════════════════════════════════════════════
+// Wave 12 (P4–P6): Compositional OrbWire Patch/Machine Steppers &
+//                  7 Stateful Domain Transition Families (`G-ORB-1..7`)
+// ═══════════════════════════════════════════════════════════════════════════
+
+    fn orb_wire_apply_patch_step(
+        current_rev: u64,
+        incoming_rev: u64,
+        current_has_val: u8,
+        current_val: u32,
+        presence: u8,
+        incoming_val: u32,
+    ) -> u64;
+    fn orb_wire_machine_step(
+        schema_id: u32,
+        state_rev: u64,
+        event_seq: u64,
+        effect_kind: u8,
+        effect_admitted: u8,
+        out_cap: u32,
+        required_out_bytes: u32,
+    ) -> u64;
+    fn orb_hierarchy_merge_step(
+        current_epoch: u64,
+        incoming_epoch: u64,
+        archive_epoch: u64,
+        cur_archived: u8,
+        cur_superseded: u8,
+        is_partial_patch: u8,
+        parent_presence: u8,
+        cur_parent_ord: u32,
+        inc_parent_ord: u32,
+        inc_archive: u8,
+        inc_unarchive: u8,
+        inc_supersede: u8,
+    ) -> u64;
+    fn orb_transcript_fold_step(
+        last_applied_seq: u64,
+        incoming_seq: u64,
+        entry_count: u32,
+        thinking_open: u8,
+        normalized_action: u8,
+        is_replay_from_log: u8,
+    ) -> u64;
+    fn orb_outbox_crash_reconcile_step(
+        durable_queued: u32,
+        durable_acked: u32,
+        volatile_in_flight: u32,
+        lease_boot_epoch: u64,
+        node_boot_epoch: u64,
+        volatile_lease_owner: u32,
+        req_owner: u32,
+    ) -> u64;
+    fn orb_provider_attempt_step(
+        pinned_account_id: u32,
+        candidate_account_id: u32,
+        attempts_used: u32,
+        retry_budget: u32,
+        first_byte_committed: u8,
+        failure_kind: u8,
+        upstream_now_epoch: u64,
+        cooldown_until_epoch: u64,
+        upstream_deadline: u64,
+        auth_valid: u8,
+    ) -> u64;
+    fn orb_auth_toctou_execute_step(
+        principal_kind: u8,
+        bunker_state: u8,
+        observed_target_id: u32,
+        exec_target_id: u32,
+        observed_lease_epoch: u64,
+        live_lease_epoch: u64,
+        now_tick: u64,
+        expiry_tick: u64,
+        observed_digest: u64,
+        exec_digest: u64,
+    ) -> u32;
+    fn orb_resource_ledger_step(
+        op_kind: u8,
+        reserved_slots: u32,
+        active_slots: u32,
+        max_slots: u32,
+        spent_cents: u64,
+        cost_delta_cents: u64,
+        budget_cents: u64,
+        now_tick: u64,
+        ttl_expiry_tick: u64,
+    ) -> u64;
+    fn orb_stream_bounded_commit_step(
+        prev_len: u32,
+        prev_commit: u32,
+        prev_checkpoint: u32,
+        new_len: u32,
+        raw_commit: u32,
+        max_open_tail_bytes: u32,
+    ) -> u64;
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriterReuse {
@@ -4975,6 +5072,15 @@ pub mod raw_cabi {
     #[inline] pub fn orb_compute_secret_gate(a0: u8, a1: u8, a2: u8, a3: u8) -> u32 { unsafe { super::orb_compute_secret_gate(a0, a1, a2, a3) } }
     #[inline] pub fn orb_node_gc_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 { unsafe { super::orb_node_gc_step(a0, a1, a2, a3, a4, a5, a6) } }
     #[inline] pub fn orb_node_disk_admission_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u8) -> u64 { unsafe { super::orb_node_disk_admission_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_wire_apply_patch_step(a0: u64, a1: u64, a2: u8, a3: u32, a4: u8, a5: u32) -> u64 { unsafe { super::orb_wire_apply_patch_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_wire_machine_step(a0: u32, a1: u64, a2: u64, a3: u8, a4: u8, a5: u32, a6: u32) -> u64 { unsafe { super::orb_wire_machine_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_hierarchy_merge_step(a0: u64, a1: u64, a2: u64, a3: u8, a4: u8, a5: u8, a6: u8, a7: u32, a8: u32, a9: u8, a10: u8, a11: u8) -> u64 { unsafe { super::orb_hierarchy_merge_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11) } }
+    #[inline] pub fn orb_transcript_fold_step(a0: u64, a1: u64, a2: u32, a3: u8, a4: u8, a5: u8) -> u64 { unsafe { super::orb_transcript_fold_step(a0, a1, a2, a3, a4, a5) } }
+    #[inline] pub fn orb_outbox_crash_reconcile_step(a0: u32, a1: u32, a2: u32, a3: u64, a4: u64, a5: u32, a6: u32) -> u64 { unsafe { super::orb_outbox_crash_reconcile_step(a0, a1, a2, a3, a4, a5, a6) } }
+    #[inline] pub fn orb_provider_attempt_step(a0: u32, a1: u32, a2: u32, a3: u32, a4: u8, a5: u8, a6: u64, a7: u64, a8: u64, a9: u8) -> u64 { unsafe { super::orb_provider_attempt_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) } }
+    #[inline] pub fn orb_auth_toctou_execute_step(a0: u8, a1: u8, a2: u32, a3: u32, a4: u64, a5: u64, a6: u64, a7: u64, a8: u64, a9: u64) -> u32 { unsafe { super::orb_auth_toctou_execute_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9) } }
+    #[inline] pub fn orb_resource_ledger_step(a0: u8, a1: u32, a2: u32, a3: u32, a4: u64, a5: u64, a6: u64, a7: u64, a8: u64) -> u64 { unsafe { super::orb_resource_ledger_step(a0, a1, a2, a3, a4, a5, a6, a7, a8) } }
+    #[inline] pub fn orb_stream_bounded_commit_step(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32) -> u64 { unsafe { super::orb_stream_bounded_commit_step(a0, a1, a2, a3, a4, a5) } }
     #[inline] pub fn leansys_verify_slice_bounds(a0: u64, a1: u64, a2: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_slice_bounds(a0, a1, a2) } }
     #[inline] pub fn leansys_verify_wal_frame(a0: u32, a1: u32, a2: u64, a3: u64, a4: u64) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_wal_frame(a0, a1, a2, a3, a4) } }
     #[inline] pub fn leansys_verify_cas_digest(a0: u64, a1: u64, a2: u8) -> u8 { unsafe { super::lean_sys_cabi::leansys_verify_cas_digest(a0, a1, a2) } }
@@ -5094,6 +5200,15 @@ pub mod raw_cabi {
             "orb_compute_secret_gate" if args.len() == 4 => orb_compute_secret_gate(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8) as u64,
             "orb_node_gc_step" if args.len() == 7 => orb_node_gc_step(args[0], args[1], args[2], args[3], args[4], args[5], args[6]),
             "orb_node_disk_admission_step" if args.len() == 6 => orb_node_disk_admission_step(args[0], args[1], args[2], args[3], args[4], args[5] as u8),
+            "orb_wire_apply_patch_step" if args.len() == 6 => orb_wire_apply_patch_step(args[0], args[1], args[2] as u8, args[3] as u32, args[4] as u8, args[5] as u32),
+            "orb_wire_machine_step" if args.len() == 7 => orb_wire_machine_step(args[0] as u32, args[1], args[2], args[3] as u8, args[4] as u8, args[5] as u32, args[6] as u32),
+            "orb_hierarchy_merge_step" if args.len() == 12 => orb_hierarchy_merge_step(args[0], args[1], args[2], args[3] as u8, args[4] as u8, args[5] as u8, args[6] as u8, args[7] as u32, args[8] as u32, args[9] as u8, args[10] as u8, args[11] as u8),
+            "orb_transcript_fold_step" if args.len() == 6 => orb_transcript_fold_step(args[0], args[1], args[2] as u32, args[3] as u8, args[4] as u8, args[5] as u8),
+            "orb_outbox_crash_reconcile_step" if args.len() == 7 => orb_outbox_crash_reconcile_step(args[0] as u32, args[1] as u32, args[2] as u32, args[3], args[4], args[5] as u32, args[6] as u32),
+            "orb_provider_attempt_step" if args.len() == 10 => orb_provider_attempt_step(args[0] as u32, args[1] as u32, args[2] as u32, args[3] as u32, args[4] as u8, args[5] as u8, args[6], args[7], args[8], args[9] as u8),
+            "orb_auth_toctou_execute_step" if args.len() == 10 => orb_auth_toctou_execute_step(args[0] as u8, args[1] as u8, args[2] as u32, args[3] as u32, args[4], args[5], args[6], args[7], args[8], args[9]) as u64,
+            "orb_resource_ledger_step" if args.len() == 9 => orb_resource_ledger_step(args[0] as u8, args[1] as u32, args[2] as u32, args[3] as u32, args[4], args[5], args[6], args[7], args[8]),
+            "orb_stream_bounded_commit_step" if args.len() == 6 => orb_stream_bounded_commit_step(args[0] as u32, args[1] as u32, args[2] as u32, args[3] as u32, args[4] as u32, args[5] as u32),
             "leansys_verify_slice_bounds" if args.len() == 3 => leansys_verify_slice_bounds(args[0] as u64, args[1] as u64, args[2] as u64) as u64,
             "leansys_verify_wal_frame" if args.len() == 5 => leansys_verify_wal_frame(args[0] as u32, args[1] as u32, args[2] as u64, args[3] as u64, args[4] as u64) as u64,
             "leansys_verify_cas_digest" if args.len() == 3 => leansys_verify_cas_digest(args[0] as u64, args[1] as u64, args[2] as u8) as u64,
@@ -6437,6 +6552,924 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 117);
+        assert_eq!(count, 126);
+    }
+}
+
+// Wave 12 (P4–P6): Compositional OrbWire Patch/Machine Steppers &
+//                  7 Stateful Domain Transition Families (`G-ORB-1..7`)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Tri-state field presence tag (`Orb.Spec.FieldPresence`) distinguishing omitted (`None`),
+/// explicit update (`Some(val)`), and explicit clear (`Cleared`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FieldPresenceTag {
+    Omitted = 0,
+    Present = 1,
+    Cleared = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireApplyPatchInput {
+    pub current_rev: u64,
+    pub incoming_rev: u64,
+    pub current_val: Option<u32>,
+    pub presence: FieldPresenceTag,
+    pub incoming_val: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireApplyPatchVerdict {
+    pub raw: u64,
+    pub action_code: u8,
+    pub admitted: bool,
+    pub next_val: Option<u32>,
+}
+
+/// Typed wrapper over `orb_wire_apply_patch_step`.
+#[inline]
+pub fn wire_apply_patch_step(input: WireApplyPatchInput) -> WireApplyPatchVerdict {
+    let raw = unsafe {
+        orb_wire_apply_patch_step(
+            input.current_rev,
+            input.incoming_rev,
+            u8::from(input.current_val.is_some()),
+            input.current_val.unwrap_or(0),
+            input.presence as u8,
+            input.incoming_val,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    let hi32 = (raw >> 32) as u32;
+    let has_val = ((lo32 >> 9) & 1) != 0;
+    WireApplyPatchVerdict {
+        raw,
+        action_code: (lo32 & 0xFF) as u8,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        next_val: if has_val { Some(hi32) } else { None },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireMachineStepInput {
+    pub schema_id: u32,
+    pub state_rev: u64,
+    pub event_seq: u64,
+    pub effect_kind: u8,
+    pub effect_admitted: bool,
+    pub out_cap: u32,
+    pub required_out_bytes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireMachineStepVerdict {
+    pub raw: u64,
+    pub action_code: u8,
+    pub admitted: bool,
+    pub emit_effect: bool,
+    pub next_rev32: u32,
+}
+
+/// Typed wrapper over `orb_wire_machine_step`.
+#[inline]
+pub fn wire_machine_step(input: WireMachineStepInput) -> WireMachineStepVerdict {
+    let raw = unsafe {
+        orb_wire_machine_step(
+            input.schema_id,
+            input.state_rev,
+            input.event_seq,
+            input.effect_kind,
+            u8::from(input.effect_admitted),
+            input.out_cap,
+            input.required_out_bytes,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    WireMachineStepVerdict {
+        raw,
+        action_code: (lo32 & 0xFF) as u8,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        emit_effect: ((lo32 >> 9) & 1) != 0,
+        next_rev32: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HierarchyMergeStepInput {
+    pub current_epoch: u64,
+    pub incoming_epoch: u64,
+    pub archive_epoch: u64,
+    pub cur_archived: bool,
+    pub cur_superseded: bool,
+    pub is_partial_patch: bool,
+    pub parent_presence: FieldPresenceTag,
+    pub cur_parent_ord: u32,
+    pub inc_parent_ord: u32,
+    pub inc_archive: bool,
+    pub inc_unarchive: bool,
+    pub inc_supersede: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HierarchyMergeStepVerdict {
+    pub raw: u64,
+    pub action_code: u8,
+    pub admitted: bool,
+    pub next_archived: bool,
+    pub next_superseded: bool,
+    pub unarchived: bool,
+    pub next_parent_ord: u32,
+}
+
+/// Family 1 (`G-ORB-5`): Typed wrapper over `orb_hierarchy_merge_step`.
+#[inline]
+pub fn hierarchy_merge_step(input: HierarchyMergeStepInput) -> HierarchyMergeStepVerdict {
+    let raw = unsafe {
+        orb_hierarchy_merge_step(
+            input.current_epoch,
+            input.incoming_epoch,
+            input.archive_epoch,
+            u8::from(input.cur_archived),
+            u8::from(input.cur_superseded),
+            u8::from(input.is_partial_patch),
+            input.parent_presence as u8,
+            input.cur_parent_ord,
+            input.inc_parent_ord,
+            u8::from(input.inc_archive),
+            u8::from(input.inc_unarchive),
+            u8::from(input.inc_supersede),
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    HierarchyMergeStepVerdict {
+        raw,
+        action_code: (lo32 & 0xFF) as u8,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        next_archived: ((lo32 >> 9) & 1) != 0,
+        next_superseded: ((lo32 >> 10) & 1) != 0,
+        unarchived: ((lo32 >> 11) & 1) != 0,
+        next_parent_ord: (raw >> 32) as u32,
+    }
+}
+
+/// Observe `hierarchy_merge_step` (`orb_hierarchy_merge_step`) against a host merge decision.
+pub fn observe_hierarchy_merge_shadow(
+    input: HierarchyMergeStepInput,
+    host_admitted: bool,
+    host_next_parent_ord: u32,
+    counter: &ShadowCounter,
+) -> HierarchyMergeStepVerdict {
+    let verdict = hierarchy_merge_step(input);
+    let sim =
+        shadow::RefinementSimulation::<(bool, u32), (bool, u32), HierarchyMergeStepInput, u8, u8> {
+            subsystem: "orb_hierarchy_merge_step",
+            abs_state: |s| *s,
+            norm_effects: |effs| effs.to_vec(),
+            lean_step: |_s, ev, _ctx| {
+                let v = hierarchy_merge_step(*ev);
+                ((v.admitted, v.next_parent_ord), vec![v.action_code])
+            },
+            classify_known_legacy_bug: |_, _, _, _| None,
+        };
+    let host_eff = vec![if host_admitted { 1u8 } else { 2u8 }];
+    let ctx = shadow::EventContext {
+        now_ms: input.incoming_epoch,
+        fresh_nonce: input.current_epoch,
+        idempotency_key: input.incoming_epoch,
+        boot_id_matches: true,
+        schema_id: 2,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &(false, input.cur_parent_ord),
+            &(host_admitted, host_next_parent_ord),
+            &input,
+            &host_eff,
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptFoldStepInput {
+    pub last_applied_seq: u64,
+    pub incoming_seq: u64,
+    pub entry_count: u32,
+    pub thinking_open: bool,
+    pub normalized_action: u8,
+    pub is_replay_from_log: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptFoldStepVerdict {
+    pub raw: u64,
+    pub action_code: u8,
+    pub admitted: bool,
+    pub thinking_open_next: bool,
+    pub closed_previous_thinking: bool,
+    pub gap_buffered: bool,
+    pub next_entry_count: u32,
+}
+
+/// Family 2 (`G-ORB-3`): Typed wrapper over `orb_transcript_fold_step`.
+#[inline]
+pub fn transcript_fold_step(input: TranscriptFoldStepInput) -> TranscriptFoldStepVerdict {
+    let raw = unsafe {
+        orb_transcript_fold_step(
+            input.last_applied_seq,
+            input.incoming_seq,
+            input.entry_count,
+            u8::from(input.thinking_open),
+            input.normalized_action,
+            u8::from(input.is_replay_from_log),
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    TranscriptFoldStepVerdict {
+        raw,
+        action_code: (lo32 & 0xFF) as u8,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        thinking_open_next: ((lo32 >> 9) & 1) != 0,
+        closed_previous_thinking: ((lo32 >> 10) & 1) != 0,
+        gap_buffered: ((lo32 >> 11) & 1) != 0,
+        next_entry_count: (raw >> 32) as u32,
+    }
+}
+
+/// Observe `transcript_fold_step` (`orb_transcript_fold_step`) against host fold progression.
+pub fn observe_transcript_fold_shadow(
+    input: TranscriptFoldStepInput,
+    host_admitted: bool,
+    host_next_entry_count: u32,
+    host_action_code: u8,
+    counter: &ShadowCounter,
+) -> TranscriptFoldStepVerdict {
+    let verdict = transcript_fold_step(input);
+    let sim =
+        shadow::RefinementSimulation::<(bool, u32), (bool, u32), TranscriptFoldStepInput, u8, u8> {
+            subsystem: "orb_transcript_fold_step",
+            abs_state: |s| *s,
+            norm_effects: |effs| effs.to_vec(),
+            lean_step: |_s, ev, _ctx| {
+                let v = transcript_fold_step(*ev);
+                ((v.admitted, v.next_entry_count), vec![v.action_code])
+            },
+            classify_known_legacy_bug: |_, _, _, _| None,
+        };
+    let ctx = shadow::EventContext {
+        now_ms: 0,
+        fresh_nonce: input.incoming_seq,
+        idempotency_key: input.incoming_seq,
+        boot_id_matches: true,
+        schema_id: 2,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &(false, input.entry_count),
+            &(host_admitted, host_next_entry_count),
+            &input,
+            &[host_action_code],
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboxCrashReconcileInput {
+    pub durable_queued: u32,
+    pub durable_acked: u32,
+    pub volatile_in_flight: u32,
+    pub lease_boot_epoch: u64,
+    pub node_boot_epoch: u64,
+    pub volatile_lease_owner: u32,
+    pub req_owner: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboxCrashReconcileVerdict {
+    pub raw: u64,
+    pub action_code: u8,
+    pub admitted: bool,
+    pub crash_reconciled: bool,
+    pub has_single_writer: bool,
+    pub unacked_depth: u32,
+}
+
+/// Family 3 (`G-ORB-2`): Typed wrapper over `orb_outbox_crash_reconcile_step`.
+#[inline]
+pub fn outbox_crash_reconcile_step(
+    input: OutboxCrashReconcileInput,
+) -> OutboxCrashReconcileVerdict {
+    let raw = unsafe {
+        orb_outbox_crash_reconcile_step(
+            input.durable_queued,
+            input.durable_acked,
+            input.volatile_in_flight,
+            input.lease_boot_epoch,
+            input.node_boot_epoch,
+            input.volatile_lease_owner,
+            input.req_owner,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    OutboxCrashReconcileVerdict {
+        raw,
+        action_code: (lo32 & 0xFF) as u8,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        crash_reconciled: ((lo32 >> 9) & 1) != 0,
+        has_single_writer: ((lo32 >> 10) & 1) != 0,
+        unacked_depth: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderAttemptStepInput {
+    pub pinned_account_id: u32,
+    pub candidate_account_id: u32,
+    pub attempts_used: u32,
+    pub retry_budget: u32,
+    pub first_byte_committed: bool,
+    pub failure_kind: u8,
+    pub upstream_now_epoch: u64,
+    pub cooldown_until_epoch: u64,
+    pub upstream_deadline: u64,
+    pub auth_valid: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderAttemptStepVerdict {
+    pub raw: u64,
+    pub action_code: u8,
+    pub admitted: bool,
+    pub first_byte_locked_next: bool,
+    pub next_attempts_used: u32,
+}
+
+/// Family 4 (`G-ORB-2`): Typed wrapper over `orb_provider_attempt_step`.
+#[inline]
+pub fn provider_attempt_step(input: ProviderAttemptStepInput) -> ProviderAttemptStepVerdict {
+    let raw = unsafe {
+        orb_provider_attempt_step(
+            input.pinned_account_id,
+            input.candidate_account_id,
+            input.attempts_used,
+            input.retry_budget,
+            u8::from(input.first_byte_committed),
+            input.failure_kind,
+            input.upstream_now_epoch,
+            input.cooldown_until_epoch,
+            input.upstream_deadline,
+            u8::from(input.auth_valid),
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    ProviderAttemptStepVerdict {
+        raw,
+        action_code: (lo32 & 0xFF) as u8,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        first_byte_locked_next: ((lo32 >> 9) & 1) != 0,
+        next_attempts_used: (raw >> 32) as u32,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthToctouExecuteInput {
+    pub principal_kind: u8,
+    pub bunker_state: BunkerState,
+    pub observed_target_id: u32,
+    pub exec_target_id: u32,
+    pub observed_lease_epoch: u64,
+    pub live_lease_epoch: u64,
+    pub now_tick: u64,
+    pub expiry_tick: u64,
+    pub observed_digest: u64,
+    pub exec_digest: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthToctouExecuteVerdict {
+    pub raw: u32,
+    pub admitted: bool,
+    pub fail_closed: bool,
+    pub reason_code: u8,
+}
+
+/// Family 5 (`G-ORB-7`): Typed wrapper over `orb_auth_toctou_execute_step`.
+#[inline]
+pub fn auth_toctou_execute_step(input: AuthToctouExecuteInput) -> AuthToctouExecuteVerdict {
+    let raw = unsafe {
+        orb_auth_toctou_execute_step(
+            input.principal_kind,
+            input.bunker_state as u8,
+            input.observed_target_id,
+            input.exec_target_id,
+            input.observed_lease_epoch,
+            input.live_lease_epoch,
+            input.now_tick,
+            input.expiry_tick,
+            input.observed_digest,
+            input.exec_digest,
+        )
+    };
+    AuthToctouExecuteVerdict {
+        raw,
+        admitted: ((raw >> 8) & 1) != 0,
+        fail_closed: ((raw >> 9) & 1) != 0,
+        reason_code: (raw & 0xFF) as u8,
+    }
+}
+
+/// Observe `auth_toctou_execute_step` (`orb_auth_toctou_execute_step`) against host TOCTOU enforcement.
+pub fn observe_auth_toctou_shadow(
+    input: AuthToctouExecuteInput,
+    host_admitted: bool,
+    host_reason_code: u8,
+    counter: &ShadowCounter,
+) -> AuthToctouExecuteVerdict {
+    let verdict = auth_toctou_execute_step(input);
+    let sim = shadow::RefinementSimulation::<bool, bool, AuthToctouExecuteInput, u8, u8> {
+        subsystem: "orb_auth_toctou_execute_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = auth_toctou_execute_step(*ev);
+            (v.admitted, vec![v.reason_code])
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let ctx = shadow::EventContext {
+        now_ms: input.now_tick,
+        fresh_nonce: input.observed_lease_epoch,
+        idempotency_key: input.observed_digest,
+        boot_id_matches: true,
+        schema_id: 2,
+    };
+    if let Ok(mut ring) = counter.ring.lock() {
+        let _ = sim.observe_step(
+            &false,
+            &host_admitted,
+            &input,
+            &[host_reason_code],
+            ctx,
+            &mut ring,
+        );
+    }
+    verdict
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ResourceLedgerOp {
+    Reserve = 0,
+    ActivateReserved = 1,
+    ReleaseActive = 2,
+    ReapExpired = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLedgerStepInput {
+    pub op_kind: ResourceLedgerOp,
+    pub reserved_slots: u32,
+    pub active_slots: u32,
+    pub max_slots: u32,
+    pub spent_cents: u64,
+    pub cost_delta_cents: u64,
+    pub budget_cents: u64,
+    pub now_tick: u64,
+    pub ttl_expiry_tick: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLedgerStepVerdict {
+    pub raw: u64,
+    pub state_valid: bool,
+    pub admitted: bool,
+    pub next_reserved_slots: u16,
+    pub next_active_slots: u16,
+}
+
+/// Family 6 (`G-ORB-3`): Typed wrapper over `orb_resource_ledger_step`.
+#[inline]
+pub fn resource_ledger_step(input: ResourceLedgerStepInput) -> ResourceLedgerStepVerdict {
+    let raw = unsafe {
+        orb_resource_ledger_step(
+            input.op_kind as u8,
+            input.reserved_slots,
+            input.active_slots,
+            input.max_slots,
+            input.spent_cents,
+            input.cost_delta_cents,
+            input.budget_cents,
+            input.now_tick,
+            input.ttl_expiry_tick,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    let hi32 = (raw >> 32) as u32;
+    ResourceLedgerStepVerdict {
+        raw,
+        state_valid: lo32 != 0,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        next_reserved_slots: (hi32 & 0xFFFF) as u16,
+        next_active_slots: ((hi32 >> 16) & 0xFFFF) as u16,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamBoundedCommitInput {
+    pub prev_len: u32,
+    pub prev_commit: u32,
+    pub prev_checkpoint: u32,
+    pub new_len: u32,
+    pub raw_commit: u32,
+    pub max_open_tail_bytes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamBoundedCommitVerdict {
+    pub raw: u64,
+    pub admitted: bool,
+    pub checkpoint_forced: bool,
+    pub next_checkpoint: u32,
+}
+
+/// Family 7 (`G-ORB-6`): Typed wrapper over `orb_stream_bounded_commit_step`.
+#[inline]
+pub fn stream_bounded_commit_step(input: StreamBoundedCommitInput) -> StreamBoundedCommitVerdict {
+    let raw = unsafe {
+        orb_stream_bounded_commit_step(
+            input.prev_len,
+            input.prev_commit,
+            input.prev_checkpoint,
+            input.new_len,
+            input.raw_commit,
+            input.max_open_tail_bytes,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    StreamBoundedCommitVerdict {
+        raw,
+        admitted: ((lo32 >> 8) & 1) != 0,
+        checkpoint_forced: ((lo32 >> 9) & 1) != 0,
+        next_checkpoint: (raw >> 32) as u32,
+    }
+
+}
+
+mod stateful_tests {
+        use crate::shadow::{apply_patch_frame, execute_wire_machine_frame, OrbWireFrame, OrbWireMachine, ORB_WIRE_DEFAULT_MAX_BUDGET, ORB_WIRE_HEADER_BYTES};
+    use super::*;
+    #[test]
+    fn wave12_orbwire_machine_and_seven_stateful_families_verified() {
+        use crate::{
+            auth_toctou_execute_step, hierarchy_merge_step, observe_auth_toctou_shadow,
+            observe_hierarchy_merge_shadow, observe_transcript_fold_shadow,
+            outbox_crash_reconcile_step, provider_attempt_step, resource_ledger_step,
+            stream_bounded_commit_step, transcript_fold_step, wire_apply_patch_step,
+            wire_machine_step, AuthToctouExecuteInput, BunkerState, FieldPresenceTag,
+            HierarchyMergeStepInput, OutboxCrashReconcileInput, ProviderAttemptStepInput,
+            ResourceLedgerOp, ResourceLedgerStepInput, ShadowCounter, StreamBoundedCommitInput,
+            TranscriptFoldStepInput, WireApplyPatchInput, WireMachineStepInput,
+        };
+
+        struct CounterWireMachine;
+        impl OrbWireMachine for CounterWireMachine {
+            type State = (u64, u32);
+            type Effect = u32;
+
+            fn state_rev(state: &Self::State) -> u64 {
+                state.0
+            }
+
+            fn decode_step(
+                state: &Self::State,
+                frame: &OrbWireFrame,
+                event_seq: u64,
+            ) -> Result<(Self::State, Vec<Self::Effect>, u8, bool), OrbWireStatus> {
+                let delta = frame.records.first().map_or(0, |r| r.payload32);
+                let next_total = state.1.saturating_add(delta);
+                Ok(((event_seq, next_total), vec![next_total], 1, true))
+            }
+
+            fn encode_effects(
+                _next_state: &Self::State,
+                effects: &[Self::Effect],
+                schema_id: u16,
+            ) -> OrbWireFrame {
+                OrbWireFrame {
+                    schema_id,
+                    flags: 0,
+                    records: effects
+                        .iter()
+                        .map(|&v| OrbWireRecordWord {
+                            tag: 1,
+                            flags: 1,
+                            len16: 0,
+                            payload32: v,
+                        })
+                        .collect(),
+                    arena: Vec::new(),
+                }
+            }
+        }
+
+        // P4: `OrbWireMachine` capacity fence & replay idempotence + `apply_patch_frame`
+        let in_frame = OrbWireFrame {
+            schema_id: 2,
+            flags: 0,
+            records: vec![OrbWireRecordWord {
+                tag: 0,
+                flags: 1,
+                len16: 0,
+                payload32: 7,
+            }],
+            arena: Vec::new(),
+        };
+        let mut encoded = [0u8; 64];
+        let enc_len = in_frame
+            .encode_into(&mut encoded, ORB_WIRE_DEFAULT_MAX_BUDGET)
+            .unwrap();
+        let mut tiny_out = [0xCCu8; 8];
+        assert_eq!(
+            execute_wire_machine_frame::<CounterWireMachine>(
+                &(10, 5),
+                &encoded[..enc_len],
+                2,
+                11,
+                &mut tiny_out,
+                ORB_WIRE_DEFAULT_MAX_BUDGET
+            ),
+            Err(5)
+        );
+        assert_eq!(tiny_out, [0xCCu8; 8]);
+
+        let mut out_buf = [0u8; 64];
+        let (next_st, effs, written) = execute_wire_machine_frame::<CounterWireMachine>(
+            &(10, 5),
+            &encoded[..enc_len],
+            2,
+            11,
+            &mut out_buf,
+            ORB_WIRE_DEFAULT_MAX_BUDGET,
+        )
+        .unwrap();
+        assert_eq!(next_st, (11, 12));
+        assert_eq!(effs, vec![12]);
+        assert!(written >= ORB_WIRE_HEADER_BYTES);
+        // Replay at same seq is rejected (`action_code = 3`)
+        assert_eq!(
+            execute_wire_machine_frame::<CounterWireMachine>(
+                &next_st,
+                &encoded[..enc_len],
+                2,
+                11,
+                &mut out_buf,
+                ORB_WIRE_DEFAULT_MAX_BUDGET
+            ),
+            Err(3)
+        );
+
+        let mut slots = [Some(42), Some(99), None];
+        let patch_frame = OrbWireFrame {
+            schema_id: 2,
+            flags: 0,
+            records: vec![
+                OrbWireRecordWord {
+                    tag: 0,
+                    flags: 0,
+                    len16: 0,
+                    payload32: 0,
+                },
+                OrbWireRecordWord {
+                    tag: 1,
+                    flags: 2,
+                    len16: 0,
+                    payload32: 0,
+                },
+                OrbWireRecordWord {
+                    tag: 2,
+                    flags: 1,
+                    len16: 0,
+                    payload32: 777,
+                },
+            ],
+            arena: Vec::new(),
+        };
+        let rev = apply_patch_frame(5, 6, &mut slots, &patch_frame).unwrap();
+        assert_eq!(rev, 6);
+        assert_eq!(slots, [Some(42), None, Some(777)]);
+        assert_eq!(apply_patch_frame(6, 6, &mut slots, &patch_frame), Err(2));
+
+        let patch_omit = wire_apply_patch_step(WireApplyPatchInput {
+            current_rev: 1,
+            incoming_rev: 2,
+            current_val: Some(55),
+            presence: FieldPresenceTag::Omitted,
+            incoming_val: 0,
+        });
+        assert!(patch_omit.admitted);
+        assert_eq!(patch_omit.next_val, Some(55));
+        let wm_ok = wire_machine_step(WireMachineStepInput {
+            schema_id: 2,
+            state_rev: 3,
+            event_seq: 4,
+            effect_kind: 1,
+            effect_admitted: true,
+            out_cap: 128,
+            required_out_bytes: 32,
+        });
+        assert!(wm_ok.admitted && wm_ok.emit_effect && wm_ok.next_rev32 == 4);
+
+        // Family 1 (`G-ORB-5`): Partial patch preserves omitted parent; sticky supersede blocks unarchive
+        let counter = ShadowCounter::new();
+        let h_keep = observe_hierarchy_merge_shadow(
+            HierarchyMergeStepInput {
+                current_epoch: 10,
+                incoming_epoch: 11,
+                archive_epoch: 0,
+                cur_archived: false,
+                cur_superseded: false,
+                is_partial_patch: true,
+                parent_presence: FieldPresenceTag::Omitted,
+                cur_parent_ord: 42,
+                inc_parent_ord: 0,
+                inc_archive: false,
+                inc_unarchive: false,
+                inc_supersede: false,
+            },
+            true,
+            42,
+            &counter,
+        );
+        assert!(h_keep.admitted && h_keep.next_parent_ord == 42);
+        let h_sup = hierarchy_merge_step(HierarchyMergeStepInput {
+            current_epoch: 11,
+            incoming_epoch: 12,
+            archive_epoch: 5,
+            cur_archived: true,
+            cur_superseded: true,
+            is_partial_patch: true,
+            parent_presence: FieldPresenceTag::Omitted,
+            cur_parent_ord: 42,
+            inc_parent_ord: 0,
+            inc_archive: false,
+            inc_unarchive: true,
+            inc_supersede: false,
+        });
+        assert!(!h_sup.admitted && h_sup.next_superseded && h_sup.next_archived);
+
+        // Family 2 (`G-ORB-3`): Contiguous seq progression & live/replay equivalence
+        let f_live = observe_transcript_fold_shadow(
+            TranscriptFoldStepInput {
+                last_applied_seq: 10,
+                incoming_seq: 11,
+                entry_count: 3,
+                thinking_open: true,
+                normalized_action: 5,
+                is_replay_from_log: false,
+            },
+            true,
+            4,
+            1,
+            &counter,
+        );
+        let f_replay = transcript_fold_step(TranscriptFoldStepInput {
+            last_applied_seq: 10,
+            incoming_seq: 11,
+            entry_count: 3,
+            thinking_open: true,
+            normalized_action: 5,
+            is_replay_from_log: true,
+        });
+        assert_eq!(f_live, f_replay);
+        assert!(f_live.admitted && f_live.closed_previous_thinking && f_live.next_entry_count == 4);
+        let f_gap = transcript_fold_step(TranscriptFoldStepInput {
+            last_applied_seq: 10,
+            incoming_seq: 13,
+            entry_count: 3,
+            thinking_open: false,
+            normalized_action: 5,
+            is_replay_from_log: false,
+        });
+        assert!(!f_gap.admitted && f_gap.gap_buffered && f_gap.next_entry_count == 3);
+
+        // Family 3 (`G-ORB-2`): Outbox crash resets volatile lease and preserves unacked WAL items
+        let ob = outbox_crash_reconcile_step(OutboxCrashReconcileInput {
+            durable_queued: 9,
+            durable_acked: 4,
+            volatile_in_flight: 5,
+            lease_boot_epoch: 100,
+            node_boot_epoch: 101,
+            volatile_lease_owner: 77,
+            req_owner: 88,
+        });
+        assert!(
+            ob.admitted && ob.crash_reconciled && ob.has_single_writer && ob.unacked_depth == 5
+        );
+
+        // Family 4 (`G-ORB-2`): Provider attempt locks stream after first byte and pins account
+        let pa_locked = provider_attempt_step(ProviderAttemptStepInput {
+            pinned_account_id: 7,
+            candidate_account_id: 7,
+            attempts_used: 1,
+            retry_budget: 3,
+            first_byte_committed: true,
+            failure_kind: 1,
+            upstream_now_epoch: 50,
+            cooldown_until_epoch: 0,
+            upstream_deadline: 100,
+            auth_valid: true,
+        });
+        assert!(
+            !pa_locked.admitted && pa_locked.action_code == 3 && pa_locked.first_byte_locked_next
+        );
+
+        // Family 5 (`G-ORB-7`): `observe -> gate -> execute` TOCTOU binding fails closed on digest drift
+        let auth_ok = observe_auth_toctou_shadow(
+            AuthToctouExecuteInput {
+                principal_kind: 2,
+                bunker_state: BunkerState::Normal,
+                observed_target_id: 9,
+                exec_target_id: 9,
+                observed_lease_epoch: 44,
+                live_lease_epoch: 44,
+                now_tick: 100,
+                expiry_tick: 200,
+                observed_digest: 0xDEAD_BEEF,
+                exec_digest: 0xDEAD_BEEF,
+            },
+            true,
+            1,
+            &counter,
+        );
+        assert!(auth_ok.admitted && !auth_ok.fail_closed);
+        let auth_mut = auth_toctou_execute_step(AuthToctouExecuteInput {
+            exec_digest: 0xDEAD_BEE0,
+            ..AuthToctouExecuteInput {
+                principal_kind: 2,
+                bunker_state: BunkerState::Normal,
+                observed_target_id: 9,
+                exec_target_id: 9,
+                observed_lease_epoch: 44,
+                live_lease_epoch: 44,
+                now_tick: 100,
+                expiry_tick: 200,
+                observed_digest: 0xDEAD_BEEF,
+                exec_digest: 0xDEAD_BEEF,
+            }
+        });
+        assert!(!auth_mut.admitted && auth_mut.fail_closed && auth_mut.reason_code == 6);
+        assert_eq!(
+            counter
+                .snapshot("orb_auth_toctou_execute_step")
+                .total_divergences,
+            0
+        );
+
+        // Family 6 (`G-ORB-3`): Conserved resource ledger prevents overspend/wrap and reaps expired TTL
+        let rl_ok = resource_ledger_step(ResourceLedgerStepInput {
+            op_kind: ResourceLedgerOp::Reserve,
+            reserved_slots: 1,
+            active_slots: 2,
+            max_slots: 4,
+            spent_cents: 600,
+            cost_delta_cents: 400,
+            budget_cents: 1_000,
+            now_tick: 10,
+            ttl_expiry_tick: 50,
+        });
+        assert!(rl_ok.admitted && rl_ok.next_reserved_slots == 2 && rl_ok.next_active_slots == 2);
+        let rl_wrap = resource_ledger_step(ResourceLedgerStepInput {
+            cost_delta_cents: u64::MAX,
+            ..ResourceLedgerStepInput {
+                op_kind: ResourceLedgerOp::Reserve,
+                reserved_slots: 1,
+                active_slots: 2,
+                max_slots: 4,
+                spent_cents: 600,
+                cost_delta_cents: 400,
+                budget_cents: 1_000,
+                now_tick: 10,
+                ttl_expiry_tick: 50,
+            }
+        });
+        assert!(!rl_wrap.admitted && rl_wrap.next_reserved_slots == 1);
+
+        // Family 7 (`G-ORB-6`): Bounded-tail checkpoint clamps giant open fence tail <= max_open_tail_bytes
+        let sb = stream_bounded_commit_step(StreamBoundedCommitInput {
+            prev_len: 1_000,
+            prev_commit: 200,
+            prev_checkpoint: 200,
+            new_len: 20_000,
+            raw_commit: 200,
+            max_open_tail_bytes: 4_096,
+        });
+        assert!(sb.admitted && sb.checkpoint_forced && sb.next_checkpoint == 20_000 - 4_096);
+        assert!(20_000 - sb.next_checkpoint <= 4_096);
     }
 }

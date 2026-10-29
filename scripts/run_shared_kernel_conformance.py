@@ -415,7 +415,7 @@ def main(argv=None):
     # `internal` also marks six public-prefix steppers not exposed to mobile.
     # The roadmap includes those steppers; exclude only the compiler helper.
     functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
-    if len(functions) != 117 or len(manifest["functions"]) != 118:
+    if len(functions) != 126 or len(manifest["functions"]) != 127:
         raise ValueError("public export inventory changed; qualify the new surface explicitly")
     if run(["git", "rev-parse", "HEAD"], SYS).strip() != "077775ba387f1eeb2976cb8763b4633b8d5ce313":
         raise ValueError("unexpected LeanSys revision")
@@ -446,7 +446,7 @@ def main(argv=None):
         witness_cases[mut_id] = existing
     (OUT / "cases.json").write_text(json.dumps(cases) + "\n")
     (OUT / "cases.txt").write_text("".join(f"{c['id']}:{c['symbol']}:" + ",".join(map(str, c['args'])) + "\n" for c in cases))
-    report = {"status": "INCOMPLETE", "public_exports": 117, "cases": len(cases),
+    report = {"status": "INCOMPLETE", "public_exports": 126, "cases": len(cases),
               "heads": {"orb": run(["git", "rev-parse", "HEAD"], ORB).strip(),
                         "turbo": run(["git", "rev-parse", "HEAD"], TURBO).strip()},
               "sources": {str(p): digest(p) for p, _ in sources},
@@ -638,7 +638,7 @@ for (const c of cases) {
             qualification_failed = True
             report["host_adapters"]["rust_orb_spec"] = {"status": "FAIL", "mismatches": rust_mismatches}
         else:
-            report["host_adapters"]["rust_orb_spec"] = {"status": "PASS", "rows": len(rust_host_rows), "exports": 117}
+            report["host_adapters"]["rust_orb_spec"] = {"status": "PASS", "rows": len(rust_host_rows), "exports": 126}
     except Exception as error:
         report["host_adapters"]["rust_orb_spec"] = {"status": "BLOCKED", "reason": str(error)}
         qualification_failed |= isinstance(error, (RowFailure, ValueError))

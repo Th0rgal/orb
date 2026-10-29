@@ -53,6 +53,9 @@ jobs:
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/Spec.lean \
             -o .lake/build/lib/lean/Orb/Spec.olean \
             -i .lake/build/lib/lean/Orb/Spec.ilean
+          LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true -DautoImplicit=false Orb/MutantSuite.lean \
+            -o .lake/build/lib/lean/Orb/MutantSuite.olean \
+            -i .lake/build/lib/lean/Orb/MutantSuite.ilean
           LEAN_PATH=.lake/build/lib/lean lean -DwarningAsError=true audit/AuditSpec.lean
           lean -DwarningAsError=true -DautoImplicit=false Orb/Scroll.lean \
             -o .lake/build/lib/lean/Orb/Scroll.olean \
@@ -170,6 +173,10 @@ jobs:
           python3 -m unittest -v scripts/test_spec_audit.py
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Spec.lean > audit-results/spec-audit.json
           python3 scripts/check_spec_audit.py audit-results/spec-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/MutantSuite.lean > audit-results/mutant-audit.json
+          python3 scripts/check_spec_audit.py audit-results/mutant-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Stream.lean > audit-results/stream-audit.json
+          python3 scripts/check_spec_audit.py audit-results/stream-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

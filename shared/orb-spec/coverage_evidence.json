@@ -49,11 +49,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "src/api/control/fork.rs",
@@ -123,11 +123,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
@@ -193,23 +193,23 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
-          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "dd3971e2b8e77549485c74056c1192e5eda62c1beab184f1eee7f38ee6c373ce"
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
         }
       ],
       "execution": {
@@ -256,23 +256,23 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
-          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "dd3971e2b8e77549485c74056c1192e5eda62c1beab184f1eee7f38ee6c373ce"
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
         }
       ],
       "execution": {
@@ -314,23 +314,23 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
-          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "dd3971e2b8e77549485c74056c1192e5eda62c1beab184f1eee7f38ee6c373ce"
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
         }
       ],
       "execution": {
@@ -372,23 +372,23 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
-          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "dd3971e2b8e77549485c74056c1192e5eda62c1beab184f1eee7f38ee6c373ce"
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
         }
       ],
       "execution": {
@@ -435,19 +435,19 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
-          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
           "path": "src/api/privilege_broker.rs",
@@ -502,19 +502,19 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
-          "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
           "path": "src/api/control/remote_jobs.rs",
@@ -579,15 +579,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "src/api/mission_access.rs",
@@ -637,15 +637,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "src/api/proxy.rs",
@@ -700,15 +700,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "src/api/proxy.rs",
@@ -773,15 +773,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "34cc4e6831369142020c07749c70e4bb953f457b104b067d0dbecb88829fe67d"
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "7684a3426697b8574f330b832a142bddfbdbd35e605436113716063c84662aa7"
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a3a346c8011e85f351f647641d58ecd583e6317e07331458d39b29d6957f68d3"
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
         },
         {
           "path": "src/remote_node/job_ledger.rs",
@@ -806,6 +806,633 @@
       "blockers": [
         "Submission-sequence ordering and SQLite/JSON persistence are maintained by Rust; orb_job_ledger_step decides over derived boolean predicates.",
         "Crash-atomic equivalence between JSON receipts and the SQL mirror is tested locally, not formally proved."
+      ]
+    },
+    "orb_wire_apply_patch_step": {
+      "status": "partial",
+      "claim": "Local OrbWire patch tests verify revision-fenced tri-state field presence (Omitted preserves, Present updates, Cleared resets) and stale-revision rejection.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "wire_apply_patch_presence_merge_laws"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "apply_patch_frame"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Patch-frame application is exercised in orb-spec shadow/codec tests; authoritative production IPC cutover remains open.",
+        "Slot index bounds and staging copies in Rust surround the scalar Lean patch gate."
+      ]
+    },
+    "orb_wire_machine_step": {
+      "status": "partial",
+      "claim": "Local OrbWireMachine tests verify output-buffer capacity fencing with zero partial mutation, schema range validation, monotone sequence progression, and replay rejection.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "wire_machine_step_cap_exceeded_preserves_rev"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "wire_machine_step"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "OrbWireMachine frames are exercised in orb-spec unit tests rather than live multi-node RPC endpoints.",
+        "Payload serialization of domain state and effects runs in host Rust around the scalar admission gate."
+      ]
+    },
+    "orb_hierarchy_merge_step": {
+      "status": "partial",
+      "claim": "Local hierarchy-merge shadow tests verify partial-patch parent preservation, full-snapshot replacement, and sticky supersession blocking unarchive.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "hierarchy_merge_partial_presence_and_sticky_supersede"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "symbol": "kill_family1_hierarchy_mutants"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "observe_hierarchy_merge_shadow"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "lean/Orb/MutantSuite.lean",
+          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        },
+        {
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Authoritative sidebar/tree store cutover across iOS, Android, and desktop clients remains pending.",
+        "UUID-to-ordinal mapping and JSON patch deserialization occur in host code prior to the scalar step."
+      ]
+    },
+    "orb_transcript_fold_step": {
+      "status": "partial",
+      "claim": "Local transcript-fold shadow tests verify contiguous sequence progression, gap buffering without entry inflation, and bitwise live-vs-replay fold equivalence.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "transcript_replay_fold_eq_live_fold"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "symbol": "kill_family2_transcript_mutants"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "observe_transcript_fold_shadow"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "lean/Orb/MutantSuite.lean",
+          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        },
+        {
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Out-of-order buffer draining and DOM/list materialization remain in client host code.",
+        "Native mobile and browser E2E transcript replay cutover is not established by this local Rust receipt."
+      ]
+    },
+    "orb_outbox_crash_reconcile_step": {
+      "status": "partial",
+      "claim": "Local outbox crash-reconcile tests verify volatile lease reset on boot-epoch mismatch, conservation of unacknowledged WAL entries, and single-writer lease acquisition.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "outbox_crash_conservation_and_single_writer"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "symbol": "kill_family3_outbox_mutants"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "outbox_crash_reconcile_step"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "lean/Orb/MutantSuite.lean",
+          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        },
+        {
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Filesystem fsync durability and SQLite/IndexedDB WAL recovery remain outside the scalar reconciler.",
+        "Production local-queue and remote-outbox cutover to orb_outbox_crash_reconcile_step is not yet complete."
+      ]
+    },
+    "orb_provider_attempt_step": {
+      "status": "partial",
+      "claim": "Local provider-attempt tests verify sticky first-byte stream lock against mid-stream retry, account pinning, quota cooldown gating, and upstream deadline enforcement.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "provider_attempt_first_byte_lock_pin_and_cooldown"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "symbol": "kill_family4_provider_mutants"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "provider_attempt_step"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "lean/Orb/MutantSuite.lean",
+          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        },
+        {
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "HTTP status classification and Tokio stream polling remain in src/api/proxy.rs.",
+        "Authoritative cutover of multi-provider failover loops to orb_provider_attempt_step remains open."
+      ]
+    },
+    "orb_auth_toctou_execute_step": {
+      "status": "partial",
+      "claim": "Local TOCTOU authorization shadow tests verify fail-closed execution when bunker state, principal kind, expiry, lease epoch, target id, or payload digest drifts between gate and execute.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "auth_toctou_all_evidence_mutations_fail_closed"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "symbol": "kill_family5_auth_toctou_mutants"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "observe_auth_toctou_shadow"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "lean/Orb/MutantSuite.lean",
+          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        },
+        {
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Approval-queue and secret-broker wiring is intentionally deferred to avoid colliding with concurrent approval-queue work.",
+        "Cryptographic digest computation and kernel syscall atomicity remain outside the scalar TOCTOU check."
+      ]
+    },
+    "orb_resource_ledger_step": {
+      "status": "partial",
+      "claim": "Local resource-ledger tests verify slot conservation (reserved + active <= maxSlots), wrap-free budget subtraction on u64::MAX cost deltas, and expired-TTL reservation reaping.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "resource_ledger_conservation_and_ttl_reap"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "resource_ledger_overspend_rejected_without_wrap"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "symbol": "kill_family6_resource_ledger_mutants"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "resource_ledger_step"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "lean/Orb/MutantSuite.lean",
+          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        },
+        {
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "Managed-VM provider billing reconciliation and SQLite ledger transactions remain in host Rust.",
+        "Authoritative cutover of VM spawn/extend/reap paths to orb_resource_ledger_step remains open."
+      ]
+    },
+    "orb_stream_bounded_commit_step": {
+      "status": "partial",
+      "claim": "Local bounded-stream commit tests verify forced checkpoint advancement so the unparsed open fence tail never exceeds maxOpenTailBytes.",
+      "links": [
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Spec.lean",
+          "symbol": "stream_bounded_commit_multichunk_conservation"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/Stream.lean",
+          "symbol": "boundedCost_linear"
+        },
+        {
+          "kind": "theorem",
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "symbol": "kill_family7_stream_commit_mutants"
+        },
+        {
+          "kind": "host_observer",
+          "path": "crates/orb-spec/src/lib.rs",
+          "symbol": "stream_bounded_commit_step"
+        },
+        {
+          "kind": "host_test",
+          "path": "crates/orb-spec/src/shadow.rs",
+          "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "lean/Orb/Kernel.lean",
+          "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+        },
+        {
+          "path": "lean/Orb/Spec.lean",
+          "sha256": "0546ed4fa3b8a05a2d1b900e2ad4a93a242009ed875646fc7f602fe2db8f164d"
+        },
+        {
+          "path": "lean/Orb/Stream.lean",
+          "sha256": "368a33903177af3b4288ee3d608169771f16664fa9ca2f65d536886cc11988b7"
+        },
+        {
+          "path": "lean/Orb/MutantSuite.lean",
+          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+        },
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "d4cf6e0f24f77a9f7a43bf906e4b22262abe4e956a2574d2eeaf052efa7f8b69"
+        },
+        {
+          "path": "crates/orb-spec/src/shadow.rs",
+          "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "sha256": "f6c2aaf404664073b7117b8b9b4e701c774561a6cac5b88004b7fbd861db5ddd"
+        },
+        {
+          "path": "lean/Orb/StatefulMutantSuite.lean",
+          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "DOM/Markdown incremental rendering in desktop/iOS/Android clients is not yet cut over to orb_stream_bounded_commit_step.",
+        "UTF-8 codepoint boundary alignment around forced checkpoints is handled by host string slicing."
       ]
     }
   }

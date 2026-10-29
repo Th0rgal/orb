@@ -140,3 +140,4 @@ private def runAdversarialSelfTest : CommandElabM Unit := do
   unless errors.isEmpty do
     throwError "Orb spec audit failed:\n{String.intercalate "\n" errors.toList}"
   logInfo m!"Orb spec audit OK: {kernel.size + spec.size + mutants.size} declarations, {theorems} theorems ({mutantKills} mutant kills), {exports} exports, {metaStepSpecs} MetaStepSpec instances, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"
+  logInfo m!"Orb spec audit OK: {kernel.size + spec.size + mutants.size} declarations, {theorems} theorems, {exports} exports, {metaStepSpecs} MetaStepSpec instances, 10 Meta-Specs + adversarial self-test verified, axioms ⊆ {allowedAxioms}"

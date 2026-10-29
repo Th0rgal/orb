@@ -360,6 +360,115 @@ object OrbKernel {
     ): Long
 
     @JvmStatic
+    external fun orbWireApplyPatchStep(
+        currentRev: Long,
+        incomingRev: Long,
+        currentHasVal: Int,
+        currentVal: Int,
+        presence: Int,
+        incomingVal: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbWireMachineStep(
+        schemaId: Int,
+        stateRev: Long,
+        eventSeq: Long,
+        effectKind: Int,
+        effectAdmitted: Int,
+        outCap: Int,
+        requiredOutBytes: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbHierarchyMergeStep(
+        currentEpoch: Long,
+        incomingEpoch: Long,
+        archiveEpoch: Long,
+        curArchived: Int,
+        curSuperseded: Int,
+        isPartialPatch: Int,
+        parentPresence: Int,
+        curParentOrd: Int,
+        incParentOrd: Int,
+        incArchive: Int,
+        incUnarchive: Int,
+        incSupersede: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbTranscriptFoldStep(
+        lastAppliedSeq: Long,
+        incomingSeq: Long,
+        entryCount: Int,
+        thinkingOpen: Int,
+        normalizedAction: Int,
+        isReplayFromLog: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbOutboxCrashReconcileStep(
+        durableQueued: Int,
+        durableAcked: Int,
+        volatileInFlight: Int,
+        leaseBootEpoch: Long,
+        nodeBootEpoch: Long,
+        volatileLeaseOwner: Int,
+        reqOwner: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbProviderAttemptStep(
+        pinnedAccountId: Int,
+        candidateAccountId: Int,
+        attemptsUsed: Int,
+        retryBudget: Int,
+        firstByteCommitted: Int,
+        failureKind: Int,
+        upstreamNowEpoch: Long,
+        cooldownUntilEpoch: Long,
+        upstreamDeadline: Long,
+        authValid: Int
+    ): Long
+
+    @JvmStatic
+    external fun orbAuthToctouExecuteStep(
+        principalKind: Int,
+        bunkerState: Int,
+        observedTargetId: Int,
+        execTargetId: Int,
+        observedLeaseEpoch: Long,
+        liveLeaseEpoch: Long,
+        nowTick: Long,
+        expiryTick: Long,
+        observedDigest: Long,
+        execDigest: Long
+    ): Int
+
+    @JvmStatic
+    external fun orbResourceLedgerStep(
+        opKind: Int,
+        reservedSlots: Int,
+        activeSlots: Int,
+        maxSlots: Int,
+        spentCents: Long,
+        costDeltaCents: Long,
+        budgetCents: Long,
+        nowTick: Long,
+        ttlExpiryTick: Long
+    ): Long
+
+    @JvmStatic
+    external fun orbStreamBoundedCommitStep(
+        prevLen: Int,
+        prevCommit: Int,
+        prevCheckpoint: Int,
+        newLen: Int,
+        rawCommit: Int,
+        maxOpenTailBytes: Int
+    ): Long
+
+    @JvmStatic
     external fun leansysSseFrameScan(
         frameOff: Long,
         frameLen: Long,

@@ -70,6 +70,15 @@ class CoverageRegistryTests(unittest.TestCase):
                 "orb_stream_deadlines",
                 "orb_proxy_step",
                 "orb_job_ledger_step",
+                "orb_wire_apply_patch_step",
+                "orb_wire_machine_step",
+                "orb_hierarchy_merge_step",
+                "orb_transcript_fold_step",
+                "orb_outbox_crash_reconcile_step",
+                "orb_provider_attempt_step",
+                "orb_auth_toctou_execute_step",
+                "orb_resource_ledger_step",
+                "orb_stream_bounded_commit_step",
             },
         )
         for entry in partial:
