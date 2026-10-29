@@ -538,7 +538,12 @@ fn is_google_concurrency_sibling(
         (e.provider_id == "google" && m.contains("gemini-4-carbon"))
             || (e.provider_id == "antigravity" && m.starts_with("agy-model-"))
     };
-    is_carbon(head) && is_carbon(other)
+    let is_argon = |e: &crate::provider_health::ResolvedEntry| {
+        let m = e.model_id.to_ascii_lowercase();
+        (e.provider_id == "google" && m.contains("gemini-4-argon"))
+            || (e.provider_id == "antigravity" && (m.contains("gemini-4-argon") || m == "agy-demo"))
+    };
+    (is_carbon(head) && is_carbon(other)) || (is_argon(head) && is_argon(other))
 }
 
 fn entry_has_routable_proxy_credentials(entry: &crate::provider_health::ResolvedEntry) -> bool {
@@ -3842,6 +3847,7 @@ async fn chat_completions_routed(
         let use_google_oauth_cli_proxy_adapter = provider_type == ProviderType::Google
             && entry.has_oauth
             && entry.api_key.is_none()
+            && entry.account_id == crate::provider_health::stable_provider_uuid("google-cli-proxy")
             && crate::api::ai_providers::google_cli_proxy_account_available();
         let use_google_oauth_adapter = provider_type == ProviderType::Google
             && entry.has_oauth
@@ -10915,6 +10921,90 @@ mod tests {
         );
         assert!(proxy_queue_timeout(true) <= std::time::Duration::from_secs(30));
         assert!(proxy_queue_timeout(false) >= std::time::Duration::from_secs(180));
+    }
+
+    #[tokio::test]
+    async fn argon_sibling_group_spills_within_argon_without_crossing_into_carbon() {
+        let cap = google_max_concurrency();
+        let argon_google_id = uuid::Uuid::new_v4();
+        let argon_agy_id = uuid::Uuid::new_v4();
+        let carbon_google_id = uuid::Uuid::new_v4();
+        let make_entries = || {
+            vec![
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-argon".into(),
+                    account_id: argon_google_id,
+                    api_key: Some("key-argon".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "antigravity".into(),
+                    model_id: "gemini-4-argon-high".into(),
+                    account_id: argon_agy_id,
+                    api_key: None,
+                    has_oauth: true,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: carbon_google_id,
+                    api_key: Some("key-carbon".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+            ]
+        };
+        let has_cred =
+            |e: &crate::provider_health::ResolvedEntry| e.api_key.is_some() || e.has_oauth;
+
+        let mut primary_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (p, _) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                has_cred,
+            )
+            .await
+            .unwrap();
+            assert_eq!(entries[0].account_id, argon_google_id);
+            primary_permits.push(p);
+        }
+
+        // Next request spills to antigravity Argon, never Carbon.
+        let mut secondary_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (p, waited) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                has_cred,
+            )
+            .await
+            .unwrap();
+            assert!(waited.is_zero());
+            assert_eq!(entries[0].account_id, argon_agy_id);
+            secondary_permits.push(p);
+        }
+
+        // When both Argon accounts are full, Argon waits on Argon instead of spilling to Carbon.
+        let mut entries = make_entries();
+        let timed_out = acquire_google_group_permit(
+            &mut entries,
+            0,
+            std::time::Duration::from_millis(20),
+            has_cred,
+        )
+        .await;
+        assert!(timed_out.is_err());
     }
 
     #[test]

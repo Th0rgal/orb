@@ -3349,41 +3349,105 @@ impl ManagedManager {
             wrote.map_err(|e| format!("write enrollment file: {e}"))?;
             let provision_started = tokio::time::Instant::now();
             // Image fixups are best effort: a failure is logged, never fatal.
-            let provisioned = match provider
-                .write_file(&provider_id, PROVISION_PATH, PROVISION_SCRIPT)
-                .await
-            {
-                Ok(()) => provider
-                    .exec(&provider_id, &format!("sudo bash {PROVISION_PATH}"), 60)
+            // Boat's sandbox exec proxy can transiently return HTTP 502
+            // (`sandbox_direct_failed`) right after ready; retry transient errors.
+            let mut provisioned = Err(String::new());
+            for attempt in 0..4 {
+                provisioned = match provider
+                    .write_file(&provider_id, PROVISION_PATH, PROVISION_SCRIPT)
                     .await
-                    .and_then(|v| match exec_exit_code(&v) {
-                        Some(code) if code != 0 => Err(format!("exit code {code}")),
-                        _ => Ok(()),
-                    }),
-                Err(e) => Err(e),
-            };
+                {
+                    Ok(()) => provider
+                        .exec(&provider_id, &format!("sudo bash {PROVISION_PATH}"), 60)
+                        .await
+                        .and_then(|v| match exec_exit_code(&v) {
+                            Some(code) if code != 0 => Err(format!("exit code {code}")),
+                            _ => Ok(()),
+                        }),
+                    Err(e) => Err(e),
+                };
+                if provisioned.is_ok()
+                    || provisioned
+                        .as_ref()
+                        .err()
+                        .is_none_or(|e| !is_retryable_exec_error(e))
+                {
+                    break;
+                }
+                if attempt + 1 < 4 {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+            }
             let provision_ms = provision_started.elapsed().as_millis() as u64;
             if let Err(error) = &provisioned {
                 tracing::warn!(machine = %id, %error, "managed VM provisioning script failed");
             }
             // A fork or snapshot carries the source node's credential, projected
-            // sign-in and delivered secrets: drop them so this VM enrolls fresh
-            // (its own missions request their secrets again). Any failure fails
-            // provisioning, which destroys the VM.
-            let node_started = provider
-                .exec(
-                    &provider_id,
-                    &format!(
-                        "chmod 600 /home/user/.orb/enroll.env && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && {} && sudo systemctl restart orb-node.service",
-                        snapshots::SECRETS_WIPE
-                    ),
-                    120,
-                )
-                .await
-                .map_err(|e| format!("start orb-node: {e}"))?;
-            if let Some(code) = exec_exit_code(&node_started).filter(|c| *c != 0) {
-                return Err(format!("start orb-node: exit code {code}"));
+            // sign-in and delivered secrets: drop them once while orb-node is
+            // stopped, BEFORE starting the daemon. Keeping credential deletion
+            // separate from `systemctl restart` ensures a retry after a lost
+            // exec response cannot erase a newly enrolled `node.cred`.
+            let wipe_cmd = format!(
+                "(sudo systemctl stop orb-node.service 2>/dev/null || true) && sudo rm -rf /var/lib/orb-node/node.cred /var/lib/orb-node/work/managed-auth && {} && chmod 600 /home/user/.orb/enroll.env",
+                snapshots::SECRETS_WIPE
+            );
+            let mut wipe_res = Err(String::new());
+            for attempt in 0..5 {
+                wipe_res = provider
+                    .exec(&provider_id, &wipe_cmd, 60)
+                    .await
+                    .and_then(|res| {
+                        if let Some(code) = exec_exit_code(&res).filter(|c| *c != 0) {
+                            Err(format!("exit code {code}"))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                if wipe_res.is_ok()
+                    || wipe_res
+                        .as_ref()
+                        .err()
+                        .is_none_or(|e| !is_retryable_exec_error(e))
+                {
+                    break;
+                }
+                if attempt + 1 < 5 {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
             }
+            wipe_res.map_err(|e| format!("prepare orb-node state: {e}"))?;
+
+            let mut start_res = Err(String::new());
+            for attempt in 0..5 {
+                start_res = provider
+                    .exec(&provider_id, "sudo systemctl restart orb-node.service", 120)
+                    .await
+                    .and_then(|node_started| {
+                        if let Some(code) = exec_exit_code(&node_started).filter(|c| *c != 0) {
+                            Err(format!("exit code {code}"))
+                        } else {
+                            Ok(())
+                        }
+                    });
+                if start_res.is_ok()
+                    || start_res
+                        .as_ref()
+                        .err()
+                        .is_none_or(|e| !is_retryable_exec_error(e))
+                {
+                    break;
+                }
+                if attempt + 1 < 5 {
+                    tracing::warn!(
+                        machine = %id,
+                        attempt = attempt + 1,
+                        error = %start_res.as_ref().err().unwrap_or(&String::new()),
+                        "transient error starting orb-node on managed VM; retrying"
+                    );
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+            }
+            start_res.map_err(|e| format!("start orb-node: {e}"))?;
             (provision_ms, provisioned)
         };
         let enroll_started = tokio::time::Instant::now();
@@ -4054,16 +4118,25 @@ impl ManagedManager {
                             let del = pm.deletable_at;
                             self.update(&m.id, |row| row.deletable_at = del).await;
                         }
-                        if provider.is_stopped_state(&pm.state) && m.state == MachineState::Online {
-                            let _ = self
-                                .destroy_inner(&m.id, Some("stopped_by_provider".into()), false)
-                                .await;
-                            closed.push(m.id.clone());
+                        if provider.is_stopped_state(&pm.state) {
+                            if m.state == MachineState::Online {
+                                let _ = self
+                                    .destroy_inner(&m.id, Some("stopped_by_provider".into()), false)
+                                    .await;
+                                closed.push(m.id.clone());
+                            } else if m.state == MachineState::Destroying {
+                                self.mark_vanished(&m.id).await;
+                                vanished.push(m.id.clone());
+                            }
                         }
                     }
-                    // An empty list while we know live VMs is more likely a
+                    // An empty list while we know live Online VMs is more likely a
                     // provider glitch than every VM vanishing: wait for proof.
-                    None if !remote.is_empty() && m.state == MachineState::Online => {
+                    // A Destroying row whose provider no longer lists it for two
+                    // passes (e.g. rotated API key or already reaped) is safe to close.
+                    None if (!remote.is_empty() && m.state == MachineState::Online)
+                        || m.state == MachineState::Destroying =>
+                    {
                         let passes = {
                             let mut st = self.reconcile_state.lock().await;
                             let n = st.vanished_passes.entry(m.id.clone()).or_insert(0);
@@ -4655,6 +4728,18 @@ pub fn exec_exit_code(v: &Value) -> Option<i64> {
     ["exitCode", "exit_code", "code"]
         .iter()
         .find_map(|k| v.get(*k).and_then(Value::as_i64))
+}
+
+fn is_retryable_exec_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    err.contains("HTTP 502")
+        || err.contains("HTTP 503")
+        || err.contains("HTTP 504")
+        || lower.contains("sandbox_direct_failed")
+        || lower.contains("sandbox_starting")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection")
 }
 
 /// Per-job memory ceiling on a managed VM: 90% of its RAM (GiB).

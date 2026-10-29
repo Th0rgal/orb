@@ -440,6 +440,7 @@ impl ProjectsStore {
             std::fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(&path)?;
+        connection.busy_timeout(std::time::Duration::from_secs(10))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         // Required for `project_grant`'s ON DELETE CASCADE — SQLite defaults it
         // off, so without this a deleted project would strand its grant row.
@@ -4832,7 +4833,7 @@ pub fn read_project_skills(db_path: &std::path::Path, slug: &str) -> Vec<String>
     else {
         return Vec::new();
     };
-    let _ = connection.busy_timeout(std::time::Duration::from_secs(2));
+    let _ = connection.busy_timeout(std::time::Duration::from_secs(10));
     connection
         .query_row(
             "SELECT skills FROM projects WHERE slug = ?1",
