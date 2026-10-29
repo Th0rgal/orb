@@ -501,18 +501,23 @@ async fn rollback_moved_missions(
         }
         let attempt = snap.id.to_string();
         if let Some(prior) = &snap.prior_track_lease {
-            let still_matches = state
-                .projects
-                .live_leases(None)
-                .ok()
-                .and_then(|leases| {
-                    leases
-                        .into_iter()
-                        .rfind(|l| l.attempt_id == attempt && l.mutation_domain == "track")
-                })
-                .is_some_and(|l| {
-                    l.slug == prior.slug && l.track == prior.track && l.mode == prior.mode
-                });
+            let still_matches = match state.projects.live_leases(None) {
+                Ok(leases) => leases
+                    .into_iter()
+                    .rfind(|l| l.attempt_id == attempt && l.mutation_domain == "track")
+                    .is_some_and(|l| {
+                        l.slug == prior.slug && l.track == prior.track && l.mode == prior.mode
+                    }),
+                Err(err) => {
+                    tracing::error!(
+                        mission_id = %snap.id,
+                        %err,
+                        "Subtree project transfer lease inspection failed during rollback"
+                    );
+                    first_error.get_or_insert(err);
+                    false
+                }
+            };
             if !still_matches {
                 let pr = super::super::track_leases::pr_number(snap.before.github_pr.as_deref());
                 if let Err(rollback_err) = state.projects.move_track_lease(
@@ -816,26 +821,36 @@ where
             if child.project.project == target_project {
                 continue;
             }
-            let removed_folders: Vec<String> = child
-                .project
-                .tags
-                .iter()
-                .filter(|t| t.starts_with("orb-folder:"))
-                .cloned()
-                .collect();
-            let child_snap =
-                match MovedMissionSnapshot::capture(&state, &child, Vec::new(), removed_folders) {
-                    Ok(snap) => snap,
-                    Err(err) => {
-                        if rollback_moved_missions(&state, &control.mission_store, &moved)
-                            .await
-                            .is_ok()
-                        {
-                            let _ = state.projects.clear_subtree_project_edit(&root_key);
+            let child_snap = match planned_snapshots.iter().find(|s| s.id == child_id).cloned() {
+                Some(snap) => snap,
+                None => {
+                    let removed_folders: Vec<String> = child
+                        .project
+                        .tags
+                        .iter()
+                        .filter(|t| t.starts_with("orb-folder:"))
+                        .cloned()
+                        .collect();
+                    match MovedMissionSnapshot::capture(&state, &child, Vec::new(), removed_folders)
+                    {
+                        Ok(snap) => snap,
+                        Err(err) => {
+                            if rollback_moved_missions(&state, &control.mission_store, &moved)
+                                .await
+                                .is_ok()
+                            {
+                                let _ = state.projects.clear_subtree_project_edit(&root_key);
+                            }
+                            return Err(err);
                         }
-                        return Err(err);
                     }
-                };
+                }
+            };
+            // Include the attempted child in `moved` before running its update:
+            // if its metadata write commits and only the trailing read fails,
+            // compensation must roll back (or retain the receipt for) this
+            // child too rather than stranding it in the destination project.
+            moved.push(child_snap);
             // Omit internal `disk-reservation-v1:` tags from the synthetic
             // request body so admission validation does not reject legacy
             // rows; `update_mission_project_locked` re-attaches them from
@@ -849,7 +864,7 @@ where
                 })
                 .cloned()
                 .collect();
-            match update_mission_project_locked(
+            if let Err(err) = update_mission_project_locked(
                 is_actor_busy(child_id),
                 State(state.clone()),
                 Extension(user.clone()),
@@ -869,16 +884,13 @@ where
             )
             .await
             {
-                Ok(_) => moved.push(child_snap),
-                Err(err) => {
-                    if rollback_moved_missions(&state, &control.mission_store, &moved)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = state.projects.clear_subtree_project_edit(&root_key);
-                    }
-                    return Err(err);
+                if rollback_moved_missions(&state, &control.mission_store, &moved)
+                    .await
+                    .is_ok()
+                {
+                    let _ = state.projects.clear_subtree_project_edit(&root_key);
                 }
+                return Err(err);
             }
         }
     }
