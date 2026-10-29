@@ -53,9 +53,10 @@ export async function transferProjectFile(slug: string, path: string, destinatio
     throw error;
   }
 }
-export async function copyFileReference(slug: string, path: string, copy: boolean, directory = false): Promise<string> {
+export async function copyFileReference(slug: string, path: string, copy: boolean, directory = false, clipboardData?: DataTransfer | null): Promise<string> {
   const text = prefix + JSON.stringify({ slug, path, copy, ...(directory ? { directory } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
-  await copyText(text);
+  if (clipboardData) { clipboardData.setData("text/plain", text); return text; }
+  await copyText(text).catch(() => {});
   return text;
 }
 export function readFileReference(text: string): FileClipboard | null {
@@ -65,9 +66,10 @@ export function readFileReference(text: string): FileClipboard | null {
     return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.path === "string" && typeof value.copy === "boolean" && ["undefined", "boolean"].includes(typeof value.directory) && typeof value.nonce === "string" ? value : null;
   } catch { return null; }
 }
-export async function copyCronReference(slug: string, id: string, name: string, folder?: string): Promise<string> {
+export async function copyCronReference(slug: string, id: string, name: string, folder?: string, clipboardData?: DataTransfer | null): Promise<string> {
   const text = cronPrefix + JSON.stringify({ slug, id, name, ...(folder ? { folder } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
-  await copyText(text);
+  if (clipboardData) { clipboardData.setData("text/plain", text); return text; }
+  await copyText(text).catch(() => {});
   return text;
 }
 export function readCronReference(text: string): CronClipboard | null {
@@ -77,9 +79,13 @@ export function readCronReference(text: string): CronClipboard | null {
     return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.id === "string" && typeof value.name === "string" && typeof value.nonce === "string" ? value : null;
   } catch { return null; }
 }
-export async function copyItemsReference(items: ClipboardItem[], copy: boolean): Promise<string> {
-  const text = itemsPrefix + JSON.stringify({ items, copy, backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
-  await copyText(text);
+export function makeItemsReference(items: ClipboardItem[], copy: boolean): string {
+  return itemsPrefix + JSON.stringify({ items, copy, backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
+}
+export async function copyItemsReference(items: ClipboardItem[], copy: boolean, clipboardData?: DataTransfer | null): Promise<string> {
+  const text = makeItemsReference(items, copy);
+  if (clipboardData) { clipboardData.setData("text/plain", text); return text; }
+  await copyText(text).catch(() => {});
   return text;
 }
 export function readItemsReference(text: string): ItemsClipboard | null {

@@ -25,6 +25,18 @@ pub struct UpdateMissionProjectRequest {
     pub desired_state: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_string_patch")]
     pub next_check_at: Option<Option<String>>,
+    /// When true and `project` assigns a destination slug, also move every
+    /// `parent_mission_id` descendant not yet in that project (clearing child
+    /// `orb-folder:*` tags while preserving capability and hierarchy tags).
+    #[serde(default)]
+    pub include_descendants: bool,
+}
+
+fn folder_only_tag_diff(a: &[String], b: &[String]) -> bool {
+    a.iter()
+        .filter(|tag| !b.contains(tag))
+        .chain(b.iter().filter(|tag| !a.contains(tag)))
+        .all(|tag| tag.starts_with("orb-folder:"))
 }
 
 /// Whether this patch could change the mission's PR-writer status.
@@ -120,15 +132,16 @@ pub async fn update_mission_project(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdateMissionProjectRequest>,
+    Json(mut req): Json<UpdateMissionProjectRequest>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
+    let include_descendants = std::mem::take(&mut req.include_descendants);
     let control = control_for_user(&state, &user).await;
     let (respond, result) = oneshot::channel();
     control
         .cmd_tx
         .send(ControlCommand::UpdateProject {
             mission_id: id,
-            user,
+            user: user.clone(),
             request: req,
             respond,
         })
@@ -136,7 +149,57 @@ pub async fn update_mission_project(
         .map_err(session_unavailable)?;
     #[cfg(test)]
     dispatch_admission_tests::notify_wait(id, "project");
-    result.await.map_err(recv_failed)?.map(Json)
+    let updated = result.await.map_err(recv_failed)??;
+    if include_descendants {
+        if let Some(target_slug) = updated.project.project.clone() {
+            let descendants = collect_child_mission_ids(&control.mission_store, id).await?;
+            for child_id in descendants {
+                let Some(child) = control
+                    .mission_store
+                    .get_mission(child_id)
+                    .await
+                    .map_err(internal_error)?
+                else {
+                    continue;
+                };
+                if child.project.project.as_deref() == Some(target_slug.as_str()) {
+                    continue;
+                }
+                let child_tags: Vec<String> = child
+                    .project
+                    .tags
+                    .iter()
+                    .filter(|t| !t.starts_with("orb-folder:"))
+                    .cloned()
+                    .collect();
+                let (child_respond, child_result) = oneshot::channel();
+                control
+                    .cmd_tx
+                    .send(ControlCommand::UpdateProject {
+                        mission_id: child_id,
+                        user: user.clone(),
+                        request: UpdateMissionProjectRequest {
+                            project: Some(Some(target_slug.clone())),
+                            track: None,
+                            intent: None,
+                            github_pr: None,
+                            writer: None,
+                            tags: Some(child_tags),
+                            desired_state: None,
+                            next_check_at: None,
+                            include_descendants: false,
+                        },
+                        respond: child_respond,
+                    })
+                    .await
+                    .map_err(session_unavailable)?;
+                #[cfg(test)]
+                dispatch_admission_tests::notify_wait(child_id, "project");
+                child_result.await.map_err(recv_failed)??;
+            }
+        }
+    }
+    Ok(Json(updated))
 }
 
 pub(super) async fn update_mission_project_locked(
@@ -163,8 +226,8 @@ pub(super) async fn update_mission_project_locked(
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
 
-    // Read before the normalize step below consumes `req`'s fields.
-    let could_change_writer_status = patch_can_change_writer_status(&req);
+    let non_tag_writer_inputs_changed =
+        req.github_pr.is_some() || req.writer.is_some() || req.intent.is_some();
 
     // Normalize: blank string patches clear the field; tags are trimmed.
     let normalize = |patch: Option<Option<String>>| -> Option<Option<String>> {
@@ -237,6 +300,11 @@ pub(super) async fn update_mission_project_locked(
     if tags.is_some() {
         tags = Some(effective_tags.clone());
     }
+    // Pure sidebar folder edits (`orb-folder:*` only) do not alter writer
+    // capability, so they must not inject `"pr-writer"` or re-arbitrate foreign
+    // PR writer leases.
+    let could_change_writer_status = non_tag_writer_inputs_changed
+        || !folder_only_tag_diff(&effective_tags, &current.project.tags);
     let deferred_goal = control
         .mission_store
         .get_deferred_goal(id)
@@ -262,16 +330,19 @@ pub(super) async fn update_mission_project_locked(
         )
     });
     // Writer capability governs tracks even when PR metadata is absent.
-    // Explicit promotion must replace a read-only tag before lease_mode sees it.
+    // Explicit promotion must replace a read-only tag before lease_mode sees it,
+    // while pure project/folder moves keep capability tags untouched.
     let becomes_writer = initial_prompt_requests_writer || deferred_goal_requests_writer;
-    if becomes_writer {
-        effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
-        effective_tags.push("pr-writer".to_string());
-        tags = Some(effective_tags.clone());
-    } else if req.writer == Some(false) {
-        effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
-        effective_tags.push("pr-readonly".to_string());
-        tags = Some(effective_tags.clone());
+    if could_change_writer_status {
+        if becomes_writer {
+            effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
+            effective_tags.push("pr-writer".to_string());
+            tags = Some(effective_tags.clone());
+        } else if req.writer == Some(false) {
+            effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
+            effective_tags.push("pr-readonly".to_string());
+            tags = Some(effective_tags.clone());
+        }
     }
 
     let writer_guard = if becomes_writer && could_change_writer_status {
@@ -306,12 +377,13 @@ pub(super) async fn update_mission_project_locked(
     // old ones. A held writer lease is a 409 and the patch is not applied.
     let effective_project = effective_string(&project, &current.project.project);
     let effective_track = effective_string(&track, &current.project.track);
+    let project_changed = effective_project != current.project.project;
     // A pure project move (generated per-mission tracks and Orb folder tags
     // follow the mission) keeps the holder, mode, PR and real track. Leases
     // are only revalidated at turn start, so a running mission can move as
     // long as the lease moves atomically; its run, queue and deferred goal
     // stay untouched and the next turn starts under the new project.
-    if effective_project != current.project.project && effective_project.is_some() {
+    if project_changed && effective_project.is_some() {
         let generated = super::super::track_leases::generated_track_key(&id.to_string());
         let generated_shape = |t: &str| {
             t.strip_prefix("mission-")
@@ -320,16 +392,10 @@ pub(super) async fn update_mission_project_locked(
         let track_follows = effective_track == current.project.track
             || (effective_track.as_deref() == Some(generated.as_str())
                 && current.project.track.as_deref().is_none_or(generated_shape));
-        let folder_only = |a: &[String], b: &[String]| {
-            a.iter()
-                .filter(|tag| !b.contains(tag))
-                .chain(b.iter().filter(|tag| !a.contains(tag)))
-                .all(|tag| tag.starts_with("orb-folder:"))
-        };
         let move_only = track_follows
             && effective_github_pr == current.project.github_pr
             && effective_intent == current.project.intent
-            && folder_only(&effective_tags, &current.project.tags)
+            && folder_only_tag_diff(&effective_tags, &current.project.tags)
             && state
                 .projects
                 .dispatch_admission(&id.to_string())
@@ -371,17 +437,17 @@ pub(super) async fn update_mission_project_locked(
             }
         }
     }
-    if effective_project != current.project.project
+    if project_changed
         || effective_track != current.project.track
         || effective_github_pr != current.project.github_pr
-        || effective_tags != current.project.tags
+        || !folder_only_tag_diff(&effective_tags, &current.project.tags)
         || effective_intent != current.project.intent
     {
         dispatch_admission::require_quiescent(&state, &control.mission_store, &current, actor_busy)
             .await
             .map_err(|error| (StatusCode::CONFLICT, error))?;
     }
-    let track_changed = track.is_some() || project.is_some() || could_change_writer_status;
+    let track_changed = track.is_some() || project_changed || could_change_writer_status;
     let mut lease_request = None;
     let track = if let (true, Some(slug), Some(key)) = (
         track_changed,
@@ -393,23 +459,30 @@ pub(super) async fn update_mission_project_locked(
             .projects
             .absorb_track(slug, key, current.title.as_deref(), pr)
             .map_err(internal_error)?;
-        let mode = if becomes_writer {
-            "writer"
-        } else {
-            super::super::track_leases::lease_mode(
-                req.writer,
-                &effective_tags,
-                effective_intent.as_deref(),
-            )
-        };
-        let request = super::super::track_leases::lease_request(
-            slug,
-            &outcome.key,
-            &id.to_string(),
-            mode,
-            Some(&format!("project-edit:{}", Uuid::new_v4())),
-        );
-        lease_request = Some(request);
+        let holds_lease = execution_ownership::snapshot(&state.control)
+            .await
+            .map_err(internal_error)?
+            .holds_track(id)
+            != Some(false);
+        if holds_lease {
+            let mode = if becomes_writer {
+                "writer"
+            } else {
+                super::super::track_leases::lease_mode(
+                    req.writer,
+                    &effective_tags,
+                    effective_intent.as_deref(),
+                )
+            };
+            let request = super::super::track_leases::lease_request(
+                slug,
+                &outcome.key,
+                &id.to_string(),
+                mode,
+                Some(&format!("project-edit:{}", Uuid::new_v4())),
+            );
+            lease_request = Some(request);
+        }
         Some(Some(outcome.key))
     } else {
         track

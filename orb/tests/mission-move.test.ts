@@ -57,6 +57,7 @@ it('reads the running worker from Core’s 409 delete refusal',()=>{
 });
 
 import { deleteDescendants, descendantsSentence } from '../src/deleteRunning';
+import { missionIdFromTreeId, missionTreeId } from '../src/tree/TreeView';
 it('lists every session a delete takes with it, flagging running ones',()=>{
  const rows=[{id:'ev',title:'EV Bench',status:'completed'},{id:'b',title:'Benchmarks',status:'active',parent_mission_id:'ev'},{id:'btw',title:'EV Bench · btw',status:'completed',callback_parent_mission_id:'ev'},{id:'x',title:'Other',status:'active'}];
  const list=deleteDescendants(['ev'],rows);
@@ -64,4 +65,31 @@ it('lists every session a delete takes with it, flagging running ones',()=>{
  expect(descendantsSentence(list)).toBe('This also deletes 2 sessions: Benchmarks (running), EV Bench · btw.');
  expect(descendantsSentence([])).toBe('');
  expect(descendantsSentence(Array.from({length:8},(_,i)=>({id:`${i}`,title:`S${i}`,running:false})),3)).toBe('This also deletes 8 sessions: S0, S1, S2, and 5 more.');
+});
+it('sets includeDescendants on cross-project and split-subtree root moves and forwards include_descendants to Core',async()=>{
+ const crossPlan=planMissionMoves([P],'other','Audits',known);
+ expect(crossPlan[0]).toEqual({id:P,from:'verity',folder:'Audits',includeDescendants:true});
+ const splitKnown=[{id:P,project:'other'},{id:C,project:'verity',parent_mission_id:P}];
+ const healPlan=planMissionMoves([P],'other','',splitKnown);
+ expect(healPlan).toEqual([
+  {id:P,from:'other',folder:'',includeDescendants:true},
+  {id:C,from:'verity',folder:''},
+ ]);
+ vi.mocked(getMission).mockResolvedValue({id:P,tags:[]} as any);
+ vi.mocked(api).mockResolvedValue({ok:true} as any);
+ await moveMissions([crossPlan[0]],'other');
+ expect(JSON.parse(vi.mocked(api).mock.calls[0][1]!.body as string)).toEqual({
+  project:'other',
+  tags:['orb-folder:Audits'],
+  include_descendants:true,
+ });
+});
+it('assigns distinct tree IDs to cross-project placeholder parents while resolving canonical mission IDs',()=>{
+ expect(missionTreeId(P)).toBe(`m:${P}`);
+ expect(missionTreeId(P,'verity-core')).toBe(`mp:verity-core:${P}`);
+ expect(missionTreeId(P,'archive:verity-core')).toBe(`mp:archive:verity-core:${P}`);
+ expect(missionIdFromTreeId(`m:${P}`)).toBe(P);
+ expect(missionIdFromTreeId(`mp:verity-core:${P}`)).toBe(P);
+ expect(missionIdFromTreeId(`mp:archive:verity-core:${P}`)).toBe(P);
+ expect(missionIdFromTreeId('pf:verity-core:Audits')).toBeNull();
 });

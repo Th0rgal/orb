@@ -38,6 +38,19 @@ export function placeholderParent(slug: string) {
 
 export const missionFolder = (mission: Mission) => mission.tags?.find(t => t.startsWith("orb-folder:"))?.slice("orb-folder:".length) ?? "";
 
+export function missionTreeId(id: string, placeholderScope?: string): string {
+  return placeholderScope !== undefined ? `mp:${placeholderScope}:${id}` : `m:${id}`;
+}
+
+export function missionIdFromTreeId(treeId: string): string | null {
+  if (treeId.startsWith("m:")) return treeId.slice(2);
+  if (treeId.startsWith("mp:")) {
+    const sep = treeId.lastIndexOf(":");
+    return sep > 2 ? treeId.slice(sep + 1) : null;
+  }
+  return null;
+}
+
 /**
  * Builds the sidebar's project tree and archive tree from the loaded state.
  * Pure derivation: every input is read through `deps`, so the result tracks
@@ -95,14 +108,15 @@ export function createProjectTree(deps: {
   const controllerLaunched = (mission: Mission) => !missionParent(mission) && mission.origin === "hermes" && !!mission.origin_session_id;
   const controllerRow = (slug: string) => { const job = controllers[slug]?.job; return !!job && !job.archived; };
   const controllerRoots = (slug: string) => controllerRow(slug) ? rootMissions(slug).filter(root => controllerLaunched(root.mission)) : [];
-  const missionNode = (slug: string, nested: NestedMission<Mission>): Node => {
-    const mission = nested.mission, id = `m:${mission.id}`;
+  const missionNode = (slug: string, nested: NestedMission<Mission>, archive = false): Node => {
+    const mission = nested.mission;
+    const id = mission.orb_placeholder ? missionTreeId(mission.id, archive ? `archive:${slug}` : slug) : missionTreeId(mission.id);
     const data: RowData = { kind: "mission", slug, mission, label: nested.version ? versionLabel(mission) : displayTitle(forkTitle(renamedTitle("mission", mission.id, mission.title))) || (mission.orb_placeholder ? "Parent mission" : mission.id), ...(nested.version ? { version: true } : {}), ...(mission.orb_placeholder ? { placeholder: true } : {}) };
     if (!nested.children.length) return { id, data };
     const selected = deps.selected();
     const open = expanded[id] ?? (!!selected?.startsWith("m:") && holds(nested, selected.slice(2)));
     return { id, data: { ...data, launched: countNested(nested), launchedLive: countNested(nested, child => isWorking(child.status)), versions: countVersions(nested) },
-      expanded: open, children: open ? nested.children.map(child => missionNode(slug, child)) : [] };
+      expanded: open, children: open ? nested.children.map(child => missionNode(slug, child, archive)) : [] };
   };
   const tree = (): Node[] => deps.projects().map(project => {
     const slug = project.slug, open = !!expanded[slug];
@@ -135,7 +149,7 @@ export function createProjectTree(deps: {
     }
     const groups = new Map<string, Node[]>();
     for (const [slug, rows] of byProject) {
-      groups.set(slug, nestMissions(rows, { placeholder: placeholderParent(slug) }).map(root => missionNode(slug, root)));
+      groups.set(slug, nestMissions(rows, { placeholder: placeholderParent(slug) }).map(root => missionNode(slug, root, true)));
     }
     for (const project of deps.projects()) {
       const job = controllers[project.slug]?.job;

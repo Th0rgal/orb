@@ -13228,6 +13228,235 @@ async fn queued_followup_is_delivered_after_running_project_move() {
 }
 
 #[tokio::test]
+async fn running_forked_mission_without_writer_tag_moves_across_projects_and_folders() {
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Active, None).await;
+    let generated = crate::api::track_leases::generated_track_key(&m.id.to_string());
+    let base_tags = vec![
+        format!("fork-workspace:{}", Uuid::new_v4()),
+        format!("fork-of:{}", Uuid::new_v4()),
+    ];
+    h.state
+        .projects
+        .release_leases_for_attempt(&m.id.to_string())
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                track: Some(Some(generated.clone())),
+                tags: Some(base_tags.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_deferred_goal(m.id, Some("Implement PR #244 and push branch".into()))
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", &generated, None, None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&crate::api::track_leases::lease_request(
+            "lido",
+            &generated,
+            &m.id.to_string(),
+            "writer",
+            None,
+        ))
+        .unwrap();
+    h.control
+        .mission_store
+        .begin_mission_run(m.id, "running-actor", None)
+        .await
+        .unwrap();
+
+    // Moving into a folder within the same project succeeds while running.
+    let mut folder_tags = base_tags.clone();
+    folder_tags.push("orb-folder:Audits".into());
+    let (status, body) =
+        patch_project(&h, m.id, json!({"project":"lido", "tags": folder_tags})).await;
+    assert!(status.is_success(), "{body}");
+
+    // Moving across projects succeeds while running without injecting pr-writer.
+    let (status, body) =
+        patch_project(&h, m.id, json!({"project":"verity", "tags": base_tags})).await;
+    assert!(status.is_success(), "{body}");
+    let after = h
+        .control
+        .mission_store
+        .get_mission(m.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.project.project.as_deref(), Some("verity"));
+    assert_eq!(after.project.tags, base_tags);
+    let leases = live_for(&h, m.id);
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].slug, "verity");
+    assert_eq!(leases[0].mode, "writer");
+}
+
+#[tokio::test]
+async fn terminal_and_superseded_workers_sharing_track_move_without_taking_live_leases() {
+    let h = Harness::new().await;
+    let w_superseded = h.writer(MissionStatus::Acknowledged, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&w_superseded.id.to_string())
+        .unwrap();
+    let w_completed = h.writer(MissionStatus::Completed, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&w_completed.id.to_string())
+        .unwrap();
+    let w_live = h.writer(MissionStatus::Active, None).await;
+    h.control
+        .mission_store
+        .begin_mission_run(w_live.id, "running-actor", None)
+        .await
+        .unwrap();
+
+    for m in [&w_superseded, &w_completed, &w_live] {
+        let (status, body) = patch_project(
+            &h,
+            m.id,
+            json!({"project":"verity", "tags": m.project.tags}),
+        )
+        .await;
+        assert!(status.is_success(), "move {} failed: {body}", m.id);
+        let after = h
+            .control
+            .mission_store
+            .get_mission(m.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.project.project.as_deref(), Some("verity"));
+    }
+    assert!(live_for(&h, w_superseded.id).is_empty());
+    assert!(live_for(&h, w_completed.id).is_empty());
+    let live_leases = live_for(&h, w_live.id);
+    assert_eq!(live_leases.len(), 1);
+    assert_eq!(live_leases[0].slug, "verity");
+}
+
+#[tokio::test]
+async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_child_folders() {
+    let h = Harness::new().await;
+    let parent = h.writer(MissionStatus::Completed, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&parent.id.to_string())
+        .unwrap();
+    let child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let grandchild = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("sub-worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(child.id),
+            None,
+        )
+        .await
+        .unwrap();
+    for (id, tags) in [
+        (
+            child.id,
+            vec!["pr-writer".to_string(), "orb-folder:Old".to_string()],
+        ),
+        (grandchild.id, vec!["pr-readonly".to_string()]),
+    ] {
+        h.control
+            .mission_store
+            .update_mission_project(
+                id,
+                MissionProjectPatch {
+                    project: Some(Some("lido".into())),
+                    track: Some(Some("trio-reserve1".into())),
+                    tags: Some(tags),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        h.control
+            .mission_store
+            .update_mission_status(id, MissionStatus::Completed)
+            .await
+            .unwrap();
+    }
+
+    let (status, body) = patch_project(
+        &h,
+        parent.id,
+        json!({"project":"verity", "tags":["pr-writer","orb-folder:Audits"], "include_descendants": true}),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+
+    let p_after = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let c_after = h
+        .control
+        .mission_store
+        .get_mission(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let g_after = h
+        .control
+        .mission_store
+        .get_mission(grandchild.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p_after.project.project.as_deref(), Some("verity"));
+    assert!(p_after
+        .project
+        .tags
+        .contains(&"orb-folder:Audits".to_string()));
+    assert_eq!(c_after.project.project.as_deref(), Some("verity"));
+    assert_eq!(c_after.project.tags, vec!["pr-writer".to_string()]);
+    assert_eq!(g_after.project.project.as_deref(), Some("verity"));
+    assert_eq!(g_after.project.tags, vec!["pr-readonly".to_string()]);
+}
+
+#[tokio::test]
 async fn auto_managed_launch_is_validated_before_any_vm_is_rented() {
     // Boat review 2026-10-24: four VMs were rented and destroyed because the
     // child launch failed after the VM existed (REMOTE_MODEL_REQUIRED,

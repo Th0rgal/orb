@@ -4,8 +4,12 @@ import { missionMoveKey, moveOptimistically, previewMove, withMovedMissions } fr
 import { missionParent } from './missionTree';
 import { usageTelemetry } from './usageTelemetry';
 const prefix = 'orb:cut-mission:';
-export async function cutMission(id: string): Promise<string> {
-  const text = prefix + JSON.stringify({ id, backend: getApiUrl(), nonce: crypto.randomUUID() });
+export function makeCutMission(id: string): string {
+  return prefix + JSON.stringify({ id, backend: getApiUrl(), nonce: crypto.randomUUID() });
+}
+export async function cutMission(id: string, clipboardData?: DataTransfer | null): Promise<string> {
+  const text = makeCutMission(id);
+  if (clipboardData) { clipboardData.setData('text/plain', text); return text; }
   await copyText(text);
   return text;
 }
@@ -19,7 +23,7 @@ export function readCutMission(text: string, backend: string): string | null {
 // Optimistic moves (moves.ts): every view shows the mission in its new place
 // at once; list refreshes still carrying the old project cannot move it back.
 export const applyPendingMoves = withMovedMissions;
-export async function moveMission(id: string, project: string, folder: string, fromProject: string | null = null): Promise<void> {
+export async function moveMission(id: string, project: string, folder: string, fromProject: string | null = null, includeDescendants = false): Promise<void> {
   const version = connectionVersion();
   await moveOptimistically(missionMoveKey(id), { kind: 'mission', fromProject, toProject: project, path: folder }, async () => {
     const mission = await getMission(id);
@@ -28,14 +32,14 @@ export async function moveMission(id: string, project: string, folder: string, f
     if (folder) tags.push(`orb-folder:${folder}`);
     await api(`/api/control/missions/${encodeURIComponent(id)}/project`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project, tags }),
+      body: JSON.stringify({ project, tags, ...(includeDescendants ? { include_descendants: true } : {}) }),
     });
     window.dispatchEvent(new CustomEvent('orb:mission-moved', { detail: { id, project, tags } }));
   });
 }
 
 type Known = { id: string; project?: string | null; parent_mission_id?: string | null; callback_parent_mission_id?: string | null; title?: string | null };
-export type MovePlan = { id: string; from: string | null; folder: string }[];
+export type MovePlan = { id: string; from: string | null; folder: string; includeDescendants?: boolean }[];
 /**
  * What moving `ids` to `project/folder` must write. Selected missions whose
  * ancestor is also selected travel with that ancestor. Launched missions
@@ -55,17 +59,24 @@ export function planMissionMoves(ids: readonly string[], project: string, folder
     return false;
   };
   const roots = [...new Set(ids)].filter(id => !hasSelectedAncestor(id));
-  const plan: MovePlan = roots.map(id => ({ id, from: byId.get(id)?.project ?? null, folder }));
   const included = new Set(roots);
+  const childSteps: MovePlan = [];
   for (let added = true; added;) {
     added = false;
     for (const m of known) {
       const parent = missionParent(m);
       if (included.has(m.id) || !parent || !included.has(parent)) continue;
       included.add(m.id); added = true;
-      if ((m.project ?? null) !== project) plan.push({ id: m.id, from: m.project ?? null, folder: '' });
+      if ((m.project ?? null) !== project) childSteps.push({ id: m.id, from: m.project ?? null, folder: '' });
     }
   }
+  const hasCrossProjectChild = childSteps.length > 0;
+  const plan: MovePlan = roots.map(id => {
+    const from = byId.get(id)?.project ?? null;
+    const cross = from !== project || hasCrossProjectChild;
+    return { id, from, folder, ...(cross ? { includeDescendants: true } : {}) };
+  });
+  plan.push(...childSteps);
   return plan;
 }
 /**
@@ -76,6 +87,6 @@ export function planMissionMoves(ids: readonly string[], project: string, folder
 export async function moveMissions(plan: MovePlan, project: string): Promise<{ id: string; error: unknown }[]> {
   if (plan.length) usageTelemetry.action('sidebar_move', 'sidebar', plan.length);
   for (const step of plan) previewMove(missionMoveKey(step.id), { kind: 'mission', fromProject: step.from, toProject: project, path: step.folder });
-  const results = await Promise.allSettled(plan.map(step => moveMission(step.id, project, step.folder, step.from)));
+  const results = await Promise.allSettled(plan.map(step => moveMission(step.id, project, step.folder, step.from, !!step.includeDescendants)));
   return results.flatMap((r, i) => r.status === 'rejected' ? [{ id: plan[i].id, error: r.reason }] : []);
 }

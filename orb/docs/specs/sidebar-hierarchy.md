@@ -256,7 +256,78 @@ placeholder is the follow-up.
 - Mobile: `OrbContractTests.testParentLinkIsStickyAcrossPayloadsThatOmitIt`,
   `OrbMissionTreeTest.parentLinkIsStickyAcrossPayloadsThatOmitIt`.
 
-## Cut/paste placement ownership
+## Cut/paste and cross-project transfer ownership
+
+### Root causes (with evidence, 2026-10-30 — split subtree & blocked macOS Tauri transfers)
+
+On `agent-core` on 2026-10-29 (`16:20:39Z`–`20:16:53Z`), transferring active
+orchestrator mission `0c532a32` (`evm.fast`) with ~40 historical worker
+children between `assistant` (`Assistant`) and `verity-core` (`Ethereum`) in
+the installed macOS Orb client (`/Applications/Orb.app`) split the tree across
+both projects (`1/13` in `Assistant`, `16` in `Ethereum`, both highlighted and
+stuck in `.mission-cut`) and ignored subsequent `⌘X`/`⌘V` and drag attempts:
+
+1. **Prompt-derived writer tag mutation broke `move_only` on active missions.**
+   `0c532a32` had `tags = ["fork-workspace:...", "fork-of:..."]` (no
+   `"pr-writer"` tag) while its initial prompt matched `requested_pr_writer`.
+   `update_mission_project_locked` (`src/api/control/mission_settings.rs`)
+   treated any `req.tags` payload as `could_change_writer_status = true`,
+   injected `"pr-writer"` into `effective_tags`, and then evaluated
+   `folder_only(&effective_tags, &current.project.tags)` as `false` — skipping
+   `move_running_mission_project` and returning `409 Conflict`
+   (`assignment_busy`). Moving a running mission between `orb-folder:*` folders
+   within the same project similarly fell through to `require_quiescent`.
+2. **Terminal/superseded workers minted fresh 6-hour writer leases on move.**
+   `update_mission_project_locked` unconditionally acquired a live track lease
+   even when `ExecutionOwnership::holds_track(id) == Some(false)` (`completed`,
+   `failed`, `cancelled`, `acknowledged` / `superseded`). The first completed
+   worker on each shared track (`wave6-b1-loopfree`, `wave6-b2-htab`, etc.)
+   succeeded (`200 OK`) and grabbed an exclusive writer lease on `verity-core`,
+   causing 17 sibling historical runs on the same tracks to fail with `409
+   Conflict` (`LeaseError::Owned`) and stay stranded in `assistant`.
+3. **Duplicate `SidebarTree` key (`m:<parentId>`) for cross-project
+   placeholders.** `placeholderParent` (`orb/src/tree/TreeView.ts`) emitted
+   `id = "m:0c532a32"` in `Ethereum` while `Assistant` held the real
+   `id = "m:0c532a32"`, colliding in `reconcile(next, { key: "id" })`
+   (`orb/src/Tree.tsx`), highlighting both rows simultaneously, and routing
+   `findNodeById` to `Assistant` when interacting with `Ethereum`.
+4. **macOS Tauri menu intercepted `⌘X`/`⌘C`/`⌘V` as `ClipboardEvent`s and
+   sidebar lacked row paste/drop.** Tauri v2's default macOS `Edit` menu
+   intercepts `⌘X`/`⌘C`/`⌘V` before `keydown` reaches `WKWebView` and dispatches
+   DOM `cut`/`copy`/`paste` events instead; `ProjectFiles.tsx` only listened to
+   `onKeyDown`, ignored `⌘V` and `"Move here"` on non-header/non-folder rows
+   inside a project, omitted `resolvedParents` from `allKnownMissions`, and had
+   no pointer drag-and-drop between projects/folders.
+
+### Transfer invariants
+
+**H6. Cross-project placeholder rows carry distinct tree keys
+(`mp:<slug>:<missionId>`).** A parent mission's canonical row in its own project
+uses `m:<missionId>`; a cross-project placeholder parent (`orb_placeholder`)
+uses `mp:<slug>:<missionId>`. `SidebarTree` keyed reconciliation, expand state,
+selection, and `findNodeById` never collide across projects, while clicking or
+acting on `mp:<slug>:<missionId>` opens/targets `<missionId>`.
+
+**P1. Pure project/folder moves preserve runtime state and historical leases.**
+- A patch changing only `project` and/or `orb-folder:*` tags never mutates
+  `"pr-writer"` / `"pr-readonly"` tags or arbitrates foreign PR writer leases;
+  running missions move atomically via `move_running_mission_project` (across
+  projects) or direct tag update (within a project).
+- Missions with `ExecutionOwnership::holds_track(id) == Some(false)` absorb
+  their track in the destination project and release stale leases without
+  acquiring a new live track lease, so completed or superseded sibling runs
+  never block each other or live workers.
+- Root cross-project moves pass `include_descendants: true` so Core also moves
+  any paged-out, archived, or unexpanded `parent_mission_id` descendants on the
+  server (stripping child `orb-folder:*` tags while keeping capability and
+  hierarchy tags).
+
+**P2. Single sidebar transfer pipeline across menu, clipboard, and drag.**
+Context-menu `Move` / `Move here` (available on projects, folders, and rows
+inside a project), keyboard `⌘X`/`⌘C`/`⌘V` (`keydown` and native macOS
+`cut`/`copy`/`paste` `ClipboardEvent`s), and pointer drag-and-drop onto
+`[data-drop-project]` targets resolve destination `(slug, enclosingFolder)` via
+one helper and execute through the same move pipeline.
 
 A mission has one visible project/folder during and after a move, including when
 it is the open conversation. The loaded sidebar listing owns placement; open
@@ -270,8 +341,17 @@ before that acknowledgement. Do not wait for a destination list request before
 making this change. Failed writes remove only their optimistic projection and
 restore their original placement with a visible retryable error.
 
-Regression sequence: open a mission in A; cut/paste into B while the write is
-held; observe exactly one row in B; acknowledge the write while holding B's list
-refresh; deliver the old A response and old conversation details; expire the
-move overlay. At every step the row remains only in B. Repeat for a nested
-folder and a rejected move, which must restore A.
+Regression sequences:
+1. Open a mission in A; cut/paste into B while the write is held; observe
+   exactly one row in B; acknowledge the write while holding B's list refresh;
+   deliver the old A response and old conversation details; expire the move
+   overlay. At every step the row remains only in B. Repeat for a nested folder
+   and a rejected move, which must restore A.
+2. Active forked parent without `"pr-writer"` tag (whose initial prompt requests
+   writer) plus multiple completed/superseded workers sharing a writer track:
+   transferring to another project moves the active parent and every worker
+   without `409 Conflict` or live lease leaks, including unloaded descendants.
+3. Split subtree across projects A and B: placeholder parent in B uses
+   `mp:B:<id>` without colliding with `m:<id>` in A, and transferring via native
+   `cut`/`paste` `ClipboardEvent`, row context menu `Move here`, or pointer
+   drag-and-drop consolidates the subtree into the target project.
