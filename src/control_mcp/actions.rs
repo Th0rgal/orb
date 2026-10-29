@@ -176,6 +176,107 @@ pub fn reconcile(conn: &Connection, p: &Principal, call: &Call) -> Result<Value,
     tx.commit().map_err(|e| e.to_string())?;
     Ok(result)
 }
+/// History deletion preserves files and action receipts. Unlike filesystem
+/// purge, it only needs to retain missions an accepted action can depend on.
+/// Unknown tools/legacy scopes remain conservative until their dependencies
+/// have been audited here. Callers hold the dispatch admission fence.
+pub(crate) fn require_history_deletable(
+    conn: &Connection,
+    owner: &str,
+    mission_ids: &std::collections::HashSet<Uuid>,
+    board_references: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_actions_v1')",
+        [], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !exists || mission_ids.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id,tool,state,principal,arguments FROM mcp_actions_v1 WHERE owner=?1 AND state IN ('queued','dispatching','reconciliation_required') ORDER BY created_at,id",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([owner], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (id, tool, state, principal, arguments) = row.map_err(|e| e.to_string())?;
+        let disjoint = (|| {
+            let p: Principal = serde_json::from_str(&principal).ok()?;
+            if p.sub != owner {
+                return None;
+            }
+            let args: Value = serde_json::from_str(&arguments).ok()?;
+            args.as_object()?;
+            if p.mission_id.is_some_and(|id| mission_ids.contains(&id)) {
+                return Some(false);
+            }
+            // These are canonical UUIDs, normalized/validated at acceptance.
+            // Do not treat missing/invalid legacy targets as disjoint.
+            for field in ["mission_id", "parent_mission_id", "supersedes_mission_id"] {
+                if let Some(value) = args.get(field).filter(|v| !v.is_null()) {
+                    let id = Uuid::parse_str(value.as_str()?).ok()?;
+                    if mission_ids.contains(&id) {
+                        return Some(false);
+                    }
+                }
+            }
+            match tool.as_str() {
+                "resume_mission"
+                | "send_message_to_mission"
+                | "ask_mission"
+                | "cancel_mission"
+                | "acknowledge_mission"
+                | "start_workspace_job" => {
+                    Uuid::parse_str(args.get("mission_id")?.as_str()?).ok()?;
+                }
+                // New children depend on their issuer/parent and superseded
+                // mission, not every historical mission in the project.
+                "start_mission" | "consult_model" => {}
+                "schedule_wakeup" | "schedule_job_wakeup" => {
+                    p.mission_id?;
+                }
+                // Accept records a board verdict without resuming its worker,
+                // but deletion of its boss cascades to the task record.
+                // VM destruction owns a machine, not conversation history;
+                // unsettled mission jobs are checked separately by deletion.
+                "accept_task" => {
+                    let mut identified = false;
+                    for field in ["task_id", "task_key"] {
+                        if let Some(value) = args.get(field).filter(|v| !v.is_null()) {
+                            let reference = value.as_str()?;
+                            if reference.is_empty() || board_references.contains(reference) {
+                                return Some(false);
+                            }
+                            identified = true;
+                        }
+                    }
+                    if !identified {
+                        return None;
+                    }
+                }
+                "destroy_managed_machine" => {}
+                _ => return None,
+            }
+            Some(true)
+        })() == Some(true);
+        if !disjoint {
+            return Err(format!(
+                "Accepted MCP action {id} ({tool}, {state}) may depend on this mission; inspect get_action and settle it before deleting"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn recover(conn: &Connection) -> Result<usize, String> {
     // Queued work can be safely started. Dispatched work cannot be blindly
     // replayed: a provider may have accepted it before Core lost the response.
@@ -204,6 +305,135 @@ mod tests {
             arguments: json!({"title":"x","prompt":"x","idempotency_key":"stable"}),
         }
     }
+    #[test]
+    fn history_deletion_scopes_accepted_actions_without_settling_them() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        let target = Uuid::new_v4();
+        let ids = std::collections::HashSet::from([target]);
+        let mut p = principal();
+        let mut c = call();
+        c.name = "resume_mission".into();
+        c.arguments["mission_id"] = json!(Uuid::new_v4());
+        let receipt = reserve(&conn, &p, &c).unwrap();
+        let action = receipt["action_id"].as_str().unwrap();
+        for state in ["queued", "dispatching", "reconciliation_required"] {
+            conn.execute("UPDATE mcp_actions_v1 SET state=?1", [state])
+                .unwrap();
+            // Regression: unrelated old uncertainty cannot lock all deletion.
+            require_history_deletable(&conn, &p.sub, &ids, &std::collections::HashSet::new())
+                .unwrap();
+            c.arguments["mission_id"] = json!(target);
+            conn.execute(
+                "UPDATE mcp_actions_v1 SET arguments=?1",
+                [c.arguments.to_string()],
+            )
+            .unwrap();
+            let error =
+                require_history_deletable(&conn, &p.sub, &ids, &std::collections::HashSet::new())
+                    .unwrap_err();
+            assert!(error.contains(action) && error.contains(state));
+            c.arguments["mission_id"] = json!(Uuid::new_v4());
+            conn.execute(
+                "UPDATE mcp_actions_v1 SET arguments=?1",
+                [c.arguments.to_string()],
+            )
+            .unwrap();
+        }
+        // The entire descendant deletion set is protected, not just its root.
+        let child = Uuid::new_v4();
+        c.arguments["mission_id"] = json!(child);
+        conn.execute(
+            "UPDATE mcp_actions_v1 SET arguments=?1",
+            [c.arguments.to_string()],
+        )
+        .unwrap();
+        require_history_deletable(&conn, &p.sub, &ids, &std::collections::HashSet::new()).unwrap();
+        assert!(require_history_deletable(
+            &conn,
+            &p.sub,
+            &std::collections::HashSet::from([target, child]),
+            &std::collections::HashSet::new()
+        )
+        .is_err());
+        // Other owners' receipts cannot block deletion or disclose their IDs.
+        require_history_deletable(
+            &conn,
+            "other-owner",
+            &std::collections::HashSet::from([child]),
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        // The issuer can be the parent of new work, even with another target.
+        p.mission_id = Some(target);
+        conn.execute(
+            "UPDATE mcp_actions_v1 SET principal=?1",
+            [serde_json::to_string(&p).unwrap()],
+        )
+        .unwrap();
+        assert!(
+            require_history_deletable(&conn, &p.sub, &ids, &std::collections::HashSet::new())
+                .is_err()
+        );
+        p.mission_id = None;
+        conn.execute(
+            "UPDATE mcp_actions_v1 SET principal=?1",
+            [serde_json::to_string(&p).unwrap()],
+        )
+        .unwrap();
+        for (tool, args, allowed) in [
+            ("start_mission", json!({"parent_mission_id":target}), false),
+            (
+                "start_mission",
+                json!({"supersedes_mission_id":target}),
+                false,
+            ),
+            ("start_mission", json!({}), true),
+            ("resume_mission", json!({}), false),
+            ("resume_mission", json!({"mission_id":"short-id"}), false),
+            ("new_unknown_tool", json!({}), false),
+            ("reject_task", json!({"task_id":"indirect-worker"}), false),
+            ("schedule_wakeup", json!({}), false),
+            ("accept_task", json!({"task_id":"settled-verdict"}), true),
+            ("destroy_managed_machine", json!({"machine_id":"vm"}), true),
+        ] {
+            conn.execute(
+                "UPDATE mcp_actions_v1 SET tool=?1,arguments=?2",
+                params![tool, args.to_string()],
+            )
+            .unwrap();
+            assert_eq!(
+                require_history_deletable(&conn, &p.sub, &ids, &std::collections::HashSet::new())
+                    .is_ok(),
+                allowed,
+                "{tool}: {args}"
+            );
+        }
+        for field in ["task_id", "task_key"] {
+            conn.execute(
+                "UPDATE mcp_actions_v1 SET tool='accept_task', arguments=?1",
+                [json!({field:"owned-task"}).to_string()],
+            )
+            .unwrap();
+            assert!(require_history_deletable(
+                &conn,
+                &p.sub,
+                &ids,
+                &std::collections::HashSet::from(["owned-task".to_string()])
+            )
+            .is_err());
+        }
+        conn.execute("UPDATE mcp_actions_v1 SET principal='{}'", [])
+            .unwrap();
+        assert!(
+            require_history_deletable(&conn, &p.sub, &ids, &std::collections::HashSet::new())
+                .is_err()
+        );
+        conn.execute("UPDATE mcp_actions_v1 SET state='completed'", [])
+            .unwrap();
+        require_history_deletable(&conn, &p.sub, &ids, &std::collections::HashSet::new()).unwrap();
+    }
+
     #[test]
     fn duplicate_collision_and_cross_user_access() {
         let conn = Connection::open_in_memory().unwrap();

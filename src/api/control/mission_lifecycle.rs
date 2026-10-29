@@ -764,10 +764,29 @@ pub async fn delete_mission(
     let _durable = dispatch_admission::durable_lock(&state.config)
         .await
         .map_err(internal_error)?;
+    // Deleting a boss cascades to its board records. Preserve those receipts
+    // too, including operator actions addressed by task key rather than UUID.
+    let mut board_references = HashSet::new();
+    for id in &ids_to_delete {
+        for task in control
+            .mission_store
+            .list_board_tasks(*id)
+            .await
+            .map_err(internal_error)?
+        {
+            board_references.insert(task.id.to_string());
+            board_references.insert(task.task_key);
+        }
+    }
     {
         let conn = state.projects.connection.lock().map_err(internal_error)?;
-        workspace_purge::require_no_accepted_actions(&conn)
-            .map_err(|e| (StatusCode::CONFLICT, e))?;
+        crate::control_mcp::actions::require_history_deletable(
+            &conn,
+            &user.id,
+            &ids_to_delete,
+            &board_references,
+        )
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
     }
     // Descendant creation is admission-serialized. Recompute after acquiring
     // the fence and reject if the validated deletion set changed while waiting.
