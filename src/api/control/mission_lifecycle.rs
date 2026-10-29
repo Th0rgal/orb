@@ -765,8 +765,9 @@ pub async fn delete_mission(
         .await
         .map_err(internal_error)?;
     // Deleting a boss cascades to its board records. Preserve those receipts
-    // too, including operator actions addressed by task key rather than UUID.
-    let mut board_references = HashSet::new();
+    // too. Board-local keys are scoped by the action issuer, not compared
+    // across boards (common keys such as "build" are unrelated).
+    let mut board_task_ids = HashSet::new();
     for id in &ids_to_delete {
         for task in control
             .mission_store
@@ -774,8 +775,7 @@ pub async fn delete_mission(
             .await
             .map_err(internal_error)?
         {
-            board_references.insert(task.id.to_string());
-            board_references.insert(task.task_key);
+            board_task_ids.insert(task.id.to_string());
         }
     }
     {
@@ -784,7 +784,7 @@ pub async fn delete_mission(
             &conn,
             &user.id,
             &ids_to_delete,
-            &board_references,
+            &board_task_ids,
         )
         .map_err(|e| (StatusCode::CONFLICT, e))?;
     }

@@ -184,7 +184,7 @@ pub(crate) fn require_history_deletable(
     conn: &Connection,
     owner: &str,
     mission_ids: &std::collections::HashSet<Uuid>,
-    board_references: &std::collections::HashSet<String>,
+    board_task_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_actions_v1')",
@@ -258,6 +258,8 @@ pub(crate) fn require_history_deletable(
                 }
                 // Accept records a board verdict without resuming its worker,
                 // but deletion of its boss cascades to the task record.
+                // Keys are board-local: the issuer check above protects their
+                // boss. Only task UUIDs may be compared across boards.
                 // VM destruction owns a machine, not conversation history;
                 // unsettled mission jobs are checked separately by deletion.
                 "accept_task" => {
@@ -265,7 +267,11 @@ pub(crate) fn require_history_deletable(
                     for field in ["task_id", "task_key"] {
                         if let Some(value) = args.get(field).filter(|v| !v.is_null()) {
                             let reference = value.as_str()?;
-                            if reference.is_empty() || board_references.contains(reference) {
+                            if reference.is_empty()
+                                || (field == "task_id"
+                                    && args.get("task_key").is_none_or(Value::is_null)
+                                    && board_task_ids.contains(reference))
+                            {
                                 return Some(false);
                             }
                             identified = true;
@@ -447,13 +453,49 @@ mod tests {
                 [json!({field:"owned-task"}).to_string()],
             )
             .unwrap();
-            assert!(require_history_deletable(
-                &conn,
-                &p.sub,
-                &ids,
-                &std::collections::HashSet::from(["owned-task".to_string()])
+            assert_eq!(
+                require_history_deletable(
+                    &conn,
+                    &p.sub,
+                    &ids,
+                    &std::collections::HashSet::from(["owned-task".to_string()])
+                )
+                .is_err(),
+                field == "task_id"
+            );
+        }
+        // The resolver gives task_key precedence over task_id.
+        conn.execute(
+            "UPDATE mcp_actions_v1 SET arguments=?1",
+            [json!({"task_key":"owned-task", "task_id":"owned-task"}).to_string()],
+        )
+        .unwrap();
+        require_history_deletable(
+            &conn,
+            &p.sub,
+            &ids,
+            &std::collections::HashSet::from(["owned-task".to_string()]),
+        )
+        .unwrap();
+        // The same key on another boss's board is disjoint; deleting the
+        // issuing boss is blocked by identity, regardless of the key text.
+        for boss in [Uuid::new_v4(), target] {
+            p.mission_id = Some(boss);
+            conn.execute(
+                "UPDATE mcp_actions_v1 SET principal=?1",
+                [serde_json::to_string(&p).unwrap()],
             )
-            .is_err());
+            .unwrap();
+            assert_eq!(
+                require_history_deletable(
+                    &conn,
+                    &p.sub,
+                    &ids,
+                    &std::collections::HashSet::from(["owned-task".to_string()])
+                )
+                .is_err(),
+                boss == target
+            );
         }
         conn.execute("UPDATE mcp_actions_v1 SET principal='{}'", [])
             .unwrap();

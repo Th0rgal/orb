@@ -114,8 +114,9 @@ parent (including the existing `orb_<uuid>` origin-session inference), supersede
 and explicit target missions for queued, dispatching and
 uncertain actions. Unrelated actions with audited dependencies do not block
 history deletion; malformed/legacy targets and unaudited tools fail closed.
-Board acceptance only records a settled verdict, but its task ID/key blocks
-deletion of the boss whose deletion would cascade to that task. Machine
+Board acceptance only records a settled verdict, but its task UUID blocks
+deletion of the boss whose deletion would cascade to that task. Task keys are
+board-local and protected by the issuing boss identity, never compared globally. Machine
 destruction owns the machine. Neither requires unrelated conversation history. Rejection/resumption
 through indirect board references remains conservative. Blockers identify the
 action ID, tool and state without exposing arguments. Action receipts are never
