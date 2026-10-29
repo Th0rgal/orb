@@ -8,7 +8,7 @@ export type StreamItem =
   | { kind: "user"; key: string; text: string; images?: DraftImage[]; messageId?: string; source?: string; queued?: boolean; attached?: boolean; receipt?: boolean; /** Server time the message was stored (ISO), when known. */ at?: string }
   | { kind: "think"; key: string; text: string; done: boolean }
   | { kind: "text"; key: string; text: string; live: boolean; /** When the turn this text closes completed (ISO), when known. */ at?: string; /** The producer's one bubble for a whole response (text_delta_latest), across tool boundaries: it holds the answer, never only narration. */ cumulative?: boolean }
-  | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean }
+  | { kind: "error"; key: string; text: string; terminal?: boolean; cancelled?: boolean; title?: string }
   | {
       kind: "tool";
       key: string;
@@ -326,7 +326,24 @@ export class TranscriptReducer {
         // close() forgets the native bubbles, so find the receipt's row first.
         const nativeLast = isNativeReceipt ? this.bubbles.get(this.native.at(-1)!) : undefined;
         this.close();
-        if(d.success===false){this.items.push({kind:"error",key:this.key("error"),text:text||"Mission failed",terminal:true,cancelled:text.trim().toLowerCase()==="cancelled"});return;}
+        if(d.success===false){
+          const evidence=d.completion_evidence as {terminal_reason?:string}|undefined;
+          const reason=evidence?.terminal_reason?.toLowerCase();
+          const interruption=reason==="cancelled"||reason==="server_shutdown"||reason==="stalled";
+          if(interruption){
+            // Cancellation preserves partial prose; it is not the error reason.
+            if(previous?.kind==="text"&&index!=null)this.put(index,{...previous,text:text||previous.text,live:false});
+            else if(text&&!isNativeReceipt)this.items.push({kind:"text",key:this.key("text"),text,live:false});
+          }
+          const prefix=native.at(-1)?.text.trim();
+          const detail=interruption
+            ? reason==="stalled"?"Core stopped this execution after no progress was detected. Resume to inspect existing work and continue."
+              : reason==="server_shutdown"?"The backend restarted during this run. The conversation is preserved."
+              : "The execution was interrupted before completion. Resume to continue from the saved conversation."
+            : prefix&&trimmed.startsWith(prefix)&&trimmed.length>prefix.length?trimmed.slice(prefix.length).trim():text||"Mission failed";
+          this.items.push({kind:"error",key:this.key("error"),text:detail,terminal:true,cancelled:!interruption&&text.trim().toLowerCase()==="cancelled",...(interruption?{title:"Mission interrupted"}:{})});
+          return;
+        }
         const at=typeof d.at==="string"?{at:d.at}:{};
         if(!isNativeReceipt){
           if(previous?.kind === "text" && index != null){this.put(index,{...previous,text:text||previous.text,live:false,...at});this.lastFinal=index;}
@@ -377,11 +394,19 @@ export class TranscriptReducer {
           this.hoistTrailingThoughts();
         }
         const summary = str(d.summary ?? d.content).trim();
-        if (isFailedStatus(status) && summary) {
+        if ((isFailedStatus(status) || status === "interrupted") && summary) {
           const lastUser = this.lastUser;
           // The harness already reported the concrete failure; the status summary
           // ("Remote node 'x' finished") would only add a second, vaguer card.
-          const alreadyShown = this.items.slice(lastUser + 1).some(item => item.kind === "error" && (item.terminal || item.text.trim() === summary));
+          let terminalIndex = -1;
+          for(let i=this.items.length-1;i>lastUser;i--)if(this.items[i].kind==="error"&&(this.items[i] as Extract<StreamItem,{kind:"error"}>).terminal){terminalIndex=i;break;}
+          const terminal = this.items[terminalIndex];
+          // Later lifecycle evidence can invalidate an earlier recovery promise.
+          // Do not hide it merely because a partial response created an error row.
+          if(terminal?.kind==="error" && status==="interrupted") {
+            this.put(terminalIndex,{...terminal,title:"Mission interrupted",text:summary==="Cancelled by user"?"The execution was interrupted before completion. Resume to continue from the saved conversation.":summary});
+          }
+          const alreadyShown = terminalIndex>=0 || this.items.slice(lastUser + 1).some(item => item.kind === "error" && item.text.trim() === summary);
           if (!alreadyShown) {
             this.items.push({ kind: "error", key: this.key("error"), text: summary, terminal: true });
           }

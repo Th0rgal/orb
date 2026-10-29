@@ -724,7 +724,16 @@ pub(crate) async fn repair_orphaned_active_missions(
     auto_resumed_workers: &mut HashSet<Uuid>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    for mission in active_missions {
+    for snapshot in active_missions {
+        let admission = super::control::DISPATCH_ADMISSION.lock().await;
+        let mission = match mission_store.get_mission(snapshot.id).await {
+            Ok(Some(mission)) if mission.status == MissionStatus::Active => mission,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::warn!(mission_id = %snapshot.id, %error, "Cannot recheck orphan candidate");
+                continue;
+            }
+        };
         if mission.backend.starts_with("cloud_") {
             continue;
         }
@@ -876,6 +885,8 @@ pub(crate) async fn repair_orphaned_active_missions(
                     .to_string(),
             ),
         });
+
+        drop(admission);
 
         // One supervised auto-resume for orphaned WORKER missions. The
         // boss used to babysit this by hand (10 manual resume_worker
@@ -1085,31 +1096,9 @@ pub(crate) async fn stuck_mission_watchdog_loop(
                 );
                 continue;
             }
-            if let Err(e) = mission_store
-                .update_mission_status_with_reason(
-                    info.mission_id,
-                    MissionStatus::Interrupted,
-                    Some("watchdog_stalled"),
-                )
-                .await
-            {
-                tracing::warn!(
-                    "Stuck-mission watchdog: status update failed for {}: {}",
-                    info.mission_id,
-                    e
-                );
-                continue;
-            }
-            let _ = events_tx.send(AgentEvent::MissionStatusChanged {
-                completion: None,
-                execution: None,
-                mission_id: info.mission_id,
-                status: MissionStatus::Interrupted,
-                summary: Some(format!(
-                    "Interrupted: no agent activity for {}s (>{}s threshold)",
-                    info.seconds_since_activity, STUCK_SECONDS
-                )),
-            });
+            // The actor records the stall cause on the running execution. Its
+            // completion owns the terminal transition; writing here races the
+            // runner and used to be overwritten by generic Cancelled.
         }
 
         // Case 2 — Active in DB, not in actor's running list at all.

@@ -78,3 +78,36 @@ keyboard actions, themes and narrow viewports.
 These changes do not automatically revive old failed missions or infer the
 cause of old `interrupted` errors. Confirm current user intent before manually
 resuming historical work.
+
+## Recovery ownership and partial replies
+
+CLI exit zero does not prove that the work or background tasks completed.
+A background handoff closes that execution and sets `interrupted` with
+`background_task_handoff`. The persisted remote wait (failed job ID, retry
+count, due time) owns recovery. Clients show **Recovery scheduled** from that
+record, never from assistant prose.
+
+Required event order (incident `8c1be306`):
+
+1. The old remote job ends with background tasks unfinished.
+2. Core persists its wait and closes the old execution lease.
+3. An orphan sweep, even with an earlier Active snapshot, re-reads the mission
+   under dispatch admission and leaves the waiting mission untouched.
+4. Replay revalidates the exact wait and failed job under the same admission
+   lock as Stop/manual Resume. A stale timer cannot dispatch or overwrite a
+   newer run/recovery. Only one writer is admitted.
+5. Stop fences continuation; manual Resume supersedes the old recovery.
+   Neither may be undone by a stale timer's failure cleanup.
+
+Local inactivity interruption is not an explicit Stop. It retains queued work
+and durable continuations, does not cancel child missions, and refines a native
+`Cancelled` result to `Stalled` before terminal evidence is published. Explicit
+Stop overrides this pending interruption and still revokes follow-ups. Shutdown
+and concrete native errors retain their own causes. A stall alone does not
+establish that replaying side effects is safe: absent an existing continuation,
+show Resume rather than promising an automatic retry.
+
+Partial assistant prose is preserved once, separately from failure evidence.
+It must not hide a later lifecycle interruption. Legacy generic `Cancelled`
+is not proof of a user Stop. Tests replay handoff/orphan ordering, stale timers,
+Stop versus inactivity, and live/reloaded transcript sequences.
