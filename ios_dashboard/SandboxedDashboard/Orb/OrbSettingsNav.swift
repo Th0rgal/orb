@@ -27,6 +27,15 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
         case .notifications: "What reaches your Inbox and when Orb tells you."
         }
     }
+    var mobileSummary: String {
+        switch self {
+        case .account: "Server, telemetry, dictation & diagnostics"
+        case .models: "Fallback chains, providers, usage & API keys"
+        case .agents: "Skills, Assistant, /btw & compute fleet"
+        case .security: "Approvals, Bunker Mode, grants & secrets"
+        case .notifications: "Inbox summaries & alert preferences"
+        }
+    }
     var systemImage: String {
         switch self {
         case .account: "person.crop.circle"
@@ -42,7 +51,7 @@ enum OrbSettingsSection: String, CaseIterable, Identifiable {
         case .account: [("settings", "Account"), ("usage-telemetry", "Usage telemetry"), ("dictation", "Dictation"), ("debug", "Advanced")]
         case .models: [("routing", "Fallback Chains"), ("providers", "Providers"), ("usage-settings", "Usage"), ("routing-keys", "API Keys")]
         case .agents: [("skills-settings", "Skills"), ("hermes-settings", "Assistant"), ("btw-settings", "Quick questions (/btw)"), ("machines", "Machines")]
-        case .security: [("security-settings", "Access"), ("mission-access", "Mission access"), ("bitwarden-settings", "Secrets vault")]
+        case .security: [("security-settings", "Access"), ("bitwarden-settings", "Secrets vault")]
         case .notifications: [("inbox-settings", "Notifications")]
         }
     }
@@ -68,12 +77,19 @@ struct OrbSettingsHome: View {
     var body: some View {
         NavigationStack {
             List(OrbSettingsSection.allCases) { section in
-                NavigationLink { page(section) } label: {
+                NavigationLink {
+                    if section.pages.count == 1, let single = section.pages.first {
+                        destination(single.id)
+                            .orbTrackPage("settings.\(single.id)", surface: .pane, entryPoint: "settings.\(section.rawValue)")
+                    } else {
+                        page(section)
+                    }
+                } label: {
                     HStack(spacing: 12) {
                         Image(systemName: section.systemImage).frame(width: 24).foregroundStyle(.secondary)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(section.label)
-                            Text(section.subtitle).font(.footnote).foregroundStyle(.secondary)
+                            Text(section.mobileSummary).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
                         }
                         Spacer(minLength: 8)
                         if attention.contains(section) {
@@ -100,7 +116,7 @@ struct OrbSettingsHome: View {
                     NavigationLink { destination(p.id).orbTrackPage("settings.\(p.id)", surface: .pane, entryPoint: "settings.\(section.rawValue)") } label: { Text(p.label) }
                         .accessibilityIdentifier(p.id == "settings" ? "settings.backend" : "settings.\(p.id)")
                 }
-            } header: { Text(section.subtitle).textCase(nil) }
+            }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle(section.label).navigationBarTitleDisplayMode(.inline)

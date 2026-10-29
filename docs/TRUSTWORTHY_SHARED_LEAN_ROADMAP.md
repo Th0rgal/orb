@@ -12,14 +12,14 @@ Fresh exact-head reviews are required for subsequent changes. Turbo has no GitHu
 check rollup; Orb kernel-abi passed, while draft Rust jobs were skipped.
 No phase acceptance, merge or production deployment follows from those checks.
 
-The coverage registry remains incomplete: 101 entries are unconnected and 12
+The coverage registry remains incomplete: 106 entries are unconnected and 12
 have explicit partial evidence in `shared/orb-spec/coverage_evidence.json`.
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.
-Its 113 manifest entries are 80 `orb_*` exports (`Orb.Kernel.*`), 32 `leansys_*`
+Its 118 manifest entries are 85 `orb_*` exports (`Orb.Kernel.*`), 32 `leansys_*`
 exports (`LeanSys.Spec.*`, verified against pinned `lean-sys` by `gen_orb_kernel_unboxed.py`),
 and the compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg` (`model: null`).
-The original 112-export requirement still covers all public Orb/LeanSys exports; the helper
+The 117 public exports cover all public Orb/LeanSys exports; the helper
 remains inventoried separately rather than being counted as an extra public gate.
 Shadow observations now count missing host HOME poststates as unobserved,
 never as ExactMatch; remote execution observation remains open. The stale-snapshot repair also includes newly stored supersession in the
@@ -75,7 +75,7 @@ This document persists the complete, executable **Orb Trustworthy Shared-Lean Ro
 | Repository / Component | Baseline Revision Inspected | Role |
 | :--- | :--- | :--- |
 | **`Th0rgal/orb`** | `e6b3283eff02e644660a79acc8b0a6d4c6a14331` | Core backend, `orb-spec` crate, desktop/iOS/Android clients, formal kernel (`Orb.Kernel`, `Orb.Spec`, `Orb.Stream`, `Orb.Scroll`) |
-| **`Th0rgal/turbo-lean`** (Orb pin prior to P0) | `71c61b14a8cf5e061def8a571208c2a6ffd26c66` | Incremental Lean verifier, `audit-spec`, `LeanNative` compiler & `LNIR` operational semantics |
+| **`Th0rgal/turbo-lean`** (`lean/turbo-lean-revision` pin) | `628ecd830a2c92f537cb677e2198594b2dc20397` | Incremental Lean verifier, kernel-audited `.olean` provenance, `audit-spec`, `LeanNative` compiler & `LNIR` operational semantics |
 | **`Th0rgal/turbo-lean`** (`main` HEAD at mission start) | `fbd36764a27c62705c825744d9f0a5ca7523811e` | Includes M1.4–M5 refactored pipeline (`ConLeche`, `ElabAudit`, `EqSat`, `LoopSchedule`, `OwnershipRC`, `CoreCLI` compression) |
 | **`Th0rgal/lean-sys`** | `077775ba387f1eeb2976cb8763b4633b8d5ce313` | Verified systems gates & scanners (`leansys_*`) |
 
@@ -108,7 +108,7 @@ This document persists the complete, executable **Orb Trustworthy Shared-Lean Ro
 │    native/WASM binary vs host wrappers  │ │  • Compile orb_kernel_unboxed.c  │
 │  • Cryptographic per-case receipts      │ │    to orb_kernel.wasm (0 waiting │
 │  • Missing engine => FAIL/INCOMPLETE    │ │    on P3 compiler research)      │
-│  • All 112 Orb/LeanSys exports + fuzz   │ │  • Generated TS adapters + BigInt│
+│  • All 117 Orb/LeanSys exports + fuzz   │ │  • Generated TS adapters + BigInt│
 │  • Engine & harness mutation tests      │ │  • Async bootstrap + retry UI    │
 └──────────────────────┬──────────────────┘ └──────────────┬───────────────────┘
                        │                                   │

@@ -81,11 +81,21 @@ extension OrbConversation {
 
     /// The current turn's narration renders inside the work fold, so its
     /// assistant rows after the last user message leave the message list.
+    /// Also suppresses standalone placeholder assistant turns ("." / "…")
+    /// emitted between tool batches when there is no remote log payload.
     nonisolated static func withoutNarration(_ rows: [(String, String, String)], narration: Set<String>) -> [(String, String, String)] {
-        guard !narration.isEmpty else { return rows }
         let lastUser = rows.lastIndex(where: { $0.1 == "user" }) ?? -1
         return rows.enumerated().filter { index, row in
-            !(index > lastUser && row.1 == "assistant" && narration.contains(row.2.trimmingCharacters(in: .whitespacesAndNewlines)))
+            if row.1 == "assistant" {
+                let parsed = OrbRemoteLog.parse(row.2)
+                if parsed.details == nil && OrbActivityCompaction.isPlaceholderTurn(parsed.text) {
+                    return false
+                }
+                if !narration.isEmpty && index > lastUser && narration.contains(row.2.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    return false
+                }
+            }
+            return true
         }.map(\.element)
     }
 

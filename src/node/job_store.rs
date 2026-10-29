@@ -93,16 +93,26 @@ impl JobStore {
         tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&work_dir)?;
             let conn = Connection::open(work_dir.join("jobs.db"))?;
+            conn.busy_timeout(std::time::Duration::from_secs(10))?;
+            let _ = conn.pragma_update(None, "journal_mode", "WAL");
             conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT);",
+                "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, artifacts_json TEXT, cancellation_json TEXT);",
             )?;
             conn.execute_batch("CREATE TABLE IF NOT EXISTS node_scratch (
                 id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, job_id TEXT,
                 parent_identity TEXT NOT NULL, directory_identity TEXT NOT NULL,
                 retired_at TEXT
             );")?;
-            let _ = conn.execute("ALTER TABLE jobs ADD COLUMN artifacts_json TEXT", []);
-            let _ = conn.execute("ALTER TABLE jobs ADD COLUMN cancellation_json TEXT", []);
+            let existing_cols: std::collections::HashSet<String> = {
+                let mut stmt = conn.prepare("PRAGMA table_info(jobs)")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for col in ["artifacts_json", "cancellation_json"] {
+                if !existing_cols.contains(col) {
+                    conn.execute(&format!("ALTER TABLE jobs ADD COLUMN {col} TEXT"), [])?;
+                }
+            }
             Ok(Self { conn: Arc::new(Mutex::new(conn)) })
         })
         .await?
@@ -476,5 +486,52 @@ mod tests {
 
         let recent = store.recent(10).await.unwrap();
         assert_eq!(recent.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn open_migrates_legacy_jobs_table_without_cancellation_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_id = Uuid::new_v4();
+        let legacy_mission = Uuid::new_v4();
+        {
+            let conn = Connection::open(dir.path().join("jobs.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    mission_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    exit_code INTEGER,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    log_path TEXT,
+                    error TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO jobs (id, mission_id, payload_json, state, created_at, log_path)
+                 VALUES (?1, ?2, '{}', 'queued', ?3, 'logs/legacy.log')",
+                params![
+                    legacy_id.to_string(),
+                    legacy_mission.to_string(),
+                    now_rfc3339()
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let loaded = store.get(legacy_id).await.unwrap().unwrap();
+        assert_eq!(loaded.id, legacy_id);
+        assert!(loaded.cancellation.is_none());
+        store
+            .record_cancellation(legacy_id, "core", "test stop")
+            .await
+            .unwrap();
+        let updated = store.get(legacy_id).await.unwrap().unwrap();
+        assert_eq!(updated.cancellation.unwrap().actor, "core");
+        assert_eq!(store.recent(5).await.unwrap().len(), 1);
     }
 }

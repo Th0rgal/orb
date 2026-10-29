@@ -1,7 +1,7 @@
-    Finished `test` profile [unoptimized] target(s) in 0.15s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-8374b4127ccc7fbc)
+    Finished `test` profile [unoptimized] target(s) in 0.08s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-cce4852a0adf52dc)
 
-running 30 tests
+running 31 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
 test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
 test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
@@ -31,7 +31,8 @@ test tests::tier1_admission_cooldown_cost_and_stream_loop_match_kernel ... ok
 test tests::tier1_ledger_liveness_and_pr_gate_match_kernel ... ok
 test tests::turn_summary_usage_limit_relative_time_and_transcript_patch_match_fixtures ... ok
 test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gates ... ok
+test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
 test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
 
-test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 

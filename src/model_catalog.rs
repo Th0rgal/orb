@@ -137,6 +137,9 @@ impl Observation {
                 models.insert(m.id.clone(), m.clone());
             }
         }
+        if self.provider_id == "google" && self.access_profile != "oauth" {
+            models.retain(|id, _| crate::model_policy::is_google_api_key_allowed_model(id));
+        }
         models.into_values().collect()
     }
     pub fn effective_source(&self) -> &'static str {
@@ -401,5 +404,30 @@ mod tests {
             read_state(dir.path()).connections[0].effective_models()[0].id,
             "new"
         );
+    }
+    #[test]
+    fn google_api_profile_exposes_only_carbon_models() {
+        let mut api = observation();
+        api.provider_id = "google".into();
+        api.access_profile = "api".into();
+        api.last_success = Some(Success {
+            observed_at: Utc::now(),
+            completeness: Completeness::Complete,
+            models: vec![
+                model("gemini-4-carbon-eap"),
+                model("gemini-4-argon"),
+                model("gemini-3.8-flash"),
+            ],
+        });
+        assert_eq!(
+            api.effective_models()
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gemini-4-carbon-eap"]
+        );
+        let mut oauth = api;
+        oauth.access_profile = "oauth".into();
+        assert_eq!(oauth.effective_models().len(), 3);
     }
 }

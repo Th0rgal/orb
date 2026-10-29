@@ -803,7 +803,11 @@ pub(crate) async fn plan_remote(
         // on its quota, the next login takes over and the replay goes out now.
         if mission.backend == "antigravity" && replays < MAX_REMOTE_REPLAYS {
             if let Some((spent, Some(next))) =
-                crate::api::antigravity_accounts::note_native_quota_refusal(failure)
+                crate::api::antigravity_accounts::note_native_quota_refusal_for_model(
+                    failure,
+                    Some(working_dir),
+                    mission.model_override.as_deref(),
+                )
             {
                 return Some(UsageLimitWait {
                     limit: antigravity_switch_label(&spent, &next),

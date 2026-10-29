@@ -6,7 +6,7 @@
 :80 {
 	# API & backend endpoints → Rust backend
 	handle /api/* {
-		reverse_proxy localhost:3000 {
+		reverse_proxy localhost:{$PORT:3000} {
 			header_up X-Real-IP {remote_host}
 			# SSE: disable response buffering so event streams flush immediately
 			flush_interval -1

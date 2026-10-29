@@ -131,10 +131,13 @@ final class OrbFlowUITests: XCTestCase {
         XCTAssertTrue(banner.waitForNonExistence(timeout: 15), "no pending request left")
         app.buttons["Settings"].tap()
         app.buttons["settings.security"].tap()
-        let link = app.buttons["settings.mission-access"]
+        let link = app.buttons["settings.security-settings"]
         XCTAssertTrue(link.waitForExistence(timeout: 10))
         link.tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ==[c] 'History'")).firstMatch.waitForExistence(timeout: 10))
+        let toggle = app.buttons["activity.toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        toggle.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ==[c] 'REVOKED'")).firstMatch.waitForExistence(timeout: 10))
         captureFile(app, "access-settings-history")
     }
     @MainActor func testMissionLongPressRenameMoveAndStopArchive() throws {

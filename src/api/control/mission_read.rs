@@ -237,6 +237,7 @@ pub(super) fn collect_project_missions_from_sqlite(
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let _ = connection.busy_timeout(std::time::Duration::from_secs(10));
     let columns: std::collections::HashSet<String> = connection
         .prepare("SELECT name FROM pragma_table_info('missions')")
         .and_then(|mut st| {
@@ -328,6 +329,7 @@ pub(super) fn collect_attention_missions_from_sqlite(
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let _ = connection.busy_timeout(std::time::Duration::from_secs(10));
     let columns: std::collections::HashSet<String> = connection
         .prepare("SELECT name FROM pragma_table_info('missions')")
         .and_then(|mut st| {
@@ -447,6 +449,7 @@ pub(super) fn load_mission_projection_from_sqlite(
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
+    let _ = connection.busy_timeout(std::time::Duration::from_secs(10));
     let mut statement = connection
         .prepare(
             "SELECT status, title, workspace_id, backend, created_at, updated_at \

@@ -105,11 +105,18 @@ struct OrbProvidersSettings: View {
                         }
                         Button(provider["enabled"] == .bool(false) ? "Enable" : "Disable") { Task { await toggle(provider) } }.disabled(!ready || busy)
                     } label: {
+                        let parsed = Self.splitDisplayName(provider)
                         HStack(spacing: 12) {
                             OrbProviderLogo(type: provider["provider_type"].text, name: provider["name"].text)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(provider["name"].text)
-                                Text(status(provider)).font(.caption).foregroundStyle(quotaStatus(provider)?.level.color ?? .secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(parsed.title)
+                                    .font(.subheadline.weight(.medium))
+                                    .lineLimit(1)
+                                Text(status(provider, accountHint: parsed.account))
+                                    .font(.caption)
+                                    .foregroundStyle(quotaStatus(provider)?.level.color ?? .secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
                             }
                         }
                     }
@@ -176,7 +183,20 @@ struct OrbProvidersSettings: View {
         guard type == "kimi" || proxy || (owner == "sandboxed_sh" && ["anthropic", "openai", "google"].contains(type)) else { return nil }
         return OrbProviderLogin(id: provider["id"].text, name: provider["name"].text, type: type, proxy: proxy)
     }
-    private func status(_ p: OrbJSON) -> String {
+    static func splitDisplayName(_ p: OrbJSON) -> (title: String, account: String) {
+        let raw = p["name"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let explicitEmail = p["account_email"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.hasSuffix(")"), let openIdx = raw.lastIndex(of: "("), openIdx > raw.startIndex {
+            let prefix = String(raw[..<openIdx]).trimmingCharacters(in: .whitespaces)
+            let inside = String(raw[raw.index(after: openIdx)..<raw.index(before: raw.endIndex)]).trimmingCharacters(in: .whitespaces)
+            if !prefix.isEmpty && !inside.isEmpty {
+                return (prefix, inside)
+            }
+        }
+        return (raw.isEmpty ? p["provider_type"].text : raw, explicitEmail)
+    }
+
+    private func status(_ p: OrbJSON, accountHint: String = "") -> String {
         let detail = usage[p["id"].text]
         let state: String
         if p["enabled"] == .bool(false) { state = "Disabled" }
@@ -185,7 +205,8 @@ struct OrbProvidersSettings: View {
         else if !detail["error"].text.isEmpty { state = "Usage unavailable" }
         else if let quota = OrbProviderQuota.quotaStatus(OrbProviderQuota.windows(detail)) { state = quota.label }
         else { state = p["status"]["type"].text.replacingOccurrences(of: "_", with: " ") }
-        return "\(p["provider_type"].text) · \(state)"
+        let lead = accountHint.isEmpty ? p["provider_type"].text : accountHint
+        return [lead, state].filter { !$0.isEmpty }.joined(separator: " · ")
     }
     /// Quota severity of the row (nil while below 80% or when another state wins).
     private func quotaStatus(_ p: OrbJSON) -> OrbQuotaStatus? {

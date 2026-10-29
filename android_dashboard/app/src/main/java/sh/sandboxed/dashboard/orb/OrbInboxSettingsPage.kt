@@ -1,8 +1,10 @@
 package sh.sandboxed.dashboard.orb
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -55,7 +57,30 @@ fun OrbInboxSettingsPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxSize().background(OrbStyle.background).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = OrbStyle.textPrimary) }
-            Text("Inbox", color = OrbStyle.textPrimary, style = MaterialTheme.typography.titleLarge)
+            Text("Notifications", color = OrbStyle.textPrimary, style = MaterialTheme.typography.titleLarge)
+        }
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = OrbStyle.surface,
+            border = BorderStroke(1.dp, OrbStyle.border),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Alert me on new Inbox items", color = OrbStyle.textPrimary, style = MaterialTheme.typography.bodyLarge)
+                    Text("Notify on finished runs, approvals, and blocked missions.", color = OrbStyle.textSecondary, style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(
+                    checked = OrbNotifications.notificationsEnabled,
+                    onCheckedChange = { OrbNotifications.setEnabled(it) }
+                )
+            }
         }
         Text("AI summaries", color = OrbStyle.textPrimary, style = MaterialTheme.typography.titleMedium)
         Text("Choose a model or routing chain for Inbox digests. Off keeps your last choice.", color = OrbStyle.textSecondary)

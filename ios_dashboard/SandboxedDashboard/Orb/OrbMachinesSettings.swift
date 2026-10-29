@@ -14,11 +14,20 @@ struct OrbMachinesSettings: View {
     @State private var managed: OrbManagedMachinesResponse?
     @State private var managedFetchedAt = Date.now
     @State private var managedBusy = false
+    @State private var busyProvider: String?
     var body: some View {
         List {
             OrbSettingsError(message: fleetError)
             OrbComputersSection(computers: computers, ready: computersReady) { startedMission = $0 }
-            if let managed {
+            if let providers = managed?.providers, !providers.isEmpty {
+                OrbMachineProvidersSection(
+                    providers: providers,
+                    busyProvider: busyProvider,
+                    onToggle: { pr, next in Task { await toggleProvider(pr, enabled: next) } },
+                    onSave: { id, patch in try await saveProvider(id, patch: patch) }
+                )
+            }
+            if let managed, managed.enabled {
                 OrbManagedMachinesSection(response: managed, fetchedAt: managedFetchedAt, busy: managedBusy,
                                           onDestroy: { m in Task { await destroy(m) } },
                                           onExtend: { m in Task { await managedAction { _ = try await client.call("/api/managed-machines/\(OrbCore.escape(m.id))/extend", method: "POST", body: .object(["ttl_minutes": .number(60)])) } } },
@@ -37,9 +46,10 @@ struct OrbMachinesSettings: View {
                                           onOpenMission: { startedMission = $0 })
             }
             Section("Fleet") {
-                if loading && nodes.isEmpty { ProgressView() }
-                if fleetReady && nodes.isEmpty { Text("No remote nodes registered.").foregroundStyle(.secondary) }
-                ForEach(nodes, id: \.selfID) { node in
+                let fleetNodes = managed == nil ? nodes : nodes.filter { !OrbManaged.isManagedNode($0) }
+                if loading && fleetNodes.isEmpty { ProgressView() }
+                if fleetReady && fleetNodes.isEmpty { Text("No static fleet nodes registered.").foregroundStyle(.secondary) }
+                ForEach(fleetNodes, id: \.selfID) { node in
                     DisclosureGroup {
                         LabeledContent("Status", value: node["status"].text)
                         LabeledContent("Active jobs", value: node["active_jobs"].display.isEmpty ? "Unavailable" : node["active_jobs"].display)
@@ -55,7 +65,14 @@ struct OrbMachinesSettings: View {
                         VStack(alignment: .leading) {
                             HStack(spacing: 6) {
                                 Text(OrbManaged.nodeTitle(node))
-                                if OrbManaged.isManagedNode(node) { OrbManagedBadge() }
+                                if OrbManaged.isManagedNode(node) {
+                                    OrbManagedBadge()
+                                    if let p = OrbManaged.nodeProvider(node), p != "boat" {
+                                        Text(OrbManaged.providerLabel(p))
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.tint)
+                                    }
+                                }
                             }
                             Text(node["status"].text + (node["cordoned"].flag ? " · New jobs paused" : "")).font(.caption).foregroundStyle(.secondary)
                         }
@@ -116,6 +133,30 @@ struct OrbMachinesSettings: View {
         guard !managedBusy else { return }; managedBusy = true; defer { managedBusy = false }
         do { try await action(); fleetError = ""; await loadManaged() }
         catch is CancellationError {} catch { fleetError = OrbManaged.message(error) }
+    }
+    /// Optimistic provider enable/disable toggle with rollback on failure.
+    private func toggleProvider(_ pr: OrbManagedProviderInfo, enabled: Bool) async {
+        guard busyProvider == nil, let before = managed else { return }
+        busyProvider = pr.provider
+        defer { busyProvider = nil }
+        if var copy = managed, let idx = copy.providers?.firstIndex(where: { $0.provider == pr.provider }) {
+            copy.providers?[idx].enabled = enabled
+            managed = copy
+        }
+        do {
+            _ = try await client.call("/api/managed-machines/providers/\(OrbCore.escape(pr.provider))", method: "PUT", body: .object(["enabled": .bool(enabled)]))
+            fleetError = ""
+            await loadManaged()
+        } catch is CancellationError {}
+        catch {
+            managed = before
+            fleetError = OrbManaged.message(error)
+        }
+    }
+    private func saveProvider(_ id: String, patch: [String: OrbJSON]) async throws {
+        _ = try await client.call("/api/managed-machines/providers/\(OrbCore.escape(id))", method: "PUT", body: .object(patch))
+        fleetError = ""
+        await loadManaged()
     }
     private func toggle(_ node: OrbJSON) async {
         guard !busy else { return }; busy = true; defer { busy = false }

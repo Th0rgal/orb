@@ -479,7 +479,7 @@ pub async fn generate(
         json!({"role":"system","content":PROMPT}),
         json!({"role":"user","content":text}),
     ];
-    let result = tokio::time::timeout(Duration::from_secs(90), client.complete(&messages, &[]))
+    let result = tokio::time::timeout(Duration::from_secs(195), client.complete(&messages, &[]))
         .await
         .map_err(|_| {
             (

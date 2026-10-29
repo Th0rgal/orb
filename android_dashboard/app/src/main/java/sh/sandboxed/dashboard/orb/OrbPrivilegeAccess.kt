@@ -78,7 +78,7 @@ object OrbPrivilegeAccess {
 
     /** Run on the Core host; Core deletes the file when a device uses it. */
     const val ENROLLMENT_CODE_COMMAND =
-        "ssh agent-core 'umask 077; head -c 12 /dev/urandom | base64 | tr -dc A-Za-z0-9 | tee /root/.sandboxed-sh/approval_enrollment_code; echo'"
+        "ssh agent-core 'umask 077; mkdir -p /root/.sandboxed-sh; head -c 12 /dev/urandom | base64 | tr -dc A-Za-z0-9 | tee /root/.sandboxed-sh/approval_enrollment_code; echo'"
 
     /** Prompt only where Core asks for signatures and this key is not enrolled (iOS `OrbApprovalEnrollmentMonitor`). */
     fun shouldPromptEnrollment(mode: String, enrolled: Boolean, dismissedMode: String?): Boolean =

@@ -1,5 +1,7 @@
 package sh.sandboxed.dashboard.orb
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.os.Build
@@ -7,6 +9,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import android.util.Base64
+import android.widget.Toast
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,8 +29,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -43,8 +51,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -271,11 +282,15 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             privilegeCommands = OrbJSON.dictList(privSnap["command_audit"])
             bunkerIncidents = OrbJSON.dictList(privSnap["bunker_incidents"])
             val snapBunker = (privSnap["bunker_state"] as? Number)?.toInt() ?: 0
-            val meshSnap = runCatching { dictOf(core.request("/api/mesh/status")) }.getOrDefault(emptyMap())
-            val mBunker = (meshSnap["bunker_state"] as? Number)?.toInt() ?: 0
-            bunkerState = maxOf(snapBunker, mBunker)
-            meshEpoch = (meshSnap["epoch"] as? Number)?.toInt()
-            meshVerified = meshSnap["formal_verified"] == true
+            val meshSnap = runCatching { dictOf(core.request("/api/mesh/status")) }.getOrNull()
+            if (meshSnap != null) {
+                val mBunker = (meshSnap["bunker_state"] as? Number)?.toInt() ?: 0
+                bunkerState = maxOf(snapBunker, mBunker)
+                meshEpoch = (meshSnap["epoch"] as? Number)?.toInt()
+                meshVerified = meshSnap["formal_verified"] == true
+            } else {
+                bunkerState = snapBunker
+            }
         } catch (_: Throwable) {
         }
         // A Core that predates /api/approvals answers 404: the per-kind lists
@@ -295,9 +310,6 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             queue = next
         }
         try {
-            val broker = dictOf(core.request("/api/bitwarden/broker"))
-            requests = OrbJSON.dictList(broker["requests"]).filter { it["status"] == "pending" }
-            grants = OrbJSON.dictList(broker["grants"])
             val d = dictOf(core.request("/api/approvals/devices"))
             devices = OrbJSON.dictList(d["devices"])
             mode = OrbJSON.str(d, "mode") ?: ""
@@ -305,14 +317,20 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
             val match = devices.firstOrNull { mine != null && it["public_key"] == mine }
             activity?.let { OrbApprovalKey.setDeviceId(it, baseURL, match?.get("id") as? String) }
             enrolledHere = match != null
+            error = null
+        } catch (e: Throwable) {
+            error = e.message
+        }
+        try {
+            val broker = dictOf(core.request("/api/bitwarden/broker"))
+            requests = OrbJSON.dictList(broker["requests"]).filter { it["status"] == "pending" }
+            grants = OrbJSON.dictList(broker["grants"])
             if (projects.isEmpty()) {
                 projects = (core.request("/api/bitwarden/projects") as? List<*>).orEmpty()
                     .mapNotNull { it as? Map<*, *> }
                     .associate { (it["id"] as? String ?: "") to (it["name"] as? String ?: "") }
             }
-            error = null
-        } catch (e: Throwable) {
-            error = e.message
+        } catch (_: Throwable) {
         }
     }
 
@@ -372,138 +390,90 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
         }
     }
 
+    var showActivity by remember { mutableStateOf(false) }
+    var showEnrollDialog by remember { mutableStateOf(false) }
+    var selectedCommand by remember { mutableStateOf<OrbActivityCompaction.CoalescedCommand?>(null) }
+
+    val livePrivilege = remember(privilege) { privilege.filter { OrbPrivilegeAccess.isLive(it) } }
+    val liveAccess = remember(access) {
+        val active = access.filter {
+            it["state"] == "approved" && runCatching {
+                java.time.Instant.parse(it["expires_at"] as String).isAfter(java.time.Instant.now())
+            }.getOrDefault(false)
+        }
+        OrbActivityCompaction.dedupeMissionGrants(active)
+    }
+    val totalGrants = livePrivilege.size + liveAccess.size + grants.size
+    val coalescedCommands = remember(privilegeCommands) {
+        OrbActivityCompaction.coalescePrivilegeCommands(privilegeCommands)
+    }
+    val historyAccess = remember(access) {
+        access.filter { it["state"] != "pending" && it["state"] != "approved" }.take(20)
+    }
+    val activityCount = bunkerIncidents.size + coalescedCommands.size + historyAccess.size
+
+    fun missionName(title: Any?, id: Any?) =
+        (title as? String)?.takeIf { it.isNotBlank() } ?: "Mission ${(id as? String)?.take(8) ?: ""}"
+
     Column(modifier = Modifier.fillMaxSize().background(OrbStyle.background)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
-                modifier = Modifier.size(38.dp).clip(CircleShape).orbPressClickable { onBack() },
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, CircleShape)
+                    .orbPressClickable { onBack() },
                 contentAlignment = Alignment.Center
-            ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White) }
-            Spacer(Modifier.width(8.dp))
-            Text("Secrets", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(17.dp))
+            }
+            Text(
+                text = "Access",
+                color = Color.White,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.width(38.dp))
         }
         Column(
-            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             error?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 13.sp) }
 
-            Card("Approvals") {
-                // One list: normal requests, "Approve N" for them, then the
-                // critical ones in red, then "Approve all" (red when it
-                // includes critical ones).
-                if (queue.isEmpty()) Text("Nothing is waiting for your approval.", color = OrbStyle.textMuted, fontSize = 13.sp)
-                val normal = queue.filter { !OrbApprovalQueue.isCritical(it) }
-                val critical = queue.filter { OrbApprovalQueue.isCritical(it) }
-                @Composable
-                fun approveButton(items: List<Map<String, Any?>>, label: String, red: Boolean) = Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(enabled = !busy && items.isNotEmpty(), onClick = { act { approveQueue(items) } }) {
-                        Text(label, color = if (red) Color(0xFFFF6B6B) else Color.Unspecified, fontWeight = FontWeight.Medium)
-                    }
-                }
-                @Composable
-                fun row(i: Map<String, Any?>) = Column(Modifier.padding(vertical = 6.dp)) {
-                    Text(OrbApprovalQueue.title(i), color = if (OrbApprovalQueue.isCritical(i)) Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Text("asked by ${OrbApprovalQueue.requester(i)}", color = OrbStyle.textMuted, fontSize = 12.sp)
-                    (i["reason"] as? String)?.takeIf { it.isNotBlank() }?.let { Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp) }
-                    OrbApprovalQueue.detail(i) { projects[it] ?: it.take(8) }.takeIf { it.isNotEmpty() }?.let {
-                        Text(it, color = OrbStyle.textMuted, fontSize = 12.sp)
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(enabled = !busy, onClick = { act { approveQueue(listOf(i)) } }) { Text("Allow") }
-                        TextButton(enabled = !busy, onClick = {
-                            act {
-                                OrbApprovalKey.signedRequest(
-                                    core, activity, "POST", OrbApprovalQueue.denyPath(i) { core.encodeComponent(it) },
-                                    null, "Decline: ${OrbApprovalQueue.title(i)}"
-                                )
-                            }
-                        }) { Text("Deny", color = Color(0xFFFF6B6B)) }
-                    }
-                }
-                normal.forEach { row(it) }
-                if (normal.isNotEmpty() && critical.isNotEmpty()) {
-                    val normals = OrbApprovalQueue.normalBatch(queue)
-                    approveButton(normals, "Approve ${normals.size}", red = false)
-                }
-                critical.forEach { row(it) }
-                if (queue.size > 1) {
-                    approveButton(OrbApprovalQueue.allBatch(queue), OrbApprovalQueue.approveAllLabel(queue), red = critical.isNotEmpty())
-                }
-            }
-
-            Card("Mission requests") {
-                if (requests.isEmpty()) Text("No pending requests.", color = OrbStyle.textMuted, fontSize = 13.sp)
-                requests.forEach { r ->
-                    val id = r["id"] as String
-                    val who = listOfNotNull(r["mission_title"] as? String, r["paloma_project"] as? String).joinToString(" · ")
-                    Column(Modifier.padding(vertical = 6.dp)) {
-                        Text(describe(r), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text(who, color = OrbStyle.textMuted, fontSize = 12.sp)
-                        (r["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
-                            Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp)
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            @Composable
-                            fun approve(scopeName: String?, label: String) = TextButton(enabled = !busy, onClick = {
-                                act {
-                                    OrbApprovalKey.signedRequest(
-                                        core, activity, "POST",
-                                        "/api/bitwarden/requests/${core.encodeComponent(id)}/approve",
-                                        if (scopeName == null) emptyMap() else mapOf("scope" to scopeName),
-                                        "$label: ${describe(r)} for $who",
-                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
-                                    )
-                                }
-                            }) { Text(label) }
-                            if (r["kind"] != "read") {
-                                approve(null, "Approve")
-                            } else {
-                                if (r["key"] != null) approve("secret", "Secret")
-                                if (r["project_id"] != null) approve("project", "Project")
-                                approve("all", "All")
-                            }
-                            TextButton(enabled = !busy, onClick = {
-                                act {
-                                    OrbApprovalKey.signedRequest(
-                                        core, activity, "POST",
-                                        "/api/bitwarden/requests/${core.encodeComponent(id)}/reject",
-                                        null, "Decline: ${describe(r)}",
-                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
-                                    )
-                                }
-                            }) { Text("Decline", color = Color(0xFFFF6B6B)) }
-                        }
-                    }
-                }
-            }
-
-            Card("Privileged access") {
-                val pendingPrivilege = privilege.filter { it["state"] == "pending" }
-                val livePrivilege = privilege.filter { OrbPrivilegeAccess.isLive(it) }
-                Text(
-                    "Root, service deploy or read-only ops on a host. A grant lasts at most the mission session; Core checks and logs every command. Approving needs your fingerprint or face.",
-                    color = OrbStyle.textMuted, fontSize = 12.sp
-                )
+            // 1. Fleet posture (compact 2-line card)
+            Card("Fleet posture") {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Column(Modifier.weight(1f)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
-                            "Fleet posture: ${OrbPrivilegeAccess.bunkerLabel(bunkerState)}" +
-                                (meshEpoch?.let { " · lean-mesh epoch $it (${if (meshVerified) "Lean 4 verified" else "unverified"})" } ?: ""),
+                            text = OrbPrivilegeAccess.bunkerLabel(bunkerState) +
+                                (meshEpoch?.let { " · epoch $it${if (meshVerified) " · Lean verified" else ""}" } ?: ""),
                             color = if (bunkerState > 0) Color(0xFFFF6B6B) else Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            if (bunkerState > 0) "Bunker Mode is on: new privileged requests are locked and active grants are revoked."
-                            else "Canary tripwires and dead-man heartbeat switches are armed across all workers.",
+                            text = if (bunkerState > 0) "Privileged requests locked · active grants revoked"
+                            else "Canary tripwires & dead-man heartbeats armed",
                             color = OrbStyle.textMuted,
-                            fontSize = 11.sp
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     if (bunkerState > 0) {
@@ -516,7 +486,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     "exit Fleet Bunker Mode"
                                 )
                             }
-                        }) { Text("Exit Bunker") }
+                        }) { Text("Exit", fontWeight = FontWeight.SemiBold) }
                     } else {
                         TextButton(enabled = !busy, onClick = {
                             act {
@@ -527,196 +497,107 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     "enter Hard Bunker Lockdown across the fleet"
                                 )
                             }
-                        }) { Text("Lock Down", color = Color(0xFFFF6B6B)) }
+                        }) { Text("Lock Down", color = Color(0xFFFF6B6B), fontWeight = FontWeight.SemiBold) }
                     }
                 }
-                if (pendingPrivilege.isEmpty() && livePrivilege.isEmpty()) Text("No requests or grants.", color = OrbStyle.textMuted, fontSize = 13.sp)
-                pendingPrivilege.forEach { r ->
-                    val id = r["id"] as String
-                    val who = OrbPrivilegeAccess.requester(r)
-                    val what = OrbPrivilegeAccess.title(r)
-                    Column(Modifier.padding(vertical = 6.dp)) {
-                        Text(what, color = if (r["scope"] == "root_exec") Color(0xFFFF6B6B) else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text("asked by $who", color = OrbStyle.textMuted, fontSize = 12.sp)
-                        (r["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
-                            Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp)
+            }
+
+            // 2. Unified Pending Approvals (shown only when non-empty)
+            if (queue.isNotEmpty()) {
+                Card("Pending approvals (${queue.size})") {
+                    val normal = queue.filter { !OrbApprovalQueue.isCritical(it) }
+                    val critical = queue.filter { OrbApprovalQueue.isCritical(it) }
+                    @Composable
+                    fun approveButton(items: List<Map<String, Any?>>, label: String, red: Boolean) =
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            TextButton(enabled = !busy && items.isNotEmpty(), onClick = { act { approveQueue(items) } }) {
+                                Text(label, color = if (red) Color(0xFFFF6B6B) else OrbStyle.inboxBlue, fontWeight = FontWeight.Medium)
+                            }
                         }
-                        Text("Allows ${OrbPrivilegeAccess.unlocks(r)} · ${OrbPrivilegeAccess.lifetime(r)}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                    @Composable
+                    fun row(i: Map<String, Any?>) = Column(Modifier.padding(vertical = 4.dp)) {
+                        Text(
+                            OrbApprovalQueue.title(i),
+                            color = if (OrbApprovalQueue.isCritical(i)) Color(0xFFFF6B6B) else Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text("asked by ${OrbApprovalQueue.requester(i)}", color = OrbStyle.textMuted, fontSize = 12.sp)
+                        (i["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
+                            Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        OrbApprovalQueue.detail(i) { projects[it] ?: it.take(8) }.takeIf { it.isNotEmpty() }?.let {
+                            Text(it, color = OrbStyle.textMuted, fontSize = 12.sp)
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(enabled = !busy, onClick = { act { approveQueue(listOf(i)) } }) { Text("Allow") }
                             TextButton(enabled = !busy, onClick = {
                                 act {
                                     OrbApprovalKey.signedRequest(
-                                        core, activity, "POST",
-                                        "/api/privilege-access/${core.encodeComponent(id)}/approve",
-                                        OrbPrivilegeAccess.approveBody(r),
-                                        "Grant $what to $who",
-                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
-                                    )
-                                }
-                            }) { Text("Allow") }
-                            TextButton(enabled = !busy, onClick = {
-                                act {
-                                    OrbApprovalKey.signedRequest(
-                                        core, activity, "POST",
-                                        "/api/privilege-access/${core.encodeComponent(id)}/deny",
-                                        null, "Decline: $who asks for $what",
-                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
+                                        core, activity, "POST", OrbApprovalQueue.denyPath(i) { core.encodeComponent(it) },
+                                        null, "Decline: ${OrbApprovalQueue.title(i)}"
                                     )
                                 }
                             }) { Text("Deny", color = Color(0xFFFF6B6B)) }
                         }
                     }
-                }
-                livePrivilege.forEach { g ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("${OrbPrivilegeAccess.requester(g)} · ${OrbPrivilegeAccess.title(g)}", color = Color.White, fontSize = 14.sp)
-                            Text(
-                                "${if (g["session_scoped"] == true) "Ends with the session" else "Fixed lifetime"} · until ${g["expires_at"]}",
-                                color = OrbStyle.textMuted, fontSize = 12.sp
-                            )
-                        }
-                        TextButton(enabled = !busy, onClick = {
-                            act { core.request("/api/privilege-access/${core.encodeComponent(g["id"] as String)}", "DELETE") }
-                        }) { Text("Revoke") }
+                    normal.forEach { row(it) }
+                    if (normal.isNotEmpty() && critical.isNotEmpty()) {
+                        val normals = OrbApprovalQueue.normalBatch(queue)
+                        approveButton(normals, "Approve ${normals.size}", red = false)
                     }
-                }
-                bunkerIncidents.take(10).forEach { inc ->
-                    val dry = inc["dry_run"] == true
-                    val nextState = (inc["new_bunker_state"] as? Number)?.toInt() ?: 0
-                    val peer = (inc["peer_name"] as? String)?.takeIf { it.isNotBlank() }?.let { "$it · " } ?: ""
-                    val epoch = (inc["epoch"] as? Number)?.toInt() ?: 0
-                    Text(
-                        "${if (dry) "CANARY TEST" else OrbPrivilegeAccess.bunkerLabel(nextState).uppercase()}: $peer${inc["reason"]} (epoch $epoch)",
-                        color = if (!dry && nextState > 0) Color(0xFFFF6B6B) else OrbStyle.textMuted,
-                        fontSize = 11.sp
-                    )
-                }
-                privilegeCommands.take(15).forEach { c ->
-                    val exitCode = (c["exit_code"] as? Number)?.toInt()
-                    Text(
-                        "${exitCode?.let { "EXIT $it" } ?: "RUN"} · ${c["target_host"]} · ${c["command"]}",
-                        color = OrbStyle.textMuted,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-
-            Card("Mission access") {
-                fun mission(title: Any?, id: Any?) =
-                    (title as? String)?.takeIf { it.isNotBlank() } ?: "Mission ${(id as? String)?.take(8) ?: ""}"
-                val pendingAccess = access.filter { it["state"] == "pending" }
-                val liveAccess = access.filter {
-                    it["state"] == "approved" && runCatching {
-                        java.time.Instant.parse(it["expires_at"] as String).isAfter(java.time.Instant.now())
-                    }.getOrDefault(false)
-                }
-                Text(
-                    "Read-only grants between missions (events, messages, shared files). Never allows messages, cancel or resume. Approving needs your fingerprint or face.",
-                    color = OrbStyle.textMuted, fontSize = 12.sp
-                )
-                if (pendingAccess.isEmpty() && liveAccess.isEmpty()) Text("No requests or grants.", color = OrbStyle.textMuted, fontSize = 13.sp)
-                pendingAccess.forEach { r ->
-                    val id = r["id"] as String
-                    val who = mission(r["requester_title"], r["requester_mission_id"])
-                    val target = mission(r["target_title"], r["target_mission_id"])
-                    val hours = (r["ttl_hours"] as? Number)?.toInt() ?: 24
-                    Column(Modifier.padding(vertical = 6.dp)) {
-                        Text("Read $target", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text("asked by $who · $hours h", color = OrbStyle.textMuted, fontSize = 12.sp)
-                        (r["reason"] as? String)?.takeIf { it.isNotBlank() }?.let {
-                            Text("“$it”", color = OrbStyle.textMuted, fontSize = 12.sp)
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            TextButton(enabled = !busy, onClick = {
-                                act {
-                                    OrbApprovalKey.signedRequest(
-                                        core, activity, "POST",
-                                        "/api/mission-access/${core.encodeComponent(id)}/approve",
-                                        mapOf("ttl_hours" to hours),
-                                        "Let $who read $target for $hours h",
-                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Approved)
-                                    )
-                                }
-                            }) { Text("Allow read") }
-                            TextButton(enabled = !busy, onClick = {
-                                act {
-                                    OrbApprovalKey.signedRequest(
-                                        core, activity, "POST",
-                                        "/api/mission-access/${core.encodeComponent(id)}/deny",
-                                        null, "Decline: $who wants to read $target",
-                                        UsageTelemetry.Approval(UsageTelemetry.ApprovalKind.Grant, UsageTelemetry.Decision.Denied)
-                                    )
-                                }
-                            }) { Text("Deny", color = Color(0xFFFF6B6B)) }
-                        }
-                    }
-                }
-                liveAccess.forEach { g ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                "${mission(g["requester_title"], g["requester_mission_id"])} → ${mission(g["target_title"], g["target_mission_id"])}",
-                                color = Color.White, fontSize = 14.sp
-                            )
-                            Text("Read only · until ${g["expires_at"]}", color = OrbStyle.textMuted, fontSize = 12.sp)
-                        }
-                        TextButton(enabled = !busy, onClick = {
-                            act { core.request("/api/mission-access/${core.encodeComponent(g["id"] as String)}", "DELETE") }
-                        }) { Text("Revoke") }
+                    critical.forEach { row(it) }
+                    if (queue.size > 1) {
+                        approveButton(OrbApprovalQueue.allBatch(queue), OrbApprovalQueue.approveAllLabel(queue), red = critical.isNotEmpty())
                     }
                 }
             }
 
-            if (grants.isNotEmpty()) {
-                Card("Active grants") {
-                    // Collapsed by default; the choice is remembered on this device.
-                    val expiries = grants.mapNotNull { grantMinutesLeft(it["expires_at"] as? String) }
-                    val summary = "${grants.size} active ${if (grants.size == 1) "grant" else "grants"}" +
-                        (expiries.minOrNull()?.let { " · next expires in ${formatMinutes(it)}" } ?: "")
-                    TextButton(onClick = {
-                        showGrants = !showGrants
-                        grantPrefs.edit().putBoolean(GRANTS_EXPANDED_KEY, showGrants).apply()
-                    }) { Text("${if (showGrants) "▾" else "▸"} $summary", color = OrbStyle.textMuted, fontSize = 13.sp) }
-                    if (showGrants) {
-                        // Grants of one mission are listed together so its title appears once.
-                        grants.groupBy { it["mission_id"] as? String ?: "" }.values.forEach { group ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    (group[0]["mission_title"] as? String) ?: "Mission",
-                                    color = OrbStyle.textMuted, fontSize = 12.sp, maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+            // 3. Approval devices + Require phone signature toggle + Enroll modal trigger
+            Card("Approval devices") {
+                val enforce = mode == "enforce"
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Require phone signature", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            if (enforce) "Enforced · unsigned requests rejected"
+                            else if (devices.isEmpty()) "Enroll a phone first to enforce signatures"
+                            else "Warn mode · unsigned requests allowed",
+                            color = OrbStyle.textMuted,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Switch(
+                        checked = enforce,
+                        enabled = !busy && (enforce || devices.isNotEmpty()),
+                        onCheckedChange = { wantEnforce ->
+                            val nextMode = if (wantEnforce) "enforce" else "warn"
+                            act {
+                                OrbApprovalKey.signedRequest(
+                                    core, activity, "PUT",
+                                    "/api/approvals/mode",
+                                    mapOf("mode" to nextMode),
+                                    "set approval mode to $nextMode"
                                 )
-                                if (group.size > 1) TextButton(enabled = !busy, onClick = {
-                                    act { group.forEach { g -> core.request("/api/bitwarden/grants/${core.encodeComponent(g["id"] as String)}", "DELETE") } }
-                                }) { Text("Revoke all", fontSize = 12.sp) }
-                            }
-                            group.forEach { g ->
-                                val scopeMap = dictOf(g["scope"])
-                                val label = when (scopeMap["kind"]) {
-                                    "all" -> "All projects"
-                                    "project" -> "Project ${projects[scopeMap["project_id"] as? String] ?: ""}"
-                                    else -> "${scopeMap["key"]}"
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 12.dp)) {
-                                    Text(label, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                    Text(grantMinutesLeft(g["expires_at"] as? String)?.let { formatMinutes(it) } ?: "", color = OrbStyle.textMuted, fontSize = 12.sp)
-                                    TextButton(enabled = !busy, onClick = {
-                                        act { core.request("/api/bitwarden/grants/${core.encodeComponent(g["id"] as String)}", "DELETE") }
-                                    }) { Text("Revoke", fontSize = 12.sp) }
-                                }
                             }
                         }
-                    }
+                    )
                 }
-            }
 
-            Card("Approval devices · $mode") {
+                if (devices.isNotEmpty()) {
+                    HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(vertical = 4.dp))
+                }
                 devices.forEach { d ->
                     val mine = d["public_key"] == OrbApprovalKey.publicKey()
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("${d["name"]}${if (mine) " (this phone)" else ""}", color = Color.White, fontSize = 14.sp)
+                            Text("${d["name"]}${if (mine) " (this phone)" else ""}", color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text("${d["platform"]}", color = OrbStyle.textMuted, fontSize = 12.sp)
                         }
                         TextButton(enabled = !busy, onClick = {
@@ -731,18 +612,271 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     }
                 }
                 if (!enrolledHere) {
-                    Text(
-                        "Enroll this phone: its Keystore key signs approvals after a fingerprint or face check. " +
-                            "Enter the one-time code created on the Core host; Core deletes it once a device uses it:",
-                        color = OrbStyle.textMuted, fontSize = 12.sp
-                    )
-                    androidx.compose.foundation.text.selection.SelectionContainer {
-                        Text(OrbPrivilegeAccess.ENROLLMENT_CODE_COMMAND, color = Color.White, fontSize = 11.sp,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(OrbStyle.card)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+                            .orbPressClickable { showEnrollDialog = true }
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("Enroll this phone…", color = OrbStyle.inboxBlue, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     }
-                    OutlinedTextField(value = code, onValueChange = { code = it }, singleLine = true,
-                        label = { Text("One-time code") }, modifier = Modifier.fillMaxWidth())
-                    TextButton(enabled = !busy && code.trim().length >= 8, onClick = {
+                }
+            }
+
+            // 4. Unified Active Grants (shown only when > 0)
+            if (totalGrants > 0) {
+                val expandedGrants = if (totalGrants <= 3) true else showGrants
+                Card("Active grants ($totalGrants)") {
+                    if (totalGrants > 3) {
+                        val expiries = (livePrivilege + liveAccess + grants).mapNotNull { grantMinutesLeft(it["expires_at"] as? String) }
+                        val summary = "$totalGrants active grants" +
+                            (expiries.minOrNull()?.let { " · next expires in ${formatMinutes(it)}" } ?: "")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .orbPressClickable {
+                                    showGrants = !showGrants
+                                    grantPrefs.edit().putBoolean(GRANTS_EXPANDED_KEY, showGrants).apply()
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (showGrants) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
+                                contentDescription = null,
+                                tint = OrbStyle.textMuted,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(summary, color = OrbStyle.textSecondary, fontSize = 13.sp)
+                        }
+                    }
+                    if (expandedGrants) {
+                        livePrivilege.forEach { g ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "${OrbPrivilegeAccess.requester(g)} · ${OrbPrivilegeAccess.title(g)}",
+                                        color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        grantMinutesLeft(g["expires_at"] as? String)?.let { "${formatMinutes(it)} left" } ?: "Session grant",
+                                        color = OrbStyle.textMuted, fontSize = 12.sp
+                                    )
+                                }
+                                TextButton(enabled = !busy, onClick = {
+                                    act { core.request("/api/privilege-access/${core.encodeComponent(g["id"] as String)}", "DELETE") }
+                                }) { Text("Revoke", fontSize = 12.sp) }
+                            }
+                        }
+                        liveAccess.forEach { g ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "${missionName(g["requester_title"], g["requester_mission_id"])} → ${missionName(g["target_title"], g["target_mission_id"])}",
+                                        color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                    )
+                                    val accessScope = if ((g["scope"] as? String) == "control") "Control" else "Read only"
+                                    Text(
+                                        "$accessScope · " + (grantMinutesLeft(g["expires_at"] as? String)?.let { "${formatMinutes(it)} left" } ?: ""),
+                                        color = OrbStyle.textMuted, fontSize = 12.sp
+                                    )
+                                }
+                                TextButton(enabled = !busy, onClick = {
+                                    act { core.request("/api/mission-access/${core.encodeComponent(g["id"] as String)}", "DELETE") }
+                                }) { Text("Revoke", fontSize = 12.sp) }
+                            }
+                        }
+                        grants.groupBy { it["mission_id"] as? String ?: "" }.values.forEach { group ->
+                            group.forEach { g ->
+                                val scopeMap = dictOf(g["scope"])
+                                val label = when (scopeMap["kind"]) {
+                                    "all" -> "All secrets"
+                                    "project" -> "Project ${projects[scopeMap["project_id"] as? String] ?: ""}"
+                                    else -> "Secret ${scopeMap["key"]}"
+                                }
+                                val mTitle = (g["mission_title"] as? String)?.takeIf { it.isNotBlank() } ?: "Mission"
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("$mTitle · $label", color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(grantMinutesLeft(g["expires_at"] as? String)?.let { "${formatMinutes(it)} left" } ?: "", color = OrbStyle.textMuted, fontSize = 12.sp)
+                                    }
+                                    TextButton(enabled = !busy, onClick = {
+                                        act { core.request("/api/bitwarden/grants/${core.encodeComponent(g["id"] as String)}", "DELETE") }
+                                    }) { Text("Revoke", fontSize = 12.sp) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 5. Collapsed-by-default Activity log (coalesced, 1-line rows, tap-to-inspect)
+            if (activityCount > 0) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(OrbStyle.surface)
+                        .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("activity.toggle")
+                            .orbPressClickable { showActivity = !showActivity },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (showActivity) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = OrbStyle.textMuted,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (showActivity) "Hide activity ($activityCount)" else "Show activity ($activityCount)",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    if (showActivity) {
+                        bunkerIncidents.take(10).forEach { inc ->
+                            val dry = inc["dry_run"] == true
+                            val nextState = (inc["new_bunker_state"] as? Number)?.toInt() ?: 0
+                            val peer = (inc["peer_name"] as? String)?.takeIf { it.isNotBlank() }?.let { "$it · " } ?: ""
+                            val epoch = (inc["epoch"] as? Number)?.toInt() ?: 0
+                            Text(
+                                "${if (dry) "CANARY TEST" else OrbPrivilegeAccess.bunkerLabel(nextState).uppercase()}: $peer${inc["reason"]} (epoch $epoch)",
+                                color = if (!dry && nextState > 0) Color(0xFFFF6B6B) else OrbStyle.textMuted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        coalescedCommands.take(25).forEach { cmd ->
+                            val statusColor = when {
+                                cmd.exitCode != null && cmd.exitCode != 0 -> Color(0xFFFF6B6B)
+                                cmd.exitCode == 0 -> OrbStyle.success
+                                else -> OrbStyle.warning
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(OrbStyle.card)
+                                    .orbPressClickable { selectedCommand = cmd }
+                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = cmd.status,
+                                    color = statusColor,
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1
+                                )
+                                if (cmd.host.isNotEmpty()) {
+                                    Text(
+                                        text = OrbPrivilegeAccess.host(cmd.host),
+                                        color = OrbStyle.textMuted,
+                                        fontSize = 11.sp,
+                                        maxLines = 1
+                                    )
+                                }
+                                Text(
+                                    text = cmd.command,
+                                    color = OrbStyle.textSecondary,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                        historyAccess.forEach { h ->
+                            val stateUpper = ((h["state"] as? String) ?: "").uppercase()
+                            Text(
+                                text = "$stateUpper · ${missionName(h["requester_title"], h["requester_mission_id"])} → ${missionName(h["target_title"], h["target_mission_id"])}",
+                                color = OrbStyle.textMuted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.size(16.dp))
+        }
+    }
+
+    if (showEnrollDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) showEnrollDialog = false },
+            containerColor = OrbStyle.elevated,
+            title = { Text("Enroll this phone", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "1. Run this command on the Core host to generate a one-time enrollment code:",
+                        color = OrbStyle.textSecondary,
+                        fontSize = 12.sp
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(OrbStyle.card)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        androidx.compose.foundation.text.selection.SelectionContainer(modifier = Modifier.weight(1f)) {
+                            Text(
+                                OrbPrivilegeAccess.ENROLLMENT_CODE_COMMAND,
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        TextButton(onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            cm?.setPrimaryClip(ClipData.newPlainText("Enroll command", OrbPrivilegeAccess.ENROLLMENT_CODE_COMMAND))
+                            Toast.makeText(context, "Command copied", Toast.LENGTH_SHORT).show()
+                        }) { Text("Copy") }
+                    }
+                    Text(
+                        "2. Enter the code below. Your Keystore key will sign approvals after a biometric check.",
+                        color = OrbStyle.textSecondary,
+                        fontSize = 12.sp
+                    )
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { code = it },
+                        singleLine = true,
+                        label = { Text("One-time code") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy && code.trim().length >= 8,
+                    onClick = {
                         act {
                             val pub = OrbApprovalKey.publicKey() ?: OrbApprovalKey.create()
                             val device = dictOf(
@@ -758,11 +892,47 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                             )
                             activity?.let { OrbApprovalKey.setDeviceId(it, baseURL, device["id"] as? String) }
                             code = ""
+                            showEnrollDialog = false
                         }
-                    }) { Text("Enroll this phone") }
-                }
+                    }
+                ) { Text("Enroll") }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { showEnrollDialog = false }) { Text("Cancel") }
             }
+        )
+    }
+
+    selectedCommand?.let { cmd ->
+        val fullDetail = buildString {
+            append(cmd.status)
+            if (cmd.host.isNotEmpty()) append(" · ").append(cmd.host)
+            if (cmd.timestamp.isNotEmpty()) append("\nAt: ").append(cmd.timestamp)
+            if (cmd.missionId.isNotEmpty()) append("\nMission: ").append(cmd.missionId)
+            append("\n\n").append(cmd.command)
+            if (cmd.detail.isNotBlank()) append("\n\n").append(cmd.detail)
         }
+        AlertDialog(
+            onDismissRequest = { selectedCommand = null },
+            containerColor = OrbStyle.elevated,
+            title = { Text("Command audit", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+            text = {
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(fullDetail, color = OrbStyle.textSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    cm?.setPrimaryClip(ClipData.newPlainText("Command audit", fullDetail))
+                    Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                    selectedCommand = null
+                }) { Text("Copy") }
+            },
+            dismissButton = {
+                TextButton(onClick = { selectedCommand = null }) { Text("Close") }
+            }
+        )
     }
 }
 

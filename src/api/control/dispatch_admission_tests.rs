@@ -14786,7 +14786,7 @@ async fn recovery_handoff_survives_orphan_sweep_with_stale_active_snapshot() {
         1
     );
     // Explicit Stop invalidates replay even if a timer already took a snapshot.
-    cancel_mission(
+    let _ = cancel_mission(
         State(h.state.clone()),
         Extension(h.user.clone()),
         Path(mission.id),

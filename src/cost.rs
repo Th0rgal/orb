@@ -287,14 +287,19 @@ const PRICING_ENTRIES: &[PricingEntry] = &[
         aliases: &["o4-mini"],
         pricing: pricing(1_100, 4_400, None, Some(550)),
     },
-    // Gemini 4 Argon (Google API / Antigravity catalog, EAP). Google has not
-    // published a list price yet: it carries the Gemini 3.1 Pro rates
+    // Gemini 4 Argon & Carbon (Google API / Antigravity catalog, EAP). Google
+    // has not published a list price yet: they carry the Gemini 3.1 Pro rates
     // ($2/$12 per Mtok, $0.20 cached) so router traffic is not costed as 0.
     // Effort variants (-low/-medium/-high) and -eap share the family alias;
-    // `agy-demo` is the name the Antigravity CLI reports for the same model.
+    // `agy-demo` and `agy-model-{low,medium,high}` are the Antigravity CLI ids.
     PricingEntry {
         canonical: "gemini-4-argon",
         aliases: &["gemini-4-argon", "gemini-4.0-argon", "agy-demo"],
+        pricing: pricing(2_000, 12_000, None, Some(200)),
+    },
+    PricingEntry {
+        canonical: "gemini-4-carbon",
+        aliases: &["gemini-4-carbon", "gemini-4.0-carbon", "agy-model"],
         pricing: pricing(2_000, 12_000, None, Some(200)),
     },
     PricingEntry {
@@ -1148,5 +1153,30 @@ mod tests {
         let (cost, source) = resolve_cost_cents_and_source(None, Some("gpt-4o"), &empty);
         assert_eq!(cost, 0);
         assert_eq!(source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn gemini_4_carbon_and_agy_model_variants_have_known_pricing() {
+        let usage = TokenUsage {
+            input_tokens: 100_000,
+            output_tokens: 10_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(50_000),
+        };
+        for model in [
+            "google/gemini-4-carbon-eap",
+            "gemini-4-carbon",
+            "antigravity/agy-model-high",
+            "agy-model-medium",
+            "agy-model-low",
+            "antigravity/gemini-4-argon-high",
+            "google/gemini-4-argon",
+        ] {
+            assert!(has_pricing(model), "{model} must have list pricing");
+            assert!(
+                cost_cents_from_usage(model, &usage) > 0,
+                "{model} must produce positive estimated cost"
+            );
+        }
     }
 }
