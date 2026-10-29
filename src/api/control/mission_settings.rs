@@ -488,6 +488,17 @@ async fn rollback_moved_missions(
 ) -> Result<(), String> {
     let mut first_error: Option<String> = None;
     for snap in moved.iter().rev() {
+        if let Err(recover_err) =
+            dispatch_admission::recover_dispatch_single(state, store, snap.id).await
+        {
+            tracing::error!(
+                mission_id = %snap.id,
+                %recover_err,
+                "Subtree project transfer individual journal recovery failed before rollback"
+            );
+            first_error.get_or_insert(recover_err);
+            continue;
+        }
         let attempt = snap.id.to_string();
         if let Some(prior) = &snap.prior_track_lease {
             let still_matches = state
@@ -591,9 +602,6 @@ pub(super) async fn recover_subtree_project_edit_entry(
 ) -> Result<(), String> {
     let snapshots: Vec<MovedMissionSnapshot> =
         serde_json::from_value(receipt).map_err(|e| e.to_string())?;
-    for snap in &snapshots {
-        dispatch_admission::recover_dispatch_single(state, store, snap.id).await?;
-    }
     rollback_moved_missions(state, store, &snapshots).await?;
     state.projects.clear_subtree_project_edit(root_key)
 }
