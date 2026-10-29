@@ -1,0 +1,38 @@
+    Finished `test` profile [unoptimized] target(s) in 0.08s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-cce4852a0adf52dc)
+
+running 31 tests
+test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
+test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
+test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
+test shadow::tests::orb_wire_enumerative_boundary_perturbations_rejected ... ok
+test shadow::tests::orb_wire_fuzz_10000_malformed_frames_never_panics ... ok
+test shadow::tests::orb_wire_roundtrip_and_failure_no_partial_mutation ... ok
+test shadow::tests::phase1_mission_control_and_fork_home_incident_replays ... ok
+test shadow::tests::phase2_proxy_provider_pool_and_argmin_route_fold_replay ... ok
+test shadow::tests::phase3_agent_event_normalizer_and_transcript_reducer_replays ... ok
+test shadow::tests::phase4_cursor_pagination_and_sidebar_merge_replays ... ok
+test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
+test shadow::tests::phase6_scroll_epoch_and_client_parity_replays ... ok
+test shadow::tests::shadow_runner_classifies_exact_matches_and_known_legacy_bugs ... ok
+test stats_settle_tests::settle_adds_once_ignores_replays_and_saturates ... ok
+test tests::approval_gate_needs_every_condition_and_confirms_critical ... ok
+test tests::attribution_step_rejects_forged_hints_and_never_returns_empty ... ok
+test tests::board_retry_and_slots_respect_parameterized_caps ... ok
+test tests::bundle_budget_and_log_window_respect_custom_limits ... ok
+test tests::canary_actor_trust_ignores_argv_and_unknown_uid ... ok
+test tests::lease_mode_classifier_respects_precedence ... ok
+test tests::phase2_proxy_stream_and_breaker_steppers_preserve_invariants ... ok
+test tests::phase3_mission_reconcile_queue_vm_and_access_steppers_preserve_invariants ... ok
+test tests::phase4_cross_client_projection_steppers_preserve_invariants ... ok
+test tests::phase6_scroll_epoch_and_client_parity_zero_divergences ... ok
+test tests::schedule_step_dedupes_fences_and_fires_once_per_slot ... ok
+test tests::tier1_admission_cooldown_cost_and_stream_loop_match_kernel ... ok
+test tests::tier1_ledger_liveness_and_pr_gate_match_kernel ... ok
+test tests::turn_summary_usage_limit_relative_time_and_transcript_patch_match_fixtures ... ok
+test tests::wave10_canary_whitelist_high_signal_bait_enforcer_and_biometric_gates ... ok
+test tests::wave12_node_disk_pressure_and_placement_kernels_match_specs ... ok
+test tests::writer_reuse_gate_enforces_continuation_and_retag_rules ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+

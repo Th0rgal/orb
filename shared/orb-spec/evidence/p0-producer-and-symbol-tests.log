@@ -1,0 +1,41 @@
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 2m 04s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 1 test
+test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3643 filtered out; finished in 0.69s
+
+   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
+    Finished `test` profile [unoptimized] target(s) in 57.55s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+
+running 14 tests
+test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
+test api::control::fork::tests::antigravity_forks_bound_history_and_preserve_current_instructions ... ok
+test api::control::fork::tests::btw_background_work_keeps_the_session_live ... ok
+test api::control::fork::tests::btw_creation_lock_only_blocks_the_same_conversation ... ok
+test api::control::fork::tests::editing_an_edited_message_keeps_its_carried_history ... ok
+test api::control::fork::tests::editing_the_only_message_restarts_with_the_new_text ... ok
+test api::control::fork::tests::mission_control_rejects_store_supersession_with_stale_caller_snapshot ... ok
+test api::control::fork::tests::preserves_conversation_roles_and_literal_content ... ok
+test api::control::fork::tests::production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout ... ok
+test api::control::fork::tests::production_workspace_prefix_enforces_fork_home_and_node_invariants ... ok
+test api::control::fork::tests::recovery_prompt_carries_history_without_launch_failures ... ok
+test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_missing_workspace ... ok
+test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
+test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3630 filtered out; finished in 0.13s
+
+   Compiling orb-spec v1.3.0 (/tmp/orb-work/orb/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 0.42s
+     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-80ea7278ce92855a)
+
+running 2 tests
+test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
+test real_object_and_archive_mutations_are_rejected ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.09s
+

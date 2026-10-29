@@ -100,6 +100,12 @@ class Generator(unittest.TestCase):
         self.assertEqual(len(protos), len(data["functions"]))
         self.assertIn("uint8_t leansys_sse_frame_scan(uint64_t, uint64_t, uint64_t, uint8_t, uint8_t, uint8_t);", protos)
 
+    def test_build_inventory_covers_every_manifest_symbol_once(self):
+        data = manifest()
+        path = ROOT / "shared/orb-spec/cabi/orb_kernel_exports.rs"
+        symbols = re.findall(r'^    "(\w+)",$', gen.outputs(data)[path], re.M)
+        self.assertEqual(symbols, [f["name"] for f in data["functions"]])
+
     def test_check_mode_reports_stale(self):
         self.assertEqual(gen.main(["--check"]), 0)
 

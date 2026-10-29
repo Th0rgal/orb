@@ -126,7 +126,11 @@ pub(crate) async fn run(ctx: TurnContext<'_>) -> AgentResult {
     }
     let thought_home = native_home(ctx.workspace);
     if let Some(home) = projectable_home(ctx.workspace) {
-        crate::api::antigravity_native::install_in_home(&home);
+        crate::api::antigravity_native::install_in_home_for_model(
+            &home,
+            Some(ctx.app_working_dir),
+            ctx.model,
+        );
     }
     crate::antigravity::clear_historical_error_steps(&thought_home, ctx.session_id);
     let mut child = match exec

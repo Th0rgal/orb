@@ -1,0 +1,2722 @@
+{
+  "schema_version": "orb-coverage-registry-v1",
+  "acceptance": "INCOMPLETE",
+  "total_exports": 118,
+  "counts_by_status": {
+    "partial": 12,
+    "unconnected": 106
+  },
+  "entries": [
+    {
+      "export": "orb_verify_writer_reuse",
+      "requirement": "Inventory ABI declaration orb_verify_writer_reuse; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyWriterReuse",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_lease_mode",
+      "requirement": "Inventory ABI declaration orb_verify_lease_mode; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyLeaseMode",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_track_hold",
+      "requirement": "Inventory ABI declaration orb_verify_track_hold; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyTrackHold",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_repo_disjoint",
+      "requirement": "Inventory ABI declaration orb_verify_repo_disjoint; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyRepoDisjoint",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_remote_outbox",
+      "requirement": "Inventory ABI declaration orb_verify_remote_outbox; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyRemoteOutbox",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_board_slots",
+      "requirement": "Inventory ABI declaration orb_verify_board_slots; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyBoardSlots",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_board_retry",
+      "requirement": "Inventory ABI declaration orb_verify_board_retry; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyBoardRetry",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_job_transition",
+      "requirement": "Inventory ABI declaration orb_verify_job_transition; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyJobTransition",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_bundle_budget",
+      "requirement": "Inventory ABI declaration orb_verify_bundle_budget; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyBundleBudget",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_token_rotation",
+      "requirement": "Inventory ABI declaration orb_verify_token_rotation; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyTokenRotation",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_approval",
+      "requirement": "Inventory ABI declaration orb_verify_approval; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyApproval",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_vm_lifecycle_step",
+      "requirement": "Inventory ABI declaration orb_vm_lifecycle_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.vmLifecycleStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_vm_claim_step",
+      "requirement": "Inventory ABI declaration orb_vm_claim_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.vmClaimStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_compute_secret_gate",
+      "requirement": "Inventory ABI declaration orb_compute_secret_gate; behavioral acceptance pending",
+      "model": "Orb.Kernel.computeSecretGate",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_verify_log_window",
+      "requirement": "Inventory ABI declaration orb_verify_log_window; behavioral acceptance pending",
+      "model": "Orb.Kernel.verifyLogWindow",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mix64_word",
+      "requirement": "Inventory ABI declaration orb_mix64_word; behavioral acceptance pending",
+      "model": "Orb.Kernel.mix64Word",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_proxy_step",
+      "requirement": "Inventory ABI declaration orb_proxy_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.proxyStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "SSE JSON chunk classification (sse_chunk_commits_output) runs in Rust before passing chunk_commits to orb_proxy_step.",
+        "Multi-attempt provider pool state across retries is not yet unified into a single proved state-machine trace."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local proxy stall tests verify transparent rerouting when upstream stalls before committed output and sticky-fence error surfacing without reroute once output is committed.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "proxy_committed_fence_forbids_reroute"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/proxy.rs",
+            "symbol": "client_stream_response"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/proxy.rs",
+            "symbol": "stall_before_output_is_rerouted_transparently"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/proxy.rs",
+            "symbol": "stall_after_output_is_surfaced_not_retried"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "src/api/proxy.rs",
+            "sha256": "1f26be0eac61f6df5453af64ed7fdeec39eed75b139cd2b6c4f6ffc222a264e9"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "SSE JSON chunk classification (sse_chunk_commits_output) runs in Rust before passing chunk_commits to orb_proxy_step.",
+          "Multi-attempt provider pool state across retries is not yet unified into a single proved state-machine trace."
+        ]
+      }
+    },
+    {
+      "export": "orb_stream_deadlines",
+      "requirement": "Inventory ABI declaration orb_stream_deadlines; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamDeadlines",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Tokio timer scheduling and SSE byte-tail boundary detection are implemented in Rust; Lean evaluates scalar elapsed/deadline inputs.",
+        "Full multi-chunk stream liveness under backpressure is not covered by the single-step scalar theorem."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local proxy SSE latency tests verify keepalive emission only at complete SSE event boundaries and independent client-gap timing.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "stream_deadlines_clock_isolation"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/proxy.rs",
+            "symbol": "client_stream_response"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/proxy.rs",
+            "symbol": "keepalives_fill_long_pauses_between_events_only"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "src/api/proxy.rs",
+            "sha256": "1f26be0eac61f6df5453af64ed7fdeec39eed75b139cd2b6c4f6ffc222a264e9"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Tokio timer scheduling and SSE byte-tail boundary detection are implemented in Rust; Lean evaluates scalar elapsed/deadline inputs.",
+          "Full multi-chunk stream liveness under backpressure is not covered by the single-step scalar theorem."
+        ]
+      }
+    },
+    {
+      "export": "orb_breaker_step",
+      "requirement": "Inventory ABI declaration orb_breaker_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.breakerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_step",
+      "requirement": "Inventory ABI declaration orb_mission_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_reconcile_step",
+      "requirement": "Inventory ABI declaration orb_reconcile_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.reconcileStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_queue_step",
+      "requirement": "Inventory ABI declaration orb_queue_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.queueStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_vm_step",
+      "requirement": "Inventory ABI declaration orb_vm_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.vmStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "lp_orb_x2dspec_Orb_Kernel_accessStep___redArg",
+      "requirement": "Inventory ABI declaration lp_orb_x2dspec_Orb_Kernel_accessStep___redArg; behavioral acceptance pending",
+      "model": null,
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review.",
+        "Source model unresolved (including pinned LeanSys or compiler helper)."
+      ]
+    },
+    {
+      "export": "orb_access_step",
+      "requirement": "Inventory ABI declaration orb_access_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.accessStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Owner identity, mission lineage, and wall-clock grant expiry booleans are computed by Rust before calling orb_access_step.",
+        "Timing side channels across storage lookups are outside the scalar non-disclosure theorem."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local cross-mission access tests verify zero target-title or existence oracle disclosure prior to live owner approval, read-only tool gating, and immediate hiding upon revocation.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "access_pre_grant_non_disclosure"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/mission_access.rs",
+            "symbol": "grant_for_tool"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/mission_access.rs",
+            "symbol": "agent_view"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/mission_access.rs",
+            "symbol": "agent_sees_nothing_of_the_target_before_a_live_grant"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/mission_access.rs",
+            "symbol": "an_approved_grant_never_allows_control"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/mission_access.rs",
+            "symbol": "read_allowed_only_after_approval"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "src/api/mission_access.rs",
+            "sha256": "320f108471c5e07830e3d4ab196daa5140c5cd1d4919d77f93a587b2d43cd3e4"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Owner identity, mission lineage, and wall-clock grant expiry booleans are computed by Rust before calling orb_access_step.",
+          "Timing side channels across storage lookups are outside the scalar non-disclosure theorem."
+        ]
+      }
+    },
+    {
+      "export": "orb_workfold_step",
+      "requirement": "Inventory ABI declaration orb_workfold_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.workfoldStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_taskcard_step",
+      "requirement": "Inventory ABI declaration orb_taskcard_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.taskcardStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_sidebar_visibility",
+      "requirement": "Inventory ABI declaration orb_sidebar_visibility; behavioral acceptance pending",
+      "model": "Orb.Kernel.sidebarVisibility",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_admission_step",
+      "requirement": "Inventory ABI declaration orb_admission_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.admissionStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_account_cooldown_secs",
+      "requirement": "Inventory ABI declaration orb_account_cooldown_secs; behavioral acceptance pending",
+      "model": "Orb.Kernel.accountCooldownSecs",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_cost_cents_step",
+      "requirement": "Inventory ABI declaration orb_cost_cents_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.costCentsStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_loop_step",
+      "requirement": "Inventory ABI declaration orb_stream_loop_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamLoopStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_job_ledger_step",
+      "requirement": "Inventory ABI declaration orb_job_ledger_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.jobLedgerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Submission-sequence ordering and SQLite/JSON persistence are maintained by Rust; orb_job_ledger_step decides over derived boolean predicates.",
+        "Crash-atomic equivalence between JSON receipts and the SQL mirror is tested locally, not formally proved."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local remote job-ledger tests verify that newer validations suppress stale terminal wakes, prevent superseded handles from holding wait leases, and defer wakes under tentative submissions.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "job_ledger_newer_supersedes_wait_lease"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/remote_node/job_ledger.rs",
+            "symbol": "current_remote_build_wait_handle"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/remote_node/job_ledger.rs",
+            "symbol": "terminal_wake_disposition"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/remote_node/job_ledger.rs",
+            "symbol": "newer_validation_suppresses_stale_terminal_wake"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/remote_node/job_ledger.rs",
+            "symbol": "newer_terminal_validation_prevents_old_handle_from_owning_wait_lease"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/remote_node/job_ledger.rs",
+            "symbol": "newer_tentative_submission_defers_without_suppressing_wake"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "src/remote_node/job_ledger.rs",
+            "sha256": "d843ac62973f380c8d4d7d1b9d16ef07e855ef2ab22dc3f6346ecc04e46e0550"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Submission-sequence ordering and SQLite/JSON persistence are maintained by Rust; orb_job_ledger_step decides over derived boolean predicates.",
+          "Crash-atomic equivalence between JSON receipts and the SQL mirror is tested locally, not formally proved."
+        ]
+      }
+    },
+    {
+      "export": "orb_proc_liveness_step",
+      "requirement": "Inventory ABI declaration orb_proc_liveness_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.procLivenessStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_pr_gate_step",
+      "requirement": "Inventory ABI declaration orb_pr_gate_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.prGateStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_turn_summary_step",
+      "requirement": "Inventory ABI declaration orb_turn_summary_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.turnSummaryStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_usage_limit_status",
+      "requirement": "Inventory ABI declaration orb_usage_limit_status; behavioral acceptance pending",
+      "model": "Orb.Kernel.usageLimitStatus",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_relative_time_bucket",
+      "requirement": "Inventory ABI declaration orb_relative_time_bucket; behavioral acceptance pending",
+      "model": "Orb.Kernel.relativeTimeBucket",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_transcript_patch_step",
+      "requirement": "Inventory ABI declaration orb_transcript_patch_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.transcriptPatchStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_attribution_step",
+      "requirement": "Inventory ABI declaration orb_attribution_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.attributionStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_schedule_step",
+      "requirement": "Inventory ABI declaration orb_schedule_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scheduleStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stats_settle_step",
+      "requirement": "Inventory ABI declaration orb_stats_settle_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.statsSettleStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_privilege_step",
+      "requirement": "Inventory ABI declaration orb_privilege_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.privilegeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_bunker_step",
+      "requirement": "Inventory ABI declaration orb_bunker_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.bunkerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_deploy_gate_step",
+      "requirement": "Inventory ABI declaration orb_deploy_gate_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.deployGateStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_max_top",
+      "requirement": "Inventory ABI declaration orb_scroll_max_top; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollMaxTop",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_clamp_top",
+      "requirement": "Inventory ABI declaration orb_scroll_clamp_top; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollClampTop",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_gap",
+      "requirement": "Inventory ABI declaration orb_scroll_gap; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollGap",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_layout_step",
+      "requirement": "Inventory ABI declaration orb_scroll_layout_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollLayoutStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_user_step",
+      "requirement": "Inventory ABI declaration orb_scroll_user_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollUserStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_jump_step",
+      "requirement": "Inventory ABI declaration orb_scroll_jump_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollJumpStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_correct",
+      "requirement": "Inventory ABI declaration orb_scroll_correct; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollCorrect",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_shows_jump",
+      "requirement": "Inventory ABI declaration orb_scroll_shows_jump; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollShowsJump",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_coalescer_step",
+      "requirement": "Inventory ABI declaration orb_stream_coalescer_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamCoalescerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_fence_step",
+      "requirement": "Inventory ABI declaration orb_stream_fence_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamFenceStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_commit_step",
+      "requirement": "Inventory ABI declaration orb_stream_commit_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamCommitStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_stream_token_cost_step",
+      "requirement": "Inventory ABI declaration orb_stream_token_cost_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamTokenCostStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_state_classify",
+      "requirement": "Inventory ABI declaration orb_mission_state_classify; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionStateClassify",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_sort_rank",
+      "requirement": "Inventory ABI declaration orb_mission_sort_rank; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionSortRank",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_flags",
+      "requirement": "Inventory ABI declaration orb_mission_flags; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionFlags",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_inbox_section",
+      "requirement": "Inventory ABI declaration orb_mission_inbox_section; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionInboxSection",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_connection_issue_classify",
+      "requirement": "Inventory ABI declaration orb_connection_issue_classify; behavioral acceptance pending",
+      "model": "Orb.Kernel.connectionIssueClassify",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_worked_duration_bucket",
+      "requirement": "Inventory ABI declaration orb_worked_duration_bucket; behavioral acceptance pending",
+      "model": "Orb.Kernel.workedDurationBucket",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_turn_outcome_step",
+      "requirement": "Inventory ABI declaration orb_turn_outcome_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.turnOutcomeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_numeric_cell_scan",
+      "requirement": "Inventory ABI declaration orb_numeric_cell_scan; behavioral acceptance pending",
+      "model": "Orb.Kernel.numericCellScan",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_file_ref_line_span",
+      "requirement": "Inventory ABI declaration orb_file_ref_line_span; behavioral acceptance pending",
+      "model": "Orb.Kernel.fileRefLineSpan",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_machine_action_admitted",
+      "requirement": "Inventory ABI declaration orb_machine_action_admitted; behavioral acceptance pending",
+      "model": "Orb.Kernel.machineActionAdmitted",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_send_flow_step",
+      "requirement": "Inventory ABI declaration orb_send_flow_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.sendFlowStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_wire_validate_frame",
+      "requirement": "Inventory ABI declaration orb_wire_validate_frame; behavioral acceptance pending",
+      "model": "Orb.Kernel.wireValidateFrame",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "OrbWire frames are currently exercised in orb-spec shadow/codec tests rather than authoritative production IPC or cross-client wire traffic.",
+        "Scalar header validation does not prove Rust slice indexing or byte-order serialization correctness."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local OrbWire codec tests exercise total frame validation, boundary perturbations, no-partial-mutation on small output buffers, and 10,000 malformed-frame fuzz inputs without panic.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "wire_frame_total_and_record_roundtrip"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "encode_into"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "decode"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "orb_wire_roundtrip_and_failure_no_partial_mutation"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "orb_wire_enumerative_boundary_perturbations_rejected"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "orb_wire_fuzz_10000_malformed_frames_never_panics"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "OrbWire frames are currently exercised in orb-spec shadow/codec tests rather than authoritative production IPC or cross-client wire traffic.",
+          "Scalar header validation does not prove Rust slice indexing or byte-order serialization correctness."
+        ]
+      }
+    },
+    {
+      "export": "orb_wire_pack_record",
+      "requirement": "Inventory ABI declaration orb_wire_pack_record; behavioral acceptance pending",
+      "model": "Orb.Kernel.wirePackRecord",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Record packing is exercised in orb-spec codec tests; authoritative P4 state-machine arena cutover remains open.",
+        "The theorem covers scalar bit-packing, not full variable-length payload decoding."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local OrbWire codec tests verify 64-bit record word packing/unpacking round-trips and arena slice offset bounds.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "wire_frame_total_and_record_roundtrip"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "wire_pack_record"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "encode_into"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "orb_wire_roundtrip_and_failure_no_partial_mutation"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Record packing is exercised in orb-spec codec tests; authoritative P4 state-machine arena cutover remains open.",
+          "The theorem covers scalar bit-packing, not full variable-length payload decoding."
+        ]
+      }
+    },
+    {
+      "export": "orb_wire_schema_migrate_step",
+      "requirement": "Inventory ABI declaration orb_wire_schema_migrate_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.wireSchemaMigrateStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Schema migration is not yet wired to persistent SQLite or cross-client payload migrations.",
+        "The scalar version-step check does not prove payload semantic preservation across schema versions."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local OrbWire tests verify consecutive-version schema migration admission and rejection of version skips, downgrades, and budget overflows.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "wire_schema_migrate_requires_consecutive_version"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "can_migrate_to"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "orb_wire_roundtrip_and_failure_no_partial_mutation"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Schema migration is not yet wired to persistent SQLite or cross-client payload migrations.",
+          "The scalar version-step check does not prove payload semantic preservation across schema versions."
+        ]
+      }
+    },
+    {
+      "export": "orb_effect_admissible",
+      "requirement": "Inventory ABI declaration orb_effect_admissible; behavioral acceptance pending",
+      "model": "Orb.Kernel.effectAdmissible",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Effect admissibility checks caller-supplied boolean flags in orb-spec; production side-effect executors do not yet enforce a universal effect-token capability.",
+        "Freshness of lease and idempotency flags across TOCTOU windows remains unproved."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local shadow-runner tests verify batch effect admissibility preconditions for leased job launch and verified session resume, rejecting unleased effects.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "effect_admissible_blocks_unleased_or_unverified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "verify_effect_batch_admissible"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "shadow_runner_classifies_exact_matches_and_known_legacy_bugs"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Effect admissibility checks caller-supplied boolean flags in orb-spec; production side-effect executors do not yet enforce a universal effect-token capability.",
+          "Freshness of lease and idempotency flags across TOCTOU windows remains unproved."
+        ]
+      }
+    },
+    {
+      "export": "orb_provider_pool_step",
+      "requirement": "Inventory ABI declaration orb_provider_pool_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.providerPoolStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_route_argmin_step",
+      "requirement": "Inventory ABI declaration orb_route_argmin_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.routeArgminStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_mission_control_step",
+      "requirement": "Inventory ABI declaration orb_mission_control_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.missionControlStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Shadow comparison checks exact pre-dispatch MissionControlAction codes against independent host expectations, not post-dispatch remote node process execution.",
+        "Snapshot-to-store races and caller evidence freshness across concurrent mutations are not proved.",
+        "The linked theorems prove scalar step properties; no end-to-end multi-step crash/queue refinement certificate exists yet.",
+        "An archived caller with a live stored snapshot produces a recorded divergence; the monotone scalar archive model does not refine reverse snapshots."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local tests compare store archive state and exact MissionControlAction codes against independent host expectations, detect EffectMismatch even when boolean admission/rejection agrees, reject stored closure through the submission producer before node contact or job publication, and preserve divergence when an archived caller contradicts a live store.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "archived_mission_never_revives"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "resume_codex_requires_verified_lineage"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "missionControlStep_actionCode_eq_expected"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/control/remote_jobs.rs",
+            "symbol": "evaluate_mission_control_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "shadow_state_observation_detects_independent_host_poststate_and_effect_divergences"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "production_mission_control_gate_enforces_archive_lease_dedupe_and_codex_rollout"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "mission_control_rejects_store_supersession_with_stale_caller_snapshot"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/dispatch_admission_tests.rs",
+            "symbol": "remote_submission_rejects_closed_snapshots_and_records_host_observations"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "src/api/control/fork.rs",
+            "sha256": "c82c0b759bc90032518d10f976be1944d6a690286e5c184215e1caae351b1f85"
+          },
+          {
+            "path": "src/api/control/remote_jobs.rs",
+            "sha256": "3f130ef43a66ac77ce59d787a9106c2b4c62d0b3404f1677bc6c7717e0499657"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
+            "sha256": "dbed7ff5a384553f7f4a861f119fab80638085626e1d2d768f7d3e2fa2d2021f"
+          },
+          {
+            "path": "src/api/control/dispatch_admission_tests.rs",
+            "sha256": "1b4ed61e0f7eaa55c6d4bd4bcd4a60607286b6c5b49d4b62e8394a06d8d53d85"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_submission_rejects_closed_snapshots_and_records_host_observations -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::fork::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --test artifact_symbols",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Shadow comparison checks exact pre-dispatch MissionControlAction codes against independent host expectations, not post-dispatch remote node process execution.",
+          "Snapshot-to-store races and caller evidence freshness across concurrent mutations are not proved.",
+          "The linked theorems prove scalar step properties; no end-to-end multi-step crash/queue refinement certificate exists yet.",
+          "An archived caller with a live stored snapshot produces a recorded divergence; the monotone scalar archive model does not refine reverse snapshots."
+        ]
+      }
+    },
+    {
+      "export": "orb_fork_home_step",
+      "requirement": "Inventory ABI declaration orb_fork_home_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.forkHomeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Remote HOME poststate has not been observed; no production ExactMatch claim.",
+        "Synthetic injection tests do not qualify remote execution or device behavior.",
+        "The linked theorem concerns the scalar word, not the remote shell or filesystem."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local tests detect synthetic HOME poststate and effect divergences; production preflight without execution evidence is counted as unobserved.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "fork_preserves_job_home_and_source_cwd"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/control/fork.rs",
+            "symbol": "workspace_prefix"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "shadow_state_observation_detects_independent_host_poststate_and_effect_divergences"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "production_workspace_prefix_enforces_fork_home_and_node_invariants"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/fork.rs",
+            "symbol": "unobserved_remote_home_is_not_an_exact_match"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
+            "sha256": "8eb6531bfd7f1a83ac18e6c20115b4a9f5e95ac87bd2bcdf805d616d6609d4ec"
+          },
+          {
+            "path": "src/api/control/fork.rs",
+            "sha256": "c82c0b759bc90032518d10f976be1944d6a690286e5c184215e1caae351b1f85"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::control::fork::tests:: -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Remote HOME poststate has not been observed; no production ExactMatch claim.",
+          "Synthetic injection tests do not qualify remote execution or device behavior.",
+          "The linked theorem concerns the scalar word, not the remote shell or filesystem."
+        ]
+      }
+    },
+    {
+      "export": "orb_privd_command_step",
+      "requirement": "Inventory ABI declaration orb_privd_command_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.privdCommandStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Tokenization, path canonicalization, and symlink inspection happen in Rust before scalar flags reach Lean; TOCTOU filesystem races between check and exec are not formally proved.",
+        "Remote fleet SSH ForcedCommand enforcement is not exercised end-to-end by this local unit receipt."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local privilege-broker and orb-spec tests exercise command grammar, symlink/path traversal, unsafe environment scrubbing, and scope non-escalation with zero shadow divergences.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "privd_rejects_metacharacters_traversal_unsafe_env_and_escalation"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/privilege_broker.rs",
+            "symbol": "evaluate_privd_command_confinement"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/privilege_broker.rs",
+            "symbol": "phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "phase5_privd_command_and_ssh_identity_confinement_replays"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          },
+          {
+            "path": "src/api/privilege_broker.rs",
+            "sha256": "a98f8c8259b52175b8b0fd94a1ff34ceb761f7ab795b17235b42311aebf75c38"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Tokenization, path canonicalization, and symlink inspection happen in Rust before scalar flags reach Lean; TOCTOU filesystem races between check and exec are not formally proved.",
+          "Remote fleet SSH ForcedCommand enforcement is not exercised end-to-end by this local unit receipt."
+        ]
+      }
+    },
+    {
+      "export": "orb_ssh_identity_step",
+      "requirement": "Inventory ABI declaration orb_ssh_identity_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.sshIdentityStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Environment map inspection and symlink metadata checks are performed by host Rust code; Lean decides over the extracted booleans.",
+        "Actual remote container/VM environment isolation is not proved by local unit execution."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local remote-job confinement tests verify control-plane SSH key non-leakage on worker/container targets, symlinked parent rejection, cyber-program allowlisting, and Codex goal budget fencing with zero shadow divergences.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "ssh_identity_never_leaks_control_plane_secrets_and_enforces_codex_gate"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/control/remote_jobs.rs",
+            "symbol": "evaluate_remote_ssh_and_codex_confinement"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/remote_jobs.rs",
+            "symbol": "phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "phase5_privd_command_and_ssh_identity_confinement_replays"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+          },
+          {
+            "path": "src/api/control/remote_jobs.rs",
+            "sha256": "3f130ef43a66ac77ce59d787a9106c2b4c62d0b3404f1677bc6c7717e0499657"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+            "sha256": "544c3c168022adf0cfef70698fe41c4b5be41643c45b462d25ea2563611e326a"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib phase5_privd_command_and_ssh_identity_confinement_replays -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib api::mission_access::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib remote_node::job_ledger::tests:: -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib keepalives_fill_long_pauses_between_events_only -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_before_output_is_rerouted_transparently -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stall_after_output_is_surfaced_not_retried -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Environment map inspection and symlink metadata checks are performed by host Rust code; Lean decides over the extracted booleans.",
+          "Actual remote container/VM environment isolation is not proved by local unit execution."
+        ]
+      }
+    },
+    {
+      "export": "orb_agent_event_normalize_step",
+      "requirement": "Inventory ABI declaration orb_agent_event_normalize_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.agentEventNormalizeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_transcript_reduce_step",
+      "requirement": "Inventory ABI declaration orb_transcript_reduce_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.transcriptReduceStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_cursor_page_step",
+      "requirement": "Inventory ABI declaration orb_cursor_page_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.cursorPageStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_sidebar_merge_step",
+      "requirement": "Inventory ABI declaration orb_sidebar_merge_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.sidebarMergeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_scroll_epoch_step",
+      "requirement": "Inventory ABI declaration orb_scroll_epoch_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.scrollEpochStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_client_parity_step",
+      "requirement": "Inventory ABI declaration orb_client_parity_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.clientParityStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_node_gc_step",
+      "requirement": "Inventory ABI declaration orb_node_gc_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.nodeGcStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_node_disk_admission_step",
+      "requirement": "Inventory ABI declaration orb_node_disk_admission_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.nodeDiskAdmissionStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_slice_bounds",
+      "requirement": "Inventory ABI declaration leansys_verify_slice_bounds; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifySliceBounds",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_wal_frame",
+      "requirement": "Inventory ABI declaration leansys_verify_wal_frame; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyWalFrame",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_cas_digest",
+      "requirement": "Inventory ABI declaration leansys_verify_cas_digest; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyCasDigest",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_check_http_bounds",
+      "requirement": "Inventory ABI declaration leansys_check_http_bounds; behavioral acceptance pending",
+      "model": "LeanSys.Spec.checkHttpBounds",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_jsonl_tape",
+      "requirement": "Inventory ABI declaration leansys_verify_jsonl_tape; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyJsonlTape",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_ring_cursor",
+      "requirement": "Inventory ABI declaration leansys_verify_ring_cursor; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyRingCursor",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_sst_block",
+      "requirement": "Inventory ABI declaration leansys_verify_sst_block; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifySstBlock",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_poll_interest",
+      "requirement": "Inventory ABI declaration leansys_verify_poll_interest; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyPollInterest",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_rlimit_budget",
+      "requirement": "Inventory ABI declaration leansys_verify_rlimit_budget; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyRlimitBudget",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_mix64_word",
+      "requirement": "Inventory ABI declaration leansys_mix64_word; behavioral acceptance pending",
+      "model": "LeanSys.Spec.mix64Word",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_composite_key_order",
+      "requirement": "Inventory ABI declaration leansys_verify_composite_key_order; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyCompositeKeyOrder",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_token_auth",
+      "requirement": "Inventory ABI declaration leansys_verify_token_auth; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyTokenAuth",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_log_window",
+      "requirement": "Inventory ABI declaration leansys_verify_log_window; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyLogWindow",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_jsonrpc_frame",
+      "requirement": "Inventory ABI declaration leansys_verify_jsonrpc_frame; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyJsonRpcFrame",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_gate_admit",
+      "requirement": "Inventory ABI declaration leansys_gate_admit; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyGateAdmit",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_mmap_seqlock",
+      "requirement": "Inventory ABI declaration leansys_verify_mmap_seqlock; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyMmapSeqlock",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_proc_stat_fields",
+      "requirement": "Inventory ABI declaration leansys_verify_proc_stat_fields; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyProcStatFields",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_sse_frame_scan",
+      "requirement": "Inventory ABI declaration leansys_sse_frame_scan; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifySseFrameScan",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_gfm_pipe_scan",
+      "requirement": "Inventory ABI declaration leansys_gfm_pipe_scan; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyGfmPipeScan",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_tag_scan",
+      "requirement": "Inventory ABI declaration leansys_tag_scan; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyTagScan",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_transcript_index",
+      "requirement": "Inventory ABI declaration leansys_transcript_index; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyTranscriptIndex",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_par_chunk",
+      "requirement": "Inventory ABI declaration leansys_verify_par_chunk; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyParChunk",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_arena_disjoint",
+      "requirement": "Inventory ABI declaration leansys_verify_arena_disjoint; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyArenaDisjoint",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_snapshot_visibility",
+      "requirement": "Inventory ABI declaration leansys_verify_snapshot_visibility; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifySnapshotVisibility",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_http_route_match",
+      "requirement": "Inventory ABI declaration leansys_verify_http_route_match; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyHttpRouteMatch",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_counterexample_triage",
+      "requirement": "Inventory ABI declaration leansys_verify_counterexample_triage; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyCounterexampleTriage",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_dag_wave_step",
+      "requirement": "Inventory ABI declaration leansys_verify_dag_wave_step; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyDagWaveStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_ios_jetsam_budget",
+      "requirement": "Inventory ABI declaration leansys_verify_ios_jetsam_budget; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyIosJetsamBudget",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_worker_budget",
+      "requirement": "Inventory ABI declaration leansys_verify_worker_budget; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyWorkerBudget",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_page_aligned_buffer",
+      "requirement": "Inventory ABI declaration leansys_verify_page_aligned_buffer; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyPageAlignedBuffer",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_select_isa",
+      "requirement": "Inventory ABI declaration leansys_select_isa; behavioral acceptance pending",
+      "model": "LeanSys.Spec.selectIsaVariant",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_isa_selection",
+      "requirement": "Inventory ABI declaration leansys_verify_isa_selection; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyIsaSelection",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    }
+  ]
+}

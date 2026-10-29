@@ -2611,7 +2611,8 @@
           "name": "cap",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifySliceBounds"
     },
     {
       "name": "leansys_verify_wal_frame",
@@ -2637,7 +2638,8 @@
           "name": "computedHash",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyWalFrame"
     },
     {
       "name": "leansys_verify_cas_digest",
@@ -2655,7 +2657,8 @@
           "name": "hasPathSep",
           "type": "uint8_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyCasDigest"
     },
     {
       "name": "leansys_check_http_bounds",
@@ -2677,7 +2680,8 @@
           "name": "authOk",
           "type": "uint8_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.checkHttpBounds"
     },
     {
       "name": "leansys_verify_jsonl_tape",
@@ -2707,7 +2711,8 @@
           "name": "depth",
           "type": "uint32_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyJsonlTape"
     },
     {
       "name": "leansys_verify_ring_cursor",
@@ -2729,7 +2734,8 @@
           "name": "msgLen",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyRingCursor"
     },
     {
       "name": "leansys_verify_sst_block",
@@ -2759,7 +2765,8 @@
           "name": "bloomMask",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifySstBlock"
     },
     {
       "name": "leansys_verify_poll_interest",
@@ -2789,7 +2796,8 @@
           "name": "maxIdleMs",
           "type": "uint32_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyPollInterest"
     },
     {
       "name": "leansys_verify_rlimit_budget",
@@ -2819,7 +2827,8 @@
           "name": "maxPipeBytes",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyRlimitBudget"
     },
     {
       "name": "leansys_mix64_word",
@@ -2833,7 +2842,8 @@
           "name": "word",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.mix64Word"
     },
     {
       "name": "leansys_verify_composite_key_order",
@@ -2863,7 +2873,8 @@
           "name": "seqB",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyCompositeKeyOrder"
     },
     {
       "name": "leansys_verify_token_auth",
@@ -2893,7 +2904,8 @@
           "name": "expiresAt",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyTokenAuth"
     },
     {
       "name": "leansys_verify_log_window",
@@ -2915,7 +2927,8 @@
           "name": "maxBytes",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyLogWindow"
     },
     {
       "name": "leansys_verify_jsonrpc_frame",
@@ -2937,7 +2950,8 @@
           "name": "payloadLen",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyJsonRpcFrame"
     },
     {
       "name": "leansys_gate_admit",
@@ -2955,7 +2969,8 @@
           "name": "certVerified",
           "type": "uint8_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyGateAdmit"
     },
     {
       "name": "leansys_verify_mmap_seqlock",
@@ -2997,7 +3012,8 @@
           "name": "ringCap",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyMmapSeqlock"
     },
     {
       "name": "leansys_verify_proc_stat_fields",
@@ -3023,7 +3039,8 @@
           "name": "actualFields",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyProcStatFields"
     },
     {
       "name": "leansys_sse_frame_scan",
@@ -3057,7 +3074,8 @@
       "jni": {
         "method": "leansysSseFrameScan",
         "ret": "jbyte"
-      }
+      },
+      "model": "LeanSys.Spec.verifySseFrameScan"
     },
     {
       "name": "leansys_gfm_pipe_scan",
@@ -3091,7 +3109,8 @@
       "jni": {
         "method": "leansysGfmPipeScan",
         "ret": "jbyte"
-      }
+      },
+      "model": "LeanSys.Spec.verifyGfmPipeScan"
     },
     {
       "name": "leansys_tag_scan",
@@ -3125,7 +3144,8 @@
       "jni": {
         "method": "leansysTagScan",
         "ret": "jbyte"
-      }
+      },
+      "model": "LeanSys.Spec.verifyTagScan"
     },
     {
       "name": "leansys_transcript_index",
@@ -3155,7 +3175,8 @@
       "jni": {
         "method": "leansysTranscriptIndex",
         "ret": "jlong"
-      }
+      },
+      "model": "LeanSys.Spec.verifyTranscriptIndex"
     },
     {
       "name": "leansys_verify_par_chunk",
@@ -3177,7 +3198,8 @@
           "name": "minGrain",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyParChunk"
     },
     {
       "name": "leansys_verify_arena_disjoint",
@@ -3203,7 +3225,8 @@
           "name": "arenaCap",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyArenaDisjoint"
     },
     {
       "name": "leansys_verify_snapshot_visibility",
@@ -3221,7 +3244,8 @@
           "name": "isTombstone",
           "type": "uint8_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifySnapshotVisibility"
     },
     {
       "name": "leansys_verify_http_route_match",
@@ -3243,7 +3267,8 @@
           "name": "routeCount",
           "type": "uint32_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyHttpRouteMatch"
     },
     {
       "name": "leansys_verify_counterexample_triage",
@@ -3265,7 +3290,8 @@
           "name": "triageClass",
           "type": "uint8_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyCounterexampleTriage"
     },
     {
       "name": "leansys_verify_dag_wave_step",
@@ -3295,7 +3321,8 @@
           "name": "maxWorkers",
           "type": "uint64_t"
         }
-      ]
+      ],
+      "model": "LeanSys.Spec.verifyDagWaveStep"
     },
     {
       "name": "leansys_verify_ios_jetsam_budget",
@@ -3325,7 +3352,8 @@
       "jni": {
         "method": "leansysVerifyIosJetsamBudget",
         "ret": "jint"
-      }
+      },
+      "model": "LeanSys.Spec.verifyIosJetsamBudget"
     },
     {
       "name": "leansys_verify_worker_budget",
@@ -3355,7 +3383,8 @@
       "jni": {
         "method": "leansysVerifyWorkerBudget",
         "ret": "jint"
-      }
+      },
+      "model": "LeanSys.Spec.verifyWorkerBudget"
     },
     {
       "name": "leansys_verify_page_aligned_buffer",
@@ -3389,7 +3418,8 @@
       "jni": {
         "method": "leansysVerifyPageAlignedBuffer",
         "ret": "jint"
-      }
+      },
+      "model": "LeanSys.Spec.verifyPageAlignedBuffer"
     },
     {
       "name": "leansys_select_isa",
@@ -3415,7 +3445,8 @@
       "jni": {
         "method": "leansysSelectIsa",
         "ret": "jint"
-      }
+      },
+      "model": "LeanSys.Spec.selectIsaVariant"
     },
     {
       "name": "leansys_verify_isa_selection",
@@ -3441,7 +3472,8 @@
       "jni": {
         "method": "leansysVerifyIsaSelection",
         "ret": "jint"
-      }
+      },
+      "model": "LeanSys.Spec.verifyIsaSelection"
     }
   ]
 }

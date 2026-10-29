@@ -172,9 +172,16 @@ pub(crate) async fn require_node_managed_auth(
         return Ok(());
     };
     if profile == "antigravity" {
-        // One Google sign-in: hand the node the routing login first. Older
+        let requested_model = match plan {
+            RemoteHarnessPlan::Antigravity { model, .. } => model.as_deref(),
+            _ => None,
+        };
+        // Hand the node the login suited to the requested model (switching to
+        // the only account offering Gemini 4 Carbon when requested). Older
         // nodes and nodes keeping their own sign-in fall back to the heartbeat.
-        match crate::api::antigravity_native::sync_node(state, node_id).await {
+        match crate::api::antigravity_native::sync_node_for_model(state, node_id, requested_model)
+            .await
+        {
             Ok(crate::api::antigravity_native::NodeSync::Ready) => {
                 let client = RemoteNodeClient::default();
                 remote_node::probe_node(&state.fleet, &client, node).await;
@@ -330,8 +337,8 @@ pub fn evaluate_transcript_reduce_gate(
     )
 }
 
-/// Evaluate `orb_client_parity_step` (`client_projection_bitwise_parity_across_ios_android_wasm`)
-/// on the Core transcript projection and record the comparison in `client_parity_shadow_counter()`.
+/// Evaluate `orb_client_parity_step` (`client_summary_digest_word_parity_across_targets`)
+/// on the Core transcript summary digest and record the comparison in `client_parity_shadow_counter()`.
 pub fn evaluate_client_parity_gate(
     client_target: crate::orb_spec::ClientProjectionTarget,
     wire_schema_id: u32,

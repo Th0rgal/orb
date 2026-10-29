@@ -49,6 +49,9 @@ pub(crate) struct Health {
     pub gemini_remaining: Option<f64>,
     /// When that Gemini window resets (Unix seconds).
     pub gemini_reset: Option<i64>,
+    /// Same for the Gemini 4 Carbon EAP (`agy-model-*`) pool.
+    pub carbon_remaining: Option<f64>,
+    pub carbon_reset: Option<i64>,
     /// Same for the "Claude and GPT models" pool.
     pub claude_remaining: Option<f64>,
     pub claude_reset: Option<i64>,
@@ -218,7 +221,11 @@ pub(crate) fn project(assist: &Value) -> Option<String> {
 
 fn is_gemini(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    m.contains("gemini") || m.starts_with("agy-")
+    (m.contains("gemini") && !m.contains("carbon")) || m.starts_with("agy-demo")
+}
+
+fn is_carbon(model: &str) -> bool {
+    super::antigravity_usage::quota_pool(model) == "gemini-eap"
 }
 
 fn is_claude_or_gpt(model: &str) -> bool {
@@ -444,6 +451,156 @@ pub(crate) fn chosen_file(dir: &Path) -> Option<String> {
     choose(&candidates, &map, chrono::Utc::now().timestamp()).map(|c| c.file.clone())
 }
 
+/// Map a native `agy` CLI model id (such as `agy-model` or `gemini-4-carbon`)
+/// to the discovered catalog id recorded in `model-discovery.json`.
+pub(crate) fn catalog_model_for_native(model: &str) -> &str {
+    let m = model
+        .trim()
+        .strip_prefix("antigravity/")
+        .unwrap_or(model.trim());
+    match m {
+        "agy-model" | "gemini-4-carbon" | "gemini-4-carbon-eap" | "gemini-4-carbon-high" => {
+            "agy-model-high"
+        }
+        "gemini-4-carbon-medium" => "agy-model-medium",
+        "gemini-4-carbon-low" => "agy-model-low",
+        "agy-demo" | "agy-demo-high" => "gemini-4-argon-high",
+        "agy-demo-medium" => "gemini-4-argon-medium",
+        "agy-demo-low" => "gemini-4-argon-low",
+        other => other,
+    }
+}
+
+fn pool_has_quota_for_model(health: Option<&Health>, model: &str, now: i64) -> bool {
+    let Some(h) = health else { return true };
+    if h.refused_until.is_some_and(|at| at > now) {
+        return false;
+    }
+    match super::antigravity_usage::quota_pool(model) {
+        "gemini-eap" => !pool_spent(h.carbon_remaining, h.carbon_reset, now),
+        "claude-gpt" => !pool_spent(h.claude_remaining, h.claude_reset, now),
+        _ => !pool_spent(h.gemini_remaining, h.gemini_reset, now),
+    }
+}
+
+fn pool_usable_again_for_model(health: Option<&Health>, model: &str, now: i64) -> i64 {
+    let Some(h) = health else { return now };
+    let pool_reset = match super::antigravity_usage::quota_pool(model) {
+        "gemini-eap" => pool_spent(h.carbon_remaining, h.carbon_reset, now)
+            .then(|| h.carbon_reset.unwrap_or(i64::MAX)),
+        "claude-gpt" => pool_spent(h.claude_remaining, h.claude_reset, now)
+            .then(|| h.claude_reset.unwrap_or(i64::MAX)),
+        _ => pool_spent(h.gemini_remaining, h.gemini_reset, now)
+            .then(|| h.gemini_reset.unwrap_or(i64::MAX)),
+    };
+    [pool_reset, h.refused_until.filter(|at| *at > now)]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(now)
+}
+
+/// Choose the best Antigravity login for a specific requested model, switching
+/// to the only account(s) whose discovered catalog actually offers `model`
+/// (e.g. `agy-model-high` for Gemini 4 Carbon) even when a higher-priority
+/// sibling lacks it or when the entitled account's regular Gemini pool is spent.
+pub(crate) fn choose_for_model<'a>(
+    candidates: &'a [Candidate],
+    health: &HashMap<String, Health>,
+    catalog: Option<(
+        &crate::model_catalog::DiscoveryState,
+        &[crate::ai_providers::AIProvider],
+    )>,
+    model: Option<&str>,
+    now: i64,
+) -> Option<&'a Candidate> {
+    let Some(model) = model.map(str::trim).filter(|s| !s.is_empty()) else {
+        return choose(candidates, health, now);
+    };
+    let catalog_model = catalog_model_for_native(model);
+    let mut eligible: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|c| {
+            health
+                .get(&c.file)
+                .is_none_or(|h| h.eligibility != Eligibility::NeedsVerification)
+        })
+        .collect();
+    if let Some((state, accounts)) = catalog {
+        let offering: Vec<&Candidate> = eligible
+            .iter()
+            .copied()
+            .filter(|c| {
+                let Some(account) = accounts
+                    .iter()
+                    .find(|a| a.cli_proxy_auth_file.as_deref() == Some(c.file.as_str()))
+                else {
+                    return true;
+                };
+                let route = crate::model_discovery::route(account);
+                let connection = crate::model_catalog::route_key(
+                    &account.id.to_string(),
+                    &route.base,
+                    &route.profile,
+                );
+                !connection_lacks(state, &connection, catalog_model)
+            })
+            .collect();
+        if !offering.is_empty() {
+            eligible = offering;
+        }
+    }
+    eligible.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| b.expires_at.cmp(&a.expires_at))
+            .then_with(|| a.file.cmp(&b.file))
+    });
+    eligible
+        .iter()
+        .copied()
+        .find(|c| pool_has_quota_for_model(health.get(&c.file), catalog_model, now))
+        .or_else(|| {
+            eligible.iter().copied().min_by_key(|c| {
+                pool_usable_again_for_model(health.get(&c.file), catalog_model, now)
+            })
+        })
+}
+
+/// The auth file native runs should use for `model` (falling back to the
+/// general priority/quota choice when `model` is omitted).
+pub(crate) fn chosen_file_for_model(
+    dir: &Path,
+    work_dir: Option<&Path>,
+    model: Option<&str>,
+) -> Option<String> {
+    let candidates = candidates(dir);
+    let map = HEALTH.read().map(|m| m.clone()).unwrap_or_default();
+    let now = chrono::Utc::now().timestamp();
+    let Some(model) = model.map(str::trim).filter(|s| !s.is_empty()) else {
+        return choose(&candidates, &map, now).map(|c| c.file.clone());
+    };
+    let catalog_and_accounts = work_dir.map(|root| {
+        let catalog = crate::model_catalog::read_state(root);
+        let accounts: Vec<crate::ai_providers::AIProvider> =
+            std::fs::read_to_string(root.join(crate::util::AI_PROVIDERS_PATH))
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+        (catalog, accounts)
+    });
+    choose_for_model(
+        &candidates,
+        &map,
+        catalog_and_accounts
+            .as_ref()
+            .map(|(cat, accs)| (cat, accs.as_slice())),
+        Some(model),
+        now,
+    )
+    .map(|c| c.file.clone())
+}
+
 /// Desired edits to an auth file for its eligibility; `None` when unchanged.
 pub(crate) fn reconcile_file(
     value: &Value,
@@ -653,23 +810,34 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
                 }
             }
         }
-        let ((gemini_remaining, gemini_reset), (claude_remaining, claude_reset)) = if eligibility
-            == Eligibility::Eligible
-        {
+        let (
+            (gemini_remaining, gemini_reset),
+            (carbon_remaining, carbon_reset),
+            (claude_remaining, claude_reset),
+        ) = if eligibility == Eligibility::Eligible {
             let body = project
                 .as_deref()
                 .map_or_else(|| json!({}), |p| json!({"project": p}));
             match super::antigravity_usage::call(client, token, "retrieveUserQuota", body).await {
-                Ok(quota) => (gemini_quota(&quota), pool_quota(&quota, is_claude_or_gpt)),
-                Err(_) => previous.as_ref().map_or(((None, None), (None, None)), |h| {
-                    (
-                        (h.gemini_remaining, h.gemini_reset),
-                        (h.claude_remaining, h.claude_reset),
-                    )
-                }),
+                Ok(quota) => (
+                    gemini_quota(&quota),
+                    pool_quota(&quota, is_carbon),
+                    pool_quota(&quota, is_claude_or_gpt),
+                ),
+                Err(_) => {
+                    previous
+                        .as_ref()
+                        .map_or(((None, None), (None, None), (None, None)), |h| {
+                            (
+                                (h.gemini_remaining, h.gemini_reset),
+                                (h.carbon_remaining, h.carbon_reset),
+                                (h.claude_remaining, h.claude_reset),
+                            )
+                        })
+                }
             }
         } else {
-            ((None, None), (None, None))
+            ((None, None), (None, None), (None, None))
         };
         set_health(
             &account.file,
@@ -681,6 +849,8 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
                 },
                 gemini_remaining,
                 gemini_reset,
+                carbon_remaining,
+                carbon_reset,
                 claude_remaining,
                 claude_reset,
                 refused_until: previous.as_ref().and_then(|h| h.refused_until),
@@ -709,13 +879,17 @@ pub(crate) async fn refresh_once(client: &reqwest::Client) -> Option<String> {
 /// "Eligibility check failed" means Google wants the owner to verify that
 /// login: it is marked unverified so the machine moves to a sibling, and the
 /// periodic check restores it once verified.
-pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option<String>)> {
+pub(crate) fn note_native_quota_refusal_for_model(
+    failure: &str,
+    work_dir: Option<&Path>,
+    model: Option<&str>,
+) -> Option<(String, Option<String>)> {
     let ineligible = is_eligibility_refusal(failure);
     if !ineligible && !is_individual_quota_refusal(failure) {
         return None;
     }
     let dir = super::cli_proxy_accounts::auth_dir()?;
-    let spent = chosen_file(&dir)?;
+    let spent = chosen_file_for_model(&dir, work_dir, model)?;
     let now = chrono::Utc::now();
     let until = crate::account_limits::parse_limit_reset(
         failure,
@@ -731,6 +905,8 @@ pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option
             eligibility: Eligibility::Unknown,
             gemini_remaining: None,
             gemini_reset: None,
+            carbon_remaining: None,
+            carbon_reset: None,
             claude_remaining: None,
             claude_reset: None,
             refused_until: None,
@@ -742,7 +918,7 @@ pub(crate) fn note_native_quota_refusal(failure: &str) -> Option<(String, Option
             health.refused_until = Some(until);
         }
     }
-    let next = chosen_file(&dir).filter(|next| *next != spent);
+    let next = chosen_file_for_model(&dir, work_dir, model).filter(|next| *next != spent);
     let identity = |file: &str| {
         super::cli_proxy_accounts::accounts_in(&dir)
             .into_iter()
@@ -959,6 +1135,8 @@ mod tests {
             eligibility: e,
             gemini_remaining: remaining,
             gemini_reset: reset,
+            carbon_remaining: None,
+            carbon_reset: None,
             claude_remaining: None,
             claude_reset: None,
             refused_until: None,
@@ -1334,6 +1512,107 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn choose_for_model_switches_to_only_account_offering_carbon_even_when_lower_priority_or_gemini_spent(
+    ) {
+        use crate::ai_providers::{AIProvider, ProviderType};
+        use crate::model_catalog::{Completeness, DiscoveryState, Observation, Success};
+
+        let mut high_prio = AIProvider::new(ProviderType::Antigravity, "her3sy".into());
+        high_prio.cli_proxy_auth_file = Some("antigravity-her3sy.json".into());
+        let mut carbon_only = AIProvider::new(ProviderType::Antigravity, "marchand".into());
+        carbon_only.cli_proxy_auth_file = Some("antigravity-marchand.json".into());
+
+        let obs = |account: &AIProvider, models: &[&str]| {
+            let route = crate::model_discovery::route(account);
+            Observation {
+                connection: crate::model_catalog::route_key(
+                    &account.id.to_string(),
+                    &route.base,
+                    &route.profile,
+                ),
+                provider_id: "antigravity".into(),
+                access_profile: "oauth".into(),
+                exportable: false,
+                checked_at: chrono::Utc::now(),
+                status: "discovered".into(),
+                diagnostic: None,
+                last_success: Some(Success {
+                    observed_at: chrono::Utc::now(),
+                    completeness: Completeness::Complete,
+                    models: models
+                        .iter()
+                        .map(|id| crate::api::providers::ProviderModel {
+                            id: (*id).into(),
+                            name: (*id).into(),
+                            description: None,
+                        })
+                        .collect(),
+                }),
+                fallback_models: vec![],
+            }
+        };
+
+        let state = DiscoveryState {
+            schema_version: 1,
+            connections: vec![
+                obs(
+                    &high_prio,
+                    &["claude-opus-5-5-thinking", "gemini-3.1-pro-high"],
+                ),
+                obs(
+                    &carbon_only,
+                    &["agy-model-low", "agy-model-medium", "agy-model-high"],
+                ),
+            ],
+        };
+        let accounts = vec![high_prio, carbon_only];
+        let c = [
+            cand("antigravity-her3sy.json", 100),
+            cand("antigravity-marchand.json", 10),
+        ];
+
+        // Even when marchand's regular Gemini pool is 0% (Argon exhausted), its
+        // Carbon EAP pool is full and it is the ONLY account offering Carbon.
+        let mut marchand_health = h(Eligibility::Eligible, Some(0.0), Some(9999));
+        marchand_health.carbon_remaining = Some(0.95);
+        let m = HashMap::from([
+            (
+                "antigravity-her3sy.json".into(),
+                h(Eligibility::Eligible, Some(1.0), None),
+            ),
+            ("antigravity-marchand.json".into(), marchand_health),
+        ]);
+
+        for alias in [
+            "agy-model",
+            "gemini-4-carbon",
+            "gemini-4-carbon-eap",
+            "agy-model-low",
+        ] {
+            assert_eq!(
+                choose_for_model(&c, &m, Some((&state, &accounts)), Some(alias), 100)
+                    .unwrap()
+                    .file,
+                "antigravity-marchand.json",
+                "must switch to marchand for {alias}"
+            );
+        }
+        // Without a Carbon request, the higher-priority healthy general login still wins.
+        assert_eq!(
+            choose_for_model(
+                &c,
+                &m,
+                Some((&state, &accounts)),
+                Some("claude-opus-5-5-thinking"),
+                100,
+            )
+            .unwrap()
+            .file,
+            "antigravity-her3sy.json"
         );
     }
 }

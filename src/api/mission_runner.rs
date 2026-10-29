@@ -6096,6 +6096,21 @@ pub(crate) fn detect_opencode_provider_auth(
                 }
             }
         }
+        let store_path = app_dir.join(".sandboxed-sh").join("ai_providers.json");
+        if let Ok(contents) = std::fs::read_to_string(&store_path) {
+            if let Ok(providers) =
+                serde_json::from_str::<Vec<crate::ai_providers::AIProvider>>(&contents)
+            {
+                if providers.iter().any(|p| {
+                    p.enabled
+                        && p.provider_type == crate::ai_providers::ProviderType::Google
+                        && p.has_credentials()
+                }) {
+                    has_google = true;
+                    configured_providers.insert("google".to_string());
+                }
+            }
+        }
     }
 
     // Explicit provider configuration wins over every credential source.
@@ -7099,6 +7114,11 @@ fn build_opencode_auth_from_ai_providers(
                 crate::ai_providers::ProviderType::Antigravity
                     | crate::ai_providers::ProviderType::MuseCode
             )
+            // Keep Google API keys inside Core's proxy (`ensure_opencode_provider_for_model`
+            // routes `google/*` and `gemini/*` via `SANDBOXED_PROXY_SECRET`) so mission
+            // workspaces cannot bypass the Carbon-only billing guard with a raw key.
+            || (provider.provider_type == crate::ai_providers::ProviderType::Google
+                && provider.api_key.is_some())
         {
             continue;
         }
@@ -12600,6 +12620,8 @@ mod tests {
         )
         .unwrap();
         assert!(super::detect_opencode_provider_auth(Some(temp.path())).has_google);
+        // Managed Google API keys stay on Core's proxy and never reach workspace auth.json.
+        assert!(build_opencode_auth_from_ai_providers(temp.path()).is_none());
         for alias in ["google", "gemini"] {
             fs::write(
                 temp.path().join("opencode.json"),

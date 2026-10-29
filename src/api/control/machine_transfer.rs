@@ -469,9 +469,12 @@ async fn core_antigravity_ready(state: &AppState, model: Option<&str>) -> bool {
     };
     let cli = super::super::mission_runner::get_backend_string_setting("antigravity", "cli_path")
         .unwrap_or_else(|| "agy".into());
+    let (wanted_base, _) = crate::antigravity::normalize_model_and_effort(model, None);
     crate::api::providers::workspace_antigravity_models(workspace, &state.config.working_dir, &cli)
         .await
-        .is_ok_and(|models| model.is_none_or(|wanted| models.iter().any(|(id, _)| id == wanted)))
+        .is_ok_and(|models| {
+            wanted_base.is_none_or(|wanted| models.iter().any(|(id, _)| id == wanted))
+        })
 }
 
 async fn core_vibe_workspace_ready(
@@ -1042,7 +1045,9 @@ async fn validate_destination(
                 return Err(conflict("Remote nodes are disabled"));
             }
             if backend == "antigravity" {
-                if let Err(error) = crate::api::antigravity_native::sync_node(state, id).await {
+                if let Err(error) =
+                    crate::api::antigravity_native::sync_node_for_model(state, id, model).await
+                {
                     tracing::warn!(node = %id, "Antigravity sign-in not pushed: {error}");
                 }
             }
@@ -1054,12 +1059,13 @@ async fn validate_destination(
                 return Err(conflict("Selected harness is not ready on this machine"));
             }
             if backend == "antigravity" {
-                if let Some(model) = model {
+                if let (Some(base_model), _) =
+                    crate::antigravity::normalize_model_and_effort(model, None)
+                {
                     let models = node_request(state, id, "/antigravity/models", None).await?;
-                    if !models
-                        .as_array()
-                        .is_some_and(|rows| rows.iter().any(|row| row[0].as_str() == Some(model)))
-                    {
+                    if !models.as_array().is_some_and(|rows| {
+                        rows.iter().any(|row| row[0].as_str() == Some(base_model))
+                    }) {
                         return Err(conflict(
                             "Selected Antigravity model is unavailable on the destination node",
                         ));
