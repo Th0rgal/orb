@@ -7862,7 +7862,7 @@ pub(crate) async fn resolve_command_path_in_workspace(
     }
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('\'');
     for ch in value.chars() {
