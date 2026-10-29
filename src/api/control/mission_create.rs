@@ -898,31 +898,41 @@ pub(super) fn verify_coalesced_attachments(
     Ok(())
 }
 
-/// Follow `superseded_by:` tags from a coordinator to the conversation that
-/// currently continues it, so a replacement worker is not attached to a retired
-/// coordinator (which then cannot be deleted while the worker runs).
-pub(super) async fn live_successor(
+/// Resolve the complete successor lineage of a replacement's inherited parent.
+/// Creation uses the last ID; deletion retains every intermediate record needed
+/// to reach it. Store failures and cycles cannot prove a disjoint dependency.
+pub(super) async fn replacement_parent_lineage(
     store: &Arc<dyn MissionStore>,
-    mut id: Option<Uuid>,
-) -> Option<Uuid> {
+    prior_id: Uuid,
+) -> Result<Vec<Uuid>, String> {
+    let Some(prior) = store.get_mission(prior_id).await? else {
+        return Ok(Vec::new());
+    };
+    let mut id = prior.parent_mission_id;
+    let mut lineage = Vec::new();
     for _ in 0..64 {
-        let current = id?;
-        let Ok(Some(mission)) = store.get_mission(current).await else {
-            return id;
+        let Some(current) = id else {
+            return Ok(lineage);
         };
-        let next = mission
+        if lineage.contains(&current) {
+            return Err("Replacement parent chain contains a cycle".into());
+        }
+        lineage.push(current);
+        let Some(mission) = store.get_mission(current).await? else {
+            return Ok(lineage);
+        };
+        id = mission
             .project
             .tags
             .iter()
             .rev()
             .find_map(|tag| tag.strip_prefix("superseded_by:"))
             .and_then(|raw| Uuid::parse_str(raw).ok());
-        match next {
-            Some(next) if next != current => id = Some(next),
-            _ => return id,
+        if id.is_none() || id == Some(current) {
+            return Ok(lineage);
         }
     }
-    id
+    Err("Replacement parent chain exceeds the resolution limit".into())
 }
 
 pub async fn create_mission(
@@ -1013,15 +1023,12 @@ pub(in crate::api) async fn create_mission_inner(
     // or the API surfaced as top-level missions detached from their coordinator.
     if req.parent_mission_id.is_none() {
         if let Some(prior_id) = req.supersedes_mission_id {
-            if let Some(prior) = parent_control
-                .mission_store
-                .get_mission(prior_id)
-                .await
-                .map_err(internal_error)?
-            {
-                req.parent_mission_id =
-                    live_successor(&parent_control.mission_store, prior.parent_mission_id).await;
-            }
+            req.parent_mission_id =
+                replacement_parent_lineage(&parent_control.mission_store, prior_id)
+                    .await
+                    .map_err(internal_error)?
+                    .last()
+                    .copied();
         }
     }
 

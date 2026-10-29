@@ -13616,13 +13616,227 @@ async fn workspace_purge_history_delete_does_not_rpc_into_locked_actor() {
 }
 
 #[tokio::test]
+async fn workspace_purge_history_delete_ignores_unrelated_uncertain_actions() {
+    let h = Harness::new().await;
+    let mission = h.writer(MissionStatus::Acknowledged, None).await;
+    let other = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("unrelated accepted action"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(other.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        crate::control_mcp::actions::init(&conn).unwrap();
+        let principal = crate::control_mcp::gateway::Principal {
+            sub: h.user.id.clone(),
+            username: h.user.username.clone(),
+            role: crate::control_mcp::Role::Operator,
+            mission_id: None,
+            project: None,
+            action_run_generation: None,
+            session_id: Uuid::new_v4(),
+            exp: usize::MAX,
+        };
+        conn.execute(
+            "INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state) VALUES('uncertain',?1,'test','retry','fingerprint',?2,'resume_mission',?3,'reconciliation_required')",
+            rusqlite::params![h.user.id, serde_json::to_string(&principal).unwrap(), serde_json::json!({"mission_id":other.id}).to_string()],
+        ).unwrap();
+    }
+    let result = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(mission.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.0["deleted"], serde_json::json!(mission.id));
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(mission.id)
+        .await
+        .unwrap()
+        .is_none());
+    let blocked = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(other.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(blocked.0, StatusCode::CONFLICT);
+    assert!(blocked.1.contains("uncertain"));
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(other.id)
+        .await
+        .unwrap()
+        .is_some());
+    let conn = h.state.projects.connection.lock().unwrap();
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM mcp_actions_v1 WHERE id='uncertain'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "reconciliation_required");
+}
+
+#[tokio::test]
+async fn workspace_purge_history_delete_retains_inherited_successor_parent() {
+    let h = Harness::new().await;
+    let store = &h.control.mission_store;
+    let retired = store
+        .create_mission(
+            Some("retired"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    let current = store
+        .create_mission(
+            Some("current"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(current.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            retired.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("superseded_by:{}", current.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let worker = store
+        .create_mission_with_parent(
+            Some("worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(retired.id),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(collect_child_mission_ids(store, current.id)
+        .await
+        .unwrap()
+        .is_empty());
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        crate::control_mcp::actions::init(&conn).unwrap();
+        let principal = crate::control_mcp::gateway::Principal {
+            sub: h.user.id.clone(),
+            username: h.user.username.clone(),
+            role: crate::control_mcp::Role::Operator,
+            mission_id: None,
+            project: None,
+            action_run_generation: None,
+            session_id: Uuid::new_v4(),
+            exp: usize::MAX,
+        };
+        conn.execute("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state) VALUES('replacement',?1,'test','retry','fingerprint',?2,'start_mission',?3,'queued')",
+            rusqlite::params![h.user.id, serde_json::to_string(&principal).unwrap(), json!({"supersedes_mission_id":worker.id}).to_string()]).unwrap();
+    }
+    let error = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(current.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert!(error.1.contains("replacement parent"));
+    assert!(store.get_mission(current.id).await.unwrap().is_some());
+    // Intermediate successor records are needed too, not only the final parent.
+    let newest = store
+        .create_mission(
+            Some("newest"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(newest.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            current.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("superseded_by:{}", newest.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    for id in [current.id, newest.id] {
+        let error = delete_mission(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Path(id),
+            Query(DeleteMissionQuery::default()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(error.1.contains("replacement parent"));
+    }
+}
+
+#[tokio::test]
 async fn workspace_purge_history_delete_retains_accepted_action_target() {
     let h = Harness::new().await;
     let mission = h.writer(MissionStatus::Acknowledged, None).await;
     {
         let conn = h.state.projects.connection.lock().unwrap();
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS mcp_actions_v1(id TEXT,owner TEXT,scope TEXT,retry_key TEXT,fingerprint TEXT,principal TEXT,tool TEXT,arguments TEXT,state TEXT DEFAULT 'queued');").unwrap();
-        conn.execute("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments) VALUES('pending','test','test','retry','fingerprint','{}','resume_mission','{}')", []).unwrap();
+        crate::control_mcp::actions::init(&conn).unwrap();
+        conn.execute("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments) VALUES('pending',?1,'test','retry','fingerprint','{}','resume_mission','{}')", [&h.user.id]).unwrap();
     }
     let result = delete_mission(
         State(h.state.clone()),
