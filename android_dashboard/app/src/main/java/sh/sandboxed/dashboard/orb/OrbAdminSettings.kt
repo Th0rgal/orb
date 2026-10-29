@@ -904,10 +904,13 @@ fun OrbProxyKeysSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         val targets = stale
                         staleKeys = null
                         scope.launch {
+                            var firstErr: String? = null
                             targets.forEach { k ->
                                 runCatching { core.request("/api/proxy-keys/${core.encodeComponent(k.id)}", "DELETE") }
+                                    .onFailure { if (firstErr == null) firstErr = it.message }
                             }
                             load()
+                            if (firstErr != null) error = firstErr
                         }
                     }) { Text("Delete", color = OrbStyle.error) }
                 } else {
@@ -1242,16 +1245,19 @@ private fun OrbSkillDetailView(core: OrbCore, name: String, onBack: () -> Unit) 
             title = { Text("Delete $name?", color = Color.White) },
             text = { Text("It leaves the Library and every agent.", color = OrbStyle.textSecondary) },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(enabled = !saving, onClick = {
                     confirmDelete = false
+                    saving = true
                     scope.launch {
                         try {
-                            runCatching { core.request("/api/library/skill/${core.encodeComponent(name)}", "DELETE") }
+                            core.request("/api/library/skill/${core.encodeComponent(name)}", "DELETE")
                             core.request("/api/library/commit", "POST", body = mapOf("message" to "skill: delete $name"))
                             core.request("/api/library/push", "POST")
                             onBack()
                         } catch (e: Throwable) {
                             error = e.message
+                        } finally {
+                            saving = false
                         }
                     }
                 }) { Text("Delete", color = OrbStyle.error) }
@@ -1315,27 +1321,53 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
 
     fun save(restart: Boolean) {
         if (busy) return
+        val subDefaultModel = defaultModel
+        val subReasoningEffort = reasoningEffort
+        val subUseRouter = useRouter
+        val subMemory = memory
+        val subUserProfile = userProfile
+        val subMemoryLimit = memoryLimit
+        val subUserLimit = userLimit
+        val subCompression = compression
+        val subCompressionThreshold = compressionThreshold
+        val subTelegramProgress = telegramProgress
+        val subTelegramCleanup = telegramCleanup
+        val subSoul = soul
         busy = true
         notice = null
         scope.launch {
             try {
                 val body = mapOf(
-                    "default_model" to defaultModel.trim(),
-                    "reasoning_effort" to reasoningEffort,
-                    "use_sandboxed_router" to useRouter,
-                    "memory_enabled" to memory,
-                    "user_profile_enabled" to userProfile,
-                    "memory_char_limit" to memoryLimit,
-                    "user_char_limit" to userLimit,
-                    "compression_enabled" to compression,
-                    "compression_threshold" to compressionThreshold,
-                    "telegram_tool_progress" to telegramProgress,
-                    "telegram_cleanup_progress" to telegramCleanup,
-                    "soul_markdown" to soul,
+                    "default_model" to subDefaultModel.trim(),
+                    "reasoning_effort" to subReasoningEffort,
+                    "use_sandboxed_router" to subUseRouter,
+                    "memory_enabled" to subMemory,
+                    "user_profile_enabled" to subUserProfile,
+                    "memory_char_limit" to subMemoryLimit,
+                    "user_char_limit" to subUserLimit,
+                    "compression_enabled" to subCompression,
+                    "compression_threshold" to subCompressionThreshold,
+                    "telegram_tool_progress" to subTelegramProgress,
+                    "telegram_cleanup_progress" to subTelegramCleanup,
+                    "soul_markdown" to subSoul,
                     "restart_service" to restart
                 )
                 val updated = OrbJSON.dict(core.request("/api/cloud/hermes/settings", "PUT", body = body))
-                if (updated != null) applyState(updated)
+                if (updated != null) {
+                    rawState = updated
+                    if (useRouter == subUseRouter) useRouter = updated["use_sandboxed_router"] == true
+                    if (defaultModel == subDefaultModel) defaultModel = OrbJSON.str(updated, "default_model").orEmpty()
+                    if (reasoningEffort == subReasoningEffort) reasoningEffort = OrbJSON.str(updated, "reasoning_effort").orEmpty()
+                    if (memory == subMemory) memory = updated["memory_enabled"] == true
+                    if (memoryLimit == subMemoryLimit) memoryLimit = (updated["memory_char_limit"] as? Number)?.toInt() ?: 8000
+                    if (userProfile == subUserProfile) userProfile = updated["user_profile_enabled"] == true
+                    if (userLimit == subUserLimit) userLimit = (updated["user_char_limit"] as? Number)?.toInt() ?: 4000
+                    if (compression == subCompression) compression = updated["compression_enabled"] == true
+                    if (compressionThreshold == subCompressionThreshold) compressionThreshold = (updated["compression_threshold"] as? Number)?.toDouble() ?: 0.5
+                    if (telegramProgress == subTelegramProgress) telegramProgress = OrbJSON.str(updated, "telegram_tool_progress")?.takeIf { it.isNotEmpty() } ?: "new"
+                    if (telegramCleanup == subTelegramCleanup) telegramCleanup = updated["telegram_cleanup_progress"] == true
+                    if (soul == subSoul) soul = OrbJSON.str(updated, "soul_markdown").orEmpty()
+                }
                 error = null
                 notice = if (restart) "Saved configuration and restarted Hermes." else "Saved Hermes configuration."
             } catch (e: Throwable) {
@@ -1395,10 +1427,10 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     Text("Model & router", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Route through Core router", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        Switch(checked = useRouter, onCheckedChange = { useRouter = it })
+                        Switch(checked = useRouter, onCheckedChange = { useRouter = it }, enabled = !busy)
                     }
-                    OrbMiniField("Default model", defaultModel) { defaultModel = it }
-                    OrbMiniField("Reasoning effort (default / low / medium / high)", reasoningEffort) { reasoningEffort = it }
+                    OrbMiniField("Default model", defaultModel, enabled = !busy) { defaultModel = it }
+                    OrbMiniField("Reasoning effort (default / low / medium / high)", reasoningEffort, enabled = !busy) { reasoningEffort = it }
                 }
 
                 // Memory & compression
@@ -1414,21 +1446,22 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     Text("Memory & compression", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Persistent memory (MEMORY.md)", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        Switch(checked = memory, onCheckedChange = { memory = it })
+                        Switch(checked = memory, onCheckedChange = { memory = it }, enabled = !busy)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("User profile memory (USER.md)", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        Switch(checked = userProfile, onCheckedChange = { userProfile = it })
+                        Switch(checked = userProfile, onCheckedChange = { userProfile = it }, enabled = !busy)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Context auto-compression", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        Switch(checked = compression, onCheckedChange = { compression = it })
+                        Switch(checked = compression, onCheckedChange = { compression = it }, enabled = !busy)
                     }
                     if (compression) {
                         Text("Threshold ${(compressionThreshold * 100).roundToInt()}% of context", color = OrbStyle.textSecondary, fontSize = 12.sp)
                         Slider(
                             value = compressionThreshold.toFloat(),
                             onValueChange = { compressionThreshold = ((it * 20).roundToInt() / 20.0) },
+                            enabled = !busy,
                             valueRange = 0.1f..0.95f
                         )
                     }
@@ -1447,7 +1480,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                     Text("Channels & persona", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Clean up Telegram progress", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        Switch(checked = telegramCleanup, onCheckedChange = { telegramCleanup = it })
+                        Switch(checked = telegramCleanup, onCheckedChange = { telegramCleanup = it }, enabled = !busy)
                     }
                     Row(
                         modifier = Modifier
@@ -1455,7 +1488,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                             .clip(RoundedCornerShape(10.dp))
                             .background(OrbStyle.card)
                             .border(1.dp, OrbStyle.border, RoundedCornerShape(10.dp))
-                            .orbPressClickable { showSoulDialog = true }
+                            .orbPressClickable(enabled = !busy) { showSoulDialog = true }
                             .padding(horizontal = 12.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -1511,6 +1544,7 @@ fun OrbHermesSettingsPage(core: OrbCore, onBack: () -> Unit) {
                 OutlinedTextField(
                     value = soul,
                     onValueChange = { soul = it },
+                    enabled = !busy,
                     textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 260.dp)
                 )

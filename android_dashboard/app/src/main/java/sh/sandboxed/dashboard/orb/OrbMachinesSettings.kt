@@ -424,6 +424,7 @@ internal fun OrbKeyValueLine(label: String, value: String) {
 internal fun OrbMiniField(
     label: String,
     value: String,
+    enabled: Boolean = true,
     onValueChange: (String) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -439,6 +440,7 @@ internal fun OrbMiniField(
             BasicTextField(
                 value = value,
                 onValueChange = onValueChange,
+                enabled = enabled,
                 textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                 cursorBrush = SolidColor(Color.White),
                 singleLine = true,
