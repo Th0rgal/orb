@@ -50,11 +50,18 @@ share concurrent reads. Mutable images expire within five minutes;
 desktop also scopes them to mission revision. Decoded/upload image caches are in-memory; native workspace files retain their existing account-scoped disk cache, while
 native presentation/history caches survive restarts. No cache is an archive.
 
-Scroll event ordering matters: a layout shrink can clamp the browser before its
-ResizeObserver runs, or an earlier corrective scroll event can arrive after the
-next layout. These are not new reader intent. The scroll owner restores the old
-anchor before remembering the viewport; `scroll-anchor.browser.spec.ts` replays
-both narration collapse and stale-cache enrichment with the working row absent.
+Scroll event ordering matters: HTML dispatches queued `scroll` events before
+`ResizeObserver` callbacks, so a layout shrink or column widening can clamp the
+browser before `ResizeObserver` runs, and an earlier corrective bottom scroll can
+arrive after the next frame's narrowing or viewport-height shrink. These are not
+new reader intent (`scrollEvent` in `lean/Orb/Scroll.lean` and `scrollPolicy.ts`):
+passive `scroll` events during geometry changes never unpin a following reader,
+the scroller's own viewport box is observed alongside its content column and dock,
+and an unpinned scroll owner restores the old anchor before remembering the
+viewport. `scroll-anchor.browser.spec.ts` and `scroll-contract.browser.spec.ts`
+replay narration collapse, stale-cache enrichment, frame-by-frame narrowing,
+widening-plus-height-shrink, and side-panel divider drags across both the main
+and `/btw` side conversations.
 
 Raw backfill is always sequence-sorted and deduplicated before reduction, including when a complete cache has newer presentation events beyond its raw cursor. Roster reads may only supersede an already applied newer response; a newer pending request does not invalidate useful completed data.
 

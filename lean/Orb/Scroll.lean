@@ -51,6 +51,21 @@ def userScroll (s : State) (height client top' : Int) : State :=
   else if gap height client t < near then { pinned := true, top := t }
   else { s with top := t }
 
+/-- A browser `scroll` event at `top'`.
+    - Reader input (`intent = true`) delegates to `userScroll`.
+    - When geometry changed since `s.top` was recorded (`resized = true` and `intent = false`),
+      the event is a layout consequence (an earlier bottom scroll arriving after narrowing or
+      streaming, or browser clamping when widening/shrinking): layout never changes `pinned`.
+    - At unchanged geometry (`intent = false`, `resized = false`), corrective bottom scrolls
+      (`s.top ≤ t`) and clamps (`gap < near`) also preserve `pinned`; only an explicit upward
+      programmatic jump away from the bottom (`t < s.top` and `near ≤ gap`) stops following. -/
+def scrollEvent (s : State) (intent resized : Bool) (height client top' : Int) : State :=
+  if intent then userScroll s height client top'
+  else
+    let t := clampTop height client top'
+    if !resized && s.pinned && t < s.top && near ≤ gap height client t then { pinned := false, top := t }
+    else { s with top := t }
+
 /-- A send or "Jump to latest". -/
 def jump (_ : State) (height client : Int) : State := { pinned := true, top := maxTop height client }
 
@@ -101,6 +116,76 @@ theorem scroll_to_bottom_pins (s : State) (h c t : Int) (down : s.top ≤ clampT
 theorem jump_pins_at_bottom (s : State) (h c : Int) (hc : c ≤ h) :
     (jump s h c).pinned = true ∧ gap h c (jump s h c).top = 0 := by
   simp [jump, gap, maxTop]; omega
+
+theorem scrollEvent_intent (s : State) (resized : Bool) (h c t : Int) :
+    scrollEvent s true resized h c t = userScroll s h c t := rfl
+
+/-- Any passive `scroll` event during a geometry change (`intent = false`, `resized = true` —
+    narrowing, widening, viewport-height shrink, dock resize, or narration folding) preserves
+    whether the reader is following. -/
+theorem resize_scroll_keeps_pinned (s : State) (h c t : Int) :
+    (scrollEvent s false true h c t).pinned = s.pinned := by
+  simp [scrollEvent]
+
+/-- An earlier corrective bottom scroll arriving after narrowing, streaming or
+    viewport-height shrink (`s.top ≤ clampTop h c t`) never unpins a following reader. -/
+theorem growth_scroll_keeps_pinned (s : State) (resized : Bool) (h c t : Int)
+    (hp : s.pinned = true) (mono : s.top ≤ clampTop h c t) :
+    (scrollEvent s false resized h c t).pinned = true := by
+  have : ¬ clampTop h c t < s.top := by omega
+  simp [scrollEvent, hp, this]
+
+/-- Browser clamping to `maxTop` when content shrinks or the column widens lands at
+    `gap ≤ 0 < near`, so the clamped scroll event never unpins a following reader. -/
+theorem clamp_scroll_keeps_pinned (s : State) (resized : Bool) (h c : Int) (hp : s.pinned = true) :
+    (scrollEvent s false resized h c (maxTop h c)).pinned = true := by
+  have hcl : clampTop h c (maxTop h c) = maxTop h c := by simp [clampTop, maxTop]
+  have hgap : ¬ near ≤ gap h c (maxTop h c) := by simp [near, gap, maxTop]; omega
+  simp [scrollEvent, hp, hcl, hgap]
+
+/-- Multi-step resize (narrowing, widening, or viewport-height shrink in any order):
+    Frame 0 settles `layout` at `(h₀, c₀)`, Frame 1 changes geometry to `(h₁, c₁)` before
+    a queued `scroll` event at any `t` runs (`resized = true`), and Frame 1's `ResizeObserver`
+    settles `layout` back at `gap = 0`. -/
+theorem resize_sequence_keeps_bottom (s : State) (h₀ c₀ d₀ h₁ c₁ d₁ t : Int)
+    (hp : s.pinned = true) (hc : c₁ ≤ h₁) :
+    let s₁ := layout s h₀ c₀ d₀
+    let s₂ := scrollEvent s₁ false true h₁ c₁ t
+    let s₃ := layout s₂ h₁ c₁ d₁
+    s₂.pinned = true ∧ s₃.pinned = true ∧ gap h₁ c₁ s₃.top = 0 := by
+  dsimp only
+  have hp₁ : (layout s h₀ c₀ d₀).pinned = true := by rw [layout_keeps_pinned]; exact hp
+  have hp₂ : (scrollEvent (layout s h₀ c₀ d₀) false true h₁ c₁ t).pinned = true := by
+    rw [resize_scroll_keeps_pinned]; exact hp₁
+  have hp₃ : (layout (scrollEvent (layout s h₀ c₀ d₀) false true h₁ c₁ t) h₁ c₁ d₁).pinned = true := by
+    rw [layout_keeps_pinned]; exact hp₂
+  exact ⟨hp₂, hp₃, pinned_layout_at_bottom _ h₁ c₁ d₁ hp₂ hc⟩
+
+/-- Consecutive narrowing frames even before geometry tracking notices (`resized = false`):
+    Frame 0 pins to `maxTop h₀ c₀`, Frame 1 grows `maxTop h₀ c₀ ≤ maxTop h₁ c₁` before
+    Frame 0's queued `scroll` event runs, and Frame 1's `ResizeObserver` settles at `gap = 0`. -/
+theorem resize_narrow_keeps_bottom (s : State) (h₀ c₀ d₀ h₁ c₁ d₁ : Int)
+    (hp : s.pinned = true) (narrow : maxTop h₀ c₀ ≤ maxTop h₁ c₁) (hc : c₁ ≤ h₁) :
+    let s₁ := layout s h₀ c₀ d₀
+    let s₂ := scrollEvent s₁ false false h₁ c₁ s₁.top
+    let s₃ := layout s₂ h₁ c₁ d₁
+    s₂.pinned = true ∧ s₃.pinned = true ∧ gap h₁ c₁ s₃.top = 0 := by
+  dsimp only
+  have hp₁ : (layout s h₀ c₀ d₀).pinned = true := by rw [layout_keeps_pinned]; exact hp
+  have htop₁ : (layout s h₀ c₀ d₀).top = maxTop h₀ c₀ := by simp [layout, hp]
+  have hmono : (layout s h₀ c₀ d₀).top ≤ clampTop h₁ c₁ (layout s h₀ c₀ d₀).top := by
+    rw [htop₁]; simp [clampTop, maxTop] at narrow ⊢; omega
+  have hp₂ : (scrollEvent (layout s h₀ c₀ d₀) false false h₁ c₁ (layout s h₀ c₀ d₀).top).pinned = true :=
+    growth_scroll_keeps_pinned _ false h₁ c₁ _ hp₁ hmono
+  have hp₃ : (layout (scrollEvent (layout s h₀ c₀ d₀) false false h₁ c₁ (layout s h₀ c₀ d₀).top) h₁ c₁ d₁).pinned = true := by
+    rw [layout_keeps_pinned]; exact hp₂
+  exact ⟨hp₂, hp₃, pinned_layout_at_bottom _ h₁ c₁ d₁ hp₂ hc⟩
+
+/-- An upward programmatic jump away from the bottom at unchanged geometry unpins. -/
+theorem programmatic_jump_unpins (s : State) (h c t : Int)
+    (up : clampTop h c t < s.top) (away : near ≤ gap h c (clampTop h c t)) :
+    (scrollEvent s false false h c t).pinned = false := by
+  cases hp : s.pinned <;> simp [scrollEvent, hp, up, away]
 
 /-! ### 4. The correction is idempotent; adding deltas is not -/
 

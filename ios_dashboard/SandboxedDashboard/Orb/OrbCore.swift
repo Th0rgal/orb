@@ -158,24 +158,73 @@ enum OrbMissionTree {
         return missions.filter { retained.contains($0.id) }
     }
 
-    /// Maps each listed fork to the most recently active version of its conversation.
+    private static let forkSettleMs: Int64 = 15_000
+
+    private static func epochMs(_ raw: String) -> Int64 {
+        guard !raw.isEmpty, let date = OrbStyle.parseDate(raw) else { return 0 }
+        return Int64((date.timeIntervalSince1970 * 1000.0).rounded())
+    }
+
+    private static func isRetiredVersion(_ mission: OrbRow) -> Bool {
+        let lower = mission.state.lowercased()
+        if lower == "acknowledged" || lower == "archived" { return true }
+        return mission.raw["tags"].items.map(\.text).contains {
+            $0 == "superseded" || $0.hasPrefix("superseded_by:") || $0.hasPrefix("superseded-by:") || $0.lowercased() == "orb-archived"
+        }
+    }
+
+    /// Maps each listed fork to its conversation's leader using the normative
+    /// `(unretired, live, effectiveActivity, forkDepth)` rank (`docs/specs/sidebar-hierarchy.md` F1).
     static func forkLeaders(_ missions: [OrbRow]) -> [String: OrbRow] {
         var byID: [String: OrbRow] = [:]
         for mission in missions where byID[mission.id] == nil { byID[mission.id] = mission }
-        func root(_ mission: OrbRow) -> String {
+        struct Lineage { let rootID: String; let depth: Int; let ancestors: [String] }
+        func lineage(_ mission: OrbRow) -> Lineage {
             var current = mission
             var seen: Set<String> = []
+            var ancestors: [String] = []
             while let source = current.forkSource, let next = byID[source], !seen.contains(source) {
                 seen.insert(current.id)
                 current = next
+                ancestors.append(current.id)
             }
-            return current.id
+            return Lineage(rootID: current.id, depth: ancestors.count, ancestors: ancestors)
         }
+        var info: [String: Lineage] = [:]
+        var rootOrder: [String] = []
         var groups: [String: [OrbRow]] = [:]
-        for mission in missions { groups[root(mission), default: []].append(mission) }
+        for mission in missions {
+            let lin = info[mission.id] ?? lineage(mission)
+            info[mission.id] = lin
+            if groups[lin.rootID] == nil { rootOrder.append(lin.rootID) }
+            groups[lin.rootID, default: []].append(mission)
+        }
         var leaders: [String: OrbRow] = [:]
-        for group in groups.values where group.count > 1 {
-            let leader = group.max { $0.updatedAt < $1.updatedAt }!
+        for rootID in rootOrder {
+            guard let group = groups[rootID], group.count > 1 else { continue }
+            var effective: [String: Int64] = [:]
+            for m in group { effective[m.id] = epochMs(m.updatedAt) }
+            for m in group {
+                let created = epochMs(m.raw["created_at"].text)
+                guard created > 0, let ancestors = info[m.id]?.ancestors else { continue }
+                for ancID in ancestors {
+                    if let ancAct = effective[ancID], ancAct <= created + forkSettleMs {
+                        effective[ancID] = min(ancAct, created)
+                    }
+                }
+            }
+            func rank(_ m: OrbRow) -> (Int, Int, Int64, Int) {
+                (isRetiredVersion(m) ? 0 : 1, m.active ? 1 : 0, effective[m.id] ?? 0, info[m.id]?.depth ?? 0)
+            }
+            var leader = group[0]
+            var bestRank = rank(leader)
+            for candidate in group.dropFirst() {
+                let r = rank(candidate)
+                if r > bestRank {
+                    leader = candidate
+                    bestRank = r
+                }
+            }
             for mission in group { leaders[mission.id] = leader }
         }
         return leaders

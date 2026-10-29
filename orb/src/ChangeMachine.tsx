@@ -1,10 +1,9 @@
-import { isManagedNode } from "./machines/nodes";
+import { isManagedNode, missionNode, nodeLabel } from "./machines/nodes";
 import { swallow } from "./log";
 import { navigateOverlayItems } from "./overlayNavigation";
 import { Popover } from "./Popover";
 import {cachedMachineDestinations,cacheMachineDestinations,preferSparkAdministration} from "./machineDestinations";
 import {connectionVersion} from "./api";
-import {nodeLabel} from "./machines/nodes";
 import { Select } from "./Select";
 import { For, Show, createMemo, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { ErrorNotice } from "./ErrorNotice";
@@ -14,6 +13,7 @@ import { localBinding, localRunActive, pollLocal, refreshLocalAgents, stopLocal 
 import { setClientMissionStatus } from "./api";
 import { deliverAssistantText } from "./clientLink";
 import { MachineLoadBadge, byLeastLoaded, machineLoadTitle } from "./machineLoad";
+import { lastMissionNode, recalledLaunch, rememberMissionNode } from "./missionLaunch";
 import { TransferInventory, formatBytes } from "./TransferInventory";
 import { TransferSelection, selectionRequest, selectionTotals, type Choice } from "./TransferSelection";
 import { activeTransfer, activateTransfer, copyTransfer, inspectTransfer, inventoryTransfer, machineLabel, sameMachine, selectTransfer, snapshotTransfer, transferRequest, verifyTransfer, type Destination, type Machine, type TransferAction, type TransferView, type WorkspaceInventory } from "./machineTransfer";
@@ -56,6 +56,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   const [destinations, setDestinations] = createSignal<Destination[]>(cachedMachineDestinations());
   const [selected, setSelected] = createSignal<Destination>();
   const [action, setAction] = createSignal<TransferAction>();
+  const [viewSource, setViewSource] = createSignal<Machine>();
   const [backend, setBackend] = createSignal(p.mission.backend ?? "");
   const [model, setModel] = createSignal(p.mission.model_override ?? "");
   const [loading, setLoading] = createSignal(true);
@@ -71,7 +72,25 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   let root!: HTMLDivElement;
   let client: string | undefined;
   const requestKey = crypto.randomUUID();
-  const current = (): Machine => p.mission.machine_transfer?.destination ?? (p.mission.tags?.includes("placement:client") ? { kind: "client", id: client ?? "unknown" } : p.mission.remote_node_id || p.mission.remote_job?.node_id ? { kind: "node", id: (p.mission.remote_node_id ?? p.mission.remote_job?.node_id)! } : { kind: "core" });
+  createEffect(() => {
+    const node = missionNode(p.mission);
+    if (node && p.mission.id) rememberMissionNode(p.mission.id, node);
+  });
+  const recalledRemoteNode = () => {
+    const node = recalledLaunch(p.mission.id)?.nodeId;
+    return node && node !== "local" && node !== "core" ? node : undefined;
+  };
+  const current = (): Machine => {
+    const pending = action();
+    if (pending && activeTransfer(pending)) return pending.source;
+    const inspected = viewSource();
+    if (inspected) return inspected.kind === "client" && inspected.id === "unknown" && client ? { kind: "client", id: client } : inspected;
+    if (p.mission.machine_transfer?.destination) return p.mission.machine_transfer.destination;
+    if (p.mission.tags?.includes("placement:client") || recalledLaunch(p.mission.id)?.nodeId === "local") return { kind: "client", id: client ?? "unknown" };
+    const node = missionNode(p.mission) ?? recalledRemoteNode() ?? lastMissionNode(p.mission.id);
+    return node ? { kind: "node", id: node } : { kind: "core" };
+  };
+  const sourceLabel = () => destinations().find(d => sameMachine(d.machine, current()))?.label ?? machineLabel(current());
   const running = () => localRunActive(p.mission.id) || ["active", "pending", "running", "starting"].includes(p.mission.status);
   createEffect(() => { const destination = selected()?.machine; if (destination) p.onDestination?.(destination); });
   const destinationChoices = () => selected() && p.choicesFor ? p.choicesFor(selected()!.machine) : p.choices;
@@ -98,6 +117,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       if (!alive || version!==connectionVersion()) return;
       client=id;
       features=view.features;
+      setViewSource(view.source);
       setDestinations(rows);
       setReady(true);
       const previous=selected();
@@ -200,7 +220,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
     <Show when={selected()}>
       <header class="transfer-head">
         <Show when={!action() && !busy()}><button type="button" class="icon-btn sm" aria-label="Choose another machine" title="Choose another machine" onClick={back}><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" /></svg></button></Show>
-        <div><strong>Continue on {selected()!.label}</strong><small>{machineLabel(current())} → {selected()!.label}</small></div>
+        <div><strong>Continue on {selected()!.label}</strong><small>{sourceLabel()} → {selected()!.label}</small></div>
       </header>
       <ol class="transfer-steps" aria-label="Transfer progress">
         <For each={STEPS}>{(name, i) => <li classList={{ done: i() < step(), current: i() === step() }} aria-current={i() === step() ? "step" : undefined}>{name}</li>}</For>

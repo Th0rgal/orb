@@ -129,7 +129,9 @@ use filesystem free-space measurements before/after any separately authorized
 cleanup. Missing or unreadable node ledgers never grant deletion permission.
 
 [Worker scratch reclamation](specs/node-storage-lifecycle.md) covers new owned
-TMPDIR/TMP/TEMP directories after confirmed supervision and a 72-hour grace period.
+TMPDIR/TMP/TEMP directories after confirmed supervision (72-hour baseline grace when
+healthy; pressure-accelerated `6h` / `0h` sweep for confirmed-retired receipts under
+`orb_node_gc_step`, while unretired receipts remain permanently retained).
 Hard-coded /tmp paths and legacy data require owner review. Completed remote mission
 source still needs a future node-local implementation of the explicit discard
 contract; archive/delete does not silently opt it in.
@@ -139,5 +141,8 @@ copying .lake into ad-hoc review trees. Never copy a .lake directory into itself
 (the Ashur incident included a multi-GiB .lake/.lake copy). Keep persistent source
 and final artifacts in the mission workspace, outside execution scratch. CI caches
 and toolchains require their own tool-aware budgets; they are not generic temporary
-files. The node now logs eligible cache counts and the untouched storage classes
-when pressure cannot be relieved, instead of claiming all caches were evicted.
+files. When non-cache storage pins a worker below `SANDBOXED_NODE_MIN_FREE_GB` above
+its emergency floor, `orb_node_gc_step` preserves hot (`< 2h`) shared Lake caches
+instead of thrashing them every 30 minutes and publishes `disk_pressure_pinned` on
+`/heartbeat` so Core placement (`orb_node_disk_admission_step`) excludes the node and
+surfaces the exact floor or pinned-pressure reason.

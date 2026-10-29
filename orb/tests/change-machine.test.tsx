@@ -1,12 +1,14 @@
 import { render, screen, fireEvent, waitFor, cleanup } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import {cacheMachineDestinations} from "../src/machineDestinations";
 import { ChangeMachine, forgetMachineDestinationLoads, preloadMachineDestinations } from "../src/ChangeMachine";
+import * as api from "../src/api";
 import * as transfers from "../src/machineTransfer";
 import type { Mission, HarnessChoice } from "../src/api";
 const mission: Mission = { id: "source", title: "Original", status: "awaiting_user", history: [], created_at: "", updated_at: "", backend: "codex", model_override: "model" };
 const choices: HarnessChoice[] = [{ backend: { id: "codex", name: "Codex" }, models: [{ value: "model", label: "Model" }] }];
-afterEach(() => { cacheMachineDestinations([]); forgetMachineDestinationLoads(); cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { localStorage.clear(); sessionStorage.clear(); cacheMachineDestinations([]); forgetMachineDestinationLoads(); cleanup(); vi.restoreAllMocks(); });
 it("lists the current machine and explains unavailable targets", async () => {
   vi.spyOn(transfers, "inspectTransfer").mockResolvedValue({ version: 1, actions: [], destinations: [{ machine: { kind: "core" }, label: "Core", available: true }, { machine: { kind: "node", id: "offline" }, label: "Offline", available: false, reason: "Machine unreachable" }] });
   const ui = render(() => <ChangeMachine mission={mission} choices={choices} onClose={() => {}} onMoved={() => {}} />);
@@ -111,4 +113,98 @@ it('selects the first destination model when changing harness', async()=>{
  fireEvent.change(screen.getByLabelText('Transfer harness'),{target:{value:'antigravity'}});
  expect((screen.getByLabelText('Transfer model') as HTMLSelectElement).value).toBe('node-only');
  expect((screen.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("keeps old-agent → Core source label and completes an empty-workspace transfer after cancelling a queued remote job", async () => {
+  const [liveMission, setLiveMission] = createSignal<Mission>({
+    ...mission,
+    id: "3049daa5-0879-48f2-bba0-b02d336b9b33",
+    status: "active",
+    backend: "opencode",
+    model_override: "builtin/smart",
+    remote_job: { id: "job-1", node_id: "old-agent", state: "queued" } as any,
+  });
+  const opencodeChoices: HarnessChoice[] = [
+    { backend: { id: "opencode", name: "OpenCode" }, models: [{ value: "builtin/smart", label: "Smart (Default)" }] },
+  ];
+  vi.spyOn(transfers, "inspectTransfer").mockResolvedValue({
+    version: 1,
+    actions: [],
+    destinations: [
+      { machine: { kind: "core" }, label: "Core", available: true, harnesses: ["opencode"] },
+      { machine: { kind: "node", id: "old-agent" }, label: "old-agent", available: true, harnesses: ["opencode"] },
+    ],
+  });
+  vi.spyOn(api, "cancelMission").mockImplementation(async () => {
+    setLiveMission(prev => ({ ...prev, status: "interrupted", remote_job: undefined }));
+  });
+  vi.spyOn(api, "getMission").mockImplementation(async () => liveMission());
+  const prepared: transfers.TransferAction = {
+    id: "transfer-3049",
+    mission_id: "3049daa5-0879-48f2-bba0-b02d336b9b33",
+    phase: "preparing",
+    source: { kind: "node", id: "old-agent" },
+    destination: { kind: "core" },
+    backend: "opencode",
+    model: "builtin/smart",
+    source_root: "mission:3049daa5-0879-48f2-bba0-b02d336b9b33",
+    created_at: "",
+  };
+  const snapshotted: transfers.TransferAction = {
+    ...prepared,
+    phase: "copying",
+    manifest: { bytes: 0, files: [], excluded: [] },
+  };
+  vi.spyOn(transfers, "transferRequest").mockResolvedValue(prepared as any);
+  vi.spyOn(transfers, "inventoryTransfer").mockResolvedValue({
+    rows: [],
+    bytes: 0,
+    files: 0,
+    reserved: { bytes: 4096, files: 1 },
+    truncated: false,
+    protected: 0,
+    limits: { bytes: 10 * 1024 * 1024 * 1024, files: 50_000 },
+  });
+  vi.spyOn(transfers, "selectTransfer").mockResolvedValue({ ok: true } as any);
+  vi.spyOn(transfers, "snapshotTransfer").mockResolvedValue(snapshotted);
+  vi.spyOn(transfers, "copyTransfer").mockResolvedValue(snapshotted);
+  vi.spyOn(transfers, "verifyTransfer").mockResolvedValue({ ...snapshotted, phase: "verified" });
+  const movedMission: Mission = { ...liveMission(), status: "awaiting_user", machine_transfer: { ...snapshotted, phase: "activated" } };
+  vi.spyOn(transfers, "activateTransfer").mockResolvedValue(movedMission);
+  const moved = vi.fn();
+
+  render(() => <ChangeMachine mission={liveMission()} choices={opencodeChoices} onClose={() => {}} onMoved={moved} />);
+  await waitFor(() => expect((screen.getByRole("menuitem", { name: /old-agent/ }) as HTMLButtonElement).disabled).toBe(true));
+  expect((screen.getByRole("menuitem", { name: /Core/ }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByRole("menuitem", { name: /Core/ }));
+  expect(screen.getByText("old-agent → Core")).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Stop and prepare" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy());
+  expect(screen.getByText("old-agent → Core")).toBeTruthy();
+  expect(screen.queryByText("Core → Core")).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Move to Core" })).toBeTruthy());
+  expect(screen.getByText("old-agent → Core")).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Move to Core" }));
+  await waitFor(() => expect(moved).toHaveBeenCalledWith(movedMission));
+});
+
+it("uses server-inspected source placement when an auto-placed remote mission has no active remote_job", async () => {
+  vi.spyOn(transfers, "inspectTransfer").mockResolvedValue({
+    version: 1,
+    source: { kind: "node", id: "old-agent" },
+    actions: [],
+    destinations: [
+      { machine: { kind: "core" }, label: "Core", available: true, harnesses: ["codex"] },
+      { machine: { kind: "node", id: "old-agent" }, label: "old-agent", available: true, harnesses: ["codex"] },
+    ],
+  });
+  render(() => <ChangeMachine mission={mission} choices={choices} onClose={() => {}} onMoved={() => {}} />);
+  await waitFor(() => expect((screen.getByRole("menuitem", { name: /old-agent/ }) as HTMLButtonElement).disabled).toBe(true));
+  expect((screen.getByRole("menuitem", { name: /Core/ }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByRole("menuitem", { name: /Core/ }));
+  expect(screen.getByText("old-agent → Core")).toBeTruthy();
 });

@@ -65,18 +65,40 @@ fn key(state: &AppState) -> Result<String, String> {
 /// for hours before its harness first contacts Core.
 pub const RENEWAL_GRACE_SECS: i64 = 24 * 3600;
 
+/// How long an unrevoked, non-superseded host coordinator credential
+/// (`role == Coordinator && mission_id.is_none()`) remains renewable across
+/// idle stretches where no mission launcher exists to re-mint its token file.
+pub const COORDINATOR_RENEWAL_GRACE_SECS: i64 = 90 * 24 * 3600;
+
+fn renewal_within_grace(principal: &Principal, stored_expires_at: i64, now: i64) -> bool {
+    let token_exp = principal.exp as i64;
+    if stored_expires_at < token_exp {
+        return false;
+    }
+    if principal.role == Role::Coordinator && principal.mission_id.is_none() {
+        let not_superseded = stored_expires_at <= token_exp.saturating_add(RENEWAL_GRACE_SECS);
+        let within_idle_cap = now <= token_exp.saturating_add(COORDINATOR_RENEWAL_GRACE_SECS);
+        not_superseded && within_idle_cap
+    } else {
+        now <= token_exp.saturating_add(RENEWAL_GRACE_SECS)
+    }
+}
+
 pub fn verify(state: &AppState, token: &str) -> Result<Principal, String> {
     verify_with(state, token, false)
 }
 
-/// Accepts a signed, unrevoked session up to [`RENEWAL_GRACE_SECS`] after
-/// expiry. Only `/api/mcp/renew` uses this, and renewal also requires the
+/// Accepts a signed, unrevoked session within its renewal grace window
+/// ([`RENEWAL_GRACE_SECS`] for mission-bound sessions;
+/// [`COORDINATOR_RENEWAL_GRACE_SECS`] for non-superseded standing coordinator
+/// sessions). Only `/api/mcp/renew` uses this, and renewal also requires any
 /// bound mission to be live.
 pub fn verify_for_renewal(state: &AppState, token: &str) -> Result<Principal, String> {
     verify_with(state, token, true)
 }
 
 fn verify_with(state: &AppState, token: &str, renewal: bool) -> Result<Principal, String> {
+    use rusqlite::OptionalExtension;
     let token = token.strip_prefix("mcp1.").ok_or("Invalid MCP token")?;
     let mut validation = jsonwebtoken::Validation::default();
     if renewal {
@@ -90,17 +112,34 @@ fn verify_with(state: &AppState, token: &str, renewal: bool) -> Result<Principal
     )
     .map(|v| v.claims)
     .map_err(|_| "Invalid or expired MCP session")?;
-    if renewal && (principal.exp as i64) + RENEWAL_GRACE_SECS < chrono::Utc::now().timestamp() {
-        return Err("Invalid or expired MCP session".into());
-    }
     let conn = state
         .projects
         .connection
         .lock()
         .map_err(|_| "Session store unavailable")?;
-    let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0 AND expires_at>=?3)",rusqlite::params![principal.session_id.to_string(),principal.sub,principal.exp as i64],|r|r.get(0)).map_err(|_|"Session unavailable")?;
-    if !valid {
+    let stored_expires_at: Option<i64> = conn
+        .query_row(
+            "SELECT expires_at FROM mcp_sessions_v1 WHERE id=?1 AND owner=?2 AND revoked=0 AND expires_at>=?3",
+            rusqlite::params![
+                principal.session_id.to_string(),
+                principal.sub,
+                principal.exp as i64
+            ],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| "Session unavailable")?;
+    let Some(stored_expires_at) = stored_expires_at else {
         return Err("MCP session revoked".into());
+    };
+    if renewal
+        && !renewal_within_grace(
+            &principal,
+            stored_expires_at,
+            chrono::Utc::now().timestamp(),
+        )
+    {
+        return Err("Invalid or expired MCP session".into());
     }
     Ok(principal)
 }
@@ -490,7 +529,8 @@ async fn authorize(
         "snapshot_managed_machine"
         | "fork_managed_machine"
         | "stop_managed_machine"
-        | "resume_managed_machine" => {
+        | "resume_managed_machine"
+        | "exec_raw_managed_machine" => {
             let id = args
                 .get("machine_id")
                 .and_then(Value::as_str)
@@ -1379,6 +1419,71 @@ mod tests {
         assert!(claim_call_slot(Uuid::new_v4()).is_ok());
         permits.pop();
         assert!(claim_call_slot(id).is_ok());
+    }
+
+    #[test]
+    fn standing_coordinator_renews_across_multi_day_idle_unless_superseded_or_mission_bound() {
+        let exp = 1_793_023_651usize;
+        let standing = Principal {
+            sub: "prod".into(),
+            username: "prod".into(),
+            role: Role::Coordinator,
+            mission_id: None,
+            project: None,
+            action_run_generation: None,
+            session_id: Uuid::new_v4(),
+            exp,
+        };
+        // Exact production regression: standing coordinator idle for ~69h (`stored == exp`).
+        assert!(renewal_within_grace(
+            &standing,
+            exp as i64,
+            exp as i64 + 69 * 3600
+        ));
+        // Concurrent sibling process renewed 1h ahead: still accepted within 24h overlap.
+        assert!(renewal_within_grace(
+            &standing,
+            exp as i64 + 3600,
+            exp as i64 + 7200
+        ));
+        // Old rotated-out token superseded >24h ago cannot be replayed indefinitely.
+        assert!(!renewal_within_grace(
+            &standing,
+            exp as i64 + RENEWAL_GRACE_SECS + 1,
+            exp as i64 + RENEWAL_GRACE_SECS + 10
+        ));
+        // Bounded by COORDINATOR_RENEWAL_GRACE_SECS ceiling.
+        assert!(!renewal_within_grace(
+            &standing,
+            exp as i64,
+            exp as i64 + COORDINATOR_RENEWAL_GRACE_SECS + 1
+        ));
+
+        // Mission-bound sessions (Executor or Coordinator) still enforce strict 24h grace.
+        let mission_coord = Principal {
+            mission_id: Some(Uuid::new_v4()),
+            ..standing.clone()
+        };
+        assert!(renewal_within_grace(
+            &mission_coord,
+            exp as i64,
+            exp as i64 + RENEWAL_GRACE_SECS
+        ));
+        assert!(!renewal_within_grace(
+            &mission_coord,
+            exp as i64,
+            exp as i64 + RENEWAL_GRACE_SECS + 1
+        ));
+        let executor = Principal {
+            role: Role::Executor,
+            mission_id: Some(Uuid::new_v4()),
+            ..standing
+        };
+        assert!(!renewal_within_grace(
+            &executor,
+            exp as i64,
+            exp as i64 + 69 * 3600
+        ));
     }
 }
 

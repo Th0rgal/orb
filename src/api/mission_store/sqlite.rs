@@ -22,9 +22,12 @@ mod board;
 mod import;
 mod paloma;
 mod queue;
+pub(crate) mod search_index;
 mod telegram;
 mod usage;
 use migrations::*;
+#[cfg(test)]
+mod search_tests;
 #[cfg(test)]
 mod tests;
 
@@ -438,6 +441,7 @@ impl SqliteMissionStore {
             // Cancel abandoned transfers after all mission tables exist.
             conn.execute_batch(include_str!("transfer_cleanup.sql"))
                 .map_err(|e| format!("Failed to install transfer cleanup: {e}"))?;
+            let needs_search_backfill = search_index::ensure_schema(&conn)?;
 
             let mut readers = Vec::with_capacity(READ_CONNECTIONS);
             for _ in 0..READ_CONNECTIONS {
@@ -452,14 +456,18 @@ impl SqliteMissionStore {
                 readers.push(Arc::new(Mutex::new(reader)));
             }
 
-            Ok::<_, String>((conn, readers))
+            Ok::<_, String>((conn, readers, needs_search_backfill))
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))??;
-        let (conn, readers) = conn;
+        let (conn, readers, needs_search_backfill) = conn;
+        let conn_arc = Arc::new(Mutex::new(conn));
+        if needs_search_backfill {
+            search_index::spawn_background_backfill(Arc::downgrade(&conn_arc), content_dir.clone());
+        }
 
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            conn: conn_arc,
             readers: Arc::new(readers),
             next_reader: Arc::default(),
             content_dir,
@@ -2076,5 +2084,21 @@ impl MissionStore for SqliteMissionStore {
         client: Option<bool>,
     ) -> Result<Vec<BoardOutboxItem>, String> {
         SqliteMissionStore::list_pending_board_outbox_filtered(self, limit, client).await
+    }
+    async fn search_index_coverage(&self) -> Result<super::SearchIndexCoverage, String> {
+        SqliteMissionStore::search_index_coverage_sqlite(self).await
+    }
+    async fn search_conversations(
+        &self,
+        query: &super::ConversationSearchQuery,
+    ) -> Result<super::ConversationSearchResponse, String> {
+        SqliteMissionStore::search_conversations_sqlite(self, query).await
+    }
+    async fn get_passage_context(
+        &self,
+        mission_id: Uuid,
+        params: &super::PassageContextQuery,
+    ) -> Result<Option<super::PassageContextResponse>, String> {
+        SqliteMissionStore::get_passage_context_sqlite(self, mission_id, params).await
     }
 }

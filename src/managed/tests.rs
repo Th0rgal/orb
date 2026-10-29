@@ -16,6 +16,8 @@ fn settings() -> ManagedSettings {
         raw_allowed_images: vec!["clean".into()],
         core_url: Some("https://core.example".into()),
         idle_minutes: 30,
+        working_idle_minutes: 0,
+        post_job_idle_minutes: 5,
         owner_grace_minutes: 0,
         waiting_grace_minutes: 60,
         orphan_grace_minutes: 0,
@@ -53,12 +55,19 @@ impl ManagedProvider for FakeProvider {
     fn name(&self) -> &'static str {
         "fake"
     }
+    fn supports_free_stop(&self) -> bool {
+        true
+    }
+    fn supports_snapshots(&self) -> bool {
+        true
+    }
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
         let n = self.created.fetch_add(1, Ordering::SeqCst);
         Ok(ProviderMachine {
             provider_id: format!("bx_fake{n}"),
             state: "ready".into(),
             name: spec.name.clone(),
+            deletable_at: None,
         })
     }
     async fn get(&self, provider_id: &str) -> Result<ProviderMachine, String> {
@@ -66,6 +75,7 @@ impl ManagedProvider for FakeProvider {
             provider_id: provider_id.into(),
             state: "ready".into(),
             name: String::new(),
+            deletable_at: None,
         })
     }
     async fn list(&self) -> Result<Vec<ProviderMachine>, String> {
@@ -314,16 +324,19 @@ async fn reconcile_stops_tagged_orphans_only() {
             provider_id: "bx_orphan1".into(),
             state: "ready".into(),
             name: "orb-managed-mmzzzz".into(),
+            deletable_at: None,
         },
         ProviderMachine {
             provider_id: "bx_research".into(),
             state: "ready".into(),
             name: "autoresearch run".into(),
+            deletable_at: None,
         },
         ProviderMachine {
             provider_id: "bx_old".into(),
             state: "archived".into(),
             name: "orb-managed-mmold".into(),
+            deletable_at: None,
         },
     ];
     let report = m.reconcile_once().await.unwrap();
@@ -412,11 +425,22 @@ async fn boat_e2e_provider_round_trip() {
     let provider = boat::BoatProvider::from_env().expect("BOAT_API_KEY");
     let tag = format!("{SANDBOX_NAME_PREFIX}e2e{}", random_id());
     let spec = SpawnSpec {
+        machine_id: tag.clone(),
         size: "small".into(),
+        cpu: 2,
+        ram_gb: 4,
+        gpu: None,
+        arch: None,
+        max_hourly_usd: None,
+        preferred_offer_id: None,
+        exclude_offer_ids: Vec::new(),
         ttl_seconds: 900,
         image: None,
         name: tag.clone(),
         idempotency_key: tag.clone(),
+        bootstrap_script: None,
+        allow_24h_commitment: false,
+        provisioning_mode: ProvisioningMode::Worker,
     };
     let created = provider.spawn(&spec).await.expect("spawn");
     let id = created.provider_id.clone();
@@ -548,6 +572,11 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         run_started_at: None,
         cost_before_resume: 0.0,
         secrets_wiped: false,
+        project: None,
+        root_mission_id: None,
+        active_mission_ids: Vec::new(),
+        deletable_at: None,
+        has_executed_job: false,
     };
     register_node(&machine, 3999, "tok");
     let settings = crate::remote_node::RemoteNodeSettings {
@@ -940,6 +969,11 @@ fn spend_machine(
         run_started_at: None,
         cost_before_resume: 0.0,
         secrets_wiped: false,
+        project: None,
+        root_mission_id: None,
+        active_mission_ids: Vec::new(),
+        deletable_at: None,
+        has_executed_job: false,
     }
 }
 
@@ -1199,12 +1233,14 @@ async fn reconcile_orphan_grace_and_vanished_rows() {
         provider_id: "bx_unrelated".into(),
         state: "ready".into(),
         name: "not ours".into(),
+        deletable_at: None,
     };
     *fake.listed.lock().unwrap() = vec![
         ProviderMachine {
             provider_id: "bx_orphan".into(),
             state: "ready".into(),
             name: "orb-managed-mmzz".into(),
+            deletable_at: None,
         },
         other.clone(),
     ];
@@ -1215,7 +1251,7 @@ async fn reconcile_orphan_grace_and_vanished_rows() {
     assert_eq!(m.get(&live.id).await.unwrap().state, MachineState::Online);
     // Grace passed (age the first sighting).
     m.reconcile_state.lock().await.orphans_seen.insert(
-        "bx_orphan".into(),
+        "fake:bx_orphan".into(),
         Utc::now() - chrono::Duration::minutes(11),
     );
     let r = m.reconcile_once().await.unwrap();
@@ -1252,6 +1288,7 @@ async fn reconcile_dry_run_keeps_orphans() {
         provider_id: "bx_orphan".into(),
         state: "ready".into(),
         name: "orb-managed-mmzz".into(),
+        deletable_at: None,
     }];
     let r = m.reconcile_once().await.unwrap();
     assert_eq!(r["dry_run"], serde_json::json!(true));
@@ -2377,4 +2414,706 @@ async fn worker_only_spawn_rejects_raw_snapshot_before_renting() {
     assert_eq!(provider.created.load(Ordering::SeqCst), 0);
     assert!(provider.forks.lock().unwrap().is_empty());
     assert!(manager.machines_snapshot().await.is_empty());
+}
+
+#[tokio::test]
+async fn working_owner_idle_reaps_unused_and_post_job_machines() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.working_idle_minutes = 15;
+    s.post_job_idle_minutes = 5;
+    s.max_concurrent = Some(4);
+    let (m, _) = manager(dir.path(), s);
+    let unused = online_machine(&m, "parent-working").await;
+    let post_job = online_machine(&m, "parent-working").await;
+    let mut map = std::collections::HashMap::new();
+    map.insert("parent-working".to_string(), OwnerState::Working);
+    m.set_owner_probe(probe_from(map));
+
+    // Unused worker at 6 minutes: kept (< 15m working_idle_minutes).
+    // Post-job worker at 6 minutes: reaped (>= 5m post_job_idle_minutes).
+    let six_min_ago = Utc::now() - chrono::Duration::minutes(6);
+    m.update(&unused.id, |x| {
+        x.last_busy_at = Some(six_min_ago);
+        x.has_executed_job = false;
+    })
+    .await;
+    m.update(&post_job.id, |x| {
+        x.last_busy_at = Some(six_min_ago);
+        x.has_executed_job = true;
+    })
+    .await;
+    m.reap_once().await;
+    assert_eq!(m.get(&unused.id).await.unwrap().state, MachineState::Online);
+    let reaped_post = m.get(&post_job.id).await.unwrap();
+    assert_eq!(reaped_post.state, MachineState::Destroyed);
+    assert_eq!(
+        reaped_post.destroy_reason.as_deref(),
+        Some("working_owner_idle")
+    );
+
+    // Unused worker at 16 minutes: now reaped too.
+    m.update(&unused.id, |x| {
+        x.last_busy_at = Some(Utc::now() - chrono::Duration::minutes(16));
+    })
+    .await;
+    m.reap_once().await;
+    let reaped_unused = m.get(&unused.id).await.unwrap();
+    assert_eq!(reaped_unused.state, MachineState::Destroyed);
+    assert_eq!(
+        reaped_unused.destroy_reason.as_deref(),
+        Some("working_owner_idle")
+    );
+}
+
+#[tokio::test]
+async fn crash_recovery_closes_half_provisioned_rows_on_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = Some(4);
+    let (m, _) = manager(dir.path(), s.clone());
+    let mut no_pid = online_machine(&m, "owner").await;
+    no_pid.id = "mm_nopid".into();
+    no_pid.state = MachineState::Provisioning;
+    no_pid.provider_id = None;
+    no_pid.ledger_closed = false;
+
+    let mut with_pid = online_machine(&m, "owner").await;
+    with_pid.id = "mm_withpid".into();
+    with_pid.state = MachineState::Enrolling;
+    with_pid.provider_id = Some("bx_half".into());
+    with_pid.ledger_closed = false;
+
+    *m.machines.lock().await = vec![no_pid, with_pid];
+    m.persist().await;
+
+    let reloaded_fake = Arc::new(FakeProvider::default());
+    let reloaded = Arc::new(ManagedManager::new(
+        s,
+        Some(reloaded_fake.clone()),
+        dir.path(),
+        3999,
+    ));
+    reloaded.load().await;
+
+    let r1 = reloaded.get("mm_nopid").await.unwrap();
+    assert_eq!(r1.state, MachineState::Failed);
+    assert!(r1.ledger_closed);
+    assert_eq!(
+        r1.destroy_reason.as_deref(),
+        Some("core_restarted_during_provision")
+    );
+
+    let r2 = reloaded.get("mm_withpid").await.unwrap();
+    assert_eq!(r2.state, MachineState::Destroying);
+    reloaded.reap_once().await;
+    assert_eq!(
+        reloaded.get("mm_withpid").await.unwrap().state,
+        MachineState::Destroyed
+    );
+    assert!(reloaded_fake
+        .destroyed
+        .lock()
+        .unwrap()
+        .contains(&"bx_half".to_string()));
+}
+
+#[tokio::test]
+async fn stopped_machine_reserves_its_name_against_duplicate_allocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = settings();
+    s.max_concurrent = Some(4);
+    s.daily_cap_usd = Some(50.0);
+    let (m, _) = manager(dir.path(), s);
+    let first = online_machine_sized(&m, "o1", Some("xlarge")).await;
+    assert_eq!(first.name, "xlarge-a");
+    m.stop_inner(&first.id, "user_stopped", false)
+        .await
+        .unwrap();
+    assert_eq!(m.get(&first.id).await.unwrap().state, MachineState::Stopped);
+
+    // Spawning another xlarge while `xlarge-a` is Stopped must allocate `xlarge-b`, never `xlarge-a`.
+    let second = online_machine_sized(&m, "o2", Some("xlarge")).await;
+    assert_eq!(second.name, "xlarge-b");
+}
+
+#[tokio::test]
+async fn deletable_at_defers_provider_destroy_until_minimum_lease_expires() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, fake) = manager(dir.path(), settings());
+    let vm = online_machine(&m, "mac-owner").await;
+    let lease_end = Utc::now() + chrono::Duration::hours(23);
+    m.update(&vm.id, |x| x.deletable_at = Some(lease_end)).await;
+
+    // Attempting to destroy before `deletable_at` unregisters the node and schedules
+    // `awaiting_deletable_at`, without calling provider.destroy prematurely.
+    let deferred = m.destroy(&vm.id, "user_destroyed").await.unwrap();
+    assert_eq!(deferred.state, MachineState::Online);
+    assert_eq!(deferred.reap_at, Some(lease_end));
+    assert_eq!(
+        deferred.reap_reason.as_deref(),
+        Some("awaiting_deletable_at:user_destroyed")
+    );
+    assert!(fake.destroyed.lock().unwrap().is_empty());
+
+    // Once `deletable_at` passes, `reap_once` destroys the VM cleanly.
+    m.update(&vm.id, |x| {
+        let past = Utc::now() - chrono::Duration::seconds(5);
+        x.deletable_at = Some(past);
+        x.reap_at = Some(past);
+    })
+    .await;
+    m.reap_once().await;
+    assert_eq!(m.get(&vm.id).await.unwrap().state, MachineState::Destroyed);
+    assert_eq!(fake.destroyed.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn multi_provider_planning_and_scaleway_commitment_gate() {
+    let s = settings();
+    let (hz, _) = ManagedManager::plan_for_provider(
+        &s,
+        "hetzner",
+        &SpawnRequest {
+            size: Some("large".into()),
+            arch: Some("arm64".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(hz.size, "cax31");
+    assert_eq!(hz.arch, "arm64");
+
+    // CPU/RAM selection with arch="arm64" must pick cax31 instead of x86_64 cpx41.
+    let (hz_cpu_ram, _) = ManagedManager::plan_for_provider(
+        &s,
+        "hetzner",
+        &SpawnRequest {
+            cpu: Some(8),
+            ram_gb: Some(16),
+            arch: Some("arm64".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(hz_cpu_ram.size, "cax31");
+
+    // Requesting 16 vCPU arm64 on Hetzner has no matching size and must fail cleanly.
+    let err_hz_arch = ManagedManager::plan_for_provider(
+        &s,
+        "hetzner",
+        &SpawnRequest {
+            cpu: Some(16),
+            arch: Some("arm64".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err_hz_arch.error, "invalid_size");
+
+    // Boat only offers x86_64 sizes.
+    let err_boat_arch = ManagedManager::plan_for_provider(
+        &s,
+        "boat",
+        &SpawnRequest {
+            arch: Some("arm64".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err_boat_arch.error, "invalid_size");
+
+    let err_bad_arch = ManagedManager::plan_for_provider(
+        &s,
+        "hetzner",
+        &SpawnRequest {
+            arch: Some("riscv64".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err_bad_arch.error, "invalid_arch");
+
+    let (vast, _) = ManagedManager::plan_for_provider(
+        &s,
+        "vastai",
+        &SpawnRequest {
+            size: Some("a100".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(vast.size, "a100");
+    assert_eq!(vast.gpu, Some("A100 SXM4"));
+
+    // Scaleway Apple Silicon cannot bootstrap Linux orb-node workers: reject worker mode upfront.
+    let worker_err = ManagedManager::plan_for_provider(
+        &s,
+        "scaleway",
+        &SpawnRequest {
+            size: Some("M2-M".into()),
+            allow_24h_commitment: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(worker_err.error, "unsupported_provisioning_mode");
+
+    // Raw mode still requires explicit 24h commitment confirmation.
+    let err = ManagedManager::plan_for_provider(
+        &s,
+        "scaleway",
+        &SpawnRequest {
+            size: Some("M2-M".into()),
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.error, "commitment_confirmation_required");
+
+    let (mac, _) = ManagedManager::plan_for_provider(
+        &s,
+        "scaleway",
+        &SpawnRequest {
+            size: Some("M2-M".into()),
+            provisioning_mode: Some(ProvisioningMode::Raw),
+            allow_24h_commitment: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(mac.size, "M2-M");
+    assert_eq!(mac.min_billing_hours, Some(24));
+    assert!(!RuntimeSettings::default().reaper_dry_run);
+}
+
+#[tokio::test]
+async fn scaleway_provider_spawn_rejects_apple_silicon_worker_before_network() {
+    let scw =
+        scaleway::ScalewayProvider::new("http://127.0.0.1:9", "dummy-key", Some("proj-1".into()));
+    let spec = SpawnSpec {
+        machine_id: "mmmac001".into(),
+        size: "M2-M".into(),
+        cpu: 8,
+        ram_gb: 16,
+        ttl_seconds: 3600,
+        image: Some("macos-15".into()),
+        name: "orb-managed-mmmac001".into(),
+        idempotency_key: "orb-managed-mmmac001".into(),
+        bootstrap_script: None,
+        gpu: None,
+        arch: Some("arm64".into()),
+        max_hourly_usd: None,
+        preferred_offer_id: None,
+        exclude_offer_ids: Vec::new(),
+        allow_24h_commitment: true,
+        provisioning_mode: ProvisioningMode::Worker,
+    };
+    let err = scw.spawn(&spec).await.unwrap_err();
+    assert!(err.contains("provisioning_mode: \"raw\""), "{err}");
+}
+
+#[test]
+fn provider_for_never_aliases_boat_to_non_test_cloud_providers() {
+    let dir = tempfile::tempdir().unwrap();
+    let hz: Arc<dyn ManagedProvider> = Arc::new(hetzner::HetznerProvider::new(
+        "http://127.0.0.1:9",
+        "hz-key",
+    ));
+    let m = Arc::new(ManagedManager::new(settings(), Some(hz), dir.path(), 3000));
+    assert!(
+        m.provider_for("boat").is_none(),
+        "boat must remain unconfigured so Bitwarden discovery can still register BoatProvider"
+    );
+    assert_eq!(m.provider_for("hetzner").unwrap().name(), "hetzner");
+
+    // FakeProvider in unit tests still backs default "boat" rows.
+    let (m_fake, _) = manager(dir.path(), settings());
+    assert_eq!(m_fake.provider_for("boat").unwrap().name(), "fake");
+}
+
+#[tokio::test]
+async fn vastai_quote_admits_real_offer_rate_and_enforces_cpu_ram_floors() {
+    use axum::{
+        routing::{post, put},
+        Json, Router,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let asks_called = Arc::new(AtomicUsize::new(0));
+    let asks_called_route = Arc::clone(&asks_called);
+
+    let app = Router::new()
+        .route(
+            "/bundles/",
+            post(|| async {
+                Json(serde_json::json!({
+                    "offers": [
+                        // Cheaper offer, but undersized RAM (16 GB < 64 GB floor) -> must be skipped!
+                        {"id": 101, "dph_total": 0.35, "cpu_cores_effective": 16.0, "cpu_ram": 16384.0},
+                        // Undersized CPU (8 < 16 floor) -> must be skipped!
+                        {"id": 102, "dph_total": 0.40, "cpu_cores_effective": 8.0, "cpu_ram": 65536.0},
+                        // Valid 20 vCPU / 64 GB RTX 4090 offer at $0.68/h (above $0.45 catalog rate, within 1.6x ceiling)
+                        {"id": 103, "dph_total": 0.68, "cpu_cores_effective": 20.0, "cpu_ram": 64512.0}
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/asks/:offer_id/",
+            put(move |axum::extract::Path(offer_id): axum::extract::Path<String>| {
+                let asks_called_route = Arc::clone(&asks_called_route);
+                async move {
+                    asks_called_route.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(offer_id, "103", "must rent verified offer 103, never undersized 101/102");
+                    Json(serde_json::json!({"success": true, "new_contract": 999001}))
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut tight = settings();
+    // 60 min at catalog $0.45/h would fit under $0.55 cap, but actual offer is $0.68/h!
+    tight.daily_cap_usd = Some(0.55);
+    let vast: Arc<dyn ManagedProvider> = Arc::new(vastai::VastAiProvider::new(
+        format!("http://{addr}"),
+        "vast-test-key",
+    ));
+    let m_tight = Arc::new(ManagedManager::new(
+        tight,
+        Some(Arc::clone(&vast)),
+        dir.path(),
+        3000,
+    ));
+    let rejected = m_tight
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            ttl_minutes: Some(60),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.error, "budget_exceeded");
+    assert_eq!(
+        asks_called.load(Ordering::SeqCst),
+        0,
+        "budget admission must reject actual offer rate BEFORE renting any GPU"
+    );
+
+    // With $1.00 daily cap, spawn admits and records the quoted $0.68/h rate + 20 vCPU / 63 GB RAM.
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut ample = settings();
+    ample.daily_cap_usd = Some(1.00);
+    let m_ample = Arc::new(ManagedManager::new(ample, Some(vast), dir2.path(), 3000));
+    let spawned = m_ample
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            ttl_minutes: Some(60),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!((spawned.usd_per_hour - 0.68).abs() < 1e-6);
+    assert_eq!(spawned.cpu, 20);
+    assert_eq!(spawned.ram_gb, 63);
+    srv.abort();
+}
+
+#[tokio::test]
+async fn vastai_fallback_reconciles_machine_resources_and_regenerates_bootstrap() {
+    use axum::{
+        extract::Path,
+        http::StatusCode,
+        routing::{post, put},
+        Json, Router,
+    };
+
+    let captured_9003_onstart: Arc<tokio::sync::Mutex<Option<String>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let captured_route = Arc::clone(&captured_9003_onstart);
+
+    let app = Router::new()
+        .route(
+            "/bundles/",
+            post(|| async {
+                Json(serde_json::json!({
+                    "offers": [
+                        // Preferred offer 9002: 64 vCPU / 256 GB RAM @ $0.68/h (sniped on PUT)
+                        {"id": 9002, "dph_total": 0.68, "cpu_cores_effective": 64.0, "cpu_ram": 262144.0},
+                        // Replacement offer 9003: 20 vCPU / 64 GB RAM @ $0.55/h
+                        {"id": 9003, "dph_total": 0.55, "cpu_cores_effective": 20.0, "cpu_ram": 65536.0}
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/asks/:offer_id/",
+            put(move |Path(offer_id): Path<String>, Json(body): Json<Value>| {
+                let captured_route = Arc::clone(&captured_route);
+                async move {
+                    if offer_id == "9002" {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(serde_json::json!({"error": "offer 9002 already rented"})),
+                        );
+                    }
+                    assert_eq!(offer_id, "9003");
+                    let onstart = body
+                        .get("onstart")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    *captured_route.lock().await = Some(onstart);
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({"success": true, "new_contract": 999002})),
+                    )
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = settings();
+    cfg.daily_cap_usd = Some(5.0);
+    let vast: Arc<dyn ManagedProvider> = Arc::new(vastai::VastAiProvider::new(
+        format!("http://{addr}"),
+        "vast-test-key",
+    ));
+    let mgr = Arc::new(ManagedManager::new(cfg, Some(vast), dir.path(), 3000));
+    let spawned = mgr
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            ttl_minutes: Some(60),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Wait briefly for the spawned background provision task to hit PUT /asks/9002/ -> fallback PUT /asks/9003/.
+    for _ in 0..50 {
+        if mgr
+            .get(&spawned.id)
+            .await
+            .and_then(|m| m.provider_id)
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let reconciled = mgr.get(&spawned.id).await.unwrap();
+    assert_eq!(reconciled.provider_id.as_deref(), Some("999002"));
+    assert_eq!(reconciled.cpu, 20, "must reconcile CPU down from 64 to 20");
+    assert_eq!(
+        reconciled.ram_gb, 64,
+        "must reconcile RAM down from 256 to 64"
+    );
+    assert!((reconciled.usd_per_hour - 0.55).abs() < 1e-6);
+
+    let onstart = captured_9003_onstart
+        .lock()
+        .await
+        .clone()
+        .expect("onstart sent to 9003");
+    assert!(
+        onstart.contains("SANDBOXED_NODE_CAPACITY=10\n"),
+        "regenerated bootstrap must advertise 10 slots (not 32): {onstart}"
+    );
+    assert!(
+        onstart.contains(&format!(
+            "SANDBOXED_NODE_JOB_MEMORY_BYTES={}\n",
+            managed_job_memory_bytes(64)
+        )),
+        "regenerated bootstrap must cap job memory to 64 GB RAM (not 256 GB): {onstart}"
+    );
+    srv.abort();
+}
+
+#[test]
+fn cloud_bootstrap_script_configures_user_bus_and_harnesses_within_onstart_budget() {
+    let script = cloud_bootstrap_script(
+        "https://agent-core.sandboxed.example.com",
+        "0123456789abcdef0123456789abcdef",
+        "managed-0123456789abcdef0123456789abcdef",
+        &"a".repeat(64),
+        16,
+        managed_job_memory_bytes(64),
+        "vastai",
+        "gpu-rtx4090",
+        "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+    );
+    assert!(
+        script.len() < 4096,
+        "bootstrap script ({} bytes) must fit Vast.ai 4 KiB onstart limit",
+        script.len()
+    );
+    assert!(script.contains("dbus-user-session"));
+    assert!(script.contains("loginctl enable-linger orbnode"));
+    assert!(script.contains("XDG_RUNTIME_DIR=/run/user/${UID_N}"));
+    assert!(script.contains("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${UID_N}/bus"));
+    assert!(script.contains("orb_fetch sandboxed-node \"$B/sandboxed-node\" 0755"));
+    assert!(script.contains("orb_fetch sandboxed-mcp \"$B/sandboxed-mcp\" 0755"));
+    assert!(script.contains("orb_fetch update-node-codex \"$S/update-node-codex\" 0755"));
+    assert!(script.contains("orb_fetch update-node-harnesses \"$S/update-node-harnesses\" 0755"));
+    assert!(script.contains("update-node-harnesses\" --only \"$h\" --probe-user orbnode"));
+    assert!(!script.contains("$H/enroll.env"));
+
+    let syntax = std::process::Command::new("bash")
+        .arg("-n")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("bash -n");
+    assert!(
+        syntax.status.success(),
+        "cloud_bootstrap_script failed bash -n: {}",
+        String::from_utf8_lossy(&syntax.stderr)
+    );
+}
+
+#[tokio::test]
+async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
+    let dir = tempfile::tempdir().unwrap();
+    let boat_p: Arc<dyn ManagedProvider> =
+        Arc::new(boat::BoatProvider::new("http://127.0.0.1:9", "boat-k"));
+    let hz_p: Arc<dyn ManagedProvider> =
+        Arc::new(hetzner::HetznerProvider::new("http://127.0.0.1:9", "hz-k"));
+    let m = Arc::new(ManagedManager::new(
+        settings(),
+        Some(boat_p),
+        dir.path(),
+        3000,
+    ));
+    m.register_provider(hz_p);
+
+    let catalog = m.provider_catalog();
+    assert_eq!(catalog.len(), 4);
+    assert_eq!(catalog[0].provider, "boat");
+    assert_eq!(catalog[0].display_name, "boat.dev");
+    assert!(catalog[0].configured);
+    assert!(catalog[0].supports_free_stop);
+    assert!(catalog[0].supports_snapshots);
+
+    assert_eq!(catalog[1].provider, "hetzner");
+    assert_eq!(catalog[1].display_name, "Hetzner Cloud");
+    assert!(catalog[1].configured);
+    assert!(!catalog[1].supports_free_stop);
+    assert!(!catalog[1].supports_snapshots);
+
+    assert_eq!(catalog[2].provider, "vastai");
+    assert!(!catalog[2].configured);
+    assert_eq!(catalog[3].provider, "scaleway");
+    assert!(!catalog[3].configured);
+    assert!(
+        catalog[3]
+            .sizes
+            .iter()
+            .all(|s| !scaleway::is_apple_silicon_type(s.size)),
+        "worker catalog must not advertise macOS-only Apple Silicon sizes"
+    );
+
+    let t0 = chrono::DateTime::parse_from_rfc3339("2026-10-29T10:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let t1 = chrono::DateTime::parse_from_rfc3339("2026-10-29T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let sample_machine = ManagedMachine {
+        id: "mm1001".into(),
+        name: "cpx41-a".into(),
+        provider: "hetzner".into(),
+        provider_id: Some("42001".into()),
+        node_id: "managed-mm1001".into(),
+        provisioning_mode: ProvisioningMode::Worker,
+        antigravity_projected: false,
+        image: "ubuntu-24.04".into(),
+        size: "cpx41".into(),
+        cpu: 8,
+        ram_gb: 16,
+        disk_gb: 240,
+        usd_per_hour: 0.05,
+        state: MachineState::Online,
+        created_at: t0,
+        expires_at: t1,
+        online_at: Some(t0),
+        destroyed_at: None,
+        destroy_reason: None,
+        cost_usd: 0.025,
+        cost_is_metered: false,
+        owner_kind: Some("mission".into()),
+        requested_by_mission_id: None,
+        owner_mission_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+        owner_user_id: Some("user-1".into()),
+        reason: Some("Lean proof shard".into()),
+        reap_at: None,
+        reap_reason: None,
+        error: None,
+        ledger_closed: false,
+        last_busy_at: Some(t0),
+        budget_pool_id: None,
+        auto_extensions: 0,
+        stopped_at: None,
+        stopped_by_reaper: false,
+        source_snapshot: None,
+        forked_from: None,
+        fork_source_provider_id: None,
+        resumes: 0,
+        secrets_wiped: false,
+        run_started_at: None,
+        cost_before_resume: 0.0,
+        prior_pool_charges: Vec::new(),
+        pool_spent_offset: 0.0,
+        project: Some("verity".into()),
+        root_mission_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+        active_mission_ids: vec!["550e8400-e29b-41d4-a716-446655440000".into()],
+        deletable_at: None,
+        has_executed_job: true,
+    };
+    let view = ListView {
+        enabled: true,
+        provider: "boat".into(),
+        providers: catalog,
+        machines: vec![sample_machine.clone()],
+        budget: BudgetView {
+            spent_today_usd: 0.025,
+            committed_usd: 0.075,
+            daily_cap_usd: Some(50.0),
+            active: 1,
+            max_concurrent: Some(16),
+            default_ttl_minutes: 60,
+            max_ttl_minutes: 720,
+            default_size: "small".into(),
+            max_size: "xlarge".into(),
+            image: "orb-node-base".into(),
+        },
+        sizes: SIZES.to_vec(),
+        daily_spend: daily_spend(&[sample_machine], 7, t0 + chrono::Duration::minutes(30)),
+    };
+    let actual = serde_json::to_value(&view).unwrap();
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("shared/orb-spec/fixtures/managed-machines-response.json");
+    let expected: Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture_path).expect("read fixture"))
+            .expect("parse fixture");
+    assert_eq!(actual, expected);
 }

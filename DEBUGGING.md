@@ -118,10 +118,18 @@ attempting recovery. Then require strict-host-key SSH to DGX and a silent
 
 Hermes gotchas:
 
-- After a prod deploy, `systemctl restart hermes-assistant` so the gateway
-  respawns the freshly installed `/usr/local/bin/assistant-mcp`.
-- Companion binaries are environment-scoped: production owns the historical
-  unsuffixed paths (`assistant-mcp`, `orchestrator-mcp`, `palomactl`), while
+- Do **not** run `systemctl restart hermes-assistant` after a `sandboxed-sh-prod`
+  deploy: Hermes uses `/usr/local/bin/sandboxed-mcp --profile coordinator`
+  (`SANDBOXED_MCP_TOKEN_FILE=/var/lib/hermes-assistant/mcp-credential`,
+  checked and renewed by `hermes-proxy-key-repair.timer`), and
+  `sandboxed-sh-prod deploy` (`recycle_stale_companion_processes`) hot-recycles
+  stale `sandboxed-mcp` child processes in place without restarting the gateway
+  or interrupting chats. When `hermes-assistant` itself must be restarted,
+  `60-sandboxed-drain.conf` marks a planned quiet drain (`suppress_notification=true`)
+  so idle home channels are not spammed while active chat turns still receive
+  an interrupt notice.
+- Companion binaries are environment-scoped: production owns the unsuffixed
+  paths (`sandboxed-mcp`, `assistant-mcp`, `orchestrator-mcp`, `palomactl`), while
   `sandboxed-sh-dev` installs `*-dev`. Never copy a dev MCP over an unsuffixed
   production path; doing so changes Hermes production tooling without a prod
   deploy.

@@ -392,26 +392,70 @@ object OrbMissionTree {
         return roots.map { build(it, 0, emptySet()) }
     }
 
-    private fun activity(mission: OrbRow): String = mission.str("updated_at", "created_at") ?: ""
+    private const val FORK_SETTLE_MS = 15_000L
 
-    /** Maps each listed fork to the most recently active version of its conversation. */
+    private fun activity(mission: OrbRow): String = mission.str("updated_at", "created_at") ?: ""
+    private fun activityMs(mission: OrbRow): Long = OrbJSON.dateEpochMs(mission.str("updated_at", "created_at")) ?: 0L
+    private fun createdAtMs(mission: OrbRow): Long = OrbJSON.dateEpochMs(mission.str("created_at")) ?: 0L
+
+    fun hasSupersededTag(mission: OrbRow): Boolean =
+        OrbJSON.strList(mission.raw, "tags").any {
+            it == "superseded" || it.startsWith("superseded_by:") || it.startsWith("superseded-by:")
+        }
+
+    private fun isRetiredVersion(mission: OrbRow): Boolean = isArchived(mission) || hasSupersededTag(mission)
+
+    /** Maps each listed fork to its conversation's leader using the normative
+     * `(unretired, live, effectiveActivity, forkDepth)` rank (`docs/specs/sidebar-hierarchy.md` F1). */
     fun forkLeaders(missions: List<OrbRow>): Map<String, OrbRow> {
-        val byId = missions.associateBy { it.id }
-        fun root(mission: OrbRow): String {
+        val byId = LinkedHashMap<String, OrbRow>(missions.size)
+        for (mission in missions) byId.putIfAbsent(mission.id, mission)
+        data class Lineage(val rootId: String, val depth: Int, val ancestors: List<String>)
+        fun lineage(mission: OrbRow): Lineage {
             var current = mission
             val seen = mutableSetOf<String>()
+            val ancestors = mutableListOf<String>()
             while (true) {
                 val source = forkSource(current) ?: break
                 val next = byId[source] ?: break
-                if (!seen.add(current.id)) break
+                if (seen.contains(source) || !seen.add(current.id)) break
                 current = next
+                ancestors.add(current.id)
             }
-            return current.id
+            return Lineage(current.id, ancestors.size, ancestors)
         }
+        val info = missions.associate { it.id to lineage(it) }
         val leaders = mutableMapOf<String, OrbRow>()
-        for (group in missions.groupBy { root(it) }.values) {
+        for (group in missions.groupBy { info.getValue(it.id).rootId }.values) {
             if (group.size < 2) continue
-            val leader = group.maxBy { activity(it) }
+            val effective = HashMap<String, Long>(group.size)
+            for (m in group) effective[m.id] = activityMs(m)
+            for (m in group) {
+                val created = createdAtMs(m)
+                if (created <= 0L) continue
+                for (ancId in info.getValue(m.id).ancestors) {
+                    val ancAct = effective[ancId]
+                    if (ancAct != null && ancAct <= created + FORK_SETTLE_MS) {
+                        effective[ancId] = minOf(ancAct, created)
+                    }
+                }
+            }
+            fun beats(a: OrbRow, b: OrbRow): Boolean {
+                val ua = if (isRetiredVersion(a)) 0 else 1
+                val ub = if (isRetiredVersion(b)) 0 else 1
+                if (ua != ub) return ua > ub
+                val la = if (isLive(a)) 1 else 0
+                val lb = if (isLive(b)) 1 else 0
+                if (la != lb) return la > lb
+                val ea = effective[a.id] ?: 0L
+                val eb = effective[b.id] ?: 0L
+                if (ea != eb) return ea > eb
+                return info.getValue(a.id).depth > info.getValue(b.id).depth
+            }
+            var leader = group.first()
+            for (m in group.drop(1)) {
+                if (beats(m, leader)) leader = m
+            }
             for (mission in group) leaders[mission.id] = leader
         }
         return leaders
