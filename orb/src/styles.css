@@ -3866,7 +3866,7 @@ select.orb-select-native:disabled { cursor: default; }
 .tb-tools:empty { display: none; }
 .tb-tools > div { display: contents; }
 .mission-tools { display: flex; align-items: center; gap: 6px; padding-top: 3px; }
-.chapters, .changes { position: relative; }
+.chapters { position: relative; }
 .chapters-btn { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; color: var(--fg-3); background: color-mix(in srgb, var(--bg) 85%, transparent); border: 1px solid var(--stroke-soft); backdrop-filter: blur(8px); font-variant-numeric: tabular-nums; }
 .chapters-btn:hover, .chapters-btn.on { color: var(--fg); border-color: var(--stroke); }
 .chapters-list { position: absolute; right: 0; top: 32px; width: min(360px, 80vw); max-height: 60vh; overflow: auto; margin: 0; padding: 4px; list-style: none; border-radius: 10px; background: var(--bg); border: 1px solid var(--stroke); box-shadow: 0 8px 28px rgb(0 0 0 / 14%); }
@@ -3874,13 +3874,6 @@ select.orb-select-native:disabled { cursor: default; }
 .chapters-list button:hover { background: var(--hover-1); color: var(--fg); }
 .chapters-n { flex: none; width: 18px; color: var(--fg-3); font-variant-numeric: tabular-nums; text-align: right; }
 .chapters-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.changes-list { width: min(420px, 85vw); }
-.changes-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 12px; font-family: var(--mono); }
-.changes-row .chapters-t { flex: 1; min-width: 0; }
-.changes-pr { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--stroke-soft); font-size: 12px; color: var(--fg-2); }
-.changes-note { margin: 6px 8px 4px; font-size: 11px; }
-.diff-add { color: var(--green); font-variant-numeric: tabular-nums; }
-.diff-del { color: var(--red); font-variant-numeric: tabular-nums; }
 
 /* One quiet focus treatment for every text field and select (no native blue ring):
    the border darkens to the theme's focus tone with a soft same-tone halo. */
