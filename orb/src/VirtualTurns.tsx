@@ -1,7 +1,7 @@
 import {For,createEffect,createMemo,createSignal,onCleanup,onMount,type JSX} from 'solid-js';
 import {matchOffsets} from './searchIndex';
 import { timed } from "./diagnostics";
-import { scrollKeeper } from "./mission/scrollPolicy";
+import { isScrollPinned, markScrollIntent, scrollKeeper } from "./mission/scrollPolicy";
 export type SearchHit={key:string;occurrence:number};
 export interface TranscriptSearch {
  search(query:string,sensitive:boolean,whole:boolean):SearchHit[];
@@ -82,7 +82,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
   // An estimate correction only moves the reader when the row replaced a gap
   // spacer laid out at that estimate. Rows of the first render never sat in a
   // gap, and a reader at the bottom is kept there by the pinned scroll.
-  const box=scroller,atBottom=!box||box.scrollHeight-box.scrollTop-box.clientHeight<80;
+  const box=scroller,atBottom=!box||(isScrollPinned(box)??box.scrollHeight-box.scrollTop-box.clientHeight<80);
   let delta=0,changed=false;
   for(const [key,rect]of reads){
    const height=rect.height;if(height<=0||sizes.get(key)===height)continue;
@@ -100,14 +100,11 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
   // At the bottom the pinned scroll owns the position. A row above that shrank
  // has already been absorbed by the browser clamping scrollTop; subtracting
  // the delta again moved a pinned reader up by that amount (and unpinned it).
- if(delta&&scroller&&!atBottom){
-  scroller.scrollTop+=delta;
-  // When the pinned scroll already put its anchor back for this same change
-  // (its observer ran first), the delta above is applied twice: its keeper
-  // measures where the anchor is and settles to the one correct position.
-  scrollKeeper(scroller)?.();
- }
+ if(delta&&scroller&&!atBottom)scroller.scrollTop+=delta;
   if(changed){setRevision(n=>n+1);settle();}
+  // Settle after segments update so the keeper reads updated gap heights and
+  // keeps a pinned reader at the bottom even when a large resize exceeded 80px.
+  if((delta&&!atBottom)||changed)scrollKeeper(scroller)?.();
  });
  const queueMeasure=(key:string,node:HTMLElement)=>{measureQueue.set(key,node);if(!measureQueued){measureQueued=true;queueMicrotask(flushMeasure);}};
  const resizes=new ResizeObserver(entries=>{for(const entry of entries){const node=entry.target as HTMLElement,key=node.dataset.turnKey;if(key)measureQueue.set(key,node);}flushMeasure();});
@@ -152,7 +149,7 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
     const row=layout().find(row=>row.item.key===hit.key);if(!row)return;
     setPinned(prev=>new Set([...prev,hit.key]));
     await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
-    const node=nodes.get(hit.key);node?.scrollIntoView({block:'center'});update();return node;
+    const node=nodes.get(hit.key);markScrollIntent(scroller);node?.scrollIntoView({block:'center'});update();return node;
    },
   });update();
   requestAnimationFrame(()=>{rendered=true;});
