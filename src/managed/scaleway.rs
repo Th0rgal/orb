@@ -30,6 +30,9 @@ pub const SCALEWAY_SIZES: [SizeSpec; 8] = [
         ram_gb: 4,
         disk_gb: 40,
         usd_per_hour: 0.032,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "DEV1-L",
@@ -37,6 +40,9 @@ pub const SCALEWAY_SIZES: [SizeSpec; 8] = [
         ram_gb: 8,
         disk_gb: 80,
         usd_per_hour: 0.064,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "PRO2-S",
@@ -44,6 +50,9 @@ pub const SCALEWAY_SIZES: [SizeSpec; 8] = [
         ram_gb: 16,
         disk_gb: 80,
         usd_per_hour: 0.088,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "PRO2-M",
@@ -51,6 +60,9 @@ pub const SCALEWAY_SIZES: [SizeSpec; 8] = [
         ram_gb: 32,
         disk_gb: 160,
         usd_per_hour: 0.175,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "L4-1-24G",
@@ -58,6 +70,9 @@ pub const SCALEWAY_SIZES: [SizeSpec; 8] = [
         ram_gb: 45,
         disk_gb: 200,
         usd_per_hour: 0.85,
+        gpu: Some("L4 24GB"),
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "H100-1-80G",
@@ -65,6 +80,9 @@ pub const SCALEWAY_SIZES: [SizeSpec; 8] = [
         ram_gb: 240,
         disk_gb: 400,
         usd_per_hour: 3.15,
+        gpu: Some("H100 80GB"),
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "M2-M",
@@ -72,6 +90,9 @@ pub const SCALEWAY_SIZES: [SizeSpec; 8] = [
         ram_gb: 16,
         disk_gb: 256,
         usd_per_hour: 0.12,
+        gpu: None,
+        arch: "arm64",
+        min_billing_hours: Some(24),
     },
     SizeSpec {
         size: "M2-PRO",
@@ -79,8 +100,14 @@ pub const SCALEWAY_SIZES: [SizeSpec; 8] = [
         ram_gb: 32,
         disk_gb: 512,
         usd_per_hour: 0.24,
+        gpu: None,
+        arch: "arm64",
+        min_billing_hours: Some(24),
     },
 ];
+
+/// Linux/GPU sizes capable of running `sandboxed-node` in `worker` mode.
+pub const SCALEWAY_WORKER_SIZES: &[SizeSpec] = SCALEWAY_SIZES.split_at(6).0;
 
 pub fn is_apple_silicon_type(size: &str) -> bool {
     let up = size.trim().to_ascii_uppercase();
@@ -321,7 +348,7 @@ impl ManagedProvider for ScalewayProvider {
     }
 
     fn sizes(&self) -> &[SizeSpec] {
-        &SCALEWAY_SIZES
+        SCALEWAY_WORKER_SIZES
     }
 
     fn supports_free_stop(&self) -> bool {
@@ -345,17 +372,22 @@ impl ManagedProvider for ScalewayProvider {
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
-        let project_id = self.resolve_project_id().await?;
         let commercial_type = normalize_scaleway_size(&spec.size);
         let zone = &self.default_zone;
-
         if is_apple_silicon_type(&commercial_type) {
+            if spec.provisioning_mode.is_worker() {
+                return Err(
+                    "Scaleway Apple Silicon Mac minis do not support Linux worker bootstrap (`orb-node`). Pass `provisioning_mode: \"raw\"` alongside `allow_24h_commitment: true`."
+                        .into(),
+                );
+            }
             if !spec.allow_24h_commitment {
                 return Err(
                     "Scaleway Apple Silicon Mac minis carry a mandatory 24-hour minimum billing commitment (`deletable_at`). Pass `allow_24h_commitment: true` explicitly to confirm."
                         .into(),
                 );
             }
+            let project_id = self.resolve_project_id().await?;
             let body = json!({
                 "name": spec.name,
                 "project_id": project_id,
@@ -371,6 +403,7 @@ impl ManagedProvider for ScalewayProvider {
             return parse_apple_silicon_machine(&v, zone)
                 .ok_or_else(|| "scaleway apple-silicon create: missing server id".to_string());
         }
+        let project_id = self.resolve_project_id().await?;
 
         let image = match spec.image.as_deref() {
             Some(img) if !img.is_empty() && img != "orb-node-base" && img != "provider-default" => {

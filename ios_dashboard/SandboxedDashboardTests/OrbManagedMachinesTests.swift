@@ -179,4 +179,22 @@ final class OrbManagedMachinesTests: XCTestCase {
         m.state = "destroyed"
         XCTAssertNil(OrbManaged.reapLine(m, now: at("2026-10-23T12:00:00Z")))
     }
+
+    func testDecodesSharedMultiProviderResponseFixture() throws {
+        let data = try Data(contentsOf: OrbSpec.url("fixtures/managed-machines-response.json"))
+        let r = try OrbManaged.decode(data)
+        XCTAssertTrue(r.enabled)
+        XCTAssertEqual(r.provider, "boat")
+        let providers = try XCTUnwrap(r.providers)
+        XCTAssertEqual(providers.map(\.provider), ["boat", "hetzner", "vastai", "scaleway"])
+        XCTAssertEqual(providers.map(\.display_name), ["boat.dev", "Hetzner Cloud", "Vast.ai", "Scaleway"])
+        XCTAssertEqual(providers.map(\.configured), [true, true, false, false])
+        XCTAssertEqual(providers.map(\.supports_free_stop), [true, false, false, false])
+        XCTAssertEqual(providers.map(\.supports_snapshots), [true, false, false, false])
+        XCTAssertEqual(providers[1].sizes.first(where: { $0.size == "cax31" })?.arch, "arm64")
+        XCTAssertEqual(providers[2].sizes.first(where: { $0.size == "rtx4090" })?.gpu, "RTX 4090")
+        XCTAssertEqual(r.machines.count, 1)
+        XCTAssertEqual(r.machines[0].provider, "hetzner")
+        XCTAssertFalse(OrbManaged.canStop(r.machines[0], providers: providers))
+    }
 }

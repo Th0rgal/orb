@@ -582,9 +582,32 @@ async fn enroll(Json(body): Json<EnrollBody>) -> Response {
     }
 }
 
-/// Self-authenticated `sandboxed-node` binary download for cloud-init / onstart
-/// worker VMs (`hetzner`, `vastai`, `scaleway`) before they enroll over the relay.
-async fn bootstrap_binary(Path(id): Path<String>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+struct BootstrapBinaryQuery {
+    binary: Option<String>,
+}
+
+fn elf_arch_matches(header: &[u8], want_arm64: bool) -> bool {
+    if header.len() < 20 || &header[0..4] != b"\x7fELF" {
+        // Non-ELF (e.g. local macOS test binary or stub script): allow.
+        return true;
+    }
+    let e_machine = u16::from_le_bytes([header[18], header[19]]);
+    if want_arm64 {
+        e_machine == 183 // EM_AARCH64
+    } else {
+        e_machine == 62 // EM_X86_64
+    }
+}
+
+/// Self-authenticated bootstrap artifact download (`sandboxed-node`,
+/// `sandboxed-mcp`, and harness reconcilers) for cloud-init / onstart worker VMs
+/// (`hetzner`, `vastai`, `scaleway`) before they enroll over the relay.
+async fn bootstrap_binary(
+    Path(id): Path<String>,
+    Query(query): Query<BootstrapBinaryQuery>,
+    headers: HeaderMap,
+) -> Response {
     let m = match manager() {
         Ok(m) => m,
         Err(r) => return r,
@@ -593,51 +616,91 @@ async fn bootstrap_binary(Path(id): Path<String>, headers: HeaderMap) -> Respons
     let Some(machine) = m.verify_bootstrap_token(&id, token).await else {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     };
+    let kind = query
+        .binary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("sandboxed-node");
+    let inline_script = match kind {
+        "provision-script" => Some(crate::managed::PROVISION_SCRIPT),
+        "update-node-codex" => Some(crate::managed::UPDATE_NODE_CODEX_SCRIPT),
+        "update-node-harnesses" => Some(crate::managed::UPDATE_NODE_HARNESSES_SCRIPT),
+        _ => None,
+    };
+    if let Some(script) = inline_script {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/x-script; charset=utf-8")
+            .body(axum::body::Body::from(script))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+    let (bin_name, env_x86, env_arm64) = match kind {
+        "sandboxed-node" => (
+            "sandboxed-node",
+            "SANDBOXED_MANAGED_NODE_BINARY",
+            "SANDBOXED_MANAGED_NODE_BINARY_ARM64",
+        ),
+        "sandboxed-mcp" => (
+            "sandboxed-mcp",
+            "SANDBOXED_MANAGED_MCP_BINARY",
+            "SANDBOXED_MANAGED_MCP_BINARY_ARM64",
+        ),
+        _ => return (StatusCode::BAD_REQUEST, "unsupported bootstrap artifact").into_response(),
+    };
     let arm64 = machine.size.eq_ignore_ascii_case("cax31")
         || crate::managed::scaleway::is_apple_silicon_type(&machine.size);
-    let candidate = if arm64 {
-        std::env::var("SANDBOXED_MANAGED_NODE_BINARY_ARM64")
+    let mut candidates: Vec<std::path::PathBuf> = Vec::with_capacity(4);
+    if arm64 {
+        if let Some(p) = std::env::var(env_arm64)
             .ok()
             .filter(|p| !p.trim().is_empty())
-            .map(std::path::PathBuf::from)
-    } else {
-        None
+        {
+            candidates.push(std::path::PathBuf::from(p));
+        }
+    } else if let Some(p) = std::env::var(env_x86).ok().filter(|p| !p.trim().is_empty()) {
+        candidates.push(std::path::PathBuf::from(p));
     }
-    .or_else(|| {
-        std::env::var("SANDBOXED_MANAGED_NODE_BINARY")
-            .ok()
-            .filter(|p| !p.trim().is_empty())
-            .map(std::path::PathBuf::from)
-    })
-    .or_else(|| {
-        let std_path = std::path::PathBuf::from("/usr/local/bin/sandboxed-node");
-        std_path.exists().then_some(std_path)
-    })
-    .or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join("sandboxed-node")))
-            .filter(|p| p.exists())
-    });
-    let Some(bin_path) = candidate else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sandboxed-node binary is not staged on Core",
-        )
-            .into_response();
-    };
-    match tokio::fs::read(&bin_path).await {
-        Ok(bytes) => Response::builder()
+    candidates.push(std::path::PathBuf::from(format!(
+        "/usr/local/bin/{bin_name}"
+    )));
+    if let Some(sibling) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join(bin_name)))
+    {
+        candidates.push(sibling);
+    }
+
+    for path in candidates {
+        let Ok(mut file) = tokio::fs::File::open(&path).await else {
+            continue;
+        };
+        let mut hdr = [0u8; 20];
+        let n = tokio::io::AsyncReadExt::read(&mut file, &mut hdr)
+            .await
+            .unwrap_or(0);
+        if !elf_arch_matches(&hdr[..n], arm64) {
+            continue;
+        }
+        if tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(0))
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        let stream = tokio_util::io::ReaderStream::new(file);
+        return Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/octet-stream")
-            .body(axum::body::Body::from(bytes))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to read sandboxed-node binary",
-        )
-            .into_response(),
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
+    let arch_label = if arm64 { "arm64" } else { "x86_64" };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("{bin_name} ({arch_label}) binary is not staged on Core"),
+    )
+        .into_response()
 }
 
 async fn node_auth(
@@ -793,6 +856,23 @@ mod tests {
         );
         let r = super::client_destroy_reason(Some("ttl_expired\n<script>"));
         assert_eq!(r, "requested: ttl_expiredscript");
+    }
+
+    #[test]
+    fn elf_arch_guard_rejects_mismatched_elf_binaries() {
+        let mut x86_elf = [0u8; 20];
+        x86_elf[0..4].copy_from_slice(b"\x7fELF");
+        x86_elf[18..20].copy_from_slice(&62u16.to_le_bytes());
+
+        let mut arm64_elf = [0u8; 20];
+        arm64_elf[0..4].copy_from_slice(b"\x7fELF");
+        arm64_elf[18..20].copy_from_slice(&183u16.to_le_bytes());
+
+        assert!(super::elf_arch_matches(&x86_elf, false));
+        assert!(!super::elf_arch_matches(&x86_elf, true));
+        assert!(super::elf_arch_matches(&arm64_elf, true));
+        assert!(!super::elf_arch_matches(&arm64_elf, false));
+        assert!(super::elf_arch_matches(b"#!/usr/bin/env bash\n", true));
     }
 }
 

@@ -26,6 +26,9 @@ pub const HETZNER_SIZES: [SizeSpec; 6] = [
         ram_gb: 4,
         disk_gb: 80,
         usd_per_hour: 0.015,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "cpx31",
@@ -33,6 +36,9 @@ pub const HETZNER_SIZES: [SizeSpec; 6] = [
         ram_gb: 8,
         disk_gb: 160,
         usd_per_hour: 0.027,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "cpx41",
@@ -40,6 +46,9 @@ pub const HETZNER_SIZES: [SizeSpec; 6] = [
         ram_gb: 16,
         disk_gb: 240,
         usd_per_hour: 0.050,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "cax31",
@@ -47,6 +56,9 @@ pub const HETZNER_SIZES: [SizeSpec; 6] = [
         ram_gb: 16,
         disk_gb: 160,
         usd_per_hour: 0.024,
+        gpu: None,
+        arch: "arm64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "cpx51",
@@ -54,6 +66,9 @@ pub const HETZNER_SIZES: [SizeSpec; 6] = [
         ram_gb: 32,
         disk_gb: 360,
         usd_per_hour: 0.102,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
     SizeSpec {
         size: "ccx33",
@@ -61,6 +76,9 @@ pub const HETZNER_SIZES: [SizeSpec; 6] = [
         ram_gb: 32,
         disk_gb: 240,
         usd_per_hour: 0.105,
+        gpu: None,
+        arch: "x86_64",
+        min_billing_hours: None,
     },
 ];
 
@@ -380,6 +398,8 @@ mod tests {
         let spec = SpawnSpec {
             machine_id: "mm12345678".into(),
             size: "large".into(),
+            cpu: 8,
+            ram_gb: 16,
             ttl_seconds: 3600,
             image: Some("orb-node-base".into()),
             name: "orb-managed-mm12345678".into(),
@@ -388,7 +408,9 @@ mod tests {
             gpu: None,
             arch: None,
             max_hourly_usd: None,
+            preferred_offer_id: None,
             allow_24h_commitment: false,
+            provisioning_mode: crate::managed::ProvisioningMode::Worker,
         };
         let body = spawn_body(&spec, "fsn1");
         assert_eq!(body["name"], "orb-managed-mm12345678");
