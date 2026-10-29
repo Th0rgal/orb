@@ -240,7 +240,19 @@ pub(crate) fn require_history_deletable(
                 }
                 // New children depend on their issuer/parent and superseded
                 // mission, not every historical mission in the project.
-                "start_mission" | "consult_model" => {}
+                "start_mission" | "consult_model" => {
+                    // Creation also infers lineage from Hermes' per-mission
+                    // session. Reuse its parser so deletion cannot orphan an
+                    // accepted launch from an unbound operator session.
+                    if args
+                        .get("origin_session_id")
+                        .and_then(Value::as_str)
+                        .and_then(crate::managed::lifecycle::mission_of_orb_session)
+                        .is_some_and(|id| mission_ids.contains(&id))
+                    {
+                        return Some(false);
+                    }
+                }
                 "schedule_wakeup" | "schedule_job_wakeup" => {
                     p.mission_id?;
                 }
@@ -389,6 +401,26 @@ mod tests {
                 false,
             ),
             ("start_mission", json!({}), true),
+            (
+                "start_mission",
+                json!({"origin_session_id":format!("orb_{}", target.simple())}),
+                false,
+            ),
+            (
+                "consult_model",
+                json!({"origin_session_id":format!("orb_{}", target.simple())}),
+                false,
+            ),
+            (
+                "start_mission",
+                json!({"origin_session_id":format!("orb_{}", Uuid::new_v4().simple())}),
+                true,
+            ),
+            (
+                "start_mission",
+                json!({"origin_session_id":"shared-chat"}),
+                true,
+            ),
             ("resume_mission", json!({}), false),
             ("resume_mission", json!({"mission_id":"short-id"}), false),
             ("new_unknown_tool", json!({}), false),

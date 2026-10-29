@@ -110,7 +110,8 @@ termination without node-local proof also retains data regardless of display sta
 
 Conversation deletion checks accepted actions against the full deletion set
 (including descendants), under the same admission fence. It retains issuer,
-parent, superseded and explicit target missions for queued, dispatching and
+parent (including the existing `orb_<uuid>` origin-session inference), superseded
+and explicit target missions for queued, dispatching and
 uncertain actions. Unrelated actions with audited dependencies do not block
 history deletion; malformed/legacy targets and unaudited tools fail closed.
 Board acceptance only records a settled verdict, but its task ID/key blocks
