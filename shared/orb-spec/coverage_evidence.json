@@ -69,7 +69,7 @@
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "573076ec368d029b1f418993d4b83f48e03d3646f60d7074dbbe8ea707ac0816"
+          "sha256": "d18756dc7f9ba4036f0203d27b1a9bd7d9f5468a747b1948096798b2f75dd430"
         }
       ],
       "execution": {
@@ -1014,7 +1014,7 @@
         },
         {
           "path": "src/api/mission_store/mod.rs",
-          "sha256": "a028a115a4fdad926dd3319fbfe2afb8134bfe51ebe535881f98e1eabc4e3b1d"
+          "sha256": "fd214a716f1df06b371212ba1289b6f6b2216f65440c46c9bf4d004bff2768b1"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
