@@ -116,7 +116,14 @@ mission directories and nested build/toolchain trees without reading command
 payloads or treating succeeded jobs as permission to delete source:
 
 ```bash
+# Optional: export non-secret Core mission status metadata on Core first
 python3 scripts/storage_inventory.py \
+  --missions-dir /root/.sandboxed-sh/missions \
+  --export-missions /tmp/missions-snapshot.jsonl
+
+# Attribute worker UUID dirs + nested caches against both jobs.db and Core status
+python3 scripts/storage_inventory.py \
+  --missions-snapshot /tmp/missions-snapshot.jsonl \
   --node-work-dir /var/lib/sandboxed-node \
   --root /tmp --root /opt/actions-runner --root /srv/verity-ci-cache
 ```
@@ -124,9 +131,24 @@ python3 scripts/storage_inventory.py \
 Run in the node's mount namespace when inspecting its private /tmp, or supply the
 host-visible systemd-private path. The scanner never deletes, excludes symlinks
 and nested mounts, and reports both apparent bytes and allocated file blocks.
+Supplying `--missions-dir` or `--missions-snapshot` alongside `--node-work-dir`
+enriches UUID mission directories and nested caches with Core's authoritative
+`mission_status`, `owner`, and `workspace_id` while keeping `action="keep"`.
 Nested entries overlap and shared XFS extents are not exclusive/reclaimable bytes;
 use filesystem free-space measurements before/after any separately authorized
-cleanup. Missing or unreadable node ledgers never grant deletion permission.
+cleanup. Missing or unreadable node ledgers or snapshots never grant deletion
+permission.
+
+When reconstructible per-mission build/toolchain trees (`.elan`, `.lake`,
+`target`, `toolchains`, `.rustup`, `node_modules`) inside finished missions pin a
+worker's disk, inspect and reclaim only those reconstructible caches via
+`scripts/reclaim_worker_build_caches.py` (dry-run by default; requires complete
+Core + `jobs.db` indexes and `lsof +D` open-descriptor verification before
+`--apply`, and never deletes mission source or `.git` repositories). To roll out
+`sandboxed-node` binary updates across busy workers without retiring in-flight
+turns, stage `.new` binaries and run `scripts/rolling_upgrade_nodes.py` to
+cordon, drain `jobs.db` to zero active jobs, swap, restart, and uncordon in
+capacity-bounded waves.
 
 [Worker scratch reclamation](specs/node-storage-lifecycle.md) covers new owned
 TMPDIR/TMP/TEMP directories after confirmed supervision (72-hour baseline grace when
