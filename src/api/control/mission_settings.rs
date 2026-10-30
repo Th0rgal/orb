@@ -82,31 +82,22 @@ async fn collect_launched_descendant_ids(
             }
         }
     }
-    // Discover Hermes webhook callback roots directly from the store as well so
-    // archived or paged-out callback descendants (and workers beneath them)
-    // move atomically even when the client has not loaded them.
+    // Discover Hermes webhook callback roots from a single store snapshot
+    // (`list_missions` orders by `updated_at DESC`, so offset paging could skip
+    // an active callback mission whose timestamp advances between pages).
     if super::super::projects_overview::hermes_state_db_path().is_some() {
-        const PAGE: usize = 500;
-        let mut offset = 0usize;
-        loop {
-            let page = mission_store
-                .list_missions(PAGE, offset)
-                .await
-                .map_err(internal_error)?;
-            let page_len = page.len();
-            for m in page {
-                if m.parent_mission_id.is_none()
-                    && m.origin.as_deref() == Some("hermes")
-                    && m.origin_session_id.is_some()
-                    && seen_candidates.insert(m.id)
-                {
-                    candidate_missions.push(m);
-                }
+        let all_missions = mission_store
+            .list_missions(usize::MAX, 0)
+            .await
+            .map_err(internal_error)?;
+        for m in all_missions {
+            if m.parent_mission_id.is_none()
+                && m.origin.as_deref() == Some("hermes")
+                && m.origin_session_id.is_some()
+                && seen_candidates.insert(m.id)
+            {
+                candidate_missions.push(m);
             }
-            if page_len < PAGE {
-                break;
-            }
-            offset += page_len;
         }
     }
     let callback_links = if candidate_missions.is_empty() {
