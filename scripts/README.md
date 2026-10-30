@@ -82,7 +82,7 @@ Example:
 Read-only storage attribution across Core workspaces and remote `sandboxed-node` work directories (`--apply` is intentionally rejected). Supports `--export-missions` / `--missions-snapshot` so worker UUID directories and nested caches are attributed to Core mission status and owner without copying prompt/history payloads.
 
 ### reclaim_worker_build_caches.py
-Dry-run-first reclaimer for reconstructible build/toolchain caches (`.elan`, `.lake`, `target`, `toolchains`, `.rustup`, `node_modules`) inside verified non-active worker mission directories (`lsof +D`-checked, fail-closed on incomplete Core or `jobs.db` indexes, preserves all mission source and `.git` state).
+Dry-run-first reclaimer for reconstructible build/toolchain caches (`.elan`, `.lake`, `target`, `toolchains`, `.rustup`, `node_modules`) inside verified non-active worker mission directories (`lsof +D`-checked, single-device / nested-mount-fenced via `dir_fd`, fail-closed on incomplete Core or `jobs.db` indexes, preserves all mission source and `.git` state).
 
 ### rolling_upgrade_nodes.py
-Zero-disruption rolling upgrade controller for `sandboxed-node` workers. Cordons at most `--max-concurrent-cordons` nodes at a time via `/api/nodes/:name/cordon`, waits for `0` active jobs in `jobs.db` across a TOCTOU check before swapping staged binaries and restarting `sandboxed-node`, then uncordons each node.
+Zero-disruption rolling upgrade controller for `sandboxed-node` workers. Cordons at most `--max-concurrent-cordons` nodes at a time via `/api/nodes/:name/cordon`, fences worker admission via an exclusive `BEGIN IMMEDIATE` lock on `jobs.db` before verifying zero active jobs/leases, swaps staged binaries with automatic `.prev` rollback and `.new.failed` quarantine on activation failure, and uncordons only health-verified nodes.
