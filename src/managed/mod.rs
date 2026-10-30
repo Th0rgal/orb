@@ -1689,6 +1689,13 @@ impl ManagedManager {
             .cloned()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_default_provider_for_test(&self, name: &str) {
+        if let Ok(mut def) = self.default_provider_name.write() {
+            *def = name.to_string();
+        }
+    }
+
     /// Effective global concurrent live VM ceiling for `provider` (`None` = unlimited).
     pub fn provider_max_concurrent(&self, provider: &str) -> Option<usize> {
         let id = provider.trim().to_ascii_lowercase();

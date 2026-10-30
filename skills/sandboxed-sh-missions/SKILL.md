@@ -158,8 +158,8 @@ consult_model(model="gpt-6-astra",        # or "fable-5.1", "opus-5.5", or a ful
 ```
 
 It creates a child mission in the caller's project (inherited from the
-parent), on a fresh Boat VM (`remote_node_id="auto-managed"`, falling back to
-`"auto"` if Boat is disabled; pass `remote_node_id="same"` only when the
+parent), on a fresh Boat VM (`remote_node_id="auto-managed:boat"`, falling back
+to `"auto"` if Boat is disabled; pass `remote_node_id="same"` only when the
 consultant must inspect uncommitted local workspace files on your machine),
 with backend=opencode, model_override=<provider>/<model> and writer=false
 (pr-readonly). Pass `read_only=false` only if the consultant must write. Short aliases resolve

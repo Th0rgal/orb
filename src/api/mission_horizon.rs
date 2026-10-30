@@ -115,12 +115,12 @@ pub struct RemoteSupersedeContext<'a> {
     pub fleet: &'a std::sync::Arc<crate::remote_node::FleetMonitor>,
 }
 
-async fn cancel_superseded_remote_jobs(
+pub async fn cancel_superseded_remote_jobs_by_id(
     store: &dyn MissionStore,
-    prior: &Mission,
+    prior_id: Uuid,
     remote: &RemoteSupersedeContext<'_>,
 ) {
-    crate::api::control::usage_limit_wait::update_remote_wait(remote.working_dir, prior.id, |_| {
+    crate::api::control::usage_limit_wait::update_remote_wait(remote.working_dir, prior_id, |_| {
         None
     })
     .await;
@@ -129,7 +129,7 @@ async fn cancel_superseded_remote_jobs(
         Ok(handles) => handles,
         Err(error) => {
             tracing::warn!(
-                mission_id = %prior.id,
+                mission_id = %prior_id,
                 ?error,
                 "could not read remote job ledger while superseding mission"
             );
@@ -137,18 +137,18 @@ async fn cancel_superseded_remote_jobs(
         }
     };
     let client = crate::remote_node::RemoteNodeClient::default();
-    for handle in handles.into_iter().filter(|h| h.mission_id == prior.id) {
+    for handle in handles.into_iter().filter(|h| h.mission_id == prior_id) {
         if crate::managed::node_provably_gone(&handle.node_id).await {
             let _ = super::control::finish_remote_job_lease(
                 store,
-                prior.id,
+                prior_id,
                 handle.job_id,
                 "superseded",
             )
             .await;
             let _ = store
                 .complete_scheduled_remote_job(
-                    prior.id,
+                    prior_id,
                     handle.job_id,
                     Some(false),
                     Some("superseded".to_string()),
@@ -166,7 +166,7 @@ async fn cancel_superseded_remote_jobs(
 
         let Some(node) = remote.remote_nodes.node(&handle.node_id).cloned() else {
             tracing::warn!(
-                mission_id = %prior.id,
+                mission_id = %prior_id,
                 job_id = %handle.job_id,
                 node_id = %handle.node_id,
                 "superseded remote job node config unavailable; poll loop will cancel if attached"
@@ -178,7 +178,7 @@ async fn cancel_superseded_remote_jobs(
             .filter(|token| !token.trim().is_empty())
         else {
             tracing::warn!(
-                mission_id = %prior.id,
+                mission_id = %prior_id,
                 job_id = %handle.job_id,
                 node_id = %handle.node_id,
                 "superseded remote job node token unavailable; poll loop will cancel if attached"
@@ -191,7 +191,7 @@ async fn cancel_superseded_remote_jobs(
             .await;
         if let Err(ref error) = cancel_res {
             tracing::warn!(
-                mission_id = %prior.id,
+                mission_id = %prior_id,
                 job_id = %handle.job_id,
                 node_id = %node.id,
                 ?error,
@@ -204,13 +204,13 @@ async fn cancel_superseded_remote_jobs(
                 Some(status)
             }
             Err(error) if error.is_not_found() && cancel_res.is_ok() => Some(
-                crate::remote_node::missing_job_cancelled(prior.id, handle.job_id),
+                crate::remote_node::missing_job_cancelled(prior_id, handle.job_id),
             ),
             _ => None,
         };
 
         let lease_owner = super::control::remote_job_lease_owner(handle.job_id);
-        let active_run = store.get_active_mission_run(prior.id).await.ok().flatten();
+        let active_run = store.get_active_mission_run(prior_id).await.ok().flatten();
         let owns_active_lease = active_run
             .as_ref()
             .is_some_and(|run| run.owner_actor_id == lease_owner);
@@ -218,7 +218,7 @@ async fn cancel_superseded_remote_jobs(
         if let Some(status) = confirmed_terminal {
             let _ = store
                 .complete_scheduled_remote_job(
-                    prior.id,
+                    prior_id,
                     handle.job_id,
                     Some(status.state == "succeeded"),
                     (status.state != "succeeded").then(|| "superseded".to_string()),
@@ -226,7 +226,7 @@ async fn cancel_superseded_remote_jobs(
                 .await;
             let _ = super::control::finish_remote_job_lease(
                 store,
-                prior.id,
+                prior_id,
                 handle.job_id,
                 "superseded",
             )
@@ -244,7 +244,7 @@ async fn cancel_superseded_remote_jobs(
                 remote
                     .fleet
                     .record_outcome(crate::remote_node::DispatchOutcome {
-                        mission_id: prior.id,
+                        mission_id: prior_id,
                         node_id: node.id,
                         job_id: Some(handle.job_id),
                         state: status.state,
@@ -262,11 +262,23 @@ async fn cancel_superseded_remote_jobs(
                 std::sync::Arc::clone(remote.fleet),
                 node,
                 shared_token,
-                prior.id,
+                prior_id,
                 handle.job_id,
                 handle.started_at,
                 remote.working_dir.to_path_buf(),
                 "superseded",
+            );
+        }
+    }
+    if matches!(store.get_active_mission_run(prior_id).await, Ok(None)) {
+        if let Err(error) = store
+            .update_mission_status(prior_id, MissionStatus::Acknowledged)
+            .await
+        {
+            tracing::warn!(
+                mission_id = %prior_id,
+                %error,
+                "could not acknowledge a superseded attempt after remote cancellation"
             );
         }
     }
@@ -329,7 +341,7 @@ async fn absorb(
         tracing::info!(prior = %prior.id, %successor, count = moved.len(), "moved workers to the superseding mission");
     }
     if let Some(remote) = remote {
-        cancel_superseded_remote_jobs(store, prior, remote).await;
+        cancel_superseded_remote_jobs_by_id(store, prior.id, remote).await;
     }
     if store.get_active_mission_run(prior.id).await?.is_none() {
         if let Err(error) = store

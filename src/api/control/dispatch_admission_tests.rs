@@ -17679,5 +17679,394 @@ async fn child_placement_handles_client_parent_auth_fallback_and_idempotent_retr
     for m in &manager.list(24).await.machines {
         crate::managed::unregister_test_node(m);
     }
->>>>>>> f9e5b6b (feat(control): default subagent placement to Boat and cancel superseded remote jobs)
+}
+
+#[tokio::test]
+async fn bugbot_regressions_pin_boat_provider_exclude_vibe_cleanup_rented_vm_and_drop_locks_before_cancel(
+) {
+    let static_vibe = spawn_fixture_node("static-vibe", "STATIC_VIBE_TOK", "running").await;
+    *static_vibe.capabilities.lock().unwrap() =
+        (StatusCode::OK, json!({"version": 2, "harnesses": ["vibe"]}));
+    let boat_guest = spawn_fixture_node("boat-reg-guest", "BOAT_REG_GUEST_TOK", "running").await;
+    let h = Harness::with_nodes(vec![static_vibe.node.clone()]).await;
+    let (manager, boat_provider) = attach_boat_fixture(&h, &boat_guest.node.base_url).await;
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::vibe::VibeBackend::new()));
+    let mut mistral = crate::ai_providers::AIProvider::new(
+        crate::ai_providers::ProviderType::Mistral,
+        "fixture".into(),
+    );
+    mistral.api_key = Some("fixture-only-key".into());
+    let providers_path = h
+        .state
+        .config
+        .working_dir
+        .join(crate::util::AI_PROVIDERS_PATH);
+    std::fs::create_dir_all(providers_path.parent().unwrap()).unwrap();
+    std::fs::write(providers_path, serde_json::to_vec(&vec![mistral]).unwrap()).unwrap();
+
+    h.state.fleet.record_heartbeat(
+        "static-vibe",
+        crate::remote_node::NodeHeartbeat {
+            resource_history: Vec::new(),
+            node_id: "static-vibe".into(),
+            online: true,
+            capacity_total: 4,
+            capacity_available: 4,
+            active_leases: 0,
+            version: "test".into(),
+            protocol_version: crate::remote_node::protocol::NODE_PROTOCOL_VERSION,
+            labels: Vec::new(),
+            cpu_total: 8,
+            mem_total_bytes: 32 << 30,
+            mem_available_bytes: 28 << 30,
+            disk_total_bytes: 200 << 30,
+            disk_available_bytes: 150 << 30,
+            active_jobs: 0,
+            queued_jobs: 0,
+            side_jobs: 0,
+            cached_toolchains: Vec::new(),
+            lean_runtime_ready: Some(true),
+            source_bundle_capacity: None,
+            min_free_disk_bytes: None,
+            disk_pressure_pinned: false,
+            managed_auth: Vec::new(),
+        },
+    );
+
+    // 1. Pin default child placement to `auto-managed:boat` even when another
+    //    provider (`hetzner`) is configured as the managed default.
+    struct FailingHetznerProvider {
+        spawns: std::sync::Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl crate::managed::ManagedProvider for FailingHetznerProvider {
+        fn name(&self) -> &'static str {
+            "hetzner"
+        }
+        async fn spawn(
+            &self,
+            _: &crate::managed::SpawnSpec,
+        ) -> Result<crate::managed::ProviderMachine, String> {
+            *self.spawns.lock().unwrap() += 1;
+            Err("hetzner must not be used for default child placement".into())
+        }
+        async fn get(&self, id: &str) -> Result<crate::managed::ProviderMachine, String> {
+            Ok(crate::managed::ProviderMachine {
+                provider_id: id.into(),
+                state: "ready".into(),
+                name: String::new(),
+                deletable_at: None,
+            })
+        }
+        async fn list(&self) -> Result<Vec<crate::managed::ProviderMachine>, String> {
+            Ok(Vec::new())
+        }
+        async fn destroy(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn extend(&self, _: &str, _: u64) -> Result<(), String> {
+            Ok(())
+        }
+        async fn write_file(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn exec(&self, _: &str, _: &str, _: u64) -> Result<Value, String> {
+            Ok(json!({"exitCode": 0}))
+        }
+        async fn usage(&self, _: &str) -> Result<crate::managed::ProviderUsage, String> {
+            Ok(crate::managed::ProviderUsage {
+                dollars: 0.0,
+                seconds: 0,
+                running: true,
+            })
+        }
+    }
+    let hetzner = Arc::new(FailingHetznerProvider {
+        spawns: std::sync::Mutex::new(0),
+    });
+    manager.register_provider(hetzner.clone());
+    manager.set_default_provider_for_test("hetzner");
+    assert_eq!(
+        manager.default_provider().map(|p| p.name()),
+        Some("hetzner")
+    );
+    assert_eq!(
+        super::worker_location::default_child_remote_node_id(&h.state, &h.user.id, "opencode"),
+        "auto-managed:boat"
+    );
+
+    let parent = active_mission(&h, "parent with hetzner default").await;
+    let boat_pinned = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "child pinned to boat",
+                "parent_mission_id": parent.id,
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "prompt": "run on boat despite hetzner default",
+                "writer": false
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap()
+    .1
+     .0;
+    assert_eq!(*hetzner.spawns.lock().unwrap(), 0);
+    assert_eq!(boat_provider.spawned_specs.lock().unwrap().len(), 1);
+    assert_eq!(boat_pinned["managed_machine"]["provider"], "boat");
+
+    // 2. Exclude `vibe` from managed default placement: omitted `remote_node_id`
+    //    falls back to `"auto"` (`static-vibe`), while explicit `"auto-managed:boat"`
+    //    fails closed with 400 before renting a VM.
+    assert_eq!(
+        super::worker_location::default_child_remote_node_id(&h.state, &h.user.id, "vibe"),
+        "auto"
+    );
+    let vibe_child = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "vibe child fallback",
+                "parent_mission_id": parent.id,
+                "backend": "vibe",
+                "model_override": "mistral/mistral-vibe-cli-latest",
+                "prompt": "run vibe on static node",
+                "writer": false
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap()
+    .1
+     .0;
+    assert!(vibe_child["id"].is_string());
+    assert_eq!(static_vibe.submissions.lock().unwrap().len(), 1);
+    assert_eq!(boat_provider.spawned_specs.lock().unwrap().len(), 1);
+
+    let explicit_vibe_err = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "explicit vibe on boat",
+                "parent_mission_id": parent.id,
+                "backend": "vibe",
+                "model_override": "mistral/mistral-vibe-cli-latest",
+                "remote_node_id": "auto-managed:boat",
+                "prompt": "must fail closed"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(explicit_vibe_err.0, StatusCode::BAD_REQUEST);
+    assert!(explicit_vibe_err.1.contains("vibe-acp"));
+    assert_eq!(boat_provider.spawned_specs.lock().unwrap().len(), 1);
+
+    // 3. Clean up newly rented VMs when post-rental track admission rejects.
+    let held_writer = h.writer(MissionStatus::Active, None).await;
+    assert_eq!(held_writer.project.project.as_deref(), Some("lido"));
+    let destroyed_before = boat_provider.destroyed_ids.lock().unwrap().len();
+    let track_conflict_err = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "conflicting track writer",
+                "parent_mission_id": parent.id,
+                "project": "lido",
+                "track": held_writer.project.track,
+                "writer": true,
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "remote_node_id": "auto-managed:boat:medium",
+                "prompt": "must destroy rented vm on track conflict"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(track_conflict_err.0, StatusCode::CONFLICT);
+    assert_eq!(
+        boat_provider.destroyed_ids.lock().unwrap().len(),
+        destroyed_before + 1,
+        "post-rental track conflict must destroy the newly rented Boat VM"
+    );
+
+    // 4. Release `DISPATCH_ADMISSION` before awaiting remote job cancellation
+    //    on supersession so a slow remote node never blocks global admission.
+    let (cancel_entered_tx, cancel_entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_cancel_tx, release_cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let enter_cell = Arc::new(std::sync::Mutex::new(Some(cancel_entered_tx)));
+    let release_cell = Arc::new(tokio::sync::Mutex::new(Some(release_cancel_rx)));
+    let slow_token_env = format!("SANDBOXED_SLOW_NODE_TOK_{}", Uuid::new_v4().simple());
+    std::env::set_var(&slow_token_env, "slow-tok");
+    let slow_app = axum::Router::new()
+        .route(
+            "/jobs/:id/cancel",
+            axum::routing::post({
+                let enter_cell = enter_cell.clone();
+                let release_cell = release_cell.clone();
+                move |axum::extract::Path(id): axum::extract::Path<Uuid>| {
+                    let enter_cell = enter_cell.clone();
+                    let release_cell = release_cell.clone();
+                    async move {
+                        if let Some(tx) = enter_cell.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        if let Some(rx) = release_cell.lock().await.take() {
+                            let _ = rx.await;
+                        }
+                        Json(crate::remote_node::NodeJobStatus {
+                            cancellation: None,
+                            job_id: id,
+                            mission_id: Uuid::nil(),
+                            state: "cancelled".into(),
+                            exit_code: Some(130),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            started_at: None,
+                            finished_at: Some(chrono::Utc::now().to_rfc3339()),
+                            error: None,
+                            log_tail: None,
+                            artifacts: Vec::new(),
+                        })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/jobs/:id",
+            axum::routing::get(
+                |axum::extract::Path(id): axum::extract::Path<Uuid>| async move {
+                    Json(crate::remote_node::NodeJobStatus {
+                        cancellation: None,
+                        job_id: id,
+                        mission_id: Uuid::nil(),
+                        state: "cancelled".into(),
+                        exit_code: Some(130),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        started_at: None,
+                        finished_at: Some(chrono::Utc::now().to_rfc3339()),
+                        error: None,
+                        log_tail: None,
+                        artifacts: Vec::new(),
+                    })
+                },
+            ),
+        );
+    let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow_addr = slow_listener.local_addr().unwrap();
+    let slow_server = tokio::spawn(async move {
+        let _ = axum::serve(slow_listener, slow_app).await;
+    });
+
+    let slow_node = crate::remote_node::RemoteNodeConfig {
+        id: "slow-supersede-node".into(),
+        base_url: format!("http://{slow_addr}"),
+        token_env: slow_token_env.clone(),
+        labels: None,
+    };
+    let h_slow = Harness::with_nodes(vec![slow_node]).await;
+    h_slow
+        .state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::opencode::OpenCodeBackend::new(
+            "http://127.0.0.1:9".into(),
+            None,
+            false,
+        )));
+    let prior = active_mission(&h_slow, "prior remote reviewer").await;
+    let slow_job = Uuid::new_v4();
+    crate::remote_node::job_ledger::record(
+        &h_slow.state.config.working_dir,
+        accepted_mission_handle(
+            prior.id,
+            "slow-supersede-node",
+            slow_job,
+            chrono::Utc::now(),
+        ),
+    )
+    .await
+    .unwrap();
+    ensure_remote_job_lease(
+        h_slow.control.mission_store.as_ref(),
+        prior.id,
+        slow_job,
+        "slow-supersede-node",
+    )
+    .await
+    .unwrap();
+    // Mark `prior` terminal-ready on horizon (`Completed` or `Failed` is attention-horizon).
+    h_slow
+        .control
+        .mission_store
+        .update_mission_status(prior.id, MissionStatus::Failed)
+        .await
+        .unwrap();
+
+    let state_clone = h_slow.state.clone();
+    let user_clone = h_slow.user.clone();
+    let create_fut = tokio::spawn(async move {
+        create_mission(
+            State(state_clone),
+            Extension(user_clone),
+            Some(Json(
+                serde_json::from_value(json!({
+                    "title": "replacement reviewer",
+                    "backend": "opencode",
+                    "placement": "client",
+                    "supersedes_mission_id": prior.id
+                }))
+                .unwrap(),
+            )),
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), cancel_entered_rx)
+        .await
+        .expect("supersession must enter remote cancel")
+        .expect("cancel_entered_tx dropped before signalling");
+
+    // While `/jobs/:id/cancel` is paused on the slow node, `DISPATCH_ADMISSION`
+    // and the durable admission file lock MUST already be free!
+    let guard = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        super::DISPATCH_ADMISSION.lock(),
+    )
+    .await
+    .expect("DISPATCH_ADMISSION must not be held during remote job cancellation");
+    let file_guard = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        super::dispatch_admission::durable_lock(&h_slow.state.config),
+    )
+    .await
+    .expect("durable admission lock must not be held during remote job cancellation")
+    .unwrap();
+    drop(file_guard);
+    drop(guard);
+
+    let _ = release_cancel_tx.send(());
+    let created = create_fut.await.unwrap().unwrap();
+    assert!(created.1 .0["id"].is_string());
+
+    std::env::remove_var(&slow_token_env);
+    slow_server.abort();
+    for m in &manager.list(24).await.machines {
+        crate::managed::unregister_test_node(m);
+    }
 }

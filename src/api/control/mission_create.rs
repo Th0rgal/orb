@@ -2227,191 +2227,232 @@ pub(in crate::api) async fn create_mission_inner(
         req.claim_managed_machine_id = Some(machine.id.clone());
         rented_managed = Some((machine, reused));
     }
-    if let Err(error) = control
-        .cmd_tx
-        .send(ControlCommand::CreateMission {
-            title,
-            workspace_id,
-            agent,
-            model_override,
-            model_effort,
-            fast_mode: req.fast_mode,
-            service_tier: req.service_tier,
-            backend,
-            config_profile: effective_config_profile,
-            parent_mission_id: req.parent_mission_id,
-            working_directory: req.working_directory,
-            scheduling: crate::api::mission_store::MissionScheduling {
-                priority: req.priority.unwrap_or(0),
-                not_before: req.not_before.map(|t| t.to_rfc3339()),
-                deadline: req.deadline.map(|t| t.to_rfc3339()),
-            },
-            requires_local_disk: local_mission,
-            estimated_disk_gib: effective_estimated_disk_gib,
-            admission_tags: normalized_request_tags.clone().unwrap_or_default(),
-            respond: tx,
-        })
-        .await
-    {
-        if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed()) {
-            let _ = manager.destroy(&machine.id, "launch_failed").await;
-        }
-        return Err(session_unavailable(error));
-    }
 
-    let mut mission = match rx.await {
-        Ok(Ok(mission)) => mission,
-        Ok(Err(error)) => {
-            if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed()) {
-                let _ = manager.destroy(&machine.id, "launch_failed").await;
-            }
-            return Err(internal_error(error));
-        }
-        Err(error) => {
-            if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed()) {
-                let _ = manager.destroy(&machine.id, "launch_failed").await;
-            }
-            return Err(recv_failed(error));
-        }
-    };
-
-    // The machine rented for this mission now serves it: its lifetime, not
-    // the caller's, governs the VM (docs/specs/managed-vm-lifecycle.md).
-    if let (Some(machine), Some(manager)) = (
-        req.claim_managed_machine_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty()),
-        state.managed(),
-    ) {
-        // The requester is the server-resolved parent (gateway-attributed or
-        // derived from the caller's `orb_<id>` session), and only when it
-        // exists in this user's own store; claim_for_mission enforces that
-        // the machine is this user's.
-        let parent = match req.parent_mission_id {
-            Some(p) if matches!(control.mission_store.get_mission(p).await, Ok(Some(_))) => {
-                Some(p.to_string())
-            }
-            _ => None,
-        };
-        if let Err(error) = manager
-            .claim_for_mission(
-                machine,
-                &mission.id.to_string(),
-                parent.as_deref(),
-                Some(&user.id),
-            )
+    let post_rent = async {
+        if let Err(error) = control
+            .cmd_tx
+            .send(ControlCommand::CreateMission {
+                title,
+                workspace_id,
+                agent,
+                model_override,
+                model_effort,
+                fast_mode: req.fast_mode,
+                service_tier: req.service_tier,
+                backend,
+                config_profile: effective_config_profile,
+                parent_mission_id: req.parent_mission_id,
+                working_directory: req.working_directory,
+                scheduling: crate::api::mission_store::MissionScheduling {
+                    priority: req.priority.unwrap_or(0),
+                    not_before: req.not_before.map(|t| t.to_rfc3339()),
+                    deadline: req.deadline.map(|t| t.to_rfc3339()),
+                },
+                requires_local_disk: local_mission,
+                estimated_disk_gib: effective_estimated_disk_gib,
+                admission_tags: normalized_request_tags.clone().unwrap_or_default(),
+                respond: tx,
+            })
             .await
         {
-            tracing::warn!(mission_id = %mission.id, %machine, %error, "could not record the managed machine's owner");
+            return Err(session_unavailable(error));
         }
-    }
 
-    if let Some(amount) = req.budget_usd {
-        if let Err(error) = crate::api::mission_budget::set_budget(
-            &control.mission_store,
-            &user,
-            mission.id,
-            Some(amount),
-        )
-        .await
-        {
-            tracing::warn!(mission_id = %mission.id, %error, "could not record the mission budget");
-        }
-    }
-    // The claimed machine charges to the new mission's pool and concurrency cap pool.
-    if let (Some(machine), Some(manager)) = (
-        req.claim_managed_machine_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|m| !m.is_empty()),
-        state.managed(),
-    ) {
-        let pool =
-            crate::api::mission_budget::pool_for(&control.mission_store, mission.id, &user.id)
-                .await;
-        if pool.is_some() {
-            manager.set_machine_pool(machine, pool).await;
-        }
-        if let Some(m_row) = manager.get(machine).await {
-            let cap_pool = crate::api::mission_budget::cap_pool_for(
-                &control.mission_store,
-                mission.id,
-                &user.id,
-                &m_row.provider,
-            )
-            .await;
-            manager.set_machine_cap_pool(machine, cap_pool).await;
-        }
-        if let Some((ref mut rented, _)) = rented_managed {
-            if let Some(updated_machine) = manager.get(machine).await {
-                *rented = updated_machine;
+        let mut mission = match rx.await {
+            Ok(Ok(mission)) => mission,
+            Ok(Err(error)) => return Err(internal_error(error)),
+            Err(error) => return Err(recv_failed(error)),
+        };
+
+        // The machine rented for this mission now serves it: its lifetime, not
+        // the caller's, governs the VM (docs/specs/managed-vm-lifecycle.md).
+        if let (Some(machine), Some(manager)) = (
+            req.claim_managed_machine_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty()),
+            state.managed(),
+        ) {
+            // The requester is the server-resolved parent (gateway-attributed or
+            // derived from the caller's `orb_<id>` session), and only when it
+            // exists in this user's own store; claim_for_mission enforces that
+            // the machine is this user's.
+            let parent = match req.parent_mission_id {
+                Some(p) if matches!(control.mission_store.get_mission(p).await, Ok(Some(_))) => {
+                    Some(p.to_string())
+                }
+                _ => None,
+            };
+            if let Err(error) = manager
+                .claim_for_mission(
+                    machine,
+                    &mission.id.to_string(),
+                    parent.as_deref(),
+                    Some(&user.id),
+                )
+                .await
+            {
+                tracing::warn!(mission_id = %mission.id, %machine, %error, "could not record the managed machine's owner");
             }
         }
-    }
 
-    if let Some(requirements) = auto_placement.as_deref() {
-        // Only auto-placed missions may later be moved off a full node.
-        if let Err(error) =
-            rebalance::record_auto(&state.config.working_dir, mission.id, requirements)
-        {
-            tracing::warn!(mission_id = %mission.id, %error, "could not record auto placement; the mission will not be rebalanced");
+        if let Some(amount) = req.budget_usd {
+            if let Err(error) = crate::api::mission_budget::set_budget(
+                &control.mission_store,
+                &user,
+                mission.id,
+                Some(amount),
+            )
+            .await
+            {
+                tracing::warn!(mission_id = %mission.id, %error, "could not record the mission budget");
+            }
         }
-    }
-    if let Some(mode) = req.cyber_access {
-        if let Err(error) = cyber::write(&state.config.working_dir, mission.id, mode) {
-            interrupt_new_mission(&control, mission.id, "cyber_settings_unavailable").await;
-            return Err(internal_error(error));
-        }
-    }
-
-    if let Some(fingerprint) = side_launch_fingerprint {
-        if let Err(error) = fork::record_side_launch(
-            &state.config.working_dir,
-            mission.id,
-            req.idempotency_key.as_deref().unwrap_or_default(),
-            fingerprint,
+        // The claimed machine charges to the new mission's pool and concurrency cap pool.
+        if let (Some(machine), Some(manager)) = (
+            req.claim_managed_machine_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty()),
+            state.managed(),
         ) {
-            interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable").await;
-            return Err(internal_error(error));
+            let pool =
+                crate::api::mission_budget::pool_for(&control.mission_store, mission.id, &user.id)
+                    .await;
+            if pool.is_some() {
+                manager.set_machine_pool(machine, pool).await;
+            }
+            if let Some(m_row) = manager.get(machine).await {
+                let cap_pool = crate::api::mission_budget::cap_pool_for(
+                    &control.mission_store,
+                    mission.id,
+                    &user.id,
+                    &m_row.provider,
+                )
+                .await;
+                manager.set_machine_cap_pool(machine, cap_pool).await;
+            }
+            if let Some((ref mut rented, _)) = rented_managed {
+                if let Some(updated_machine) = manager.get(machine).await {
+                    *rented = updated_machine;
+                }
+            }
         }
-    } else if let Some(prior_id) = req.supersedes_mission_id {
-        if let Some(prior_receipt) = fork::side_launch_receipt(&state.config.working_dir, prior_id)
-            .map_err(internal_error)?
-        {
+
+        if let Some(requirements) = auto_placement.as_deref() {
+            // Only auto-placed missions may later be moved off a full node.
+            if let Err(error) =
+                rebalance::record_auto(&state.config.working_dir, mission.id, requirements)
+            {
+                tracing::warn!(mission_id = %mission.id, %error, "could not record auto placement; the mission will not be rebalanced");
+            }
+        }
+        if let Some(mode) = req.cyber_access {
+            if let Err(error) = cyber::write(&state.config.working_dir, mission.id, mode) {
+                interrupt_new_mission(&control, mission.id, "cyber_settings_unavailable").await;
+                return Err(internal_error(error));
+            }
+        }
+
+        if let Some(fingerprint) = side_launch_fingerprint {
             if let Err(error) = fork::record_side_launch(
                 &state.config.working_dir,
                 mission.id,
-                req.idempotency_key.as_deref().unwrap_or(&prior_receipt.key),
-                &prior_receipt.fingerprint,
-            )
-            .and_then(|()| {
-                if prior_receipt.accepted {
-                    fork::accept_side_launch(&state.config.working_dir, mission.id)
-                } else {
-                    Ok(())
-                }
-            }) {
+                req.idempotency_key.as_deref().unwrap_or_default(),
+                fingerprint,
+            ) {
                 interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable")
                     .await;
                 return Err(internal_error(error));
             }
+        } else if let Some(prior_id) = req.supersedes_mission_id {
+            if let Some(prior_receipt) =
+                fork::side_launch_receipt(&state.config.working_dir, prior_id)
+                    .map_err(internal_error)?
+            {
+                if let Err(error) = fork::record_side_launch(
+                    &state.config.working_dir,
+                    mission.id,
+                    req.idempotency_key.as_deref().unwrap_or(&prior_receipt.key),
+                    &prior_receipt.fingerprint,
+                )
+                .and_then(|()| {
+                    if prior_receipt.accepted {
+                        fork::accept_side_launch(&state.config.working_dir, mission.id)
+                    } else {
+                        Ok(())
+                    }
+                }) {
+                    interrupt_new_mission(&control, mission.id, "side_launch_receipt_unavailable")
+                        .await;
+                    return Err(internal_error(error));
+                }
+            }
         }
-    }
 
-    // Match actor/sweep lock order before taking the PR-writer lock. The track
-    // conflict path may reconcile a terminal predecessor, so admission must
-    // remain serialized until the new lease and assignment are both persisted.
-    let admission_guard = DISPATCH_ADMISSION.lock().await;
-    let admission_file_guard = match dispatch_admission::durable_lock(&state.config).await {
-        Ok(guard) => guard,
-        Err(error) => {
-            // The actor already persisted this candidate and its scratch
-            // reservation. It has received no prompt or writer assignment.
-            // Compensate directly: an actor roundtrip under admission can
-            // deadlock, and the durable admission file itself is unavailable.
-            let cleanup: Result<(), String> = async {
-                let reason = "dispatch_admission_unavailable";
+        // Match actor/sweep lock order before taking the PR-writer lock. The track
+        // conflict path may reconcile a terminal predecessor, so admission must
+        // remain serialized until the new lease and assignment are both persisted.
+        let admission_guard = DISPATCH_ADMISSION.lock().await;
+        let admission_file_guard = match dispatch_admission::durable_lock(&state.config).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                // The actor already persisted this candidate and its scratch
+                // reservation. It has received no prompt or writer assignment.
+                // Compensate directly: an actor roundtrip under admission can
+                // deadlock, and the durable admission file itself is unavailable.
+                let cleanup: Result<(), String> = async {
+                    let reason = "dispatch_admission_unavailable";
+                    control
+                        .mission_store
+                        .update_mission_status_with_reason(
+                            mission.id,
+                            MissionStatus::Interrupted,
+                            Some(reason),
+                        )
+                        .await?;
+                    let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+                        completion: None,
+                        execution: None,
+                        mission_id: mission.id,
+                        status: MissionStatus::Interrupted,
+                        summary: Some(reason.to_string()),
+                    });
+                    release_local_mission_disk(&state.config, mission.id).await
+                }
+                .await;
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({
+                        "error": "dispatch_admission_unavailable",
+                        "mission_id": mission.id,
+                        "detail": error,
+                        "cleanup_error": cleanup.err(),
+                    })
+                    .to_string(),
+                ));
+            }
+        };
+        // Close the preflight-to-create race under the store-only mutex. Exactly
+        // one concurrent creator wins; a loser is durably interrupted before it
+        // can receive a goal or become a writer.
+        let pr_writer_guard = if request_needs_writer_lease {
+            Some(
+                acquire_durable_pr_writer_lock(&state.control)
+                    .await
+                    .map_err(internal_error)?,
+            )
+        } else {
+            None
+        };
+        if let (Some(github_pr), Some(_guard)) = (req.github_pr.as_deref(), pr_writer_guard.as_ref())
+        {
+            if let Some(existing) =
+                find_existing_pr_writer_global(&state.control, github_pr, Some(mission.id))
+                    .await
+                    .map_err(internal_error)?
+            {
+                let reason = "pr_writer_lease_conflict";
                 control
                     .mission_store
                     .update_mission_status_with_reason(
@@ -2419,7 +2460,8 @@ pub(in crate::api) async fn create_mission_inner(
                         MissionStatus::Interrupted,
                         Some(reason),
                     )
-                    .await?;
+                    .await
+                    .map_err(internal_error)?;
                 let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
                     completion: None,
                     execution: None,
@@ -2427,561 +2469,544 @@ pub(in crate::api) async fn create_mission_inner(
                     status: MissionStatus::Interrupted,
                     summary: Some(reason.to_string()),
                 });
-                release_local_mission_disk(&state.config, mission.id).await
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "PR writer lease is already held by mission {} (status={}); interrupted duplicate mission {} for {}",
+                        existing.id,
+                        existing.status,
+                        mission.id,
+                        canonical_github_pr(github_pr)
+                    ),
+                ));
             }
-            .await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({
-                    "error": "dispatch_admission_unavailable",
-                    "mission_id": mission.id,
-                    "detail": error,
-                    "cleanup_error": cleanup.err(),
-                })
-                .to_string(),
-            ));
         }
-    };
-    // Close the preflight-to-create race under the store-only mutex. Exactly
-    // one concurrent creator wins; a loser is durably interrupted before it
-    // can receive a goal or become a writer.
-    let pr_writer_guard = if request_needs_writer_lease {
-        Some(
-            acquire_durable_pr_writer_lock(&state.control)
-                .await
-                .map_err(internal_error)?,
-        )
-    } else {
-        None
-    };
-    if let (Some(github_pr), Some(_guard)) = (req.github_pr.as_deref(), pr_writer_guard.as_ref()) {
-        if let Some(existing) =
-            find_existing_pr_writer_global(&state.control, github_pr, Some(mission.id))
-                .await
-                .map_err(internal_error)?
-        {
-            let reason = "pr_writer_lease_conflict";
-            control
-                .mission_store
-                .update_mission_status_with_reason(
-                    mission.id,
-                    MissionStatus::Interrupted,
-                    Some(reason),
-                )
-                .await
-                .map_err(internal_error)?;
-            let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
-                completion: None,
-                execution: None,
-                mission_id: mission.id,
-                status: MissionStatus::Interrupted,
-                summary: Some(reason.to_string()),
-            });
-            return Err((
-                StatusCode::CONFLICT,
-                format!(
-                    "PR writer lease is already held by mission {} (status={}); interrupted duplicate mission {} for {}",
-                    existing.id,
-                    existing.status,
-                    mission.id,
-                    canonical_github_pr(github_pr)
-                ),
-            ));
-        }
-    }
 
-    // Apply project tagging metadata if provided at creation time. Empty/blank
-    // strings are treated as unset; tags are trimmed and empties dropped.
-    let nonblank = |s: &Option<String>| -> Option<String> {
-        s.as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    };
-    // A mission dispatched from a bound conversation inherits that project
-    // when the caller did not name one. Agents omit it often — 11 of the 39
-    // missions created in one 12h window on prod carried no project at all —
-    // and an untagged mission is invisible to every project-scoped view:
-    // the health rollup, the state timeline, the writer-slot counts, and the
-    // inventory the controllers themselves query. Making the tag structural
-    // beats asking every dispatcher to remember it.
-    //
-    // An explicit value always wins, including a deliberate blank, which is
-    // how a caller says "this belongs to no project".
-    let project = match nonblank(&req.project) {
-        Some(explicit) => Some(
-            super::super::projects_overview::resolve_roster_slug(&state.projects, &explicit)
-                .ok()
-                .flatten()
-                .unwrap_or(explicit),
-        ),
-        None if req.project.is_some() => None,
-        None => req
-            .origin_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|session| !session.is_empty())
-            .and_then(|session| {
-                // A conversation rolls over into a continuation, and the
-                // binding names whichever id the operator declared — often
-                // several rollovers above this one. Walk up the ancestry,
-                // nearest first, so the closest binding wins.
-                let chain = match super::super::projects_overview::hermes_state_db_path() {
-                    Some(path) => super::super::session_chain::ancestry(&path, session),
-                    None => vec![session.to_string()],
-                };
-                chain.iter().find_map(|candidate| {
-                    match state.projects.project_for_session(candidate) {
-                        Ok(slug) => slug,
-                        Err(error) => {
-                            tracing::warn!(
-                                session_id = candidate,
-                                error = %error,
-                                "could not resolve a project for the origin session"
-                            );
-                            None
-                        }
-                    }
-                })
-            }),
-    };
-    let mut track = nonblank(&req.track);
-    let intent = nonblank(&req.intent);
-    let github_pr = nonblank(&req.github_pr);
-    let desired_state = nonblank(&req.desired_state);
-    let next_check_at = nonblank(&req.next_check_at);
-    let mut tags = normalized_request_tags;
-    // Absorb at write time: a project mission always lands on a plan row
-    // (existing key / alias / single PR ref, else a new `absorbed` track) and
-    // takes a lease on it. A held writer lease interrupts this duplicate
-    // instead of letting two writers race on one track.
-    if let Some(project_slug) = project.as_deref() {
-        match bind_mission_to_track(
-            &state,
-            &control,
-            &mission,
-            project_slug,
-            track.as_deref(),
-            req.title.as_deref(),
-            github_pr.as_deref(),
-            intent.as_deref(),
-            req.writer,
-            tags.as_deref().unwrap_or(&[]),
-            request_is_writer,
-            req.idempotency_key.as_deref(),
-            &req.acceptance_criteria,
-        )
-        .await
-        {
-            Ok(canonical) => track = Some(canonical),
-            Err(response) => {
-                drop(pr_writer_guard);
-                return Err(response);
-            }
-        }
-    }
-    // Explicit capability governs track admission and harness permissions even
-    // without PR metadata. Persist it before deferred dispatch can re-infer
-    // authority from an initial prompt such as "verity-integration-b".
-    if req.writer.is_some()
-        || req
-            .github_pr
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-    {
-        let capability = if request_is_writer {
-            Some("pr-writer")
-        } else if req.writer == Some(false) {
-            Some("pr-readonly")
-        } else {
-            None
+        // Apply project tagging metadata if provided at creation time. Empty/blank
+        // strings are treated as unset; tags are trimmed and empties dropped.
+        let nonblank = |s: &Option<String>| -> Option<String> {
+            s.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
         };
-        if let Some(capability) = capability {
-            let tags = tags.get_or_insert_with(Vec::new);
-            tags.retain(|tag| tag != "pr-writer" && tag != "pr-readonly");
-            if !tags.iter().any(|tag| tag == capability) {
-                tags.push(capability.to_string());
-            }
-        }
-    }
-    // Creation persisted the admission lease before replying. This later
-    // metadata patch must retain it, otherwise user tags could release it.
-    let durable_reservation_tags: Vec<String> = mission
-        .project
-        .tags
-        .iter()
-        .filter(|tag| {
-            tag.starts_with(DISK_RESERVATION_TAG_PREFIX)
-                || crate::api::mission_horizon::is_reserved_btw_tag(tag)
-        })
-        .cloned()
-        .collect();
-    if !durable_reservation_tags.is_empty() {
-        let requested = tags.get_or_insert_with(Vec::new);
-        for reservation in durable_reservation_tags {
-            if !requested.iter().any(|tag| tag == &reservation) {
-                requested.push(reservation);
-            }
-        }
-    }
-    if project.is_some()
-        || track.is_some()
-        || intent.is_some()
-        || github_pr.is_some()
-        || tags.is_some()
-        || desired_state.is_some()
-        || next_check_at.is_some()
-    {
-        control
-            .mission_store
-            .update_mission_project(
-                mission.id,
-                crate::api::mission_store::MissionProjectPatch {
-                    title: None,
-                    project: project.clone().map(Some),
-                    track: track.clone().map(Some),
-                    intent: intent.clone().map(Some),
-                    github_pr: github_pr.clone().map(Some),
-                    tags: tags.clone(),
-                    preserve_updated_at: false,
-                    tag_patch: None,
-                    desired_state: desired_state.clone().map(Some),
-                    next_check_at: next_check_at.clone().map(Some),
-                },
+        // A mission dispatched from a bound conversation inherits that project
+        // when the caller did not name one. Agents omit it often — 11 of the 39
+        // missions created in one 12h window on prod carried no project at all —
+        // and an untagged mission is invisible to every project-scoped view:
+        // the health rollup, the state timeline, the writer-slot counts, and the
+        // inventory the controllers themselves query. Making the tag structural
+        // beats asking every dispatcher to remember it.
+        //
+        // An explicit value always wins, including a deliberate blank, which is
+        // how a caller says "this belongs to no project".
+        let project = match nonblank(&req.project) {
+            Some(explicit) => Some(
+                super::super::projects_overview::resolve_roster_slug(&state.projects, &explicit)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(explicit),
+            ),
+            None if req.project.is_some() => None,
+            None => req
+                .origin_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|session| !session.is_empty())
+                .and_then(|session| {
+                    // A conversation rolls over into a continuation, and the
+                    // binding names whichever id the operator declared — often
+                    // several rollovers above this one. Walk up the ancestry,
+                    // nearest first, so the closest binding wins.
+                    let chain = match super::super::projects_overview::hermes_state_db_path() {
+                        Some(path) => super::super::session_chain::ancestry(&path, session),
+                        None => vec![session.to_string()],
+                    };
+                    chain.iter().find_map(|candidate| {
+                        match state.projects.project_for_session(candidate) {
+                            Ok(slug) => slug,
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_id = candidate,
+                                    error = %error,
+                                    "could not resolve a project for the origin session"
+                                );
+                                None
+                            }
+                        }
+                    })
+                }),
+        };
+        let mut track = nonblank(&req.track);
+        let intent = nonblank(&req.intent);
+        let github_pr = nonblank(&req.github_pr);
+        let desired_state = nonblank(&req.desired_state);
+        let next_check_at = nonblank(&req.next_check_at);
+        let mut tags = normalized_request_tags;
+        // Absorb at write time: a project mission always lands on a plan row
+        // (existing key / alias / single PR ref, else a new `absorbed` track) and
+        // takes a lease on it. A held writer lease interrupts this duplicate
+        // instead of letting two writers race on one track.
+        if let Some(project_slug) = project.as_deref() {
+            match bind_mission_to_track(
+                &state,
+                &control,
+                &mission,
+                project_slug,
+                track.as_deref(),
+                req.title.as_deref(),
+                github_pr.as_deref(),
+                intent.as_deref(),
+                req.writer,
+                tags.as_deref().unwrap_or(&[]),
+                request_is_writer,
+                req.idempotency_key.as_deref(),
+                &req.acceptance_criteria,
             )
             .await
-            .map_err(internal_error)?;
-        // Reflect the applied values in the returned mission without a re-fetch.
-        mission.project.project = project.or(mission.project.project);
-        mission.project.track = track.or(mission.project.track);
-        mission.project.intent = intent.or(mission.project.intent);
-        mission.project.github_pr = github_pr.or(mission.project.github_pr);
-        mission.project.desired_state = desired_state.or(mission.project.desired_state);
-        mission.project.next_check_at = next_check_at.or(mission.project.next_check_at);
-        if let Some(v) = tags {
-            mission.project.tags = v;
-        }
-        let remote_supersede = super::super::mission_horizon::RemoteSupersedeContext {
-            working_dir: &state.config.working_dir,
-            remote_nodes: &state.config.remote_nodes,
-            fleet: &state.fleet,
-        };
-        if let Err(error) = super::super::mission_horizon::supersede_prior_attempts_with_remote(
-            control.mission_store.as_ref(),
-            &mission,
-            Some(&remote_supersede),
-        )
-        .await
-        {
-            tracing::warn!(
-                mission_id = %mission.id,
-                %error,
-                "could not absorb prior attempts on the same item"
-            );
-        }
-    }
-    if let Some(prior_id) = req.supersedes_mission_id {
-        let remote_supersede = super::super::mission_horizon::RemoteSupersedeContext {
-            working_dir: &state.config.working_dir,
-            remote_nodes: &state.config.remote_nodes,
-            fleet: &state.fleet,
-        };
-        if let Err(error) = super::super::mission_horizon::supersede_explicit_with_remote(
-            control.mission_store.as_ref(),
-            &mission,
-            prior_id,
-            Some(&remote_supersede),
-        )
-        .await
-        {
-            tracing::warn!(
-                mission_id = %mission.id,
-                %prior_id,
-                %error,
-                "supersedes_mission_id was not applied"
-            );
-        }
-    }
-    drop(pr_writer_guard);
-    drop(admission_file_guard);
-    drop(admission_guard);
-
-    // Creation origin ("hermes" + owning session id). Written once here so
-    // clients can group foreign-origin missions under their conversation.
-    if let Some(origin) = req
-        .origin
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let mut origin_session_id = req
-            .origin_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        // A fabricated session id is worse than none: it is BELIEVED. Measured
-        // 2026-08-06, a controller hand-passed "20260805_night_supervision" —
-        // valid in shape, existing nowhere — so the mission was invisible to
-        // ?origin_session_id=, its completion callback could pin nowhere, and
-        // the interruption that followed had no conversation to report into.
-        // When the Hermes state database is available, verify the session
-        // exists; an id that provably does not gets dropped with a warning,
-        // leaving the mission honestly unattributed and adoptable later.
-        // "Could not check" keeps the stamp — stripping attribution on every
-        // deployment without HERMES_STATE_DB would be the larger harm.
-        if let Some(session) = origin_session_id {
-            if hermes_session_exists(session) == Some(false) {
-                tracing::warn!(
-                    mission_id = %mission.id,
-                    origin_session_id = %session,
-                    "origin_session_id names no existing Hermes session; \
-                     leaving the mission unattributed instead of stamping a \
-                     fabricated id"
-                );
-                if let Ok(value) = axum::http::HeaderValue::from_str(session) {
-                    headers.insert("x-dropped-origin-session", value);
+            {
+                Ok(canonical) => track = Some(canonical),
+                Err(response) => {
+                    drop(pr_writer_guard);
+                    return Err(response);
                 }
-                origin_session_id = None;
             }
         }
-        control
-            .mission_store
-            .set_mission_origin(mission.id, origin, origin_session_id)
-            .await
-            .map_err(internal_error)?;
-        mission.origin = Some(origin.to_string());
-        mission.origin_session_id = origin_session_id.map(str::to_string);
-    }
-
-    // Persist attachments before publishing the deferred-goal dispatch ticket.
-    // The scheduler can run at every await after set_deferred_goal.
-    if let Some(attachments) = req.attachments.as_ref().filter(|rows| !rows.is_empty()) {
-        let mut payload = crate::api::mission_payload::MissionPayload {
-            attachments: attachments.clone(),
-            project: mission.project.project.clone(),
-            controller_md: None,
-        };
-        if attachments
+        // Explicit capability governs track admission and harness permissions even
+        // without PR metadata. Persist it before deferred dispatch can re-infer
+        // authority from an initial prompt such as "verity-integration-b".
+        if req.writer.is_some()
+            || req
+                .github_pr
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            let capability = if request_is_writer {
+                Some("pr-writer")
+            } else if req.writer == Some(false) {
+                Some("pr-readonly")
+            } else {
+                None
+            };
+            if let Some(capability) = capability {
+                let tags = tags.get_or_insert_with(Vec::new);
+                tags.retain(|tag| tag != "pr-writer" && tag != "pr-readonly");
+                if !tags.iter().any(|tag| tag == capability) {
+                    tags.push(capability.to_string());
+                }
+            }
+        }
+        // Creation persisted the admission lease before replying. This later
+        // metadata patch must retain it, otherwise user tags could release it.
+        let durable_reservation_tags: Vec<String> = mission
+            .project
+            .tags
             .iter()
-            .any(|row| row.kind == crate::api::mission_payload::AttachmentKind::Controller)
-        {
-            if let Some(project) = mission.project.project.as_deref() {
-                payload.controller_md = Some(
-                    super::super::projects_overview::controller_snapshot_markdown(&state, project)
-                        .await,
-                );
+            .filter(|tag| {
+                tag.starts_with(DISK_RESERVATION_TAG_PREFIX)
+                    || crate::api::mission_horizon::is_reserved_btw_tag(tag)
+            })
+            .cloned()
+            .collect();
+        if !durable_reservation_tags.is_empty() {
+            let requested = tags.get_or_insert_with(Vec::new);
+            for reservation in durable_reservation_tags {
+                if !requested.iter().any(|tag| tag == &reservation) {
+                    requested.push(reservation);
+                }
             }
         }
-        if let Err(error) = crate::api::mission_payload::write_sidecar(
-            &state.config.working_dir,
-            mission.id,
-            &payload,
-        ) {
-            // A retry must not coalesce onto a half-created mission and report
-            // success while discarding both its prompt and attachments.
-            control
-                .mission_store
-                .update_mission_status_with_reason(
-                    mission.id,
-                    MissionStatus::Failed,
-                    Some("attachment_persistence_failed"),
-                )
-                .await
-                .map_err(internal_error)?;
-            state
-                .projects
-                .release_leases_for_attempt(&mission.id.to_string())
-                .map_err(internal_error)?;
-            release_local_mission_disk(&state.config, mission.id)
-                .await
-                .map_err(internal_error)?;
-            let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
-                completion: None,
-                execution: None,
-                mission_id: mission.id,
-                status: MissionStatus::Failed,
-                summary: Some("attachment_persistence_failed".into()),
-            });
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("persist attachments: {error}"),
-            ));
-        }
-    }
-
-    // Atomic create+start: stash the initial prompt as the deferred goal. The
-    // FLEET-001 scheduler pass (every ~5s) dispatches pending missions with a
-    // deferred goal as soon as parallel capacity allows, honoring `not_before`
-    // when set. Unlike the old create-then-message pattern, this cannot be
-    // dropped at capacity.
-    // The initial prompt, keyed by the id of its queued broadcast so a later
-    // non-queued event for the same message replaces it in live clients.
-    let mut initial_prompt: Option<(Uuid, String)> = None;
-    // A remote launch is owned by the node job from the moment it exists. A
-    // deferred goal is the FLEET-001 scheduler's dispatch ticket: for a
-    // remote mission it would make the mission eligible for a LOCAL harness
-    // during every await below (node placement, proxy-key mint, the node
-    // submit round-trip). Incident 620cdb74 (2026-09-20): the scheduler
-    // started a local runner for a typed dgx-spark launch while the submit
-    // was in flight, persisted the prompt a second time (source=scheduler),
-    // and left the remote job without its run lease. Remote prompts are
-    // persisted exactly once by `persist_remote_mission_prompt` instead.
-    let remote_launch = remote_node_id.is_some() && remote_plan.is_some();
-    if let Some(prompt) = nonblank(&req.prompt) {
-        // Canonicalise `/goal\n…` to the space form before storing: the
-        // deferred goal is later re-injected verbatim, and the backend goal
-        // drivers only recognise `/goal <objective>` with a space.
-        let prompt = canonical_goal_message(&prompt).unwrap_or(prompt);
-        let prompt_event_id = if worker_location::client_owner(&mission).is_some() {
-            worker_location::initial_delivery_id(mission.id)
-        } else {
-            Uuid::new_v4()
-        };
-        // Client placements keep the prompt out of the scheduler ticket.
-        // `get_scheduled_pending_missions` only returns rows that still have
-        // a deferred goal, and the stores also exclude `placement:client`.
-        if !remote_launch && !client_placement {
-            control
-                .mission_store
-                .set_deferred_goal(
-                    mission.id,
-                    Some(deferred_messages::encode(prompt_event_id, &prompt)),
-                )
-                .await
-                .map_err(internal_error)?;
-        }
-        // A `/goal …` prompt is a goal-mode mandate from the very first turn.
-        // Persist it here, synchronously on the same store that created the
-        // mission — the event-loop hook that also does this only sees events
-        // while a control session is pumping, so MCP/API creations could
-        // otherwise stay goal_mode=false forever.
-        if let Some(objective) = parse_goal_objective(&prompt) {
-            control
-                .mission_store
-                .update_mission_goal(mission.id, true, Some(&objective))
-                .await
-                .map_err(internal_error)?;
-            mission.goal_mode = true;
-            mission.goal_objective = Some(objective);
-        }
-        // Surface the queued goal so UIs show it as pending until dispatch.
-        let _ = control.events_tx.send(AgentEvent::UserMessage {
-            id: prompt_event_id,
-            content: prompt.clone(),
-            queued: true,
-            mission_id: Some(mission.id),
-            source: Some(format!("api:{}", user.id)),
-        });
-        initial_prompt = Some((prompt_event_id, prompt));
-    }
-
-    if let (Some(remote_node_id), Some(remote_plan)) =
-        (remote_node_id.as_deref(), remote_plan.as_ref())
-    {
-        // All remote commands use the durable node job API. The legacy
-        // synchronous `/execute` path has no cancellation handle if its HTTP
-        // wait expires, so routing `remote_async=false` through it could orphan
-        // a process on the node. The response contract here is unchanged: the
-        // mission is returned Active while its durable poller owns completion.
-        //
-        // A raw remote mission never starts a local harness, so nothing else
-        // would ever persist its prompt: the queued broadcast above is
-        // deliberately dropped by the store until a runner starts the turn.
-        // Persist it here, before dispatch and before the response, so the
-        // mission's history and event replay carry the user's mandate even
-        // when dispatch fails.
-        let dispatch = match persist_remote_mission_prompt(
-            &control,
-            mission.id,
-            &user.id,
-            initial_prompt.take(),
-        )
-        .await
+        let mut superseded_ids: Vec<Uuid> = Vec::new();
+        if project.is_some()
+            || track.is_some()
+            || intent.is_some()
+            || github_pr.is_some()
+            || tags.is_some()
+            || desired_state.is_some()
+            || next_check_at.is_some()
         {
-            Ok(()) => {
-                dispatch_remote_job(
-                    &state,
-                    &control,
-                    &mission,
-                    remote_node_id,
-                    remote_plan,
-                    None,
-                    None,
+            control
+                .mission_store
+                .update_mission_project(
+                    mission.id,
+                    crate::api::mission_store::MissionProjectPatch {
+                        title: None,
+                        project: project.clone().map(Some),
+                        track: track.clone().map(Some),
+                        intent: intent.clone().map(Some),
+                        github_pr: github_pr.clone().map(Some),
+                        tags: tags.clone(),
+                        preserve_updated_at: false,
+                        tag_patch: None,
+                        desired_state: desired_state.clone().map(Some),
+                        next_check_at: next_check_at.clone().map(Some),
+                    },
                 )
                 .await
+                .map_err(internal_error)?;
+            // Reflect the applied values in the returned mission without a re-fetch.
+            mission.project.project = project.or(mission.project.project);
+            mission.project.track = track.or(mission.project.track);
+            mission.project.intent = intent.or(mission.project.intent);
+            mission.project.github_pr = github_pr.or(mission.project.github_pr);
+            mission.project.desired_state = desired_state.or(mission.project.desired_state);
+            mission.project.next_check_at = next_check_at.or(mission.project.next_check_at);
+            if let Some(v) = tags {
+                mission.project.tags = v;
             }
-            Err(message) => Err(message),
-        };
-        match dispatch {
-            Ok(mut updated) => {
-                worker_location::mark_initialized(&control.mission_store, &mut updated)
-                    .await
-                    .map_err(internal_error)?;
-                let mut value = mission_create_response(&state, &control, updated).await?;
-                if let Some((machine, reused)) = rented_managed {
-                    if let Some(obj) = value.as_object_mut() {
-                        obj.insert(
-                            "managed_machine".to_string(),
-                            serde_json::to_value(machine).unwrap_or(serde_json::Value::Null),
-                        );
-                        obj.insert(
-                            "reused_idle_machine".to_string(),
-                            serde_json::Value::Bool(reused),
-                        );
+            match super::super::mission_horizon::supersede_prior_attempts(
+                control.mission_store.as_ref(),
+                &mission,
+            )
+            .await
+            {
+                Ok(absorbed) => superseded_ids.extend(absorbed),
+                Err(error) => {
+                    tracing::warn!(
+                        mission_id = %mission.id,
+                        %error,
+                        "could not absorb prior attempts on the same item"
+                    );
+                }
+            }
+        }
+        if let Some(prior_id) = req.supersedes_mission_id {
+            match super::super::mission_horizon::supersede_explicit(
+                control.mission_store.as_ref(),
+                &mission,
+                prior_id,
+            )
+            .await
+            {
+                Ok(()) => {
+                    if !superseded_ids.contains(&prior_id) {
+                        superseded_ids.push(prior_id);
                     }
                 }
-                return Ok((headers, Json(value)));
-            }
-            Err(message) => {
-                if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed())
-                {
-                    let _ = manager.destroy(&machine.id, "launch_failed").await;
+                Err(error) => {
+                    tracing::warn!(
+                        mission_id = %mission.id,
+                        %prior_id,
+                        %error,
+                        "supersedes_mission_id was not applied"
+                    );
                 }
-                let _ = control
+            }
+        }
+        drop(pr_writer_guard);
+        drop(admission_file_guard);
+        drop(admission_guard);
+
+        // Cancel superseded remote jobs ONLY after releasing `DISPATCH_ADMISSION`
+        // and durable admission locks so a slow/unresponsive remote node never
+        // blocks unrelated mission admission or terminal reconciliation.
+        if !superseded_ids.is_empty() {
+            let remote_supersede = super::super::mission_horizon::RemoteSupersedeContext {
+                working_dir: &state.config.working_dir,
+                remote_nodes: &state.config.remote_nodes,
+                fleet: &state.fleet,
+            };
+            for prior_id in superseded_ids {
+                super::super::mission_horizon::cancel_superseded_remote_jobs_by_id(
+                    control.mission_store.as_ref(),
+                    prior_id,
+                    &remote_supersede,
+                )
+                .await;
+            }
+        }
+
+        // Creation origin ("hermes" + owning session id). Written once here so
+        // clients can group foreign-origin missions under their conversation.
+        if let Some(origin) = req
+            .origin
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let mut origin_session_id = req
+                .origin_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            // A fabricated session id is worse than none: it is BELIEVED. Measured
+            // 2026-08-06, a controller hand-passed "20260805_night_supervision" —
+            // valid in shape, existing nowhere — so the mission was invisible to
+            // ?origin_session_id=, its completion callback could pin nowhere, and
+            // the interruption that followed had no conversation to report into.
+            // When the Hermes state database is available, verify the session
+            // exists; an id that provably does not gets dropped with a warning,
+            // leaving the mission honestly unattributed and adoptable later.
+            // "Could not check" keeps the stamp — stripping attribution on every
+            // deployment without HERMES_STATE_DB would be the larger harm.
+            if let Some(session) = origin_session_id {
+                if hermes_session_exists(session) == Some(false) {
+                    tracing::warn!(
+                        mission_id = %mission.id,
+                        origin_session_id = %session,
+                        "origin_session_id names no existing Hermes session; \
+                         leaving the mission unattributed instead of stamping a \
+                         fabricated id"
+                    );
+                    if let Ok(value) = axum::http::HeaderValue::from_str(session) {
+                        headers.insert("x-dropped-origin-session", value);
+                    }
+                    origin_session_id = None;
+                }
+            }
+            control
+                .mission_store
+                .set_mission_origin(mission.id, origin, origin_session_id)
+                .await
+                .map_err(internal_error)?;
+            mission.origin = Some(origin.to_string());
+            mission.origin_session_id = origin_session_id.map(str::to_string);
+        }
+
+        // Persist attachments before publishing the deferred-goal dispatch ticket.
+        // The scheduler can run at every await after set_deferred_goal.
+        if let Some(attachments) = req.attachments.as_ref().filter(|rows| !rows.is_empty()) {
+            let mut payload = crate::api::mission_payload::MissionPayload {
+                attachments: attachments.clone(),
+                project: mission.project.project.clone(),
+                controller_md: None,
+            };
+            if attachments
+                .iter()
+                .any(|row| row.kind == crate::api::mission_payload::AttachmentKind::Controller)
+            {
+                if let Some(project) = mission.project.project.as_deref() {
+                    payload.controller_md = Some(
+                        super::super::projects_overview::controller_snapshot_markdown(
+                            &state, project,
+                        )
+                        .await,
+                    );
+                }
+            }
+            if let Err(error) = crate::api::mission_payload::write_sidecar(
+                &state.config.working_dir,
+                mission.id,
+                &payload,
+            ) {
+                // A retry must not coalesce onto a half-created mission and report
+                // success while discarding both its prompt and attachments.
+                control
                     .mission_store
                     .update_mission_status_with_reason(
                         mission.id,
                         MissionStatus::Failed,
-                        Some(REMOTE_DISPATCH_FAILED),
+                        Some("attachment_persistence_failed"),
                     )
-                    .await;
+                    .await
+                    .map_err(internal_error)?;
+                state
+                    .projects
+                    .release_leases_for_attempt(&mission.id.to_string())
+                    .map_err(internal_error)?;
+                release_local_mission_disk(&state.config, mission.id)
+                    .await
+                    .map_err(internal_error)?;
                 let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
                     completion: None,
                     execution: None,
                     mission_id: mission.id,
                     status: MissionStatus::Failed,
-                    summary: Some(message.clone()),
+                    summary: Some("attachment_persistence_failed".into()),
                 });
-                return Err((StatusCode::BAD_GATEWAY, message));
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("persist attachments: {error}"),
+                ));
             }
         }
-    }
 
-    if client_placement {
-        // Persist history and the completion receipt before exposing a delivery.
-        // A retry may replay delivery only after all initialization is durable.
-        persist_remote_mission_prompt(&control, mission.id, &user.id, initial_prompt.clone())
-            .await
-            .map_err(internal_error)?;
-        worker_location::mark_initialized(&control.mission_store, &mut mission)
-            .await
-            .map_err(internal_error)?;
-        if worker_location::client_owner(&mission).is_some() {
-            if let Some((id, prompt)) = &initial_prompt {
-                worker_location::enqueue(&control.mission_store, mission.id, *id, prompt.clone())
+        // Atomic create+start: stash the initial prompt as the deferred goal. The
+        // FLEET-001 scheduler pass (every ~5s) dispatches pending missions with a
+        // deferred goal as soon as parallel capacity allows, honoring `not_before`
+        // when set. Unlike the old create-then-message pattern, this cannot be
+        // dropped at capacity.
+        // The initial prompt, keyed by the id of its queued broadcast so a later
+        // non-queued event for the same message replaces it in live clients.
+        let mut initial_prompt: Option<(Uuid, String)> = None;
+        // A remote launch is owned by the node job from the moment it exists. A
+        // deferred goal is the FLEET-001 scheduler's dispatch ticket: for a
+        // remote mission it would make the mission eligible for a LOCAL harness
+        // during every await below (node placement, proxy-key mint, the node
+        // submit round-trip). Incident 620cdb74 (2026-09-20): the scheduler
+        // started a local runner for a typed dgx-spark launch while the submit
+        // was in flight, persisted the prompt a second time (source=scheduler),
+        // and left the remote job without its run lease. Remote prompts are
+        // persisted exactly once by `persist_remote_mission_prompt` instead.
+        let remote_launch = remote_node_id.is_some() && remote_plan.is_some();
+        if let Some(prompt) = nonblank(&req.prompt) {
+            // Canonicalise `/goal\n…` to the space form before storing: the
+            // deferred goal is later re-injected verbatim, and the backend goal
+            // drivers only recognise `/goal <objective>` with a space.
+            let prompt = canonical_goal_message(&prompt).unwrap_or(prompt);
+            let prompt_event_id = if worker_location::client_owner(&mission).is_some() {
+                worker_location::initial_delivery_id(mission.id)
+            } else {
+                Uuid::new_v4()
+            };
+            // Client placements keep the prompt out of the scheduler ticket.
+            // `get_scheduled_pending_missions` only returns rows that still have
+            // a deferred goal, and the stores also exclude `placement:client`.
+            if !remote_launch && !client_placement {
+                control
+                    .mission_store
+                    .set_deferred_goal(
+                        mission.id,
+                        Some(deferred_messages::encode(prompt_event_id, &prompt)),
+                    )
                     .await
                     .map_err(internal_error)?;
             }
+            // A `/goal …` prompt is a goal-mode mandate from the very first turn.
+            // Persist it here, synchronously on the same store that created the
+            // mission — the event-loop hook that also does this only sees events
+            // while a control session is pumping, so MCP/API creations could
+            // otherwise stay goal_mode=false forever.
+            if let Some(objective) = parse_goal_objective(&prompt) {
+                control
+                    .mission_store
+                    .update_mission_goal(mission.id, true, Some(&objective))
+                    .await
+                    .map_err(internal_error)?;
+                mission.goal_mode = true;
+                mission.goal_objective = Some(objective);
+            }
+            // Surface the queued goal so UIs show it as pending until dispatch.
+            let _ = control.events_tx.send(AgentEvent::UserMessage {
+                id: prompt_event_id,
+                content: prompt.clone(),
+                queued: true,
+                mission_id: Some(mission.id),
+                source: Some(format!("api:{}", user.id)),
+            });
+            initial_prompt = Some((prompt_event_id, prompt));
         }
-        let value = mission_create_response(&state, &control, mission).await?;
-        return Ok((headers, Json(value)));
-    }
 
-    worker_location::mark_initialized(&control.mission_store, &mut mission)
-        .await
-        .map_err(internal_error)?;
-    let value = mission_create_response(&state, &control, mission).await?;
-    Ok((headers, Json(value)))
+        if let (Some(remote_node_id), Some(remote_plan)) =
+            (remote_node_id.as_deref(), remote_plan.as_ref())
+        {
+            // All remote commands use the durable node job API. The legacy
+            // synchronous `/execute` path has no cancellation handle if its HTTP
+            // wait expires, so routing `remote_async=false` through it could orphan
+            // a process on the node. The response contract here is unchanged: the
+            // mission is returned Active while its durable poller owns completion.
+            //
+            // A raw remote mission never starts a local harness, so nothing else
+            // would ever persist its prompt: the queued broadcast above is
+            // deliberately dropped by the store until a runner starts the turn.
+            // Persist it here, before dispatch and before the response, so the
+            // mission's history and event replay carry the user's mandate even
+            // when dispatch fails.
+            let dispatch = match persist_remote_mission_prompt(
+                &control,
+                mission.id,
+                &user.id,
+                initial_prompt.take(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    dispatch_remote_job(
+                        &state,
+                        &control,
+                        &mission,
+                        remote_node_id,
+                        remote_plan,
+                        None,
+                        None,
+                    )
+                    .await
+                }
+                Err(message) => Err(message),
+            };
+            match dispatch {
+                Ok(mut updated) => {
+                    worker_location::mark_initialized(&control.mission_store, &mut updated)
+                        .await
+                        .map_err(internal_error)?;
+                    let mut value = mission_create_response(&state, &control, updated).await?;
+                    if let Some((ref machine, reused)) = rented_managed {
+                        if let Some(obj) = value.as_object_mut() {
+                            obj.insert(
+                                "managed_machine".to_string(),
+                                serde_json::to_value(machine).unwrap_or(serde_json::Value::Null),
+                            );
+                            obj.insert(
+                                "reused_idle_machine".to_string(),
+                                serde_json::Value::Bool(reused),
+                            );
+                        }
+                    }
+                    return Ok((headers, Json(value)));
+                }
+                Err(message) => {
+                    let _ = control
+                        .mission_store
+                        .update_mission_status_with_reason(
+                            mission.id,
+                            MissionStatus::Failed,
+                            Some(REMOTE_DISPATCH_FAILED),
+                        )
+                        .await;
+                    let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+                        completion: None,
+                        execution: None,
+                        mission_id: mission.id,
+                        status: MissionStatus::Failed,
+                        summary: Some(message.clone()),
+                    });
+                    return Err((StatusCode::BAD_GATEWAY, message));
+                }
+            }
+        }
+
+        if client_placement {
+            // Persist history and the completion receipt before exposing a delivery.
+            // A retry may replay delivery only after all initialization is durable.
+            persist_remote_mission_prompt(&control, mission.id, &user.id, initial_prompt.clone())
+                .await
+                .map_err(internal_error)?;
+            worker_location::mark_initialized(&control.mission_store, &mut mission)
+                .await
+                .map_err(internal_error)?;
+            if worker_location::client_owner(&mission).is_some() {
+                if let Some((id, prompt)) = &initial_prompt {
+                    worker_location::enqueue(
+                        &control.mission_store,
+                        mission.id,
+                        *id,
+                        prompt.clone(),
+                    )
+                    .await
+                    .map_err(internal_error)?;
+                }
+            }
+            let value = mission_create_response(&state, &control, mission).await?;
+            return Ok((headers, Json(value)));
+        }
+
+        worker_location::mark_initialized(&control.mission_store, &mut mission)
+            .await
+            .map_err(internal_error)?;
+        let value = mission_create_response(&state, &control, mission).await?;
+        Ok((headers, Json(value)))
+    }
+    .await;
+
+    if post_rent.is_err() {
+        // Never leave a freshly rented VM running when any post-rental admission,
+        // track lease, attachment persistence, or dispatch step fails (reused
+        // sibling VMs remain governed by their idle grace window).
+        if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed()) {
+            let _ = manager.destroy(&machine.id, "launch_failed").await;
+        }
+    }
+    post_rent
 }
 
 /// Create/coalesce responses carry the same execution and remote placement
@@ -3074,8 +3099,8 @@ pub(crate) fn parse_auto_managed_spec(raw: &str) -> Option<(Option<String>, Opti
     }
 }
 
-/// Backend-level managed VM auth check used both by pre-rent validation and by
-/// child default placement (`auto-managed` vs `auto` fallback).
+/// Backend-level managed VM prerequisite check used both by pre-rent validation
+/// and by child default placement (`auto-managed:boat` vs `auto` fallback).
 pub(crate) fn managed_backend_auth_precheck(
     backend_id: &str,
     manager: Option<&crate::managed::ManagedManager>,
@@ -3086,6 +3111,9 @@ pub(crate) fn managed_backend_auth_precheck(
             "{}: managed VMs (orb-node-base) have no grok login; pick claudecode, codex or opencode (with model_override) for auto-managed",
             remote_grok::REMOTE_AUTH_REQUIRED
         )),
+        "vibe" => Err(
+            "REMOTE_HARNESS_UNAVAILABLE: managed VMs (orb-node-base) do not install vibe-acp; pick claudecode, codex or opencode (with model_override) for auto-managed".to_string()
+        ),
         "antigravity" => {
             let allowed = manager.is_some_and(|m| m.runtime_settings().antigravity_on_managed)
                 && crate::managed::antigravity_owner_allowed(
@@ -3107,9 +3135,10 @@ pub(crate) fn managed_backend_auth_precheck(
     }
 }
 
-/// Harness auth a fresh `orb-node-base` VM can satisfy, decided before the
-/// VM is rented: the image has no grok login, and the owner's Antigravity
-/// sign-in is projected only when the operator allows it.
+/// Harness prerequisites a fresh `orb-node-base` VM can satisfy, decided before
+/// the VM is rented: the image has no grok login or `vibe-acp` installation,
+/// and the owner's Antigravity sign-in is projected only when the operator
+/// allows it.
 pub(crate) fn managed_auth_precheck(
     plan: &RemoteHarnessPlan,
     manager: Option<&crate::managed::ManagedManager>,
@@ -3117,6 +3146,7 @@ pub(crate) fn managed_auth_precheck(
 ) -> Result<(), String> {
     match plan {
         RemoteHarnessPlan::Grok { .. } => managed_backend_auth_precheck("grok", manager, user_id),
+        RemoteHarnessPlan::Vibe { .. } => managed_backend_auth_precheck("vibe", manager, user_id),
         RemoteHarnessPlan::Antigravity { .. } => {
             managed_backend_auth_precheck("antigravity", manager, user_id)
         }

@@ -159,7 +159,7 @@ pub async fn resolved_client_owner(
 pub const SAME_NODE: &str = "same";
 
 /// Resolve the default `remote_node_id` for a native child mission whose caller
-/// omitted `remote_node_id`: Boat (`"auto-managed"`) when managed Boat
+/// omitted `remote_node_id`: Boat (`"auto-managed:boat"`) when managed Boat
 /// provisioning is configured/enabled and the child harness passes managed auth
 /// precheck; otherwise `"auto"` (fleet-wide least-loaded static scheduler),
 /// never pinning to the parent's host.
@@ -180,7 +180,7 @@ pub fn default_child_remote_node_id(
         )
         .is_ok()
     {
-        "auto-managed"
+        "auto-managed:boat"
     } else {
         "auto"
     }

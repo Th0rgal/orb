@@ -62,13 +62,14 @@ Creation paths:
 - Child / subagent default placement (`start_mission`, `consult_model`, and
   direct `POST /api/control/missions` with `parent_mission_id`, no `cloud`, and
   no `placement`):
-  - Omitting `remote_node_id` defaults to Boat (`"auto-managed"`), **not** the
-    parent's machine, so waiting parents never starve their own host slots.
+  - Omitting `remote_node_id` defaults to Boat (`"auto-managed:boat"`), **not**
+    the parent's machine, so waiting parents never starve their own host slots.
   - When `remote_node_id` was omitted and Boat provisioning is disabled or the
     child's effective backend fails `managed_backend_auth_precheck` (`grok` has
-    no login on `orb-node-base`; `antigravity` requires `antigravity_on_managed`
-    + an allowed owner), Core falls back cleanly to `"auto"` (fleet-wide
-    least-loaded static scheduler), never pinning to the parent's node.
+    no login on `orb-node-base`; `vibe` lacks `vibe-acp` on `orb-node-base`;
+    `antigravity` requires `antigravity_on_managed` + an allowed owner), Core
+    falls back cleanly to `"auto"` (fleet-wide least-loaded static scheduler),
+    never pinning to the parent's node.
   - Explicit `remote_node_id = "auto-managed[:provider[:size]]"` keeps
     fail-closed `400 Bad Request` validation when Boat or managed harness auth
     is unavailable.
