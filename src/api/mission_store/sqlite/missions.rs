@@ -746,11 +746,86 @@ impl SqliteMissionStore {
         .map_err(|e| e.to_string())?
     }
 
+    pub(super) async fn get_mission_metadata(&self, id: Uuid) -> Result<Option<Mission>, String> {
+        let conn = self.reader();
+        let id_str = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.query_row(
+                &format!("SELECT {MISSION_LIST_COLUMNS} FROM missions WHERE id = ?1"),
+                params![id_str],
+                row_to_mission,
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub(super) async fn existing_mission_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashSet<Uuid>, String> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let conn = self.reader();
+        let unique_ids: Vec<Uuid> = {
+            let mut seen = std::collections::HashSet::with_capacity(ids.len());
+            ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+        };
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare("SELECT 1 FROM missions WHERE id = ?1 LIMIT 1")
+                .map_err(|e| e.to_string())?;
+            let mut found = std::collections::HashSet::with_capacity(unique_ids.len());
+            for id in unique_ids {
+                let exists = stmt
+                    .query_row(params![id.to_string()], |_| Ok(()))
+                    .optional()
+                    .map_err(|e| e.to_string())?
+                    .is_some();
+                if exists {
+                    found.insert(id);
+                }
+            }
+            Ok(found)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    pub(super) async fn list_hermes_root_missions(&self) -> Result<Vec<Mission>, String> {
+        let conn = self.reader();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT {MISSION_LIST_COLUMNS}
+                     FROM missions
+                     WHERE parent_mission_id IS NULL
+                       AND origin = 'hermes'
+                       AND origin_session_id IS NOT NULL"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], row_to_mission)
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     pub(super) async fn get_initial_user_message(
         &self,
         id: Uuid,
     ) -> Result<Option<String>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id_str = id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -970,60 +1045,17 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn get_child_missions(&self, parent_id: Uuid) -> Result<Vec<Mission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let parent_id_str = parent_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
-                .prepare("SELECT id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, interrupted_at, resumable, session_id, terminal_reason, parent_mission_id, working_directory, COALESCE(mission_mode, 'task') as mission_mode, COALESCE(fast_mode, 0) as fast_mode, COALESCE(requires_local_disk, 1) as requires_local_disk, service_tier FROM missions WHERE parent_mission_id = ?1")
+                .prepare(&format!(
+                    "SELECT {MISSION_LIST_COLUMNS} FROM missions WHERE parent_mission_id = ?1"
+                ))
                 .map_err(|e| e.to_string())?;
             let missions = stmt
-                .query_map(params![parent_id_str], |row| {
-                    Ok(Mission {
-                        id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
-                        status: parse_status(&row.get::<_, String>(1)?),
-                        title: row.get(2)?,
-                        short_description: row.get(3)?,
-                        metadata_updated_at: row.get(4)?,
-                        metadata_source: row.get(5)?,
-                        metadata_model: row.get(6)?,
-                        metadata_version: row.get(7)?,
-                        workspace_id: Uuid::parse_str(&row.get::<_, String>(8)?).unwrap_or_default(),
-                        workspace_name: None,
-                        agent: row.get(9)?,
-                        model_override: row.get(10)?,
-                        model_effort: row.get(11)?,
-                        fast_mode: row.get::<_, i32>(23)? != 0,
-                        service_tier: read_service_tier(row)?,
-                        backend: row.get::<_, String>(12)?,
-                        config_profile: row.get(13)?,
-                        history: vec![],
-                        created_at: row.get(14)?,
-                        updated_at: row.get(15)?,
-                        interrupted_at: row.get(16)?,
-                        paused_at: None,
-                        resumable: row.get::<_, i32>(17)? != 0,
-                        desktop_sessions: Vec::new(),
-                        session_id: row.get(18)?,
-                        terminal_reason: row.get(19)?,
-                        terminal_evidence: None,
-                        parent_mission_id: row.get::<_, Option<String>>(20)?.and_then(|s| Uuid::parse_str(&s).ok()),
-                        working_directory: row.get(21)?,
-                        requires_local_disk: row.get::<_, i32>(24)? != 0,
-                        mission_mode: row.get::<_, Option<String>>(22)?
-                            .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok())
-                            .unwrap_or_default(),
-                            goal_mode: false,
-                            goal_objective: None,
-                            first_viewed_at: None,
-                            scheduling: Default::default(),
-                            project: MissionProject::default(),
-                            activity: MissionActivity::default(),
-                            awaiting_kind: None,
-                            origin: None,
-                            origin_session_id: None,
-                    })
-                })
+                .query_map(params![parent_id_str], row_to_mission)
                 .map_err(|e| e.to_string())?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
@@ -2047,7 +2079,7 @@ impl SqliteMissionStore {
         &self,
         mission_id: Uuid,
     ) -> Result<Option<String>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id = mission_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();

@@ -2249,7 +2249,8 @@ async fn get_ai_proxy_health(
                 .ai_providers
                 .get(id)
                 .await
-                .map(|p| p.label.filter(|l| !l.is_empty()).unwrap_or(p.name));
+                .map(|p| p.label.filter(|l| !l.is_empty()).unwrap_or(p.name))
+                .or_else(|| super::ai_providers::synthetic_standard_account_label(id));
             let snap = state.health_tracker.get_health(id).await;
             let cooldown = snap
                 .cooldown_remaining_secs

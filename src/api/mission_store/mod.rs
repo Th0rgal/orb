@@ -3264,6 +3264,45 @@ pub trait MissionStore: Send + Sync {
         Ok(vec![])
     }
 
+    /// Read a mission's row metadata without loading transcript history or
+    /// terminal evidence side tables. Defaults to [`Self::get_mission`].
+    async fn get_mission_metadata(&self, id: Uuid) -> Result<Option<Mission>, String> {
+        self.get_mission(id).await
+    }
+
+    /// Return the subset of `ids` that exist in this store, without loading
+    /// transcripts. Defaults to per-id [`Self::get_mission_metadata`] checks.
+    async fn existing_mission_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashSet<Uuid>, String> {
+        let mut found = std::collections::HashSet::with_capacity(ids.len());
+        for &id in ids {
+            if found.contains(&id) {
+                continue;
+            }
+            if self.get_mission_metadata(id).await?.is_some() {
+                found.insert(id);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Return root missions (`parent_mission_id IS NULL`) with
+    /// `origin = 'hermes'` and a non-empty `origin_session_id`.
+    async fn list_hermes_root_missions(&self) -> Result<Vec<Mission>, String> {
+        Ok(self
+            .list_missions(usize::MAX, 0)
+            .await?
+            .into_iter()
+            .filter(|m| {
+                m.parent_mission_id.is_none()
+                    && m.origin.as_deref() == Some("hermes")
+                    && m.origin_session_id.is_some()
+            })
+            .collect())
+    }
+
     /// Move every child of `from` under `to`; returns the moved ids.
     async fn reparent_child_missions(&self, from: Uuid, to: Uuid) -> Result<Vec<Uuid>, String> {
         let _ = (from, to);

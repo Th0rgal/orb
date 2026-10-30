@@ -1,7 +1,7 @@
 import { api, getApiUrl, getMission, connectionVersion } from './api';
 import { copyText } from './clipboard';
 import { missionMoveKey, moveBatchOptimistically, moveOptimistically, previewMove, withMovedMissions } from './moves';
-import { missionParent } from './missionTree';
+import { forkLeaders, missionParent } from './missionTree';
 import { usageTelemetry } from './usageTelemetry';
 const prefix = 'orb:cut-mission:';
 export function makeCutMission(id: string): string {
@@ -62,7 +62,17 @@ export async function moveMission(id: string, project: string, folder: string, f
   );
 }
 
-type Known = { id: string; project?: string | null; parent_mission_id?: string | null; callback_parent_mission_id?: string | null; title?: string | null; tags?: readonly string[] | null };
+type Known = {
+  id: string;
+  project?: string | null;
+  parent_mission_id?: string | null;
+  callback_parent_mission_id?: string | null;
+  title?: string | null;
+  tags?: readonly string[] | null;
+  status?: string | null;
+  updated_at?: string | null;
+  created_at?: string | null;
+};
 export type MovePlanStep = {
   id: string;
   from: string | null;
@@ -78,14 +88,45 @@ export type MovePlanStep = {
 export type MovePlan = MovePlanStep[];
 /**
  * What moving `ids` to `project/folder` must project and write. Selected
- * missions whose ancestor is also selected travel with that ancestor. Launched
- * missions (children, at any depth) live in their parent's project, so a move
- * to another project projects the whole subtree immediately while persisting
- * it atomically through the root's single `include_descendants` request.
+ * missions whose ancestor is also selected travel with that ancestor. When a
+ * selected mission leads a co-located `fork-of:` conversation group in its
+ * source project, the earlier versions folded into that single sidebar row
+ * travel with it; selecting an individual earlier version moves only that
+ * version. Launched missions (children, at any depth) live in their parent's
+ * project, so a move to another project projects the whole subtree immediately
+ * while persisting it atomically through each root's `include_descendants` write.
  */
 export function planMissionMoves(ids: readonly string[], project: string, folder: string, known: readonly Known[]): MovePlan {
   const byId = new Map(known.map(m => [m.id, m]));
-  const selected = new Set(ids);
+  const projectBucket = (p: string | null | undefined) => p || 'default';
+  const buckets = new Map<string, Known[]>();
+  for (const m of known) {
+    const bucket = projectBucket(m.project);
+    buckets.set(bucket, [...(buckets.get(bucket) ?? []), m]);
+  }
+  const leadersByBucket = new Map<string, Map<string, Known>>();
+  for (const [bucket, list] of buckets) leadersByBucket.set(bucket, forkLeaders(list));
+  const expandedIds: string[] = [];
+  const seenExpanded = new Set<string>();
+  const pushExpanded = (id: string) => {
+    if (!seenExpanded.has(id)) {
+      seenExpanded.add(id);
+      expandedIds.push(id);
+    }
+  };
+  for (const id of ids) {
+    pushExpanded(id);
+    const target = byId.get(id);
+    if (!target) continue;
+    const bucket = projectBucket(target.project);
+    const leaders = leadersByBucket.get(bucket);
+    if (leaders?.get(id)?.id === id) {
+      for (const sibling of buckets.get(bucket) ?? []) {
+        if (leaders.get(sibling.id)?.id === id) pushExpanded(sibling.id);
+      }
+    }
+  }
+  const selected = new Set(expandedIds);
   const hasSelectedAncestor = (id: string) => {
     const seen = new Set<string>([id]);
     for (let p = byId.get(id) && missionParent(byId.get(id)!); p && !seen.has(p); p = byId.get(p) ? missionParent(byId.get(p)!) : undefined) {
@@ -94,7 +135,7 @@ export function planMissionMoves(ids: readonly string[], project: string, folder
     }
     return false;
   };
-  const roots = [...new Set(ids)].filter(id => !hasSelectedAncestor(id));
+  const roots = expandedIds.filter(id => !hasSelectedAncestor(id));
   const rootOf = new Map<string, string>(roots.map(r => [r, r]));
   const crossProjectByRoot = new Map<string, MovePlanStep[]>();
   const callbackIdsByRoot = new Map<string, string[]>();

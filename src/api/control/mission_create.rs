@@ -1122,12 +1122,12 @@ pub(in crate::api) async fn create_mission_inner(
         .filter(|slug| !slug.is_empty())
         .map(str::to_string)
     {
-        let canonical = super::super::projects_overview::canonicalize_project_slug(&raw);
+        let canonical = state.projects.resolve_project_slug(&raw);
         if canonical != raw {
             tracing::info!(
                 from = %raw,
                 to = %canonical,
-                "canonicalized mission project tag via routes.json alias"
+                "canonicalized mission project tag via alias or roster title"
             );
             req.project = Some(canonical);
         }

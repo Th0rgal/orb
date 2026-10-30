@@ -299,6 +299,48 @@ stuck in `.mission-cut`) and ignored subsequent `⌘X`/`⌘V` and drag attempts:
    inside a project, omitted `resolvedParents` from `allKnownMissions`, and had
    no pointer drag-and-drop between projects/folders.
 
+### Root causes (with evidence, 2026-10-30 01:21Z — 33.3 s subtree timeout & split fork version groups)
+
+When transferring `0c532a32` (`evm.fast`, leading a 4-version `fork-of:` group
+with `97399f01` `opti evm-wasm/fast`, `52bbf658` `Autoresearch-archi`, and
+`5fc3a745`, plus 63 launched children on a 12,492-mission production store) to
+`Ethereum` (`slug = "verity-core"`, `title = "Ethereum"`) at `01:21:15.126Z`:
+
+1. **O(subtree × full_store) subtree move exceeded the 30 s client request
+   timeout.** `POST /api/control/missions/0c532a32…/project` (`include_descendants:
+   true`) took `33.3 s` (`01:21:15.126Z`–`01:21:48.393Z`):
+   - `update_mission_project_locked` invoked `execution_ownership::snapshot`
+     (`store.list_missions(usize::MAX, 0)` across 12,492 rows + offline SQLite
+     stores + `job_ledger::load`) once per quiescent child (`52 × 12,492` row
+     scans), ran `busy_reason` twice per quiescent child, queried
+     `live_leases(None)` per child, and reloaded full 200-event transcripts
+     (`get_mission`) ~5 times per child while `get_child_missions`,
+     `get_initial_user_message`, and `get_deferred_goal` contended on the SQLite
+     writer mutex (`self.conn`).
+   - `collect_launched_descendant_ids` scanned all 12,492 missions and invoked
+     `callback_parent::links` uncached against Hermes `state.db` + `get_mission`
+     for every historical webhook session (`6.0 s`, and `2.2–2.7 s` on every
+     `GET /api/control/missions` poll).
+   - At `+30.0 s` (`01:21:45.126Z`), Orb desktop's `AbortSignal.timeout(30_000)`
+     raised `RequestTimeoutError`, rolling all 64 optimistic move projections
+     back to `Assistant` with *"The server is taking too long to answer"* 3.3 s
+     before Core committed the transfer, leaving client and server out of sync.
+2. **Co-located `fork-of:` versions folded inside a leading sidebar row stayed
+   behind.** `forkLeaders` folds `52bbf658` (206 children, including 2
+   `project = NULL` Wave 5 children shown under `Default`), `97399f01` (38
+   children), and `5fc3a745` (7 children) inside `0c532a32` as earlier versions
+   of one conversation row. `planMissionMoves` moved only `0c532a32`, causing
+   `97399f01` (`opti evm-wasm/fast`, `interrupted`) and `52bbf658` to pop back
+   up at the root of `Assistant` and `Default` as if the conversation had not
+   moved.
+3. **Display-title project patch (`"ethereum"` / `"Ethereum"`) bypassed roster
+   slug resolution.** `normalize_project_patch` checked `routes.json` aliases
+   only, not unique active `ProjectsStore` display titles (`title = "Ethereum"`
+   -> `slug = "verity-core"`).
+4. **Native `paste` outside `.tree-entry` ignored hovered sidebar targets when
+   focus sat on a non-body control.** `onPasteEvent` fell back to `pointerPos`
+   only when `event.target === document.body || document.documentElement`.
+
 ### Transfer invariants
 
 **H6. Cross-project placeholder rows carry distinct tree keys
@@ -308,7 +350,8 @@ uses `mp:<slug>:<missionId>`. `SidebarTree` keyed reconciliation, expand state,
 selection, and `findNodeById` never collide across projects, while clicking or
 acting on `mp:<slug>:<missionId>` opens/targets `<missionId>`.
 
-**P1. Pure project/folder moves preserve runtime state and historical leases.**
+**P1. Pure project/folder moves preserve runtime state, historical leases, and
+O(subtree) latency.**
 - A patch changing only `project` and/or `orb-folder:*` tags never mutates
   `"pr-writer"` / `"pr-readonly"` tags or arbitrates foreign PR writer leases;
   running missions move atomically via `move_running_mission_project` (across
@@ -317,21 +360,32 @@ acting on `mp:<slug>:<missionId>` opens/targets `<missionId>`.
   their track in the destination project and release stale leases without
   acquiring a new live track lease, so completed or superseded sibling runs
   never block each other or live workers.
-- Root cross-project moves pass `include_descendants: true` (plus verified
-  callback `descendant_ids`) and issue a single root write per subtree (`viaRootId`
-  projects loaded descendants optimistically without firing standalone child
-  writes). Core moves every launched descendant (excluding `fork-of:` versions)
-  under the same `DISPATCH_ADMISSION` and durable admission lock, stripping
-  child `orb-folder:*` tags while keeping capability and hierarchy tags. If any
-  descendant transfer fails (for example, a live writer conflict on a
-  destination track), Core rolls back the root and every preceding descendant's
-  `MissionProject` metadata and track leases before returning the error, and the
-  client rolls back the entire subtree's optimistic projection as one batch.
+- `normalize_project_patch` canonicalizes via `routes.json` first and, when no
+  exact `ProjectsStore` slug matches, resolves a unique case-insensitive active
+  project slug or display `title` (`"Ethereum"` / `"ethereum"` ->
+  `"verity-core"`).
+- Subtree transfers (`include_descendants: true`) run in O(subtree) time
+  without full-store scans or transcript loads: `get_child_missions`,
+  `get_mission_metadata`, `list_hermes_root_missions`, `get_initial_user_message`,
+  and `get_deferred_goal` read from the SQLite reader pool; `callback_parent::links`
+  caches webhook session lineage by Hermes `state.db`/`-wal` metadata and checks
+  parent existence in batch; and `SubtreeMoveContext` reuses a single lazy
+  `execution_ownership::Snapshot`, remote job ledger snapshot, and live track
+  lease table across all descendants.
+- Moving a conversation row that leads a `fork-of:` version group in the sidebar
+  (`forkLeaders(known).get(id)?.id === id`) includes co-located earlier versions
+  from the same source project (and their launched subtrees, including
+  unassigned `project = null` children surfaced in `Default`) so one folded
+  conversation row never splits across projects or resurfaces stopped versions
+  behind it. Explicitly moving a non-leader earlier version moves only that
+  selected version and its launched descendants.
 
 **P2. Single sidebar transfer pipeline across menu, clipboard, and drag.**
 Context-menu `Move` / `Move here` (available on projects, folders, and rows
 inside a project), keyboard `⌘X`/`⌘C`/`⌘V` (`keydown` and native macOS
-`cut`/`copy`/`paste` `ClipboardEvent`s), and pointer drag-and-drop onto
+`cut`/`copy`/`paste` `ClipboardEvent`s, falling back to hovered
+`[data-drop-project]` or `selectionAnchor` whenever focus is on any non-editable
+element outside `.tree-entry`), and pointer drag-and-drop onto
 `[data-drop-project]` targets resolve destination `(slug, enclosingFolder)` via
 one helper and execute through the same move pipeline.
 
@@ -345,7 +399,10 @@ A successful move commits its placement to the sidebar listings atomically:
 remove the old membership, insert/update the destination, and fence reads started
 before that acknowledgement. Do not wait for a destination list request before
 making this change. Failed writes remove only their optimistic projection and
-restore their original placement with a visible retryable error.
+restore their original placement with a visible retryable error; if any failure
+is a transient network/timeout error (`isTransientNetworkError`), both the
+destination and source project listings still refresh in the background so a
+server commit that raced a client timeout converges immediately.
 
 Regression sequences:
 1. Open a mission in A; cut/paste into B while the write is held; observe
@@ -356,8 +413,14 @@ Regression sequences:
 2. Active forked parent without `"pr-writer"` tag (whose initial prompt requests
    writer) plus multiple completed/superseded workers sharing a writer track:
    transferring to another project moves the active parent and every worker
-   without `409 Conflict` or live lease leaks, including unloaded descendants.
+   without `409 Conflict` or live lease leaks, including unloaded descendants,
+   reusing one ownership snapshot across the subtree.
 3. Split subtree across projects A and B: placeholder parent in B uses
    `mp:B:<id>` without colliding with `m:<id>` in A, and transferring via native
-   `cut`/`paste` `ClipboardEvent`, row context menu `Move here`, or pointer
+   `cut`/`paste` `ClipboardEvent` (including when focus sits on a non-body
+   button outside `.tree-entry`), row context menu `Move here`, or pointer
    drag-and-drop consolidates the subtree into the target project.
+4. Leading `fork-of:` conversation with co-located earlier versions and
+   `project = null` worker children: moving the leader transfers every
+   co-located version and its launched children together, while moving an
+   individual non-leader version leaves sibling versions in place.

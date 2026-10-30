@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { bumpProjects, connectionVersion, getApiUrl, type Mission } from "../api";
+import { bumpProjects, connectionVersion, getApiUrl, isTransientNetworkError, type Mission } from "../api";
 import {
   isClipboardReferenceRetired,
   isUnsyncedClipboard,
@@ -111,14 +111,20 @@ export function createMissionMoves(deps: {
     const failures = await moveMissions(plan, slug);
     if (version !== connectionVersion()) return;
     const failedIds = new Set(failures.map(f => f.id));
+    const transientFailedIds = new Set(failures.filter(f => isTransientNetworkError(f.error)).map(f => f.id));
     // Load the destination before leaving the source, so no row blinks out.
     await deps.loadMissions(slug);
     if (version !== connectionVersion()) return;
     const sourceSlugs = new Set<string>();
     for (const step of plan) {
+      const fromSlug = step.from || "default";
       if (!failedIds.has(step.id)) {
         deps.leaveProjects(step.id, slug);
-        if (step.from && step.from !== slug) sourceSlugs.add(step.from);
+        if (fromSlug !== slug) sourceSlugs.add(fromSlug);
+      } else if (transientFailedIds.has(step.id) && fromSlug !== slug) {
+        // A client timeout may abort right as Core commits the move: refresh
+        // the source project too so the sidebar converges with server truth.
+        sourceSlugs.add(fromSlug);
       }
     }
     for (const src of sourceSlugs) void deps.loadMissions(src);

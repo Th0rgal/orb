@@ -3,7 +3,50 @@
 use crate::api::mission_store::Mission;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 use uuid::Uuid;
+
+#[derive(Clone, PartialEq, Eq)]
+struct DbStamp {
+    path: PathBuf,
+    db: Option<(u64, Option<SystemTime>)>,
+    wal: Option<(u64, Option<SystemTime>)>,
+}
+
+impl DbStamp {
+    fn capture(path: &Path) -> Self {
+        let stat = |p: &Path| {
+            std::fs::metadata(p)
+                .ok()
+                .map(|m| (m.len(), m.modified().ok()))
+        };
+        let mut wal_os = path.as_os_str().to_os_string();
+        wal_os.push("-wal");
+        Self {
+            path: path.to_path_buf(),
+            db: stat(path),
+            wal: stat(Path::new(&wal_os)),
+        }
+    }
+}
+
+struct SessionParentCache {
+    stamp: Option<DbStamp>,
+    by_session: HashMap<String, Option<Uuid>>,
+}
+
+static SESSION_PARENT_CACHE: OnceLock<Mutex<SessionParentCache>> = OnceLock::new();
+
+fn session_parent_cache() -> &'static Mutex<SessionParentCache> {
+    SESSION_PARENT_CACHE.get_or_init(|| {
+        Mutex::new(SessionParentCache {
+            stamp: None,
+            by_session: HashMap::new(),
+        })
+    })
+}
 
 /// The Hermes `mission-complete` prompt opening, before and after the
 /// 2026-10-19 template change (`. Mission: {title}` became `: {title}`).
@@ -143,7 +186,7 @@ pub(super) async fn links(
     let Some(path) = super::super::projects_overview::hermes_state_db_path() else {
         return HashMap::new();
     };
-    let sessions: Vec<_> = missions
+    let sessions: Vec<(Uuid, String)> = missions
         .iter()
         .filter(|m| m.parent_mission_id.is_none() && m.origin.as_deref() == Some("hermes"))
         .filter_map(|m| {
@@ -155,29 +198,86 @@ pub(super) async fn links(
     if sessions.is_empty() {
         return HashMap::new();
     }
-    let candidates = tokio::task::spawn_blocking(move || {
-        let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        else {
-            return Vec::new();
-        };
+
+    let stamp = DbStamp::capture(&path);
+    let missing_sessions: Vec<String> = {
+        let mut cache = session_parent_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if cache.stamp.as_ref() != Some(&stamp) {
+            cache.stamp = Some(stamp.clone());
+            cache.by_session.clear();
+        }
+        let mut missing = std::collections::HashSet::new();
+        for (_, session) in &sessions {
+            if !cache.by_session.contains_key(session) {
+                missing.insert(session.clone());
+            }
+        }
+        missing.into_iter().collect()
+    };
+
+    if !missing_sessions.is_empty() {
+        let resolved = tokio::task::spawn_blocking(move || {
+            let Ok(connection) =
+                Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            else {
+                return None;
+            };
+            Some(
+                missing_sessions
+                    .into_iter()
+                    .map(|session| {
+                        let resolved_parent = parent(&connection, &session);
+                        (session, resolved_parent)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(resolved) = resolved {
+            let mut cache = session_parent_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if cache.stamp.as_ref() == Some(&stamp) {
+                for (session, resolved_parent) in resolved {
+                    cache.by_session.insert(session, resolved_parent);
+                }
+            }
+        }
+    }
+
+    let candidates: Vec<(Uuid, Uuid)> = {
+        let cache = session_parent_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         sessions
             .into_iter()
             .filter_map(|(id, session)| {
-                parent(&connection, &session)
-                    .filter(|parent| *parent != id)
+                cache
+                    .by_session
+                    .get(&session)
+                    .copied()
+                    .flatten()
+                    .filter(|&parent| parent != id)
                     .map(|parent| (id, parent))
             })
-            .collect::<Vec<_>>()
-    })
-    .await
-    .unwrap_or_default();
-    let mut result = HashMap::new();
-    for (id, parent) in candidates {
-        if store.get_mission(parent).await.ok().flatten().is_some() {
-            result.insert(id, parent);
-        }
+            .collect()
+    };
+    if candidates.is_empty() {
+        return HashMap::new();
     }
-    result
+    let parent_ids: Vec<Uuid> = candidates.iter().map(|(_, parent)| *parent).collect();
+    let Ok(existing) = store.existing_mission_ids(&parent_ids).await else {
+        return HashMap::new();
+    };
+    candidates
+        .into_iter()
+        .filter(|(_, parent)| existing.contains(parent))
+        .collect()
 }
 
 #[cfg(test)]

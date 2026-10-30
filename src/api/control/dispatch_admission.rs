@@ -187,7 +187,7 @@ pub(super) async fn recover_dispatch_single(
             serde_json::from_value(journal["after"]["project"].clone())
                 .map_err(|e| e.to_string())?;
         let current = store
-            .get_mission(id)
+            .get_mission_metadata(id)
             .await?
             .ok_or_else(|| format!("project edit mission {id} missing"))?;
         let matches = |expected: &crate::api::mission_store::MissionProject| {
@@ -413,6 +413,12 @@ pub(crate) async fn recover_sweep(state: &Arc<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn format_busy_error(reason: &'static str) -> String {
+    format!(
+        "assignment_busy: {reason}; stop and drain old running, queued, or Pending work before changing assignment"
+    )
+}
+
 /// Presentation status alone cannot prove that old work has stopped. The actor
 /// supplies its runner/queue state while holding the admission mutex; durable
 /// runs also fence execution owned by another cooperating process. Pending
@@ -424,9 +430,7 @@ pub(super) async fn require_quiescent(
     actor_busy: bool,
 ) -> Result<(), String> {
     if let Some(reason) = busy_reason(state, store, mission, actor_busy).await? {
-        return Err(format!(
-            "assignment_busy: {reason}; stop and drain old running, queued, or Pending work before changing assignment"
-        ));
+        return Err(format_busy_error(reason));
     }
     Ok(())
 }
@@ -439,15 +443,28 @@ pub(super) async fn busy_reason(
     mission: &Mission,
     actor_busy: bool,
 ) -> Result<Option<&'static str>, String> {
+    busy_reason_with_remote_jobs(state, store, mission, actor_busy, None).await
+}
+
+pub(super) async fn busy_reason_with_remote_jobs(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+    mission: &Mission,
+    actor_busy: bool,
+    remote_job_missions: Option<&HashSet<Uuid>>,
+) -> Result<Option<&'static str>, String> {
     if store.get_active_mission_run(mission.id).await?.is_some() {
         return Ok(Some("mission has an active run"));
     }
-    if crate::remote_node::job_ledger::load(&state.config.working_dir)
-        .await
-        .map_err(|error| error.to_string())?
-        .iter()
-        .any(|handle| handle.mission_id == mission.id)
-    {
+    let has_remote_job = match remote_job_missions {
+        Some(ids) => ids.contains(&mission.id),
+        None => crate::remote_node::job_ledger::load(&state.config.working_dir)
+            .await
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|handle| handle.mission_id == mission.id),
+    };
+    if has_remote_job {
         return Ok(Some("mission has a remote job"));
     }
     if store

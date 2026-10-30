@@ -2010,7 +2010,7 @@ export function LiveProjectsSection(p: {
       if (!(window.getSelection()?.isCollapsed ?? true)) return;
       const copy = event.type === "copy";
       const entryId = event.target instanceof Element ? event.target.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined;
-      const fallbackId = !entryId && (event.target === document.body || event.target === document.documentElement)
+      const fallbackId = !entryId
         ? (selectionActive() ? (selectionAnchor() ?? [...(selectedRowIds() ?? [])][0]) : (!copy && p.selected()?.startsWith("m:") ? p.selected()! : undefined))
         : undefined;
       const treeId = entryId ?? fallbackId;
@@ -2023,7 +2023,7 @@ export function LiveProjectsSection(p: {
       if (editableTarget(event.target)) return;
       const entryId = event.target instanceof Element ? event.target.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined;
       let dest = entryId ? resolveTreeDestination(entryId) : null;
-      if (!dest && (event.target === document.body || event.target === document.documentElement)) {
+      if (!dest) {
         const hoverEl = pointerPos ? dropAt(pointerPos.x, pointerPos.y) : undefined;
         if (hoverEl?.dataset.dropProject) dest = { slug: hoverEl.dataset.dropProject, path: hoverEl.dataset.dropFolder ?? "" };
         else if (selectionAnchor()) dest = resolveTreeDestination(selectionAnchor()!);

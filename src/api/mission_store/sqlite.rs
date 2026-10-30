@@ -816,6 +816,18 @@ impl MissionStore for SqliteMissionStore {
     async fn get_child_missions(&self, parent_id: Uuid) -> Result<Vec<Mission>, String> {
         SqliteMissionStore::get_child_missions(self, parent_id).await
     }
+    async fn get_mission_metadata(&self, id: Uuid) -> Result<Option<Mission>, String> {
+        SqliteMissionStore::get_mission_metadata(self, id).await
+    }
+    async fn existing_mission_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashSet<Uuid>, String> {
+        SqliteMissionStore::existing_mission_ids(self, ids).await
+    }
+    async fn list_hermes_root_missions(&self) -> Result<Vec<Mission>, String> {
+        SqliteMissionStore::list_hermes_root_missions(self).await
+    }
     async fn set_mission_requires_local_disk(
         &self,
         id: Uuid,
