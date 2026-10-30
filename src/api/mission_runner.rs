@@ -646,6 +646,10 @@ fn public_api_base_url(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn public_proxy_base_url(proxy_value: Option<&str>, api_value: Option<&str>) -> Option<String> {
+    public_api_base_url(proxy_value).or_else(|| public_api_base_url(api_value))
+}
+
 fn localhost_api_base_url(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -655,6 +659,17 @@ fn localhost_api_base_url(value: Option<&str>) -> Option<String> {
 
 pub(crate) fn public_api_base_url_from_env() -> Option<String> {
     public_api_base_url(std::env::var("SANDBOXED_PUBLIC_URL").ok().as_deref())
+}
+
+/// Public base URL for remote harnesses reaching Core's `/v1/*` LLM proxy.
+/// Defaults to `SANDBOXED_PUBLIC_URL`, or uses `SANDBOXED_PROXY_PUBLIC_URL`
+/// when `/v1/*` is exposed on a direct router endpoint (bypassing CDN edge
+/// buffering/timeouts while keeping `/api/*` behind `SANDBOXED_PUBLIC_URL`).
+pub(crate) fn public_proxy_base_url_from_env() -> Option<String> {
+    public_proxy_base_url(
+        std::env::var("SANDBOXED_PROXY_PUBLIC_URL").ok().as_deref(),
+        std::env::var("SANDBOXED_PUBLIC_URL").ok().as_deref(),
+    )
 }
 
 pub(super) fn localhost_api_base_url_from_env() -> Option<String> {
@@ -10282,7 +10297,7 @@ mod tests {
     use super::{
         extract_telegram_instructions, grok_event_reasoning, grok_event_text, grok_event_usage,
         grok_stdout_line_requests_interactive_login, inject_telegram_identity_into_claude_md,
-        localhost_api_base_url, merge_stream_fragment, public_api_base_url,
+        localhost_api_base_url, merge_stream_fragment, public_api_base_url, public_proxy_base_url,
     };
     use crate::agents::{AgentResult, CostSource, TerminalReason};
     use crate::cost::resolve_cost_cents_and_source;
@@ -14584,6 +14599,27 @@ mod tests {
             public_api_base_url(Some(" https://example.com ")).as_deref(),
             Some("https://example.com")
         );
+    }
+
+    #[test]
+    fn public_proxy_base_url_prefers_router_override_and_falls_back_to_public_url() {
+        assert_eq!(
+            public_proxy_base_url(
+                Some(" https://orbrouter.example.com "),
+                Some("https://api.example.com"),
+            )
+            .as_deref(),
+            Some("https://orbrouter.example.com")
+        );
+        assert_eq!(
+            public_proxy_base_url(Some("   "), Some("https://api.example.com")).as_deref(),
+            Some("https://api.example.com")
+        );
+        assert_eq!(
+            public_proxy_base_url(None, Some("https://api.example.com")).as_deref(),
+            Some("https://api.example.com")
+        );
+        assert_eq!(public_proxy_base_url(None, Some("")), None);
     }
 
     #[test]

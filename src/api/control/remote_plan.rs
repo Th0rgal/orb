@@ -82,7 +82,7 @@ pub(crate) fn remote_launch_capabilities() -> crate::remote_node::RemoteLaunchCa
             .map(|h| h.to_string())
             .collect(),
         raw_command: true,
-        proxy_url_configured: super::super::mission_runner::public_api_base_url_from_env()
+        proxy_url_configured: super::super::mission_runner::public_proxy_base_url_from_env()
             .is_some(),
         error_prefixes: vec![
             REMOTE_HARNESS_UNSUPPORTED.to_string(),
@@ -715,6 +715,10 @@ pub(crate) fn remote_execution_for_plan(
             let mut env = HashMap::from([
                 (REMOTE_PROXY_KEY_ENV.to_string(), proxy_key.to_string()),
                 ("NO_COLOR".to_string(), "1".to_string()),
+                (
+                    crate::api::runners::opencode::OPENCODE_BASH_DEFAULT_TIMEOUT_ENV.to_string(),
+                    crate::api::runners::opencode::opencode_bash_default_timeout_ms().to_string(),
+                ),
             ]);
             // `plan_remote_harness` guarantees a model for OpenCode; the
             // config registers exactly that id under `builtin`.
