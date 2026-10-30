@@ -73,6 +73,36 @@ describe('Claude profile settings', () => {
     expect(await savedSettings()).toEqual(edited);
   });
 
+  it('marks normalized content saved and resets later edits to that saved content', async () => {
+    await openClaudeSettings();
+    const editor = screen.getByLabelText('Settings JSON');
+    fireEvent.change(editor, { target: { value: '{"default_model":"claude-opus-4.8"}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    const saved = await savedSettings();
+    const savedText = JSON.stringify(saved, null, 2);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Saved!' })).toBeDisabled());
+    expect(editor).toHaveValue(savedText);
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument();
+    fireEvent.change(editor, { target: { value: '{}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
+    expect(editor).toHaveValue(savedText);
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument();
+  });
+
+  it('preserves edits and the previous saved baseline when saving fails', async () => {
+    await openClaudeSettings();
+    vi.mocked(saveConfigProfileFile).mockRejectedValueOnce(new Error('Save unavailable'));
+    const editor = screen.getByLabelText('Settings JSON');
+    const edited = '{"default_model":"claude-opus-4.8"}';
+    fireEvent.change(editor, { target: { value: edited } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await screen.findByText('Save unavailable');
+    expect(editor).toHaveValue(edited);
+    expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
+    expect(editor).toHaveValue(JSON.stringify(preferences));
+  });
+
   it('preserves native settings while normalizing dashboard preferences', async () => {
     await openClaudeSettings();
     fireEvent.change(screen.getByLabelText('Settings JSON'), {

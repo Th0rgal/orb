@@ -607,6 +607,7 @@ export default function SettingsPage() {
 
   const handleSave = useCallback(async () => {
     if (parseError || !selectedFile) return;
+    let savedContent = fileContent;
 
     try {
       setSaving(true);
@@ -630,6 +631,7 @@ export default function SettingsPage() {
           );
           await saveConfigProfileFile(selectedProfile, selectedFile, sanitized);
           setFileContent(sanitized);
+          savedContent = sanitized;
         } else {
           await saveConfigProfileFile(selectedProfile, selectedFile, fileContent);
         }
@@ -638,7 +640,7 @@ export default function SettingsPage() {
         await saveConfigProfileFile(selectedProfile, selectedFile, fileContent);
         setIsLibraryDefault(false); // No longer showing library default after save
       }
-      setOriginalFileContent(fileContent);
+      setOriginalFileContent(savedContent);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
       await refreshStatus();
