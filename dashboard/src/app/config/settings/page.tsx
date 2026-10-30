@@ -113,7 +113,7 @@ function normalizeJson(value: unknown): string {
 
 const CLAUDE_CODE_DEFAULT_MODEL = 'claude-opus-5';
 
-const coerceClaudeCodeConfig = (value: Record<string, unknown> | null): ClaudeCodeConfig => {
+const coerceClaudeCodeConfig = (value: Record<string, unknown> | null): ClaudeCodeConfig & Record<string, unknown> => {
   if (!value) {
     return { default_model: CLAUDE_CODE_DEFAULT_MODEL, default_agent: null, hidden_agents: [] };
   }
@@ -130,7 +130,9 @@ const coerceClaudeCodeConfig = (value: Record<string, unknown> | null): ClaudeCo
   const hiddenAgents = Array.isArray(hiddenAgentsRaw)
     ? hiddenAgentsRaw.filter((entry): entry is string => typeof entry === 'string')
     : [];
-  return { default_model: defaultModel, default_agent: defaultAgent, hidden_agents: hiddenAgents };
+  // Profile files also hold Claude-native settings (e.g. hooks and env).
+  // Preserve those keys when saving, syncing, and comparing with the host.
+  return { ...value, default_model: defaultModel, default_agent: defaultAgent, hidden_agents: hiddenAgents };
 };
 
 // Harness configuration metadata
