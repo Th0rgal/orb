@@ -12,7 +12,10 @@
   --inbox-muted: color-mix(in srgb, var(--fg-2) 70%, var(--fg-3));
 }
 .inbox-page button:focus-visible {
-  outline: 2px solid var(--overlay-focus); outline-offset: 2px;
+  outline: 1px solid var(--focus-border); outline-offset: -1px;
+}
+.inbox-page .inbox-opt-btn.primary:focus-visible {
+  outline-offset: 1px;
 }
 .inbox-head { justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .inbox-title-group, .inbox-head-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -145,7 +148,7 @@
 .inbox-peek-status-label::-webkit-details-marker { display: none; }
 .inbox-peek-status-label svg { width: 12px; height: 12px; transition: transform var(--t); }
 .inbox-sources[open] > summary svg { transform: rotate(180deg); }
-.inbox-peek-status-label:focus-visible { outline: 2px solid var(--overlay-focus); outline-offset: 2px; }
+.inbox-peek-status-label:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
 .inbox-context-chip { color: var(--fg-2); font-size: 12px; line-height: 18px; text-align: left; white-space: normal; justify-content: flex-start; }
 .inbox-summary-origin { display: block; margin-bottom: 3px; color: var(--inbox-muted); font-size: 10px; }
 .inbox-row.peeked .inbox-summary { display: block; overflow: visible; }

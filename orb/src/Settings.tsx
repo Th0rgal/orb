@@ -11,39 +11,13 @@ import { clearConnection, connectionVersion, getApiUrl, getJwt, isConnected, log
 import { localInstalled, pathOverrides, refreshLocalAgents, setPathOverride, tauriInvoke } from "./localAgents";
 import { nativeInvoke } from "./native";
 import { DebugInfoPanel } from "./DebugInfo";
+import { SettingsCard as Card, SettingsRow as Row } from "./SettingsCard";
 import { Toggle } from "./Toggle";
 export { Toggle };
 import { getThemePref, setThemePref, type ThemePref } from "./theme";
 
 const THEME_LABELS: Record<ThemePref, string> = { auto: "Auto", light: "Light", dark: "Dark" };
 const THEME_PREFS: Record<string, ThemePref> = { Auto: "auto", Light: "light", Dark: "dark" };
-
-
-
-function Row(p: { title: string; desc?: string; children?: JSX.Element }) {
-  return (
-    <div class="s-row">
-      <div class="s-row-text">
-        <div class="s-row-title">{p.title}</div>
-        <Show when={p.desc}>
-          <div class="s-row-desc">{p.desc}</div>
-        </Show>
-      </div>
-      <div class="s-row-ctrl">{p.children}</div>
-    </div>
-  );
-}
-
-function Card(p: { title?: string; children: JSX.Element }) {
-  return (
-    <section class="s-sec">
-      <Show when={p.title}>
-        <h3>{p.title}</h3>
-      </Show>
-      <div class="s-card">{p.children}</div>
-    </section>
-  );
-}
 
 function CloudAccountsCard(p: { onOpenPage?: (id: string) => void }) {
   const [accounts, setAccounts] = createSignal<CloudAccount[]>([]);

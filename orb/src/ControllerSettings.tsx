@@ -8,6 +8,7 @@ import * as Ic from "./icons";
 import { getApiUrl, updateController, type ControllerPatch, type ControllerView } from "./api";
 import { ignoredCronFields, scheduleExpression } from "./cronSchema";
 import { SchedulePicker } from "./SchedulePicker";
+import { SettingsCard, SettingsRow as Row } from "./SettingsCard";
 import { knownSkillNames } from "./skillsApi";
 
 
@@ -48,29 +49,7 @@ export function draftOf(view: ControllerView): CronDraft {
 }
 
 function Section(p: { title: string; hint?: string; children: JSX.Element }) {
-  return (
-    <section class="s-sec cs-sec">
-      <h3>{p.title}</h3>
-      <Show when={p.hint}>
-        <p class="cs-hint">{p.hint}</p>
-      </Show>
-      <div class="s-card">{p.children}</div>
-    </section>
-  );
-}
-
-function Row(p: { title: string; desc?: string; stack?: boolean; children: JSX.Element }) {
-  return (
-    <div class={`s-row ${p.stack ? "cs-stack" : ""}`}>
-      <div class="s-row-text">
-        <div class="s-row-title">{p.title}</div>
-        <Show when={p.desc}>
-          <div class="s-row-desc">{p.desc}</div>
-        </Show>
-      </div>
-      <div class="s-row-ctrl">{p.children}</div>
-    </div>
-  );
+  return <SettingsCard title={p.title} hint={p.hint} class="cs-sec">{p.children}</SettingsCard>;
 }
 
 /** Shared creation and editing form. Drafts survive tabs, navigation and unmount. */

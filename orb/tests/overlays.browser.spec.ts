@@ -248,6 +248,26 @@ for(const theme of ["dark","light"]) test(`menu focus stays quiet and keyboard n
  await expect(page.getByRole('button',{name:'Reasoning effort: low',exact:true})).toBeFocused();
 });
 
+test('Text fields focus with a subtle 1px border and no outer ring or halo on click or keyboard focus',async({page})=>{
+ for (const theme of ['dark','light'] as const) {
+  await page.goto(`/tests/overlays.html?theme=${theme}`);
+  await page.getByRole('button',{name:'Rename',exact:true}).click();
+  const input=page.getByLabel('Agent name');
+  await expect(input).toBeFocused();
+  await expect(input).toHaveCSS('outline-style','none');
+  await expect(input).toHaveCSS('box-shadow','none');
+  await input.click();
+  await expect(input).toHaveCSS('outline-style','none');
+  await expect(input).toHaveCSS('box-shadow','none');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button',{name:'Confirm deletion',exact:true}).click();
+  const cancel=page.getByRole('button',{name:'Cancel',exact:true});
+  await expect(cancel).toBeFocused();
+  expect(await cancel.evaluate(el => parseFloat(getComputedStyle(el).outlineWidth))).toBeLessThanOrEqual(1);
+  await page.keyboard.press('Escape');
+ }
+});
+
 test('Codex speed uses keyboard selection and excludes unsupported subscriptions',async({page})=>{
  await page.addInitScript(()=>localStorage.setItem('orb.apiUrl',location.origin));
  await page.route('**/api/control/codex-speed?**',route=>route.fulfill({json:{tiers:[{id:'standard',available:true},{id:'fast',available:true},{id:'ultrafast',available:false,reason:'Requires a compatible subscription'}]},headers:{'Access-Control-Allow-Origin':'*'}}));

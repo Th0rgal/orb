@@ -65,6 +65,17 @@ The app must feel instant and calm. Treat these as requirements, not polish:
   transcript open time flat. Measure before and after a performance change
   (trace, frame timings, or a browser test assertion) and put the numbers in
   the PR.
+- **Quiet, unified focus and selection (Cursor-style).** Never add per-feature
+  `outline` colors (blue/purple/accent) or outer `box-shadow` focus halos. Text
+  inputs, textareas and selects show focus solely by stepping their `1px`
+  border to `--focus-border` (`outline: none; box-shadow: none` — remember
+  `:focus-visible` matches text inputs on mouse click too). Buttons, tabs and
+  disclosures stay quiet on pointer click and use the shared `1px solid
+  var(--focus-border)` `:focus-visible` stroke; text selection uses
+  `--selection-bg`. Compose settings pages from `SettingsCard` / `SettingsRow`
+  (`orb/src/SettingsCard.tsx`) and modals/forms from `Dialog` / `Field`
+  (`orb/src/Dialog.tsx`, see `docs/ui/overlays.md`), never raw ad-hoc `.s-row`
+  markup.
 - Check light and dark mode, large text sizes on mobile, and keyboard use on
   desktop.
 

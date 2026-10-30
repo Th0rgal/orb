@@ -5,6 +5,7 @@ import { ErrorToast } from "./toast";
 import { ApprovalDevicesPanel } from "./ApprovalDevicesPanel";
 import { PrivilegeAccessPanel } from "./PrivilegeAccessPanel";
 import { MissionAccessPanel } from "./MissionAccessPanel";
+export { SettingsCard, SettingsRow } from "./SettingsCard";
 
 /** Page chrome for a settings section: title, one-line subtitle and tabs.
  * The panel inside keeps its own markup; CSS folds its scroll box and title

@@ -2,7 +2,7 @@
 :root {
   --overlay-surface: #191919; --overlay-border: #333333; --overlay-field: #202020;
   --overlay-hover: #292929; --overlay-radius: 12px; --overlay-menu-radius: 8px;
-  --overlay-control-radius: 6px; --overlay-focus: var(--blue, #86aee4);
+  --overlay-control-radius: 6px; --overlay-focus: var(--focus-border);
 }
 :root[data-theme="light"] {
   --overlay-surface: #fafafa; --overlay-border: #d8d8d8; --overlay-field: #ffffff; --overlay-hover: #ededed;
@@ -27,14 +27,18 @@
 .dlg-button-destructive { color: var(--red); background: transparent; border-color: var(--red); }
 .dlg-button-destructive:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 12%, transparent); }
 .dlg button:disabled, .overlay-popover button:disabled { opacity: .45; cursor: default; }
-.dlg :is(button, input, textarea, select):focus-visible, .dlg-button:focus-visible { outline: 2px solid var(--overlay-focus); outline-offset: 2px; }
+.dlg :is(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea, select):is(:focus, :focus-visible) { outline: none; box-shadow: none; }
+.dlg :is(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea, select):not([aria-invalid="true"]):is(:focus, :focus-visible) { border-color: var(--focus-border); }
+.dlg button:focus-visible, .dlg-button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
+.dlg-button-primary:focus-visible { outline-offset: 1px; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .field > label { color: var(--fg); font-size: 13px; }
 .field-description { color: var(--fg-2); font-size: 13px; }
 .field-error { color: var(--red); overflow-wrap: anywhere; font-size: 13px; }
-.field :is(input, select), .s-input, .cs-input { height: 32px; min-width: 0; border: 1px solid var(--overlay-border); border-radius: var(--overlay-control-radius); background: var(--overlay-field); color: var(--fg); font: 13px var(--sans); padding: 0 10px; }
+.field :is(input, select), .s-input, .cs-input { height: 32px; min-width: 0; border: 1px solid var(--overlay-border); border-radius: var(--overlay-control-radius); background: var(--overlay-field); color: var(--fg); font: 13px var(--sans); padding: 0 10px; transition: border-color var(--t, 90ms) var(--ease, ease); }
+.field :is(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea, select):hover:not(:focus):not(:disabled):not([aria-invalid="true"]), .s-input:hover:not(:focus):not(:disabled):not([aria-invalid="true"]), .cs-input:hover:not(:focus):not(:disabled) { border-color: var(--stroke-strong); }
 .field textarea { min-height: 80px; }
-.field [aria-invalid="true"] { border-color: var(--red); }
+.field [aria-invalid="true"], .s-input[aria-invalid="true"] { border-color: var(--red); }
 .dlg form { display: flex; flex-direction: column; gap: 12px; }
 .overlay-popover { position: fixed; box-sizing: border-box; width: 280px; max-width: calc(100vw - 32px); min-height: 0; overflow: auto; padding: 8px; border: 1px solid var(--overlay-border); border-radius: var(--overlay-menu-radius); background: var(--overlay-surface); color: var(--fg); box-shadow: var(--shadow-lg); font: 13px/1.5 var(--sans); -webkit-app-region: no-drag; }
 .overlay-popover:is(.menu, .picker) { padding: var(--menu-inset); }
@@ -68,7 +72,6 @@
 .menu-chevron { margin-left: auto; padding-left: 12px; }
 .overlay-popover { right:auto; bottom:auto; animation:none; }
 .overlay-popover .s-input { max-width:100%; }
-.s-input:focus-visible, .field input:focus-visible, .s-btn:focus-visible { outline:2px solid var(--overlay-focus); outline-offset:2px; }
 
 .dlg-foot .cs-save-area { position:static; margin:0; width:100%; }
 .dlg-foot .cs-savebar { position:static; margin:0; padding:0; border:0; background:transparent; box-shadow:none; }
@@ -76,7 +79,7 @@
 /* Menu rows use one full-row highlight for pointer and keyboard navigation.
    Pickers own their active row; the checkmark alone marks the committed value. */
 .overlay-popover :is(button, input, textarea, select):focus-visible { outline: 0; box-shadow: none; }
-.overlay-popover :is(input, textarea, select):focus-visible { border-color: var(--fg-3); }
+.overlay-popover :is(input, textarea, select):is(:focus, :focus-visible) { border-color: var(--focus-border); }
 .overlay-popover .menu-item:is(:hover, :focus) { background: var(--overlay-hover); }
 .overlay-popover[role="menu"]:has(.menu-item:focus) .menu-item:hover:not(:focus) { background: transparent; }
 .overlay-popover button:not(.menu-item):not([role^="menuitem"]):not([role="option"]):focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }

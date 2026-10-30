@@ -42,12 +42,24 @@ Titles use 15px/500; body and controls use 13px. Inputs are 32px and buttons 28p
 The 16px viewport inset and scrolling body keep actions reachable in small windows.
 
 Secondary actions are transparent; primary actions are neutral; red marks irreversible
-actions. Keyboard focus in modals uses a separate outline. Anchored menu rows use
-the same neutral, full-row background for hover and keyboard navigation, with no
-left stripe or outline. A checkmark indicates the committed picker value; only
-the active row is highlighted. Search fields use a subtle existing-border change.
-Other popover buttons retain a neutral inset outline for keyboard focus. Menus
-and pickers share the 4px surface inset and matching inner corner radius.
+actions. Focus and selection stay subtle and monochrome across all surfaces (modeled
+after Cursor's neutral alpha stroke ramp):
+- Text inputs, textareas and selects indicate focus solely by stepping their `1px`
+  border to `--focus-border` (`outline: none; box-shadow: none`), never a `2px`
+  accent ring or outer `box-shadow` halo (note: `:focus-visible` matches text inputs
+  even on pointer click in CSS Selectors Level 4, so never attach an `outline` to
+  `input:focus-visible` or `textarea:focus-visible`).
+- Buttons, tabs, toggles and disclosures stay quiet on pointer clicks and show a
+  `1px solid var(--focus-border)` outline on keyboard `:focus-visible` (`outline-offset: -1px`,
+  or `1px` on solid primary buttons). Never introduce per-feature blue, purple or
+  thick `2px` focus rings.
+- Text selection uses the neutral `--selection-bg` token rather than OS accent blue.
+- Anchored menu rows use the same neutral, full-row background for hover and keyboard
+  navigation, with no left stripe or outline. A checkmark indicates the committed
+  picker value; only the active row is highlighted. Search fields use a subtle
+  existing-border change. Other popover buttons retain a neutral `1px` inset outline
+  for keyboard focus. Menus and pickers share the 4px surface inset and matching
+  inner corner radius.
 Active search results are different from committed values. Arrow navigation must
 never commit a value. Disabled options cannot receive an activation.
 
