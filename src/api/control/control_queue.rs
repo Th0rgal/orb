@@ -527,9 +527,95 @@ pub(super) fn control_message_contains_id(
                 .any(|(id, _)| *id == candidate))
 }
 
+static OUTBOX_CRASH_RECONCILE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+pub fn outbox_crash_reconcile_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    OUTBOX_CRASH_RECONCILE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+pub fn evaluate_outbox_crash_reconcile_gate(
+    durable_queued: u32,
+    durable_acked: u32,
+    volatile_in_flight: u32,
+    lease_boot_epoch: u64,
+    node_boot_epoch: u64,
+    volatile_lease_owner: u32,
+    req_owner: u32,
+) -> crate::orb_spec::OutboxCrashReconcileVerdict {
+    let input = crate::orb_spec::OutboxCrashReconcileInput {
+        durable_queued,
+        durable_acked,
+        volatile_in_flight,
+        lease_boot_epoch,
+        node_boot_epoch,
+        volatile_lease_owner,
+        req_owner,
+    };
+    let verdict = crate::orb_spec::outbox_crash_reconcile_step(input);
+    let valid_wal = durable_acked <= durable_queued;
+    let host_unacked = if valid_wal {
+        durable_queued - durable_acked
+    } else {
+        0
+    };
+    let crash_reset = lease_boot_epoch != node_boot_epoch;
+    let eff_owner = if crash_reset { 0 } else { volatile_lease_owner };
+    let eff_in_flight = if crash_reset { 0 } else { volatile_in_flight };
+    let host_admitted = valid_wal
+        && host_unacked > 0
+        && req_owner != 0
+        && (eff_owner == 0 || eff_owner == req_owner)
+        && eff_in_flight < host_unacked;
+    let host_action_code = if !valid_wal {
+        0u8
+    } else if host_admitted {
+        1u8
+    } else if host_unacked == 0 {
+        2u8
+    } else {
+        3u8
+    };
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        (bool, u32),
+        (bool, u32),
+        crate::orb_spec::OutboxCrashReconcileInput,
+        u8,
+        u8,
+    > {
+        subsystem: "orb_outbox_crash_reconcile_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = crate::orb_spec::outbox_crash_reconcile_step(*ev);
+            ((v.admitted, v.unacked_depth), vec![v.action_code])
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: node_boot_epoch,
+        fresh_nonce: lease_boot_epoch,
+        idempotency_key: u64::from(req_owner),
+        boot_id_matches: !crash_reset,
+        schema_id: 2,
+    };
+    outbox_crash_reconcile_shadow_counter().with_ring(|ring| {
+        let _ = sim.observe_step(
+            &(false, 0),
+            &(host_admitted, host_unacked),
+            &input,
+            &[host_action_code],
+            ctx,
+            ring,
+        );
+    });
+    verdict
+}
+
 pub(super) fn partition_restored_control_messages(
     items: Vec<QueuedMessage>,
 ) -> (Vec<QueuedMessage>, Vec<QueuedMessage>) {
+    let total = items.len().min(u32::MAX as usize) as u32;
     let mut pending = Vec::with_capacity(items.len());
     let mut consumed = Vec::new();
     for item in items {
@@ -539,6 +625,8 @@ pub(super) fn partition_restored_control_messages(
             pending.push(item);
         }
     }
+    let acked = consumed.len().min(u32::MAX as usize) as u32;
+    let _ = evaluate_outbox_crash_reconcile_gate(total, acked, acked, 0, 1, 1, 1);
     (pending, consumed)
 }
 
@@ -608,7 +696,16 @@ pub(super) fn serialize_queue_snapshot(
     }
     let mut consumed: Vec<_> = recovered_consumed.values().cloned().collect();
     consumed.sort_by_key(|message| message.id);
+    let acked = (items.iter().filter(|m| m.inflight).count() + consumed.len())
+        .min(u32::MAX as usize) as u32;
     items.extend(consumed);
+    let total = items.len().min(u32::MAX as usize) as u32;
+    let inflight = parallel_runners
+        .values()
+        .filter(|r| r.inflight_message().is_some())
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let _ = evaluate_outbox_crash_reconcile_gate(total, acked, inflight, 1, 1, 1, 1);
     serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -662,5 +759,47 @@ mod native_schedule_pool_tests {
             MAX_NATIVE_SCHEDULES_PER_MISSION
         );
         assert_eq!(wakeup_supersession_keep("wall-clock"), 1);
+    }
+
+    #[test]
+    fn outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences() {
+        let msgs = vec![
+            QueuedMessage {
+                id: Uuid::new_v4(),
+                content: "inflight-acked".into(),
+                agent: None,
+                mission_id: None,
+                source: None,
+                inflight: true,
+                queue_error: None,
+            },
+            QueuedMessage {
+                id: Uuid::new_v4(),
+                content: "unacked-pending".into(),
+                agent: None,
+                mission_id: None,
+                source: None,
+                inflight: false,
+                queue_error: None,
+            },
+        ];
+        let (pending, consumed) = partition_restored_control_messages(msgs);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(consumed.len(), 1);
+
+        let crash_verdict = evaluate_outbox_crash_reconcile_gate(5, 2, 3, 10, 11, 9, 7);
+        assert!(crash_verdict.admitted);
+        assert!(crash_verdict.crash_reconciled);
+        assert!(crash_verdict.has_single_writer);
+        assert_eq!(crash_verdict.unacked_depth, 3);
+
+        let corrupt_wal = evaluate_outbox_crash_reconcile_gate(2, 5, 0, 11, 11, 0, 7);
+        assert!(!corrupt_wal.admitted);
+        assert_eq!(corrupt_wal.action_code, 0);
+
+        let snap =
+            outbox_crash_reconcile_shadow_counter().snapshot("orb_outbox_crash_reconcile_step");
+        assert!(snap.total_events >= 3);
+        assert_eq!(snap.total_divergences, 0);
     }
 }

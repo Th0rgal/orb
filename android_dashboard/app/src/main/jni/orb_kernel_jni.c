@@ -231,6 +231,51 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_orbClientParityStep(JNIEnv *env, jclas
     return (jlong)orb_client_parity_step((uint8_t)clientTarget, (uint32_t)wireSchemaId, (uint32_t)transcriptSeq, (uint32_t)markdownBlocksCount, (uint32_t)sendQueueDepth, (uint8_t)scrollCorrectedInEpoch);
 }
 
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireApplyPatchStep(JNIEnv *env, jclass clazz, jlong currentRev, jlong incomingRev, jint currentHasVal, jint currentVal, jint presence, jint incomingVal) {
+    return (jlong)orb_wire_apply_patch_step((uint64_t)currentRev, (uint64_t)incomingRev, (uint8_t)currentHasVal, (uint32_t)currentVal, (uint8_t)presence, (uint32_t)incomingVal);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbWireMachineStep(JNIEnv *env, jclass clazz, jint schemaId, jlong stateRev, jlong eventSeq, jint effectKind, jint effectAdmitted, jint outCap, jint requiredOutBytes) {
+    return (jlong)orb_wire_machine_step((uint32_t)schemaId, (uint64_t)stateRev, (uint64_t)eventSeq, (uint8_t)effectKind, (uint8_t)effectAdmitted, (uint32_t)outCap, (uint32_t)requiredOutBytes);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbHierarchyMergeStep(JNIEnv *env, jclass clazz, jlong currentEpoch, jlong incomingEpoch, jlong archiveEpoch, jint curArchived, jint curSuperseded, jint isPartialPatch, jint parentPresence, jint curParentOrd, jint incParentOrd, jint incArchive, jint incUnarchive, jint incSupersede) {
+    return (jlong)orb_hierarchy_merge_step((uint64_t)currentEpoch, (uint64_t)incomingEpoch, (uint64_t)archiveEpoch, (uint8_t)curArchived, (uint8_t)curSuperseded, (uint8_t)isPartialPatch, (uint8_t)parentPresence, (uint32_t)curParentOrd, (uint32_t)incParentOrd, (uint8_t)incArchive, (uint8_t)incUnarchive, (uint8_t)incSupersede);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbTranscriptFoldStep(JNIEnv *env, jclass clazz, jlong lastAppliedSeq, jlong incomingSeq, jint entryCount, jint thinkingOpen, jint normalizedAction, jint isReplayFromLog) {
+    return (jlong)orb_transcript_fold_step((uint64_t)lastAppliedSeq, (uint64_t)incomingSeq, (uint32_t)entryCount, (uint8_t)thinkingOpen, (uint8_t)normalizedAction, (uint8_t)isReplayFromLog);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbOutboxCrashReconcileStep(JNIEnv *env, jclass clazz, jint durableQueued, jint durableAcked, jint volatileInFlight, jlong leaseBootEpoch, jlong nodeBootEpoch, jint volatileLeaseOwner, jint reqOwner) {
+    return (jlong)orb_outbox_crash_reconcile_step((uint32_t)durableQueued, (uint32_t)durableAcked, (uint32_t)volatileInFlight, (uint64_t)leaseBootEpoch, (uint64_t)nodeBootEpoch, (uint32_t)volatileLeaseOwner, (uint32_t)reqOwner);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbProviderAttemptStep(JNIEnv *env, jclass clazz, jint pinnedAccountId, jint candidateAccountId, jint attemptsUsed, jint retryBudget, jint firstByteCommitted, jint failureKind, jlong upstreamNowEpoch, jlong cooldownUntilEpoch, jlong upstreamDeadline, jint authValid) {
+    return (jlong)orb_provider_attempt_step((uint32_t)pinnedAccountId, (uint32_t)candidateAccountId, (uint32_t)attemptsUsed, (uint32_t)retryBudget, (uint8_t)firstByteCommitted, (uint8_t)failureKind, (uint64_t)upstreamNowEpoch, (uint64_t)cooldownUntilEpoch, (uint64_t)upstreamDeadline, (uint8_t)authValid);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbAuthToctouExecuteStep(JNIEnv *env, jclass clazz, jint principalKind, jint bunkerState, jint observedTargetId, jint execTargetId, jlong observedLeaseEpoch, jlong liveLeaseEpoch, jlong nowTick, jlong expiryTick, jlong observedDigest, jlong execDigest) {
+    return (jint)orb_auth_toctou_execute_step((uint8_t)principalKind, (uint8_t)bunkerState, (uint32_t)observedTargetId, (uint32_t)execTargetId, (uint64_t)observedLeaseEpoch, (uint64_t)liveLeaseEpoch, (uint64_t)nowTick, (uint64_t)expiryTick, (uint64_t)observedDigest, (uint64_t)execDigest);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbResourceLedgerStep(JNIEnv *env, jclass clazz, jint opKind, jint reservedSlots, jint activeSlots, jint maxSlots, jlong spentCents, jlong costDeltaCents, jlong budgetCents, jlong nowTick, jlong ttlExpiryTick) {
+    return (jlong)orb_resource_ledger_step((uint8_t)opKind, (uint32_t)reservedSlots, (uint32_t)activeSlots, (uint32_t)maxSlots, (uint64_t)spentCents, (uint64_t)costDeltaCents, (uint64_t)budgetCents, (uint64_t)nowTick, (uint64_t)ttlExpiryTick);
+}
+
+JNIEXPORT jlong JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_orbStreamBoundedCommitStep(JNIEnv *env, jclass clazz, jint prevLen, jint prevCommit, jint prevCheckpoint, jint newLen, jint rawCommit, jint maxOpenTailBytes) {
+    return (jlong)orb_stream_bounded_commit_step((uint32_t)prevLen, (uint32_t)prevCommit, (uint32_t)prevCheckpoint, (uint32_t)newLen, (uint32_t)rawCommit, (uint32_t)maxOpenTailBytes);
+}
+
 JNIEXPORT jbyte JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSseFrameScan(JNIEnv *env, jclass clazz, jlong frameOff, jlong frameLen, jlong chunkLen, jint fieldKind, jint nextByte, jint lastByte) {
     return (jbyte)leansys_sse_frame_scan((uint64_t)frameOff, (uint64_t)frameLen, (uint64_t)chunkLen, (uint8_t)fieldKind, (uint8_t)nextByte, (uint8_t)lastByte);
@@ -274,4 +319,9 @@ Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysSelectIsa(JNIEnv *env, jclass c
 JNIEXPORT jint JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyIsaSelection(JNIEnv *env, jclass clazz, jlong detectedHwCaps, jlong requiredMask, jint selectedVariantId, jint maxVariantId) {
     return (jint)leansys_verify_isa_selection((uint64_t)detectedHwCaps, (uint64_t)requiredMask, (uint8_t)selectedVariantId, (uint8_t)maxVariantId);
+}
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyFdBounds(JNIEnv *env, jclass clazz, jlong rawWord, jint fdOut) {
+    return (jint)leansys_verify_fd_bounds((uint64_t)rawWord, (uint32_t)fdOut);
 }

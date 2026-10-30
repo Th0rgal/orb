@@ -2,6 +2,7 @@ import { shallowEqual } from "./poll";
 import { isFailedStatus } from "./missionStatus";
 import type { DraftImage } from "./imageAttachments";
 import { deferredMessages } from "./deferredMessages";
+import { orbTranscriptFoldStep } from "./orbKernel";
 import { isGeneratedRemoteJobStatus, type StreamEvent } from "./stream";
 
 export type StreamItem =
@@ -37,6 +38,8 @@ export class TranscriptReducer {
   private bubbles = new Map<string, number>();
   private seen = new Set<string>();
   private seq = new Map<string, number>();
+  private foldSeq = new Map<string, bigint>();
+  private foldEntries = 0;
   private revisions = new Map<string, number>();
   private next = 0;
   /** Index of the last delivered (not queued) user message, or -1. */
@@ -222,6 +225,25 @@ export class TranscriptReducer {
       this.seq.set(channel, ev.sequence);
     }
     const last = this.items.at(-1);
+    const foldAction = ev.type === "thinking" ? 4
+      : ev.type === "text_delta" || ev.type === "text_op" ? 5
+      : ev.type === "tool_call" ? 6
+      : ev.type === "tool_result" ? 7
+      : ev.type === "assistant_message" ? 9
+      : ev.type === "error" ? 10 : 8;
+    const prevFoldSeq = this.foldSeq.get(channel) ?? 0n;
+    const nextFoldSeq = prevFoldSeq + 1n;
+    const foldStep = orbTranscriptFoldStep(
+      prevFoldSeq,
+      nextFoldSeq,
+      this.foldEntries,
+      last?.kind === "think" && !last.done,
+      foldAction,
+      ev.storedId !== undefined,
+    );
+    if (!foldStep.admitted) return;
+    this.foldSeq.set(channel, nextFoldSeq);
+    this.foldEntries = foldStep.nextEntryCount;
     switch (ev.type) {
       case "text_delta":
       case "text_op": {

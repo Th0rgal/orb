@@ -292,84 +292,6 @@
       ]
     },
     {
-      "name": "orb_vm_lifecycle_step",
-      "ret": "uint32_t",
-      "params": [
-        {
-          "name": "ownerClass",
-          "type": "uint8_t"
-        },
-        {
-          "name": "busy",
-          "type": "uint8_t"
-        },
-        {
-          "name": "ttlExpired",
-          "type": "uint8_t"
-        },
-        {
-          "name": "graceOrIdleElapsed",
-          "type": "uint8_t"
-        },
-        {
-          "name": "workingIdleEnabled",
-          "type": "uint8_t"
-        },
-        {
-          "name": "supportsFreeStop",
-          "type": "uint8_t"
-        },
-        {
-          "name": "minDeletePending",
-          "type": "uint8_t"
-        }
-      ]
-    },
-    {
-      "name": "orb_vm_claim_step",
-      "ret": "uint32_t",
-      "params": [
-        {
-          "name": "isLive",
-          "type": "uint8_t"
-        },
-        {
-          "name": "sameTenant",
-          "type": "uint8_t"
-        },
-        {
-          "name": "ownerNone",
-          "type": "uint8_t"
-        },
-        {
-          "name": "ownerInLineage",
-          "type": "uint8_t"
-        }
-      ]
-    },
-    {
-      "name": "orb_compute_secret_gate",
-      "ret": "uint32_t",
-      "params": [
-        {
-          "name": "isCoreReservedComputeKey",
-          "type": "uint8_t"
-        },
-        {
-          "name": "callerOnManagedNode",
-          "type": "uint8_t"
-        },
-        {
-          "name": "isAllowlistedManagedSecret",
-          "type": "uint8_t"
-        },
-        {
-          "name": "operatorBreakGlass",
-          "type": "uint8_t"
-        }
-      ]
-    },
-    {
       "name": "orb_verify_log_window",
       "ret": "uint8_t",
       "params": [
@@ -2530,70 +2452,386 @@
       }
     },
     {
-      "name": "orb_node_gc_step",
+      "name": "orb_wire_apply_patch_step",
       "ret": "uint64_t",
       "params": [
         {
-          "name": "freeBytes",
+          "name": "currentRev",
           "type": "uint64_t"
         },
         {
-          "name": "floorBytes",
+          "name": "incomingRev",
           "type": "uint64_t"
         },
         {
-          "name": "emergencyFloorBytes",
-          "type": "uint64_t"
+          "name": "currentHasVal",
+          "type": "uint8_t"
         },
         {
-          "name": "agedScratchBytes",
-          "type": "uint64_t"
+          "name": "currentVal",
+          "type": "uint32_t"
         },
         {
-          "name": "freshScratchBytes",
-          "type": "uint64_t"
+          "name": "presence",
+          "type": "uint8_t"
         },
         {
-          "name": "coldCacheBytes",
-          "type": "uint64_t"
-        },
-        {
-          "name": "hotCacheBytes",
-          "type": "uint64_t"
+          "name": "incomingVal",
+          "type": "uint32_t"
         }
       ],
-      "internal": true
+      "jni": {
+        "method": "orbWireApplyPatchStep",
+        "ret": "jlong"
+      }
     },
     {
-      "name": "orb_node_disk_admission_step",
+      "name": "orb_wire_machine_step",
       "ret": "uint64_t",
       "params": [
         {
-          "name": "freeBytes",
+          "name": "schemaId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "stateRev",
           "type": "uint64_t"
         },
         {
-          "name": "reservedBytes",
+          "name": "eventSeq",
           "type": "uint64_t"
         },
         {
-          "name": "nodeFloorBytes",
+          "name": "effectKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "effectAdmitted",
+          "type": "uint8_t"
+        },
+        {
+          "name": "outCap",
+          "type": "uint32_t"
+        },
+        {
+          "name": "requiredOutBytes",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbWireMachineStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_hierarchy_merge_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "currentEpoch",
           "type": "uint64_t"
         },
         {
-          "name": "coreFloorBytes",
+          "name": "incomingEpoch",
           "type": "uint64_t"
         },
         {
-          "name": "hysteresisBytes",
+          "name": "archiveEpoch",
           "type": "uint64_t"
         },
         {
-          "name": "nodePinnedPressure",
+          "name": "curArchived",
+          "type": "uint8_t"
+        },
+        {
+          "name": "curSuperseded",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isPartialPatch",
+          "type": "uint8_t"
+        },
+        {
+          "name": "parentPresence",
+          "type": "uint8_t"
+        },
+        {
+          "name": "curParentOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "incParentOrd",
+          "type": "uint32_t"
+        },
+        {
+          "name": "incArchive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "incUnarchive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "incSupersede",
           "type": "uint8_t"
         }
       ],
-      "internal": true
+      "jni": {
+        "method": "orbHierarchyMergeStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_transcript_fold_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "lastAppliedSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "incomingSeq",
+          "type": "uint64_t"
+        },
+        {
+          "name": "entryCount",
+          "type": "uint32_t"
+        },
+        {
+          "name": "thinkingOpen",
+          "type": "uint8_t"
+        },
+        {
+          "name": "normalizedAction",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isReplayFromLog",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbTranscriptFoldStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_outbox_crash_reconcile_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "durableQueued",
+          "type": "uint32_t"
+        },
+        {
+          "name": "durableAcked",
+          "type": "uint32_t"
+        },
+        {
+          "name": "volatileInFlight",
+          "type": "uint32_t"
+        },
+        {
+          "name": "leaseBootEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nodeBootEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "volatileLeaseOwner",
+          "type": "uint32_t"
+        },
+        {
+          "name": "reqOwner",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbOutboxCrashReconcileStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_provider_attempt_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "pinnedAccountId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "candidateAccountId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "attemptsUsed",
+          "type": "uint32_t"
+        },
+        {
+          "name": "retryBudget",
+          "type": "uint32_t"
+        },
+        {
+          "name": "firstByteCommitted",
+          "type": "uint8_t"
+        },
+        {
+          "name": "failureKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "upstreamNowEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "cooldownUntilEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "upstreamDeadline",
+          "type": "uint64_t"
+        },
+        {
+          "name": "authValid",
+          "type": "uint8_t"
+        }
+      ],
+      "jni": {
+        "method": "orbProviderAttemptStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_auth_toctou_execute_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "principalKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "bunkerState",
+          "type": "uint8_t"
+        },
+        {
+          "name": "observedTargetId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "execTargetId",
+          "type": "uint32_t"
+        },
+        {
+          "name": "observedLeaseEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "liveLeaseEpoch",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nowTick",
+          "type": "uint64_t"
+        },
+        {
+          "name": "expiryTick",
+          "type": "uint64_t"
+        },
+        {
+          "name": "observedDigest",
+          "type": "uint64_t"
+        },
+        {
+          "name": "execDigest",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbAuthToctouExecuteStep",
+        "ret": "jint"
+      }
+    },
+    {
+      "name": "orb_resource_ledger_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "opKind",
+          "type": "uint8_t"
+        },
+        {
+          "name": "reservedSlots",
+          "type": "uint32_t"
+        },
+        {
+          "name": "activeSlots",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxSlots",
+          "type": "uint32_t"
+        },
+        {
+          "name": "spentCents",
+          "type": "uint64_t"
+        },
+        {
+          "name": "costDeltaCents",
+          "type": "uint64_t"
+        },
+        {
+          "name": "budgetCents",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nowTick",
+          "type": "uint64_t"
+        },
+        {
+          "name": "ttlExpiryTick",
+          "type": "uint64_t"
+        }
+      ],
+      "jni": {
+        "method": "orbResourceLedgerStep",
+        "ret": "jlong"
+      }
+    },
+    {
+      "name": "orb_stream_bounded_commit_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "prevLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "prevCommit",
+          "type": "uint32_t"
+        },
+        {
+          "name": "prevCheckpoint",
+          "type": "uint32_t"
+        },
+        {
+          "name": "newLen",
+          "type": "uint32_t"
+        },
+        {
+          "name": "rawCommit",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxOpenTailBytes",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "orbStreamBoundedCommitStep",
+        "ret": "jlong"
+      }
     },
     {
       "name": "leansys_verify_slice_bounds",
@@ -3474,6 +3712,169 @@
         "ret": "jint"
       },
       "model": "LeanSys.Spec.verifyIsaSelection"
+    },
+    {
+      "name": "leansys_verify_fd_bounds",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "rawWord",
+          "type": "uint64_t"
+        },
+        {
+          "name": "fdOut",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "leansysVerifyFdBounds",
+        "ret": "jint"
+      },
+      "model": "LeanSys.Spec.verifyFdBounds"
+    },
+    {
+      "name": "orb_vm_lifecycle_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "ownerClass",
+          "type": "uint8_t"
+        },
+        {
+          "name": "busy",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ttlExpired",
+          "type": "uint8_t"
+        },
+        {
+          "name": "graceOrIdleElapsed",
+          "type": "uint8_t"
+        },
+        {
+          "name": "workingIdleEnabled",
+          "type": "uint8_t"
+        },
+        {
+          "name": "supportsFreeStop",
+          "type": "uint8_t"
+        },
+        {
+          "name": "minDeletePending",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "orb_vm_claim_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "isLive",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sameTenant",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ownerNone",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ownerInLineage",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "orb_compute_secret_gate",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "isCoreReservedComputeKey",
+          "type": "uint8_t"
+        },
+        {
+          "name": "callerOnManagedNode",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isAllowlistedManagedSecret",
+          "type": "uint8_t"
+        },
+        {
+          "name": "operatorBreakGlass",
+          "type": "uint8_t"
+        }
+      ]
+    },
+    {
+      "name": "orb_node_gc_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "freeBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "floorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "emergencyFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "agedScratchBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "freshScratchBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "coldCacheBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "hotCacheBytes",
+          "type": "uint64_t"
+        }
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_node_disk_admission_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "freeBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "reservedBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nodeFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "coreFloorBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "hysteresisBytes",
+          "type": "uint64_t"
+        },
+        {
+          "name": "nodePinnedPressure",
+          "type": "uint8_t"
+        }
+      ],
+      "internal": true
     }
   ]
 }

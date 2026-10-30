@@ -9172,3 +9172,32 @@ async fn failed_tool_scan_marks_user_wait_inventory_incomplete() {
     assert_eq!(waits.get(&waiting.mission_id), Some(&None));
     assert!(!waits.contains_key(&running.mission_id));
 }
+
+#[test]
+fn stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences() {
+    let mission_id = Uuid::new_v4();
+    let mut buffers = HashMap::new();
+    let unclosed_fence = format!("```rust\n{}", "x".repeat(12_000));
+    let _ = streaming::text_op_events_for_stream(
+        AgentEvent::TextDelta {
+            content: unclosed_fence,
+            mission_id: Some(mission_id),
+        },
+        &mut buffers,
+    );
+
+    let forced =
+        streaming::evaluate_stream_bounded_commit_gate(1_000, 200, 200, 20_000, 200, 4_096);
+    assert!(forced.admitted);
+    assert!(forced.checkpoint_forced);
+    assert_eq!(forced.next_checkpoint, 20_000 - 4_096);
+
+    let non_mono = streaming::evaluate_stream_bounded_commit_gate(500, 200, 100, 600, 250, 4_096);
+    assert!(!non_mono.admitted);
+    assert_eq!(non_mono.next_checkpoint, 100);
+
+    let snap = streaming::stream_bounded_commit_shadow_counter()
+        .snapshot("orb_stream_bounded_commit_step");
+    assert!(snap.total_events >= 3);
+    assert_eq!(snap.total_divergences, 0);
+}

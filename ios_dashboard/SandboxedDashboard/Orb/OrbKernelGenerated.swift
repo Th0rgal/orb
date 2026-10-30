@@ -35,15 +35,6 @@ internal func orb_verify_token_rotation(_ presentedNonEmpty: UInt8, _ matchCurre
 @_silgen_name("orb_verify_approval")
 internal func orb_verify_approval(_ signed: UInt8, _ owned: UInt8, _ pending: UInt8, _ unexpired: UInt8, _ unchanged: UInt8, _ risk: UInt8, _ confirmed: UInt8) -> UInt8
 
-@_silgen_name("orb_vm_lifecycle_step")
-internal func orb_vm_lifecycle_step(_ ownerClass: UInt8, _ busy: UInt8, _ ttlExpired: UInt8, _ graceOrIdleElapsed: UInt8, _ workingIdleEnabled: UInt8, _ supportsFreeStop: UInt8, _ minDeletePending: UInt8) -> UInt32
-
-@_silgen_name("orb_vm_claim_step")
-internal func orb_vm_claim_step(_ isLive: UInt8, _ sameTenant: UInt8, _ ownerNone: UInt8, _ ownerInLineage: UInt8) -> UInt32
-
-@_silgen_name("orb_compute_secret_gate")
-internal func orb_compute_secret_gate(_ isCoreReservedComputeKey: UInt8, _ callerOnManagedNode: UInt8, _ isAllowlistedManagedSecret: UInt8, _ operatorBreakGlass: UInt8) -> UInt32
-
 @_silgen_name("orb_verify_log_window")
 internal func orb_verify_log_window(_ offset: UInt64, _ reqLen: UInt64, _ maxChunk: UInt64, _ hardCap: UInt64, _ fileSize: UInt64, _ actualLen: UInt64) -> UInt8
 
@@ -233,6 +224,33 @@ internal func orb_scroll_epoch_step(_ layoutEpoch: UInt32, _ lastCorrectedEpoch:
 @_silgen_name("orb_client_parity_step")
 internal func orb_client_parity_step(_ clientTarget: UInt8, _ wireSchemaId: UInt32, _ transcriptSeq: UInt32, _ markdownBlocksCount: UInt32, _ sendQueueDepth: UInt32, _ scrollCorrectedInEpoch: UInt8) -> UInt64
 
+@_silgen_name("orb_wire_apply_patch_step")
+internal func orb_wire_apply_patch_step(_ currentRev: UInt64, _ incomingRev: UInt64, _ currentHasVal: UInt8, _ currentVal: UInt32, _ presence: UInt8, _ incomingVal: UInt32) -> UInt64
+
+@_silgen_name("orb_wire_machine_step")
+internal func orb_wire_machine_step(_ schemaId: UInt32, _ stateRev: UInt64, _ eventSeq: UInt64, _ effectKind: UInt8, _ effectAdmitted: UInt8, _ outCap: UInt32, _ requiredOutBytes: UInt32) -> UInt64
+
+@_silgen_name("orb_hierarchy_merge_step")
+internal func orb_hierarchy_merge_step(_ currentEpoch: UInt64, _ incomingEpoch: UInt64, _ archiveEpoch: UInt64, _ curArchived: UInt8, _ curSuperseded: UInt8, _ isPartialPatch: UInt8, _ parentPresence: UInt8, _ curParentOrd: UInt32, _ incParentOrd: UInt32, _ incArchive: UInt8, _ incUnarchive: UInt8, _ incSupersede: UInt8) -> UInt64
+
+@_silgen_name("orb_transcript_fold_step")
+internal func orb_transcript_fold_step(_ lastAppliedSeq: UInt64, _ incomingSeq: UInt64, _ entryCount: UInt32, _ thinkingOpen: UInt8, _ normalizedAction: UInt8, _ isReplayFromLog: UInt8) -> UInt64
+
+@_silgen_name("orb_outbox_crash_reconcile_step")
+internal func orb_outbox_crash_reconcile_step(_ durableQueued: UInt32, _ durableAcked: UInt32, _ volatileInFlight: UInt32, _ leaseBootEpoch: UInt64, _ nodeBootEpoch: UInt64, _ volatileLeaseOwner: UInt32, _ reqOwner: UInt32) -> UInt64
+
+@_silgen_name("orb_provider_attempt_step")
+internal func orb_provider_attempt_step(_ pinnedAccountId: UInt32, _ candidateAccountId: UInt32, _ attemptsUsed: UInt32, _ retryBudget: UInt32, _ firstByteCommitted: UInt8, _ failureKind: UInt8, _ upstreamNowEpoch: UInt64, _ cooldownUntilEpoch: UInt64, _ upstreamDeadline: UInt64, _ authValid: UInt8) -> UInt64
+
+@_silgen_name("orb_auth_toctou_execute_step")
+internal func orb_auth_toctou_execute_step(_ principalKind: UInt8, _ bunkerState: UInt8, _ observedTargetId: UInt32, _ execTargetId: UInt32, _ observedLeaseEpoch: UInt64, _ liveLeaseEpoch: UInt64, _ nowTick: UInt64, _ expiryTick: UInt64, _ observedDigest: UInt64, _ execDigest: UInt64) -> UInt32
+
+@_silgen_name("orb_resource_ledger_step")
+internal func orb_resource_ledger_step(_ opKind: UInt8, _ reservedSlots: UInt32, _ activeSlots: UInt32, _ maxSlots: UInt32, _ spentCents: UInt64, _ costDeltaCents: UInt64, _ budgetCents: UInt64, _ nowTick: UInt64, _ ttlExpiryTick: UInt64) -> UInt64
+
+@_silgen_name("orb_stream_bounded_commit_step")
+internal func orb_stream_bounded_commit_step(_ prevLen: UInt32, _ prevCommit: UInt32, _ prevCheckpoint: UInt32, _ newLen: UInt32, _ rawCommit: UInt32, _ maxOpenTailBytes: UInt32) -> UInt64
+
 @_silgen_name("leansys_verify_slice_bounds")
 internal func leansys_verify_slice_bounds(_ off: UInt64, _ len: UInt64, _ cap: UInt64) -> UInt8
 
@@ -328,6 +346,18 @@ internal func leansys_select_isa(_ detectedHwCaps: UInt64, _ requiredMask: UInt6
 
 @_silgen_name("leansys_verify_isa_selection")
 internal func leansys_verify_isa_selection(_ detectedHwCaps: UInt64, _ requiredMask: UInt64, _ selectedVariantId: UInt8, _ maxVariantId: UInt8) -> UInt8
+
+@_silgen_name("leansys_verify_fd_bounds")
+internal func leansys_verify_fd_bounds(_ rawWord: UInt64, _ fdOut: UInt32) -> UInt8
+
+@_silgen_name("orb_vm_lifecycle_step")
+internal func orb_vm_lifecycle_step(_ ownerClass: UInt8, _ busy: UInt8, _ ttlExpired: UInt8, _ graceOrIdleElapsed: UInt8, _ workingIdleEnabled: UInt8, _ supportsFreeStop: UInt8, _ minDeletePending: UInt8) -> UInt32
+
+@_silgen_name("orb_vm_claim_step")
+internal func orb_vm_claim_step(_ isLive: UInt8, _ sameTenant: UInt8, _ ownerNone: UInt8, _ ownerInLineage: UInt8) -> UInt32
+
+@_silgen_name("orb_compute_secret_gate")
+internal func orb_compute_secret_gate(_ isCoreReservedComputeKey: UInt8, _ callerOnManagedNode: UInt8, _ isAllowlistedManagedSecret: UInt8, _ operatorBreakGlass: UInt8) -> UInt32
 
 enum OrbKernel {
     struct WorkfoldVerdict: Equatable, Sendable {
@@ -708,6 +738,10 @@ enum OrbKernel {
 
     static func verifyIsaSelection(detectedHwCaps: UInt64, requiredMask: UInt64, selectedVariantId: Int, maxVariantId: Int = 4) -> Bool {
         leansys_verify_isa_selection(detectedHwCaps, requiredMask, satU8(selectedVariantId), satU8(maxVariantId)) != 0
+    }
+
+    static func verifyFdBounds(rawWord: UInt64, fdOut: UInt32) -> Bool {
+        leansys_verify_fd_bounds(rawWord, fdOut) != 0
     }
 
     static func scrollEpochStep(

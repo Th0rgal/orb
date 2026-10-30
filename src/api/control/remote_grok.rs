@@ -270,6 +270,9 @@ static TRANSCRIPT_REDUCE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::Sh
 static CLIENT_PARITY_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
     std::sync::OnceLock::new();
 
+static TRANSCRIPT_FOLD_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
 pub fn agent_event_normalize_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
     AGENT_EVENT_NORMALIZE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
 }
@@ -280,6 +283,10 @@ pub fn transcript_reduce_shadow_counter() -> &'static crate::orb_spec::ShadowCou
 
 pub fn client_parity_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
     CLIENT_PARITY_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+pub fn transcript_fold_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    TRANSCRIPT_FOLD_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
 }
 
 /// Evaluate `orb_agent_event_normalize_step` (`TotalTransducer`, `NoEventLoss`,
@@ -334,6 +341,45 @@ pub fn evaluate_transcript_reduce_gate(
         },
         host_emits,
         transcript_reduce_shadow_counter(),
+    )
+}
+
+pub fn evaluate_transcript_fold_gate(
+    last_applied_seq: u64,
+    incoming_seq: u64,
+    entry_count: u32,
+    thinking_open: bool,
+    normalized_action: crate::orb_spec::AgentEventNormalizeAction,
+    is_replay_from_log: bool,
+) -> crate::orb_spec::TranscriptFoldStepVerdict {
+    let action_u8 = normalized_action as u8;
+    let is_duplicate = incoming_seq <= last_applied_seq;
+    let is_contiguous = !is_duplicate && (incoming_seq - last_applied_seq == 1);
+    let (host_admitted, host_next_entry_count, host_action_code) = if is_duplicate {
+        (false, entry_count, 2)
+    } else if !is_contiguous {
+        (false, entry_count, 3)
+    } else {
+        match action_u8 {
+            4 => (true, entry_count, 1),
+            5..=7 | 9..=10 => (true, entry_count.saturating_add(1), 1),
+            2 | 3 | 8 => (true, entry_count, 4),
+            _ => (false, entry_count, 5),
+        }
+    };
+    crate::orb_spec::observe_transcript_fold_shadow(
+        crate::orb_spec::TranscriptFoldStepInput {
+            last_applied_seq,
+            incoming_seq,
+            entry_count,
+            thinking_open,
+            normalized_action: action_u8,
+            is_replay_from_log,
+        },
+        host_admitted,
+        host_next_entry_count,
+        host_action_code,
+        transcript_fold_shadow_counter(),
     )
 }
 
@@ -422,6 +468,9 @@ pub(crate) struct GrokStream {
     pub(crate) is_replay_stream: bool,
     pub(crate) last_parity_digest: u32,
     pub(crate) parity_admitted: bool,
+    pub(crate) folded_entry_count: u32,
+    pub(crate) last_upstream_seq: u64,
+    pub(crate) gap_buffer: std::collections::BTreeMap<u64, String>,
 }
 
 impl GrokStream {
@@ -488,11 +537,20 @@ impl GrokStream {
                 self.is_replay_stream,
                 host_reduce_emits,
             );
-            if !norm.emit_event || !red.emit_entry {
+            let fold = evaluate_transcript_fold_gate(
+                self.last_reduced_seq,
+                incoming_seq,
+                self.folded_entry_count,
+                self.reducer_thinking_open,
+                norm.action,
+                self.is_replay_stream,
+            );
+            if !norm.emit_event || !red.emit_entry || !fold.admitted {
                 return false;
             }
             self.last_reduced_seq = incoming_seq;
             self.reducer_thinking_open = red.thinking_open_next;
+            self.folded_entry_count = fold.next_entry_count;
             return true;
         };
 
@@ -659,28 +717,73 @@ impl GrokStream {
             MAX_LINE_BYTES,
             host_emits,
         );
-        if !norm.emit_event {
-            return false;
-        }
-
         let explicit_seq = value
             .get("sequence")
             .and_then(|v| v.as_u64())
             .or_else(|| value.get("seq").and_then(|v| v.as_u64()));
-        let incoming_seq = explicit_seq.unwrap_or_else(|| self.last_reduced_seq.saturating_add(1));
+        if !norm.emit_event {
+            if let Some(seq) = explicit_seq {
+                if seq == self.last_upstream_seq.saturating_add(1) {
+                    self.last_upstream_seq = seq;
+                } else if seq > self.last_upstream_seq.saturating_add(1)
+                    && self.gap_buffer.len() < 256
+                {
+                    self.gap_buffer
+                        .entry(seq)
+                        .or_insert_with(|| trimmed.to_string());
+                }
+            }
+            return false;
+        }
+
+        let (fold_prev_seq, incoming_seq) = if let Some(seq) = explicit_seq {
+            if seq <= self.last_upstream_seq {
+                (self.last_reduced_seq, self.last_reduced_seq)
+            } else if seq == self.last_upstream_seq.saturating_add(1) {
+                (
+                    self.last_reduced_seq,
+                    self.last_reduced_seq.saturating_add(1),
+                )
+            } else {
+                (self.last_upstream_seq, seq)
+            }
+        } else {
+            (
+                self.last_reduced_seq,
+                self.last_reduced_seq.saturating_add(1),
+            )
+        };
         let is_replay_from_log = self.is_replay_stream
             || value.get("replay").and_then(|v| v.as_bool()) == Some(true)
-            || explicit_seq.is_some_and(|s| s <= self.last_reduced_seq);
-        let host_reduce_emits = norm.emit_event && incoming_seq > self.last_reduced_seq;
+            || explicit_seq.is_some_and(|s| s <= self.last_upstream_seq);
+        let host_reduce_emits = norm.emit_event && incoming_seq > fold_prev_seq;
         let red = evaluate_transcript_reduce_gate(
-            self.last_reduced_seq,
+            fold_prev_seq,
             incoming_seq,
             self.reducer_thinking_open,
             norm.action,
             is_replay_from_log,
             host_reduce_emits,
         );
-        if !red.emit_entry {
+        let fold = evaluate_transcript_fold_gate(
+            fold_prev_seq,
+            incoming_seq,
+            self.folded_entry_count,
+            self.reducer_thinking_open,
+            norm.action,
+            is_replay_from_log,
+        );
+        if fold.gap_buffered {
+            if let Some(seq) = explicit_seq {
+                if self.gap_buffer.len() < 256 {
+                    self.gap_buffer
+                        .entry(seq)
+                        .or_insert_with(|| trimmed.to_string());
+                }
+            }
+            return false;
+        }
+        if !red.emit_entry || !fold.admitted {
             return false;
         }
         if let Some(bound) = candidate_session_to_bind {
@@ -689,9 +792,31 @@ impl GrokStream {
         if let Some(key) = event_key {
             self.seen_event_ids.insert(key);
         }
-        self.last_reduced_seq = incoming_seq;
+        if let Some(seq) = explicit_seq {
+            self.last_upstream_seq = seq;
+        }
+        self.last_reduced_seq = fold_prev_seq.saturating_add(1);
         self.reducer_thinking_open = red.thinking_open_next;
+        self.folded_entry_count = fold.next_entry_count;
         true
+    }
+
+    fn drain_contiguous_gap_buffer(&mut self, updates: &mut Vec<StreamUpdate>) {
+        while let Some(&next_seq) = self.gap_buffer.keys().next() {
+            if next_seq <= self.last_upstream_seq {
+                self.gap_buffer.remove(&next_seq);
+                continue;
+            }
+            if next_seq != self.last_upstream_seq.saturating_add(1) {
+                break;
+            }
+            let Some(buffered) = self.gap_buffer.remove(&next_seq) else {
+                break;
+            };
+            if self.admit_and_reduce_raw_line(&buffered) {
+                self.feed_line(&buffered, updates);
+            }
+        }
     }
 
     /// Evaluates `orb_client_parity_step` (`ClientProjectionTarget::Core`) over the current
@@ -747,6 +872,7 @@ impl GrokStream {
                     if self.admit_and_reduce_raw_line(trimmed) {
                         self.feed_line(trimmed, &mut updates);
                     }
+                    self.drain_contiguous_gap_buffer(&mut updates);
                 }
                 self.dropping_line = false;
             }
@@ -762,6 +888,18 @@ impl GrokStream {
             let line = std::mem::take(&mut self.partial);
             if self.admit_and_reduce_raw_line(&line) {
                 self.feed_line(&line, &mut updates);
+            }
+            self.drain_contiguous_gap_buffer(&mut updates);
+        }
+        while let Some((&next_seq, _)) = self.gap_buffer.iter().next() {
+            let Some(buffered) = self.gap_buffer.remove(&next_seq) else {
+                break;
+            };
+            if next_seq > self.last_upstream_seq {
+                self.last_upstream_seq = next_seq.saturating_sub(1);
+                if self.admit_and_reduce_raw_line(&buffered) {
+                    self.feed_line(&buffered, &mut updates);
+                }
             }
         }
         self.snapshot_pending(&mut updates);
@@ -5569,18 +5707,53 @@ mod tests {
                 evaluate_transcript_reduce_gate(12, 12, false, complete.action, true, false);
             assert_eq!(stale_red.action, TranscriptReduceAction::DedupeOrSkip);
             assert!(!stale_red.emit_entry);
+
+            let live_fold =
+                super::evaluate_transcript_fold_gate(10, 11, 3, true, complete.action, false);
+            let replay_fold =
+                super::evaluate_transcript_fold_gate(10, 11, 3, true, complete.action, true);
+            assert_eq!(live_fold, replay_fold);
+            assert!(live_fold.admitted);
+            assert_eq!(live_fold.next_entry_count, 4);
+            let gap_fold =
+                super::evaluate_transcript_fold_gate(11, 14, 4, false, complete.action, false);
+            assert!(!gap_fold.admitted);
+            assert!(gap_fold.gap_buffered);
+            assert_eq!(gap_fold.next_entry_count, 4);
         }
 
         let norm_snap =
             agent_event_normalize_shadow_counter().snapshot("orb_agent_event_normalize_step");
         let red_snap = transcript_reduce_shadow_counter().snapshot("orb_transcript_reduce_step");
+        let fold_snap =
+            super::transcript_fold_shadow_counter().snapshot("orb_transcript_fold_step");
         let parity_snap = client_parity_shadow_counter().snapshot("orb_client_parity_step");
         assert!(norm_snap.total_events >= 20);
         assert_eq!(norm_snap.total_divergences, 0);
         assert!(red_snap.total_events >= 20);
         assert_eq!(red_snap.total_divergences, 0);
+        assert!(fold_snap.total_events >= 20);
+        assert_eq!(fold_snap.total_divergences, 0);
         assert!(parity_snap.total_events >= 1);
         assert_eq!(parity_snap.total_divergences, 0);
+
+        let mut gs = super::GrokStream::default();
+        let u1 = gs.feed("{\"sequence\":1,\"type\":\"item.completed\",\"item\":{\"id\":\"m1\",\"type\":\"agent_message\",\"text\":\"hello\"}}\n");
+        assert!(!u1.is_empty());
+        assert_eq!((gs.last_upstream_seq, gs.last_reduced_seq), (1, 1));
+        let u_skip = gs.feed("{\"sequence\":2,\"type\":\"reasoning\",\"text\":\"\"}\n");
+        assert!(u_skip.is_empty());
+        assert_eq!((gs.last_upstream_seq, gs.last_reduced_seq), (2, 1));
+        let u3 = gs.feed("{\"sequence\":3,\"type\":\"item.completed\",\"item\":{\"id\":\"m3\",\"type\":\"agent_message\",\"text\":\" world\"}}\n");
+        assert!(!u3.is_empty());
+        assert_eq!((gs.last_upstream_seq, gs.last_reduced_seq), (3, 2));
+        let u5_early = gs.feed("{\"sequence\":5,\"type\":\"item.completed\",\"item\":{\"id\":\"m5\",\"type\":\"agent_message\",\"text\":\"!\"}}\n");
+        assert!(u5_early.is_empty());
+        assert_eq!(gs.gap_buffer.len(), 1);
+        let u4_fills = gs.feed("{\"sequence\":4,\"type\":\"reasoning\",\"text\":\"thinking\"}\n");
+        assert!(!u4_fills.is_empty());
+        assert!(gs.gap_buffer.is_empty());
+        assert_eq!((gs.last_upstream_seq, gs.last_reduced_seq), (5, 4));
     }
 }
 

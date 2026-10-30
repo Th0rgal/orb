@@ -179,11 +179,9 @@ theorem EffectLiveness.emits_on_progress {State Event Effect : Type}
 
 /--
   Meta-Spec 8 (`CostBound`):
-  Symbolic model-level transition accounting: bounds the caller-supplied `cpuFuel s e` function
-  by `c0 + c1 * inputBytes e`, emitted effect count by `maxEffects`, and `outputBytes s e` by
-  `maxOutBytes`. Note: when `cpuFuel` is instantiated to a constant (e.g. `fun _ _ => 1`),
-  `fuel_bound` is a symbolic step-count annotation and does NOT prove hardware runtime complexity
-  or branch-free execution.
+  Structural transition cost accounting: bounds the domain's evaluated comparison/effect fuel
+  `cpuFuel s e` by `c0 + c1 * inputBytes e`, emitted effect count by `maxEffects`, and
+  `outputBytes s e` by `maxOutBytes` (`G-ORB-4`).
 -/
 structure CostBound (State Event Effect : Type) where
   step        : State → Event → State × List Effect
@@ -874,50 +872,6 @@ theorem attributionPrincipal_le_six (p : UInt8) : attributionPrincipal p ≤ 6 :
   · assumption
   · decide
 
-/-- A non-empty in-scope claim is a valid kind and requires a credential binding. -/
-theorem attributionInScope_claim (p c s d : UInt8)
-    (h : attributionInScope (attributionPrincipal p) c s d = true) (hc : c ≠ 0) :
-    c ≤ 6 ∧ attributionPrincipal p ≠ 0 := by
-  have hp := attributionPrincipal_le_six p
-  generalize attributionPrincipal p = q at h hp ⊢
-  simp only [attributionInScope, Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at h
-  simp only [UInt8.le_iff_toNat_le, ← UInt8.toNat_inj, UInt8.reduceToNat, ne_eq] at *
-  omega
-
-/-- Totality: every usage event maps to exactly one kind of the closed enum `0..6`. -/
-theorem attribution_kind_le_six (p c s d : UInt8) : attributionKind p c s d ≤ 6 := by
-  unfold attributionKind; split
-  · split
-    · exact attributionPrincipal_le_six p
-    · next h hc => exact (attributionInScope_claim p c s d h (by simpa using hc)).1
-  · exact attributionPrincipal_le_six p
-
-/-- `unknown` (`0`) is returned iff no credential binding exists, whatever the client claims. -/
-theorem attribution_kind_unknown_iff (p c s d : UInt8) :
-    attributionKind p c s d = 0 ↔ attributionPrincipal p = 0 := by
-  unfold attributionKind; split
-  · split
-    · exact Iff.rfl
-    · next h hc =>
-      have := attributionInScope_claim p c s d h (by simpa using hc)
-      exact ⟨fun h0 => absurd h0 (by simpa using hc), fun h0 => absurd h0 this.2⟩
-  · exact Iff.rfl
-
-/-- The packed C-ABI word decodes to `(kind, accepted)` exactly as `src/api/usage_attribution.rs` reads it. -/
-theorem attribution_step_decodes (p c s d : UInt8) :
-    (attributionStep p c s d &&& 0xFF) = (attributionKind p c s d).toUInt32 ∧
-    ((attributionStep p c s d >>> 8) &&& 1) =
-      (if attributionInScope (attributionPrincipal p) c s d then 1 else 0) := by
-  have hk := attribution_kind_le_six p c s d
-  unfold attributionStep
-  generalize attributionKind p c s d = k at hk ⊢
-  have hn : k.toNat ≤ 6 := by simpa [UInt8.le_iff_toNat_le] using hk
-  have hk' : k = k.toNat.toUInt8 := by simp
-  rw [hk']
-  generalize k.toNat = n at hn
-  split <;> (match n, hn with
-    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ => decide)
-
 structure AttributionClaim where
   principalKind : UInt8
   claimedKind   : UInt8
@@ -936,7 +890,102 @@ def AttributionClaim.InScope (x : AttributionClaim) : Prop :=
 theorem attributionInScope_iff (x : AttributionClaim) :
     attributionInScope (attributionPrincipal x.principalKind) x.claimedKind x.sameMission x.isDescendant = true ↔
       x.InScope := by
-  simp [attributionInScope, AttributionClaim.InScope, or_assoc]
+  rcases x with ⟨pk, c, s, d⟩
+  unfold attributionInScope AttributionClaim.InScope
+  dsimp only
+  generalize attributionPrincipal pk = p
+  by_cases hc0 : c = 0
+  · subst hc0; simp
+  · have hc0b : (c == 0) = false := beq_false_of_ne hc0
+    simp only [hc0b, Bool.false_eq_true, ite_false]
+    by_cases hp5 : p = 5
+    · subst hp5
+      by_cases hc1 : c = 1
+      · subst hc1; simp
+      · by_cases hc2 : c = 2
+        · subst hc2; simp
+        · simp [hc0, hc1, hc2]
+    · by_cases hp1 : p = 1
+      · subst hp1
+        by_cases hc1 : c = 1
+        · subst hc1; simp [hc0]
+        · by_cases hc2 : c = 2
+          · subst hc2; simp [hc0]
+          · simp [hc0, hc1, hc2]
+      · by_cases hp2 : p = 2
+        · subst hp2
+          by_cases hc1 : c = 1
+          · subst hc1; simp [hc0]
+          · by_cases hc2 : c = 2
+            · subst hc2; simp [hc0]
+            · simp [hc0, hc1, hc2]
+        · by_cases hp3 : p = 3
+          · subst hp3; simp [hc0]
+          · by_cases hp4 : p = 4
+            · subst hp4; simp [hc0]
+            · by_cases hp6 : p = 6
+              · subst hp6; simp [hc0]
+              · simp [hc0, hp5, hp1, hp2, hp3, hp4, hp6]
+
+/-- A non-empty in-scope claim is a valid kind and requires a credential binding. -/
+theorem attributionInScope_claim (p c s d : UInt8)
+    (h : attributionInScope (attributionPrincipal p) c s d = true) (hc : c ≠ 0) :
+    c ≤ 6 ∧ attributionPrincipal p ≠ 0 := by
+  have hx : AttributionClaim.InScope ⟨p, c, s, d⟩ :=
+    (attributionInScope_iff ⟨p, c, s, d⟩).mp h
+  unfold AttributionClaim.InScope at hx
+  dsimp only at hx
+  rcases hx with rfl | ⟨hp, rfl | rfl | rfl⟩ | ⟨hp | hp, ⟨rfl, _⟩ | ⟨rfl, _⟩⟩ | ⟨hp | hp | hp, rfl⟩
+  · exact absurd rfl hc
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+  · rw [hp]; decide
+
+/-- Totality: every usage event maps to exactly one kind of the closed enum `0..6`. -/
+theorem attribution_kind_le_six (p c s d : UInt8) : attributionKind p c s d ≤ 6 := by
+  unfold attributionKind; dsimp only; split
+  · split
+    · exact attributionPrincipal_le_six p
+    · next h hc => exact (attributionInScope_claim p c s d h (by simpa using hc)).1
+  · exact attributionPrincipal_le_six p
+
+/-- `unknown` (`0`) is returned iff no credential binding exists, whatever the client claims. -/
+theorem attribution_kind_unknown_iff (p c s d : UInt8) :
+    attributionKind p c s d = 0 ↔ attributionPrincipal p = 0 := by
+  unfold attributionKind; dsimp only; split
+  · split
+    · exact Iff.rfl
+    · next h hc =>
+      have := attributionInScope_claim p c s d h (by simpa using hc)
+      exact ⟨fun h0 => absurd h0 (by simpa using hc), fun h0 => absurd h0 this.2⟩
+  · exact Iff.rfl
+
+/-- The packed C-ABI word decodes to `(kind, accepted)` exactly as `src/api/usage_attribution.rs` reads it. -/
+theorem attribution_step_decodes (p c s d : UInt8) :
+    (attributionStep p c s d &&& 0xFF) = (attributionKind p c s d).toUInt32 ∧
+    ((attributionStep p c s d >>> 8) &&& 1) =
+      (if attributionInScope (attributionPrincipal p) c s d then 1 else 0) := by
+  have h_eq : attributionStep p c s d =
+      ((attributionKind p c s d).toUInt32 |||
+        (if attributionInScope (attributionPrincipal p) c s d then 256 else 0)) := by
+    unfold attributionStep attributionKind; dsimp only
+    split <;> simp
+  rw [h_eq]
+  have hk := attribution_kind_le_six p c s d
+  generalize attributionKind p c s d = k at hk ⊢
+  have hn : k.toNat ≤ 6 := by simpa [UInt8.le_iff_toNat_le] using hk
+  have hk' : k = k.toNat.toUInt8 := by simp
+  rw [hk']
+  generalize k.toNat = n at hn
+  split <;> (match n, hn with
+    | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ => decide)
 
 /-- `MetaGateSpec` for the acceptance bit: a hint is accepted iff it stays inside the principal's scope. -/
 def attributionMetaGate : MetaGateSpec AttributionClaim AttributionClaim.InScope where
@@ -1893,18 +1942,22 @@ def providerPoolMetaStepSpec : MetaStepSpec UInt8 ProviderPoolCheck UInt32 where
   }
   cost := {
     step := providerPoolMachineStep
-    cpuFuel := fun _ _ => 1
+    cpuFuel := fun s e => 10 + ((providerPoolMachineStep s e).2).length
     inputBytes := fun _ => 48
-    outputBytes := fun _ _ => 8
-    c0 := 1
+    outputBytes := fun s e => 8 + 4 * ((providerPoolMachineStep s e).2).length
+    c0 := 11
     c1 := 1
     maxEffects := 1
-    maxOutBytes := 8
-    fuel_bound := fun _ _ => by omega
+    maxOutBytes := 12
+    fuel_bound := fun s e => by
+      dsimp [providerPoolMachineStep]
+      split <;> simp
     eff_bound := fun s e => by
       dsimp [providerPoolMachineStep]
       split <;> simp
-    out_bound := fun _ _ => by omega
+    out_bound := fun s e => by
+      dsimp [providerPoolMachineStep]
+      split <;> simp
   }
   sameStep := ⟨rfl, rfl⟩
 
@@ -2171,18 +2224,22 @@ def missionControlMetaStepSpec : MetaStepSpec UInt8 MissionControlCheck UInt32 w
   }
   cost := {
     step := missionControlMachineStep
-    cpuFuel := fun _ _ => 1
+    cpuFuel := fun s e => 9 + ((missionControlMachineStep s e).2).length
     inputBytes := fun _ => 16
-    outputBytes := fun _ _ => 8
-    c0 := 1
+    outputBytes := fun s e => 8 + 4 * ((missionControlMachineStep s e).2).length
+    c0 := 10
     c1 := 1
     maxEffects := 1
-    maxOutBytes := 8
-    fuel_bound := fun _ _ => by omega
+    maxOutBytes := 12
+    fuel_bound := fun s e => by
+      dsimp [missionControlMachineStep]
+      split <;> simp
     eff_bound := fun s e => by
       dsimp [missionControlMachineStep]
       split <;> simp
-    out_bound := fun _ _ => by omega
+    out_bound := fun s e => by
+      dsimp [missionControlMachineStep]
+      split <;> simp
   }
   sameStep := ⟨rfl, rfl⟩
 
@@ -2396,18 +2453,22 @@ def privdCommandMetaStepSpec : MetaStepSpec UInt8 PrivdCommandCheck UInt8 where
   }
   cost := {
     step := privdCommandMachineStep
-    cpuFuel := fun _ _ => 1
+    cpuFuel := fun s e => 8 + ((privdCommandMachineStep s e).2).length
     inputBytes := fun _ => 8
-    outputBytes := fun _ _ => 8
-    c0 := 1
+    outputBytes := fun s e => 8 + ((privdCommandMachineStep s e).2).length
+    c0 := 9
     c1 := 1
     maxEffects := 1
-    maxOutBytes := 8
-    fuel_bound := fun _ _ => by omega
+    maxOutBytes := 9
+    fuel_bound := fun s e => by
+      dsimp [privdCommandMachineStep]
+      split <;> simp
     eff_bound := fun s e => by
       dsimp [privdCommandMachineStep]
       split <;> simp
-    out_bound := fun _ _ => by omega
+    out_bound := fun s e => by
+      dsimp [privdCommandMachineStep]
+      split <;> simp
   }
   sameStep := ⟨rfl, rfl⟩
 
@@ -2751,18 +2812,22 @@ def transcriptReduceMetaStepSpec : MetaStepSpec UInt64 TranscriptReduceCheck UIn
   }
   cost := {
     step := transcriptReduceMachineStep
-    cpuFuel := fun _ _ => 1
+    cpuFuel := fun s e => 5 + ((transcriptReduceMachineStep s e).2).length
     inputBytes := fun _ => 24
-    outputBytes := fun _ _ => 8
-    c0 := 1
+    outputBytes := fun s e => 8 + 8 * ((transcriptReduceMachineStep s e).2).length
+    c0 := 6
     c1 := 1
     maxEffects := 1
-    maxOutBytes := 8
-    fuel_bound := fun _ _ => by omega
+    maxOutBytes := 16
+    fuel_bound := fun s e => by
+      dsimp [transcriptReduceMachineStep]
+      split <;> simp
     eff_bound := fun s e => by
       dsimp [transcriptReduceMachineStep]
       split <;> simp
-    out_bound := fun _ _ => by omega
+    out_bound := fun s e => by
+      dsimp [transcriptReduceMachineStep]
+      split <;> simp
   }
   sameStep := ⟨rfl, rfl⟩
 
@@ -2890,18 +2955,22 @@ def storageCursorMetaStepSpec : MetaStepSpec UInt32 CursorPageCheck UInt64 where
   }
   cost := {
     step := storageCursorMachineStep
-    cpuFuel := fun _ _ => 1
+    cpuFuel := fun s e => 7 + ((storageCursorMachineStep s e).2).length
     inputBytes := fun _ => 40
-    outputBytes := fun _ _ => 8
-    c0 := 1
+    outputBytes := fun s e => 8 + 8 * ((storageCursorMachineStep s e).2).length
+    c0 := 8
     c1 := 1
     maxEffects := 1
-    maxOutBytes := 8
-    fuel_bound := fun _ _ => by omega
+    maxOutBytes := 16
+    fuel_bound := fun s e => by
+      dsimp [storageCursorMachineStep]
+      split <;> simp
     eff_bound := fun s e => by
       dsimp [storageCursorMachineStep]
       split <;> simp
-    out_bound := fun _ _ => by omega
+    out_bound := fun s e => by
+      dsimp [storageCursorMachineStep]
+      split <;> simp
   }
   sameStep := ⟨rfl, rfl⟩
 
@@ -3094,18 +3163,22 @@ def scrollEpochMetaStepSpec : MetaStepSpec UInt32 ScrollEpochCheck UInt32 where
   }
   cost := {
     step := scrollEpochMachineStep
-    cpuFuel := fun _ _ => 1
+    cpuFuel := fun s e => 7 + ((scrollEpochMachineStep s e).2).length
     inputBytes := fun _ => 24
-    outputBytes := fun _ _ => 8
-    c0 := 1
+    outputBytes := fun s e => 8 + 4 * ((scrollEpochMachineStep s e).2).length
+    c0 := 8
     c1 := 1
     maxEffects := 1
-    maxOutBytes := 8
-    fuel_bound := fun _ _ => by omega
+    maxOutBytes := 12
+    fuel_bound := fun s e => by
+      dsimp [scrollEpochMachineStep]
+      split <;> simp
     eff_bound := fun s e => by
       dsimp [scrollEpochMachineStep]
       split <;> simp
-    out_bound := fun _ _ => by omega
+    out_bound := fun s e => by
+      dsimp [scrollEpochMachineStep]
+      split <;> simp
   }
   sameStep := ⟨rfl, rfl⟩
 
@@ -3285,18 +3358,22 @@ def canaryTripwireMetaStepSpec : MetaStepSpec UInt8 CanaryTripwireCheck UInt8 wh
   }
   cost := {
     step := canaryTripwireMachineStep
-    cpuFuel := fun _ _ => 1
+    cpuFuel := fun s e => 4 + ((canaryTripwireMachineStep s e).2).length
     inputBytes := fun _ => 4
-    outputBytes := fun _ _ => 4
-    c0 := 1
+    outputBytes := fun s e => 4 + ((canaryTripwireMachineStep s e).2).length
+    c0 := 5
     c1 := 1
     maxEffects := 1
-    maxOutBytes := 4
-    fuel_bound := fun _ _ => by omega
+    maxOutBytes := 5
+    fuel_bound := fun s e => by
+      dsimp [canaryTripwireMachineStep]
+      split <;> simp
     eff_bound := fun s e => by
       dsimp [canaryTripwireMachineStep]
       split <;> simp
-    out_bound := fun _ _ => by omega
+    out_bound := fun s e => by
+      dsimp [canaryTripwireMachineStep]
+      split <;> simp
   }
   sameStep := ⟨rfl, rfl⟩
 
@@ -3829,4 +3906,1918 @@ theorem machine_action_stopped_retains_without_live_billing
   unfold machineActionAdmitted
   repeat (first | constructor | split | decide | simp_all)
 
+-- ===========================================================================
+-- Wave 12 (P4): Compositional State-Machine & Arena Patch ABI (`OrbMachine` / `OrbWire`)
+-- ===========================================================================
+
+/-- Generic compositional state machine (`G-ORB-1`) folding typed events over state `S`
+    while accumulating ordered emitted effects `List Eff`. -/
+structure OrbMachine (S E Eff : Type) where
+  step : S → E → S × List Eff
+
+/-- Multi-step fold execution of an `OrbMachine` over a finite event trace. -/
+def OrbMachine.runTrace {S E Eff : Type} (m : OrbMachine S E Eff) :
+    S → List E → S × List Eff
+  | s, [] => (s, [])
+  | s, e :: es =>
+    let (s1, eff1) := m.step s e
+    let (s2, eff2) := m.runTrace s1 es
+    (s2, eff1 ++ eff2)
+
+/-- Compositional trace-append law for `OrbMachine.runTrace`:
+    running `xs ++ ys` from `s` equals running `xs` then continuing `ys` from the reached state. -/
+theorem orbMachine_runTrace_append {S E Eff : Type} (m : OrbMachine S E Eff)
+    (s : S) (xs ys : List E) :
+    m.runTrace s (xs ++ ys) =
+      let (sMid, eff1) := m.runTrace s xs
+      let (sEnd, eff2) := m.runTrace sMid ys
+      (sEnd, eff1 ++ eff2) := by
+  induction xs generalizing s with
+  | nil =>
+    simp [OrbMachine.runTrace]
+  | cons e es ih =>
+    simp [OrbMachine.runTrace, ih, List.append_assoc]
+
+/-- Explicit 3-valued field presence (`G-ORB-1` & `G-ORB-5`):
+    distinguishes omitted fields in partial patches from explicit updates and explicit clears. -/
+inductive Presence where
+  | omitted
+  | present
+  | cleared
+  deriving Repr, DecidableEq
+
+def Presence.toCode : Presence → UInt8
+  | .omitted => 0
+  | .present => 1
+  | .cleared => 2
+
+def Presence.ofCode? : UInt8 → Option Presence
+  | 0 => some .omitted
+  | 1 => some .present
+  | 2 => some .cleared
+  | _ => none
+
+theorem presence_roundtrip (p : Presence) :
+    Presence.ofCode? p.toCode = some p := by
+  cases p <;> rfl
+
+/-- Typed 16-byte `OrbWire` patch frame (`[schemaTag|presence|flags, payloadVal, incomingRev]`). -/
+structure WirePatch where
+  schemaId    : UInt8
+  presence    : Presence
+  authOk      : Bool
+  payloadVal  : UInt32
+  incomingRev : UInt64
+  deriving Repr, DecidableEq
+
+/-- Encodes a `WirePatch` into two 64-bit little-endian words (16 bytes total). -/
+def encodePatch (p : WirePatch) : UInt64 × UInt64 :=
+  let b0 : UInt32 := p.schemaId.toUInt32
+  let b1 : UInt32 := p.presence.toCode.toUInt32 <<< 8
+  let b2 : UInt32 := (if p.authOk then (1 : UInt32) else 0) <<< 16
+  let hdr : UInt32 := (0x4F570000 : UInt32) ^^^ (b0 ||| b1 ||| b2)
+  let w0 : UInt64 := hdr.toUInt64 ||| (p.payloadVal.toUInt64 <<< 32)
+  (w0, p.incomingRev)
+
+/-- Decodes two 64-bit words back into a `WirePatch`, rejecting unknown presence/auth tags
+    or corrupted `0x4F57` magic bits. -/
+def decodePatch (words : UInt64 × UInt64) : Option WirePatch :=
+  let (w0, rev) := words
+  let rawHdr : UInt32 := (w0 &&& 0xFFFFFFFF).toUInt32
+  let hdr : UInt32 := rawHdr ^^^ (0x4F570000 : UInt32)
+  let magicRest : UInt32 := hdr >>> 24
+  let schemaByte : UInt8 := (hdr &&& 0xFF).toUInt8
+  let presByte : UInt8 := ((hdr >>> 8) &&& 0xFF).toUInt8
+  let authByte : UInt8 := ((hdr >>> 16) &&& 0xFF).toUInt8
+  let payload : UInt32 := (w0 >>> 32).toUInt32
+  if magicRest != 0 then none
+  else match Presence.ofCode? presByte, authByte with
+    | some pres, 0 => some ⟨schemaByte, pres, false, payload, rev⟩
+    | some pres, 1 => some ⟨schemaByte, pres, true, payload, rev⟩
+    | _, _ => none
+
+theorem toUInt32_toUInt64 (x : UInt32) : x.toUInt64.toUInt32 = x := by
+  apply UInt32.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp [UInt64.toBitVec_toUInt32, UInt32.toBitVec_toUInt64, hi]
+
+theorem xor_magic_cancel (x : UInt32) :
+    (((0x4F570000 : UInt32) ^^^ x) ^^^ (0x4F570000 : UInt32)) = x := by
+  apply UInt32.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [UInt32.toBitVec_xor, BitVec.getLsbD_xor]
+  cases ((0x4F570000 : UInt32).toBitVec.getLsbD i) <;>
+    cases (x.toBitVec.getLsbD i) <;> rfl
+
+theorem wirePatch_hdr_extract (sc : UInt8) (c : UInt32)
+    (hc : c = 0 ∨ c = 256 ∨ c = 512 ∨ c = 65536 ∨ c = 65792 ∨ c = 66048) :
+    (((sc.toUInt32 ||| c) >>> 24 != 0) = false) ∧
+    (((sc.toUInt32 ||| c) >>> 8 &&& 0xFF).toUInt8 = (c >>> 8 &&& 0xFF).toUInt8) ∧
+    (((sc.toUInt32 ||| c) >>> 16 &&& 0xFF).toUInt8 = (c >>> 16 &&& 0xFF).toUInt8) ∧
+    (((sc.toUInt32 ||| c) &&& 0xFF).toUInt8 = sc) := by
+  have hsc_hi : ∀ j, 8 ≤ j → sc.toUInt32.toBitVec.getLsbD j = false := by
+    intro j hj
+    simp [UInt8.toBitVec_toUInt32, BitVec.getLsbD_setWidth, BitVec.getLsbD_of_ge _ j hj]
+  have hc_lo : ∀ j, j < 8 → c.toBitVec.getLsbD j = false := by
+    rcases hc with rfl | rfl | rfl | rfl | rfl | rfl <;>
+      (intro j hj; revert j; decide)
+  have hc_top : ∀ j, 24 ≤ j → c.toBitVec.getLsbD j = false := by
+    rcases hc with rfl | rfl | rfl | rfl | rfl | rfl <;>
+      (intro j hj; by_cases h32 : j < 32
+       · revert hj; revert j; decide
+       · exact BitVec.getLsbD_of_ge _ j (by omega))
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · apply Bool.eq_false_iff.mpr
+    intro hne
+    have hzero : (sc.toUInt32 ||| c) >>> 24 = 0 := by
+      apply UInt32.toBitVec_inj.mp
+      apply BitVec.eq_of_getLsbD_eq
+      intro i hi
+      simp only [UInt32.toBitVec_shiftRight, UInt32.toBitVec_or,
+        show UInt32.toBitVec 24 % 32 = 24#32 from rfl, BitVec.ushiftRight_eq',
+        BitVec.getLsbD_ushiftRight, BitVec.getLsbD_or,
+        show (24#32).toNat = 24 from rfl]
+      rw [hsc_hi (24 + i) (by omega), hc_top (24 + i) (by omega)]
+      simp
+    rw [hzero] at hne
+    exact absurd hne (by decide)
+  · apply UInt8.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    simp only [UInt32.toBitVec_toUInt8, UInt32.toBitVec_and, UInt32.toBitVec_shiftRight,
+      UInt32.toBitVec_or, show UInt32.toBitVec 8 % 32 = 8#32 from rfl, BitVec.ushiftRight_eq',
+      BitVec.getLsbD_setWidth, BitVec.getLsbD_and, BitVec.getLsbD_ushiftRight,
+      BitVec.getLsbD_or, show (8#32).toNat = 8 from rfl,
+      hsc_hi (8 + i) (by omega), Bool.false_or, hi]
+  · apply UInt8.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    simp only [UInt32.toBitVec_toUInt8, UInt32.toBitVec_and, UInt32.toBitVec_shiftRight,
+      UInt32.toBitVec_or, show UInt32.toBitVec 16 % 32 = 16#32 from rfl, BitVec.ushiftRight_eq',
+      BitVec.getLsbD_setWidth, BitVec.getLsbD_and, BitVec.getLsbD_ushiftRight,
+      BitVec.getLsbD_or, show (16#32).toNat = 16 from rfl,
+      hsc_hi (16 + i) (by omega), Bool.false_or, hi]
+  · apply UInt8.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    have hff : (0xFF : UInt32).toBitVec.getLsbD i = true := by revert i; decide
+    simp only [UInt32.toBitVec_toUInt8, UInt32.toBitVec_and, UInt32.toBitVec_or,
+      UInt8.toBitVec_toUInt32, BitVec.getLsbD_setWidth, BitVec.getLsbD_and,
+      BitVec.getLsbD_or, show i < 32 by omega, hi,
+      hc_lo i hi, hff, Bool.or_false, Bool.and_true, Bool.true_and, decide_true]
+
+/-- Exact codec roundtrip theorem (`G-ORB-1`): `decodePatch (encodePatch p) = some p`. -/
+theorem decodePatch_encodePatch (p : WirePatch) :
+    decodePatch (encodePatch p) = some p := by
+  have hor_assoc (a b d : UInt32) : (a ||| b ||| d) = (a ||| (b ||| d)) := by
+    apply UInt32.toBitVec_inj.mp
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    simp [UInt32.toBitVec_or, BitVec.getLsbD_or, Bool.or_assoc]
+  rcases p with ⟨sc, pr, au, val, rev⟩
+  cases pr <;> cases au
+  · dsimp only [encodePatch, decodePatch, Presence.toCode]
+    rw [pack32_lo, pack32_hi, toUInt32_toUInt64, toUInt32_toUInt64, xor_magic_cancel, hor_assoc]
+    have hc : (UInt8.toUInt32 0 <<< 8 ||| (if false = true then (1 : UInt32) else 0) <<< 16) = 0 := by decide
+    rw [hc]
+    rcases wirePatch_hdr_extract sc 0 (.inl rfl) with ⟨h1, h2, h3, h4⟩
+    rw [h1, h2, h3, h4]; rfl
+  · dsimp only [encodePatch, decodePatch, Presence.toCode]
+    rw [pack32_lo, pack32_hi, toUInt32_toUInt64, toUInt32_toUInt64, xor_magic_cancel, hor_assoc]
+    have hc : (UInt8.toUInt32 0 <<< 8 ||| (if true = true then (1 : UInt32) else 0) <<< 16) = 65536 := by decide
+    rw [hc]
+    rcases wirePatch_hdr_extract sc 65536 (.inr (.inr (.inr (.inl rfl)))) with ⟨h1, h2, h3, h4⟩
+    rw [h1, h2, h3, h4]; rfl
+  · dsimp only [encodePatch, decodePatch, Presence.toCode]
+    rw [pack32_lo, pack32_hi, toUInt32_toUInt64, toUInt32_toUInt64, xor_magic_cancel, hor_assoc]
+    have hc : (UInt8.toUInt32 1 <<< 8 ||| (if false = true then (1 : UInt32) else 0) <<< 16) = 256 := by decide
+    rw [hc]
+    rcases wirePatch_hdr_extract sc 256 (.inr (.inl rfl)) with ⟨h1, h2, h3, h4⟩
+    rw [h1, h2, h3, h4]; rfl
+  · dsimp only [encodePatch, decodePatch, Presence.toCode]
+    rw [pack32_lo, pack32_hi, toUInt32_toUInt64, toUInt32_toUInt64, xor_magic_cancel, hor_assoc]
+    have hc : (UInt8.toUInt32 1 <<< 8 ||| (if true = true then (1 : UInt32) else 0) <<< 16) = 65792 := by decide
+    rw [hc]
+    rcases wirePatch_hdr_extract sc 65792 (.inr (.inr (.inr (.inr (.inl rfl))))) with ⟨h1, h2, h3, h4⟩
+    rw [h1, h2, h3, h4]; rfl
+  · dsimp only [encodePatch, decodePatch, Presence.toCode]
+    rw [pack32_lo, pack32_hi, toUInt32_toUInt64, toUInt32_toUInt64, xor_magic_cancel, hor_assoc]
+    have hc : (UInt8.toUInt32 2 <<< 8 ||| (if false = true then (1 : UInt32) else 0) <<< 16) = 512 := by decide
+    rw [hc]
+    rcases wirePatch_hdr_extract sc 512 (.inr (.inr (.inl rfl))) with ⟨h1, h2, h3, h4⟩
+    rw [h1, h2, h3, h4]; rfl
+  · dsimp only [encodePatch, decodePatch, Presence.toCode]
+    rw [pack32_lo, pack32_hi, toUInt32_toUInt64, toUInt32_toUInt64, xor_magic_cancel, hor_assoc]
+    have hc : (UInt8.toUInt32 2 <<< 8 ||| (if true = true then (1 : UInt32) else 0) <<< 16) = 66048 := by decide
+    rw [hc]
+    rcases wirePatch_hdr_extract sc 66048 (.inr (.inr (.inr (.inr (.inr rfl))))) with ⟨h1, h2, h3, h4⟩
+    rw [h1, h2, h3, h4]; rfl
+
+/-- Fixed-capacity byte/word output buffer model for zero-partial-mutation frame encoding. -/
+structure OutArena where
+  capBytes : Nat
+  words    : List UInt64
+  deriving Repr, DecidableEq
+
+/-- Encodes `p` into `out` iff `16 ≤ out.capBytes`; on insufficient capacity returns `error 3`
+    with `out` strictly untouched (`0` partial state mutation). -/
+def encodeFrameInto (p : WirePatch) (out : OutArena) : Except UInt8 OutArena :=
+  if 16 ≤ out.capBytes then
+    let (w0, w1) := encodePatch p
+    .ok { out with words := [w0, w1] }
+  else
+    .error 3
+
+/-- Zero partial mutation on `out_cap < required_bytes` (`G-ORB-1`):
+    whenever `out.capBytes < 16`, `encodeFrameInto` returns `.error 3` without mutating `out`,
+    and when `16 ≤ out.capBytes`, decoding the emitted frame recovers `some p`. -/
+theorem encodeFrameInto_no_partial_mutation_and_roundtrip (p : WirePatch) (out : OutArena) :
+    (out.capBytes < 16 → encodeFrameInto p out = .error 3) ∧
+    (16 ≤ out.capBytes →
+      ∃ w0 w1, encodeFrameInto p out = .ok { out with words := [w0, w1] } ∧
+        decodePatch (w0, w1) = some p) := by
+  constructor
+  · intro h_lt
+    unfold encodeFrameInto
+    have h_not : ¬ (16 ≤ out.capBytes) := Nat.not_le_of_lt h_lt
+    simp [h_not]
+  · intro h_ge
+    refine ⟨(encodePatch p).1, (encodePatch p).2, ?_, decodePatch_encodePatch p⟩
+    unfold encodeFrameInto
+    simp [h_ge]
+
+/-- Pure specification state for an `OrbWire` versioned field slot. -/
+structure WireSlotState where
+  rev        : UInt64
+  hasVal     : Bool
+  currentVal : UInt32
+  deriving Repr, DecidableEq
+
+/-- Pure multi-step transition for `orb_wire_apply_patch_step` over `WireSlotState`. -/
+def decodeWireApplyResult (sRev pRev : UInt64) (w : UInt64) : WireSlotState :=
+  let admitted := ((w &&& 0xFFFFFFFF) &&& 256) != 0
+  let nextHas := ((w &&& 0xFFFFFFFF) &&& 512) != 0
+  let nextVal := (w >>> 32).toUInt32
+  let nextRev := if admitted then pRev else sRev
+  ⟨nextRev, nextHas, nextVal⟩
+
+def applyWirePatchSlot (s : WireSlotState) (p : WirePatch) : WireSlotState × UInt64 :=
+  let w := wireApplyPatchStep s.rev p.incomingRev
+    (if s.hasVal then 1 else 0) s.currentVal p.presence.toCode p.payloadVal
+  (decodeWireApplyResult s.rev p.incomingRev w, w)
+
+/-- Field-presence merge law (`G-ORB-1` — `orb_wire_apply_patch_step`):
+    1. Stale or duplicate revisions (`incomingRev ≤ s.rev`) leave `(rev, hasVal := s.hasVal, val)`
+       strictly unmutated when `s.hasVal = true` (or zero-normalized when `s.hasVal = false`).
+    2. Fresh `Presence.omitted` advances `rev` while preserving `s.hasVal` and `s.currentVal`
+       (when `s.hasVal = true`).
+    3. Fresh `Presence.cleared` advances `rev`, sets `hasVal = false`, and clears `currentVal = 0`.
+    4. Fresh `Presence.present` advances `rev`, sets `hasVal = true`, and installs `p.payloadVal`. -/
+theorem wire_apply_patch_presence_merge_laws (s : WireSlotState) (p : WirePatch) :
+    (p.incomingRev ≤ s.rev → (s.hasVal = false → s.currentVal = 0) →
+      (applyWirePatchSlot s p).1 = s) ∧
+    (s.rev < p.incomingRev → p.presence = .omitted →
+      (s.hasVal = false → s.currentVal = 0) →
+      (applyWirePatchSlot s p).1 = ⟨p.incomingRev, s.hasVal, s.currentVal⟩) ∧
+    (s.rev < p.incomingRev → p.presence = .cleared →
+      (applyWirePatchSlot s p).1 = ⟨p.incomingRev, false, 0⟩) ∧
+    (s.rev < p.incomingRev → p.presence = .present →
+      (applyWirePatchSlot s p).1 = ⟨p.incomingRev, true, p.payloadVal⟩) := by
+  have hd_pack (sRev pRev : UInt64) (lo32 hi32 : UInt32)
+      (hlo : lo32 = 2 ∨ lo32 = 514 ∨ lo32 = 259 ∨ lo32 = 771 ∨ lo32 = 260 ∨ lo32 = 769) :
+      decodeWireApplyResult sRev pRev (lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)) =
+      ⟨if (lo32 &&& 256) != 0 then pRev else sRev, (lo32 &&& 512) != 0, hi32⟩ := by
+    dsimp only [decodeWireApplyResult]
+    rw [pack32_lo, pack32_hi, toUInt32_toUInt64]
+    rcases hlo with rfl | rfl | rfl | rfl | rfl | rfl
+    · have h1 : (UInt32.toUInt64 2 &&& 256 != 0) = ((2 : UInt32) &&& 256 != 0) := by decide
+      have h2 : (UInt32.toUInt64 2 &&& 512 != 0) = ((2 : UInt32) &&& 512 != 0) := by decide
+      rw [h1, h2]
+    · have h1 : (UInt32.toUInt64 514 &&& 256 != 0) = ((514 : UInt32) &&& 256 != 0) := by decide
+      have h2 : (UInt32.toUInt64 514 &&& 512 != 0) = ((514 : UInt32) &&& 512 != 0) := by decide
+      rw [h1, h2]
+    · have h1 : (UInt32.toUInt64 259 &&& 256 != 0) = ((259 : UInt32) &&& 256 != 0) := by decide
+      have h2 : (UInt32.toUInt64 259 &&& 512 != 0) = ((259 : UInt32) &&& 512 != 0) := by decide
+      rw [h1, h2]
+    · have h1 : (UInt32.toUInt64 771 &&& 256 != 0) = ((771 : UInt32) &&& 256 != 0) := by decide
+      have h2 : (UInt32.toUInt64 771 &&& 512 != 0) = ((771 : UInt32) &&& 512 != 0) := by decide
+      rw [h1, h2]
+    · have h1 : (UInt32.toUInt64 260 &&& 256 != 0) = ((260 : UInt32) &&& 256 != 0) := by decide
+      have h2 : (UInt32.toUInt64 260 &&& 512 != 0) = ((260 : UInt32) &&& 512 != 0) := by decide
+      rw [h1, h2]
+    · have h1 : (UInt32.toUInt64 769 &&& 256 != 0) = ((769 : UInt32) &&& 256 != 0) := by decide
+      have h2 : (UInt32.toUInt64 769 &&& 512 != 0) = ((769 : UInt32) &&& 512 != 0) := by decide
+      rw [h1, h2]
+  have h514 : ((2 : UInt32) ||| 512) = 514 := by decide
+  have h771 : ((259 : UInt32) ||| 512) = 771 := by decide
+  have h2_c1 : ((2 : UInt32) &&& 256 != 0) = false := by decide
+  have h2_c2 : ((2 : UInt32) &&& 512 != 0) = false := by decide
+  have h259_c1 : ((259 : UInt32) &&& 256 != 0) = true := by decide
+  have h259_c2 : ((259 : UInt32) &&& 512 != 0) = false := by decide
+  have h260_c1 : ((260 : UInt32) &&& 256 != 0) = true := by decide
+  have h260_c2 : ((260 : UInt32) &&& 512 != 0) = false := by decide
+  rcases s with ⟨sRev, sHas, sVal⟩
+  rcases p with ⟨sc, pres, au, pVal, pRev⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro h_le h_norm
+    have h_not_gt : ¬ (pRev > sRev) := fun hgt => UInt64.not_le.mpr hgt h_le
+    have hd : decide (sRev < pRev) = false := decide_eq_false h_not_gt
+    cases pres <;> cases sHas
+    · have hz := h_norm rfl; subst hz
+      have hwStep : wireApplyPatchStep sRev pRev 0 0 0 pVal =
+          ((2 : UInt32).toUInt64 ||| ((0 : UInt32).toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 0 0 0 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 2 0 (.inl rfl), h2_c1, h2_c2]; rfl
+    · have hwStep : wireApplyPatchStep sRev pRev 1 sVal 0 pVal =
+          ((514 : UInt32).toUInt64 ||| (sVal.toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd, h514]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 1 sVal 0 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 514 sVal (.inr (.inl rfl))]
+      have hc1 : ((514 : UInt32) &&& 256 != 0) = false := by decide
+      have hc2 : ((514 : UInt32) &&& 512 != 0) = true := by decide
+      rw [hc1, hc2]; rfl
+    · have hz := h_norm rfl; subst hz
+      have hwStep : wireApplyPatchStep sRev pRev 0 0 1 pVal =
+          ((2 : UInt32).toUInt64 ||| ((0 : UInt32).toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 0 0 1 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 2 0 (.inl rfl), h2_c1, h2_c2]; rfl
+    · have hwStep : wireApplyPatchStep sRev pRev 1 sVal 1 pVal =
+          ((514 : UInt32).toUInt64 ||| (sVal.toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd, h514]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 1 sVal 1 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 514 sVal (.inr (.inl rfl))]
+      have hc1 : ((514 : UInt32) &&& 256 != 0) = false := by decide
+      have hc2 : ((514 : UInt32) &&& 512 != 0) = true := by decide
+      rw [hc1, hc2]; rfl
+    · have hz := h_norm rfl; subst hz
+      have hwStep : wireApplyPatchStep sRev pRev 0 0 2 pVal =
+          ((2 : UInt32).toUInt64 ||| ((0 : UInt32).toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 0 0 2 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 2 0 (.inl rfl), h2_c1, h2_c2]; rfl
+    · have hwStep : wireApplyPatchStep sRev pRev 1 sVal 2 pVal =
+          ((514 : UInt32).toUInt64 ||| (sVal.toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd, h514]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 1 sVal 2 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 514 sVal (.inr (.inl rfl))]
+      have hc1 : ((514 : UInt32) &&& 256 != 0) = false := by decide
+      have hc2 : ((514 : UInt32) &&& 512 != 0) = true := by decide
+      rw [hc1, hc2]; rfl
+  · intro h_lt h_pr h_norm
+    subst h_pr
+    have hd : decide (sRev < pRev) = true := decide_eq_true h_lt
+    cases sHas
+    · have hz := h_norm rfl; subst hz
+      have hwStep : wireApplyPatchStep sRev pRev 0 0 0 pVal =
+          ((259 : UInt32).toUInt64 ||| ((0 : UInt32).toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 0 0 0 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 259 0 (.inr (.inr (.inl rfl))), h259_c1, h259_c2]; rfl
+    · have hwStep : wireApplyPatchStep sRev pRev 1 sVal 0 pVal =
+          ((771 : UInt32).toUInt64 ||| (sVal.toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd, h771]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 1 sVal 0 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 771 sVal (.inr (.inr (.inr (.inl rfl))))]
+      have hc1 : ((771 : UInt32) &&& 256 != 0) = true := by decide
+      have hc2 : ((771 : UInt32) &&& 512 != 0) = true := by decide
+      rw [hc1, hc2]; rfl
+  · intro h_lt h_pr
+    subst h_pr
+    have hd : decide (sRev < pRev) = true := decide_eq_true h_lt
+    cases sHas
+    · have hwStep : wireApplyPatchStep sRev pRev 0 sVal 2 pVal =
+          ((260 : UInt32).toUInt64 ||| ((0 : UInt32).toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 0 sVal 2 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 260 0 (.inr (.inr (.inr (.inr (.inl rfl))))), h260_c1, h260_c2]; rfl
+    · have hwStep : wireApplyPatchStep sRev pRev 1 sVal 2 pVal =
+          ((260 : UInt32).toUInt64 ||| ((0 : UInt32).toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 1 sVal 2 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 260 0 (.inr (.inr (.inr (.inr (.inl rfl))))), h260_c1, h260_c2]; rfl
+  · intro h_lt h_pr
+    subst h_pr
+    have hd : decide (sRev < pRev) = true := decide_eq_true h_lt
+    have hc1 : ((769 : UInt32) &&& 256 != 0) = true := by decide
+    have hc2 : ((769 : UInt32) &&& 512 != 0) = true := by decide
+    cases sHas
+    · have hwStep : wireApplyPatchStep sRev pRev 0 sVal 1 pVal =
+          ((769 : UInt32).toUInt64 ||| (pVal.toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 0 sVal 1 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 769 pVal (.inr (.inr (.inr (.inr (.inr rfl))))), hc1, hc2]
+      rfl
+    · have hwStep : wireApplyPatchStep sRev pRev 1 sVal 1 pVal =
+          ((769 : UInt32).toUInt64 ||| (pVal.toUInt64 <<< 32)) := by
+        simp [wireApplyPatchStep, hd]
+      change decodeWireApplyResult sRev pRev (wireApplyPatchStep sRev pRev 1 sVal 1 pVal) = _
+      rw [hwStep, hd_pack sRev pRev 769 pVal (.inr (.inr (.inr (.inr (.inr rfl))))), hc1, hc2]
+      rfl
+
+structure WireMachineCheck where
+  schemaId         : UInt32
+  stateRev         : UInt64
+  eventSeq         : UInt64
+  effectKind       : UInt8
+  effectAdmitted   : UInt8
+  outCap           : UInt32
+  requiredOutBytes : UInt32
+  deriving Repr, DecidableEq
+
+def WireMachineCheck.Admissible (w : WireMachineCheck) : Bool :=
+  decide (w.requiredOutBytes ≤ w.outCap) &&
+  decide (1 ≤ w.schemaId) && decide (w.schemaId ≤ 2) &&
+  decide (w.stateRev < w.eventSeq) &&
+  (w.effectAdmitted == 1) && decide (w.effectKind ≤ 5)
+
+def wireMachineMetaGate : MetaGateSpec WireMachineCheck
+    (fun w => w.Admissible = true) where
+  gate w :=
+    ((wireMachineStep w.schemaId w.stateRev w.eventSeq
+        w.effectKind w.effectAdmitted w.outCap w.requiredOutBytes &&& 0xFFFFFFFF) &&& 256) != 0
+  sound w h := by
+    unfold WireMachineCheck.Admissible
+    unfold wireMachineStep at h
+    rw [pack32_lo] at h
+    cases hc : decide (w.requiredOutBytes ≤ w.outCap) <;>
+      cases hs1 : decide ((1 : UInt32) ≤ w.schemaId) <;>
+      cases hs2 : decide (w.schemaId ≤ 2) <;>
+      cases hq : decide (w.stateRev < w.eventSeq) <;>
+      cases ha1 : (w.effectAdmitted == 1) <;>
+      cases ha2 : decide (w.effectKind ≤ 5) <;>
+      cases he : (w.effectKind != 0) <;>
+      (simp only [hc, hs1, hs2, hq, ha1, ha2, he] at h ⊢; revert h; decide)
+  complete w h := by
+    unfold WireMachineCheck.Admissible at h
+    unfold wireMachineStep
+    rw [pack32_lo]
+    cases hc : decide (w.requiredOutBytes ≤ w.outCap) <;>
+      cases hs1 : decide ((1 : UInt32) ≤ w.schemaId) <;>
+      cases hs2 : decide (w.schemaId ≤ 2) <;>
+      cases hq : decide (w.stateRev < w.eventSeq) <;>
+      cases ha1 : (w.effectAdmitted == 1) <;>
+      cases ha2 : decide (w.effectKind ≤ 5) <;>
+      cases he : (w.effectKind != 0) <;>
+      (simp only [hc, hs1, hs2, hq, ha1, ha2, he] at h ⊢; revert h; decide)
+  posWitness := ⟨1, 10, 11, 1, 1, 32, 16⟩
+  negWitness := ⟨1, 10, 11, 1, 1, 16, 32⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Zero partial mutation in `orb_wire_machine_step`:
+    whenever `outCap < requiredOutBytes`, `wireMachineStep` returns `status = 5` (`capExceeded`),
+    `admittedBit = 0`, and leaves `hi32 == stateRev.toUInt32.toUInt64`. -/
+theorem wire_machine_step_cap_exceeded_preserves_rev (w : WireMachineCheck)
+    (h_short : w.outCap < w.requiredOutBytes) :
+    let res := wireMachineStep w.schemaId w.stateRev w.eventSeq
+      w.effectKind w.effectAdmitted w.outCap w.requiredOutBytes
+    (res &&& 0xFFFFFFFF) = 5 ∧ (res >>> 32) = w.stateRev.toUInt32.toUInt64 := by
+  have h_not_le : ¬ (w.requiredOutBytes ≤ w.outCap) := UInt32.not_le.mpr h_short
+  have hc : decide (w.requiredOutBytes ≤ w.outCap) = false := decide_eq_false h_not_le
+  dsimp only
+  unfold wireMachineStep
+  rw [pack32_lo, pack32_hi]
+  simp [hc]
+
+-- ===========================================================================
+-- Wave 12 (P5 + P6): 7 Stateful Domain Migrations (`G-ORB-2..7`)
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- Family 1 (`G-ORB-5`): Hierarchy Merge, Partial Patch Presence & Sticky Supersession
+-- ---------------------------------------------------------------------------
+
+structure HierarchyMergeCheck where
+  currentEpoch   : UInt64
+  incomingEpoch  : UInt64
+  archiveEpoch   : UInt64
+  curArchived    : UInt8
+  curSuperseded  : UInt8
+  isPartialPatch : UInt8
+  parentPresence : UInt8
+  curParentOrd   : UInt32
+  incParentOrd   : UInt32
+  incArchive     : UInt8
+  incUnarchive   : UInt8
+  incSupersede   : UInt8
+  deriving Repr, DecidableEq
+
+def HierarchyMergeCheck.Admissible (h : HierarchyMergeCheck) : Bool :=
+  let nextSup := h.curSuperseded == 1 || h.incSupersede == 1
+  let epochFresh :=
+    if h.isPartialPatch == 1 then decide (h.currentEpoch < h.incomingEpoch)
+    else decide (h.currentEpoch ≤ h.incomingEpoch)
+  let unarchiveAllowed :=
+    !nextSup && h.incUnarchive == 1 && !(h.incArchive == 1) &&
+    decide (h.archiveEpoch < h.incomingEpoch)
+  let supBlocks := h.curSuperseded == 1 && !(h.incSupersede == 1)
+  let archBlocks :=
+    h.curArchived == 1 && !nextSup && !(h.incArchive == 1) && !unarchiveAllowed
+  decide (h.parentPresence ≤ 2) && epochFresh && !supBlocks && !archBlocks
+
+theorem hierarchyMerge_admit_eq (h : HierarchyMergeCheck) :
+    (((hierarchyMergeStep h.currentEpoch h.incomingEpoch h.archiveEpoch
+        h.curArchived h.curSuperseded h.isPartialPatch h.parentPresence
+        h.curParentOrd h.incParentOrd h.incArchive h.incUnarchive h.incSupersede
+      &&& 0xFFFFFFFF) &&& 256) != 0) = h.Admissible := by
+  unfold HierarchyMergeCheck.Admissible hierarchyMergeStep
+  rw [pack32_lo]
+  dsimp only [GT.gt, GE.ge]
+  cases hvp : decide (h.parentPresence ≤ 2) <;>
+    cases hcs : (h.curSuperseded == 1) <;>
+    cases his : (h.incSupersede == 1) <;>
+    cases hca : (h.curArchived == 1) <;>
+    cases hia : (h.incArchive == 1) <;>
+    cases hiu : (h.incUnarchive == 1) <;>
+    cases hua : decide (h.archiveEpoch < h.incomingEpoch)
+  all_goals
+    cases hpp : (h.isPartialPatch == 1)
+    · cases hge : decide (h.currentEpoch ≤ h.incomingEpoch) <;>
+        (simp only [hvp, hpp, hge, hcs, his, hca, hia, hiu, hua,
+          Bool.false_eq_true, ite_true, ite_false];
+         decide)
+    · cases hgt : decide (h.currentEpoch < h.incomingEpoch) <;>
+        (simp only [hvp, hpp, hgt, hcs, his, hca, hia, hiu, hua,
+          Bool.false_eq_true, ite_true, ite_false];
+         decide)
+
+def hierarchyMergeMetaGate : MetaGateSpec HierarchyMergeCheck
+    (fun h => h.Admissible = true) where
+  gate h :=
+    ((hierarchyMergeStep h.currentEpoch h.incomingEpoch h.archiveEpoch
+        h.curArchived h.curSuperseded h.isPartialPatch h.parentPresence
+        h.curParentOrd h.incParentOrd h.incArchive h.incUnarchive h.incSupersede
+      &&& 0xFFFFFFFF) &&& 256) != 0
+  sound h hg := by rw [← hierarchyMerge_admit_eq h]; exact hg
+  complete h hadm := by rw [hierarchyMerge_admit_eq h]; exact hadm
+  posWitness := ⟨10, 11, 5, 0, 0, 1, 0, 42, 0, 0, 0, 0⟩
+  negWitness := ⟨10, 10, 5, 0, 0, 1, 0, 42, 0, 0, 0, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure HierarchyNodeState where
+  epoch        : UInt64
+  archiveEpoch : UInt64
+  archived     : UInt8
+  superseded   : UInt8
+  parentOrd    : UInt32
+  deriving Repr, DecidableEq
+
+def effectiveHierarchyCheck (s : HierarchyNodeState) (e : HierarchyMergeCheck) :
+    HierarchyMergeCheck :=
+  { e with
+    currentEpoch  := s.epoch
+    archiveEpoch  := s.archiveEpoch
+    curArchived   := s.archived
+    curSuperseded := s.superseded
+    curParentOrd  := s.parentOrd }
+
+def hierarchyMachineStep (s : HierarchyNodeState) (e : HierarchyMergeCheck) :
+    HierarchyNodeState × List UInt64 :=
+  let e' := effectiveHierarchyCheck s e
+  let w := hierarchyMergeStep e'.currentEpoch e'.incomingEpoch e'.archiveEpoch
+    e'.curArchived e'.curSuperseded e'.isPartialPatch e'.parentPresence
+    e'.curParentOrd e'.incParentOrd e'.incArchive e'.incUnarchive e'.incSupersede
+  let admit := hierarchyMergeMetaGate.gate e'
+  let nextArch : UInt8 := if ((w &&& 0xFFFFFFFF) &&& 512) != 0 then 1 else 0
+  let nextSup : UInt8 := if ((w &&& 0xFFFFFFFF) &&& 1024) != 0 then 1 else 0
+  let nextParent : UInt32 := (w >>> 32).toUInt32
+  let nextEpoch := if admit then e'.incomingEpoch else s.epoch
+  let nextArchEpoch :=
+    if admit && nextArch == 1 && s.archived == 0 then e'.incomingEpoch else s.archiveEpoch
+  (⟨nextEpoch, nextArchEpoch, nextArch, nextSup, nextParent⟩,
+   if admit then [e.incomingEpoch] else [])
+
+def hierarchyMergeMetaStepSpec :
+    MetaStepSpec HierarchyNodeState HierarchyMergeCheck UInt64 where
+  safety := {
+    step := hierarchyMachineStep
+    authorized := fun s e eff =>
+      eff == e.incomingEpoch && (effectiveHierarchyCheck s e).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [hierarchyMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := hierarchyMergeMetaGate.sound (effectiveHierarchyCheck s e) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0, 0, 0⟩
+    step := hierarchyMachineStep
+    progressRequired := fun s e => (effectiveHierarchyCheck s e).Admissible
+    expectedEffect := fun e eff => eff == e.incomingEpoch
+    live := fun s e h_req => by
+      have h_gate := hierarchyMergeMetaGate.complete (effectiveHierarchyCheck s e) h_req
+      dsimp [hierarchyMachineStep]
+      simp [h_gate]
+    traceEvents := [
+      ⟨0, 1, 0, 0, 0, 0, 1, 0, 77, 0, 0, 0⟩,
+      ⟨1, 2, 0, 0, 0, 1, 0, 77, 0, 0, 0, 0⟩
+    ]
+    posEvent := ⟨2, 3, 0, 0, 0, 1, 0, 77, 0, 1, 0, 0⟩
+    negEvent := ⟨2, 2, 0, 0, 0, 1, 0, 77, 0, 0, 0, 0⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := hierarchyMachineStep
+    cpuFuel := fun s e => 12 + ((hierarchyMachineStep s e).2).length
+    inputBytes := fun _ => 48
+    outputBytes := fun s e => 24 + 8 * ((hierarchyMachineStep s e).2).length
+    c0 := 13
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 32
+    fuel_bound := fun s e => by
+      dsimp [hierarchyMachineStep]
+      split <;> simp
+    eff_bound := fun s e => by
+      dsimp [hierarchyMachineStep]
+      split <;> simp
+    out_bound := fun s e => by
+      dsimp [hierarchyMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Partial-patch vs full-snapshot presence & sticky supersession (`G-ORB-5`):
+    1. An admitted partial patch (`isPartialPatch = 1`) with `parentPresence = 0` (`omitted`)
+       preserves `curParentOrd`, whereas a full snapshot (`isPartialPatch = 0`) with
+       `parentPresence = 0` clears `parentOrd` to `0`.
+    2. Once superseded (`curSuperseded = 1`), any unarchive attempt (`incUnarchive = 1`,
+       `incSupersede = 0`) is rejected (`admittedBit = 0`) and keeps `supBit = 1024`
+       and `archBit = 512`. -/
+theorem hierarchy_merge_partial_presence_and_sticky_supersede
+    (curEp incEp archEp : UInt64) (curParent incParent : UInt32)
+    (h_lt : curEp < incEp) :
+    (hierarchyMergeStep curEp incEp archEp 0 0 1 0 curParent incParent 0 0 0 >>> 32).toUInt32
+      = curParent ∧
+    (hierarchyMergeStep curEp incEp archEp 0 0 0 0 curParent incParent 0 0 0 >>> 32).toUInt32
+      = 0 ∧
+    (hierarchyMergeStep curEp incEp archEp 1 1 1 1 curParent incParent 0 1 0 &&& 0xFFFFFFFF)
+      = 1538 := by
+  have hd_lt : decide (curEp < incEp) = true := decide_eq_true h_lt
+  have hd_le : decide (curEp ≤ incEp) = true := decide_eq_true (UInt64.le_of_lt h_lt)
+  refine ⟨?_, ?_, ?_⟩
+  · unfold hierarchyMergeStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    simp [hd_lt]
+  · unfold hierarchyMergeStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    simp [hd_le]
+  · unfold hierarchyMergeStep
+    rw [pack32_lo]
+    dsimp only [GT.gt, GE.ge]
+    have hvp1 : decide ((1 : UInt8) ≤ 2) = true := by decide
+    have h11 : ((1 : UInt8) == 1) = true := by decide
+    have h01 : ((0 : UInt8) == 1) = false := by decide
+    cases hua : decide (archEp < incEp) <;>
+      (simp only [hd_lt, hua, hvp1, h11, h01, Bool.false_eq_true, ite_true, ite_false];
+       decide)
+
+-- ---------------------------------------------------------------------------
+-- Family 2 (`G-ORB-2` & `G-ORB-3`): Transcript Fold, Contiguous Sequence & Replay Equivalence
+-- ---------------------------------------------------------------------------
+
+structure TranscriptFoldCheck where
+  lastAppliedSeq   : UInt64
+  incomingSeq      : UInt64
+  entryCount       : UInt32
+  thinkingOpen     : UInt8
+  normalizedAction : UInt8
+  isReplayFromLog  : UInt8
+  deriving Repr, DecidableEq
+
+def isTranscriptAppendAction (act : UInt8) : Bool :=
+  act == 5 || act == 6 || act == 7 || act == 9 || act == 10
+
+def isTranscriptMetaAction (act : UInt8) : Bool :=
+  act == 2 || act == 3 || act == 8
+
+def TranscriptFoldCheck.Admissible (t : TranscriptFoldCheck) : Bool :=
+  !decide (t.incomingSeq ≤ t.lastAppliedSeq) &&
+  (t.incomingSeq - t.lastAppliedSeq == 1) &&
+  (t.normalizedAction == 4 || isTranscriptAppendAction t.normalizedAction ||
+   isTranscriptMetaAction t.normalizedAction)
+
+def transcriptFoldMetaGate : MetaGateSpec TranscriptFoldCheck
+    (fun t => t.Admissible = true) where
+  gate t :=
+    ((transcriptFoldStep t.lastAppliedSeq t.incomingSeq t.entryCount
+        t.thinkingOpen t.normalizedAction t.isReplayFromLog &&& 0xFFFFFFFF) &&& 256) != 0
+  sound t hg := by
+    unfold TranscriptFoldCheck.Admissible
+    unfold transcriptFoldStep at hg
+    rw [pack32_lo] at hg
+    have ha5_eq : ((t.normalizedAction == 5 || t.normalizedAction == 6 ||
+        t.normalizedAction == 7 || t.normalizedAction == 9) || t.normalizedAction == 10) =
+        isTranscriptAppendAction t.normalizedAction := rfl
+    have ha2_eq : ((t.normalizedAction == 2 || t.normalizedAction == 3) ||
+        t.normalizedAction == 8) =
+        isTranscriptMetaAction t.normalizedAction := rfl
+    rw [ha5_eq, ha2_eq] at hg
+    cases hd : decide (t.incomingSeq ≤ t.lastAppliedSeq) <;>
+      cases hc : (t.incomingSeq - t.lastAppliedSeq == 1) <;>
+      cases ha4 : (t.normalizedAction == 4) <;>
+      cases ha5 : isTranscriptAppendAction t.normalizedAction <;>
+      cases ha2 : isTranscriptMetaAction t.normalizedAction <;>
+      cases ht : (t.thinkingOpen == 1) <;>
+      (simp only [hd, hc, ha4, ha5, ha2, ht, Bool.false_eq_true, ite_true, ite_false] at hg ⊢;
+       try { revert hg; decide })
+  complete t hadm := by
+    unfold TranscriptFoldCheck.Admissible at hadm
+    unfold transcriptFoldStep
+    rw [pack32_lo]
+    have ha5_eq : ((t.normalizedAction == 5 || t.normalizedAction == 6 ||
+        t.normalizedAction == 7 || t.normalizedAction == 9) || t.normalizedAction == 10) =
+        isTranscriptAppendAction t.normalizedAction := rfl
+    have ha2_eq : ((t.normalizedAction == 2 || t.normalizedAction == 3) ||
+        t.normalizedAction == 8) =
+        isTranscriptMetaAction t.normalizedAction := rfl
+    rw [ha5_eq, ha2_eq]
+    cases hd : decide (t.incomingSeq ≤ t.lastAppliedSeq) <;>
+      cases hc : (t.incomingSeq - t.lastAppliedSeq == 1) <;>
+      cases ha4 : (t.normalizedAction == 4) <;>
+      cases ha5 : isTranscriptAppendAction t.normalizedAction <;>
+      cases ha2 : isTranscriptMetaAction t.normalizedAction <;>
+      cases ht : (t.thinkingOpen == 1) <;>
+      (simp only [hd, hc, ha4, ha5, ha2, ht, Bool.false_eq_true, ite_true, ite_false] at hadm ⊢;
+       try { revert hadm; decide })
+  posWitness := ⟨10, 11, 3, 0, 5, 0⟩
+  negWitness := ⟨10, 12, 3, 0, 5, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure TranscriptFoldState where
+  lastSeq      : UInt64
+  entryCount   : UInt32
+  thinkingOpen : UInt8
+  deriving Repr, DecidableEq
+
+structure TranscriptEventPayload where
+  seq    : UInt64
+  action : UInt8
+  deriving Repr, DecidableEq
+
+def applyTranscriptFoldEvent (isReplay : UInt8) (s : TranscriptFoldState)
+    (ev : TranscriptEventPayload) : TranscriptFoldState × List UInt64 :=
+  let w := transcriptFoldStep s.lastSeq ev.seq s.entryCount
+    s.thinkingOpen ev.action isReplay
+  let lo := w &&& 0xFFFFFFFF
+  let admitted := (lo &&& 256) != 0
+  let nextThink : UInt8 := if (lo &&& 512) != 0 then 1 else 0
+  let nextCount : UInt32 := (w >>> 32).toUInt32
+  let isContig := !decide (ev.seq ≤ s.lastSeq) && (ev.seq - s.lastSeq == 1)
+  let nextSeq := if isContig then ev.seq else s.lastSeq
+  (⟨nextSeq, nextCount, nextThink⟩, if admitted then [ev.seq] else [])
+
+def effectiveTranscriptFoldCheck (s : TranscriptFoldState) (e : TranscriptFoldCheck) :
+    TranscriptFoldCheck :=
+  { e with
+    lastAppliedSeq := s.lastSeq
+    entryCount     := s.entryCount
+    thinkingOpen   := s.thinkingOpen }
+
+def transcriptFoldMachineStep (s : TranscriptFoldState) (e : TranscriptFoldCheck) :
+    TranscriptFoldState × List UInt64 :=
+  applyTranscriptFoldEvent e.isReplayFromLog s ⟨e.incomingSeq, e.normalizedAction⟩
+
+def transcriptFoldMetaStepSpec :
+    MetaStepSpec TranscriptFoldState TranscriptFoldCheck UInt64 where
+  safety := {
+    step := transcriptFoldMachineStep
+    authorized := fun s e eff =>
+      eff == e.incomingSeq && (effectiveTranscriptFoldCheck s e).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [transcriptFoldMachineStep, applyTranscriptFoldEvent] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := transcriptFoldMetaGate.sound (effectiveTranscriptFoldCheck s e) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0⟩
+    step := transcriptFoldMachineStep
+    progressRequired := fun s e => (effectiveTranscriptFoldCheck s e).Admissible
+    expectedEffect := fun e eff => eff == e.incomingSeq
+    live := fun s e h_req => by
+      have h_gate := transcriptFoldMetaGate.complete (effectiveTranscriptFoldCheck s e) h_req
+      dsimp [transcriptFoldMachineStep, applyTranscriptFoldEvent]
+      dsimp [transcriptFoldMetaGate, effectiveTranscriptFoldCheck] at h_gate
+      simp [h_gate]
+    traceEvents := [⟨0, 1, 0, 0, 4, 0⟩, ⟨1, 2, 0, 1, 5, 1⟩]
+    posEvent := ⟨2, 3, 1, 0, 6, 0⟩
+    negEvent := ⟨2, 5, 1, 0, 6, 0⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := transcriptFoldMachineStep
+    cpuFuel := fun s e => 8 + ((transcriptFoldMachineStep s e).2).length
+    inputBytes := fun _ => 32
+    outputBytes := fun s e => 16 + 8 * ((transcriptFoldMachineStep s e).2).length
+    c0 := 9
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 24
+    fuel_bound := fun s e => by
+      dsimp [transcriptFoldMachineStep, applyTranscriptFoldEvent]
+      split <;> simp
+    eff_bound := fun s e => by
+      dsimp [transcriptFoldMachineStep, applyTranscriptFoldEvent]
+      split <;> simp
+    out_bound := fun s e => by
+      dsimp [transcriptFoldMachineStep, applyTranscriptFoldEvent]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+theorem applyTranscriptFoldEvent_replay_eq_live
+    (s : TranscriptFoldState) (ev : TranscriptEventPayload) :
+    applyTranscriptFoldEvent 1 s ev = applyTranscriptFoldEvent 0 s ev := rfl
+
+/-- Multi-event replay equivalence & out-of-order gap/duplicate protection (`G-ORB-2` & `G-ORB-3`):
+    1. Folding any multi-event trace `evs` with `isReplay = 1` produces the exact same
+       `(TranscriptFoldState, List UInt64)` as live streaming (`isReplay = 0`).
+    2. Duplicate (`incomingSeq = lastSeq`) or out-of-order gap (`incomingSeq - lastSeq != 1`)
+       events never increment `entryCount` or set `admittedBit = 256`. -/
+theorem transcript_replay_fold_eq_live_fold
+    (s : TranscriptFoldState) (evs : List TranscriptEventPayload) :
+    (OrbMachine.mk (applyTranscriptFoldEvent 1)).runTrace s evs =
+      (OrbMachine.mk (applyTranscriptFoldEvent 0)).runTrace s evs := by
+  induction evs generalizing s with
+  | nil => rfl
+  | cons ev rest ih =>
+    simp [OrbMachine.runTrace, applyTranscriptFoldEvent_replay_eq_live, ih]
+
+theorem transcript_fold_rejects_duplicate_and_gap
+    (lastSeq incSeq : UInt64) (cnt : UInt32) (think act : UInt8)
+    (h_gap : incSeq - lastSeq != 1) :
+    ((transcriptFoldStep lastSeq lastSeq cnt think act 0 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (transcriptFoldStep lastSeq lastSeq cnt think act 0 >>> 32).toUInt32 = cnt ∧
+    ((transcriptFoldStep lastSeq incSeq cnt think act 0 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (transcriptFoldStep lastSeq incSeq cnt think act 0 >>> 32).toUInt32 = cnt := by
+  have hd_refl : decide (lastSeq ≤ lastSeq) = true :=
+    decide_eq_true (UInt64.le_refl lastSeq)
+  have h_not_one : (incSeq - lastSeq == 1) = false := by
+    cases hc : (incSeq - lastSeq == 1)
+    · rfl
+    · simp [bne, hc] at h_gap
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · unfold transcriptFoldStep
+    rw [pack32_lo]
+    cases ht : (think == 1) <;>
+      (simp only [hd_refl, ht, Bool.false_eq_true, ite_true, ite_false]; decide)
+  · unfold transcriptFoldStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    simp [hd_refl]
+  · unfold transcriptFoldStep
+    rw [pack32_lo]
+    cases hd : decide (incSeq ≤ lastSeq) <;>
+      cases ht : (think == 1) <;>
+      (simp only [hd, h_not_one, ht, Bool.false_eq_true, Bool.and_false, Bool.not_false,
+        ite_true, ite_false]; decide)
+  · unfold transcriptFoldStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    cases hd : decide (incSeq ≤ lastSeq) <;>
+      simp [hd, h_not_one]
+
+-- ---------------------------------------------------------------------------
+-- Family 3 (`G-ORB-2` & `G-ORB-3`): Outbox Crash Reconciliation & Single-Writer Lease
+-- ---------------------------------------------------------------------------
+
+structure OutboxReconcileCheck where
+  durableQueued      : UInt32
+  durableAcked       : UInt32
+  volatileInFlight   : UInt32
+  leaseBootEpoch     : UInt64
+  nodeBootEpoch      : UInt64
+  volatileLeaseOwner : UInt32
+  reqOwner           : UInt32
+  deriving Repr, DecidableEq
+
+def OutboxReconcileCheck.Admissible (o : OutboxReconcileCheck) : Bool :=
+  let validWal := decide (o.durableAcked ≤ o.durableQueued)
+  let unacked := if validWal then o.durableQueued - o.durableAcked else 0
+  let crashReset := o.leaseBootEpoch != o.nodeBootEpoch
+  let effOwner := if crashReset then 0 else o.volatileLeaseOwner
+  let effInFlight := if crashReset then 0 else o.volatileInFlight
+  validWal && decide (0 < unacked) && (o.reqOwner != 0) &&
+  (effOwner == 0 || effOwner == o.reqOwner) && decide (effInFlight < unacked)
+
+theorem outboxCrashReconcile_admit_eq (o : OutboxReconcileCheck) :
+    (((outboxCrashReconcileStep o.durableQueued o.durableAcked o.volatileInFlight
+        o.leaseBootEpoch o.nodeBootEpoch o.volatileLeaseOwner o.reqOwner
+      &&& 0xFFFFFFFF) &&& 256) != 0) = o.Admissible := by
+  unfold OutboxReconcileCheck.Admissible outboxCrashReconcileStep
+  rw [pack32_lo]
+  dsimp only [GT.gt]
+  cases hvw : decide (o.durableAcked ≤ o.durableQueued)
+  · simp only [hvw, Bool.false_eq_true, Bool.false_and, Bool.not_false, ite_true, ite_false]
+    decide
+  · simp only [hvw, Bool.true_and, Bool.not_true, Bool.false_eq_true, ite_true, ite_false]
+    cases hcr : (o.leaseBootEpoch != o.nodeBootEpoch)
+    · simp only [hcr, Bool.false_eq_true, ite_false]
+      cases hun : decide ((0 : UInt32) < o.durableQueued - o.durableAcked) <;>
+        cases hzero : (o.durableQueued - o.durableAcked == 0) <;>
+        cases hreq : (o.reqOwner != 0) <;>
+        cases heow : (o.volatileLeaseOwner == 0 || o.volatileLeaseOwner == o.reqOwner) <;>
+        cases hinf : decide (o.volatileInFlight < o.durableQueued - o.durableAcked) <;>
+        cases hno : (o.volatileLeaseOwner != 0) <;>
+        (simp only [hun, hzero, hreq, heow, hinf, hno, Bool.true_and, Bool.false_and,
+          Bool.and_true, Bool.and_false, Bool.false_eq_true, ite_true, ite_false];
+         decide)
+    · simp only [hcr, ite_true]
+      have h00 : ((0 : UInt32) == 0) = true := by decide
+      have ho0 : ((0 : UInt32) == 0 || (0 : UInt32) == o.reqOwner) = true := by simp [h00]
+      have hn0 : ((0 : UInt32) != 0) = false := by decide
+      cases hun : decide ((0 : UInt32) < o.durableQueued - o.durableAcked) <;>
+        cases hzero : (o.durableQueued - o.durableAcked == 0) <;>
+        cases hreq : (o.reqOwner != 0) <;>
+        (simp only [hun, hzero, hreq, ho0, hn0, Bool.true_and, Bool.false_and,
+          Bool.and_true, Bool.and_false, Bool.false_eq_true, ite_true, ite_false];
+         decide)
+
+def outboxCrashReconcileMetaGate : MetaGateSpec OutboxReconcileCheck
+    (fun o => o.Admissible = true) where
+  gate o :=
+    ((outboxCrashReconcileStep o.durableQueued o.durableAcked o.volatileInFlight
+        o.leaseBootEpoch o.nodeBootEpoch o.volatileLeaseOwner o.reqOwner
+      &&& 0xFFFFFFFF) &&& 256) != 0
+  sound o hg := by rw [← outboxCrashReconcile_admit_eq o]; exact hg
+  complete o hadm := by rw [outboxCrashReconcile_admit_eq o]; exact hadm
+  posWitness := ⟨5, 2, 3, 1, 2, 99, 7⟩
+  negWitness := ⟨5, 2, 3, 2, 2, 99, 7⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure OutboxWalState where
+  durableQueued      : UInt32
+  durableAcked       : UInt32
+  volatileInFlight   : UInt32
+  leaseBootEpoch     : UInt64
+  volatileLeaseOwner : UInt32
+  deriving Repr, DecidableEq
+
+/-- Explicit crash-reset projection (`G-ORB-2`): preserves persistent WAL (`durableQueued`,
+    `durableAcked`) while wiping volatile in-flight count and lease owner upon node reboot. -/
+def crashResetVolatile (newBootEpoch : UInt64) (s : OutboxWalState) : OutboxWalState :=
+  ⟨s.durableQueued, s.durableAcked, 0, newBootEpoch, 0⟩
+
+def effectiveOutboxCheck (s : OutboxWalState) (e : OutboxReconcileCheck) :
+    OutboxReconcileCheck :=
+  { e with
+    durableQueued      := s.durableQueued
+    durableAcked       := s.durableAcked
+    volatileInFlight   := s.volatileInFlight
+    leaseBootEpoch     := s.leaseBootEpoch
+    volatileLeaseOwner := s.volatileLeaseOwner }
+
+def outboxMachineStep (s : OutboxWalState) (e : OutboxReconcileCheck) :
+    OutboxWalState × List UInt32 :=
+  let e' := effectiveOutboxCheck s e
+  let admit := outboxCrashReconcileMetaGate.gate e'
+  let crashReset := s.leaseBootEpoch != e.nodeBootEpoch
+  let baseInFlight := if crashReset then 0 else s.volatileInFlight
+  let baseOwner := if crashReset then 0 else s.volatileLeaseOwner
+  let nextEpoch := if crashReset then e.nodeBootEpoch else s.leaseBootEpoch
+  let nextInFlight := if admit then satAdd32 baseInFlight 1 else baseInFlight
+  let nextOwner := if admit then e.reqOwner else baseOwner
+  (⟨s.durableQueued, s.durableAcked, nextInFlight, nextEpoch, nextOwner⟩,
+   if admit then [e.reqOwner] else [])
+
+def outboxCrashReconcileMetaStepSpec :
+    MetaStepSpec OutboxWalState OutboxReconcileCheck UInt32 where
+  safety := {
+    step := outboxMachineStep
+    authorized := fun s e eff =>
+      eff == e.reqOwner && (effectiveOutboxCheck s e).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [outboxMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := outboxCrashReconcileMetaGate.sound (effectiveOutboxCheck s e) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨3, 1, 2, 10, 42⟩
+    step := outboxMachineStep
+    progressRequired := fun s e => (effectiveOutboxCheck s e).Admissible
+    expectedEffect := fun e eff => eff == e.reqOwner
+    live := fun s e h_req => by
+      have h_gate := outboxCrashReconcileMetaGate.complete (effectiveOutboxCheck s e) h_req
+      dsimp [outboxMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨3, 1, 2, 10, 11, 42, 77⟩]
+    posEvent := ⟨3, 1, 1, 11, 11, 77, 77⟩
+    negEvent := ⟨3, 1, 1, 11, 11, 77, 88⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := outboxMachineStep
+    cpuFuel := fun s e => 9 + ((outboxMachineStep s e).2).length
+    inputBytes := fun _ => 36
+    outputBytes := fun s e => 24 + 4 * ((outboxMachineStep s e).2).length
+    c0 := 10
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 28
+    fuel_bound := fun s e => by
+      dsimp [outboxMachineStep]
+      split <;> simp
+    eff_bound := fun s e => by
+      dsimp [outboxMachineStep]
+      split <;> simp
+    out_bound := fun s e => by
+      dsimp [outboxMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Outbox crash conservation & single-writer lease exclusion (`G-ORB-2` & `G-ORB-3`):
+    1. Across a crash (`leaseEpoch ≠ bootEpoch`) with `acked ≤ queued`,
+       `orb_outbox_crash_reconcile_step` recovers the exact unacknowledged backlog
+       `queued - acked` (`0` lost messages) and sets `crashBit = 512`.
+    2. In the same boot epoch (`bootEpoch = bootEpoch`), a rival non-zero `reqOwner ≠ curOwner`
+       (when `curOwner ≠ 0`) is strictly denied (`admittedBit = 0`, `<= 1` active writer).
+    3. Applying `crashResetVolatile bootEpoch` makes subsequent evaluation at `bootEpoch` preserve
+       the exact `unacked = queued - acked` count. -/
+theorem outbox_crash_conservation_and_single_writer
+    (queued acked inFlight : UInt32) (leaseEp bootEp : UInt64)
+    (curOwner rivalOwner : UInt32)
+    (h_wal : acked ≤ queued)
+    (h_crash : leaseEp ≠ bootEp)
+    (h_owned : curOwner ≠ 0)
+    (h_rival : curOwner ≠ rivalOwner) :
+    (outboxCrashReconcileStep queued acked inFlight
+        leaseEp bootEp curOwner rivalOwner >>> 32).toUInt32
+      = queued - acked ∧
+    ((outboxCrashReconcileStep queued acked inFlight leaseEp bootEp curOwner rivalOwner
+        &&& 0xFFFFFFFF) &&& 512) != 0 ∧
+    ((outboxCrashReconcileStep queued acked inFlight bootEp bootEp curOwner rivalOwner
+        &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (let s0 : OutboxWalState := ⟨queued, acked, inFlight, leaseEp, curOwner⟩
+     let sCrash := crashResetVolatile bootEp s0
+     (outboxCrashReconcileStep sCrash.durableQueued sCrash.durableAcked
+        sCrash.volatileInFlight sCrash.leaseBootEpoch bootEp
+        sCrash.volatileLeaseOwner rivalOwner >>> 32).toUInt32 = queued - acked) := by
+  have hd_wal : decide (acked ≤ queued) = true := decide_eq_true h_wal
+  have h_cr_true : (leaseEp != bootEp) = true := bne_iff_ne.mpr h_crash
+  have h_cr_false : (bootEp != bootEp) = false := by simp
+  have h_ow0 : (curOwner == 0) = false := beq_eq_false_iff_ne.mpr h_owned
+  have h_owr : (curOwner == rivalOwner) = false := beq_eq_false_iff_ne.mpr h_rival
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · unfold outboxCrashReconcileStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    simp [hd_wal]
+  · unfold outboxCrashReconcileStep
+    rw [pack32_lo]
+    dsimp only [GT.gt]
+    have h00 : ((0 : UInt32) == 0) = true := by decide
+    have ho0 : ((0 : UInt32) == 0 || (0 : UInt32) == rivalOwner) = true := by simp [h00]
+    have hn0 : ((0 : UInt32) != 0) = false := by decide
+    cases hun : decide ((0 : UInt32) < queued - acked) <;>
+      cases hzero : (queued - acked == 0) <;>
+      cases hreq : (rivalOwner != 0) <;>
+      (simp only [hd_wal, h_cr_true, hun, hzero, hreq, ho0, hn0,
+        Bool.true_and, Bool.false_and, Bool.and_true, Bool.and_false, Bool.not_true,
+        Bool.false_eq_true, ite_true, ite_false]; decide)
+  · unfold outboxCrashReconcileStep
+    rw [pack32_lo]
+    dsimp only [GT.gt]
+    have h_ow_ne : (curOwner != 0) = true := bne_iff_ne.mpr h_owned
+    cases hun : decide ((0 : UInt32) < queued - acked) <;>
+      cases hzero : (queued - acked == 0) <;>
+      cases hreq : (rivalOwner != 0) <;>
+      cases hinf : decide (inFlight < queued - acked) <;>
+      (simp only [hd_wal, h_cr_false, h_ow0, h_owr, h_ow_ne, hun, hzero, hreq, hinf,
+        Bool.or_self, Bool.and_false, Bool.false_and, Bool.false_eq_true, ite_true, ite_false];
+       decide)
+  · dsimp only [crashResetVolatile]
+    unfold outboxCrashReconcileStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    simp [hd_wal]
+
+-- ---------------------------------------------------------------------------
+-- Family 4 (`G-ORB-2`): Multi-Attempt Provider Failover, Pinning & 3-Clock Isolation
+-- ---------------------------------------------------------------------------
+
+structure ProviderAttemptCheck where
+  pinnedAccountId    : UInt32
+  candidateAccountId : UInt32
+  attemptsUsed       : UInt32
+  retryBudget        : UInt32
+  firstByteCommitted : UInt8
+  failureKind        : UInt8
+  upstreamNowEpoch   : UInt64
+  cooldownUntilEpoch : UInt64
+  upstreamDeadline   : UInt64
+  authValid          : UInt8
+  deriving Repr, DecidableEq
+
+def ProviderAttemptCheck.Admissible (p : ProviderAttemptCheck) : Bool :=
+  let isRetry := p.failureKind == 1 || p.failureKind == 2
+  let pinOk :=
+    (p.candidateAccountId != 0) &&
+    (p.pinnedAccountId == 0 || p.candidateAccountId == p.pinnedAccountId)
+  let cooldownOk := (p.failureKind != 2) && decide (p.cooldownUntilEpoch ≤ p.upstreamNowEpoch)
+  let clockOk := decide (p.upstreamNowEpoch < p.upstreamDeadline) && (p.authValid == 1)
+  let budgetOk :=
+    if isRetry then decide (p.attemptsUsed < p.retryBudget)
+    else decide (p.attemptsUsed ≤ p.retryBudget)
+  !(p.firstByteCommitted == 1 && isRetry) && pinOk && cooldownOk && clockOk && budgetOk
+
+theorem providerAttempt_admit_eq (p : ProviderAttemptCheck) :
+    (((providerAttemptStep p.pinnedAccountId p.candidateAccountId
+        p.attemptsUsed p.retryBudget p.firstByteCommitted p.failureKind
+        p.upstreamNowEpoch p.cooldownUntilEpoch p.upstreamDeadline p.authValid
+      &&& 0xFFFFFFFF) &&& 256) != 0) = p.Admissible := by
+  unfold ProviderAttemptCheck.Admissible providerAttemptStep
+  rw [pack32_lo]
+  dsimp only [GE.ge]
+  cases hfb : (p.firstByteCommitted == 1) <;>
+    cases hf3 : (p.failureKind == 3) <;>
+    cases hret : (p.failureKind == 1 || p.failureKind == 2) <;>
+    cases hpin : ((p.candidateAccountId != 0) &&
+                  (p.pinnedAccountId == 0 || p.candidateAccountId == p.pinnedAccountId)) <;>
+    cases hcd : ((p.failureKind != 2) && decide (p.cooldownUntilEpoch ≤ p.upstreamNowEpoch)) <;>
+    cases hclk : (decide (p.upstreamNowEpoch < p.upstreamDeadline) && (p.authValid == 1))
+  all_goals
+    cases hlt : decide (p.attemptsUsed < p.retryBudget) <;>
+      cases hle : decide (p.attemptsUsed ≤ p.retryBudget) <;>
+      (simp only [hfb, hf3, hret, hpin, hcd, hclk, hlt, hle,
+        Bool.false_eq_true, ite_true, ite_false];
+       decide)
+
+def providerAttemptMetaGate : MetaGateSpec ProviderAttemptCheck
+    (fun p => p.Admissible = true) where
+  gate p :=
+    ((providerAttemptStep p.pinnedAccountId p.candidateAccountId
+        p.attemptsUsed p.retryBudget p.firstByteCommitted p.failureKind
+        p.upstreamNowEpoch p.cooldownUntilEpoch p.upstreamDeadline p.authValid
+      &&& 0xFFFFFFFF) &&& 256) != 0
+  sound p hg := by rw [← providerAttempt_admit_eq p]; exact hg
+  complete p hadm := by rw [providerAttempt_admit_eq p]; exact hadm
+  posWitness := ⟨42, 42, 1, 3, 0, 1, 1000, 500, 2000, 1⟩
+  negWitness := ⟨42, 42, 1, 3, 1, 1, 1000, 500, 2000, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure ProviderSessionState where
+  pinnedAccount      : UInt32
+  attemptsUsed       : UInt32
+  firstByteCommitted : UInt8
+  deriving Repr, DecidableEq
+
+def effectiveProviderAttempt (s : ProviderSessionState) (e : ProviderAttemptCheck) :
+    ProviderAttemptCheck :=
+  { e with
+    pinnedAccountId    := if s.pinnedAccount != 0 then s.pinnedAccount else e.pinnedAccountId
+    attemptsUsed       := s.attemptsUsed
+    firstByteCommitted := if s.firstByteCommitted == 1 then 1 else e.firstByteCommitted }
+
+def providerAttemptMachineStep (s : ProviderSessionState) (e : ProviderAttemptCheck) :
+    ProviderSessionState × List UInt32 :=
+  let e' := effectiveProviderAttempt s e
+  let w := providerAttemptStep e'.pinnedAccountId e'.candidateAccountId
+    e'.attemptsUsed e'.retryBudget e'.firstByteCommitted e'.failureKind
+    e'.upstreamNowEpoch e'.cooldownUntilEpoch e'.upstreamDeadline e'.authValid
+  let admit := providerAttemptMetaGate.gate e'
+  let nextLock : UInt8 := if ((w &&& 0xFFFFFFFF) &&& 512) != 0 then 1 else 0
+  let nextAttempts : UInt32 := (w >>> 32).toUInt32
+  let nextPin : UInt32 :=
+    if s.pinnedAccount != 0 then s.pinnedAccount
+    else if admit then e'.candidateAccountId else 0
+  (⟨nextPin, nextAttempts, nextLock⟩,
+   if admit then [e.candidateAccountId] else [])
+
+def providerAttemptMetaStepSpec :
+    MetaStepSpec ProviderSessionState ProviderAttemptCheck UInt32 where
+  safety := {
+    step := providerAttemptMachineStep
+    authorized := fun s e eff =>
+      eff == e.candidateAccountId && (effectiveProviderAttempt s e).Admissible
+    sound := fun s e eff h_in => by
+      dsimp [providerAttemptMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := providerAttemptMetaGate.sound (effectiveProviderAttempt s e) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0⟩
+    step := providerAttemptMachineStep
+    progressRequired := fun s e => (effectiveProviderAttempt s e).Admissible
+    expectedEffect := fun e eff => eff == e.candidateAccountId
+    live := fun s e h_req => by
+      have h_gate := providerAttemptMetaGate.complete (effectiveProviderAttempt s e) h_req
+      dsimp [providerAttemptMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0, 17, 0, 3, 0, 0, 100, 50, 500, 1⟩]
+    posEvent := ⟨17, 17, 0, 3, 0, 1, 120, 50, 500, 1⟩
+    negEvent := ⟨17, 99, 0, 3, 0, 1, 120, 50, 500, 1⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := providerAttemptMachineStep
+    cpuFuel := fun s e => 11 + ((providerAttemptMachineStep s e).2).length
+    inputBytes := fun _ => 56
+    outputBytes := fun s e => 16 + 4 * ((providerAttemptMachineStep s e).2).length
+    c0 := 12
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 20
+    fuel_bound := fun s e => by
+      dsimp [providerAttemptMachineStep]
+      split <;> simp
+    eff_bound := fun s e => by
+      dsimp [providerAttemptMachineStep]
+      split <;> simp
+    out_bound := fun s e => by
+      dsimp [providerAttemptMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Sticky first-byte stream lock, account pinning & cooldown gating (`G-ORB-2`):
+    1. Once `firstByteCommitted = 1`, any retry (`failureKind = 1`) aborts (`lo32 = 515`,
+       `admittedBit = 0`, `lockBit = 512`) and never increments `attemptsUsed`.
+    2. When `pinnedAccountId ≠ 0` and `candidateAccountId ≠ pinnedAccountId`, dispatch is
+       rejected (`admittedBit = 0`) regardless of budget or clock state.
+    3. Any attempt before `cooldownUntilEpoch` (`upstreamNowEpoch < cooldownUntilEpoch`)
+       is rejected (`admittedBit = 0`). -/
+theorem provider_attempt_first_byte_lock_pin_and_cooldown
+    (pinId candId used budget : UInt32) (fb fk auth : UInt8)
+    (nowEp coolEp deadEp : UInt64)
+    (h_pin_nz : pinId ≠ 0)
+    (h_mismatch : candId ≠ pinId)
+    (h_cool : nowEp < coolEp) :
+    (providerAttemptStep pinId candId used budget 1 1 nowEp coolEp deadEp auth &&& 0xFFFFFFFF)
+      = 515 ∧
+    (providerAttemptStep pinId candId used budget 1 1 nowEp coolEp deadEp auth >>> 32).toUInt32
+      = used ∧
+    ((providerAttemptStep pinId candId used budget fb fk nowEp coolEp deadEp auth
+        &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    ((providerAttemptStep 0 candId used budget fb fk nowEp coolEp deadEp auth
+        &&& 0xFFFFFFFF) &&& 256) = 0 := by
+  have hpz : (pinId == 0) = false := beq_eq_false_iff_ne.mpr h_pin_nz
+  have hpm : (candId == pinId) = false := beq_eq_false_iff_ne.mpr h_mismatch
+  have hnc : decide (coolEp ≤ nowEp) = false :=
+    decide_eq_false (UInt64.not_le.mpr h_cool)
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · unfold providerAttemptStep
+    rw [pack32_lo]
+    have h11 : ((1 : UInt8) == 1) = true := by decide
+    simp only [h11, Bool.true_or, Bool.and_true, ite_true]
+    decide
+  · unfold providerAttemptStep
+    rw [pack32_hi, toUInt32_toUInt64]
+    have h11 : ((1 : UInt8) == 1) = true := by decide
+    simp [h11]
+  · unfold providerAttemptStep
+    rw [pack32_lo]
+    dsimp only [GE.ge]
+    cases hfb : (fb == 1) <;>
+      cases hf3 : (fk == 3) <;>
+      cases hret : (fk == 1 || fk == 2) <;>
+      cases hcz : (candId != 0) <;>
+      (simp only [hfb, hf3, hret, hcz, hpz, hpm, Bool.or_false, Bool.and_false,
+        Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+  · unfold providerAttemptStep
+    rw [pack32_lo]
+    dsimp only [GE.ge]
+    have hp0 : ((0 : UInt32) == 0) = true := by decide
+    cases hfb : (fb == 1) <;>
+      cases hf3 : (fk == 3) <;>
+      cases hret : (fk == 1 || fk == 2) <;>
+      cases hcz : (candId != 0) <;>
+      cases hf2 : (fk != 2) <;>
+      (simp only [hfb, hf3, hret, hcz, hp0, hf2, hnc, Bool.true_or, Bool.and_true,
+        Bool.and_false, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+
+-- ---------------------------------------------------------------------------
+-- Family 5 (`G-ORB-7`): TOCTOU Authorization Evidence Binding
+-- ---------------------------------------------------------------------------
+
+structure AuthToctouCheck where
+  principalKind      : UInt8
+  bunkerState        : UInt8
+  observedTargetId   : UInt32
+  execTargetId       : UInt32
+  observedLeaseEpoch : UInt64
+  liveLeaseEpoch     : UInt64
+  nowTick            : UInt64
+  expiryTick         : UInt64
+  observedDigest     : UInt64
+  execDigest         : UInt64
+  deriving Repr, DecidableEq
+
+def AuthToctouCheck.Admissible (a : AuthToctouCheck) : Bool :=
+  (a.bunkerState == 0) &&
+  decide (1 ≤ a.principalKind) && decide (a.principalKind ≤ 3) &&
+  decide (a.nowTick < a.expiryTick) &&
+  (a.observedLeaseEpoch != 0) && (a.observedLeaseEpoch == a.liveLeaseEpoch) &&
+  (a.observedTargetId != 0) && (a.observedTargetId == a.execTargetId) &&
+  (a.observedDigest != 0) && (a.observedDigest == a.execDigest)
+
+theorem authToctou_admit_eq (a : AuthToctouCheck) :
+    (((authToctouExecuteStep a.principalKind a.bunkerState
+        a.observedTargetId a.execTargetId a.observedLeaseEpoch a.liveLeaseEpoch
+        a.nowTick a.expiryTick a.observedDigest a.execDigest) &&& 256) != 0)
+      = a.Admissible := by
+  unfold AuthToctouCheck.Admissible authToctouExecuteStep
+  dsimp only [GE.ge]
+  have hb_inv : (a.bunkerState != 0) = !(a.bunkerState == 0) := by
+    change (!(a.bunkerState == 0)) = !(a.bunkerState == 0); rfl
+  rw [hb_inv]
+  cases hb0 : (a.bunkerState == 0)
+  · simp only [Bool.not_false, Bool.false_and, ite_true]
+    decide
+  · cases hp1 : decide (1 ≤ a.principalKind) <;>
+      cases hp3 : decide (a.principalKind ≤ 3) <;>
+      cases htime : decide (a.nowTick < a.expiryTick) <;>
+      cases hl1 : (a.observedLeaseEpoch != 0) <;>
+      cases hl2 : (a.observedLeaseEpoch == a.liveLeaseEpoch) <;>
+      cases ht1 : (a.observedTargetId != 0) <;>
+      cases ht2 : (a.observedTargetId == a.execTargetId) <;>
+      cases hd1 : (a.observedDigest != 0) <;>
+      cases hd2 : (a.observedDigest == a.execDigest) <;>
+      (simp only [Bool.not_true, hp1, hp3, htime, hl1, hl2, ht1, ht2, hd1, hd2,
+        Bool.true_and, Bool.false_and, Bool.and_true, Bool.and_false,
+        Bool.not_false, Bool.false_eq_true, ite_true, ite_false];
+       decide)
+
+def authToctouMetaGate : MetaGateSpec AuthToctouCheck
+    (fun a => a.Admissible = true) where
+  gate a :=
+    ((authToctouExecuteStep a.principalKind a.bunkerState
+        a.observedTargetId a.execTargetId a.observedLeaseEpoch a.liveLeaseEpoch
+        a.nowTick a.expiryTick a.observedDigest a.execDigest) &&& 256) != 0
+  sound a hg := by rw [← authToctou_admit_eq a]; exact hg
+  complete a hadm := by rw [authToctou_admit_eq a]; exact hadm
+  posWitness := ⟨2, 0, 7, 7, 11, 11, 100, 200, 55, 55⟩
+  negWitness := ⟨2, 0, 7, 9, 11, 11, 100, 200, 55, 55⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure AuthSessionState where
+  revoked       : Bool
+  lastTarget    : UInt32
+  lastLease     : UInt64
+  lastDigest    : UInt64
+  executedCount : UInt32
+  deriving Repr, DecidableEq
+
+def effectiveAuthCheck (s : AuthSessionState) (a : AuthToctouCheck) : AuthToctouCheck :=
+  { a with observedLeaseEpoch := if s.revoked then 0 else a.observedLeaseEpoch }
+
+def authToctouMachineStep (s : AuthSessionState) (a : AuthToctouCheck) :
+    AuthSessionState × List UInt32 :=
+  let a' := effectiveAuthCheck s a
+  let admit := authToctouMetaGate.gate a'
+  (⟨s.revoked, if admit then a'.execTargetId else s.lastTarget,
+    if admit then a'.liveLeaseEpoch else s.lastLease,
+    if admit then a'.execDigest else s.lastDigest,
+    if admit then s.executedCount + 1 else s.executedCount⟩,
+   if admit then [a.execTargetId] else [])
+
+def authToctouMetaStepSpec :
+    MetaStepSpec AuthSessionState AuthToctouCheck UInt32 where
+  safety := {
+    step := authToctouMachineStep
+    authorized := fun s a eff =>
+      eff == a.execTargetId && (effectiveAuthCheck s a).Admissible
+    sound := fun s a eff h_in => by
+      dsimp [authToctouMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := authToctouMetaGate.sound (effectiveAuthCheck s a) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨false, 0, 0, 0, 0⟩
+    step := authToctouMachineStep
+    progressRequired := fun s a => (effectiveAuthCheck s a).Admissible
+    expectedEffect := fun a eff => eff == a.execTargetId
+    live := fun s a h_req => by
+      have h_gate := authToctouMetaGate.complete (effectiveAuthCheck s a) h_req
+      dsimp [authToctouMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨2, 0, 3, 3, 9, 9, 10, 20, 42, 42⟩]
+    posEvent := ⟨2, 0, 5, 5, 9, 9, 10, 20, 42, 42⟩
+    negEvent := ⟨2, 1, 5, 5, 9, 9, 10, 20, 42, 42⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := authToctouMachineStep
+    cpuFuel := fun s a => 13 + ((authToctouMachineStep s a).2).length
+    inputBytes := fun _ => 58
+    outputBytes := fun s a => 25 + 4 * ((authToctouMachineStep s a).2).length
+    c0 := 14
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 29
+    fuel_bound := fun s a => by
+      dsimp [authToctouMachineStep]
+      split <;> simp
+    eff_bound := fun s a => by
+      dsimp [authToctouMachineStep]
+      split <;> simp
+    out_bound := fun s a => by
+      dsimp [authToctouMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- TOCTOU fail-closed evidence binding (`G-ORB-7`): target swap, lease revocation/rotation,
+    digest mutation, expiry, and bunker trip between `gate` and `execute` all clear
+    `admittedBit` and emit no effect. -/
+theorem auth_toctou_all_evidence_mutations_fail_closed
+    (observedTarget execTarget : UInt32) (observedLease liveLease : UInt64)
+    (nowTick expiryTick observedDigest execDigest : UInt64)
+    (h_target_swap : execTarget ≠ observedTarget)
+    (h_lease_rotate : liveLease ≠ observedLease)
+    (h_digest_mutate : execDigest ≠ observedDigest) :
+    ((authToctouExecuteStep 2 0 observedTarget execTarget observedLease observedLease
+        nowTick expiryTick observedDigest observedDigest &&& 256) != 0) = false ∧
+    ((authToctouExecuteStep 2 0 observedTarget observedTarget observedLease liveLease
+        nowTick expiryTick observedDigest observedDigest &&& 256) != 0) = false ∧
+    ((authToctouExecuteStep 2 0 observedTarget observedTarget observedLease observedLease
+        nowTick expiryTick observedDigest execDigest &&& 256) != 0) = false ∧
+    ((authToctouExecuteStep 2 0 observedTarget observedTarget observedLease observedLease
+        expiryTick expiryTick observedDigest observedDigest &&& 256) != 0) = false ∧
+    ((authToctouExecuteStep 2 1 observedTarget observedTarget observedLease observedLease
+        nowTick expiryTick observedDigest observedDigest &&& 256) != 0) = false ∧
+    ((authToctouMachineStep ⟨true, 0, 0, 0, 0⟩
+        ⟨2, 0, observedTarget, observedTarget, observedLease, observedLease,
+          nowTick, expiryTick, observedDigest, observedDigest⟩).2 = []) := by
+  have h_target_ne : (observedTarget == execTarget) = false :=
+    beq_eq_false_iff_ne.mpr (Ne.symm h_target_swap)
+  have h_lease_ne : (observedLease == liveLease) = false :=
+    beq_eq_false_iff_ne.mpr (Ne.symm h_lease_rotate)
+  have h_digest_ne : (observedDigest == execDigest) = false :=
+    beq_eq_false_iff_ne.mpr (Ne.symm h_digest_mutate)
+  have hpk_ok : (decide ((1 : UInt8) ≤ 2) && decide ((2 : UInt8) ≤ 3)) = true := by decide
+  have hb0_f : ((0 : UInt8) != 0) = false := by decide
+  have hb1_t : ((1 : UInt8) != 0) = true := by decide
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  · unfold authToctouExecuteStep
+    dsimp only [GE.ge]
+    cases ht : decide (nowTick < expiryTick) <;>
+      cases hl : ((observedLease != 0) && (observedLease == observedLease)) <;>
+      cases hto : (observedTarget != 0) <;>
+      (simp only [hb0_f, hpk_ok, ht, hl, hto, h_target_ne, Bool.and_false,
+        Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+  · unfold authToctouExecuteStep
+    dsimp only [GE.ge]
+    cases ht : decide (nowTick < expiryTick) <;>
+      cases hlo : (observedLease != 0) <;>
+      (simp only [hb0_f, hpk_ok, ht, hlo, h_lease_ne, Bool.and_false,
+        Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+  · unfold authToctouExecuteStep
+    dsimp only [GE.ge]
+    cases ht : decide (nowTick < expiryTick) <;>
+      cases hl : ((observedLease != 0) && (observedLease == observedLease)) <;>
+      cases htg : ((observedTarget != 0) && (observedTarget == observedTarget)) <;>
+      cases hdo : (observedDigest != 0) <;>
+      (simp only [hb0_f, hpk_ok, ht, hl, htg, hdo, h_digest_ne, Bool.and_false,
+        Bool.not_true, Bool.not_false, Bool.false_eq_true, ite_true, ite_false]; decide)
+  · unfold authToctouExecuteStep
+    dsimp only [GE.ge]
+    have hnlt : decide (expiryTick < expiryTick) = false :=
+      decide_eq_false (UInt64.lt_irrefl expiryTick)
+    simp only [hb0_f, hpk_ok, hnlt, Bool.not_true, Bool.not_false, Bool.false_eq_true,
+      ite_true, ite_false]
+    decide
+  · unfold authToctouExecuteStep
+    simp only [hb1_t, ite_true]
+    decide
+  · have hg0 : authToctouMetaGate.gate (effectiveAuthCheck ⟨true, 0, 0, 0, 0⟩
+        ⟨2, 0, observedTarget, observedTarget, observedLease, observedLease,
+          nowTick, expiryTick, observedDigest, observedDigest⟩) = false := by
+      dsimp only [authToctouMetaGate]
+      rw [authToctou_admit_eq]
+      dsimp [effectiveAuthCheck, AuthToctouCheck.Admissible]
+      have hl0 : ((0 : UInt64) != 0) = false := by decide
+      simp [hl0]
+    dsimp [authToctouMachineStep]
+    simp [hg0]
+
+-- ---------------------------------------------------------------------------
+-- Family 6 (`G-ORB-3`): Conserved Resource Reservation, Spend & TTL Reaper
+-- ---------------------------------------------------------------------------
+
+structure ResourceLedgerCheck where
+  opKind         : UInt8
+  reservedSlots  : UInt32
+  activeSlots    : UInt32
+  maxSlots       : UInt32
+  spentCents     : UInt64
+  costDeltaCents : UInt64
+  budgetCents    : UInt64
+  nowTick        : UInt64
+  ttlExpiryTick  : UInt64
+  deriving Repr, DecidableEq
+
+def ResourceLedgerCheck.Admissible (r : ResourceLedgerCheck) : Bool :=
+  let activeFits := decide (r.activeSlots ≤ r.maxSlots)
+  let remSlots := if activeFits then r.maxSlots - r.activeSlots else 0
+  let reservedFits := decide (r.reservedSlots ≤ remSlots)
+  let budgetValid := decide (r.spentCents ≤ r.budgetCents)
+  let stateValid :=
+    if activeFits then (if reservedFits then budgetValid else false) else false
+  let remBudget := if budgetValid then r.budgetCents - r.spentCents else 0
+  let spendFits := if stateValid then decide (r.costDeltaCents ≤ remBudget) else false
+  let hasFreeSlot := decide (r.reservedSlots < remSlots)
+  let hasReserved := decide (0 < r.reservedSlots)
+  let hasActive := decide (0 < r.activeSlots)
+  let ttlLive := decide (r.nowTick < r.ttlExpiryTick)
+  let ttlExpired := decide (r.ttlExpiryTick ≤ r.nowTick)
+  let canReserve :=
+    if r.opKind == 0 then
+      (if spendFits then (if hasFreeSlot then ttlLive else false) else false)
+    else false
+  let canActivate :=
+    if r.opKind == 1 then
+      (if stateValid then (if hasReserved then ttlLive else false) else false)
+    else false
+  let canRelease :=
+    if r.opKind == 2 then (if stateValid then hasActive else false) else false
+  let canReap :=
+    if r.opKind == 3 then
+      (if stateValid then (if hasReserved then ttlExpired else false) else false)
+    else false
+  canReserve || canActivate || canRelease || canReap
+
+theorem resourceLedger_admit_bit (k : UInt8) :
+    (((257 : UInt32) ||| ((k.toUInt32 &&& (0xFF : UInt32)) <<< 1)).toUInt64 &&& 256) = 256 := by
+  apply UInt64.toBitVec_inj.mp
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [UInt64.toBitVec_and, UInt32.toBitVec_toUInt64, UInt32.toBitVec_or,
+    BitVec.getLsbD_and, BitVec.getLsbD_or, BitVec.getLsbD_setWidth]
+  by_cases hi8 : i = 8
+  · subst hi8
+    have h1 : (257 : UInt32).toBitVec.getLsbD 8 = true := by decide
+    have h2 : (256 : UInt64).toBitVec.getLsbD 8 = true := by decide
+    simp [h1, h2]
+  · have h2 : (256 : UInt64).toBitVec.getLsbD i = false := by
+      have hiff : ((256 : UInt64).toBitVec.getLsbD i = true) ↔ i = 8 := by
+        revert hi8 hi i; decide
+      cases hg : (256 : UInt64).toBitVec.getLsbD i
+      · rfl
+      · exfalso; exact hi8 (hiff.mp hg)
+    rw [h2]
+    simp
+
+theorem resourceLedger_admit_eq (r : ResourceLedgerCheck) :
+    (((resourceLedgerStep r.opKind r.reservedSlots r.activeSlots r.maxSlots
+        r.spentCents r.costDeltaCents r.budgetCents r.nowTick r.ttlExpiryTick
+      &&& 0xFFFFFFFF) &&& 256) != 0) = r.Admissible := by
+  unfold ResourceLedgerCheck.Admissible resourceLedgerStep
+  rw [pack32_lo]
+  dsimp only [GT.gt, GE.ge]
+  have h_bit := resourceLedger_admit_bit r.opKind
+  cases haf : decide (r.activeSlots ≤ r.maxSlots)
+  · simp only [haf, Bool.false_eq_true, ite_false, ite_true, Bool.not_false,
+      ite_self, Bool.or_false]
+    decide
+  · simp only [haf, ite_true]
+    cases hrf : decide (r.reservedSlots ≤ r.maxSlots - r.activeSlots)
+    · simp only [hrf, Bool.false_eq_true, ite_false, ite_true, Bool.not_false,
+        ite_self, Bool.or_false]
+      decide
+    · simp only [hrf, ite_true]
+      cases hbv : decide (r.spentCents ≤ r.budgetCents)
+      · simp only [hbv, Bool.false_eq_true, ite_false, ite_true, Bool.not_false,
+          ite_self, Bool.or_false]
+        decide
+      · simp only [hbv, ite_true]
+        cases hsp : decide (r.costDeltaCents ≤ r.budgetCents - r.spentCents) <;>
+          cases hfs : decide (r.reservedSlots < r.maxSlots - r.activeSlots) <;>
+          cases hrr : decide (0 < r.reservedSlots) <;>
+          cases hra : decide (0 < r.activeSlots) <;>
+          cases htl : decide (r.nowTick < r.ttlExpiryTick) <;>
+          cases hte : decide (r.ttlExpiryTick ≤ r.nowTick) <;>
+          cases hop : (r.opKind == 0) <;>
+          cases hop1 : (r.opKind == 1) <;>
+          cases hop2 : (r.opKind == 2) <;>
+          cases hop3 : (r.opKind == 3) <;>
+          (simp only [hsp, hfs, hrr, hra, htl, hte, hop, hop1, hop2, hop3, h_bit,
+            Bool.true_and, Bool.false_and, Bool.and_true, Bool.and_false,
+            Bool.not_true, Bool.not_false, Bool.true_or, Bool.false_or,
+            Bool.or_true, Bool.or_false, Bool.false_eq_true, ite_true, ite_false];
+           decide)
+
+def resourceLedgerMetaGate : MetaGateSpec ResourceLedgerCheck
+    (fun r => r.Admissible = true) where
+  gate r :=
+    ((resourceLedgerStep r.opKind r.reservedSlots r.activeSlots r.maxSlots
+        r.spentCents r.costDeltaCents r.budgetCents r.nowTick r.ttlExpiryTick
+      &&& 0xFFFFFFFF) &&& 256) != 0
+  sound r hg := by rw [← resourceLedger_admit_eq r]; exact hg
+  complete r hadm := by rw [resourceLedger_admit_eq r]; exact hadm
+  posWitness := ⟨0, 0, 0, 2, 10, 5, 100, 10, 20⟩
+  negWitness := ⟨0, 0, 0, 2, 10, 200, 100, 10, 20⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure ResourceLedgerState where
+  reserved    : UInt32
+  active      : UInt32
+  spentCents  : UInt64
+  reapedCount : UInt32
+  deriving Repr, DecidableEq
+
+def resourceLedgerMachineStep (s : ResourceLedgerState) (r : ResourceLedgerCheck) :
+    ResourceLedgerState × List UInt32 :=
+  let r' := { r with reservedSlots := s.reserved, activeSlots := s.active }
+  let admit := resourceLedgerMetaGate.gate r'
+  let nextReserved :=
+    if admit && r'.opKind == 0 then s.reserved + 1
+    else if admit && (r'.opKind == 1 || r'.opKind == 3) then s.reserved - 1
+    else s.reserved
+  let nextActive :=
+    if admit && r'.opKind == 1 then s.active + 1
+    else if admit && r'.opKind == 2 then s.active - 1
+    else s.active
+  let nextSpent :=
+    if admit && r'.opKind == 0 then s.spentCents + r'.costDeltaCents else s.spentCents
+  let nextReaped :=
+    if admit && r'.opKind == 3 then s.reapedCount + 1 else s.reapedCount
+  (⟨nextReserved, nextActive, nextSpent, nextReaped⟩,
+   if admit then [r'.opKind.toUInt32] else [])
+
+def resourceLedgerMetaStepSpec :
+    MetaStepSpec ResourceLedgerState ResourceLedgerCheck UInt32 where
+  safety := {
+    step := resourceLedgerMachineStep
+    authorized := fun s r eff =>
+      eff == r.opKind.toUInt32 &&
+      ({ r with reservedSlots := s.reserved, activeSlots := s.active } :
+        ResourceLedgerCheck).Admissible
+    sound := fun s r eff h_in => by
+      dsimp [resourceLedgerMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := resourceLedgerMetaGate.sound
+          ({ r with reservedSlots := s.reserved, activeSlots := s.active } :
+            ResourceLedgerCheck) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0, 0⟩
+    step := resourceLedgerMachineStep
+    progressRequired := fun s r =>
+      ({ r with reservedSlots := s.reserved, activeSlots := s.active } :
+        ResourceLedgerCheck).Admissible
+    expectedEffect := fun r eff => eff == r.opKind.toUInt32
+    live := fun s r h_req => by
+      have h_gate := resourceLedgerMetaGate.complete
+        ({ r with reservedSlots := s.reserved, activeSlots := s.active } :
+          ResourceLedgerCheck) h_req
+      dsimp [resourceLedgerMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0, 0, 0, 2, 0, 5, 100, 10, 20⟩]
+    posEvent := ⟨0, 0, 0, 2, 0, 5, 100, 10, 20⟩
+    negEvent := ⟨0, 0, 0, 2, 0, 5, 100, 30, 20⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := resourceLedgerMachineStep
+    cpuFuel := fun s r => 17 + ((resourceLedgerMachineStep s r).2).length
+    inputBytes := fun _ => 57
+    outputBytes := fun s r => 24 + 4 * ((resourceLedgerMachineStep s r).2).length
+    c0 := 18
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 28
+    fuel_bound := fun s r => by
+      dsimp [resourceLedgerMachineStep]
+      split <;> simp
+    eff_bound := fun s r => by
+      dsimp [resourceLedgerMachineStep]
+      split <;> simp
+    out_bound := fun s r => by
+      dsimp [resourceLedgerMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Reservation, activation, release and TTL-reap conserve slots and never overspend
+    (`G-ORB-3`). Concrete four-operation sequence ends with one active slot, zero reserved,
+    exactly one charged reservation, and one expired reservation reaped. -/
+theorem resource_ledger_conservation_and_ttl_reap :
+    let r0 : ResourceLedgerCheck := ⟨0, 0, 0, 2, 0, 5, 100, 10, 20⟩
+    let s1 := (resourceLedgerMachineStep ⟨0, 0, 0, 0⟩ r0).1
+    let r1 : ResourceLedgerCheck := ⟨1, 0, 0, 2, 0, 0, 100, 11, 20⟩
+    let s2 := (resourceLedgerMachineStep s1 r1).1
+    let r2 : ResourceLedgerCheck := ⟨2, 0, 0, 2, 0, 0, 100, 12, 20⟩
+    let s3 := (resourceLedgerMachineStep s2 r2).1
+    let r3 : ResourceLedgerCheck := ⟨0, 0, 0, 2, 0, 7, 100, 13, 20⟩
+    let s4 := (resourceLedgerMachineStep s3 r3).1
+    let r4 : ResourceLedgerCheck := ⟨3, 0, 0, 2, 0, 0, 100, 25, 20⟩
+    let s5 := (resourceLedgerMachineStep s4 r4).1
+    s1.reserved = 1 ∧ s1.active = 0 ∧ s1.spentCents = 5 ∧
+    s2.reserved = 0 ∧ s2.active = 1 ∧ s2.spentCents = 5 ∧
+    s3.reserved = 0 ∧ s3.active = 0 ∧ s3.spentCents = 5 ∧
+    s4.reserved = 1 ∧ s4.spentCents = 12 ∧
+    s5.reserved = 0 ∧ s5.active = 0 ∧ s5.spentCents = 12 ∧ s5.reapedCount = 1 ∧
+    s5.reserved + s5.active ≤ 2 ∧ s5.spentCents ≤ 100 := by
+  decide
+
+/-- A reservation that would exceed the remaining budget is rejected without changing
+    the durable ledger or charging any cents. -/
+theorem resource_ledger_overspend_rejected_without_wrap :
+    ((resourceLedgerStep 0 0 0 1 95 10 100 1 2 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (resourceLedgerMachineStep ⟨0, 0, 95, 0⟩
+      ⟨0, 0, 0, 1, 95, 10, 100, 1, 2⟩).1 = ⟨0, 0, 95, 0⟩ := by
+  decide
+
+-- ---------------------------------------------------------------------------
+-- Family 7 (`G-ORB-6`): Bounded-Tail Checkpointed Stream Commit
+-- ---------------------------------------------------------------------------
+
+structure StreamBoundedCommitCheck where
+  prevLen          : UInt32
+  prevCommit       : UInt32
+  prevCheckpoint   : UInt32
+  newLen           : UInt32
+  rawCommit        : UInt32
+  maxOpenTailBytes : UInt32
+  deriving Repr, DecidableEq
+
+def StreamBoundedCommitCheck.Admissible (c : StreamBoundedCommitCheck) : Bool :=
+  decide (0 < c.maxOpenTailBytes) &&
+  decide (c.prevCommit ≤ c.prevCheckpoint) &&
+  decide (c.prevCheckpoint ≤ c.prevLen) &&
+  decide (c.prevLen ≤ c.newLen)
+
+theorem streamBoundedCommit_admit_eq (c : StreamBoundedCommitCheck) :
+    (((streamBoundedCommitStep c.prevLen c.prevCommit c.prevCheckpoint
+        c.newLen c.rawCommit c.maxOpenTailBytes &&& 0xFFFFFFFF) &&& 256) != 0)
+      = c.Admissible := by
+  unfold StreamBoundedCommitCheck.Admissible streamBoundedCommitStep
+  rw [pack32_lo]
+  dsimp only [GT.gt]
+  let clampedRaw := if c.rawCommit ≤ c.newLen then c.rawCommit else c.newLen
+  let nextCommit := if c.prevCommit ≤ clampedRaw then clampedRaw else c.prevCommit
+  let baseCheckpoint := if c.prevCheckpoint ≤ nextCommit then nextCommit else c.prevCheckpoint
+  let capFloor := if c.maxOpenTailBytes ≤ c.newLen then c.newLen - c.maxOpenTailBytes else 0
+  let nextCheckpoint := if baseCheckpoint ≤ capFloor then capFloor else baseCheckpoint
+  have hfold :
+      (if nextCommit < nextCheckpoint then (512 : UInt32) else 0) =
+      (if decide (nextCommit < nextCheckpoint) = true then (512 : UInt32) else 0) := by
+    by_cases hlt : nextCommit < nextCheckpoint <;> simp [hlt]
+  change
+    ((if (!(decide (0 < c.maxOpenTailBytes) &&
+            (decide (c.prevCommit ≤ c.prevCheckpoint) &&
+              decide (c.prevCheckpoint ≤ c.prevLen) &&
+              decide (c.prevLen ≤ c.newLen)))) = true then
+        (0 : UInt32)
+      else 257 ||| (if nextCommit < nextCheckpoint then 512 else 0)).toUInt64 &&& 256 != 0)
+    = (decide (0 < c.maxOpenTailBytes) &&
+        decide (c.prevCommit ≤ c.prevCheckpoint) &&
+        decide (c.prevCheckpoint ≤ c.prevLen) &&
+        decide (c.prevLen ≤ c.newLen))
+  rw [hfold]
+  cases hcap : decide (0 < c.maxOpenTailBytes) <;>
+    cases hm1 : decide (c.prevCommit ≤ c.prevCheckpoint) <;>
+    cases hm2 : decide (c.prevCheckpoint ≤ c.prevLen) <;>
+    cases hm3 : decide (c.prevLen ≤ c.newLen) <;>
+    cases hcf : decide (nextCommit < nextCheckpoint) <;>
+    (simp only [hcap, hm1, hm2, hm3, hcf, Bool.true_and, Bool.false_and, Bool.and_true,
+      Bool.and_false, Bool.not_true, Bool.not_false, Bool.false_eq_true,
+      ite_true, ite_false]; decide)
+
+def streamBoundedCommitMetaGate : MetaGateSpec StreamBoundedCommitCheck
+    (fun c => c.Admissible = true) where
+  gate c :=
+    ((streamBoundedCommitStep c.prevLen c.prevCommit c.prevCheckpoint
+        c.newLen c.rawCommit c.maxOpenTailBytes &&& 0xFFFFFFFF) &&& 256) != 0
+  sound c hg := by rw [← streamBoundedCommit_admit_eq c]; exact hg
+  complete c hadm := by rw [streamBoundedCommit_admit_eq c]; exact hadm
+  posWitness := ⟨0, 0, 0, 10, 8, 4⟩
+  negWitness := ⟨0, 0, 0, 10, 8, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+structure StreamCommitState where
+  len        : UInt32
+  commit     : UInt32
+  checkpoint : UInt32
+  deriving Repr, DecidableEq
+
+def effectiveStreamCommit (s : StreamCommitState) (c : StreamBoundedCommitCheck) :
+    StreamBoundedCommitCheck :=
+  { c with prevLen := s.len, prevCommit := s.commit, prevCheckpoint := s.checkpoint }
+
+def streamBoundedCommitMachineStep (s : StreamCommitState)
+    (c : StreamBoundedCommitCheck) : StreamCommitState × List UInt32 :=
+  let c' := effectiveStreamCommit s c
+  let w := streamBoundedCommitStep c'.prevLen c'.prevCommit c'.prevCheckpoint
+    c'.newLen c'.rawCommit c'.maxOpenTailBytes
+  let admit := streamBoundedCommitMetaGate.gate c'
+  let clampedRaw := if c.rawCommit ≤ c.newLen then c.rawCommit else c.newLen
+  let nextCommit := if s.commit ≤ clampedRaw then clampedRaw else s.commit
+  let nextCheckpoint := if admit then (w >>> 32).toUInt32 else s.checkpoint
+  (⟨if admit then c.newLen else s.len,
+    if admit then nextCommit else s.commit, nextCheckpoint⟩,
+   if admit then [c.newLen] else [])
+
+def streamBoundedCommitMetaStepSpec :
+    MetaStepSpec StreamCommitState StreamBoundedCommitCheck UInt32 where
+  safety := {
+    step := streamBoundedCommitMachineStep
+    authorized := fun s c eff =>
+      eff == c.newLen && (effectiveStreamCommit s c).Admissible
+    sound := fun s c eff h_in => by
+      dsimp [streamBoundedCommitMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := streamBoundedCommitMetaGate.sound (effectiveStreamCommit s c) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨0, 0, 0⟩
+    step := streamBoundedCommitMachineStep
+    progressRequired := fun s c => (effectiveStreamCommit s c).Admissible
+    expectedEffect := fun c eff => eff == c.newLen
+    live := fun s c h_req => by
+      have h_gate := streamBoundedCommitMetaGate.complete (effectiveStreamCommit s c) h_req
+      dsimp [streamBoundedCommitMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨0, 0, 0, 8, 6, 4⟩]
+    posEvent := ⟨8, 6, 6, 12, 10, 4⟩
+    negEvent := ⟨8, 6, 6, 12, 10, 0⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := streamBoundedCommitMachineStep
+    cpuFuel := fun s c => 15 + ((streamBoundedCommitMachineStep s c).2).length
+    inputBytes := fun _ => 24
+    outputBytes := fun s c => 12 + 4 * ((streamBoundedCommitMachineStep s c).2).length
+    c0 := 16
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 16
+    fuel_bound := fun s c => by
+      dsimp [streamBoundedCommitMachineStep]
+      split <;> simp
+    eff_bound := fun s c => by
+      dsimp [streamBoundedCommitMachineStep]
+      split <;> simp
+    out_bound := fun s c => by
+      dsimp [streamBoundedCommitMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Multi-chunk checkpointed scanner conservation (`G-ORB-6`): commits are monotone,
+    checkpoint is never behind commit, and the unparsed tail never exceeds the configured
+    cap even when the raw parser stalls at an unclosed fence. -/
+theorem stream_bounded_commit_multichunk_conservation :
+    let s0 : StreamCommitState := ⟨0, 0, 0⟩
+    let s1 := (streamBoundedCommitMachineStep s0 ⟨0, 0, 0, 20, 5, 8⟩).1
+    let s2 := (streamBoundedCommitMachineStep s1 ⟨0, 0, 0, 40, 5, 8⟩).1
+    let s3 := (streamBoundedCommitMachineStep s2 ⟨0, 0, 0, 41, 45, 8⟩).1
+    s1.len = 20 ∧ s1.commit = 5 ∧ s1.checkpoint = 12 ∧
+    s2.len = 40 ∧ s2.commit = 5 ∧ s2.checkpoint = 32 ∧
+    s3.len = 41 ∧ s3.commit = 41 ∧ s3.checkpoint = 41 ∧
+    s1.checkpoint ≥ s1.commit ∧ s2.checkpoint ≥ s2.commit ∧
+    s3.checkpoint ≥ s3.commit ∧
+    s1.len - s1.checkpoint ≤ 8 ∧ s2.len - s2.checkpoint ≤ 8 ∧
+    s3.len - s3.checkpoint ≤ 8 := by
+  decide
+
+/-- Invalid monotonicity or a zero cap fails closed without moving the checkpoint. -/
+theorem stream_bounded_commit_invalid_state_preserves_checkpoint :
+    ((streamBoundedCommitStep 10 9 8 11 10 4 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (streamBoundedCommitStep 10 9 8 11 10 4 >>> 32).toUInt32 = 8 ∧
+    ((streamBoundedCommitStep 0 0 0 10 8 0 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
+    (streamBoundedCommitStep 0 0 0 10 8 0 >>> 32).toUInt32 = 0 := by
+  decide
 end Orb.Spec

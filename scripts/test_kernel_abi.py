@@ -46,6 +46,9 @@ class Manifest(unittest.TestCase):
         self.assertEqual([p["name"] for p in visa["params"]],
                          ["detectedHwCaps", "requiredMask", "selectedVariantId", "maxVariantId"])
         self.assertEqual(visa["jni"], {"method": "leansysVerifyIsaSelection", "ret": "jint"})
+        fdb = fn(data, "leansys_verify_fd_bounds")
+        self.assertEqual([p["name"] for p in fdb["params"]], ["rawWord", "fdOut"])
+        self.assertEqual(fdb["jni"], {"method": "leansysVerifyFdBounds", "ret": "jint"})
 
     def test_manifest_matches_cabi_exports(self):
         src = (ROOT / "shared/orb-spec/cabi/orb_kernel_unboxed.c").read_text()
