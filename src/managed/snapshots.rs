@@ -631,6 +631,15 @@ impl ManagedManager {
         id: &str,
         ttl_minutes: Option<u64>,
     ) -> Result<ManagedMachine, ManagedError> {
+        self.resume_with_lineage(id, ttl_minutes, &[]).await
+    }
+
+    pub async fn resume_with_lineage(
+        self: &std::sync::Arc<Self>,
+        id: &str,
+        ttl_minutes: Option<u64>,
+        cap_lineage: &[String],
+    ) -> Result<ManagedMachine, ManagedError> {
         let m = self
             .get(id)
             .await
@@ -675,16 +684,20 @@ impl ManagedManager {
             .clamp(5, self.settings.max_ttl_minutes.max(5));
         let machine = {
             let _guard = self.admission.lock().await;
-            let b = self.budget().await;
-            if let Some(max) = self.settings.max_concurrent {
-                if b.active >= max {
-                    return Err(ManagedError::new(
-                        "quota_exceeded",
-                        429,
-                        format!("{} managed machines are running (max {max})", b.active),
-                    ));
-                }
-            }
+            let live_snapshot = self.machines.lock().await.clone();
+            let cap_pool_id = self
+                .check_concurrency_quota(
+                    &live_snapshot,
+                    &m.provider,
+                    cap_lineage,
+                    m.cap_pool_id.as_deref(),
+                    m.owner_mission_id
+                        .as_deref()
+                        .or(m.requested_by_mission_id.as_deref()),
+                    m.owner_user_id.as_deref(),
+                )
+                .await?;
+            let b = self.budget_view(&live_snapshot);
             let new_cost = ttl as f64 / 60.0 * m.usd_per_hour;
             if let Some(cap) = self
                 .settings
@@ -705,10 +718,7 @@ impl ManagedManager {
                 )
                 .await?;
             }
-            let live: Vec<String> = self
-                .machines
-                .lock()
-                .await
+            let live: Vec<String> = live_snapshot
                 .iter()
                 .filter(|x| x.id != m.id && (x.state.is_live() || x.state == MachineState::Stopped))
                 .map(|x| x.name.clone())
@@ -724,6 +734,7 @@ impl ManagedManager {
                 .update(&m.id, |x| {
                     x.name = name;
                     x.state = MachineState::Provisioning;
+                    x.cap_pool_id = cap_pool_id;
                     x.fork_source_provider_id = Some(pid.clone());
                     x.provider_id = None;
                     x.resumes += 1;

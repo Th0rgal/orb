@@ -3875,6 +3875,57 @@
         }
       ],
       "internal": true
+    },
+    {
+      "name": "orb_vm_cap_admit",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "hasPoolOverride",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasPoolMax",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasProviderMax",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasGlobalMax",
+          "type": "uint8_t"
+        },
+        {
+          "name": "ancestorBlocked",
+          "type": "uint8_t"
+        },
+        {
+          "name": "sharedActive",
+          "type": "uint32_t"
+        },
+        {
+          "name": "globalMax",
+          "type": "uint32_t"
+        },
+        {
+          "name": "poolActive",
+          "type": "uint32_t"
+        },
+        {
+          "name": "poolMax",
+          "type": "uint32_t"
+        },
+        {
+          "name": "providerActive",
+          "type": "uint32_t"
+        },
+        {
+          "name": "providerMax",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true
     }
   ]
 }

@@ -643,8 +643,8 @@ async fn authorize(
             managed_owner_check(&store, own, &id).await?;
             args["owner_mission_id"] = json!(own.to_string());
         }
-        // A mission reads its own budget only.
-        "get_budget" => {
+        // A mission reads its own budget and effective VM limits only.
+        "get_budget" | "list_managed_machines" => {
             args["mission_id"] = json!(own.to_string());
         }
         "destroy_managed_machine" | "extend_managed_machine" => {

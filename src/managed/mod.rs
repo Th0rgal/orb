@@ -676,6 +676,10 @@ pub struct ManagedMachine {
     /// when no pool applies (only the daily cap).
     #[serde(default)]
     pub budget_pool_id: Option<String>,
+    /// Mission concurrency-override pool this machine occupies a slot in;
+    /// `None` when counted against the shared global concurrency pool.
+    #[serde(default)]
+    pub cap_pool_id: Option<String>,
     /// Automatic TTL extensions granted while the node was busy.
     #[serde(default)]
     pub auto_extensions: u32,
@@ -808,6 +812,10 @@ pub struct SpawnRequest {
     /// caller's mission lineage; never from the body.
     #[serde(skip)]
     pub budget_pool_id: Option<String>,
+    /// Mission lineage (target mission first, then ancestors) used to resolve
+    /// per-mission `vm_limits` concurrency overrides; never from the body.
+    #[serde(skip)]
+    pub cap_lineage: Vec<String>,
     /// The machine is for a child that will get this sub-budget: the
     /// reservation must fit it (and the pool it is carved from).
     #[serde(default)]
@@ -1300,6 +1308,9 @@ pub struct BudgetView {
     /// `null` = unlimited.
     pub daily_cap_usd: Option<f64>,
     pub active: usize,
+    /// Live machines counted against the shared global concurrency pool
+    /// (`cap_pool_id == None`).
+    pub shared_active: usize,
     /// `null` = unlimited.
     pub max_concurrent: Option<usize>,
     pub default_ttl_minutes: u64,
@@ -2358,6 +2369,7 @@ impl ManagedManager {
             "owner_mission_id": machine.owner_mission_id,
             "reason": machine.destroy_reason.as_ref().or(machine.reason.as_ref()),
             "budget_pool_id": machine.budget_pool_id,
+            "cap_pool_id": machine.cap_pool_id,
         });
         if let (Some(line), Some(extra)) = (line.as_object_mut(), extra.as_object()) {
             for (k, v) in extra {
@@ -2455,6 +2467,10 @@ impl ManagedManager {
                 .sum::<f64>(),
             daily_cap_usd: self.settings.daily_cap_usd,
             active: machines.iter().filter(|m| m.state.is_live()).count(),
+            shared_active: machines
+                .iter()
+                .filter(|m| m.state.is_live() && m.cap_pool_id.is_none())
+                .count(),
             max_concurrent: self.settings.max_concurrent,
             default_ttl_minutes: self.settings.default_ttl_minutes,
             max_ttl_minutes: self.settings.max_ttl_minutes,
@@ -3012,19 +3028,20 @@ impl ManagedManager {
 
         let machine = {
             let _guard = self.admission.lock().await;
-            let budget = self.budget().await;
-            if let Some(max) = self.settings.max_concurrent {
-                if budget.active >= max {
-                    return Err(ManagedError::new(
-                        "quota_exceeded",
-                        429,
-                        format!(
-                            "{} managed machines are running (max {max}); destroy one first",
-                            budget.active
-                        ),
-                    ));
-                }
-            }
+            let live_snapshot = self.machines.lock().await.clone();
+            let cap_pool_id = self
+                .check_concurrency_quota(
+                    &live_snapshot,
+                    provider.name(),
+                    &req.cap_lineage,
+                    None,
+                    req.owner_mission_id
+                        .as_deref()
+                        .or(req.requested_by_mission_id.as_deref()),
+                    req.owner_user_id.as_deref(),
+                )
+                .await?;
+            let budget = self.budget_view(&live_snapshot);
             let new_cost = committed_minutes as f64 / 60.0 * effective_usd_per_hour;
             if let Some(cap) = self
                 .settings
@@ -3043,12 +3060,6 @@ impl ManagedManager {
                     ),
                 ));
             }
-            let active_count_u32 = budget.active.min(u32::MAX as usize) as u32;
-            let max_conc_u32 = self
-                .settings
-                .max_concurrent
-                .map(|m| m.min(u32::MAX as usize) as u32)
-                .unwrap_or(active_count_u32.saturating_add(1));
             let spent_plus_new_cents =
                 ((budget.spent_today_usd + budget.committed_usd + new_cost) * 100.0).ceil() as u64;
             let daily_cap_cents = self
@@ -3056,12 +3067,15 @@ impl ManagedManager {
                 .daily_cap_usd
                 .map(|c| (c * 100.0).floor() as u64)
                 .unwrap_or(spent_plus_new_cents.saturating_add(1));
+            // Concurrency admission was already checked via `orb_vm_cap_admit`
+            // in `check_concurrency_quota`, so pass `(0, 1)` slots here to keep
+            // daily dollar budget and TTL gates independent of overridden pools.
             if !crate::orb_spec::vm_spawn_admit(crate::orb_spec::VmSpawnInput {
                 size_rank: 0,
                 max_size_rank: 0,
                 secret_projected: false,
-                active_count: active_count_u32,
-                max_concurrent: max_conc_u32,
+                active_count: 0,
+                max_concurrent: 1,
                 ttl_minutes: ttl_minutes as u32,
                 max_ttl_minutes: self.settings.max_ttl_minutes.max(5) as u32,
                 job_mem_pct: 90,
@@ -3083,8 +3097,8 @@ impl ManagedManager {
             let ledger_verdict = evaluate_resource_ledger_gate(
                 crate::orb_spec::ResourceLedgerOp::Reserve,
                 0,
-                active_count_u32,
-                max_conc_u32,
+                0,
+                1,
                 spent_before_cents,
                 cost_delta_cents,
                 ledger_cap_cents,
@@ -3123,10 +3137,7 @@ impl ManagedManager {
             }
             let id = format!("mm{}", random_id());
             let now = Utc::now();
-            let live_names: Vec<String> = self
-                .machines
-                .lock()
-                .await
+            let live_names: Vec<String> = live_snapshot
                 .iter()
                 .filter(|m| m.state.is_live() || m.state == MachineState::Stopped)
                 .map(|m| m.name.clone())
@@ -3176,6 +3187,7 @@ impl ManagedManager {
                 ledger_closed: false,
                 last_busy_at: None,
                 budget_pool_id: req.budget_pool_id.clone(),
+                cap_pool_id,
                 auto_extensions: 0,
                 stopped_at: None,
                 stopped_by_reaper: false,
@@ -4378,7 +4390,30 @@ impl ManagedManager {
 
 // ------------------------------------------------------------------ budgets
 
-/// A mission's budget as the API returns it.
+/// Per-provider live usage against an active mission concurrency override.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderCapUsageView {
+    pub provider: String,
+    pub active: usize,
+    pub max_concurrent: usize,
+}
+
+/// Resolved concurrency limits governing a mission (either its own/ancestor
+/// override pool or the global default).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EffectiveVmLimitsView {
+    /// `"mission"` when an override pool governs this mission, else `"global"`.
+    pub source: &'static str,
+    pub pool_id: Option<String>,
+    pub active: usize,
+    pub max_concurrent: Option<usize>,
+    pub global_active: usize,
+    pub global_max_concurrent: Option<usize>,
+    pub ancestor_max_concurrent: Option<usize>,
+    pub provider_limits: Vec<ProviderCapUsageView>,
+}
+
+/// A mission's budget and VM concurrency limits as the API returns them.
 #[derive(Debug, Clone, Serialize)]
 pub struct MissionBudgetView {
     pub mission_id: String,
@@ -4392,6 +4427,13 @@ pub struct MissionBudgetView {
     /// Most this mission's own budget may be set to (the parent pool's
     /// remaining plus what this mission already holds); `None` = no limit.
     pub max_grant_usd: Option<f64>,
+    /// Operator-configured concurrency override on this mission itself.
+    pub own_vm_limits: Option<budget::VmConcurrencyLimits>,
+    /// `"own"`, `"pooled"` (from an ancestor), or `"global"` (no override).
+    pub vm_limits_mode: &'static str,
+    /// Nearest pool in lineage with `vm_limits` (self, ancestor, or none).
+    pub vm_limits_pool_id: Option<String>,
+    pub effective_vm_limits: EffectiveVmLimitsView,
     pub children: Vec<ChildBudgetView>,
 }
 
@@ -4403,6 +4445,9 @@ pub struct ChildBudgetView {
     pub budget_usd: Option<f64>,
     pub spent_usd: f64,
     pub reserved_usd: f64,
+    pub has_vm_limits: bool,
+    pub vm_max_concurrent: Option<usize>,
+    pub live_machines: usize,
 }
 
 /// What a new child asks for when an ended sibling's idle VM may serve it.
@@ -4419,6 +4464,194 @@ pub struct SiblingReuse<'a> {
 }
 
 impl ManagedManager {
+    /// Resolve the cap lineage when the caller did not supply an explicit
+    /// `MissionStore` chain (e.g. background auto-resume or direct manager tests).
+    fn fallback_cap_lineage(
+        pools: &HashMap<String, budget::BudgetPool>,
+        existing_cap_pool_id: Option<&str>,
+        owner_mission_id: Option<&str>,
+    ) -> Vec<String> {
+        let mut chain = Vec::new();
+        if let Some(m) = owner_mission_id {
+            chain.push(m.to_string());
+        }
+        let mut cur = existing_cap_pool_id.or(owner_mission_id);
+        for _ in 0..32 {
+            let Some(id) = cur else { break };
+            if !chain.iter().any(|x| x == id) {
+                chain.push(id.to_string());
+            }
+            cur = pools.get(id).and_then(|p| p.parent_cap_pool_id.as_deref());
+        }
+        chain
+    }
+
+    fn resolve_covering_cap_pool(
+        pools: &HashMap<String, budget::BudgetPool>,
+        chain: &[String],
+        provider: &str,
+        user_id: Option<&str>,
+    ) -> Option<String> {
+        if let Some(u) = user_id {
+            budget::nearest_cap_pool_for_provider(
+                chain.iter().map(String::as_str),
+                pools,
+                u,
+                provider,
+            )
+        } else {
+            chain
+                .iter()
+                .find(|id| {
+                    pools.get(id.as_str()).is_some_and(|p| {
+                        p.owner_user_id.is_none()
+                            && p.vm_limits.as_ref().is_some_and(|l| l.covers(provider))
+                    })
+                })
+                .cloned()
+        }
+    }
+
+    /// Unified concurrency quota gate across `spawn`, `resume`, and sibling
+    /// pool transfers. Must be called under `self.admission` lock.
+    ///
+    /// Returns `Ok(Some(pool_id))` when an override pool covers `provider`,
+    /// `Ok(None)` when the shared global pool admitted the machine, or `Err`
+    /// (`429 quota_exceeded`) when blocked.
+    pub(crate) async fn check_concurrency_quota(
+        &self,
+        machines: &[ManagedMachine],
+        provider: &str,
+        cap_lineage: &[String],
+        existing_cap_pool_id: Option<&str>,
+        owner_mission_id: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<Option<String>, ManagedError> {
+        let pools = self.budgets.lock().await.clone();
+        let chain = if !cap_lineage.is_empty() {
+            cap_lineage.to_vec()
+        } else {
+            Self::fallback_cap_lineage(&pools, existing_cap_pool_id, owner_mission_id)
+        };
+        let covering = Self::resolve_covering_cap_pool(&pools, &chain, provider, user_id);
+        let shared_active = machines
+            .iter()
+            .filter(|m| m.state.is_live() && m.cap_pool_id.is_none())
+            .count();
+        let shared_active_u32 = shared_active.min(u32::MAX as usize) as u32;
+        let has_global_max = self.settings.max_concurrent.is_some();
+        let global_max = self
+            .settings
+            .max_concurrent
+            .unwrap_or(0)
+            .min(u32::MAX as usize) as u32;
+
+        if let Some(pool_id) = covering {
+            let lim = pools
+                .get(&pool_id)
+                .and_then(|p| p.vm_limits.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let (pool_active_usize, prov_active_usize) =
+                budget::cap_pool_counts(&pool_id, provider, &pools, machines);
+            let prov_cap = lim.provider_max_concurrent.get(provider).copied();
+
+            let mut blocked_ancestor_msg: Option<String> = None;
+            for anc_id in budget::ancestor_cap_chain(&pool_id, &chain, &pools, user_id) {
+                if blocked_ancestor_msg.is_some() {
+                    break;
+                }
+                let Some(anc_lim) = pools.get(&anc_id).and_then(|p| p.vm_limits.as_ref()) else {
+                    continue;
+                };
+                let (anc_total, anc_prov) =
+                    budget::cap_pool_counts(&anc_id, provider, &pools, machines);
+                if let Some(&anc_p_max) = anc_lim.provider_max_concurrent.get(provider) {
+                    if anc_prov >= anc_p_max {
+                        blocked_ancestor_msg = Some(if anc_p_max == 0 {
+                            format!(
+                                "Provider '{provider}' is disabled by ancestor mission concurrency limit on pool {anc_id}"
+                            )
+                        } else {
+                            format!(
+                                "{anc_prov} '{provider}' managed machines are running in ancestor pool {anc_id} (provider max {anc_p_max}); destroy one first"
+                            )
+                        });
+                        break;
+                    }
+                }
+                if let Some(anc_max) = anc_lim.max_concurrent {
+                    if anc_total >= anc_max {
+                        blocked_ancestor_msg = Some(format!(
+                            "{anc_total} managed machines are running in ancestor pool {anc_id} (mission max {anc_max}); destroy one first"
+                        ));
+                        break;
+                    }
+                }
+            }
+
+            let admitted = crate::orb_spec::vm_cap_admit(crate::orb_spec::VmCapInput {
+                has_pool_override: true,
+                has_pool_max: lim.max_concurrent.is_some(),
+                has_provider_max: prov_cap.is_some(),
+                has_global_max,
+                ancestor_blocked: blocked_ancestor_msg.is_some(),
+                shared_active: shared_active_u32,
+                global_max,
+                pool_active: pool_active_usize.min(u32::MAX as usize) as u32,
+                pool_max: lim.max_concurrent.unwrap_or(0).min(u32::MAX as usize) as u32,
+                provider_active: prov_active_usize.min(u32::MAX as usize) as u32,
+                provider_max: prov_cap.unwrap_or(0).min(u32::MAX as usize) as u32,
+            });
+            if !admitted {
+                let msg = if prov_cap == Some(0) {
+                    format!(
+                        "Provider '{provider}' is disabled by mission concurrency limit on pool {pool_id} (0 allowed)"
+                    )
+                } else if let Some(p_max) = prov_cap.filter(|&m| prov_active_usize >= m) {
+                    format!(
+                        "{prov_active_usize} '{provider}' managed machines are running in mission pool {pool_id} (provider max {p_max}); destroy one first"
+                    )
+                } else if let Some(t_max) = lim.max_concurrent.filter(|&m| pool_active_usize >= m) {
+                    format!(
+                        "{pool_active_usize} managed machines are running in mission pool {pool_id} (mission max {t_max}); destroy one first"
+                    )
+                } else {
+                    blocked_ancestor_msg.unwrap_or_else(|| {
+                        "Managed machine spawn rejected by mission concurrency cap".to_string()
+                    })
+                };
+                return Err(ManagedError::new("quota_exceeded", 429, msg));
+            }
+            Ok(Some(pool_id))
+        } else {
+            let admitted = crate::orb_spec::vm_cap_admit(crate::orb_spec::VmCapInput {
+                has_pool_override: false,
+                has_pool_max: false,
+                has_provider_max: false,
+                has_global_max,
+                ancestor_blocked: false,
+                shared_active: shared_active_u32,
+                global_max,
+                pool_active: 0,
+                pool_max: 0,
+                provider_active: 0,
+                provider_max: 0,
+            });
+            if !admitted {
+                let max = self.settings.max_concurrent.unwrap_or(0);
+                return Err(ManagedError::new(
+                    "quota_exceeded",
+                    429,
+                    format!(
+                        "{shared_active} managed machines are running (max {max}); destroy one first"
+                    ),
+                ));
+            }
+            Ok(None)
+        }
+    }
+
     async fn persist_budgets(&self) {
         let budgets = self.budgets.lock().await.clone();
         let _ = std::fs::create_dir_all(&self.dir);
@@ -4455,9 +4688,7 @@ impl ManagedManager {
 
     pub async fn pool_usage(&self, pool_id: &str) -> Option<budget::PoolUsage> {
         let pools = self.budget_pools().await;
-        if !pools.contains_key(pool_id) {
-            return None;
-        }
+        pools.get(pool_id).and_then(|p| p.budget_usd)?;
         let open = self.open_pools(&pools).await;
         let machines = self.machines.lock().await.clone();
         budget::pool_usage(pool_id, &pools, &machines, Utc::now(), &|id| {
@@ -4504,7 +4735,29 @@ impl ManagedManager {
         let _guard = self.admission.lock().await;
         match amount {
             None => {
-                self.budgets.lock().await.remove(mission_id);
+                {
+                    let mut pools = self.budgets.lock().await;
+                    let remove_entry = match pools.get_mut(mission_id) {
+                        Some(entry) if entry.vm_limits.is_some() => {
+                            entry.budget_usd = None;
+                            entry.parent_pool_id = None;
+                            entry.updated_at = Utc::now();
+                            false
+                        }
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if remove_entry {
+                        pools.remove(mission_id);
+                    }
+                    // Child pools re-attach to the parent pool.
+                    for p in pools.values_mut() {
+                        if p.parent_pool_id.as_deref() == Some(mission_id) {
+                            p.parent_pool_id =
+                                parent_pool.clone().filter(|anc| anc != &p.mission_id);
+                        }
+                    }
+                }
                 // Everything charged to the removed pool (current machines
                 // and cost recorded when machines left it) moves to the
                 // parent pool. Without a parent nothing is limited any more;
@@ -4524,12 +4777,6 @@ impl ManagedManager {
                     }
                 }
                 drop(machines);
-                // Child pools re-attach to the parent pool.
-                for p in self.budgets.lock().await.values_mut() {
-                    if p.parent_pool_id.as_deref() == Some(mission_id) {
-                        p.parent_pool_id = parent_pool.clone();
-                    }
-                }
             }
             Some(raw) => {
                 let amount = budget::validate_amount(raw)
@@ -4547,19 +4794,25 @@ impl ManagedManager {
                     }
                 }
                 let mut pools = self.budgets.lock().await;
-                let existed = pools.contains_key(mission_id);
+                let existing = pools.get(mission_id).cloned();
+                let had_budget = existing.as_ref().is_some_and(|p| p.budget_usd.is_some());
                 pools.insert(
                     mission_id.to_string(),
                     budget::BudgetPool {
                         mission_id: mission_id.to_string(),
-                        budget_usd: amount,
+                        budget_usd: Some(amount),
                         parent_pool_id: parent_pool.clone().filter(|p| p != mission_id),
-                        owner_user_id,
+                        vm_limits: existing.as_ref().and_then(|p| p.vm_limits.clone()),
+                        parent_cap_pool_id: existing
+                            .as_ref()
+                            .and_then(|p| p.parent_cap_pool_id.clone()),
+                        owner_user_id: owner_user_id
+                            .or_else(|| existing.and_then(|p| p.owner_user_id)),
                         updated_at: Utc::now(),
                     },
                 );
                 drop(pools);
-                if !existed {
+                if !had_budget {
                     // Live machines this mission owns now charge to its pool.
                     let mut machines = self.machines.lock().await;
                     for m in machines.iter_mut().filter(|m| {
@@ -4577,13 +4830,187 @@ impl ManagedManager {
         Ok(())
     }
 
+    /// Set (`Some`) or clear (`None`) a mission's VM concurrency override.
+    pub async fn set_mission_vm_limits(
+        &self,
+        mission_id: &str,
+        limits: Option<budget::VmConcurrencyLimits>,
+        lineage: &[String],
+        parent_cap_pool: Option<String>,
+        owner_user_id: Option<String>,
+    ) -> Result<(), ManagedError> {
+        let _guard = self.admission.lock().await;
+        match limits {
+            None => {
+                let pools_snapshot = {
+                    let mut pools = self.budgets.lock().await;
+                    let remove_entry = match pools.get_mut(mission_id) {
+                        Some(entry) if entry.budget_usd.is_some() => {
+                            entry.vm_limits = None;
+                            entry.parent_cap_pool_id = None;
+                            entry.updated_at = Utc::now();
+                            false
+                        }
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if remove_entry {
+                        pools.remove(mission_id);
+                    }
+                    for p in pools.values_mut() {
+                        if p.parent_cap_pool_id.as_deref() == Some(mission_id) {
+                            p.parent_cap_pool_id =
+                                parent_cap_pool.clone().filter(|anc| anc != &p.mission_id);
+                        }
+                    }
+                    pools.clone()
+                };
+                let mut machines = self.machines.lock().await;
+                for m in machines.iter_mut() {
+                    if m.cap_pool_id.as_deref() == Some(mission_id) {
+                        let fallback_chain = Self::fallback_cap_lineage(
+                            &pools_snapshot,
+                            parent_cap_pool.as_deref(),
+                            None,
+                        );
+                        m.cap_pool_id = Self::resolve_covering_cap_pool(
+                            &pools_snapshot,
+                            &fallback_chain,
+                            &m.provider,
+                            m.owner_user_id.as_deref(),
+                        );
+                    }
+                }
+            }
+            Some(raw) => {
+                let validated = budget::validate_vm_limits(raw)
+                    .map_err(|e| ManagedError::new("invalid_vm_limits", 400, e))?;
+                let pools_before = self.budgets.lock().await.clone();
+                let anc_chain = if !lineage.is_empty() {
+                    lineage.iter().skip(1).cloned().collect::<Vec<_>>()
+                } else {
+                    Self::fallback_cap_lineage(&pools_before, parent_cap_pool.as_deref(), None)
+                };
+                for anc_id in &anc_chain {
+                    let Some(anc_pool) = pools_before.get(anc_id.as_str()) else {
+                        continue;
+                    };
+                    if owner_user_id.is_some() && anc_pool.owner_user_id != owner_user_id {
+                        continue;
+                    }
+                    let Some(anc_lim) = anc_pool.vm_limits.as_ref() else {
+                        continue;
+                    };
+                    if let (Some(c_max), Some(a_max)) =
+                        (validated.max_concurrent, anc_lim.max_concurrent)
+                    {
+                        if c_max > a_max {
+                            return Err(ManagedError::new(
+                                "sub_limit_exceeds_pool",
+                                400,
+                                format!(
+                                    "max_concurrent ({c_max}) exceeds ancestor pool {anc_id}'s max_concurrent ({a_max})"
+                                ),
+                            ));
+                        }
+                    }
+                    for (prov, &c_p) in &validated.provider_max_concurrent {
+                        if let Some(&a_p) = anc_lim.provider_max_concurrent.get(prov) {
+                            if c_p > a_p {
+                                return Err(ManagedError::new(
+                                    "sub_limit_exceeds_pool",
+                                    400,
+                                    format!(
+                                        "Limit for '{prov}' ({c_p}) exceeds ancestor pool {anc_id}'s '{prov}' limit ({a_p})"
+                                    ),
+                                ));
+                            }
+                        }
+                        if let Some(a_max) = anc_lim.max_concurrent {
+                            if c_p > a_max {
+                                return Err(ManagedError::new(
+                                    "sub_limit_exceeds_pool",
+                                    400,
+                                    format!(
+                                        "Limit for '{prov}' ({c_p}) exceeds ancestor pool {anc_id}'s max_concurrent ({a_max})"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                let pools_snapshot = {
+                    let mut pools = self.budgets.lock().await;
+                    let existing = pools.get(mission_id).cloned();
+                    pools.insert(
+                        mission_id.to_string(),
+                        budget::BudgetPool {
+                            mission_id: mission_id.to_string(),
+                            budget_usd: existing.as_ref().and_then(|p| p.budget_usd),
+                            parent_pool_id: existing
+                                .as_ref()
+                                .and_then(|p| p.parent_pool_id.clone()),
+                            vm_limits: Some(validated),
+                            parent_cap_pool_id: parent_cap_pool.clone().filter(|p| p != mission_id),
+                            owner_user_id: owner_user_id
+                                .or_else(|| existing.and_then(|p| p.owner_user_id)),
+                            updated_at: Utc::now(),
+                        },
+                    );
+                    pools.clone()
+                };
+                // Re-evaluate live or stopped machines directly owned by `mission_id`
+                // (or already pointing at `mission_id`), so e.g. removing a provider
+                // limit releases machines on that provider back to the ancestor/global pool.
+                let mut machines = self.machines.lock().await;
+                for m in machines.iter_mut().filter(|m| {
+                    (m.state.is_live() || m.state == MachineState::Stopped)
+                        && (m.owner_mission_id.as_deref() == Some(mission_id)
+                            || m.cap_pool_id.as_deref() == Some(mission_id))
+                }) {
+                    let chain = Self::fallback_cap_lineage(
+                        &pools_snapshot,
+                        Some(mission_id),
+                        m.owner_mission_id.as_deref(),
+                    );
+                    m.cap_pool_id = Self::resolve_covering_cap_pool(
+                        &pools_snapshot,
+                        &chain,
+                        &m.provider,
+                        m.owner_user_id.as_deref(),
+                    );
+                }
+            }
+        }
+        self.persist_budgets().await;
+        self.persist().await;
+        Ok(())
+    }
+
     /// Re-attach a pool to its current nearest ancestor pool.
     pub async fn reparent_pool(&self, mission_id: &str, parent_pool: Option<String>) {
         let changed = {
             let mut pools = self.budgets.lock().await;
             match pools.get_mut(mission_id) {
-                Some(p) if p.parent_pool_id != parent_pool => {
+                Some(p) if p.budget_usd.is_some() && p.parent_pool_id != parent_pool => {
                     p.parent_pool_id = parent_pool.filter(|p| p != mission_id);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.persist_budgets().await;
+        }
+    }
+
+    /// Re-attach a concurrency override pool to its current nearest ancestor cap pool.
+    pub async fn reparent_cap_pool(&self, mission_id: &str, parent_cap_pool: Option<String>) {
+        let changed = {
+            let mut pools = self.budgets.lock().await;
+            match pools.get_mut(mission_id) {
+                Some(p) if p.vm_limits.is_some() && p.parent_cap_pool_id != parent_cap_pool => {
+                    p.parent_cap_pool_id = parent_cap_pool.filter(|p| p != mission_id);
                     true
                 }
                 _ => false,
@@ -4608,8 +5035,24 @@ impl ManagedManager {
         }
     }
 
-    /// Budget view for one mission. `lineage` is the mission then its
-    /// ancestors; `children` its direct children.
+    /// Attribute a machine's concurrency slot to `cap_pool` (or `None` for global).
+    pub async fn set_machine_cap_pool(&self, id: &str, cap_pool: Option<String>) {
+        if let Some(m) = self.get(id).await {
+            if m.cap_pool_id != cap_pool {
+                if let Some(m) = self
+                    .update(&m.id, |m| {
+                        m.cap_pool_id = cap_pool;
+                    })
+                    .await
+                {
+                    self.ledger("cap_pool_set", &m);
+                }
+            }
+        }
+    }
+
+    /// Budget and concurrency-override view for one mission. `lineage` is the
+    /// mission then its ancestors; `children` its direct children.
     pub async fn mission_budget(
         &self,
         mission_id: &str,
@@ -4621,6 +5064,8 @@ impl ManagedManager {
         let pool_id = budget::nearest_pool(lineage.iter().map(String::as_str), &pools, user_id);
         let parent_pool =
             budget::nearest_pool(lineage.iter().skip(1).map(String::as_str), &pools, user_id);
+        let cap_pool_id =
+            budget::nearest_cap_pool(lineage.iter().map(String::as_str), &pools, user_id);
         let open = self.open_pools(&pools).await;
         let machines = self.machines.lock().await.clone();
         let now = Utc::now();
@@ -4628,38 +5073,143 @@ impl ManagedManager {
         let pool = pool_id
             .as_deref()
             .and_then(|p| budget::pool_usage(p, &pools, &machines, now, &is_open));
-        let own = pools.get(mission_id).map(|p| p.budget_usd);
+        let own = pools.get(mission_id).and_then(|p| p.budget_usd);
+        let own_vm_limits = pools.get(mission_id).and_then(|p| p.vm_limits.clone());
+
+        let global_active = machines
+            .iter()
+            .filter(|m| m.state.is_live() && m.cap_pool_id.is_none())
+            .count();
+        let global_max_concurrent = self.settings.max_concurrent;
+
+        // Strict ancestor total ceiling (analogous to `max_grant_usd`).
+        let ancestor_max_concurrent = lineage
+            .iter()
+            .skip(1)
+            .filter_map(|anc| {
+                pools
+                    .get(anc.as_str())
+                    .filter(|p| p.owner_user_id.as_deref() == Some(user_id))
+                    .and_then(|p| p.vm_limits.as_ref())
+                    .and_then(|l| l.max_concurrent)
+            })
+            .min();
+
+        let effective_vm_limits = if let Some(ref cp_id) = cap_pool_id {
+            let mut chain_pools = vec![cp_id.clone()];
+            chain_pools.extend(budget::ancestor_cap_chain(
+                cp_id,
+                lineage,
+                &pools,
+                Some(user_id),
+            ));
+            let eff_max = chain_pools
+                .iter()
+                .filter_map(|id| {
+                    pools
+                        .get(id.as_str())
+                        .and_then(|p| p.vm_limits.as_ref())
+                        .and_then(|l| l.max_concurrent)
+                })
+                .min();
+            let (pool_active, _) = budget::cap_pool_counts(cp_id, "", &pools, &machines);
+            let mut provider_limits = Vec::new();
+            for prov in CANONICAL_PROVIDERS {
+                let prov_cap = chain_pools
+                    .iter()
+                    .filter_map(|id| {
+                        pools
+                            .get(id.as_str())
+                            .and_then(|p| p.vm_limits.as_ref())
+                            .and_then(|l| l.provider_max_concurrent.get(prov).copied())
+                    })
+                    .min();
+                if let Some(max_c) = prov_cap {
+                    let (_, prov_active) = budget::cap_pool_counts(cp_id, prov, &pools, &machines);
+                    provider_limits.push(ProviderCapUsageView {
+                        provider: prov.to_string(),
+                        active: prov_active,
+                        max_concurrent: max_c,
+                    });
+                }
+            }
+            EffectiveVmLimitsView {
+                source: "mission",
+                pool_id: Some(cp_id.clone()),
+                active: pool_active,
+                max_concurrent: eff_max,
+                global_active,
+                global_max_concurrent,
+                ancestor_max_concurrent,
+                provider_limits,
+            }
+        } else {
+            EffectiveVmLimitsView {
+                source: "global",
+                pool_id: None,
+                active: global_active,
+                max_concurrent: global_max_concurrent,
+                global_active,
+                global_max_concurrent,
+                ancestor_max_concurrent,
+                provider_limits: Vec::new(),
+            }
+        };
+
         let children = children
             .iter()
-            .map(|c| match pools.get(c) {
-                Some(p) => {
-                    let u = budget::pool_usage(c, &pools, &machines, now, &is_open);
-                    ChildBudgetView {
-                        mission_id: c.clone(),
-                        mode: "sub_budget",
-                        budget_usd: Some(p.budget_usd),
-                        spent_usd: u.as_ref().map_or(0.0, |u| u.spent_usd),
-                        reserved_usd: u.as_ref().map_or(0.0, |u| u.reserved_usd + u.carved_usd),
+            .map(|c| {
+                let child_pool = pools.get(c);
+                let has_vm_limits = child_pool.is_some_and(|p| p.vm_limits.is_some());
+                let vm_max_concurrent = child_pool
+                    .and_then(|p| p.vm_limits.as_ref())
+                    .and_then(|l| l.max_concurrent);
+                let live_machines = if has_vm_limits {
+                    budget::cap_pool_counts(c, "", &pools, &machines).0
+                } else {
+                    machines
+                        .iter()
+                        .filter(|m| {
+                            m.state.is_live() && m.owner_mission_id.as_deref() == Some(c.as_str())
+                        })
+                        .count()
+                };
+                match child_pool.and_then(|p| p.budget_usd) {
+                    Some(b_usd) => {
+                        let u = budget::pool_usage(c, &pools, &machines, now, &is_open);
+                        ChildBudgetView {
+                            mission_id: c.clone(),
+                            mode: "sub_budget",
+                            budget_usd: Some(b_usd),
+                            spent_usd: u.as_ref().map_or(0.0, |u| u.spent_usd),
+                            reserved_usd: u.as_ref().map_or(0.0, |u| u.reserved_usd + u.carved_usd),
+                            has_vm_limits,
+                            vm_max_concurrent,
+                            live_machines,
+                        }
                     }
-                }
-                None => {
-                    let mine = machines.iter().filter(|m| {
-                        m.owner_mission_id.as_deref() == Some(c.as_str())
-                            && m.budget_pool_id.is_some()
-                            && m.budget_pool_id == pool_id
-                    });
-                    let (spent, reserved) = mine.fold((0.0, 0.0), |(s, r), m| {
-                        (
-                            s + budget::machine_spent(m, now),
-                            r + budget::machine_reserved(m, now),
-                        )
-                    });
-                    ChildBudgetView {
-                        mission_id: c.clone(),
-                        mode: "pooled",
-                        budget_usd: None,
-                        spent_usd: (spent * 10000.0).round() / 10000.0,
-                        reserved_usd: (reserved * 10000.0).round() / 10000.0,
+                    None => {
+                        let mine = machines.iter().filter(|m| {
+                            m.owner_mission_id.as_deref() == Some(c.as_str())
+                                && m.budget_pool_id.is_some()
+                                && m.budget_pool_id == pool_id
+                        });
+                        let (spent, reserved) = mine.fold((0.0, 0.0), |(s, r), m| {
+                            (
+                                s + budget::machine_spent(m, now),
+                                r + budget::machine_reserved(m, now),
+                            )
+                        });
+                        ChildBudgetView {
+                            mission_id: c.clone(),
+                            mode: "pooled",
+                            budget_usd: None,
+                            spent_usd: (spent * 10000.0).round() / 10000.0,
+                            reserved_usd: (reserved * 10000.0).round() / 10000.0,
+                            has_vm_limits,
+                            vm_max_concurrent,
+                            live_machines,
+                        }
                     }
                 }
             })
@@ -4679,6 +5229,16 @@ impl ManagedManager {
             pool_id,
             pool,
             max_grant_usd,
+            vm_limits_mode: if own_vm_limits.is_some() {
+                "own"
+            } else if cap_pool_id.is_some() {
+                "pooled"
+            } else {
+                "global"
+            },
+            own_vm_limits,
+            vm_limits_pool_id: cap_pool_id,
+            effective_vm_limits,
             children,
         }
     }
@@ -4694,13 +5254,24 @@ impl ManagedManager {
         want: &SiblingReuse<'_>,
         candidates_ok: &(dyn Fn(&str) -> bool + Sync),
     ) -> Option<ManagedMachine> {
-        self.take_idle_sibling_for_provider(None, want, candidates_ok)
+        self.take_idle_sibling_for_lineage(None, &[], want, candidates_ok)
             .await
     }
 
     pub async fn take_idle_sibling_for_provider(
         &self,
         want_provider: Option<&str>,
+        want: &SiblingReuse<'_>,
+        candidates_ok: &(dyn Fn(&str) -> bool + Sync),
+    ) -> Option<ManagedMachine> {
+        self.take_idle_sibling_for_lineage(want_provider, &[], want, candidates_ok)
+            .await
+    }
+
+    pub async fn take_idle_sibling_for_lineage(
+        &self,
+        want_provider: Option<&str>,
+        cap_lineage: &[String],
         want: &SiblingReuse<'_>,
         candidates_ok: &(dyn Fn(&str) -> bool + Sync),
     ) -> Option<ManagedMachine> {
@@ -4713,10 +5284,8 @@ impl ManagedManager {
             sub_budget_usd,
         } = *want;
         let _guard = self.admission.lock().await;
-        let pick = self
-            .machines
-            .lock()
-            .await
+        let all_machines = self.machines.lock().await.clone();
+        let pick = all_machines
             .iter()
             .filter(|m| {
                 m.provisioning_mode.is_worker()
@@ -4731,8 +5300,38 @@ impl ManagedManager {
             })
             .min_by_key(|m| m.created_at)
             .cloned()?;
-        // A handover re-charges the VM: it must pass the same budget checks
-        // as a fresh rent, or the caller falls back to normal admission.
+        // A handover re-charges the VM: it must pass the same budget and
+        // concurrency checks as a fresh rent, or the caller falls back to
+        // normal admission.
+        let pools = self.budgets.lock().await.clone();
+        let eff_chain = if !cap_lineage.is_empty() {
+            cap_lineage.to_vec()
+        } else {
+            Self::fallback_cap_lineage(&pools, None, Some(requested_by))
+        };
+        let target_cap_pool =
+            Self::resolve_covering_cap_pool(&pools, &eff_chain, &pick.provider, tenant);
+        drop(pools);
+        if pick.cap_pool_id != target_cap_pool {
+            let others: Vec<ManagedMachine> = all_machines
+                .into_iter()
+                .filter(|x| x.id != pick.id)
+                .collect();
+            if self
+                .check_concurrency_quota(
+                    &others,
+                    &pick.provider,
+                    cap_lineage,
+                    None,
+                    Some(requested_by),
+                    tenant,
+                )
+                .await
+                .is_err()
+            {
+                return None;
+            }
+        }
         let reserve = budget::machine_reserved(&pick, Utc::now());
         if sub_budget_usd.is_some_and(|sub| reserve > sub) {
             return None;
@@ -4747,6 +5346,7 @@ impl ManagedManager {
         let m = self
             .update(&pick.id, |m| {
                 m.change_pool(pool, Utc::now());
+                m.cap_pool_id = target_cap_pool;
                 m.owner_mission_id = None;
                 m.requested_by_mission_id = Some(requested_by.to_string());
                 m.reap_at = None;

@@ -9,6 +9,7 @@
     "max_concurrent": 16,
     "max_size": "xlarge",
     "max_ttl_minutes": 720,
+    "shared_active": 1,
     "spent_today_usd": 0.06
   },
   "daily_spend": [
@@ -74,6 +75,7 @@
       "antigravity_projected": false,
       "auto_extensions": 0,
       "budget_pool_id": null,
+      "cap_pool_id": null,
       "cost_before_resume": 0.0,
       "cost_is_metered": false,
       "cost_usd": 0.06,

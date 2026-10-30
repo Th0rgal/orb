@@ -52,8 +52,12 @@
 .st-pill[data-tone="danger"]::before { background: var(--danger); }
 
 .st-table { margin-top: 10px; border-radius: var(--radius-lg); background: var(--bg-elev); overflow: hidden; font-size: 13px; }
+.st-tbody { display: contents; }
+.st-tbody-scroll { display: block; overflow-y: auto; overscroll-behavior: contain; border-bottom: 1px solid var(--stroke-soft); }
 .st-tr { display: grid; grid-template-columns: var(--st-cols); gap: 12px; align-items: center; min-height: 38px; padding: 6px 12px; border-bottom: 1px solid var(--stroke-soft); }
 .st-tr:last-child { border-bottom: 0; }
+.st-more { display: flex; width: 100%; justify-content: center; gap: 6px; padding: 8px 12px; border: 0; border-top: 1px solid var(--stroke-soft); background: transparent; color: var(--fg-3); font: 12px var(--sans); cursor: pointer; }
+.st-tbody-scroll + .st-more { border-top: 0; }
 .st-tr > * { min-width: 0; }
 .st-th > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .st-th { min-height: 30px; color: var(--fg-3); font-size: 11.5px; }
@@ -63,7 +67,6 @@
 .st-row:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
 .st-row[aria-expanded="true"] { background: var(--bg-hover); }
 .st-detail { padding: 8px 12px 12px; border-bottom: 1px solid var(--stroke-soft); background: var(--bg-hover); color: var(--fg-2); font-size: 12px; }
-.st-more { display: flex; width: 100%; justify-content: center; gap: 6px; padding: 8px 12px; border: 0; background: transparent; color: var(--fg-3); font: 12px var(--sans); cursor: pointer; }
 .st-more:hover { color: var(--fg); }
 .st-cell-provider { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .st-cell-name { display: flex; flex-direction: column; min-width: 0; }

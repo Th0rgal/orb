@@ -28,4 +28,50 @@ final class OrbMissionBudgetTests: XCTestCase {
         XCTAssertEqual(fresh.pool?.available, 5)
         XCTAssertEqual(OrbMissionBudget.money(2), "$2.00")
     }
+
+    func testDecodesSharedMissionBudgetFixtureAndVmLimits() throws {
+        let data = try Data(contentsOf: OrbSpec.url("fixtures/mission-budget.json"))
+        let root = try JSONDecoder().decode(OrbJSON.self, from: data)
+
+        let globalDefault = OrbMissionBudget(root["global_default"])
+        XCTAssertEqual(globalDefault.mode, "none")
+        XCTAssertEqual(globalDefault.vmLimitsMode, "global")
+        XCTAssertNil(globalDefault.ownVmLimits)
+        XCTAssertEqual(globalDefault.effectiveVmLimits?.globalMaxConcurrent, 16)
+        XCTAssertEqual(globalDefault.vmLimitsModeLine, "Uses the global limit (16 concurrent across Orb).")
+        XCTAssertFalse(globalDefault.showsSubagents)
+        XCTAssertTrue(globalDefault.children.allSatisfy(\.isIdlePooled))
+
+        let dedicated = OrbMissionBudget(root["dedicated_override"])
+        XCTAssertEqual(dedicated.mode, "own")
+        XCTAssertEqual(dedicated.vmLimitsMode, "own")
+        XCTAssertEqual(dedicated.ownVmLimits?.maxConcurrent, 6)
+        XCTAssertEqual(dedicated.ownVmLimits?.providerMaxConcurrent, ["hetzner": 0, "vastai": 2])
+        XCTAssertEqual(OrbMissionBudget.providerLimitsSummary(dedicated.ownVmLimits), "Hetzner: off · Vast.ai: 2")
+        XCTAssertEqual(dedicated.effectiveVmLimits?.active, 3)
+        XCTAssertEqual(dedicated.effectiveVmLimits?.providerLimits.count, 2)
+        XCTAssertTrue(dedicated.showsSubagents)
+        XCTAssertFalse(dedicated.children[0].isIdlePooled)
+        XCTAssertTrue(dedicated.children[1].isIdlePooled)
+
+        let cleared = dedicated.optimisticVmLimits(nil)
+        XCTAssertEqual(cleared.vmLimitsMode, "global")
+        XCTAssertNil(cleared.ownVmLimits)
+        XCTAssertEqual(cleared.effectiveVmLimits?.maxConcurrent, 16)
+    }
+
+    func testValidatesVmLimitsInputs() throws {
+        let ok = try OrbMissionBudget.parseVmLimits(
+            totalRaw: "8",
+            providerRaws: ["vastai": "2", "hetzner": "0"]
+        ).get()
+        XCTAssertEqual(ok.maxConcurrent, 8)
+        XCTAssertEqual(ok.providerMaxConcurrent, ["vastai": 2, "hetzner": 0])
+
+        let empty = OrbMissionBudget.parseVmLimits(totalRaw: "", providerRaws: [:])
+        XCTAssertThrowsError(try empty.get())
+
+        let exceedsTotal = OrbMissionBudget.parseVmLimits(totalRaw: "2", providerRaws: ["vastai": "4"])
+        XCTAssertThrowsError(try exceedsTotal.get())
+    }
 }

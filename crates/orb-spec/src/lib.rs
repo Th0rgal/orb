@@ -766,6 +766,19 @@ unsafe extern "C" {
         is_allowlisted_managed_secret: u8,
         operator_break_glass: u8,
     ) -> u32;
+    fn orb_vm_cap_admit(
+        has_pool_override: u8,
+        has_pool_max: u8,
+        has_provider_max: u8,
+        has_global_max: u8,
+        ancestor_blocked: u8,
+        shared_active: u32,
+        global_max: u32,
+        pool_active: u32,
+        pool_max: u32,
+        provider_active: u32,
+        provider_max: u32,
+    ) -> u32;
     fn orb_verify_log_window(
         off: u64,
         req: u64,
@@ -2025,6 +2038,40 @@ pub fn compute_secret_admit(input: ComputeSecretInput) -> bool {
             u8::from(input.caller_on_managed_node),
             u8::from(input.is_allowlisted_managed_secret),
             u8::from(input.operator_break_glass),
+        )
+    };
+    ((raw >> 8) & 1) != 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmCapInput {
+    pub has_pool_override: bool,
+    pub has_pool_max: bool,
+    pub has_provider_max: bool,
+    pub has_global_max: bool,
+    pub ancestor_blocked: bool,
+    pub shared_active: u32,
+    pub global_max: u32,
+    pub pool_active: u32,
+    pub pool_max: u32,
+    pub provider_active: u32,
+    pub provider_max: u32,
+}
+
+pub fn vm_cap_admit(input: VmCapInput) -> bool {
+    let raw = unsafe {
+        orb_vm_cap_admit(
+            u8::from(input.has_pool_override),
+            u8::from(input.has_pool_max),
+            u8::from(input.has_provider_max),
+            u8::from(input.has_global_max),
+            u8::from(input.ancestor_blocked),
+            input.shared_active,
+            input.global_max,
+            input.pool_active,
+            input.pool_max,
+            input.provider_active,
+            input.provider_max,
         )
     };
     ((raw >> 8) & 1) != 0
@@ -5894,6 +5941,22 @@ pub mod raw_cabi {
         unsafe { super::orb_compute_secret_gate(a0, a1, a2, a3) }
     }
     #[inline]
+    pub fn orb_vm_cap_admit(
+        a0: u8,
+        a1: u8,
+        a2: u8,
+        a3: u8,
+        a4: u8,
+        a5: u32,
+        a6: u32,
+        a7: u32,
+        a8: u32,
+        a9: u32,
+        a10: u32,
+    ) -> u32 {
+        unsafe { super::orb_vm_cap_admit(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) }
+    }
+    #[inline]
     pub fn orb_node_gc_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
         unsafe { super::orb_node_gc_step(a0, a1, a2, a3, a4, a5, a6) }
     }
@@ -6760,6 +6823,19 @@ pub mod raw_cabi {
                 orb_compute_secret_gate(args[0] as u8, args[1] as u8, args[2] as u8, args[3] as u8)
                     as u64
             }
+            "orb_vm_cap_admit" if args.len() == 11 => orb_vm_cap_admit(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u8,
+                args[4] as u8,
+                args[5] as u32,
+                args[6] as u32,
+                args[7] as u32,
+                args[8] as u32,
+                args[9] as u32,
+                args[10] as u32,
+            ) as u64,
             "orb_node_gc_step" if args.len() == 7 => orb_node_gc_step(
                 args[0], args[1], args[2], args[3], args[4], args[5], args[6],
             ),
@@ -8398,7 +8474,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 127);
+        assert_eq!(count, 128);
     }
 }
 
@@ -9320,6 +9396,46 @@ mod stateful_tests {
         });
         assert!(sb.admitted && sb.checkpoint_forced && sb.next_checkpoint == 20_000 - 4_096);
         assert!(20_000 - sb.next_checkpoint <= 4_096);
+
+        assert!(vm_cap_admit(VmCapInput {
+            has_pool_override: true,
+            has_pool_max: false,
+            has_provider_max: true,
+            has_global_max: true,
+            ancestor_blocked: false,
+            shared_active: 16,
+            global_max: 16,
+            pool_active: 0,
+            pool_max: 0,
+            provider_active: 0,
+            provider_max: 2,
+        }));
+        assert!(!vm_cap_admit(VmCapInput {
+            has_pool_override: true,
+            has_pool_max: true,
+            has_provider_max: true,
+            has_global_max: false,
+            ancestor_blocked: false,
+            shared_active: 0,
+            global_max: 0,
+            pool_active: 0,
+            pool_max: 8,
+            provider_active: 0,
+            provider_max: 0,
+        }));
+        assert!(!vm_cap_admit(VmCapInput {
+            has_pool_override: false,
+            has_pool_max: false,
+            has_provider_max: false,
+            has_global_max: true,
+            ancestor_blocked: false,
+            shared_active: 16,
+            global_max: 16,
+            pool_active: 0,
+            pool_max: 0,
+            provider_active: 0,
+            provider_max: 0,
+        }));
     }
 
     #[test]

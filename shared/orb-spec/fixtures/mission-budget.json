@@ -1,0 +1,113 @@
+{
+  "global_default": {
+    "mission_id": "550e8400-e29b-41d4-a716-446655440000",
+    "own_budget_usd": null,
+    "pool_id": null,
+    "mode": "none",
+    "pool": null,
+    "max_grant_usd": null,
+    "own_vm_limits": null,
+    "vm_limits_mode": "global",
+    "vm_limits_pool_id": null,
+    "effective_vm_limits": {
+      "source": "global",
+      "pool_id": null,
+      "active": 4,
+      "max_concurrent": 16,
+      "global_active": 4,
+      "global_max_concurrent": 16,
+      "ancestor_max_concurrent": null,
+      "provider_limits": []
+    },
+    "children": [
+      {
+        "mission_id": "90cbbeaf-0000-0000-0000-000000000001",
+        "mode": "pooled",
+        "budget_usd": null,
+        "spent_usd": 0.0,
+        "reserved_usd": 0.0,
+        "has_vm_limits": false,
+        "vm_max_concurrent": null,
+        "live_machines": 0
+      },
+      {
+        "mission_id": "6c173894-0000-0000-0000-000000000002",
+        "mode": "pooled",
+        "budget_usd": null,
+        "spent_usd": 0.0,
+        "reserved_usd": 0.0,
+        "has_vm_limits": false,
+        "vm_max_concurrent": null,
+        "live_machines": 0
+      }
+    ]
+  },
+  "dedicated_override": {
+    "mission_id": "35442f4c-99ff-49e8-a531-6686457b3f69",
+    "own_budget_usd": 25.0,
+    "pool_id": "35442f4c-99ff-49e8-a531-6686457b3f69",
+    "mode": "own",
+    "pool": {
+      "pool_id": "35442f4c-99ff-49e8-a531-6686457b3f69",
+      "budget_usd": 25.0,
+      "spent_usd": 4.5,
+      "reserved_usd": 1.25,
+      "carved_usd": 5.0,
+      "available_usd": 14.25,
+      "live_machines": 3
+    },
+    "max_grant_usd": null,
+    "own_vm_limits": {
+      "max_concurrent": 6,
+      "provider_max_concurrent": {
+        "hetzner": 0,
+        "vastai": 2
+      }
+    },
+    "vm_limits_mode": "own",
+    "vm_limits_pool_id": "35442f4c-99ff-49e8-a531-6686457b3f69",
+    "effective_vm_limits": {
+      "source": "mission",
+      "pool_id": "35442f4c-99ff-49e8-a531-6686457b3f69",
+      "active": 3,
+      "max_concurrent": 6,
+      "global_active": 16,
+      "global_max_concurrent": 16,
+      "ancestor_max_concurrent": null,
+      "provider_limits": [
+        {
+          "provider": "hetzner",
+          "active": 0,
+          "max_concurrent": 0
+        },
+        {
+          "provider": "vastai",
+          "active": 2,
+          "max_concurrent": 2
+        }
+      ]
+    },
+    "children": [
+      {
+        "mission_id": "c1a00001-0000-0000-0000-000000000001",
+        "mode": "sub_budget",
+        "budget_usd": 5.0,
+        "spent_usd": 1.2,
+        "reserved_usd": 0.45,
+        "has_vm_limits": true,
+        "vm_max_concurrent": 2,
+        "live_machines": 1
+      },
+      {
+        "mission_id": "90cbbeaf-0000-0000-0000-000000000001",
+        "mode": "pooled",
+        "budget_usd": null,
+        "spent_usd": 0.0,
+        "reserved_usd": 0.0,
+        "has_vm_limits": false,
+        "vm_max_concurrent": null,
+        "live_machines": 0
+      }
+    ]
+  }
+}

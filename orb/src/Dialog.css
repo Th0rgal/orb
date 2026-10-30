@@ -121,3 +121,19 @@
 /* Stats tiles in the sheet carry no sparkline: let the value use the width. */
 .mission-settings .st-tile .st-spark-empty { display: none; }
 .mission-settings .ms-model-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mission-settings .ms-mode-row { display: flex; flex-direction: column; gap: 8px; }
+.mission-settings .ms-cap-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.mission-settings .ms-limit-form { display: flex; flex-direction: column; gap: 10px; }
+.mission-settings .ms-disclosure-wrap { border: 1px solid var(--stroke-soft, var(--overlay-border, #333)); border-radius: var(--radius-lg, 8px); background: var(--bg-elev); overflow: hidden; }
+.mission-settings .ms-disclosure { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px; border: 0; background: transparent; color: var(--fg); font: 13px var(--sans); cursor: pointer; text-align: left; }
+.mission-settings .ms-disclosure:hover { background: var(--bg-hover); }
+.mission-settings .ms-disclosure:focus { outline: none; }
+.mission-settings .ms-disclosure:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
+.mission-settings .ms-disclosure-left { display: inline-flex; align-items: center; gap: 6px; font-weight: 450; }
+.mission-settings .ms-disclosure-chevron { width: 12px; color: var(--fg-3); font-size: 11px; text-align: center; }
+.mission-settings .ms-disclosure-meta { color: var(--fg-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mission-settings .ms-provider-body { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--stroke-soft, var(--overlay-border, #333)); }
+.mission-settings .ms-provider-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+.mission-settings .ms-provider-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mission-settings .ms-provider-label { font-size: 12px; color: var(--fg-2); }
+@media (max-width: 420px) { .mission-settings .ms-provider-grid { grid-template-columns: minmax(0, 1fr); } }
