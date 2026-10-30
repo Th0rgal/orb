@@ -74,12 +74,30 @@ pub fn args_with_effort(
         "--dangerously-skip-permissions".into(),
     ];
     let (model, effort) = normalize_model_and_effort(model, effort);
-    if let Some(model) = model {
-        args.extend(["--model".into(), model.into()]);
-    }
-    // agy-model (Carbon) and agy-demo (Argon) require an explicit effort flag.
-    if let Some(effort) = effort {
-        args.extend(["--effort".into(), effort.into()]);
+    match model {
+        // Native `agy` CLI exposes Gemini 4 Carbon exclusively as effort-baked
+        // model IDs (`agy-model-low`, `agy-model-medium`, `agy-model-high`) and
+        // rejects `--model agy-model --effort <level>` with:
+        //   `--effort is not supported for model "agy-model"`.
+        Some("agy-model") => {
+            let cli_model = match effort {
+                Some("low") => "agy-model-low",
+                Some("medium") => "agy-model-medium",
+                _ => "agy-model-high",
+            };
+            args.extend(["--model".into(), cli_model.into()]);
+        }
+        Some(model) => {
+            args.extend(["--model".into(), model.into()]);
+            if let Some(effort) = effort {
+                args.extend(["--effort".into(), effort.into()]);
+            }
+        }
+        None => {
+            if let Some(effort) = effort {
+                args.extend(["--effort".into(), effort.into()]);
+            }
+        }
     }
     if let Some(session) = session.filter(|s| !s.is_empty()) {
         args.extend(["--conversation".into(), session.into()]);
@@ -1578,15 +1596,20 @@ mod tests {
         );
         for alias in ["agy-model", "gemini-4-carbon", "gemini-4-carbon-eap"] {
             let args = args_with_effort(Some(alias), None, None, "ping");
-            assert!(args.windows(2).any(|v| v == ["--model", "agy-model"]));
-            assert!(args.windows(2).any(|v| v == ["--effort", "high"]));
+            assert!(args.windows(2).any(|v| v == ["--model", "agy-model-high"]));
+            assert!(!args.iter().any(|v| v == "--effort"));
         }
+        let args = args_with_effort(Some("agy-model"), Some("low"), None, "ping");
+        assert!(args.windows(2).any(|v| v == ["--model", "agy-model-low"]));
+        assert!(!args.iter().any(|v| v == "--effort"));
         let args = args_with_effort(Some("agy-model-medium"), None, None, "ping");
-        assert!(args.windows(2).any(|v| v == ["--model", "agy-model"]));
-        assert!(args.windows(2).any(|v| v == ["--effort", "medium"]));
+        assert!(args
+            .windows(2)
+            .any(|v| v == ["--model", "agy-model-medium"]));
+        assert!(!args.iter().any(|v| v == "--effort"));
         let args = args_with_effort(Some("gemini-4-carbon-low"), Some("high"), None, "ping");
-        assert!(args.windows(2).any(|v| v == ["--model", "agy-model"]));
-        assert!(args.windows(2).any(|v| v == ["--effort", "high"]));
+        assert!(args.windows(2).any(|v| v == ["--model", "agy-model-high"]));
+        assert!(!args.iter().any(|v| v == "--effort"));
     }
     #[test]
     fn thinking_usage_is_per_turn_and_duplicate_steps_are_idempotent() {

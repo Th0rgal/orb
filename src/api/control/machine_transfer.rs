@@ -1064,7 +1064,10 @@ async fn validate_destination(
                 {
                     let models = node_request(state, id, "/antigravity/models", None).await?;
                     if !models.as_array().is_some_and(|rows| {
-                        rows.iter().any(|row| row[0].as_str() == Some(base_model))
+                        rows.iter().any(|row| {
+                            crate::antigravity::normalize_model_and_effort(row[0].as_str(), None).0
+                                == Some(base_model)
+                        })
                     }) {
                         return Err(conflict(
                             "Selected Antigravity model is unavailable on the destination node",
