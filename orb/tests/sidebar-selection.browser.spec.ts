@@ -248,3 +248,70 @@ test('cron and mixed file/folder/cron selection supports Cmd/Shift click, Cmd+X/
   await expect(cron2).toHaveCount(0);
 });
 
+test('right-clicking mission B to copy its ID while in mission A restores mission A as selected after the menu closes', async ({page}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('orb.apiUrl', location.origin);
+    localStorage.setItem('orb.jwt', 'test');
+    (window as any).__copied = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async (value: string) => { (window as any).__copied.push(value); },
+        readText: async () => (window as any).__copied.at(-1) ?? '',
+      },
+    });
+  });
+  const idA = '00000000-0000-0000-0000-0000000000aa';
+  const idB = '00000000-0000-0000-0000-0000000000bb';
+  const missions = [
+    {id: idA, title: 'Whitesmith', status: 'active', project: 'one', tags: [], history: [], updated_at: '2026-10-30T10:00:00Z'},
+    {id: idB, title: 'boost.ci', status: 'active', project: 'one', tags: [], history: [], updated_at: '2026-10-30T09:00:00Z'},
+  ];
+  await page.route('**/api/**', async route => {
+    const req = route.request(), url = new URL(req.url()), path = url.pathname, id = path.split('/')[4];
+    const json = path === '/api/projects' ? {projects: [{slug: 'one', title: 'One'}]}
+      : path === '/api/control/missions' ? missions
+      : path.startsWith('/api/control/missions/') ? missions.find(m => m.id === id) ?? {}
+      : path.endsWith('/files') ? {entries: []} : path.endsWith('/crons') ? {jobs: []} : path.endsWith('/controller') ? {job: null, runs: []} : [];
+    await route.fulfill({json});
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', {name: 'One', exact: true}).click();
+  const tree = page.getByRole('tree', {name: 'Projects', exact: true});
+  const rowA = tree.getByRole('button', {name: 'Whitesmith', exact: true});
+  const rowB = tree.getByRole('button', {name: 'boost.ci', exact: true});
+  const itemA = tree.locator(`[data-tree-id="m:${idA}"]`);
+  const itemB = tree.locator(`[data-tree-id="m:${idB}"]`);
+
+  // Open mission A: mission A is selected.
+  await rowA.click();
+  await expect(rowA).toHaveClass(/active/);
+  await expect(rowB).not.toHaveClass(/active/);
+  await expect(itemA).toHaveAttribute('aria-selected', 'true');
+  await expect(itemB).toHaveAttribute('aria-selected', 'false');
+
+  // Right-click mission B: mission B highlights while its context menu is open.
+  await rowB.click({button: 'right'});
+  await expect(page.getByRole('menu')).toBeVisible();
+  await expect(rowB).toHaveClass(/active/);
+  await expect(itemB).toHaveAttribute('aria-selected', 'true');
+
+  // Copy mission ID: menu closes, ID is copied, and mission A is selected back.
+  await page.getByRole('menuitem', {name: 'Copy mission ID', exact: true}).click();
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__copied)).toEqual([idB]);
+  await expect(rowA).toHaveClass(/active/);
+  await expect(rowB).not.toHaveClass(/active/);
+  await expect(itemA).toHaveAttribute('aria-selected', 'true');
+  await expect(itemB).toHaveAttribute('aria-selected', 'false');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('orb.selectedConversation'))).toBe(`m:${idA}`);
+
+  // Dismissing the context menu with Escape also restores mission A.
+  await rowB.click({button: 'right'});
+  await expect(rowB).toHaveClass(/active/);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(rowA).toHaveClass(/active/);
+  await expect(rowB).not.toHaveClass(/active/);
+});

@@ -108,6 +108,8 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
 
   const menu = page.getByRole("menu");
   await expect(menu).toBeVisible();
+  // Context selection highlights the row while its menu is open without opening its conversation.
+  await expect(row).toHaveClass(/active/);
   // Identity actions only — no project/file creation leaking onto an agent row.
   await expect(menu.getByRole("menuitem")).toHaveText(["Delete agent…", /^Transfer to another agent/, "Move", "Rename", "Copy mission ID", "Mission settings…"]);
 
@@ -115,8 +117,8 @@ test("right-click an agent row: Copy mission ID copies the raw UUID and changes 
   expect(await copied(page)).toEqual([MISSION_ID]);
   await expect(menu).not.toBeVisible();
 
-  // Context selection highlights the row without opening its conversation.
-  await expect(row).toHaveClass(/active/);
+  // Closing the menu restores sidebar selection to the active view ("New Agent").
+  await expect(row).not.toHaveClass(/active/);
   await expect(page.locator(".tb-title")).toHaveText("New Agent");
   await expect(page.getByPlaceholder("Describe a task, / for commands, @ for context")).toBeVisible();
 });
@@ -139,13 +141,14 @@ test("finished agent rows offer the same copy, and it is never an execution id",
 
   const done = page.getByRole("button", { name: /Earlier report/ });
   await done.click({ button: "right" });
+  await expect(done).toHaveClass(/active/);
   await page.getByRole("menuitem", { name: "Copy mission ID" }).click();
 
   const values = await copied(page);
   expect(values).toEqual([DONE_ID]);
   expect(values[0]).not.toContain("m:");
   expect(values[0]).not.toBe("job_9f81c0aa");
-  await expect(done).toHaveClass(/active/);
+  await expect(done).not.toHaveClass(/active/);
   await expect(page.locator(".tb-title")).toHaveText("New Agent");
 });
 
