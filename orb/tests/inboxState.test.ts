@@ -94,13 +94,24 @@ it("seeds empty Core preferences from existing settings and imports existing rem
   const write = vi.fn();
   vi.doMock("../src/inboxState", () => ({ writeInboxState: write }));
   const { inboxConfig, saveInboxConfig, applySharedInboxPreferences } = await import("../src/inboxSettings");
-  const local = { aiSummary: false, includeAutonomous: true, model: "builtin/fast" };
-  saveInboxConfig(local, false);
+  const legacyLocal = { aiSummary: false, includeAutonomous: true, model: "builtin/fast" };
+  const expectedLocal = {
+    ...legacyLocal,
+    inboxEnabled: true,
+    summaryMode: "standard" as const,
+  };
+  saveInboxConfig(legacyLocal, false);
   applySharedInboxPreferences(undefined);
-  expect(inboxConfig()).toEqual(local);
-  expect(write).toHaveBeenCalledWith("preferences", local);
+  expect(inboxConfig()).toEqual(expectedLocal);
+  expect(write).toHaveBeenCalledWith("preferences", expectedLocal);
   write.mockClear();
-  const remote = { aiSummary: true, includeAutonomous: false, model: "builtin/reasoning" };
+  const remote = {
+    inboxEnabled: false,
+    aiSummary: true,
+    includeAutonomous: false,
+    model: "builtin/reasoning",
+    summaryMode: "eco" as const,
+  };
   applySharedInboxPreferences(remote);
   expect(inboxConfig()).toEqual(remote);
   expect(write).not.toHaveBeenCalled();

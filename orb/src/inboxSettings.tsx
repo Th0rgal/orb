@@ -7,17 +7,28 @@ import { listChains, routingCatalog, type ModelChain, type RoutingCatalog } from
 import { Select } from "./Select";
 import { NameDialog } from "./Dialog";
 import { sideQuestionKey } from "./sideQuestionStorage";
+import {
+  DEFAULT_INBOX_CONFIG,
+  ECO_QUIET_MS,
+  formatInboxSummaryBadge,
+  normalizeInboxConfig,
+  normalizeSummaryMode,
+  shouldRequestInboxDigest,
+  type InboxConfig,
+  type InboxSummaryMode,
+  type InboxSummarySurface,
+} from "./inboxPolicy";
 
-export type InboxConfig = {
-  aiSummary: boolean;
-  includeAutonomous: boolean;
-  model: string;
-};
-
-const DEFAULT_INBOX_CONFIG: InboxConfig = {
-  aiSummary: true,
-  includeAutonomous: false,
-  model: "builtin/smart",
+export {
+  DEFAULT_INBOX_CONFIG,
+  ECO_QUIET_MS,
+  formatInboxSummaryBadge,
+  normalizeInboxConfig,
+  normalizeSummaryMode,
+  shouldRequestInboxDigest,
+  type InboxConfig,
+  type InboxSummaryMode,
+  type InboxSummarySurface,
 };
 
 const [inboxConfigVersion, setInboxConfigVersion] = createSignal(0);
@@ -27,24 +38,23 @@ export function inboxConfig(): InboxConfig {
   inboxConfigVersion();
   try {
     const parsed = readJson<Partial<InboxConfig> | null>(sideQuestionKey("settings:inbox"), null, isRecord);
-    if (!parsed) return { ...DEFAULT_INBOX_CONFIG };
-    return {
-      includeAutonomous: parsed.includeAutonomous === true,
-      aiSummary: typeof parsed.aiSummary === "boolean" ? parsed.aiSummary : DEFAULT_INBOX_CONFIG.aiSummary,
-      model: typeof parsed.model === "string" && parsed.model.trim() ? parsed.model.trim() : DEFAULT_INBOX_CONFIG.model,
-    };
+    return normalizeInboxConfig(parsed);
   } catch {
     return { ...DEFAULT_INBOX_CONFIG };
   }
 }
 
-export function saveInboxConfig(next: Omit<InboxConfig, "includeAutonomous"> & Partial<Pick<InboxConfig, "includeAutonomous">>, sync = true): boolean {
+export function saveInboxConfig(
+  next: Partial<InboxConfig> & Pick<InboxConfig, "aiSummary" | "model">,
+  sync = true,
+): boolean {
   try {
-    const normalized: InboxConfig = {
-      aiSummary: Boolean(next.aiSummary),
-      includeAutonomous: next.includeAutonomous ?? inboxConfig().includeAutonomous,
+    const current = inboxConfig();
+    const normalized = normalizeInboxConfig({
+      ...current,
+      ...next,
       model: next.model.trim() || DEFAULT_INBOX_CONFIG.model,
-    };
+    });
     localStorage.setItem(sideQuestionKey("settings:inbox"), JSON.stringify(normalized));
     setInboxConfigVersion((v) => v + 1);
     if (sync) writeInboxState("preferences", normalized);
@@ -67,13 +77,20 @@ const PRESET_MODELS: Array<{ id: string; name: string; detail: string }> = [
   },
 ];
 
+const SUMMARY_MODE_DESCRIPTIONS: Record<InboxSummaryMode, string> = {
+  standard: "Pre-warm unread digests in the background and show end-of-turn recaps in chat.",
+  on_open: "Save tokens: only generate summaries when Inbox is open and the run has settled.",
+  eco: "Eco mode: only summarize when Inbox is open and a settled conversation has had no messages for at least 1 hour.",
+};
+
 /** Empty selection means Off and never overwrites the remembered model. */
 export function inboxSummaryChoice(model: string, choice: string) {
   const selected = choice.trim();
   return { aiSummary: selected.length > 0, model: selected || model };
 }
 
-export function InboxSettings() {
+/** Agents → Inbox & summaries (`inbox-summaries`): master Inbox switch, scope, model, and Eco mode. */
+export function InboxSummariesSettings() {
   const config = createMemo(inboxConfig);
   const [custom, setCustom] = createSignal<string>();
   const [customError, setCustomError] = createSignal("");
@@ -129,6 +146,136 @@ export function InboxSettings() {
   return (
     <div class="s-body settings-body">
       <div class="s-inner">
+        <h2>Inbox &amp; summaries</h2>
+        <section class="s-sec">
+          <h3>Inbox</h3>
+          <div class="s-card">
+            <div class="s-row">
+              <div class="s-row-text">
+                <div class="s-row-title">Enable Inbox</div>
+                <div class="s-row-desc">
+                  Show Inbox in the sidebar, keep the ⌘I shortcut active, and track unread agent updates.
+                </div>
+              </div>
+              <div class="s-row-ctrl">
+                <button
+                  type="button"
+                  class={`toggle ${config().inboxEnabled ? "on" : ""}`}
+                  role="switch"
+                  aria-label="Enable Inbox"
+                  aria-checked={config().inboxEnabled}
+                  onClick={() => save({ ...config(), inboxEnabled: !config().inboxEnabled })}
+                />
+              </div>
+            </div>
+            <div class="s-row">
+              <div class="s-row-text">
+                <div class="s-row-title">Include autonomous agents</div>
+                <div class="s-row-desc">
+                  Show updates from sub-agents and missions launched by Hermes in your Inbox and unread count.
+                  Off by default: only agents you started directly appear.
+                </div>
+              </div>
+              <div class="s-row-ctrl">
+                <button
+                  type="button"
+                  class={`toggle ${config().includeAutonomous ? "on" : ""}`}
+                  role="switch"
+                  aria-label="Include autonomous agents"
+                  aria-checked={config().includeAutonomous}
+                  disabled={!config().inboxEnabled}
+                  onClick={() => save({ ...config(), includeAutonomous: !config().includeAutonomous })}
+                />
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="s-sec">
+          <h3>AI summaries</h3>
+          <div class="s-card">
+            <div class="s-row">
+              <div class="s-row-text">
+                <div class="s-row-title">AI summaries</div>
+                <div class="s-row-desc">Choose a model or routing chain for Inbox digests. Off keeps your last choice.</div>
+              </div>
+              <div class="s-row-ctrl inbox-settings-model-ctrl">
+                <Select
+                  aria-label="AI summaries"
+                  disabled={!config().inboxEnabled}
+                  value={config().aiSummary ? config().model : ""}
+                  onChange={(e) => {
+                    const choice = e.currentTarget.value;
+                    if (choice === "__custom__") {
+                      setCustomError("");
+                      setCustom(config().model);
+                      e.currentTarget.value = config().aiSummary ? config().model : "";
+                    } else {
+                      save({ ...config(), ...inboxSummaryChoice(config().model, choice) });
+                    }
+                  }}
+                >
+                  <option value="">Off</option>
+                  <For each={modelOptions()}>{(option) => <option value={option.id}>{option.name}</option>}</For>
+                  <option value="__custom__">Custom model or chain…</option>
+                </Select>
+              </div>
+            </div>
+            <div class="s-row">
+              <div class="s-row-text">
+                <div class="s-row-title">Summary mode</div>
+                <div class="s-row-desc">{SUMMARY_MODE_DESCRIPTIONS[config().summaryMode]}</div>
+              </div>
+              <div class="s-row-ctrl inbox-settings-model-ctrl">
+                <Select
+                  aria-label="Summary mode"
+                  disabled={!config().inboxEnabled || !config().aiSummary}
+                  value={config().summaryMode}
+                  onChange={(e) => save({ ...config(), summaryMode: normalizeSummaryMode(e.currentTarget.value) })}
+                >
+                  <option value="standard">Standard</option>
+                  <option value="on_open">When Inbox opens</option>
+                  <option value="eco">Eco (1h quiet)</option>
+                </Select>
+              </div>
+            </div>
+            <Show when={message()}>
+              <div class="s-row"><span role="status" class="s-row-desc">{message()}</span></div>
+            </Show>
+          </div>
+        </section>
+        <Show when={custom() !== undefined}>
+          <NameDialog
+            title="Custom model or chain"
+            label="Model or chain ID"
+            value={custom() ?? ""}
+            onInput={setCustom}
+            placeholder="provider/model or chain ID"
+            action="Use model"
+            error={customError()}
+            onClose={() => setCustom(undefined)}
+            onAction={() => {
+              const next = { ...config(), ...inboxSummaryChoice(config().model, custom()!) };
+              if (saveInboxConfig(next)) {
+                setCustom(undefined);
+                setMessage("Saved. Inbox will use this configuration.");
+              } else {
+                setCustomError("Could not save Inbox settings. Try again.");
+              }
+            }}
+          />
+        </Show>
+      </div>
+    </div>
+  );
+}
+
+/** Notifications (`inbox-settings`): unread scope and shortcut to Agents → Inbox & summaries. */
+export function InboxSettings(p: { onOpenPage?: (id: string) => void } = {}) {
+  const config = createMemo(inboxConfig);
+  const [message, setMessage] = createSignal("");
+  return (
+    <div class="s-body settings-body">
+      <div class="s-inner">
         <h2>Notifications</h2>
         <section class="s-sec">
           <h3>Notifications</h3>
@@ -148,50 +295,33 @@ export function InboxSettings() {
                   role="switch"
                   aria-label="Include autonomous agents"
                   aria-checked={config().includeAutonomous}
+                  disabled={!config().inboxEnabled}
                   onClick={() => {
                     const next = { ...config(), includeAutonomous: !config().includeAutonomous };
-                    if (saveInboxConfig(next)) {
-                      setMessage("Saved. Inbox will use this configuration.");
-                    } else setMessage("Could not save Inbox settings.");
+                    if (saveInboxConfig(next)) setMessage("Saved. Inbox will use this configuration.");
+                    else setMessage("Could not save Inbox settings.");
                   }}
                 />
               </div>
             </div>
+            <div class="s-row">
+              <div class="s-row-text">
+                <div class="s-row-title">Inbox &amp; summaries</div>
+                <div class="s-row-desc">{formatInboxSummaryBadge(config())}</div>
+              </div>
+              <Show when={p.onOpenPage}>
+                <div class="s-row-ctrl">
+                  <button type="button" class="s-btn" onClick={() => p.onOpenPage!("inbox-summaries")}>
+                    Configure
+                  </button>
+                </div>
+              </Show>
+            </div>
+            <Show when={message()}>
+              <div class="s-row"><span role="status" class="s-row-desc">{message()}</span></div>
+            </Show>
           </div>
         </section>
-        <section class="s-sec">
-          <h3>Inbox</h3>
-          <div class="s-card"><div class="s-row">
-            <div class="s-row-text">
-              <div class="s-row-title">AI summaries</div>
-              <div class="s-row-desc">Choose a model or routing chain for Inbox digests. Off keeps your last choice.</div>
-            </div>
-            <div class="s-row-ctrl inbox-settings-model-ctrl">
-              <Select aria-label="AI summaries" value={config().aiSummary ? config().model : ""} onChange={e => {
-                const choice = e.currentTarget.value;
-                if (choice === "__custom__") {
-                  setCustomError("");
-                  setCustom(config().model);
-                  e.currentTarget.value = config().aiSummary ? config().model : "";
-                } else save({ ...config(), ...inboxSummaryChoice(config().model, choice) });
-              }}>
-                <option value="">Off</option>
-                <For each={modelOptions()}>{option => <option value={option.id}>{option.name}</option>}</For>
-                <option value="__custom__">Custom model or chain…</option>
-              </Select>
-            </div>
-          </div><div class="s-row"><span role="status" class="s-row-desc">{message()}</span></div></div>
-        </section>
-        <Show when={custom() !== undefined}>
-          <NameDialog title="Custom model or chain" label="Model or chain ID"
-            value={custom() ?? ""} onInput={setCustom} placeholder="provider/model or chain ID"
-            action="Use model" error={customError()} onClose={() => setCustom(undefined)}
-            onAction={() => {
-              const next = { ...config(), ...inboxSummaryChoice(config().model, custom()!) };
-              if (saveInboxConfig(next)) { setCustom(undefined); setMessage("Saved. Inbox will use this configuration."); }
-              else setCustomError("Could not save Inbox settings. Try again.");
-            }} />
-        </Show>
       </div>
     </div>
   );
@@ -202,8 +332,9 @@ export function applySharedInboxPreferences(prefs: unknown): void {
     writeInboxState("preferences", inboxConfig());
     return;
   }
-  if (typeof prefs !== "object") return;
+  if (typeof prefs !== "object" || Array.isArray(prefs)) return;
   const p = prefs as Partial<InboxConfig>;
   if (typeof p.aiSummary !== "boolean" || typeof p.includeAutonomous !== "boolean" || typeof p.model !== "string" || !p.model.trim()) return;
-  if (JSON.stringify(inboxConfig()) !== JSON.stringify({ includeAutonomous: p.includeAutonomous, aiSummary: p.aiSummary, model: p.model })) saveInboxConfig(p as InboxConfig, false);
+  const normalized = normalizeInboxConfig(p);
+  if (JSON.stringify(inboxConfig()) !== JSON.stringify(normalized)) saveInboxConfig(normalized, false);
 }

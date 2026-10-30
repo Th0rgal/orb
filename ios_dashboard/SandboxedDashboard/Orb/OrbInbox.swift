@@ -109,7 +109,13 @@ final class OrbSharedInboxState {
     func writePreferences() {
         let p = OrbInboxSettings.shared
         p.bindAccount(account)
-        write("preferences", .object(["aiSummary": .bool(p.aiSummary), "includeAutonomous": .bool(p.includeAutonomous), "model": .string(p.model)]))
+        write("preferences", .object([
+            "inboxEnabled": .bool(p.inboxEnabled),
+            "aiSummary": .bool(p.aiSummary),
+            "summaryMode": .string(p.summaryMode.rawValue),
+            "includeAutonomous": .bool(p.includeAutonomous),
+            "model": .string(p.model),
+        ]))
     }
     func unread(_ row: OrbRow) -> Bool? {
         ensureScope()
@@ -147,7 +153,9 @@ final class OrbSharedInboxState {
         let prefs = raw["preferences"]
         if !prefs["model"].text.isEmpty {
             let p = OrbInboxSettings.shared
+            if case .bool(let enabled) = prefs["inboxEnabled"] { p.inboxEnabled = enabled } else { p.inboxEnabled = true }
             p.aiSummary = prefs["aiSummary"].flag
+            p.summaryMode = OrbInboxPolicy.normalizeMode(prefs["summaryMode"].text)
             p.includeAutonomous = prefs["includeAutonomous"].flag
             p.model = prefs["model"].text
         }
@@ -179,12 +187,73 @@ struct OrbInboxModelPreset: Identifiable, Equatable, Sendable {
     let subtitle: String
 }
 
+enum OrbInboxSummaryMode: String, CaseIterable, Sendable {
+    case standard = "standard"
+    case onOpen = "on_open"
+    case eco = "eco"
+
+    var label: String {
+        switch self {
+        case .standard: "Standard"
+        case .onOpen: "When Inbox opens"
+        case .eco: "Eco (1h quiet)"
+        }
+    }
+
+    var summaryDescription: String {
+        switch self {
+        case .standard: "Pre-warm unread digests and show end-of-turn recaps."
+        case .onOpen: "Save tokens: only summarize when Inbox is open and the run has settled."
+        case .eco: "Eco mode: only summarize when Inbox is open and a settled conversation has had no messages for at least 1 hour."
+        }
+    }
+}
+
+enum OrbInboxPolicy {
+    static let ecoQuietMs: Double = 3_600_000
+    static let defaultModel = "builtin/smart"
+
+    static func normalizeMode(_ raw: String?) -> OrbInboxSummaryMode {
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "on_open": .onOpen
+        case "eco": .eco
+        default: .standard
+        }
+    }
+
+    static func normalize(_ raw: [String: Any]) -> (inboxEnabled: Bool, includeAutonomous: Bool, aiSummary: Bool, summaryMode: OrbInboxSummaryMode, model: String) {
+        let inboxEnabled = (raw["inboxEnabled"] as? Bool) ?? true
+        let includeAutonomous = (raw["includeAutonomous"] as? Bool) == true
+        let aiSummary = (raw["aiSummary"] as? Bool) ?? true
+        let summaryMode = normalizeMode(raw["summaryMode"] as? String)
+        let trimmed = (raw["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let model = trimmed.isEmpty ? defaultModel : trimmed
+        return (inboxEnabled, includeAutonomous, aiSummary, summaryMode, model)
+    }
+
+    static func shouldRequestDigest(
+        inboxEnabled: Bool = true,
+        aiSummary: Bool = true,
+        summaryMode: OrbInboxSummaryMode = .standard,
+        surface: String,
+        isLive: Bool,
+        updatedMs: Double,
+        nowMs: Double
+    ) -> Bool {
+        guard inboxEnabled && aiSummary else { return false }
+        if summaryMode == .standard { return true }
+        guard surface == "inbox" && !isLive else { return false }
+        if summaryMode == .onOpen { return true }
+        return updatedMs > 0 && (nowMs - updatedMs) >= ecoQuietMs
+    }
+}
+
 @MainActor
 @Observable
 final class OrbInboxSettings: @unchecked Sendable {
     static let shared = OrbInboxSettings()
 
-    static let defaultModel = "builtin/smart"
+    nonisolated static let defaultModel = OrbInboxPolicy.defaultModel
     static let modelPresets: [OrbInboxModelPreset] = [
         OrbInboxModelPreset(
             id: "builtin/smart",
@@ -198,7 +267,9 @@ final class OrbInboxSettings: @unchecked Sendable {
         ),
     ]
 
+    private let inboxEnabledKey = "orb.inbox.enabled.v1"
     private let aiSummaryKey = "orb.inbox.aiSummary.v1"
+    private let summaryModeKey = "orb.inbox.summaryMode.v1"
     private let modelKey = "orb.inbox.model.v1"
 
     static let ownerKey = "orb.inbox.preferences.owner.v1"
@@ -207,15 +278,31 @@ final class OrbInboxSettings: @unchecked Sendable {
         guard owner != account else { return }
         let previous = OrbSharedInboxState.shared.applying
         OrbSharedInboxState.shared.applying = true
-        if owner != nil { aiSummary = true; includeAutonomous = false; model = Self.defaultModel }
+        if owner != nil { inboxEnabled = true; aiSummary = true; summaryMode = .standard; includeAutonomous = false; model = Self.defaultModel }
         UserDefaults.standard.set(account, forKey: Self.ownerKey)
         OrbSharedInboxState.shared.applying = previous
     }
     private(set) var version = 0
+    var inboxEnabled: Bool {
+        didSet {
+            guard inboxEnabled != oldValue else { return }
+            UserDefaults.standard.set(inboxEnabled, forKey: inboxEnabledKey)
+            version += 1
+            if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } }
+        }
+    }
     var aiSummary: Bool {
         didSet {
             guard aiSummary != oldValue else { return }
             UserDefaults.standard.set(aiSummary, forKey: aiSummaryKey)
+            version += 1
+            if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } }
+        }
+    }
+    var summaryMode: OrbInboxSummaryMode {
+        didSet {
+            guard summaryMode != oldValue else { return }
+            UserDefaults.standard.set(summaryMode.rawValue, forKey: summaryModeKey)
             version += 1
             if !OrbSharedInboxState.shared.applying { Task { @MainActor in OrbSharedInboxState.shared.writePreferences() } }
         }
@@ -244,11 +331,17 @@ final class OrbInboxSettings: @unchecked Sendable {
     }
 
     private init() {
+        if UserDefaults.standard.object(forKey: inboxEnabledKey) == nil {
+            self.inboxEnabled = true
+        } else {
+            self.inboxEnabled = UserDefaults.standard.bool(forKey: inboxEnabledKey)
+        }
         if UserDefaults.standard.object(forKey: aiSummaryKey) == nil {
             self.aiSummary = true
         } else {
             self.aiSummary = UserDefaults.standard.bool(forKey: aiSummaryKey)
         }
+        self.summaryMode = OrbInboxPolicy.normalizeMode(UserDefaults.standard.string(forKey: summaryModeKey))
         let savedModel = (UserDefaults.standard.string(forKey: modelKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = savedModel.isEmpty ? Self.defaultModel : savedModel
     }
@@ -316,7 +409,7 @@ final class OrbInboxDigestStore {
         ensureScope()
         _ = version
         let settings = OrbInboxSettings.shared
-        guard settings.aiSummary else { return nil }
+        guard settings.inboxEnabled && settings.aiSummary else { return nil }
         let key = cacheKey(missionID: row.id, updatedAt: row.updatedAt, model: settings.model)
         if let exact = cache[key] { return exact }
         let prefix = "\(scope)|\(row.id)|"
@@ -326,8 +419,19 @@ final class OrbInboxDigestStore {
     func request(row: OrbRow, events: [StoredEvent], priority: Int = 10) {
         ensureScope()
         let settings = OrbInboxSettings.shared
-        guard settings.aiSummary else { return }
-        if row.missionState?.isActive == true { return }
+        let isLive = row.missionState?.isActive == true
+        let updatedMs = (inboxTimestamp(row.updatedAt) ?? 0) * 1000
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        guard OrbInboxPolicy.shouldRequestDigest(
+            inboxEnabled: settings.inboxEnabled,
+            aiSummary: settings.aiSummary,
+            summaryMode: settings.summaryMode,
+            surface: "inbox",
+            isLive: isLive,
+            updatedMs: updatedMs,
+            nowMs: nowMs
+        ) else { return }
+        if isLive { return }
         let model = settings.model
         let key = cacheKey(missionID: row.id, updatedAt: row.updatedAt, model: model)
         if cache[key] != nil || inFlight.contains(key) { return }
@@ -380,7 +484,7 @@ final class OrbInboxDigestStore {
     }
 
     func summaryState(row: OrbRow) -> String? {
-        guard OrbInboxSettings.shared.aiSummary else { return nil }
+        guard OrbInboxSettings.shared.inboxEnabled && OrbInboxSettings.shared.aiSummary else { return nil }
         let key = cacheKey(missionID: row.id, updatedAt: row.updatedAt, model: OrbInboxSettings.shared.model)
         if inFlight.contains(key) { return "Generating summary…" }
         if failedAt[key] != nil { return "Summary unavailable" }
@@ -428,9 +532,8 @@ enum OrbInboxSummaryChoice {
     }
 }
 
-struct OrbInboxSettingsView: View {
+struct OrbInboxSummariesSettingsView: View {
     @State private var settings = OrbInboxSettings.shared
-    @State private var notifications = OrbNotificationCenter.shared
     @State private var client = OrbSettingsClient()
     @State private var choices: [String] = []
     @State private var editing = false
@@ -447,11 +550,14 @@ struct OrbInboxSettingsView: View {
     }
     var body: some View {
         List {
-            Section {
-                Toggle("Notifications for finished & blocked runs", isOn: $notifications.notificationsEnabled)
-                    .accessibilityIdentifier("settings.inbox.notifications")
+            Section("Inbox") {
+                Toggle("Enable Inbox", isOn: $settings.inboxEnabled)
+                    .accessibilityIdentifier("settings.inbox.enabled")
                 Toggle("Include autonomous agents", isOn: $settings.includeAutonomous)
+                    .disabled(!settings.inboxEnabled)
                     .accessibilityIdentifier("settings.inbox.includeAutonomous")
+            }
+            Section {
                 Picker("AI summaries", selection: Binding(get: { settings.aiSummary ? settings.model : "" }, set: { value in
                     if value == "__custom__" { customModel = settings.model; editing = true }
                     else { choose(value) }
@@ -460,14 +566,25 @@ struct OrbInboxSettingsView: View {
                     ForEach(models, id: \.self) { Text($0).tag($0) }
                     Text("Custom model or chain…").tag("__custom__")
                 }
+                .disabled(!settings.inboxEnabled)
                 .accessibilityIdentifier("settings.inbox.aiSummaries")
+
+                Picker("Summary mode", selection: $settings.summaryMode) {
+                    ForEach(OrbInboxSummaryMode.allCases, id: \.self) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .disabled(!settings.inboxEnabled || !settings.aiSummary)
+                .accessibilityIdentifier("settings.inbox.summaryMode")
+            } header: {
+                Text("AI summaries")
             } footer: {
-                Text("Choose a model or routing chain for Inbox digests. Off keeps your last choice.")
+                Text(settings.summaryMode.summaryDescription)
             }
         }
         .scrollContentBackground(.hidden)
         .background(OrbStyle.background)
-        .navigationTitle("Notifications")
+        .navigationTitle("Inbox & summaries")
         .navigationBarTitleDisplayMode(.inline)
         .alert("Custom model or chain", isPresented: $editing) {
             TextField("provider/model or chain ID", text: $customModel)
@@ -481,6 +598,40 @@ struct OrbInboxSettingsView: View {
             let providers = (try? await client.call("/api/providers?include_all=true&include_unverified=true")["providers"].items) ?? []
             choices = chains.map { $0["id"].text } + providers.flatMap { p in p["models"].items.map { p["id"].text + "/" + $0["id"].text } }
         }
+    }
+}
+
+struct OrbInboxSettingsView: View {
+    @State private var settings = OrbInboxSettings.shared
+    @State private var notifications = OrbNotificationCenter.shared
+
+    var body: some View {
+        List {
+            Section {
+                Toggle("Notifications for finished & blocked runs", isOn: $notifications.notificationsEnabled)
+                    .accessibilityIdentifier("settings.inbox.notifications")
+                Toggle("Include autonomous agents", isOn: $settings.includeAutonomous)
+                    .disabled(!settings.inboxEnabled)
+                    .accessibilityIdentifier("settings.inbox.includeAutonomous")
+                NavigationLink {
+                    OrbInboxSummariesSettingsView()
+                } label: {
+                    HStack {
+                        Text("Inbox & summaries")
+                        Spacer()
+                        Text(!settings.inboxEnabled ? "Off" : (settings.aiSummary ? "\(settings.summaryMode.label) · \(settings.model)" : "AI off"))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            } footer: {
+                Text("Configure Inbox visibility, AI summary model and Eco mode under Agents → Inbox & summaries.")
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(OrbStyle.background)
+        .navigationTitle("Notifications")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

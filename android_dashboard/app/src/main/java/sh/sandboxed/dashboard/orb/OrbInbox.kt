@@ -168,7 +168,16 @@ object OrbSharedInboxState {
     fun writePreferences() {
         if (applying) return
         OrbInboxSettings.bindAccount(account())
-        write("preferences", mapOf("aiSummary" to OrbInboxSettings.aiSummary, "includeAutonomous" to OrbInboxSettings.includeAutonomous, "model" to OrbInboxSettings.model))
+        write(
+            "preferences",
+            mapOf(
+                "inboxEnabled" to OrbInboxSettings.inboxEnabled,
+                "aiSummary" to OrbInboxSettings.aiSummary,
+                "summaryMode" to OrbInboxSettings.summaryMode.id,
+                "includeAutonomous" to OrbInboxSettings.includeAutonomous,
+                "model" to OrbInboxSettings.model,
+            )
+        )
     }
     fun unread(mission: OrbRow): Boolean? {
         ensureScope()
@@ -191,7 +200,15 @@ object OrbSharedInboxState {
         val prefs = raw["preferences"] as? Map<*, *>
         OrbInboxSettings.bindAccount(expected)
         applying = true
-        if (prefs != null && prefs["model"] is String) OrbInboxSettings.update(newAiSummary = prefs["aiSummary"] == true, newIncludeAutonomous = prefs["includeAutonomous"] == true, newModel = prefs["model"] as String)
+        if (prefs != null && prefs["model"] is String) {
+            OrbInboxSettings.update(
+                newInboxEnabled = (prefs["inboxEnabled"] as? Boolean) ?: true,
+                newAiSummary = prefs["aiSummary"] == true,
+                newSummaryMode = OrbInboxPolicy.normalizeMode(prefs["summaryMode"] as? String),
+                newIncludeAutonomous = prefs["includeAutonomous"] == true,
+                newModel = prefs["model"] as String,
+            )
+        }
         applying = false
         // Missing Core preferences seed from the existing device settings.
         if (prefs?.get("model") !is String) writePreferences()
@@ -199,10 +216,66 @@ object OrbSharedInboxState {
     }
 }
 
+enum class OrbInboxSummaryMode(val id: String, val label: String, val description: String) {
+    Standard("standard", "Standard", "Pre-warm unread digests and show end-of-turn recaps."),
+    OnOpen("on_open", "When Inbox opens", "Save tokens: only summarize when Inbox is open and the run has settled."),
+    Eco("eco", "Eco (1h quiet)", "Eco mode: only summarize when Inbox is open and a settled conversation has had no messages for at least 1 hour.");
+}
+
+object OrbInboxPolicy {
+    const val ECO_QUIET_MS = 3_600_000L
+
+    data class NormalizedPreferences(
+        val inboxEnabled: Boolean,
+        val includeAutonomous: Boolean,
+        val aiSummary: Boolean,
+        val summaryMode: OrbInboxSummaryMode,
+        val model: String,
+    )
+
+    fun normalizeMode(raw: String?): OrbInboxSummaryMode = when (raw?.trim()) {
+        "on_open" -> OrbInboxSummaryMode.OnOpen
+        "eco" -> OrbInboxSummaryMode.Eco
+        else -> OrbInboxSummaryMode.Standard
+    }
+
+    fun normalize(raw: Map<*, *>?): NormalizedPreferences {
+        if (raw == null) {
+            return NormalizedPreferences(true, false, true, OrbInboxSummaryMode.Standard, OrbInboxSettings.DEFAULT_MODEL)
+        }
+        val inboxEnabled = (raw["inboxEnabled"] as? Boolean) ?: true
+        val includeAutonomous = raw["includeAutonomous"] == true
+        val aiSummary = (raw["aiSummary"] as? Boolean) ?: true
+        val summaryMode = normalizeMode(raw["summaryMode"] as? String)
+        val model = (raw["model"] as? String)?.trim()?.takeIf { it.isNotEmpty() } ?: OrbInboxSettings.DEFAULT_MODEL
+        return NormalizedPreferences(inboxEnabled, includeAutonomous, aiSummary, summaryMode, model)
+    }
+
+    fun shouldRequestDigest(
+        inboxEnabled: Boolean = true,
+        aiSummary: Boolean = true,
+        summaryMode: OrbInboxSummaryMode = OrbInboxSummaryMode.Standard,
+        surface: String,
+        isLive: Boolean,
+        updatedMs: Long,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        if (!inboxEnabled || !aiSummary) return false
+        if (summaryMode == OrbInboxSummaryMode.Standard) return true
+        if (surface != "inbox" || isLive) return false
+        if (summaryMode == OrbInboxSummaryMode.OnOpen) return true
+        return updatedMs > 0L && (nowMs - updatedMs) >= ECO_QUIET_MS
+    }
+}
+
 object OrbInboxSettings {
     private const val PREFS_KEY = "orb.inbox.settings.v1"
+    private const val KEY_INBOX_ENABLED = "inbox_enabled"
     private const val KEY_AI_SUMMARY = "ai_summary"
+    private const val KEY_SUMMARY_MODE = "summary_mode"
     private const val KEY_MODEL = "model"
+    var inboxEnabled by mutableStateOf(true)
+        private set
     var includeAutonomous by mutableStateOf(false)
         private set
 
@@ -219,12 +292,22 @@ object OrbInboxSettings {
         if (owner == account) return
         val previous = OrbSharedInboxState.applying
         OrbSharedInboxState.applying = true
-        if (owner != null) update(newAiSummary = true, newIncludeAutonomous = false, newModel = DEFAULT_MODEL)
+        if (owner != null) {
+            update(
+                newInboxEnabled = true,
+                newAiSummary = true,
+                newSummaryMode = OrbInboxSummaryMode.Standard,
+                newIncludeAutonomous = false,
+                newModel = DEFAULT_MODEL,
+            )
+        }
         owner = account
         prefs?.edit()?.putString("preferences_owner", account)?.commit()
         OrbSharedInboxState.applying = previous
     }
     var aiSummary by mutableStateOf(true)
+        private set
+    var summaryMode by mutableStateOf(OrbInboxSummaryMode.Standard)
         private set
     var model by mutableStateOf(DEFAULT_MODEL)
         private set
@@ -236,21 +319,34 @@ object OrbInboxSettings {
             val p = context.applicationContext.getSharedPreferences(PREFS_KEY, Context.MODE_PRIVATE)
             prefs = p
             owner = p.getString("preferences_owner", null)
+            inboxEnabled = p.getBoolean(KEY_INBOX_ENABLED, true)
             aiSummary = p.getBoolean(KEY_AI_SUMMARY, true)
+            summaryMode = OrbInboxPolicy.normalizeMode(p.getString(KEY_SUMMARY_MODE, null))
             includeAutonomous = p.getBoolean("include_autonomous", false)
             model = p.getString(KEY_MODEL, DEFAULT_MODEL)?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_MODEL
         }
     }
 
-    fun update(newAiSummary: Boolean = aiSummary, newModel: String = model, newIncludeAutonomous: Boolean = includeAutonomous, sync: Boolean = true) {
+    fun update(
+        newInboxEnabled: Boolean = inboxEnabled,
+        newAiSummary: Boolean = aiSummary,
+        newSummaryMode: OrbInboxSummaryMode = summaryMode,
+        newModel: String = model,
+        newIncludeAutonomous: Boolean = includeAutonomous,
+        sync: Boolean = true,
+    ) {
         val cleanModel = newModel.trim().ifEmpty { DEFAULT_MODEL }
+        inboxEnabled = newInboxEnabled
         aiSummary = newAiSummary
+        summaryMode = newSummaryMode
         includeAutonomous = newIncludeAutonomous
         model = cleanModel
         revision += 1
         if (sync) OrbSharedInboxState.writePreferences()
         prefs?.edit()
+            ?.putBoolean(KEY_INBOX_ENABLED, newInboxEnabled)
             ?.putBoolean(KEY_AI_SUMMARY, newAiSummary)
+            ?.putString(KEY_SUMMARY_MODE, newSummaryMode.id)
             ?.putBoolean("include_autonomous", newIncludeAutonomous)
             ?.putString(KEY_MODEL, cleanModel)
             ?.apply()
@@ -304,7 +400,7 @@ object OrbInboxDigestStore {
 
     fun get(mission: OrbRow): OrbInboxDigest? {
         val _rev = revision
-        if (!OrbInboxSettings.aiSummary) return null
+        if (!OrbInboxSettings.inboxEnabled || !OrbInboxSettings.aiSummary) return null
         val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
         val model = OrbInboxSettings.model
         cache[cacheKey(mission.id, updated, model)]?.let { return it }
@@ -313,12 +409,25 @@ object OrbInboxDigestStore {
     }
 
     fun request(core: OrbCore, mission: OrbRow, events: List<OrbRow>, priority: Int = 10) {
-        if (!OrbInboxSettings.aiSummary || !core.isConfigured) return
+        if (!core.isConfigured) return
         val status = (mission.str("status", "state") ?: "").lowercase()
-        if (MissionState.of(status)?.live == true) {
+        val isLive = MissionState.of(status)?.live == true
+        val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
+        val updatedMs = runCatching { Instant.parse(updated).toEpochMilli() }.getOrDefault(0L)
+        if (!OrbInboxPolicy.shouldRequestDigest(
+                inboxEnabled = OrbInboxSettings.inboxEnabled,
+                aiSummary = OrbInboxSettings.aiSummary,
+                summaryMode = OrbInboxSettings.summaryMode,
+                surface = "inbox",
+                isLive = isLive,
+                updatedMs = updatedMs,
+            )
+        ) {
             return
         }
-        val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
+        if (isLive) {
+            return
+        }
         val model = OrbInboxSettings.model
         val key = cacheKey(mission.id, updated, model)
         if (cache.containsKey(key) || inFlight.contains(key)) return
@@ -395,7 +504,7 @@ object OrbInboxDigestStore {
     }
 
     fun summaryState(mission: OrbRow): String? {
-        if (!OrbInboxSettings.aiSummary) return null
+        if (!OrbInboxSettings.inboxEnabled || !OrbInboxSettings.aiSummary) return null
         val updated = mission.str("updated_at", "completed_at", "started_at", "created_at") ?: ""
         val key = cacheKey(mission.id, updated, OrbInboxSettings.model)
         return when { inFlight.contains(key) -> "Generating summary…"; failedAtMs.containsKey(key) -> "Summary unavailable"; else -> null }
@@ -1493,7 +1602,7 @@ fun OrbInboxView(
     LaunchedEffect(core.baseURL, core.token) {
         while (true) { OrbSharedInboxState.refresh(); delay(10_000L) }
     }
-    LaunchedEffect(missions, filterMode, OrbInboxSettings.aiSummary, OrbInboxSettings.model, OrbInboxSettings.includeAutonomous) {
+    LaunchedEffect(missions, filterMode, OrbInboxSettings.inboxEnabled, OrbInboxSettings.aiSummary, OrbInboxSettings.summaryMode, OrbInboxSettings.model, OrbInboxSettings.includeAutonomous) {
         val candidates = missions.filter { m ->
             val st = (m.str("status", "state") ?: "").lowercase()
             MissionState.of(st)?.unreadResponse == true && !OrbInboxModel.isSubagent(m)

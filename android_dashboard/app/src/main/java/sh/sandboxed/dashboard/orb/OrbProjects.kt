@@ -214,8 +214,12 @@ fun OrbAppRoot(
         }
     }
 
-    LaunchedEffect(pendingInbox, OrbNotifications.pendingInboxFocus) {
-        if ((pendingInbox && core.consumeInboxOpen()) || OrbNotifications.pendingInboxFocus != null) {
+    LaunchedEffect(pendingInbox, OrbNotifications.pendingInboxFocus, OrbInboxSettings.inboxEnabled) {
+        if (!OrbInboxSettings.inboxEnabled && topTab == OrbTopTab.Inbox) {
+            topTab = OrbTopTab.Projects
+            return@LaunchedEffect
+        }
+        if (((pendingInbox && core.consumeInboxOpen()) || OrbNotifications.pendingInboxFocus != null) && OrbInboxSettings.inboxEnabled) {
             showSettingsSheet = false
             backStack.value = listOf(OrbNavScreen.Home)
             topTab = OrbTopTab.Inbox
@@ -647,41 +651,43 @@ fun OrbHomeScreen(
                         )
                     }
 
-                    val isInbox = selectedTab == OrbTopTab.Inbox
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(OrbStyle.controlRadius))
-                            .background(if (isInbox) OrbStyle.elevated else Color.Transparent)
-                            .orbPressClickable { onSelectTab(OrbTopTab.Inbox) }
-                            .padding(horizontal = 11.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Text(
-                            text = "Inbox",
-                            color = if (isInbox) Color.White else OrbStyle.textSecondary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                        if (inboxCount > 0) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(OrbStyle.controlRadius))
-                                    .background(if (isInbox) Color.White else OrbStyle.card)
-                                    .padding(horizontal = 6.dp, vertical = 1.5.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "$inboxCount",
-                                    color = if (isInbox) OrbStyle.background else Color.White,
-                                    fontSize = 10.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
+                    if (OrbInboxSettings.inboxEnabled) {
+                        val isInbox = selectedTab == OrbTopTab.Inbox
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                                .background(if (isInbox) OrbStyle.elevated else Color.Transparent)
+                                .orbPressClickable { onSelectTab(OrbTopTab.Inbox) }
+                                .padding(horizontal = 11.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Text(
+                                text = "Inbox",
+                                color = if (isInbox) Color.White else OrbStyle.textSecondary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                            if (inboxCount > 0) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(OrbStyle.controlRadius))
+                                        .background(if (isInbox) Color.White else OrbStyle.card)
+                                        .padding(horizontal = 6.dp, vertical = 1.5.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "$inboxCount",
+                                        color = if (isInbox) OrbStyle.background else Color.White,
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
                             }
                         }
                     }
@@ -707,7 +713,7 @@ fun OrbHomeScreen(
 
             bannerContent()
 
-            if (selectedTab == OrbTopTab.Inbox) {
+            if (selectedTab == OrbTopTab.Inbox && OrbInboxSettings.inboxEnabled) {
                 OrbInboxView(
                     core = core,
                     onSelectMission = onSelectMission,

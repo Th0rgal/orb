@@ -56,4 +56,33 @@ class OrbInboxSummaryChoiceTest {
             }
         }
     }
+
+    @Test fun policyMatchesSharedFixture() {
+        val spec = OrbSpec.dict("fixtures/inbox-summary-policy.json")
+        assertEquals((spec["ecoQuietMs"] as Number).toLong(), OrbInboxPolicy.ECO_QUIET_MS)
+        for (c in OrbJSON.dictList(spec["normalization"])) {
+            val name = c["name"] as String
+            val got = OrbInboxPolicy.normalize(OrbJSON.dict(c["input"]))
+            val expected = OrbJSON.dict(c["expected"])!!
+            assertEquals(name, expected["inboxEnabled"], got.inboxEnabled)
+            assertEquals(name, expected["includeAutonomous"], got.includeAutonomous)
+            assertEquals(name, expected["aiSummary"], got.aiSummary)
+            assertEquals(name, expected["summaryMode"], got.summaryMode.id)
+            assertEquals(name, expected["model"], got.model)
+        }
+        for (g in OrbJSON.dictList(spec["gates"])) {
+            val name = g["name"] as String
+            val norm = OrbInboxPolicy.normalize(OrbJSON.dict(g["prefs"]))
+            val got = OrbInboxPolicy.shouldRequestDigest(
+                inboxEnabled = norm.inboxEnabled,
+                aiSummary = norm.aiSummary,
+                summaryMode = norm.summaryMode,
+                surface = g["surface"] as String,
+                isLive = g["isLive"] as Boolean,
+                updatedMs = (g["updatedMs"] as Number).toLong(),
+                nowMs = (g["nowMs"] as Number).toLong(),
+            )
+            assertEquals(name, g["expected"] as Boolean, got)
+        }
+    }
 }

@@ -16,13 +16,23 @@ class OrbInboxAccountTest {
     @Test fun legacyPreferencesBelongOnlyToTheirFirstAccount() {
         OrbSharedInboxState.applying = true
         try {
-            OrbInboxSettings.update(newAiSummary = false, newIncludeAutonomous = true, newModel = "builtin/fast")
+            OrbInboxSettings.update(
+                newInboxEnabled = false,
+                newAiSummary = false,
+                newSummaryMode = OrbInboxSummaryMode.Eco,
+                newIncludeAutonomous = true,
+                newModel = "builtin/fast",
+            )
             OrbInboxSettings.bindAccount("test:alice")
+            assertFalse(OrbInboxSettings.inboxEnabled)
             assertFalse(OrbInboxSettings.aiSummary)
+            assertEquals(OrbInboxSummaryMode.Eco, OrbInboxSettings.summaryMode)
             assertTrue(OrbInboxSettings.includeAutonomous)
             assertEquals("builtin/fast", OrbInboxSettings.model)
             OrbInboxSettings.bindAccount("test:bob")
+            assertTrue(OrbInboxSettings.inboxEnabled)
             assertTrue(OrbInboxSettings.aiSummary)
+            assertEquals(OrbInboxSummaryMode.Standard, OrbInboxSettings.summaryMode)
             assertFalse(OrbInboxSettings.includeAutonomous)
             assertEquals(OrbInboxSettings.DEFAULT_MODEL, OrbInboxSettings.model)
         } finally { OrbSharedInboxState.applying = false }

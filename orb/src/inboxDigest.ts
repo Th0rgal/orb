@@ -3,6 +3,7 @@ import { connectionVersion, getApiUrl, getJwt, isConnected, type Mission } from 
 import { backgroundWake as parseBackgroundWake } from "./backgroundWake";
 import { formatToolDetail, isSyntheticUserMessage } from "./inboxModel";
 import { inboxConfig, saveInboxConfig } from "./inboxSettings";
+import { shouldRequestInboxDigest, type InboxSummarySurface } from "./inboxPolicy";
 import { isLive } from "./missionStatus";
 import { messageImages } from "./messageImages";
 import { messagePresentation as parseMessagePresentation } from "./messagePresentation";
@@ -399,7 +400,7 @@ async function fetchSharedDigest(missionId: string, model: string, updatedMs: nu
 /** Minimum gap between two summary requests for a mission that is still streaming. */
 export const LIVE_SUMMARY_INTERVAL_MS = 60_000;
 const lastRequestAt = new Map<string, number>();
-const deferred = new Map<string, { mission: Mission; updatedMs: number; priority: number; timer: ReturnType<typeof setTimeout> }>();
+const deferred = new Map<string, { mission: Mission; updatedMs: number; priority: number; surface: InboxSummarySurface; timer: ReturnType<typeof setTimeout> }>();
 const missionBusy = new Map<string, number>();
 
 function missionScope(missionId: string): string {
@@ -415,7 +416,7 @@ function missionScope(missionId: string): string {
 export function inboxSummaryState(missionId: string, updatedMs: number): string | undefined {
   inboxDigestVersion();
   const cfg = inboxConfig();
-  if (!cfg.aiSummary) return;
+  if (cfg.inboxEnabled === false || !cfg.aiSummary) return;
   if (getCachedInboxDigest(missionId, updatedMs, cfg.model)) return;
   const scope = missionScope(missionId);
   if ((missionBusy.get(scope) ?? 0) > 0 || deferred.has(scope)) return "Generating summary…";
@@ -427,10 +428,11 @@ export function requestInboxDigest(
   _items: StreamItem[] | undefined,
   updatedMs: number,
   priority = 50,
+  surface: InboxSummarySurface = "inbox",
 ): void {
   if (!isConnected()) return;
   const cfg = inboxConfig();
-  if (!cfg.aiSummary) return;
+  if (!shouldRequestInboxDigest(cfg, surface, isLive(mission.status), updatedMs)) return;
   if (getCurrentInboxDigest(mission.id, updatedMs, cfg.model)) return;
   const scope = missionScope(mission.id);
   const scopeKey = `${currentStorageKey()}:${makeCacheKey(mission.id, updatedMs, cfg.model)}`;
@@ -443,15 +445,15 @@ export function requestInboxDigest(
   const wait = isLive(mission.status) ? (lastRequestAt.get(scope) ?? -Infinity) + LIVE_SUMMARY_INTERVAL_MS - Date.now() : 0;
   if (busy || wait > 0) {
     if (pending) {
-      pending.mission = mission; pending.updatedMs = updatedMs; pending.priority = Math.min(pending.priority, priority);
+      pending.mission = mission; pending.updatedMs = updatedMs; pending.priority = Math.min(pending.priority, priority); pending.surface = surface;
       return;
     }
     const entry = {
-      mission, updatedMs, priority,
+      mission, updatedMs, priority, surface,
       timer: setTimeout(() => {
         if ((missionBusy.get(scope) ?? 0) > 0) return; // the in-flight completion re-runs it
         deferred.delete(scope);
-        requestInboxDigest(entry.mission, undefined, entry.updatedMs, entry.priority);
+        requestInboxDigest(entry.mission, undefined, entry.updatedMs, entry.priority, entry.surface);
         bumpDigestVersion();
       }, Math.max(wait, 0)),
     };
@@ -496,7 +498,7 @@ export function requestInboxDigest(
         if (next && left === 0) {
           clearTimeout(next.timer);
           deferred.delete(scope);
-          requestInboxDigest(next.mission, undefined, next.updatedMs, next.priority);
+          requestInboxDigest(next.mission, undefined, next.updatedMs, next.priority, next.surface);
         }
         bumpDigestVersion();
       }

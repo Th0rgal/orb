@@ -27,11 +27,12 @@ object OrbInboxSummaryChoice {
 }
 
 @Composable
-fun OrbInboxSettingsPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
+fun OrbInboxSummariesSettingsPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
     val core = OrbCore.shared
     val endpoint by core.baseURLFlow.collectAsState()
     val token by core.tokenFlow.collectAsState()
-    var expanded by remember { mutableStateOf(false) }
+    var expandedModel by remember { mutableStateOf(false) }
+    var expandedMode by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var customModel by remember { mutableStateOf("") }
     var choices by remember { mutableStateOf(emptyList<String>()) }
@@ -39,7 +40,7 @@ fun OrbInboxSettingsPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
     fun choose(choice: String) {
         val next = OrbInboxSummaryChoice.apply(OrbInboxSettings.model, choice)
         OrbInboxSettings.update(newAiSummary = next.aiSummary, newModel = next.model)
-        expanded = false
+        expandedModel = false
     }
     LaunchedEffect(endpoint, token) {
         choices = emptyList()
@@ -54,7 +55,123 @@ fun OrbInboxSettingsPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
             OrbJSON.dictList(provider["models"]).mapNotNull { model -> (model["id"] as? String)?.let { "$id/$it" } }
         }
     }
-    Column(modifier.fillMaxSize().background(OrbStyle.background).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+    Column(
+        modifier
+            .fillMaxSize()
+            .background(OrbStyle.background)
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = OrbStyle.textPrimary) }
+            Text("Inbox & summaries", color = OrbStyle.textPrimary, style = MaterialTheme.typography.titleLarge)
+        }
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = OrbStyle.surface,
+            border = BorderStroke(1.dp, OrbStyle.border),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Enable Inbox", color = OrbStyle.textPrimary, style = MaterialTheme.typography.bodyLarge)
+                        Text("Show Inbox in navigation and track unread agent updates.", color = OrbStyle.textSecondary, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(
+                        checked = OrbInboxSettings.inboxEnabled,
+                        onCheckedChange = { OrbInboxSettings.update(newInboxEnabled = it) }
+                    )
+                }
+                HorizontalDivider(color = OrbStyle.border)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Include autonomous agents", color = OrbStyle.textPrimary, style = MaterialTheme.typography.bodyLarge)
+                        Text("Show updates from sub-agents and Hermes-launched missions in Inbox.", color = OrbStyle.textSecondary, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(
+                        checked = OrbInboxSettings.includeAutonomous,
+                        enabled = OrbInboxSettings.inboxEnabled,
+                        onCheckedChange = { OrbInboxSettings.update(newIncludeAutonomous = it) }
+                    )
+                }
+            }
+        }
+        Text("AI summaries", color = OrbStyle.textPrimary, style = MaterialTheme.typography.titleMedium)
+        Text("Choose a model or routing chain for Inbox digests. Off keeps your last choice.", color = OrbStyle.textSecondary)
+        Box {
+            OutlinedButton(
+                enabled = OrbInboxSettings.inboxEnabled,
+                onClick = { expandedModel = true },
+                modifier = Modifier.semantics { contentDescription = "AI summaries: " + if (OrbInboxSettings.aiSummary) OrbInboxSettings.model else "Off" }
+            ) {
+                Text(if (OrbInboxSettings.aiSummary) OrbInboxSettings.model else "Off")
+            }
+            DropdownMenu(expanded = expandedModel, onDismissRequest = { expandedModel = false }) {
+                DropdownMenuItem(text = { Text("Off") }, onClick = { choose("") })
+                models.forEach { model -> DropdownMenuItem(text = { Text(model) }, onClick = { choose(model) }) }
+                DropdownMenuItem(text = { Text("Custom model or chain…") }, onClick = {
+                    customModel = OrbInboxSettings.model; expandedModel = false; editing = true
+                })
+            }
+        }
+        Text("Summary mode", color = OrbStyle.textPrimary, style = MaterialTheme.typography.titleMedium)
+        Text(OrbInboxSettings.summaryMode.description, color = OrbStyle.textSecondary)
+        Box {
+            OutlinedButton(
+                enabled = OrbInboxSettings.inboxEnabled && OrbInboxSettings.aiSummary,
+                onClick = { expandedMode = true },
+                modifier = Modifier.semantics { contentDescription = "Summary mode: ${OrbInboxSettings.summaryMode.label}" }
+            ) {
+                Text(OrbInboxSettings.summaryMode.label)
+            }
+            DropdownMenu(expanded = expandedMode, onDismissRequest = { expandedMode = false }) {
+                OrbInboxSummaryMode.entries.forEach { mode ->
+                    DropdownMenuItem(
+                        text = { Text(mode.label) },
+                        onClick = {
+                            OrbInboxSettings.update(newSummaryMode = mode)
+                            expandedMode = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+    if (editing) AlertDialog(onDismissRequest = { editing = false }, title = { Text("Custom model or chain") }, text = {
+        OutlinedTextField(value = customModel, onValueChange = { customModel = it }, label = { Text("Model or chain ID") }, singleLine = true)
+    }, confirmButton = {
+        TextButton(enabled = customModel.isNotBlank(), onClick = { choose(customModel); editing = false }) { Text("Use model") }
+    }, dismissButton = { TextButton(onClick = { editing = false }) { Text("Cancel") } })
+}
+
+@Composable
+fun OrbInboxSettingsPage(
+    onBack: () -> Unit,
+    onOpenSummaries: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .fillMaxSize()
+            .background(OrbStyle.background)
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = OrbStyle.textPrimary) }
             Text("Notifications", color = OrbStyle.textPrimary, style = MaterialTheme.typography.titleLarge)
@@ -65,41 +182,48 @@ fun OrbInboxSettingsPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
             border = BorderStroke(1.dp, OrbStyle.border),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("Alert me on new Inbox items", color = OrbStyle.textPrimary, style = MaterialTheme.typography.bodyLarge)
-                    Text("Notify on finished runs, approvals, and blocked missions.", color = OrbStyle.textSecondary, style = MaterialTheme.typography.bodySmall)
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Alert me on new Inbox items", color = OrbStyle.textPrimary, style = MaterialTheme.typography.bodyLarge)
+                        Text("Notify on finished runs, approvals, and blocked missions.", color = OrbStyle.textSecondary, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Switch(
+                        checked = OrbNotifications.notificationsEnabled,
+                        onCheckedChange = { OrbNotifications.setEnabled(it) }
+                    )
                 }
-                Switch(
-                    checked = OrbNotifications.notificationsEnabled,
-                    onCheckedChange = { OrbNotifications.setEnabled(it) }
-                )
-            }
-        }
-        Text("AI summaries", color = OrbStyle.textPrimary, style = MaterialTheme.typography.titleMedium)
-        Text("Choose a model or routing chain for Inbox digests. Off keeps your last choice.", color = OrbStyle.textSecondary)
-        Box {
-            OutlinedButton(onClick = { expanded = true }, modifier = Modifier.semantics { contentDescription = "AI summaries: " + if (OrbInboxSettings.aiSummary) OrbInboxSettings.model else "Off" }) {
-                Text(if (OrbInboxSettings.aiSummary) OrbInboxSettings.model else "Off")
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                DropdownMenuItem(text = { Text("Off") }, onClick = { choose("") })
-                models.forEach { model -> DropdownMenuItem(text = { Text(model) }, onClick = { choose(model) }) }
-                DropdownMenuItem(text = { Text("Custom model or chain…") }, onClick = {
-                    customModel = OrbInboxSettings.model; expanded = false; editing = true
-                })
+                if (onOpenSummaries != null) {
+                    HorizontalDivider(color = OrbStyle.border)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Inbox & summaries", color = OrbStyle.textPrimary, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                when {
+                                    !OrbInboxSettings.inboxEnabled -> "Inbox off"
+                                    !OrbInboxSettings.aiSummary -> "AI summaries off"
+                                    else -> "${OrbInboxSettings.summaryMode.label} · ${OrbInboxSettings.model}"
+                                },
+                                color = OrbStyle.textSecondary,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        OutlinedButton(onClick = onOpenSummaries) { Text("Configure") }
+                    }
+                }
             }
         }
     }
-    if (editing) AlertDialog(onDismissRequest = { editing = false }, title = { Text("Custom model or chain") }, text = {
-        OutlinedTextField(value = customModel, onValueChange = { customModel = it }, label = { Text("Model or chain ID") }, singleLine = true)
-    }, confirmButton = {
-        TextButton(enabled = customModel.isNotBlank(), onClick = { choose(customModel); editing = false }) { Text("Use model") }
-    }, dismissButton = { TextButton(onClick = { editing = false }) { Text("Cancel") } })
 }

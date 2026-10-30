@@ -61,20 +61,20 @@ final class OrbContractTests: XCTestCase {
     @MainActor func testLegacyInboxPreferencesClaimOnlyTheirFirstAccount() {
         let p = OrbInboxSettings.shared
         let savedOwner = UserDefaults.standard.string(forKey: OrbInboxSettings.ownerKey)
-        let original = (p.aiSummary, p.includeAutonomous, p.model)
+        let original = (p.inboxEnabled, p.aiSummary, p.summaryMode, p.includeAutonomous, p.model)
         let previous = OrbSharedInboxState.shared.applying
         OrbSharedInboxState.shared.applying = true
         defer {
-            p.aiSummary = original.0; p.includeAutonomous = original.1; p.model = original.2
+            p.inboxEnabled = original.0; p.aiSummary = original.1; p.summaryMode = original.2; p.includeAutonomous = original.3; p.model = original.4
             UserDefaults.standard.set(savedOwner, forKey: OrbInboxSettings.ownerKey)
             OrbSharedInboxState.shared.applying = previous
         }
         UserDefaults.standard.removeObject(forKey: OrbInboxSettings.ownerKey)
-        p.aiSummary = false; p.includeAutonomous = true; p.model = "builtin/fast"
+        p.inboxEnabled = false; p.aiSummary = false; p.summaryMode = .eco; p.includeAutonomous = true; p.model = "builtin/fast"
         p.bindAccount("test:alice")
-        XCTAssertFalse(p.aiSummary); XCTAssertTrue(p.includeAutonomous); XCTAssertEqual(p.model, "builtin/fast")
+        XCTAssertFalse(p.inboxEnabled); XCTAssertFalse(p.aiSummary); XCTAssertEqual(p.summaryMode, .eco); XCTAssertTrue(p.includeAutonomous); XCTAssertEqual(p.model, "builtin/fast")
         p.bindAccount("test:bob")
-        XCTAssertTrue(p.aiSummary); XCTAssertFalse(p.includeAutonomous); XCTAssertEqual(p.model, OrbInboxSettings.defaultModel)
+        XCTAssertTrue(p.inboxEnabled); XCTAssertTrue(p.aiSummary); XCTAssertEqual(p.summaryMode, .standard); XCTAssertFalse(p.includeAutonomous); XCTAssertEqual(p.model, OrbInboxSettings.defaultModel)
     }
     func testInboxAutonomousScopeIsOptIn() {
         let child = OrbRow(.object(["id": .string("child"), "status": .string("failed"), "parent_mission_id": .string("parent")]))

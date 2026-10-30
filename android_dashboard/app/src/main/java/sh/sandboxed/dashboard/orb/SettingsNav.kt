@@ -19,7 +19,7 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
         get() = when (this) {
             Account -> "Server, sign-in & diagnostics"
             Models -> "Providers, routing, usage & keys"
-            Agents -> "Skills, Assistant & machines"
+            Agents -> "Skills, Assistant, Inbox & machines"
             Security -> "Approvals, Bunker Mode & secrets"
             Notifications -> "Inbox & alert preferences"
         }
@@ -43,6 +43,7 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
                 Triple("skills-settings", "Skills", OrbSettingsRoute.Skills),
                 Triple("hermes-settings", "Assistant", OrbSettingsRoute.Assistant),
                 Triple("btw-settings", "Quick questions (/btw)", OrbSettingsRoute.SideQuestions),
+                Triple("inbox-summaries", "Inbox & summaries", OrbSettingsRoute.InboxSummaries),
                 Triple("machines", "Machines", OrbSettingsRoute.Machines),
             )
             Security -> listOf(

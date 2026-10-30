@@ -13,7 +13,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { id: "models", label: "Models", subtitle: "Fallback order, provider health, usage over time and API keys.",
     tabs: [{ id: "routing", label: "Fallback Chains" }, { id: "routing-providers", label: "Providers" }, { id: "usage-settings", label: "Usage" }, { id: "routing-keys", label: "API Keys" }] },
   { id: "agents", label: "Agents", subtitle: "What agents know and can do, the Assistant, and the agents on this computer.",
-    tabs: [{ id: "skills-settings", label: "Skills" }, { id: "hermes-settings", label: "Assistant" }, { id: "btw-settings", label: "Quick questions (/btw)" }, { id: "local-agents", label: "Local agents" }] },
+    tabs: [{ id: "skills-settings", label: "Skills" }, { id: "hermes-settings", label: "Assistant" }, { id: "btw-settings", label: "Quick questions (/btw)" }, { id: "inbox-summaries", label: "Inbox & summaries" }, { id: "local-agents", label: "Local agents" }] },
   { id: "security", label: "Security", subtitle: "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets.",
     tabs: [{ id: "security-settings", label: "Access" }, { id: "bitwarden-settings", label: "Secrets vault" }] },
   { id: "notifications", label: "Notifications", subtitle: "What reaches your Inbox and when Orb tells you.",

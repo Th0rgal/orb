@@ -70,6 +70,7 @@ import {
   hiddenAutonomousWorking,
 } from "./inboxModel";
 import { inboxConfig } from "./inboxSettings";
+import { formatInboxSummaryBadge, shouldRequestInboxDigest } from "./inboxPolicy";
 import {
   bindWorkspace,
   localBinding,
@@ -469,6 +470,8 @@ export function InboxPage(p: {
   createEffect(() => {
     if (!isConnected()) return;
     const cfg = inboxConfig();
+    if (!cfg.inboxEnabled) return;
+    const currentNow = cfg.summaryMode === "eco" ? nowMs() : Date.now();
     const visible = actionableItems();
     const visibleIds = new Set(visible.map((item) => item.id));
     const { needsYou, ready } = allSections();
@@ -477,6 +480,10 @@ export function InboxPage(p: {
     candidates.forEach((item, idx) => {
       const isVisible = visibleIds.has(item.id);
       const priority = (isVisible ? 0 : 20) + idx;
+      const canSummarize =
+        idx < 12 &&
+        !item.interaction &&
+        shouldRequestInboxDigest(cfg, "inbox", isLive(item.mission.status), item.updatedMs, currentNow);
       const prevMs = refreshedTranscriptAt.get(item.id);
       const readyTx = peekReadyTranscript(item.id);
       if (!readyTx) {
@@ -484,13 +491,13 @@ export function InboxPage(p: {
         if (idx < 12) {
           void loadTranscript(item.id)
             .then((snap) => {
-              if (cfg.aiSummary && idx < 12 && !item.interaction) {
-                requestInboxDigest(item.mission, snap.items, item.updatedMs, priority);
+              if (canSummarize) {
+                requestInboxDigest(item.mission, snap.items, item.updatedMs, priority, "inbox");
               }
             })
             .catch(() => {
-              if (cfg.aiSummary && idx < 12 && !item.interaction) {
-                requestInboxDigest(item.mission, undefined, item.updatedMs, priority);
+              if (canSummarize) {
+                requestInboxDigest(item.mission, undefined, item.updatedMs, priority, "inbox");
               }
             });
           return;
@@ -500,15 +507,15 @@ export function InboxPage(p: {
         refreshedTranscriptAt.set(item.id, item.updatedMs);
         void refreshTranscript(item.id)
           .then((snap) => {
-            if (cfg.aiSummary && idx < 12 && !item.interaction) {
-              requestInboxDigest(item.mission, snap.items, item.updatedMs, priority);
+            if (canSummarize) {
+              requestInboxDigest(item.mission, snap.items, item.updatedMs, priority, "inbox");
             }
           })
           .catch(swallow("inbox.prefetchTranscript", { mission: item.id }));
         return;
       }
-      if (cfg.aiSummary && idx < 12 && !item.interaction) {
-        requestInboxDigest(item.mission, readyTx?.items, item.updatedMs, priority);
+      if (canSummarize) {
+        requestInboxDigest(item.mission, readyTx?.items, item.updatedMs, priority, "inbox");
       }
     });
   });
@@ -1727,7 +1734,7 @@ export function InboxPage(p: {
             >
               <Ic.RunningDots />
               <span>{allSections().working.length} working</span>
-              <Show when={hiddenWorking() > 0}><span class="dim" title="Sub-agents and Hermes missions are hidden from the Inbox. Settings → Notifications → Include autonomous agents.">+{hiddenWorking()} autonomous</span></Show>
+              <Show when={hiddenWorking() > 0}><span class="dim" title="Sub-agents and Hermes missions are hidden from the Inbox. Settings → Agents → Inbox & summaries → Include autonomous agents.">+{hiddenWorking()} autonomous</span></Show>
             </button>
           </Show>
           <button
@@ -1735,10 +1742,10 @@ export function InboxPage(p: {
             class="inbox-model-pill"
             title={
               inboxConfig().aiSummary
-                ? `Inbox AI summaries: ${inboxConfig().model} (Click to configure)`
+                ? `Inbox AI summaries: ${formatInboxSummaryBadge(inboxConfig())} (Click to configure)`
                 : "Inbox AI summaries off (Click to configure)"
             }
-            aria-label={`Inbox settings (${inboxConfig().aiSummary ? `AI · ${inboxConfig().model}` : "AI summary off"})`}
+            aria-label={`Inbox settings (${formatInboxSummaryBadge(inboxConfig())})`}
             onClick={() => (p.onOpenInboxSettings ?? p.onOpenSettings)()}
           >
             <Ic.GearIcon size={13} />

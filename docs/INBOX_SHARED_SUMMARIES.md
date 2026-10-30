@@ -23,8 +23,14 @@ labelled and cannot offer current reply suggestions. Legacy desktop summaries
 remain display fallbacks but do not prevent a shared-summary refresh.
 
 `GET /api/control/inbox-state` reads per-user presentation data.
-`PUT /api/control/inbox-state/preferences` stores `aiSummary`,
-`includeAutonomous` and `model`. Autonomous agents are excluded by default.
+`PUT /api/control/inbox-state/preferences` stores `inboxEnabled`, `aiSummary`,
+`summaryMode` (`"standard"`, `"on_open"`, `"eco"`), `includeAutonomous` and
+`model` (legacy payloads omitting `inboxEnabled` or `summaryMode` default to
+`true` and `"standard"`). Autonomous agents are excluded by default. When
+`inboxEnabled` is `false`, or when `summaryMode` defers a live or recently
+active mission (`< 1h` in `"eco"` mode), `/inbox-digest` returns HTTP 409 unless
+an exact cached digest already exists; `204 No Content` is reserved for
+`aiSummary = false`. See `docs/specs/inbox-and-summaries.md`.
 `PUT /api/control/inbox-state/seen/:id` stores `{ "stamp": milliseconds }`:
 positive marks a response read, negative marks that response unread.
 Clients refresh this state every ten seconds while the Inbox is open and

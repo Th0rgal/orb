@@ -1,18 +1,26 @@
-# Inbox AI summary selection
+# Inbox & AI summary settings
 
-Desktop, iOS and Android expose one **AI summaries** picker. Its choices are
-Off, built-in routing chains, server routing chains, provider-qualified models,
-the remembered model (even when absent from the catalog), and a custom ID dialog.
-Catalog failures never erase the remembered selection.
+Desktop, iOS and Android expose **Inbox & summaries** under **Settings → Agents**
+(`inbox-summaries`), alongside `Skills`, `Assistant` and `Quick questions (/btw)`.
+**Settings → Notifications** (`inbox-settings`) retains alert delivery settings
+and links to **Inbox & summaries**.
 
-The existing synchronized preferences remain the source of truth: `aiSummary`
-controls generation and `model` remembers the selected model/chain. Off writes
-`aiSummary=false` and preserves `model`. Selecting a model writes that model and
-`aiSummary=true`. No new preference or server migration is needed. Custom IDs
-are trimmed and applied only on confirmation; Cancel and blank drafts do not
-change preferences. Desktop close requests (Cancel, Escape, X and backdrop) ask
-for confirmation before discarding an edited custom ID; Keep editing preserves it. Include-autonomous and notification preferences are unchanged.
+Controls in **Inbox & summaries**:
+- **Enable Inbox** (`inboxEnabled`, default `true`): hides Inbox navigation,
+  shortcuts and background unread work when off, without erasing saved summary
+  preferences.
+- **Include autonomous agents** (`includeAutonomous`, default `false`): includes
+  sub-agents and Hermes-launched missions in Inbox and unread counts.
+- **AI summaries** (`aiSummary` + `model`): Off, built-in routing chains, server
+  routing chains, provider-qualified models, the remembered model (even when
+  absent from the catalog), and a custom ID dialog. Off writes `aiSummary=false`
+  and preserves `model` and `summaryMode`.
+- **Summary mode** (`summaryMode`, default `"standard"`): `"standard"` (background
+  pre-warm + chat recaps), `"on_open"` (only while Inbox is open for settled
+  runs), or `"eco"` (only while Inbox is open for settled runs after 1 hour with
+  no messages).
 
-`shared/orb-spec/fixtures/inbox-summary-choice.json` replays selection, Off,
-repeated Off and re-enabling on all three platforms. Desktop also tests actual
-settings persistence across unmount/remount and cancellation of custom edits.
+`shared/orb-spec/fixtures/inbox-summary-choice.json` and
+`shared/orb-spec/fixtures/inbox-summary-policy.json` replay selection,
+preference normalization and summary request gating across Desktop, iOS, Android
+and Core. See `docs/specs/inbox-and-summaries.md` for the full specification.

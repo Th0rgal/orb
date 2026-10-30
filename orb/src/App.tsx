@@ -111,7 +111,8 @@ const BitwardenSettings = lazy(() => import("./BitwardenSettings").then(module =
 import { InboxPage } from "./Inbox";
 import { requestInboxDigest } from "./inboxDigest";
 import { countUnreadInboxMissions, listUnreadInboxCandidates } from "./inboxModel";
-import { InboxSettings, inboxConfig } from "./inboxSettings";
+import { InboxSettings, InboxSummariesSettings, inboxConfig } from "./inboxSettings";
+import { shouldRequestInboxDigest } from "./inboxPolicy";
 import { pendingMissionInteraction } from "./missionAttention";
 import { markMissionRead, unreadVersion } from "./missionUnread";
 
@@ -329,25 +330,27 @@ export default function App() {
         if (key.startsWith("m:") && !isMissionDeleting(key.slice(2))) prefetchTranscript(key.slice(2));
       }
       // Pre-warm top unread Inbox transcripts & AI digests in the background so opening Inbox is instant
-      const topUnread = listUnreadInboxCandidates(
-        inboxMissions(),
-        liveProjects(),
-        (id) => peekReadyTranscript(id)?.items,
-        pendingMissionInteraction,
-        currentMissionId(),
-        inboxConfig(),
-      ).slice(0, 10);
       const cfg = inboxConfig();
-      topUnread.forEach((item, idx) => {
-        const readyTx = peekReadyTranscript(item.id);
-        if (readyTx) {
-          if (cfg.aiSummary && !item.hasInteraction) {
-            requestInboxDigest(item.mission, readyTx.items, item.updatedMs, 10 + idx);
+      if (cfg.inboxEnabled) {
+        const topUnread = listUnreadInboxCandidates(
+          inboxMissions(),
+          liveProjects(),
+          (id) => peekReadyTranscript(id)?.items,
+          pendingMissionInteraction,
+          currentMissionId(),
+          cfg,
+        ).slice(0, 10);
+        topUnread.forEach((item, idx) => {
+          const readyTx = peekReadyTranscript(item.id);
+          if (readyTx) {
+            if (!item.hasInteraction && shouldRequestInboxDigest(cfg, "background", isLive(item.mission.status), item.updatedMs)) {
+              requestInboxDigest(item.mission, readyTx.items, item.updatedMs, 10 + idx, "background");
+            }
+          } else {
+            prefetchTranscript(item.id);
           }
-        } else {
-          prefetchTranscript(item.id);
-        }
-      });
+        });
+      }
     } catch {
       /* keep last good list */
     } finally {
@@ -418,16 +421,19 @@ export default function App() {
   const inboxCount = createMemo(() => {
     transcriptVersion();
     unreadVersion();
-    return isConnected()
-      ? countUnreadInboxMissions(
-          inboxMissions(),
-          liveProjects(),
-          (id) => peekReadyTranscript(id)?.items,
-          pendingMissionInteraction,
-          currentMissionId(),
-          inboxConfig(),
-        )
-      : 0;
+    const cfg = inboxConfig();
+    if (!cfg.inboxEnabled || !isConnected()) return 0;
+    return countUnreadInboxMissions(
+      inboxMissions(),
+      liveProjects(),
+      (id) => peekReadyTranscript(id)?.items,
+      pendingMissionInteraction,
+      currentMissionId(),
+      cfg,
+    );
+  });
+  createEffect(() => {
+    if (!inboxConfig().inboxEnabled && selected() === "inbox") open(null);
   });
   createEffect(() => {
     const mid = currentMissionId();
@@ -544,8 +550,9 @@ export default function App() {
   };
   const leaveSettings = () => {
     const h = history();
+    const inboxOn = inboxConfig().inboxEnabled;
     for (let i = hIdx() - 1; i >= 0; i--) {
-      if (!settingsSectionFor(h[i])) {
+      if (!settingsSectionFor(h[i]) && (inboxOn || h[i] !== "inbox")) {
         if (selected() === "routing" && !confirmLeaveRouting(() => { if (open(h[i], false)) setHIdx(i); })) return;
         if (open(h[i], false)) setHIdx(i);
         return;
@@ -558,6 +565,7 @@ export default function App() {
   let navigationVersion = 0;
   const open = (id: string | null, push = true) => {
     if (id?.startsWith("m:") && isMissionDeleting(id.slice(2))) return false;
+    if (id === "inbox" && !inboxConfig().inboxEnabled) id = null;
     if(id===null){
       setLaunchPreview(null);setLaunchViewKey('');
       setExplicitMachine(false);
@@ -756,6 +764,7 @@ export default function App() {
     if (hasOverlay()) return;
     const destination = navigationShortcut(e);
     if (destination) {
+      if (destination.id === "inbox" && !inboxConfig().inboxEnabled) return;
       e.preventDefault();
       if (destination.id === 'projects') {
         if (onSettings()) leaveSettings();
@@ -979,12 +988,14 @@ export default function App() {
                   <span class="row-label">New Agent</span>
                   <kbd>⌘N</kbd>
                 </button>
-                <button class={`row ${selected() === "inbox" ? "active" : ""}`} title={selected() === "inbox" ? "Space to return to the Inbox list" : undefined} onClick={() => open("inbox")}>
-                  <span class="row-ico"><Ic.InboxIcon /></span>
-                  <span class="row-label">Inbox</span>
-                  <Show when={inboxCount() > 0}><span class="inbox-sb-badge" aria-label={`${inboxCount()} need attention`}>{inboxCount()}</span></Show>
-                  <kbd aria-hidden="true">{shortcutLabel("inbox")}</kbd>
-                </button>
+                <Show when={inboxConfig().inboxEnabled}>
+                  <button class={`row ${selected() === "inbox" ? "active" : ""}`} title={selected() === "inbox" ? "Space to return to the Inbox list" : undefined} onClick={() => open("inbox")}>
+                    <span class="row-ico"><Ic.InboxIcon /></span>
+                    <span class="row-label">Inbox</span>
+                    <Show when={inboxCount() > 0}><span class="inbox-sb-badge" aria-label={`${inboxCount()} need attention`}>{inboxCount()}</span></Show>
+                    <kbd aria-hidden="true">{shortcutLabel("inbox")}</kbd>
+                  </button>
+                </Show>
                 <button class={`row ${selected() === "cloud-agent" ? "active" : ""}`} onClick={() => open("cloud-agent")}>
                   <span class="row-ico"><Ic.CloudIcon /></span><span class="row-label">Cloud agent</span><kbd aria-hidden="true">{shortcutLabel("cloud-agent")}</kbd>
                 </button>
@@ -1390,7 +1401,7 @@ export default function App() {
                 loading={missionsLoading()}
                 onOpenMission={(id) => { usageTelemetry.action("inbox_open", "inbox"); open(`m:${id}`); }}
                 onOpenSettings={openSettings}
-                onOpenInboxSettings={() => open("inbox-settings")}
+                onOpenInboxSettings={() => open("inbox-summaries")}
                 onNewAgent={() => open(null)}
                 onRefresh={refreshMissions}
                 onMissionUpdated={(m) => {
@@ -1428,10 +1439,11 @@ export default function App() {
                 <Match when={selected() === "skills-settings"}><SkillsSettings onOpenPage={open} /></Match>
                 <Match when={selected() === "hermes-settings"}><HermesSettings /></Match>
                 <Match when={selected() === "btw-settings"}><BtwSettings/></Match>
+                <Match when={selected() === "inbox-summaries"}><InboxSummariesSettings /></Match>
                 <Match when={selected() === "local-agents"}><LocalAgentsSettings /></Match>
                 <Match when={selected() === "security-settings"}><SecuritySettings /></Match>
                 <Match when={selected() === "bitwarden-settings"}><BitwardenSettings /></Match>
-                <Match when={selected() === "inbox-settings"}><InboxSettings /></Match>
+                <Match when={selected() === "inbox-settings"}><InboxSettings onOpenPage={open} /></Match>
               </Switch>
             </SettingsShell>
           </Match>

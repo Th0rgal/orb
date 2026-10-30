@@ -1,0 +1,145 @@
+{
+  "description": "Cross-client Inbox & AI summary policy shared by Desktop (orb/src/inboxSettings.tsx), iOS (OrbInbox.swift), Android (OrbInbox.kt), and Core (src/api/ask/inbox.rs). Eco quiet period is 3600000 ms (1 hour).",
+  "ecoQuietMs": 3600000,
+  "normalization": [
+    {
+      "name": "empty legacy preferences fill defaults",
+      "input": {},
+      "expected": { "inboxEnabled": true, "includeAutonomous": false, "aiSummary": true, "summaryMode": "standard", "model": "builtin/smart" }
+    },
+    {
+      "name": "legacy 3-field preferences preserve off and model",
+      "input": { "aiSummary": false, "includeAutonomous": true, "model": " builtin/fast " },
+      "expected": { "inboxEnabled": true, "includeAutonomous": true, "aiSummary": false, "summaryMode": "standard", "model": "builtin/fast" }
+    },
+    {
+      "name": "disabled inbox preserves eco mode and custom model",
+      "input": { "inboxEnabled": false, "includeAutonomous": true, "aiSummary": true, "summaryMode": "eco", "model": "team/summary" },
+      "expected": { "inboxEnabled": false, "includeAutonomous": true, "aiSummary": true, "summaryMode": "eco", "model": "team/summary" }
+    },
+    {
+      "name": "unknown summaryMode falls back to standard",
+      "input": { "inboxEnabled": true, "includeAutonomous": false, "aiSummary": true, "summaryMode": "future_mode", "model": "" },
+      "expected": { "inboxEnabled": true, "includeAutonomous": false, "aiSummary": true, "summaryMode": "standard", "model": "builtin/smart" }
+    }
+  ],
+  "gates": [
+    {
+      "name": "disabled inbox blocks all surfaces",
+      "prefs": { "inboxEnabled": false, "aiSummary": true, "summaryMode": "standard" },
+      "surface": "inbox",
+      "isLive": false,
+      "updatedMs": 1000000,
+      "nowMs": 9000000,
+      "expected": false
+    },
+    {
+      "name": "summaries off blocks all surfaces",
+      "prefs": { "inboxEnabled": true, "aiSummary": false, "summaryMode": "standard" },
+      "surface": "inbox",
+      "isLive": false,
+      "updatedMs": 1000000,
+      "nowMs": 9000000,
+      "expected": false
+    },
+    {
+      "name": "standard allows background prewarm, recap, and live inbox",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "standard" },
+      "surface": "background",
+      "isLive": false,
+      "updatedMs": 8990000,
+      "nowMs": 9000000,
+      "expected": true
+    },
+    {
+      "name": "standard allows recap right after turn settles",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "standard" },
+      "surface": "recap",
+      "isLive": false,
+      "updatedMs": 8999000,
+      "nowMs": 9000000,
+      "expected": true
+    },
+    {
+      "name": "on_open blocks background prewarm",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "on_open" },
+      "surface": "background",
+      "isLive": false,
+      "updatedMs": 1000000,
+      "nowMs": 9000000,
+      "expected": false
+    },
+    {
+      "name": "on_open blocks chat turn recap fetch",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "on_open" },
+      "surface": "recap",
+      "isLive": false,
+      "updatedMs": 1000000,
+      "nowMs": 9000000,
+      "expected": false
+    },
+    {
+      "name": "on_open blocks live run inside inbox",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "on_open" },
+      "surface": "inbox",
+      "isLive": true,
+      "updatedMs": 1000000,
+      "nowMs": 9000000,
+      "expected": false
+    },
+    {
+      "name": "on_open allows settled run inside inbox immediately",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "on_open" },
+      "surface": "inbox",
+      "isLive": false,
+      "updatedMs": 8995000,
+      "nowMs": 9000000,
+      "expected": true
+    },
+    {
+      "name": "eco blocks background prewarm even after 2 hours quiet",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "eco" },
+      "surface": "background",
+      "isLive": false,
+      "updatedMs": 1000000,
+      "nowMs": 9000000,
+      "expected": false
+    },
+    {
+      "name": "eco blocks chat recap fetch even after 2 hours quiet",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "eco" },
+      "surface": "recap",
+      "isLive": false,
+      "updatedMs": 1000000,
+      "nowMs": 9000000,
+      "expected": false
+    },
+    {
+      "name": "eco blocks settled run inside inbox before 1 hour quiet (59m59s)",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "eco" },
+      "surface": "inbox",
+      "isLive": false,
+      "updatedMs": 5400001,
+      "nowMs": 9000000,
+      "expected": false
+    },
+    {
+      "name": "eco allows settled run inside inbox at exact 1 hour quiet boundary",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "eco" },
+      "surface": "inbox",
+      "isLive": false,
+      "updatedMs": 5400000,
+      "nowMs": 9000000,
+      "expected": true
+    },
+    {
+      "name": "eco blocks live run even if updatedMs is older than 1 hour",
+      "prefs": { "inboxEnabled": true, "aiSummary": true, "summaryMode": "eco" },
+      "surface": "inbox",
+      "isLive": true,
+      "updatedMs": 1000000,
+      "nowMs": 9000000,
+      "expected": false
+    }
+  ]
+}
