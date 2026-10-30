@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  antigravityBaseModel,
   DEFAULT_EFFORT_LABEL,
   EFFORT_BY_HARNESS,
   EFFORT_LADDER,
@@ -84,4 +85,9 @@ it("Antigravity offers only native efforts and makes the required default explic
  expect(normalizeEffort("xhigh","antigravity")).toBeNull();
  expect(effortLabel(null,"antigravity","agy-demo")).toBe("Default (High)");
  expect(effortLabel("low","antigravity","agy-demo")).toBe("Low");
+ expect(effortLabel(null,"antigravity","agy-model")).toBe("Default (High)");
+ expect(effortLabel(null,"antigravity","gemini-4-carbon")).toBe("Default (High)");
+ expect(effortLabel(null,"antigravity","agy-model-medium")).toBe("Default (Medium)");
+ expect(antigravityBaseModel("agy-model-high")).toBe("agy-model");
+ expect(antigravityBaseModel("gemini-4-carbon-eap")).toBe("agy-model");
 });

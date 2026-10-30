@@ -15,9 +15,9 @@ namespace Orb.MutantSuite
 
 open Orb.Kernel
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Family 1: Versioned mission merge / hierarchy (epoch-aware, unarchive vs fence)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 /-- Mutant 1.1 (`orb_mission_control_step`): Archived fence bypass — drops `isArchived == 1` sticky fence. -/
 @[inline, export orb_mut_m01]
@@ -96,9 +96,9 @@ theorem kill_m03_forkHome_overrideHomeLeak :
       forkHomeStep 1 1 0 1 1 0 1 := by
   decide
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Family 2: Transcript reducer / streaming (stable IDs, gap buffer, replay eq)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 /-- Mutant 2.1 (`orb_transcript_reduce_step`): Off-by-one sequence monotonicity (`>=` admits duplicate seq). -/
 @[inline, export orb_mut_m04]
@@ -179,9 +179,9 @@ theorem kill_m06_agentEventNormalize_duplicateAdmitted :
       agentEventNormalizeStep 0 3 1 1 1 1 64 1024 := by
   decide
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Family 3: Durable outbox / queue / leases (persistent+volatile, crash safety)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 /-- Mutant 3.1 (`orb_queue_step`): Premature queue consumption before `durablyStarted == 1`. -/
 @[inline, export orb_mut_m07]
@@ -227,9 +227,9 @@ theorem kill_m09_verifyLeaseMode_readonlyOverridden :
       verifyLeaseMode 1 1 0 1 := by
   decide
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Family 4: Provider attempt lifecycle (retry budgets, first-byte fence, clocks)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 /-- Mutant 4.1 (`orb_provider_pool_step`): First-byte commitment fence broken — fails over mid-stream. -/
 @[inline, export orb_mut_m10]
@@ -297,9 +297,9 @@ theorem kill_m12_breakerStep_transientPoisonsSub :
       breakerStep 4 1 3 := by
   decide
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Family 5: Authorization (fresh scoped revocable evidence observe->gate->execute)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 /-- Mutant 5.1 (`orb_privilege_step`): Scope escalation — omits `scopeRank ≤ maxGrantedScope` check. -/
 @[inline, export orb_mut_m13]
@@ -358,9 +358,9 @@ theorem kill_m15_verifyApproval_criticalUnconfirmed :
       verifyApproval 1 1 1 1 1 2 0 := by
   decide
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Family 6: Scheduling / resources (reservation capacity, TTL/boot epochs)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 /-- Mutant 6.1 (`orb_verify_board_slots`): Off-by-one `≤` steals the boss's reserved slot. -/
 @[inline, export orb_mut_m16]
@@ -413,9 +413,9 @@ theorem kill_m18_routeArgmin_inadmissibleSelected :
       routeArgminStep 1 2 50 9 10 0 := by
   decide
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 -- Family 7: Incremental parsing / indexing / scroll (chunk eq, bounded tail)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ===========================================================================
 
 /-- Mutant 7.1 (`orb_stream_fence_step`): Cross-fence closure bug — tilde fence closes open backtick fence. -/
 @[inline, export orb_mut_m19]

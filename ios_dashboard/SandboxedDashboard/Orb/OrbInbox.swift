@@ -44,10 +44,19 @@ final class OrbSharedInboxState {
         guard scope != current else { return }
         scope = current; seen = [:]; revisions = [:]
         OrbInboxSettings.shared.bindAccount(current)
-        outbox = UserDefaults.standard.data(forKey: Self.outboxKey(current)).flatMap { try? JSONDecoder().decode([String: OrbJSON].self, from: $0) } ?? [:]
-        for (path, body) in outbox where path.hasPrefix("seen/") {
-            if let stamp = body["stamp"].doubleValue { seen[String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))] = stamp }
+        var stored = UserDefaults.standard.data(forKey: Self.outboxKey(current)).flatMap { try? JSONDecoder().decode([String: OrbJSON].self, from: $0) } ?? [:]
+        var purgedInvalid = false
+        for (path, body) in stored where path.hasPrefix("seen/") {
+            let decoded = String(path.dropFirst(5)).removingPercentEncoding ?? String(path.dropFirst(5))
+            if !OrbActivityCompaction.isCanonicalUUID(decoded) {
+                stored.removeValue(forKey: path)
+                purgedInvalid = true
+            } else if let stamp = body["stamp"].doubleValue {
+                seen[decoded] = stamp
+            }
         }
+        outbox = stored
+        if purgedInvalid { persistOutbox() }
     }
     func write(_ path: String, _ input: OrbJSON) {
         if applying { return }
@@ -78,7 +87,7 @@ final class OrbSharedInboxState {
                     _ = try await OrbCore.shared.call("/api/control/inbox-state/" + path, method: "PUT", body: body)
                     if expected == account && outbox[path] == body { outbox.removeValue(forKey: path); persistOutbox() }
                 } catch {
-                    if let http = error as? OrbHTTPError, http.status == 404, path.hasPrefix("seen/"), expected == account, outbox[path] == body {
+                    if let http = error as? OrbHTTPError, (http.status == 400 || http.status == 404), path.hasPrefix("seen/"), expected == account, outbox[path] == body {
                         outbox.removeValue(forKey: path); persistOutbox()
                     }
                     // Other failures retry before the next shared-state read.
@@ -92,7 +101,9 @@ final class OrbSharedInboxState {
         let rounded = stamp.rounded(.down)
         let changed = seen[id] != rounded
         seen[id] = rounded
-        if syncBackend { write("seen/" + OrbCore.escape(id), .object(["stamp": .number(rounded)])) }
+        if syncBackend && OrbActivityCompaction.isCanonicalUUID(id) {
+            write("seen/" + OrbCore.escape(id), .object(["stamp": .number(rounded)]))
+        }
         return changed
     }
     func writePreferences() {
@@ -456,7 +467,7 @@ struct OrbInboxSettingsView: View {
         }
         .scrollContentBackground(.hidden)
         .background(OrbStyle.background)
-        .navigationTitle("Inbox")
+        .navigationTitle("Notifications")
         .navigationBarTitleDisplayMode(.inline)
         .alert("Custom model or chain", isPresented: $editing) {
             TextField("provider/model or chain ID", text: $customModel)
@@ -1475,7 +1486,7 @@ struct OrbInboxView: View {
         if actionableCount != newUnread {
             actionableCount = newUnread
         }
-        notificationCenter.reconcile(needsYou: built.needsYou, ready: built.ready, working: built.working)
+        notificationCenter.reconcile(needsYou: built.needsYou, ready: built.ready, working: built.working, fromServer: !missions.isEmpty)
     }
 
     private func applyPendingFocusIfNeeded(scrollProxy: ScrollViewProxy) {
@@ -2081,7 +2092,7 @@ struct OrbInboxView: View {
                     }
 
                     // Keep the card summary concise even in Peek mode so it doesn't duplicate the Peek turns below.
-                    Text(item.summary)
+                    Text(isPeeked ? item.summary : OrbActivityCompaction.cleanInboxPreview(item.summary))
                         .font(.footnote)
                         .foregroundStyle(OrbStyle.textSecondary)
                         .lineLimit(nonDuplicatePeekTurns.isEmpty && isPeeked ? nil : 3)

@@ -4030,6 +4030,12 @@ select.orb-select-native:disabled { cursor: default; }
 .managed-provider-chip { color: var(--blue); background: color-mix(in srgb, var(--blue) 14%, transparent); font-weight: 500; }
 .managed-project-chip { color: var(--fg-2); }
 .managed-providers { display: flex; flex-wrap: wrap; gap: 6px; }
+.managed-providers-sec { margin-top: 20px; }
+.managed-provider-row { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 9px 14px; border-bottom: 1px solid var(--stroke-soft); min-width: 0; flex-wrap: wrap; }
+.managed-providers-card .managed-provider-row:last-child { border-bottom: 0; }
+.managed-provider-info { flex: 1 1 150px; min-width: 0; }
+.managed-provider-info .s-row-title, .managed-provider-info .s-row-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.managed-provider-actions { flex: none; display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
 .managed-24h-confirm { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--amber); cursor: pointer; }
 .managed-24h-confirm input { margin-top: 2px; }
 .managed-owner-chip.managed-no-owner { color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent); }

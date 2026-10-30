@@ -231,6 +231,11 @@ impl AskClient {
             body["reasoning_effort"] = json!("low");
         }
 
+        let timeout_secs = std::env::var("ASK_CLIENT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(180);
         let resp = self
             .http
             .post(&url)
@@ -240,7 +245,7 @@ impl AskClient {
                 crate::api::usage_attribution::CALLER_HEADER,
                 self.purpose.header_value(),
             )
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .json(&body)
             .send()
             .await

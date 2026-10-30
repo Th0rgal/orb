@@ -347,6 +347,9 @@ internal func leansys_select_isa(_ detectedHwCaps: UInt64, _ requiredMask: UInt6
 @_silgen_name("leansys_verify_isa_selection")
 internal func leansys_verify_isa_selection(_ detectedHwCaps: UInt64, _ requiredMask: UInt64, _ selectedVariantId: UInt8, _ maxVariantId: UInt8) -> UInt8
 
+@_silgen_name("leansys_verify_fd_bounds")
+internal func leansys_verify_fd_bounds(_ rawWord: UInt64, _ fdOut: UInt32) -> UInt8
+
 @_silgen_name("orb_vm_lifecycle_step")
 internal func orb_vm_lifecycle_step(_ ownerClass: UInt8, _ busy: UInt8, _ ttlExpired: UInt8, _ graceOrIdleElapsed: UInt8, _ workingIdleEnabled: UInt8, _ supportsFreeStop: UInt8, _ minDeletePending: UInt8) -> UInt32
 
@@ -735,6 +738,10 @@ enum OrbKernel {
 
     static func verifyIsaSelection(detectedHwCaps: UInt64, requiredMask: UInt64, selectedVariantId: Int, maxVariantId: Int = 4) -> Bool {
         leansys_verify_isa_selection(detectedHwCaps, requiredMask, satU8(selectedVariantId), satU8(maxVariantId)) != 0
+    }
+
+    static func verifyFdBounds(rawWord: UInt64, fdOut: UInt32) -> Bool {
+        leansys_verify_fd_bounds(rawWord, fdOut) != 0
     }
 
     static func scrollEpochStep(

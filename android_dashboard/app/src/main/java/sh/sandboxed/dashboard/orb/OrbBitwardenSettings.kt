@@ -290,7 +290,7 @@ fun OrbBitwardenSettingsPage(
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             OrbBwCircleButton(Icons.AutoMirrored.Filled.ArrowBack, "Back") { onBack() }
             Text(
-                text = "Secrets",
+                text = "Secrets vault",
                 color = Color.White,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,

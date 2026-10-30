@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
-  leansysGfmPipeRowAdmitted, leansysRichTagAdmitted,
+  leansysGfmPipeRowAdmitted, leansysRichTagAdmitted, leansysVerifyFdBounds,
   orbAuthToctouExecuteStep, orbHierarchyMergeStep, orbOutboxCrashReconcileStep,
   orbProviderAttemptStep, orbRelativeTimeString, orbResourceLedgerStep,
   orbStreamBoundedCommitStep, orbTranscriptFoldStep, orbTranscriptPatchStep,
   orbUsageLimitBadge, orbWireApplyPatchStep, orbWireMachineStep,
 } from "../src/orbKernel";
+import { mergeMission, reparentMission, resetMissionHierarchy } from "../src/missionHierarchy";
 import { normalizeLoosePipeTables } from "../src/pipeTables";
 import { RICH_TAG, parseRichTag, richTagSpan } from "../src/richTags";
+import { advanceStreamBoundedCommit } from "../src/stream";
+import { buildTranscript } from "../src/transcriptModel";
 
 describe("orb kernel gates mirror lean-sys", () => {
   it("rejects a negative row offset", () => {
@@ -150,5 +153,39 @@ describe("orb kernel gates mirror lean-sys", () => {
     // Family 7: Bounded-tail stream commit forces checkpoint within maxOpenTailBytes
     const sb = orbStreamBoundedCommitStep(1000, 200, 200, 20_000, 200, 4096);
     expect(sb).toEqual({ admitted: true, checkpointForced: true, nextCheckpoint: 20_000 - 4096 });
+  });
+
+  it("verifies leansysVerifyFdBounds and wired host helpers (hierarchy, transcript, stream)", () => {
+    expect(leansysVerifyFdBounds(70_000n, 70_000)).toBe(true);
+    expect(leansysVerifyFdBounds(70_000n, 4464)).toBe(false);
+    expect(leansysVerifyFdBounds(0x8000_0000n, 0x8000_0000)).toBe(false);
+    expect(leansysVerifyFdBounds(7n, -1)).toBe(false);
+
+    resetMissionHierarchy();
+    const m0 = mergeMission(undefined, { id: "m1", parent_mission_id: "p1", status: "active", tags: [] });
+    const m1 = mergeMission(m0, { id: "m1", status: "running" }, "partial");
+    expect(m1.parent_mission_id).toBe("p1");
+    reparentMission("m1", { parent_mission_id: null });
+    expect(mergeMission(undefined, { id: "m1", status: "running" }).parent_mission_id).toBeUndefined();
+
+    const liveItems = buildTranscript([
+      { type: "thinking", sequence: 1, data: { content: "plan", done: false } },
+      { type: "text_delta", sequence: 2, data: { content: "answer", mode: "delta" } },
+    ]);
+    const replayItems = buildTranscript([
+      { type: "thinking", sequence: 1, storedId: 1, data: { content: "plan", done: false } },
+      { type: "text_delta", sequence: 2, storedId: 2, data: { content: "answer", mode: "delta" } },
+    ]);
+    expect(liveItems.map(i => i.kind)).toEqual(replayItems.map(i => i.kind));
+
+    const tail0 = { totalBytes: 0, committedBytes: 0, checkpointBytes: 0 };
+    const tail1 = advanceStreamBoundedCommit(tail0, 20_000, 200, 4096);
+    expect(tail1).toEqual({
+      totalBytes: 20_000,
+      committedBytes: 200,
+      checkpointBytes: 20_000 - 4096,
+      admitted: true,
+      checkpointForced: true,
+    });
   });
 });

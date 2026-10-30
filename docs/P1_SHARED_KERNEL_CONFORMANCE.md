@@ -1,7 +1,7 @@
 # Shared-kernel conformance: implementation and limits
 
 `scripts/run_shared_kernel_conformance.py` executes every public symbol in
-`shared/orb-spec/kernel_abi.json`: 80 Orb exports and 32 LeanSys exports. The
+`shared/orb-spec/kernel_abi.json`: 94 Orb exports and 33 LeanSys exports. The
 inventoried compiler helper is excluded from the public surface. The complete
 [P0–P7 roadmap](TRUSTWORTHY_SHARED_LEAN_ROADMAP.md) and acceptance gates still apply.
 No phase is accepted by this harness.
@@ -33,7 +33,7 @@ of command logs bind the supplied local receipts; dynamic libraries, operating
 system, compiler correctness and hardware execution remain assumptions.
 
 For each export the corpus includes six boundary vectors (0, 1, 2, 3, maximum,
-maximum minus one) and two reproducibly seeded random vectors: 896 cases total.
+maximum minus one) and two reproducibly seeded random vectors: 1016 cases total.
 This small scalar corpus is not exhaustive fuzzing. Stock Lean executes wrappers
 calling the actual exported Lean definitions. Those wrappers also compile via
 stock `lean -c` and `leanc`. Native C is compiled from the vendored artifact;

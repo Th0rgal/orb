@@ -42,8 +42,61 @@ use crate::orb_spec::{
 
 static PRIVD_COMMAND_SHADOW_COUNTER: OnceLock<ShadowCounter> = OnceLock::new();
 
+static AUTH_TOCTOU_SHADOW_COUNTER: OnceLock<ShadowCounter> = OnceLock::new();
+
 pub fn privd_command_shadow_counter() -> &'static ShadowCounter {
     PRIVD_COMMAND_SHADOW_COUNTER.get_or_init(ShadowCounter::new)
+}
+
+pub fn auth_toctou_shadow_counter() -> &'static ShadowCounter {
+    AUTH_TOCTOU_SHADOW_COUNTER.get_or_init(ShadowCounter::new)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_auth_toctou_gate(
+    principal_kind: u8,
+    bunker_state: BunkerState,
+    observed_target_id: u32,
+    exec_target_id: u32,
+    observed_lease_epoch: u64,
+    live_lease_epoch: u64,
+    now_tick: u64,
+    expiry_tick: u64,
+    observed_digest: u64,
+    exec_digest: u64,
+) -> crate::orb_spec::AuthToctouExecuteVerdict {
+    let (host_admitted, host_reason_code) = if bunker_state != BunkerState::Normal {
+        (false, 1u8)
+    } else if !(1..=3).contains(&principal_kind) {
+        (false, 2u8)
+    } else if now_tick >= expiry_tick {
+        (false, 3u8)
+    } else if observed_lease_epoch == 0 || observed_lease_epoch != live_lease_epoch {
+        (false, 4u8)
+    } else if observed_target_id == 0 || observed_target_id != exec_target_id {
+        (false, 5u8)
+    } else if observed_digest == 0 || observed_digest != exec_digest {
+        (false, 6u8)
+    } else {
+        (true, 1u8)
+    };
+    crate::orb_spec::observe_auth_toctou_shadow(
+        crate::orb_spec::AuthToctouExecuteInput {
+            principal_kind,
+            bunker_state,
+            observed_target_id,
+            exec_target_id,
+            observed_lease_epoch,
+            live_lease_epoch,
+            now_tick,
+            expiry_tick,
+            observed_digest,
+            exec_digest,
+        },
+        host_admitted,
+        host_reason_code,
+        auth_toctou_shadow_counter(),
+    )
 }
 
 const OPS_READ_BINARIES: &[&str] = &[
@@ -1331,6 +1384,72 @@ impl PrivilegeBroker {
             return Err(format!(
                 "Command rejected by orb_privd_command_step confinement gate ({:?}, exit={})",
                 cmd_verdict.action, cmd_verdict.exit_code_on_reject
+            ));
+        }
+        let target_ord = |host: &str| -> u32 {
+            let mut h = Sha256::new();
+            h.update(host.as_bytes());
+            let bytes = h.finalize();
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]).max(1)
+        };
+        let observed_target_id = target_ord(&target_norm);
+        let exec_target_id = if grant.target_host == "all" {
+            observed_target_id
+        } else {
+            target_ord(&grant.target_host)
+        };
+        let lease_epoch = {
+            let mut h = Sha256::new();
+            h.update(token_hash.as_bytes());
+            let bytes = h.finalize();
+            u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ])
+            .max(1)
+        };
+        let live_lease_epoch =
+            if grant.revoked_at.is_none() && grant.state == ApprovalState::Approved {
+                lease_epoch
+            } else {
+                0
+            };
+        let cmd_digest = {
+            let mut h = Sha256::new();
+            h.update(req.command.as_bytes());
+            for a in &req.argv {
+                h.update([0u8]);
+                h.update(a.as_bytes());
+            }
+            let bytes = h.finalize();
+            u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ])
+            .max(1)
+        };
+        let now_tick = now.timestamp().max(0) as u64;
+        let expiry_tick = grant
+            .session_expires_at
+            .into_iter()
+            .chain(grant.expires_at)
+            .map(|t| t.timestamp().max(0) as u64)
+            .min()
+            .unwrap_or(0);
+        let toctou = evaluate_auth_toctou_gate(
+            (effective_scope.to_rank() as u8).saturating_add(1),
+            bunker,
+            observed_target_id,
+            exec_target_id,
+            lease_epoch,
+            live_lease_epoch,
+            now_tick,
+            expiry_tick,
+            cmd_digest,
+            cmd_digest,
+        );
+        if !toctou.admitted || toctou.fail_closed {
+            return Err(format!(
+                "Command rejected by orb_auth_toctou_execute_step (reason={})",
+                toctou.reason_code
             ));
         }
         let entry = CommandAuditEntry {
@@ -3935,5 +4054,73 @@ mod tests {
         assert!(ok
             .iter()
             .all(|r| r.live_grant(Utc::now(), BunkerState::Normal)));
+    }
+
+    #[test]
+    fn auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences() {
+        let ok = evaluate_auth_toctou_gate(
+            2,
+            BunkerState::Normal,
+            42,
+            42,
+            9001,
+            9001,
+            100,
+            200,
+            0xDEAD_BEEF,
+            0xDEAD_BEEF,
+        );
+        assert!(ok.admitted);
+        assert!(!ok.fail_closed);
+
+        let target_swap = evaluate_auth_toctou_gate(
+            2,
+            BunkerState::Normal,
+            42,
+            99,
+            9001,
+            9001,
+            100,
+            200,
+            0xDEAD_BEEF,
+            0xDEAD_BEEF,
+        );
+        assert!(!target_swap.admitted);
+        assert!(target_swap.fail_closed);
+        assert_eq!(target_swap.reason_code, 5);
+
+        let revoked_lease = evaluate_auth_toctou_gate(
+            2,
+            BunkerState::Normal,
+            42,
+            42,
+            9001,
+            9002,
+            100,
+            200,
+            0xDEAD_BEEF,
+            0xDEAD_BEEF,
+        );
+        assert!(!revoked_lease.admitted);
+        assert_eq!(revoked_lease.reason_code, 4);
+
+        let bunker_trip = evaluate_auth_toctou_gate(
+            2,
+            BunkerState::HardLockdown,
+            42,
+            42,
+            9001,
+            9001,
+            100,
+            200,
+            0xDEAD_BEEF,
+            0xDEAD_BEEF,
+        );
+        assert!(!bunker_trip.admitted);
+        assert_eq!(bunker_trip.reason_code, 1);
+
+        let snap = auth_toctou_shadow_counter().snapshot("orb_auth_toctou_execute_step");
+        assert!(snap.total_events >= 4);
+        assert_eq!(snap.total_divergences, 0);
     }
 }

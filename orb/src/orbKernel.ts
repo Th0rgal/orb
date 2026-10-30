@@ -73,6 +73,11 @@ export function leansysRichTagAdmitted(tagOff: number, tagLen: number, attrOff: 
   return kernel.leansys_tag_scan(BigInt(tagOff), BigInt(tagLen), BigInt(attrOff), BigInt(attrLen), BigInt(bufLen), tagKind) !== 0;
 }
 
+export function leansysVerifyFdBounds(rawWord: bigint, fdOut: number): boolean {
+  if (!Number.isInteger(fdOut) || fdOut < 0 || fdOut > 0xffff_ffff) return false;
+  return kernel.leansys_verify_fd_bounds(BigInt.asUintN(64, rawWord), fdOut) !== 0;
+}
+
 const u64 = (value: bigint | number): bigint =>
   typeof value === "bigint" ? BigInt.asUintN(64, value) : seconds(value);
 

@@ -292,10 +292,11 @@ export function MissionAutomationsDialog({
   const [intervalValue, setIntervalValue] = useState('5');
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>('minutes');
   const [startImmediately, setStartImmediately] = useState(true);
-  const [stopPolicy, setStopPolicy] = useState<StopPolicy>({
-    type: 'when_failing_consecutively',
-    count: 2,
-  });
+  const [stopPolicyType, setStopPolicyType] = useState<'when_failing_consecutively' | 'never'>('when_failing_consecutively');
+  const [failureLimit, setFailureLimit] = useState('2');
+  const failureCount = Number(failureLimit);
+  // Core counts consecutive failures from the latest 20 executions.
+  const isFailureLimitValid = Number.isInteger(failureCount) && failureCount >= 1 && failureCount <= 20;
   const [freshSession, setFreshSession] = useState<'always' | 'keep' | 'switch'>('keep');
   const [nextSessionId, setNextSessionId] = useState('');
   const [variables, setVariables] = useState<Array<{ key: string; value: string }>>([]);
@@ -697,6 +698,11 @@ export function MissionAutomationsDialog({
       return;
     }
 
+    if (stopPolicyType === 'when_failing_consecutively' && !isFailureLimitValid) {
+      toast.error('Enter a whole number from 1 to 20 for consecutive failures');
+      return;
+    }
+
     // Build command source
     let command_source: CommandSource;
     if (commandSourceType === 'library') {
@@ -750,7 +756,9 @@ export function MissionAutomationsDialog({
     const input: CreateAutomationInput = {
       command_source,
       trigger,
-      stop_policy: stopPolicy,
+      stop_policy: stopPolicyType === 'when_failing_consecutively'
+        ? { type: 'when_failing_consecutively', count: failureCount }
+        : { type: 'never' },
       fresh_session: freshSession,
       ...(Object.keys(vars).length > 0 ? { variables: vars } : {}),
       start_immediately: startImmediately,
@@ -771,7 +779,8 @@ export function MissionAutomationsDialog({
       setInlinePromptState('');
       setIntervalValue('5');
       setIntervalUnit('minutes');
-      setStopPolicy({ type: 'when_failing_consecutively', count: 2 });
+      setStopPolicyType('when_failing_consecutively');
+      setFailureLimit('2');
       setFreshSession('keep');
       setNextSessionId('');
       setVariables([]);
@@ -944,7 +953,9 @@ export function MissionAutomationsDialog({
     triggerKind === 'webhook' ||
     triggerKind === 'agent_finished' ||
     intervalSeconds > 0;
-  const allowCreate = !!missionId && !creating && isCommandValid && isTriggerValid;
+  const isStopPolicyValid = commandSourceType === 'native_loop' ||
+    stopPolicyType !== 'when_failing_consecutively' || isFailureLimitValid;
+  const allowCreate = !!missionId && !creating && isCommandValid && isTriggerValid && isStopPolicyValid;
 
   const isMissionDataReady = !!missionId && loadedMissionId === missionId;
   const showLoadingPlaceholder = !!missionId && (!isMissionDataReady || (loading && !hasLoaded));
@@ -1246,26 +1257,49 @@ export function MissionAutomationsDialog({
                 )}
 
                 <div>
-                  <label className="block text-xs text-white/50 mb-1.5">Stop policy</label>
+                  <label htmlFor="automation-stop-policy" className="block text-xs text-white/50 mb-1.5">Stop policy</label>
                   <select
-                    value={stopPolicy.type}
+                    id="automation-stop-policy"
+                    value={stopPolicyType}
                     onChange={(e) =>
-                      setStopPolicy(
+                      setStopPolicyType(
                         e.target.value === 'when_failing_consecutively'
-                          ? { type: 'when_failing_consecutively', count: 2 }
-                          : { type: 'never' }
+                          ? 'when_failing_consecutively'
+                          : 'never'
                       )
                     }
                     className={cn(selectClass, 'w-full')}
                     style={selectStyle}
                   >
                     <option value="when_failing_consecutively" className="bg-[#1a1a1a]">
-                      After 2 consecutive failures (recommended)
+                      After consecutive failures (recommended)
                     </option>
                     <option value="never" className="bg-[#1a1a1a]">
                       Never
                     </option>
                   </select>
+                  {stopPolicyType === 'when_failing_consecutively' && (
+                    <div className="mt-2">
+                      <label htmlFor="automation-failure-limit" className="block text-xs text-white/50 mb-1.5">
+                        Consecutive failures
+                      </label>
+                      <input
+                        id="automation-failure-limit"
+                        type="number"
+                        min={1}
+                        max={20}
+                        step={1}
+                        value={failureLimit}
+                        onChange={(e) => setFailureLimit(e.target.value)}
+                        aria-invalid={!isFailureLimitValid}
+                        aria-describedby="automation-failure-limit-help"
+                        className={cn(selectClass, 'w-full')}
+                      />
+                      <p id="automation-failure-limit-help" className="mt-1 text-[11px] text-white/40">
+                        Enter a whole number from 1 to 20. Default: 2.
+                      </p>
+                    </div>
+                  )}
                   <div className="mt-1 text-[11px] text-white/30">
                     Auto-disables this automation after repeated failures. Use &quot;Never&quot; for automations that should keep running.
                   </div>

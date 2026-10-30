@@ -320,3 +320,8 @@ JNIEXPORT jint JNICALL
 Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyIsaSelection(JNIEnv *env, jclass clazz, jlong detectedHwCaps, jlong requiredMask, jint selectedVariantId, jint maxVariantId) {
     return (jint)leansys_verify_isa_selection((uint64_t)detectedHwCaps, (uint64_t)requiredMask, (uint8_t)selectedVariantId, (uint8_t)maxVariantId);
 }
+
+JNIEXPORT jint JNICALL
+Java_sh_sandboxed_dashboard_orb_OrbKernel_leansysVerifyFdBounds(JNIEnv *env, jclass clazz, jlong rawWord, jint fdOut) {
+    return (jint)leansys_verify_fd_bounds((uint64_t)rawWord, (uint32_t)fdOut);
+}

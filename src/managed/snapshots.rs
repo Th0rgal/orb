@@ -638,6 +638,16 @@ impl ManagedManager {
         let provider = self
             .provider_for(&m.provider)
             .ok_or_else(|| ManagedError::new("disabled", 503, "No managed-machine provider"))?;
+        if !self.is_provider_enabled(provider.name()) {
+            return Err(ManagedError::new(
+                "provider_disabled",
+                409,
+                format!(
+                    "Provider '{}' is disabled in Settings",
+                    super::provider_display_name(provider.name())
+                ),
+            ));
+        }
         if !provider.supports_free_stop() {
             return Err(ManagedError::new(
                 "unsupported_by_provider",

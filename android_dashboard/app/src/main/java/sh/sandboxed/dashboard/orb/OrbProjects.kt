@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -160,6 +162,7 @@ fun OrbAppRoot(
     var bunkerError by remember(baseURL) { mutableStateOf<String?>(null) }
     var approvalMode by remember(baseURL) { mutableStateOf("") }
     var approvalEnrolled by remember(baseURL) { mutableStateOf(true) }
+    var approvalQueueCount by remember(baseURL) { mutableStateOf<Int?>(null) }
     val enrollPrefs = remember { homeContext.getSharedPreferences("orb.approval.prompt", android.content.Context.MODE_PRIVATE) }
     var enrollDismissedMode by remember(baseURL) { mutableStateOf(enrollPrefs.getString("dismissed.$baseURL", null)) }
     suspend fun refreshFleetPosture() {
@@ -174,6 +177,13 @@ fun OrbAppRoot(
             val d = OrbJSON.dict(core.request("/api/approvals/devices")) ?: emptyMap()
             approvalMode = OrbJSON.str(d, "mode") ?: ""
             approvalEnrolled = OrbPrivilegeAccess.isEnrolled(OrbApprovalKey.publicKey(), OrbJSON.dictList(d["devices"]))
+        }
+        try {
+            val items = OrbJSON.dictList(OrbJSON.dict(core.request("/api/approvals/queue"))?.get("items"))
+            approvalQueueCount = items.size
+        } catch (e: OrbError) {
+            if (e.status == 404 || e.status == 405) approvalQueueCount = null
+        } catch (_: Throwable) {
         }
     }
 
@@ -292,163 +302,212 @@ fun OrbAppRoot(
         },
         surface = UsageTelemetry.Surface.Screen
     )
-    OrbSafeDrawingRoot(modifier = modifier) {
-        when (currentScreen) {
-            is OrbNavScreen.Home -> {
-                OrbHomeScreen(
-                    core = core,
-                    selectedTab = topTab,
-                    onSelectTab = { topTab = it },
-                    onOpenSettings = { showSettingsSheet = true },
-                    onChangeServer = {
-                        settingsInitialRoute = OrbSettingsRoute.Backend
-                        showSettingsSheet = true
-                    },
-                    onSelectProject = { proj -> push(OrbNavScreen.Project(proj)) },
-                    onSelectMission = { mission, proj ->
-                        push(OrbNavScreen.Conversation(proj, mission))
-                    }
-                )
-            }
-            is OrbNavScreen.Project -> {
-                OrbProjectPage(
-                    core = core,
-                    project = currentScreen.project,
-                    onBack = { pop() },
-                    onOpenMission = { mission ->
-                        push(OrbNavScreen.Conversation(currentScreen.project, mission))
-                    },
-                    onNewAgent = { folder ->
-                        push(OrbNavScreen.Conversation(currentScreen.project, null, folder))
-                    },
-                    onOpenDocuments = { dirPath ->
-                        push(OrbNavScreen.Documents(currentScreen.project, dirPath))
-                    }
-                )
-            }
-            is OrbNavScreen.Conversation -> {
-                OrbConversationPage(
-                    core = core,
-                    project = currentScreen.project,
-                    initialMission = currentScreen.mission,
-                    initialFolder = currentScreen.initialFolder,
-                    onBack = { pop() }
-                )
-            }
-            is OrbNavScreen.Documents -> {
-                OrbProjectDocumentsPage(
-                    core = core,
-                    project = currentScreen.project,
-                    directoryPath = currentScreen.directoryPath,
-                    onBack = { pop() },
-                    onOpenDirectory = { nextDir ->
-                        push(OrbNavScreen.Documents(currentScreen.project, nextDir))
-                    },
-                    onOpenFile = { entry ->
-                        push(OrbNavScreen.DocumentViewer(currentScreen.project, entry))
-                    }
-                )
-            }
-            is OrbNavScreen.DocumentViewer -> {
-                OrbProjectDocumentViewer(
-                    core = core,
-                    project = currentScreen.project,
-                    entry = currentScreen.entry,
-                    onBack = { pop() }
-                )
-            }
-        }
+    val totalWaitingApprovals = approvalQueueCount ?: pendingSecrets
+    val showBunkerBanner = OrbPrivilegeAccess.showsBunkerCard(bunkerState, bunkerDismissedLevel)
+    val showEnrollBanner = OrbPrivilegeAccess.shouldPromptEnrollment(approvalMode, approvalEnrolled, enrollDismissedMode)
 
-        androidx.compose.foundation.layout.Column(
-            modifier = Modifier.align(Alignment.TopCenter).padding(top = 64.dp, start = 12.dp, end = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+    @Composable
+    fun BunkerBannerContent() {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(OrbStyle.elevated)
+                .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-            if (OrbPrivilegeAccess.showsBunkerCard(bunkerState, bunkerDismissedLevel)) {
-                androidx.compose.foundation.layout.Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-                        .background(OrbStyle.elevated)
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFFFF6B6B), modifier = Modifier.size(15.dp))
-                        Text(
-                            "Fleet Bunker Mode: ${OrbPrivilegeAccess.bunkerLabel(bunkerState)}",
-                            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.weight(1f).padding(start = 8.dp)
-                        )
-                        Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = OrbStyle.textMuted,
-                            modifier = Modifier.size(18.dp).orbPressClickable { bunkerDismissedLevel = bunkerState })
-                    }
-                    Text("New privileged requests are locked and active root/deploy grants are revoked.", color = OrbStyle.textMuted, fontSize = 12.sp)
-                    bunkerReason?.let { Text(it, color = Color.White, fontSize = 12.sp, maxLines = 3) }
-                    bunkerError?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp) }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        androidx.compose.material3.TextButton(onClick = {
-                            settingsInitialRoute = OrbSettingsRoute.Secrets
-                            showSettingsSheet = true
-                        }) { Text("Review") }
-                        androidx.compose.material3.TextButton(onClick = {
-                            homeScope.launch {
-                                bunkerError = runCatching {
-                                    OrbApprovalKey.signedRequest(core, homeActivity, "POST", "/api/privilege-access/unbunker", null, "exit Fleet Bunker Mode")
-                                    refreshFleetPosture()
-                                }.exceptionOrNull()?.message
-                            }
-                        }) { Text("Exit Bunker Mode") }
-                    }
-                }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFFFF6B6B), modifier = Modifier.size(15.dp))
+                Text(
+                    "Fleet Bunker Mode: ${OrbPrivilegeAccess.bunkerLabel(bunkerState)}",
+                    color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f).padding(start = 8.dp)
+                )
+                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = OrbStyle.textMuted,
+                    modifier = Modifier.size(18.dp).orbPressClickable { bunkerDismissedLevel = bunkerState })
             }
-            if (OrbPrivilegeAccess.shouldPromptEnrollment(approvalMode, approvalEnrolled, enrollDismissedMode)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-                        .background(OrbStyle.elevated)
-                        .orbPressClickable {
-                            settingsInitialRoute = OrbSettingsRoute.Secrets
-                            showSettingsSheet = true
-                        }
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    androidx.compose.foundation.layout.Column(modifier = Modifier.weight(1f)) {
-                        Text("Enroll this phone for approvals", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Approve protected actions, like exiting Bunker Mode, with your fingerprint or face.", color = OrbStyle.textMuted, fontSize = 12.sp)
+            bunkerReason?.let { Text(it, color = OrbStyle.textSecondary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+            bunkerError?.let { Text(it, color = Color(0xFFFF6B6B), fontSize = 12.sp) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = {
+                    settingsInitialRoute = OrbSettingsRoute.Secrets
+                    showSettingsSheet = true
+                }) { Text("Review") }
+                TextButton(onClick = {
+                    homeScope.launch {
+                        bunkerError = runCatching {
+                            OrbApprovalKey.signedRequest(core, homeActivity, "POST", "/api/privilege-access/unbunker", null, "exit Fleet Bunker Mode")
+                            refreshFleetPosture()
+                        }.exceptionOrNull()?.message
                     }
-                    Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = OrbStyle.textMuted,
-                        modifier = Modifier.size(18.dp).orbPressClickable {
-                            enrollDismissedMode = approvalMode
-                            enrollPrefs.edit().putString("dismissed.$baseURL", approvalMode).apply()
-                        })
-                }
+                }) { Text("Exit Bunker Mode") }
             }
         }
+    }
 
-        if (pendingSecrets > 0) {
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 88.dp)
-                    .clip(CircleShape)
-                    .background(OrbStyle.warning)
-                    .orbPressClickable {
-                        settingsInitialRoute = OrbSettingsRoute.Secrets
-                        showSettingsSheet = true
+    OrbSafeDrawingRoot(modifier = modifier) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            if (currentScreen !is OrbNavScreen.Home && showBunkerBanner) {
+                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    BunkerBannerContent()
+                }
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                when (currentScreen) {
+                    is OrbNavScreen.Home -> {
+                        OrbHomeScreen(
+                            core = core,
+                            selectedTab = topTab,
+                            onSelectTab = { topTab = it },
+                            onOpenSettings = { showSettingsSheet = true },
+                            onChangeServer = {
+                                settingsInitialRoute = OrbSettingsRoute.Backend
+                                showSettingsSheet = true
+                            },
+                            onSelectProject = { proj -> push(OrbNavScreen.Project(proj)) },
+                            onSelectMission = { mission, proj ->
+                                push(OrbNavScreen.Conversation(proj, mission))
+                            },
+                            bannerContent = {
+                                if (showBunkerBanner || totalWaitingApprovals > 0 || showEnrollBanner) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 18.dp, vertical = 4.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        if (showBunkerBanner) {
+                                            BunkerBannerContent()
+                                        }
+                                        if (totalWaitingApprovals > 0) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(OrbStyle.warning.copy(alpha = 0.14f))
+                                                    .border(1.dp, OrbStyle.warning.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+                                                    .orbPressClickable {
+                                                        settingsInitialRoute = OrbSettingsRoute.Secrets
+                                                        showSettingsSheet = true
+                                                    }
+                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Icon(Icons.Default.Lock, contentDescription = null, tint = OrbStyle.warning, modifier = Modifier.size(14.dp))
+                                                Text(
+                                                    text = "$totalWaitingApprovals approval${if (totalWaitingApprovals == 1) "" else "s"} waiting",
+                                                    color = Color.White,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Text(
+                                                    text = "Review",
+                                                    color = OrbStyle.warning,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                        }
+                                        if (showEnrollBanner) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(OrbStyle.surface)
+                                                    .border(1.dp, OrbStyle.border, RoundedCornerShape(12.dp))
+                                                    .orbPressClickable {
+                                                        settingsInitialRoute = OrbSettingsRoute.Secrets
+                                                        showSettingsSheet = true
+                                                    }
+                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Icon(Icons.Default.Lock, contentDescription = null, tint = OrbStyle.inboxBlue, modifier = Modifier.size(14.dp))
+                                                Text(
+                                                    text = "Enroll this phone for biometric approvals",
+                                                    color = Color.White,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                Text(
+                                                    text = "Enroll",
+                                                    color = OrbStyle.inboxBlue,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                                Icon(
+                                                    Icons.Default.Close,
+                                                    contentDescription = "Dismiss",
+                                                    tint = OrbStyle.textMuted,
+                                                    modifier = Modifier.size(16.dp).orbPressClickable {
+                                                        enrollDismissedMode = approvalMode
+                                                        enrollPrefs.edit().putString("dismissed.$baseURL", approvalMode).apply()
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        )
                     }
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(Icons.Default.Lock, contentDescription = null, tint = Color.Black, modifier = Modifier.size(15.dp))
-                Text(
-                    text = "$pendingSecrets secret request${if (pendingSecrets == 1) "" else "s"} waiting",
-                    color = Color.Black,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                    is OrbNavScreen.Project -> {
+                        OrbProjectPage(
+                            core = core,
+                            project = currentScreen.project,
+                            onBack = { pop() },
+                            onOpenMission = { mission ->
+                                push(OrbNavScreen.Conversation(currentScreen.project, mission))
+                            },
+                            onNewAgent = { folder ->
+                                push(OrbNavScreen.Conversation(currentScreen.project, null, folder))
+                            },
+                            onOpenDocuments = { dirPath ->
+                                push(OrbNavScreen.Documents(currentScreen.project, dirPath))
+                            }
+                        )
+                    }
+                    is OrbNavScreen.Conversation -> {
+                        OrbConversationPage(
+                            core = core,
+                            project = currentScreen.project,
+                            initialMission = currentScreen.mission,
+                            initialFolder = currentScreen.initialFolder,
+                            onBack = { pop() }
+                        )
+                    }
+                    is OrbNavScreen.Documents -> {
+                        OrbProjectDocumentsPage(
+                            core = core,
+                            project = currentScreen.project,
+                            directoryPath = currentScreen.directoryPath,
+                            onBack = { pop() },
+                            onOpenDirectory = { nextDir ->
+                                push(OrbNavScreen.Documents(currentScreen.project, nextDir))
+                            },
+                            onOpenFile = { entry ->
+                                push(OrbNavScreen.DocumentViewer(currentScreen.project, entry))
+                            }
+                        )
+                    }
+                    is OrbNavScreen.DocumentViewer -> {
+                        OrbProjectDocumentViewer(
+                            core = core,
+                            project = currentScreen.project,
+                            entry = currentScreen.entry,
+                            onBack = { pop() }
+                        )
+                    }
+                }
             }
         }
     }
@@ -487,7 +546,8 @@ fun OrbHomeScreen(
     onOpenSettings: () -> Unit,
     onSelectProject: (OrbRow) -> Unit,
     onSelectMission: (mission: OrbRow, project: OrbRow) -> Unit,
-    onChangeServer: () -> Unit = onOpenSettings
+    onChangeServer: () -> Unit = onOpenSettings,
+    bannerContent: @Composable () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val projects by core.projects.collectAsState()
@@ -555,6 +615,7 @@ fun OrbHomeScreen(
                         .clip(CircleShape)
                         .background(OrbStyle.surface)
                         .border(1.dp, OrbStyle.border, CircleShape)
+                        .semantics { contentDescription = "Settings" }
                         .orbPressClickable { onOpenSettings() },
                     contentAlignment = Alignment.Center
                 ) {
@@ -632,6 +693,7 @@ fun OrbHomeScreen(
                         .clip(CircleShape)
                         .background(OrbStyle.surface)
                         .border(1.dp, OrbStyle.border, CircleShape)
+                        .semantics { contentDescription = "New project" }
                         .orbPressClickable {
                             newProjectName = ""
                             newProjectRepo = ""
@@ -642,6 +704,8 @@ fun OrbHomeScreen(
                     OrbSfIcons.FolderBadgePlus(color = Color.White, size = 22.dp)
                 }
             }
+
+            bannerContent()
 
             if (selectedTab == OrbTopTab.Inbox) {
                 OrbInboxView(

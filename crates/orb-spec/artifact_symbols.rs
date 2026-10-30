@@ -7,9 +7,9 @@ pub fn verify_listing(text: &str, macos: bool) -> Result<(), String> {
     let expected: BTreeSet<_> = EXPORTS.iter().copied().collect();
     let mut seen = BTreeSet::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        // POSIX nm emits a standalone archive-member heading before its rows.
-        // Paths and member names may contain spaces (GNU [] or Apple () format).
-        if line.ends_with("]:") || line.ends_with("):") {
+        // POSIX/LLVM nm emits a standalone archive-member heading before its rows.
+        // Paths and member names may contain spaces (GNU [], Apple (), or bare .o: format).
+        if line.ends_with("]:") || line.ends_with("):") || line.ends_with(".o:") {
             continue;
         }
         let fields: Vec<_> = line.split_whitespace().collect();

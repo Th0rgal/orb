@@ -23,6 +23,23 @@ function palomaPub(): Plugin {
   };
 }
 
+function testFixtureKernelBootstrap(): Plugin {
+  return {
+    name: "test-fixture-kernel-bootstrap",
+    apply: "serve",
+    transformIndexHtml(html, ctx) {
+      if (!ctx.path.startsWith("/tests/")) return html;
+      return html.replace(
+        /<script\s+type="module"\s+src="([^"]+)"><\/script>/i,
+        (_m, src: string) => {
+          const target = src.startsWith("./") ? `/tests/${src.slice(2)}` : src;
+          return `<script type="module">import { initializeKernel } from "/src/orbKernelAbi.ts"; await initializeKernel(); await import(${JSON.stringify(target)});</script>`;
+        },
+      );
+    },
+  };
+}
+
 /** Short commit of the checkout being built, or "dev" outside git. */
 function buildId(): string {
   try { return execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || "dev"; } catch { return "dev"; }
@@ -34,7 +51,7 @@ export default defineConfig({
     "import.meta.env.VITE_ORB_VERSION": JSON.stringify(pkg.version),
     "import.meta.env.VITE_ORB_BUILD": JSON.stringify(buildId()),
   },
-  plugins: [solid(), palomaPub()],
+  plugins: [solid(), palomaPub(), testFixtureKernelBootstrap()],
   clearScreen: false,
   // Code highlighting is loaded lazily, so the dev server would discover Prism
   // only once a transcript shows code and then reload the page mid-test.

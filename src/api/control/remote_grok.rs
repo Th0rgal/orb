@@ -172,9 +172,16 @@ pub(crate) async fn require_node_managed_auth(
         return Ok(());
     };
     if profile == "antigravity" {
-        // One Google sign-in: hand the node the routing login first. Older
+        let requested_model = match plan {
+            RemoteHarnessPlan::Antigravity { model, .. } => model.as_deref(),
+            _ => None,
+        };
+        // Hand the node the login suited to the requested model (switching to
+        // the only account offering Gemini 4 Carbon when requested). Older
         // nodes and nodes keeping their own sign-in fall back to the heartbeat.
-        match crate::api::antigravity_native::sync_node(state, node_id).await {
+        match crate::api::antigravity_native::sync_node_for_model(state, node_id, requested_model)
+            .await
+        {
             Ok(crate::api::antigravity_native::NodeSync::Ready) => {
                 let client = RemoteNodeClient::default();
                 remote_node::probe_node(&state.fleet, &client, node).await;
@@ -263,6 +270,9 @@ static TRANSCRIPT_REDUCE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::Sh
 static CLIENT_PARITY_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
     std::sync::OnceLock::new();
 
+static TRANSCRIPT_FOLD_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
 pub fn agent_event_normalize_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
     AGENT_EVENT_NORMALIZE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
 }
@@ -273,6 +283,10 @@ pub fn transcript_reduce_shadow_counter() -> &'static crate::orb_spec::ShadowCou
 
 pub fn client_parity_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
     CLIENT_PARITY_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+pub fn transcript_fold_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    TRANSCRIPT_FOLD_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
 }
 
 /// Evaluate `orb_agent_event_normalize_step` (`TotalTransducer`, `NoEventLoss`,
@@ -327,6 +341,45 @@ pub fn evaluate_transcript_reduce_gate(
         },
         host_emits,
         transcript_reduce_shadow_counter(),
+    )
+}
+
+pub fn evaluate_transcript_fold_gate(
+    last_applied_seq: u64,
+    incoming_seq: u64,
+    entry_count: u32,
+    thinking_open: bool,
+    normalized_action: crate::orb_spec::AgentEventNormalizeAction,
+    is_replay_from_log: bool,
+) -> crate::orb_spec::TranscriptFoldStepVerdict {
+    let action_u8 = normalized_action as u8;
+    let is_duplicate = incoming_seq <= last_applied_seq;
+    let is_contiguous = !is_duplicate && (incoming_seq - last_applied_seq == 1);
+    let (host_admitted, host_next_entry_count, host_action_code) = if is_duplicate {
+        (false, entry_count, 2)
+    } else if !is_contiguous {
+        (false, entry_count, 3)
+    } else {
+        match action_u8 {
+            4 => (true, entry_count, 1),
+            5..=7 | 9..=10 => (true, entry_count.saturating_add(1), 1),
+            2 | 3 | 8 => (true, entry_count, 4),
+            _ => (false, entry_count, 5),
+        }
+    };
+    crate::orb_spec::observe_transcript_fold_shadow(
+        crate::orb_spec::TranscriptFoldStepInput {
+            last_applied_seq,
+            incoming_seq,
+            entry_count,
+            thinking_open,
+            normalized_action: action_u8,
+            is_replay_from_log,
+        },
+        host_admitted,
+        host_next_entry_count,
+        host_action_code,
+        transcript_fold_shadow_counter(),
     )
 }
 
@@ -415,6 +468,7 @@ pub(crate) struct GrokStream {
     pub(crate) is_replay_stream: bool,
     pub(crate) last_parity_digest: u32,
     pub(crate) parity_admitted: bool,
+    pub(crate) folded_entry_count: u32,
 }
 
 impl GrokStream {
@@ -481,11 +535,20 @@ impl GrokStream {
                 self.is_replay_stream,
                 host_reduce_emits,
             );
-            if !norm.emit_event || !red.emit_entry {
+            let fold = evaluate_transcript_fold_gate(
+                self.last_reduced_seq,
+                incoming_seq,
+                self.folded_entry_count,
+                self.reducer_thinking_open,
+                norm.action,
+                self.is_replay_stream,
+            );
+            if !norm.emit_event || !red.emit_entry || !fold.admitted {
                 return false;
             }
             self.last_reduced_seq = incoming_seq;
             self.reducer_thinking_open = red.thinking_open_next;
+            self.folded_entry_count = fold.next_entry_count;
             return true;
         };
 
@@ -673,7 +736,15 @@ impl GrokStream {
             is_replay_from_log,
             host_reduce_emits,
         );
-        if !red.emit_entry {
+        let fold = evaluate_transcript_fold_gate(
+            self.last_reduced_seq,
+            incoming_seq,
+            self.folded_entry_count,
+            self.reducer_thinking_open,
+            norm.action,
+            is_replay_from_log,
+        );
+        if !red.emit_entry || !fold.admitted {
             return false;
         }
         if let Some(bound) = candidate_session_to_bind {
@@ -684,6 +755,7 @@ impl GrokStream {
         }
         self.last_reduced_seq = incoming_seq;
         self.reducer_thinking_open = red.thinking_open_next;
+        self.folded_entry_count = fold.next_entry_count;
         true
     }
 
@@ -5562,16 +5634,33 @@ mod tests {
                 evaluate_transcript_reduce_gate(12, 12, false, complete.action, true, false);
             assert_eq!(stale_red.action, TranscriptReduceAction::DedupeOrSkip);
             assert!(!stale_red.emit_entry);
+
+            let live_fold =
+                super::evaluate_transcript_fold_gate(10, 11, 3, true, complete.action, false);
+            let replay_fold =
+                super::evaluate_transcript_fold_gate(10, 11, 3, true, complete.action, true);
+            assert_eq!(live_fold, replay_fold);
+            assert!(live_fold.admitted);
+            assert_eq!(live_fold.next_entry_count, 4);
+            let gap_fold =
+                super::evaluate_transcript_fold_gate(11, 14, 4, false, complete.action, false);
+            assert!(!gap_fold.admitted);
+            assert!(gap_fold.gap_buffered);
+            assert_eq!(gap_fold.next_entry_count, 4);
         }
 
         let norm_snap =
             agent_event_normalize_shadow_counter().snapshot("orb_agent_event_normalize_step");
         let red_snap = transcript_reduce_shadow_counter().snapshot("orb_transcript_reduce_step");
+        let fold_snap =
+            super::transcript_fold_shadow_counter().snapshot("orb_transcript_fold_step");
         let parity_snap = client_parity_shadow_counter().snapshot("orb_client_parity_step");
         assert!(norm_snap.total_events >= 20);
         assert_eq!(norm_snap.total_divergences, 0);
         assert!(red_snap.total_events >= 20);
         assert_eq!(red_snap.total_divergences, 0);
+        assert!(fold_snap.total_events >= 20);
+        assert_eq!(fold_snap.total_divergences, 0);
         assert!(parity_snap.total_events >= 1);
         assert_eq!(parity_snap.total_divergences, 0);
     }

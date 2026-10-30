@@ -72,6 +72,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -96,6 +97,14 @@ fun OrbMachinesSettingsPage(
     var computers by remember { mutableStateOf<List<OrbRow>>(emptyList()) }
     var computersReady by remember { mutableStateOf(false) }
     var managedReloadKey by remember { mutableIntStateOf(0) }
+    var managedEnabled by remember { mutableStateOf(false) }
+    val fleetNodes = remember(nodes, managedEnabled) {
+        if (!managedEnabled) nodes
+        else nodes.filterNot { node ->
+            val nodeId = node.str("id", "name") ?: node.id
+            OrbManagedMachines.isManagedNode(nodeId, OrbManagedMachines.nodeLabels(node))
+        }
+    }
 
     suspend fun loadMachines() {
         managedReloadKey += 1
@@ -229,6 +238,14 @@ fun OrbMachinesSettingsPage(
 
                 item { OrbComputersBlock(core = core, computers = computers, ready = computersReady) }
 
+                item {
+                    OrbManagedMachinesBlock(
+                        core = core,
+                        reloadKey = managedReloadKey,
+                        onActiveChanged = { managedEnabled = it }
+                    )
+                }
+
                 // Section("Fleet") matching OrbMachinesSettings.swift
                 item {
                     Text(
@@ -240,15 +257,15 @@ fun OrbMachinesSettingsPage(
                     )
                 }
 
-                if (nodes.isEmpty() && !isRefreshing) {
+                if (fleetNodes.isEmpty() && !isRefreshing) {
                     item {
                         Text(
-                            text = "No remote nodes registered.",
+                            text = "No static remote nodes registered.",
                             color = OrbStyle.textMuted,
                             fontSize = 14.sp
                         )
                     }
-                } else {
+                } else if (fleetNodes.isNotEmpty()) {
                     item {
                         Column(
                             modifier = Modifier
@@ -257,7 +274,7 @@ fun OrbMachinesSettingsPage(
                                 .background(OrbStyle.surface)
                                 .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
                         ) {
-                            nodes.forEachIndexed { idx, node ->
+                            fleetNodes.forEachIndexed { idx, node ->
                                 val nodeId = node.str("id", "name") ?: node.id
                                 val statusText = node.str("status", "state") ?: "online"
                                 val cordoned = node.bool("cordoned", "paused") == true
@@ -294,8 +311,18 @@ fun OrbMachinesSettingsPage(
                                                     overflow = TextOverflow.Ellipsis,
                                                     modifier = Modifier.weight(1f, fill = false)
                                                 )
-                                                if (OrbManagedMachines.isManagedNode(nodeId, OrbManagedMachines.nodeLabels(node))) {
+                                                val nodeLabels = OrbManagedMachines.nodeLabels(node)
+                                                if (OrbManagedMachines.isManagedNode(nodeId, nodeLabels)) {
                                                     OrbManagedBadge()
+                                                    val nodeProv = OrbManagedMachines.nodeProvider(nodeLabels)
+                                                    if (!nodeProv.isNullOrEmpty() && nodeProv != "boat") {
+                                                        Text(
+                                                            text = OrbManagedMachines.providerLabel(nodeProv),
+                                                            color = OrbStyle.inboxBlue,
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Medium
+                                                        )
+                                                    }
                                                 }
                                             }
                                             Text(
@@ -364,7 +391,7 @@ fun OrbMachinesSettingsPage(
                                     }
                                 }
 
-                                if (idx < nodes.lastIndex) {
+                                if (idx < fleetNodes.lastIndex) {
                                     HorizontalDivider(
                                         color = OrbStyle.border,
                                         modifier = Modifier.padding(start = 16.dp)
@@ -374,8 +401,6 @@ fun OrbMachinesSettingsPage(
                         }
                     }
                 }
-
-                item { OrbManagedMachinesBlock(core = core, reloadKey = managedReloadKey) }
             }
         }
     }
@@ -410,6 +435,8 @@ internal fun OrbKeyValueLine(label: String, value: String) {
 internal fun OrbMiniField(
     label: String,
     value: String,
+    secret: Boolean = false,
+    enabled: Boolean = true,
     onValueChange: (String) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -425,9 +452,11 @@ internal fun OrbMiniField(
             BasicTextField(
                 value = value,
                 onValueChange = onValueChange,
+                enabled = enabled,
                 textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
                 cursorBrush = SolidColor(Color.White),
                 singleLine = true,
+                visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
                 modifier = Modifier.fillMaxWidth()
             )
         }

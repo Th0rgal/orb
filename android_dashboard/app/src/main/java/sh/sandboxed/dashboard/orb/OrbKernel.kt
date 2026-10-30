@@ -551,6 +551,9 @@ object OrbKernel {
         maxVariantId: Int
     ): Int
 
+    @JvmStatic
+    external fun leansysVerifyFdBounds(rawWord: Long, fdOut: Int): Int
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
@@ -922,6 +925,11 @@ object OrbKernel {
     ): Boolean {
         requireNative()
         return leansysVerifyIsaSelection(detectedHwCaps, requiredMask, selectedVariantId.coerceIn(0, 255), maxVariantId.coerceIn(0, 255)) != 0
+    }
+
+    fun verifyFdBounds(rawWord: Long, fdOut: Int): Boolean {
+        requireNative()
+        return leansysVerifyFdBounds(rawWord, fdOut) != 0
     }
 
     data class ScrollEpochVerdict(

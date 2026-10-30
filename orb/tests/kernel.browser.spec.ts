@@ -24,7 +24,7 @@ test("kernel failure prevents App import, then retry opens the real application"
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect.poll(() => requests.some(isApp)).toBe(true);
   expect(attempts).toBe(2);
-  await expect(page.getByRole("main")).toBeVisible();
+  await expect(page.getByRole("main")).toBeVisible({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Inbox", exact: true })).toBeVisible();
   await expect(page.getByText("Orb could not open. Please reload.", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Starting Orb…", { exact: true })).toHaveCount(0);

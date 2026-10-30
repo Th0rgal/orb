@@ -3672,6 +3672,241 @@ def nodeGcMetaStepSpec : MetaStepSpec UInt8 NodeGcCheck UInt8 where
     authorized := fun _ g eff => eff == 4 && g.ShouldEvictHot
     sound := fun s g eff h_in => by
       dsimp [nodeGcMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := nodeGcHotEvictMetaGate.sound g h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := 0
+    step := nodeGcMachineStep
+    progressRequired := fun _ g => g.ShouldEvictHot
+    expectedEffect := fun _ eff => eff == 4
+    live := fun s g h_req => by
+      have h_gate := nodeGcHotEvictMetaGate.complete g h_req
+      dsimp [nodeGcMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨50, 80, 10, 5, 2, 5, 10⟩, ⟨50, 80, 10, 5, 2, 5, 25⟩]
+    posEvent := ⟨50, 80, 10, 5, 2, 5, 25⟩
+    negEvent := ⟨50, 80, 10, 5, 2, 5, 10⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := nodeGcMachineStep
+    cpuFuel := fun _ _ => 1
+    inputBytes := fun _ => 56
+    outputBytes := fun _ _ => 8
+    c0 := 1
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 8
+    fuel_bound := fun _ _ => by omega
+    eff_bound := fun s g => by
+      dsimp [nodeGcMachineStep]
+      split <;> simp
+    out_bound := fun _ _ => by omega
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Corollary 81 (`ConservedResource` — `orb_node_gc_step`, Healthy Node Keeps 72h Grace and Zero Evictions):
+    Whenever `floorBytes ≤ freeBytes`, `nodeGcStep` emits `lo32 = 0` (zero scratch or cache sweeps,
+    `pinnedPressureBit = 0`) and `hi32 = 72` hours of retired-scratch retention grace. -/
+theorem node_gc_healthy_keeps_72h_grace
+    (free floor emerg aged fresh cold hot : UInt64)
+    (h_healthy : floor ≤ free) :
+    nodeGcStep free floor emerg aged fresh cold hot = ((72 : UInt64) <<< 32) := by
+  have hu : decide (free < floor) = false :=
+    decide_eq_false (Nat.not_lt_of_ge h_healthy)
+  unfold nodeGcStep
+  simp [hu]
+
+/-- Corollary 82 (`ConservedResource` — `orb_node_gc_step`, Anti-Thrashing Guard Preserves Hot Lake Caches):
+    When a node is below `floorBytes` (`free < floor`), at or above `emergencyFloorBytes` (`emerg ≤ free`),
+    and non-cache storage pins the disk below `floorBytes` even if all scratch and caches were deleted
+    (`hot < RemAfterFresh`), `nodeGcStep` sets `pinnedPressureBit` (`4096`) while strictly clearing
+    `evictHotCacheBit` (`2048`), preventing 30-minute Lake cache thrashing. -/
+theorem node_gc_preserves_hot_cache_when_pinned_above_emergency
+    (free floor emerg aged fresh cold hot : UInt64)
+    (h_under : free < floor)
+    (h_above_emerg : emerg ≤ free)
+    (h_pinned : hot < NodeGcCheck.RemAfterFresh ⟨free, floor, emerg, aged, fresh, cold, hot⟩) :
+    ((nodeGcStep free floor emerg aged fresh cold hot &&& 0xFFFFFFFF) &&& 6144) = 4096 := by
+  have hu : decide (free < floor) = true := decide_eq_true h_under
+  have he : decide (free < emerg) = false := decide_eq_false (Nat.not_lt_of_ge h_above_emerg)
+  unfold NodeGcCheck.RemAfterFresh at h_pinned
+  simp only [hu, ↓reduceIte] at h_pinned
+  have hp : decide (hot < (if fresh >= (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
+      else (if aged >= floor - free then 0 else floor - free - aged) - cold) then 0
+      else (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
+      else (if aged >= floor - free then 0 else floor - free - aged) - cold) - fresh)) = true :=
+    decide_eq_true h_pinned
+  unfold nodeGcStep
+  simp only [hu, he, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, Bool.false_and, ↓reduceIte]
+  rw [pack32_lo]
+  generalize (if aged >= floor - free then (0 : UInt64) else floor - free - aged) = r1 at hp ⊢
+  generalize (if cold >= r1 then (0 : UInt64) else r1 - cold) = r2 at hp ⊢
+  generalize (if fresh >= r2 then (0 : UInt64) else r2 - fresh) = r3 at hp ⊢
+  have hr3_pos : decide (r3 > 0) = true := by
+    have : 0 < r3.toNat := Nat.lt_of_le_of_lt (Nat.zero_le hot.toNat) (of_decide_eq_true hp)
+    exact decide_eq_true this
+  cases hc1 : decide (r1 > 0) <;>
+    cases hc2 : decide (r2 > 0) <;>
+    (simp only [hp, hr3_pos, hc1, hc2, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, ↓reduceIte]
+     decide)
+
+/-- Corollary 83 (`EffectLiveness` — `orb_node_gc_step`, Emergency Survival Overrides Anti-Thrashing Guard):
+    When free space drops below both `floorBytes` and `emergencyFloorBytes` (`free < floor`, `free < emerg`),
+    deficit remains after retired scratch and cold caches (`0 < RemAfterFresh`), and non-empty hot caches
+    exist (`0 < hot`), `nodeGcStep` sets `evictHotCacheBit` (`2048`) even if pressure is pinned. -/
+theorem node_gc_emergency_evicts_hot_cache
+    (free floor emerg aged fresh cold hot : UInt64)
+    (h_under : free < floor)
+    (h_emerg : free < emerg)
+    (h_hot : 0 < hot)
+    (h_rem : 0 < NodeGcCheck.RemAfterFresh ⟨free, floor, emerg, aged, fresh, cold, hot⟩) :
+    ((nodeGcStep free floor emerg aged fresh cold hot &&& 0xFFFFFFFF) &&& 2048) = 2048 := by
+  have hu : decide (free < floor) = true := decide_eq_true h_under
+  have he : decide (free < emerg) = true := decide_eq_true h_emerg
+  have hh : decide (hot > 0) = true := decide_eq_true h_hot
+  unfold NodeGcCheck.RemAfterFresh at h_rem
+  simp only [hu, ↓reduceIte] at h_rem
+  have hr : decide ((if fresh >= (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
+      else (if aged >= floor - free then 0 else floor - free - aged) - cold) then 0
+      else (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
+      else (if aged >= floor - free then 0 else floor - free - aged) - cold) - fresh) > 0) = true :=
+    decide_eq_true h_rem
+  unfold nodeGcStep
+  simp only [hu, he, hh, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, ↓reduceIte]
+  rw [pack32_lo]
+  generalize (if aged >= floor - free then (0 : UInt64) else floor - free - aged) = r1 at hr ⊢
+  generalize (if cold >= r1 then (0 : UInt64) else r1 - cold) = r2 at hr ⊢
+  generalize (if fresh >= r2 then (0 : UInt64) else r2 - fresh) = r3 at hr ⊢
+  cases hc1 : decide (r1 > 0) <;>
+    cases hc2 : decide (r2 > 0) <;>
+    cases hun : decide (hot < r3) <;>
+    (simp only [hr, hc1, hc2, hun, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.and_false, ↓reduceIte]
+     decide)
+-- ===========================================================================
+-- Wave 13: Multi-Provider Managed Compute Governance — Working-Owner Idle Reap,
+--          Minimum-Commitment (`deletable_at`) Deferral, Lineage Claims & Secret Confinement
+-- ===========================================================================
+
+structure VmClaimCheck where
+  isLive         : UInt8
+  sameTenant     : UInt8
+  ownerNone      : UInt8
+  ownerInLineage : UInt8
+  deriving Repr, DecidableEq
+
+def vmClaimMetaGate : MetaGateSpec VmClaimCheck
+    (fun c => (c.isLive == 1 && c.sameTenant == 1 && (c.ownerNone == 1 || c.ownerInLineage == 1)) = true) where
+  gate c := (vmClaimStep c.isLive c.sameTenant c.ownerNone c.ownerInLineage &&& 256) != 0
+  sound c h := by
+    unfold vmClaimStep at h
+    split at h <;> (simp_all; try contradiction)
+  complete c h := by
+    unfold vmClaimStep
+    simp [h]
+    decide
+  posWitness := ⟨1, 1, 0, 1⟩
+  negWitness := ⟨1, 0, 1, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 84 (`ScopedAuthority` — `orb_vm_claim_step`): Non-live machines (`isLive = 0`), cross-tenant
+    callers (`sameTenant = 0`), and unrelated missions (`ownerNone = 0 ∧ ownerInLineage = 0`) are strictly
+    rejected (`512`), while same-tenant unowned or lineage-owned live machines are admitted (`257`). -/
+theorem vm_claim_enforces_liveness_tenant_and_lineage
+    (live tenant ownNone inLin : UInt8) :
+    vmClaimStep 0 tenant ownNone inLin = 512 ∧
+    vmClaimStep live 0 ownNone inLin = 512 ∧
+    vmClaimStep live tenant 0 0 = 512 ∧
+    vmClaimStep 1 1 1 inLin = 257 ∧
+    vmClaimStep 1 1 ownNone 1 = 257 := by
+  unfold vmClaimStep
+  repeat (first | constructor | split | decide | simp_all)
+
+structure ComputeSecretCheck where
+  isCoreReservedComputeKey   : UInt8
+  callerOnManagedNode        : UInt8
+  isAllowlistedManagedSecret : UInt8
+  operatorBreakGlass         : UInt8
+  deriving Repr, DecidableEq
+
+def computeSecretMetaGate : MetaGateSpec ComputeSecretCheck
+    (fun s => (!(s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) &&
+               !(s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0)) = true) where
+  gate s :=
+    (computeSecretGate
+      s.isCoreReservedComputeKey s.callerOnManagedNode
+      s.isAllowlistedManagedSecret s.operatorBreakGlass &&& 256) != 0
+  sound s h := by
+    unfold computeSecretGate at h
+    cases hc : (s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) <;>
+      cases hm : (s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0) <;>
+      (simp_all; try contradiction)
+  complete s h := by
+    unfold computeSecretGate
+    cases hc : (s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) <;>
+      cases hm : (s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0) <;>
+      (simp_all; try decide)
+  posWitness := ⟨0, 1, 1, 0⟩
+  negWitness := ⟨1, 0, 1, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 85 (`ScopedAuthority` — `orb_compute_secret_gate`): Core-reserved cloud provider API keys
+    (`isCoreReservedComputeKey = 1`) without operator break-glass (`operatorBreakGlass = 0`) and non-allowlisted
+    secrets requested from untrusted managed nodes (`callerOnManagedNode = 1 ∧ isAllowlistedManagedSecret = 0`)
+    are unconditionally rejected (`512`). -/
+theorem compute_secret_gate_confines_provider_keys_and_managed_nodes
+    (reserved managed allowlisted breakGlass : UInt8) :
+    computeSecretGate 1 managed allowlisted 0 = 512 ∧
+    computeSecretGate reserved 1 0 breakGlass = 512 ∧
+    computeSecretGate 0 0 allowlisted breakGlass = 257 ∧
+    computeSecretGate 0 1 1 breakGlass = 257 := by
+  unfold computeSecretGate
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 86 (`ClockDiscipline` & `ConservedResource` — `orb_vm_lifecycle_step`):
+    1. A busy non-expired VM (`busy = 1, ttlExpired = 0`) or an unloaded/unknown owner (`ownerClass = 0, ttlExpired = 0`)
+       is always kept (`0`).
+    2. Whenever a minimum billing commitment is still active (`minDeletePending = 1`, e.g. Scaleway Apple Silicon
+       24-hour `deletable_at`), `destroy (259)` is never emitted (`(res &&& 0xFF) != 3`); expired TTLs defer into
+       `schedule | deferForMinLease` (`65537`).
+    3. An idle VM owned by a `Working` parent (`ownerClass = 1, workingIdleEnabled = 1`) schedules (`1`) before
+       idle expiry and destroys (`259`) once `graceOrIdleElapsed = 1` and `minDeletePending = 0`.
+    4. An idle VM owned by a `Waiting` mission (`ownerClass = 2, graceOrIdleElapsed = 1`) stops (`258`) on
+       free-stop providers (`supportsFreeStop = 1`) and destroys (`259`) on billing-while-stopped providers (`0`). -/
+theorem vm_lifecycle_protects_busy_reaps_working_idle_and_defers_min_lease
+    (own grace workEn freeStop minDel : UInt8) :
+    vmLifecycleStep own 1 0 grace workEn freeStop minDel = 0 ∧
+    vmLifecycleStep 0 0 0 grace workEn freeStop minDel = 0 ∧
+    vmLifecycleStep own 1 1 grace workEn freeStop 1 = 65537 ∧
+    vmLifecycleStep 1 0 0 0 1 freeStop minDel = 1 ∧
+    vmLifecycleStep 1 0 0 1 1 freeStop 0 = 259 ∧
+    vmLifecycleStep 2 0 0 1 workEn 1 minDel = 258 ∧
+    vmLifecycleStep 2 0 0 1 workEn 0 0 = 259 := by
+  unfold vmLifecycleStep
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 87 (`ProjectionStability` — `orb_machine_action_admitted`): A `stopped (6)` machine never meters
+    live cost (`bit 16 == 0`) or counts as live (`bit 0 == 0`), always sets `isStopped` (`bit 24 == 16777216`),
+    and enables `canResume` (`bit 25 == 33554432`) when idle and unmuted (`50331648`). -/
+theorem machine_action_stopped_retains_without_live_billing
+    (busy muted : UInt8) :
+    (machineActionAdmitted 6 busy muted &&& 1) = 0 ∧
+    (machineActionAdmitted 6 busy muted &&& 65536) = 0 ∧
+    (machineActionAdmitted 6 busy muted &&& 16777216) = 16777216 ∧
+    machineActionAdmitted 6 0 0 = 50331648 ∧
+    machineActionAdmitted 6 1 muted = 16777216 := by
+  unfold machineActionAdmitted
+  repeat (first | constructor | split | decide | simp_all)
+
+-- ===========================================================================
 -- Wave 12 (P4): Compositional State-Machine & Arena Patch ABI (`OrbMachine` / `OrbWire`)
 -- ===========================================================================
 
@@ -4460,239 +4695,16 @@ def transcriptFoldMetaStepSpec :
     authorized := fun s e eff =>
       eff == e.incomingSeq && (effectiveTranscriptFoldCheck s e).Admissible
     sound := fun s e eff h_in => by
-      dsimp [transcriptFoldMachineStep, applyTranscriptFoldEvent] at h_in      split at h_in
+      dsimp [transcriptFoldMachineStep, applyTranscriptFoldEvent] at h_in
+      split at h_in
       · next h_emit =>
         simp only [List.mem_singleton] at h_in
         subst h_in
-        have h_adm := nodeGcHotEvictMetaGate.sound g h_emit
-        have h_adm := transcriptFoldMetaGate.sound (effectiveTranscriptFoldCheck s e) h_emit        simp [h_adm]
+        have h_adm := transcriptFoldMetaGate.sound (effectiveTranscriptFoldCheck s e) h_emit
+        simp [h_adm]
       · contradiction
   }
   liveness := {
-    init := 0
-    step := nodeGcMachineStep
-    progressRequired := fun _ g => g.ShouldEvictHot
-    expectedEffect := fun _ eff => eff == 4
-    live := fun s g h_req => by
-      have h_gate := nodeGcHotEvictMetaGate.complete g h_req
-      dsimp [nodeGcMachineStep]
-      simp [h_gate]
-    traceEvents := [⟨50, 80, 10, 5, 2, 5, 10⟩, ⟨50, 80, 10, 5, 2, 5, 25⟩]
-    posEvent := ⟨50, 80, 10, 5, 2, 5, 25⟩
-    negEvent := ⟨50, 80, 10, 5, 2, 5, 10⟩
-    reachable_live := by decide
-  }
-  cost := {
-    step := nodeGcMachineStep
-    cpuFuel := fun _ _ => 1
-    inputBytes := fun _ => 56
-    outputBytes := fun _ _ => 8
-    c0 := 1
-    c1 := 1
-    maxEffects := 1
-    maxOutBytes := 8
-    fuel_bound := fun _ _ => by omega
-    eff_bound := fun s g => by
-      dsimp [nodeGcMachineStep]
-      split <;> simp
-    out_bound := fun _ _ => by omega
-  }
-  sameStep := ⟨rfl, rfl⟩
-
-/-- Corollary 81 (`ConservedResource` — `orb_node_gc_step`, Healthy Node Keeps 72h Grace and Zero Evictions):
-    Whenever `floorBytes ≤ freeBytes`, `nodeGcStep` emits `lo32 = 0` (zero scratch or cache sweeps,
-    `pinnedPressureBit = 0`) and `hi32 = 72` hours of retired-scratch retention grace. -/
-theorem node_gc_healthy_keeps_72h_grace
-    (free floor emerg aged fresh cold hot : UInt64)
-    (h_healthy : floor ≤ free) :
-    nodeGcStep free floor emerg aged fresh cold hot = ((72 : UInt64) <<< 32) := by
-  have hu : decide (free < floor) = false :=
-    decide_eq_false (Nat.not_lt_of_ge h_healthy)
-  unfold nodeGcStep
-  simp [hu]
-
-/-- Corollary 82 (`ConservedResource` — `orb_node_gc_step`, Anti-Thrashing Guard Preserves Hot Lake Caches):
-    When a node is below `floorBytes` (`free < floor`), at or above `emergencyFloorBytes` (`emerg ≤ free`),
-    and non-cache storage pins the disk below `floorBytes` even if all scratch and caches were deleted
-    (`hot < RemAfterFresh`), `nodeGcStep` sets `pinnedPressureBit` (`4096`) while strictly clearing
-    `evictHotCacheBit` (`2048`), preventing 30-minute Lake cache thrashing. -/
-theorem node_gc_preserves_hot_cache_when_pinned_above_emergency
-    (free floor emerg aged fresh cold hot : UInt64)
-    (h_under : free < floor)
-    (h_above_emerg : emerg ≤ free)
-    (h_pinned : hot < NodeGcCheck.RemAfterFresh ⟨free, floor, emerg, aged, fresh, cold, hot⟩) :
-    ((nodeGcStep free floor emerg aged fresh cold hot &&& 0xFFFFFFFF) &&& 6144) = 4096 := by
-  have hu : decide (free < floor) = true := decide_eq_true h_under
-  have he : decide (free < emerg) = false := decide_eq_false (Nat.not_lt_of_ge h_above_emerg)
-  unfold NodeGcCheck.RemAfterFresh at h_pinned
-  simp only [hu, ↓reduceIte] at h_pinned
-  have hp : decide (hot < (if fresh >= (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
-      else (if aged >= floor - free then 0 else floor - free - aged) - cold) then 0
-      else (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
-      else (if aged >= floor - free then 0 else floor - free - aged) - cold) - fresh)) = true :=
-    decide_eq_true h_pinned
-  unfold nodeGcStep
-  simp only [hu, he, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, Bool.false_and, ↓reduceIte]
-  rw [pack32_lo]
-  generalize (if aged >= floor - free then (0 : UInt64) else floor - free - aged) = r1 at hp ⊢
-  generalize (if cold >= r1 then (0 : UInt64) else r1 - cold) = r2 at hp ⊢
-  generalize (if fresh >= r2 then (0 : UInt64) else r2 - fresh) = r3 at hp ⊢
-  have hr3_pos : decide (r3 > 0) = true := by
-    have : 0 < r3.toNat := Nat.lt_of_le_of_lt (Nat.zero_le hot.toNat) (of_decide_eq_true hp)
-    exact decide_eq_true this
-  cases hc1 : decide (r1 > 0) <;>
-    cases hc2 : decide (r2 > 0) <;>
-    (simp only [hp, hr3_pos, hc1, hc2, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, ↓reduceIte]
-     decide)
-
-/-- Corollary 83 (`EffectLiveness` — `orb_node_gc_step`, Emergency Survival Overrides Anti-Thrashing Guard):
-    When free space drops below both `floorBytes` and `emergencyFloorBytes` (`free < floor`, `free < emerg`),
-    deficit remains after retired scratch and cold caches (`0 < RemAfterFresh`), and non-empty hot caches
-    exist (`0 < hot`), `nodeGcStep` sets `evictHotCacheBit` (`2048`) even if pressure is pinned. -/
-theorem node_gc_emergency_evicts_hot_cache
-    (free floor emerg aged fresh cold hot : UInt64)
-    (h_under : free < floor)
-    (h_emerg : free < emerg)
-    (h_hot : 0 < hot)
-    (h_rem : 0 < NodeGcCheck.RemAfterFresh ⟨free, floor, emerg, aged, fresh, cold, hot⟩) :
-    ((nodeGcStep free floor emerg aged fresh cold hot &&& 0xFFFFFFFF) &&& 2048) = 2048 := by
-  have hu : decide (free < floor) = true := decide_eq_true h_under
-  have he : decide (free < emerg) = true := decide_eq_true h_emerg
-  have hh : decide (hot > 0) = true := decide_eq_true h_hot
-  unfold NodeGcCheck.RemAfterFresh at h_rem
-  simp only [hu, ↓reduceIte] at h_rem
-  have hr : decide ((if fresh >= (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
-      else (if aged >= floor - free then 0 else floor - free - aged) - cold) then 0
-      else (if cold >= (if aged >= floor - free then 0 else floor - free - aged) then 0
-      else (if aged >= floor - free then 0 else floor - free - aged) - cold) - fresh) > 0) = true :=
-    decide_eq_true h_rem
-  unfold nodeGcStep
-  simp only [hu, he, hh, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.true_and, ↓reduceIte]
-  rw [pack32_lo]
-  generalize (if aged >= floor - free then (0 : UInt64) else floor - free - aged) = r1 at hr ⊢
-  generalize (if cold >= r1 then (0 : UInt64) else r1 - cold) = r2 at hr ⊢
-  generalize (if fresh >= r2 then (0 : UInt64) else r2 - fresh) = r3 at hr ⊢
-  cases hc1 : decide (r1 > 0) <;>
-    cases hc2 : decide (r2 > 0) <;>
-    cases hun : decide (hot < r3) <;>
-    (simp only [hr, hc1, hc2, hun, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.and_false, ↓reduceIte]
-     decide)
--- ===========================================================================
--- Wave 13: Multi-Provider Managed Compute Governance — Working-Owner Idle Reap,
---          Minimum-Commitment (`deletable_at`) Deferral, Lineage Claims & Secret Confinement
--- ===========================================================================
-
-structure VmClaimCheck where
-  isLive         : UInt8
-  sameTenant     : UInt8
-  ownerNone      : UInt8
-  ownerInLineage : UInt8
-  deriving Repr, DecidableEq
-
-def vmClaimMetaGate : MetaGateSpec VmClaimCheck
-    (fun c => (c.isLive == 1 && c.sameTenant == 1 && (c.ownerNone == 1 || c.ownerInLineage == 1)) = true) where
-  gate c := (vmClaimStep c.isLive c.sameTenant c.ownerNone c.ownerInLineage &&& 256) != 0
-  sound c h := by
-    unfold vmClaimStep at h
-    split at h <;> (simp_all; try contradiction)
-  complete c h := by
-    unfold vmClaimStep
-    simp [h]
-    decide
-  posWitness := ⟨1, 1, 0, 1⟩
-  negWitness := ⟨1, 0, 1, 1⟩
-  nonVacuous := rfl
-  tight      := rfl
-
-/-- Corollary 84 (`ScopedAuthority` — `orb_vm_claim_step`): Non-live machines (`isLive = 0`), cross-tenant
-    callers (`sameTenant = 0`), and unrelated missions (`ownerNone = 0 ∧ ownerInLineage = 0`) are strictly
-    rejected (`512`), while same-tenant unowned or lineage-owned live machines are admitted (`257`). -/
-theorem vm_claim_enforces_liveness_tenant_and_lineage
-    (live tenant ownNone inLin : UInt8) :
-    vmClaimStep 0 tenant ownNone inLin = 512 ∧
-    vmClaimStep live 0 ownNone inLin = 512 ∧
-    vmClaimStep live tenant 0 0 = 512 ∧
-    vmClaimStep 1 1 1 inLin = 257 ∧
-    vmClaimStep 1 1 ownNone 1 = 257 := by
-  unfold vmClaimStep
-  repeat (first | constructor | split | decide | simp_all)
-
-structure ComputeSecretCheck where
-  isCoreReservedComputeKey   : UInt8
-  callerOnManagedNode        : UInt8
-  isAllowlistedManagedSecret : UInt8
-  operatorBreakGlass         : UInt8
-  deriving Repr, DecidableEq
-
-def computeSecretMetaGate : MetaGateSpec ComputeSecretCheck
-    (fun s => (!(s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) &&
-               !(s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0)) = true) where
-  gate s :=
-    (computeSecretGate
-      s.isCoreReservedComputeKey s.callerOnManagedNode
-      s.isAllowlistedManagedSecret s.operatorBreakGlass &&& 256) != 0
-  sound s h := by
-    unfold computeSecretGate at h
-    cases hc : (s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) <;>
-      cases hm : (s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0) <;>
-      (simp_all; try contradiction)
-  complete s h := by
-    unfold computeSecretGate
-    cases hc : (s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) <;>
-      cases hm : (s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0) <;>
-      (simp_all; try decide)
-  posWitness := ⟨0, 1, 1, 0⟩
-  negWitness := ⟨1, 0, 1, 0⟩
-  nonVacuous := rfl
-  tight      := rfl
-
-/-- Corollary 85 (`ScopedAuthority` — `orb_compute_secret_gate`): Core-reserved cloud provider API keys
-    (`isCoreReservedComputeKey = 1`) without operator break-glass (`operatorBreakGlass = 0`) and non-allowlisted
-    secrets requested from untrusted managed nodes (`callerOnManagedNode = 1 ∧ isAllowlistedManagedSecret = 0`)
-    are unconditionally rejected (`512`). -/
-theorem compute_secret_gate_confines_provider_keys_and_managed_nodes
-    (reserved managed allowlisted breakGlass : UInt8) :
-    computeSecretGate 1 managed allowlisted 0 = 512 ∧
-    computeSecretGate reserved 1 0 breakGlass = 512 ∧
-    computeSecretGate 0 0 allowlisted breakGlass = 257 ∧
-    computeSecretGate 0 1 1 breakGlass = 257 := by
-  unfold computeSecretGate
-  repeat (first | constructor | split | decide | simp_all)
-
-/-- Corollary 86 (`ClockDiscipline` & `ConservedResource` — `orb_vm_lifecycle_step`):
-    1. A busy non-expired VM (`busy = 1, ttlExpired = 0`) or an unloaded/unknown owner (`ownerClass = 0, ttlExpired = 0`)
-       is always kept (`0`).
-    2. Whenever a minimum billing commitment is still active (`minDeletePending = 1`, e.g. Scaleway Apple Silicon
-       24-hour `deletable_at`), `destroy (259)` is never emitted (`(res &&& 0xFF) != 3`); expired TTLs defer into
-       `schedule | deferForMinLease` (`65537`).
-    3. An idle VM owned by a `Working` parent (`ownerClass = 1, workingIdleEnabled = 1`) schedules (`1`) before
-       idle expiry and destroys (`259`) once `graceOrIdleElapsed = 1` and `minDeletePending = 0`.
-    4. An idle VM owned by a `Waiting` mission (`ownerClass = 2, graceOrIdleElapsed = 1`) stops (`258`) on
-       free-stop providers (`supportsFreeStop = 1`) and destroys (`259`) on billing-while-stopped providers (`0`). -/
-theorem vm_lifecycle_protects_busy_reaps_working_idle_and_defers_min_lease
-    (own grace workEn freeStop minDel : UInt8) :
-    vmLifecycleStep own 1 0 grace workEn freeStop minDel = 0 ∧
-    vmLifecycleStep 0 0 0 grace workEn freeStop minDel = 0 ∧
-    vmLifecycleStep own 1 1 grace workEn freeStop 1 = 65537 ∧
-    vmLifecycleStep 1 0 0 0 1 freeStop minDel = 1 ∧
-    vmLifecycleStep 1 0 0 1 1 freeStop 0 = 259 ∧
-    vmLifecycleStep 2 0 0 1 workEn 1 minDel = 258 ∧
-    vmLifecycleStep 2 0 0 1 workEn 0 0 = 259 := by
-  unfold vmLifecycleStep
-  repeat (first | constructor | split | decide | simp_all)
-
-/-- Corollary 87 (`ProjectionStability` — `orb_machine_action_admitted`): A `stopped (6)` machine never meters
-    live cost (`bit 16 == 0`) or counts as live (`bit 0 == 0`), always sets `isStopped` (`bit 24 == 16777216`),
-    and enables `canResume` (`bit 25 == 33554432`) when idle and unmuted (`50331648`). -/
-theorem machine_action_stopped_retains_without_live_billing
-    (busy muted : UInt8) :
-    (machineActionAdmitted 6 busy muted &&& 1) = 0 ∧
-    (machineActionAdmitted 6 busy muted &&& 65536) = 0 ∧
-    (machineActionAdmitted 6 busy muted &&& 16777216) = 16777216 ∧
-    machineActionAdmitted 6 0 0 = 50331648 ∧
-    machineActionAdmitted 6 1 muted = 16777216 := by
-  unfold machineActionAdmitted
-  repeat (first | constructor | split | decide | simp_all)
     init := ⟨0, 0, 0⟩
     step := transcriptFoldMachineStep
     progressRequired := fun s e => (effectiveTranscriptFoldCheck s e).Admissible

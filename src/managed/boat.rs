@@ -113,17 +113,27 @@ impl BoatProvider {
             resp.text().await.unwrap_or_default()
         };
         if !status.is_success() {
-            let code = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("code")
-                        .or_else(|| v.get("error"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or_default();
+            let parsed = serde_json::from_str::<Value>(&text).ok();
+            let code = parsed
+                .as_ref()
+                .and_then(|v| v.get("code").or_else(|| v.get("error")))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let message = parsed
+                .as_ref()
+                .and_then(|v| v.get("message"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let detail = match (code, message) {
+                (Some(c), Some(m)) if c != m => format!("{c}: {m}"),
+                (Some(c), _) => c.to_string(),
+                (None, Some(m)) => m.to_string(),
+                (None, None) => String::new(),
+            };
             return Err(format!(
-                "boat {method} {path} -> HTTP {} {code}",
+                "boat {method} {path} -> HTTP {} {detail}",
                 status.as_u16()
             ));
         }
@@ -312,10 +322,11 @@ impl ManagedProvider for BoatProvider {
             // Already stopped / gone.
             Err(e) if e.contains("HTTP 404") || e.contains("HTTP 409") => Ok(()),
             // A sandbox that is still starting answers `stop_failed`: wait
-            // for it to settle and retry the delete instead of leaving it.
+            // for it to settle and retry delete + stop instead of only delete
+            // (org API keys return `409 delete_confirmation_required` on DELETE).
             Err(e) if stop_failed_retryable(&e) => {
                 let mut last = e;
-                for attempt in 1..=3u64 {
+                for attempt in 1..=4u64 {
                     tokio::time::sleep(Duration::from_secs(3 * attempt)).await;
                     match self
                         .call(
@@ -328,8 +339,27 @@ impl ManagedProvider for BoatProvider {
                         .await
                     {
                         Ok(_) => return Ok(()),
-                        Err(e) if e.contains("HTTP 404") => return Ok(()),
-                        Err(e) => last = e,
+                        Err(del_err) if del_err.contains("HTTP 404") => return Ok(()),
+                        Err(_) => {}
+                    }
+                    match self
+                        .call(
+                            reqwest::Method::POST,
+                            &format!("/sandboxes/{provider_id}/stop"),
+                            Some(json!({})),
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) => return Ok(()),
+                        Err(stop_err)
+                            if stop_err.contains("HTTP 404") || stop_err.contains("HTTP 409") =>
+                        {
+                            return Ok(());
+                        }
+                        Err(stop_err) if stop_failed_retryable(&stop_err) => last = stop_err,
+                        Err(stop_err) => return Err(stop_err),
                     }
                 }
                 Err(last)

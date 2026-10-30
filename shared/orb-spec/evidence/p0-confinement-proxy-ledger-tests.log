@@ -1,86 +1,29 @@
-    Finished `test` profile [unoptimized] target(s) in 0.04s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-cce4852a0adf52dc)
+    Finished `test` profile [unoptimized] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-763bfa3d650eefea)
 
 running 1 test
 test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.00s
 
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.23s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 1 test
 test api::privilege_broker::tests::phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3595 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.02s
 
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.11s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.21s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 1 test
 test api::control::remote_jobs::boot_leftover_tests::phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3595 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.00s
 
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 12 tests
 test api::mission_access::tests::a_revoke_that_cannot_be_saved_changes_nothing ... ok
@@ -96,29 +39,10 @@ test api::mission_access::tests::scope_hint_points_reads_to_the_tool_and_refuses
 test api::mission_access::tests::state_survives_restart ... ok
 test api::mission_access::tests::ttl_is_clamped_and_self_requests_refused ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3584 filtered out; finished in 0.02s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3644 filtered out; finished in 0.02s
 
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.12s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 21 tests
 test remote_node::job_ledger::tests::accepted_handle_replaces_pre_submit_tentative_handle ... ok
@@ -143,86 +67,29 @@ test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_
 test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
 test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3575 filtered out; finished in 0.87s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3635 filtered out; finished in 5.72s
 
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 1 test
 test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3595 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.00s
 
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.12s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 1 test
 test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3595 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.00s
 
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 1 test
 test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3595 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.00s
 

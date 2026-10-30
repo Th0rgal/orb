@@ -1,7 +1,6 @@
 import { initializeKernel } from "./orbKernelAbi";
 import { startApp } from "./startup";
 import { initTheme } from "./theme";
-import "./styles.css";
 
 initTheme();
 startApp(document.getElementById("root")!, initializeKernel, async () => {

@@ -3,6 +3,7 @@ import { render } from "solid-js/web";
 import App from "./App";
 import { FindBar } from "./FindBar";
 import { Toaster } from "./toast";
+import "./styles.css";
 import { startDiagnostics } from "./diagnostics";
 
 export async function mountApp(root: HTMLElement): Promise<void> {

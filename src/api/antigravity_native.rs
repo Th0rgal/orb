@@ -7,12 +7,14 @@
 //! never travels inside a job payload.
 use crate::antigravity_auth::{Credential, PROFILE_DIR};
 
-/// The Antigravity login CLIProxyAPI routes with, if one is connected.
-pub(crate) fn routing_credential() -> Option<Credential> {
+/// The Antigravity login best suited to run `model` natively (switching to the
+/// only account whose discovered catalog offers `model`, e.g. Gemini 4 Carbon).
+pub(crate) fn routing_credential_for_model(
+    work_dir: Option<&std::path::Path>,
+    model: Option<&str>,
+) -> Option<Credential> {
     let dir = super::cli_proxy_accounts::auth_dir()?;
-    // Highest-priority eligible login with Gemini quota left; see
-    // [`super::antigravity_accounts::choose`].
-    let file = super::antigravity_accounts::chosen_file(&dir)?;
+    let file = super::antigravity_accounts::chosen_file_for_model(&dir, work_dir, model)?;
     super::cli_proxy_accounts::accounts_in(&dir)
         .into_iter()
         .find(|a| a.file == file)
@@ -26,7 +28,15 @@ pub(crate) fn routing_credential() -> Option<Credential> {
 /// Project the routing login into `home` before `agy` starts there. Without a
 /// connected login the machine's own `agy` sign-in, if any, is left alone.
 pub(crate) fn install_in_home(home: &std::path::Path) {
-    let Some(credential) = routing_credential() else {
+    install_in_home_for_model(home, None, None);
+}
+
+pub(crate) fn install_in_home_for_model(
+    home: &std::path::Path,
+    work_dir: Option<&std::path::Path>,
+    model: Option<&str>,
+) {
+    let Some(credential) = routing_credential_for_model(work_dir, model) else {
         return;
     };
     if let Err(error) = crate::antigravity_auth::install(&home.join(PROFILE_DIR), &credential) {
@@ -49,7 +59,16 @@ pub(crate) async fn sync_node(
     state: &super::routes::AppState,
     node_id: &str,
 ) -> Result<NodeSync, String> {
-    let Some(credential) = routing_credential() else {
+    sync_node_for_model(state, node_id, None).await
+}
+
+pub(crate) async fn sync_node_for_model(
+    state: &super::routes::AppState,
+    node_id: &str,
+    model: Option<&str>,
+) -> Result<NodeSync, String> {
+    let Some(credential) = routing_credential_for_model(Some(&state.config.working_dir), model)
+    else {
         return Ok(NodeSync::NoLogin);
     };
     let managed = crate::managed::is_managed_node(node_id);

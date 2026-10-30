@@ -61,11 +61,19 @@ fun OrbComputersBlock(core: OrbCore, computers: List<OrbRow>, ready: Boolean) {
             letterSpacing = 0.7.sp
         )
         if (ready && computers.isEmpty()) {
-            Text(
-                text = "No computers connected. Open Orb on a Mac signed in to this account.",
-                color = OrbStyle.textMuted,
-                fontSize = 14.sp
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(OrbStyle.surface)
+                    .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(text = "No Mac connected", color = OrbStyle.textSecondary, fontSize = 14.sp)
+                Text(text = "Open Orb on Mac", color = OrbStyle.textMuted, fontSize = 12.sp)
+            }
         }
         if (computers.isNotEmpty()) {
             Column(
@@ -108,12 +116,12 @@ fun OrbComputersBlock(core: OrbCore, computers: List<OrbRow>, ready: Boolean) {
                     }
                 }
             }
+            Text(
+                text = "Missions started here run on that computer with its local agents.",
+                color = OrbStyle.textMuted,
+                fontSize = 12.sp
+            )
         }
-        Text(
-            text = "Missions started here run on that computer with its local agents.",
-            color = OrbStyle.textMuted,
-            fontSize = 12.sp
-        )
     }
     starting?.let { computer ->
         OrbRemoteStartDialog(core = core, computer = computer, onDismiss = { starting = null }) { missionId ->

@@ -25,6 +25,7 @@ fn missing_extra_duplicate_nontext_and_imported_symbols_fail() {
         false,
     )
     .unwrap();
+    symbols::verify_listing(&format!("orb_kernel_unboxed.o:\n{valid}"), false).unwrap();
     for invalid in [
         valid.lines().skip(1).collect::<Vec<_>>().join("\n"),
         format!("{valid}injected T 0 1\n"),

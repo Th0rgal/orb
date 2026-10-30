@@ -9,6 +9,9 @@ struct OrbRoutingSettings: View {
     @State private var health: [OrbJSON] = []
     @State private var events: [OrbJSON] = []
     @State private var catalog: [OrbJSON] = []
+    @State private var providerLabels: [String: String] = [:]
+    @State private var showHealthyAccounts = false
+    @State private var showEvents = false
     @State private var error = ""
     @State private var notice = ""
     @State private var editing: OrbChainDraft?
@@ -72,22 +75,63 @@ struct OrbRoutingSettings: View {
         Button(role: .destructive) { deleting = chain } label: { Label("Delete", systemImage: "trash") }
     }
 
-    private var healthSection: some View {
-        Section("Provider health") {
-            if health.isEmpty { Text("No requests recorded yet.").foregroundStyle(.secondary) }
-            ForEach(health, id: \.healthID) { h in
-                HStack {
-                    Circle().fill(h["is_healthy"].flag ? (h["is_degraded"].flag ? OrbStyle.warning : OrbStyle.success) : OrbStyle.error).frame(width: 8, height: 8)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(h["provider_id"].text.isEmpty ? h["account_id"].text : h["provider_id"].text).font(.subheadline)
-                        Text(healthLine(h)).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if let cooldown = h["cooldown_remaining_secs"].number, cooldown > 0 {
-                        Button("Clear") { Task { await run { _ = try await client.call("/api/model-routing/health/\(OrbCore.escape(h["account_id"].text))/clear", method: "POST") } } }
-                            .buttonStyle(.bordered).controlSize(.small)
-                    }
+    private func isAttentionHealth(_ h: OrbJSON) -> Bool {
+        !h["is_healthy"].flag || h["is_degraded"].flag || (h["cooldown_remaining_secs"].number ?? 0) > 0
+    }
+
+    private func accountTitle(_ h: OrbJSON) -> String {
+        let pid = h["provider_id"].text.isEmpty ? h["account_id"].text : h["provider_id"].text
+        let aid = h["account_id"].text
+        if let mapped = providerLabels[aid], !mapped.isEmpty, mapped.lowercased() != pid.lowercased() {
+            return "\(pid) · \(mapped)"
+        }
+        let inlineLabel = h["account_label"].text.isEmpty ? h["account_email"].text : h["account_label"].text
+        if !inlineLabel.isEmpty {
+            return "\(pid) · \(inlineLabel)"
+        }
+        if !aid.isEmpty && aid != pid {
+            return "\(pid) · \(aid.prefix(8))"
+        }
+        return pid
+    }
+
+    @ViewBuilder
+    private func healthRow(_ h: OrbJSON) -> some View {
+        HStack {
+            Circle()
+                .fill(h["is_healthy"].flag ? (h["is_degraded"].flag ? OrbStyle.warning : OrbStyle.success) : OrbStyle.error)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(accountTitle(h))
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(healthLine(h))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if let cooldown = h["cooldown_remaining_secs"].number, cooldown > 0 {
+                Button("Clear") {
+                    Task { await run { _ = try await client.call("/api/model-routing/health/\(OrbCore.escape(h["account_id"].text))/clear", method: "POST") } }
                 }
+                .buttonStyle(.bordered).controlSize(.small)
+            }
+        }
+    }
+
+    private var healthSection: some View {
+        let attentionRows = health.filter(isAttentionHealth)
+        let healthyRows = health.filter { !isAttentionHealth($0) }
+        return Section("Provider health") {
+            if health.isEmpty { Text("No requests recorded yet.").foregroundStyle(.secondary) }
+            ForEach(attentionRows, id: \.healthID) { healthRow($0) }
+            if !healthyRows.isEmpty {
+                DisclosureGroup("Healthy accounts (\(healthyRows.count))", isExpanded: $showHealthyAccounts) {
+                    ForEach(healthyRows, id: \.healthID) { healthRow($0) }
+                }
+                .font(.subheadline)
             }
         }
     }
@@ -96,19 +140,31 @@ struct OrbRoutingSettings: View {
         var parts = ["\(h["total_successes"].display)/\(h["total_requests"].display) ok"]
         if let rl = h["total_rate_limits"].number, rl > 0 { parts.append("\(Int(rl)) rate limits") }
         if let latency = h["avg_latency_ms"].number { parts.append("\(Int(latency)) ms") }
-        if let cooldown = h["cooldown_remaining_secs"].number, cooldown > 0 { parts.append("cooldown \(Int(cooldown)) s") }
+        if let cooldown = h["cooldown_remaining_secs"].number, cooldown > 0 {
+            parts.append("cooldown \(OrbActivityCompaction.formatCooldown(Int(cooldown)))")
+        }
         if !h["last_failure_reason"].text.isEmpty { parts.append(h["last_failure_reason"].text) }
         return parts.joined(separator: " · ")
     }
 
+    @ViewBuilder
     private var eventsSection: some View {
-        Section("Recent fallback events") {
-            if events.isEmpty { Text("No fallbacks.").foregroundStyle(.secondary) }
-            ForEach(Array(events.prefix(30).enumerated()), id: \.offset) { _, e in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(e["from_provider"].text)/\(e["from_model"].text) → \(e["to_provider"].text.isEmpty ? "none" : e["to_provider"].text)").font(.caption)
-                    Text("\(e["reason"].text) · \(e["chain_id"].text) · \(OrbStyle.relativeTime(e["timestamp"].text))").font(.caption2).foregroundStyle(.secondary)
+        if !events.isEmpty {
+            Section {
+                DisclosureGroup("Recent fallback events (\(events.count))", isExpanded: $showEvents) {
+                    ForEach(Array(events.prefix(30).enumerated()), id: \.offset) { _, e in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(e["from_provider"].text)/\(e["from_model"].text) → \(e["to_provider"].text.isEmpty ? "none" : e["to_provider"].text)")
+                                .font(.caption)
+                                .lineLimit(1)
+                            Text("\(e["reason"].text) · \(e["chain_id"].text) · \(OrbStyle.relativeTime(e["timestamp"].text))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
                 }
+                .font(.subheadline)
             }
         }
     }
@@ -118,9 +174,19 @@ struct OrbRoutingSettings: View {
             async let c = client.call("/api/model-routing/chains")
             async let h = client.call("/api/model-routing/health")
             async let e = client.call("/api/model-routing/events")
+            async let p = client.call("/api/ai/providers")
             chains = try await c.items
             health = (try? await h.items) ?? []
             events = (try? await e.items) ?? []
+            if let provResp = try? await p {
+                let list = provResp["providers"] == .null ? provResp.items : provResp["providers"].items
+                var map: [String: String] = [:]
+                for item in list {
+                    let parsed = OrbProvidersSettings.splitDisplayName(item)
+                    map[item["id"].text] = parsed.account.isEmpty ? parsed.title : parsed.account
+                }
+                providerLabels = map
+            }
             if catalog.isEmpty { catalog = (try? await client.call("/api/providers?include_all=true&include_unverified=true")["providers"].items) ?? [] }
             error = ""
         } catch is CancellationError {
@@ -241,6 +307,7 @@ struct OrbProxyKeysSettings: View {
     @State private var keys: [OrbJSON] = []
     @State private var error = ""
     @State private var newName = ""
+    @State private var creatingKey = false
     @State private var created: OrbJSON = .null
     @State private var deleting: OrbJSON?
     @State private var cleanupDays = 30
@@ -248,32 +315,61 @@ struct OrbProxyKeysSettings: View {
     @State private var confirmCleanup = false
     @State private var busy = false
 
+    static func cleanKeyTitle(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let spaceIdx = trimmed.lastIndex(of: " ") {
+            let tail = String(trimmed[trimmed.index(after: spaceIdx)...])
+            if tail.count >= 19, tail.dropFirst(4).first == "-", tail.contains("T"), (tail.hasSuffix("Z") || tail.contains("+") || tail.contains(":")) {
+                let prefix = String(trimmed[..<spaceIdx]).trimmingCharacters(in: .whitespaces)
+                if !prefix.isEmpty { return prefix }
+            }
+        }
+        return trimmed
+    }
+
     var body: some View {
         List {
             OrbSettingsError(message: error)
             createdSection
             Section {
-                TextField("Key name", text: $newName)
-                Button("Create key") { Task { await create() } }.disabled(busy || newName.trimmingCharacters(in: .whitespaces).isEmpty)
-            } header: { Text("New key") } footer: { Text("Proxy keys authenticate OpenAI-compatible clients against this backend's model router.") }
-            Section("Keys") {
                 if keys.isEmpty { Text("No keys.").foregroundStyle(.secondary) }
                 ForEach(keys, id: \.selfID) { key in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(key["name"].text).font(.subheadline)
+                        Text(Self.cleanKeyTitle(key["name"].text)).font(.subheadline).lineLimit(1)
                         Text("\(key["key_prefix"].text)… · created \(OrbStyle.relativeTime(key["created_at"].text)) · \(key["last_used_at"].text.isEmpty ? "never used" : "used \(OrbStyle.relativeTime(key["last_used_at"].text))")")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     .swipeActions { Button("Delete", role: .destructive) { deleting = key } }
                 }
+            } header: {
+                Text("Keys (\(keys.count))")
+            } footer: {
+                Text("Proxy keys authenticate OpenAI-compatible clients against this backend's model router.")
             }
-            Section {
+            Section("Cleanup") {
                 Stepper("Unused for \(cleanupDays) days", value: $cleanupDays, in: 1...365)
                 Button("Find stale keys") { Task { await previewCleanup() } }.disabled(busy)
-            } header: { Text("Cleanup") }
+            }
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("API Keys").navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    newName = ""
+                    creatingKey = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("New key")
+            }
+        }
+        .alert("New API key", isPresented: $creatingKey) {
+            TextField("Key name", text: $newName)
+            Button("Create") { Task { await create() } }
+                .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel", role: .cancel) { newName = "" }
+        }
         .refreshable { await load() }
         .task { await load() }
         .alert("Delete key?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), presenting: deleting) { key in
@@ -447,12 +543,32 @@ struct OrbSkillsSettings: View {
         catch is CancellationError {} catch { self.error = "Couldn’t pull the Library: \(error.localizedDescription)" }
     }
 
+    static func normalizeSkillName(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9-_]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
     private func create() async {
-        let name = newName.trimmingCharacters(in: .whitespaces).lowercased().replacingOccurrences(of: " ", with: "-")
+        let name = Self.normalizeSkillName(newName)
         newName = ""
-        guard !name.isEmpty else { return }
-        let template = "---\nname: \(name)\ndescription: Describe when to use this skill.\n---\n\n# \(name)\n"
+        guard !name.isEmpty else {
+            self.error = "Enter a skill name such as lean-prover."
+            return
+        }
+        if skills.contains(where: { $0.skillName.caseInsensitiveCompare(name) == .orderedSame }) {
+            self.error = "\"\(name)\" already exists in the Library."
+            return
+        }
+        let template = "---\nname: \(name)\ndescription: \"Describe when \(name) should be used.\"\nmetadata:\n  sandboxed:\n    audience: [mission, local]\n---\n\n# \(name)\n\n## When to use\n\n- \n\n## Instructions\n\n- \n"
         do {
+            let latest = try await client.call("/api/library/skill").items.sorted { $0.skillName < $1.skillName }
+            skills = latest
+            if latest.contains(where: { $0.skillName.caseInsensitiveCompare(name) == .orderedSame }) {
+                self.error = "\"\(name)\" already exists in the Library."
+                return
+            }
             _ = try await client.callText("/api/library/skill/\(OrbCore.escape(name))", method: "PUT", body: .object(["content": .string(template)]))
             try await OrbSkillEditor.commitAndPush("skill: create \(name)", client: client)
             await load()
@@ -749,12 +865,21 @@ struct OrbHermesSettings: View {
     }
 
     private var channelSection: some View {
-        Section("Channels & persona (SOUL.md)") {
+        Section("Channels & persona") {
             Picker("Telegram tool progress", selection: $draft.telegramProgress) {
                 Text("Off").tag("off"); Text("New message").tag("new"); Text("Edit in place").tag("edit"); Text("All updates").tag("all")
             }
             Toggle("Clean up Telegram progress messages", isOn: $draft.telegramCleanup)
-            TextEditor(text: $draft.soul).font(.system(.footnote, design: .monospaced)).frame(minHeight: 160)
+            NavigationLink {
+                OrbSoulEditorView(soul: $draft.soul)
+            } label: {
+                LabeledContent("Persona (SOUL.md)") {
+                    Text(draft.soul.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Empty" : "\(draft.soul.count) chars")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            .accessibilityIdentifier("hermes.soul")
         }
     }
 
@@ -777,5 +902,18 @@ struct OrbHermesSettings: View {
             draft = Draft(state); error = ""
             notice = restart ? "Saved configuration and restarted Hermes service." : "Saved Hermes configuration."
         } catch is CancellationError {} catch { self.error = error.localizedDescription }
+    }
+}
+
+private struct OrbSoulEditorView: View {
+    @Binding var soul: String
+    var body: some View {
+        TextEditor(text: $soul)
+            .font(.system(.footnote, design: .monospaced))
+            .scrollContentBackground(.hidden)
+            .padding(12)
+            .background(OrbStyle.background)
+            .navigationTitle("Persona (SOUL.md)")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }

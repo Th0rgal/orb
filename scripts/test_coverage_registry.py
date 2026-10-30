@@ -79,6 +79,7 @@ class CoverageRegistryTests(unittest.TestCase):
                 "orb_auth_toctou_execute_step",
                 "orb_resource_ledger_step",
                 "orb_stream_bounded_commit_step",
+                "leansys_verify_fd_bounds",
             },
         )
         for entry in partial:
@@ -89,7 +90,7 @@ class CoverageRegistryTests(unittest.TestCase):
     def test_leansys_models_resolved_and_compiler_helper_remains_null(self):
         by_name = {e["export"]: e for e in self.value["entries"]}
         leansys = [e for name, e in by_name.items() if name.startswith("leansys_")]
-        self.assertEqual(len(leansys), 32)
+        self.assertEqual(len(leansys), 33)
         self.assertTrue(all(e["model"] and e["model"].startswith("LeanSys.Spec.") for e in leansys))
         self.assertIsNone(by_name["lp_orb_x2dspec_Orb_Kernel_accessStep___redArg"]["model"])
         for mode in ("bad_prefix", "orb_conflict"):

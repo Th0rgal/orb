@@ -24,6 +24,9 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 ### Essential environment variables
 
 Copy `.env.example` to `.env` and configure the values below. The full file contains additional optional settings.
+Docker Compose loads this optional `.env` file into the `sandboxed-sh` container.
+After changing it, run `docker compose up -d` to recreate the container with
+the new values.
 
 #### Authentication
 
@@ -47,10 +50,15 @@ Copy `.env.example` to `.env` and configure the values below. The full file cont
 | Variable | Default | Description |
 |---|---|---|
 | `HOST` | `0.0.0.0` | Bind address for the backend |
-| `PORT` | `3000` | Backend listen port (inside the container) |
+| `PORT` | `3000` | Backend listen port inside the container; Caddy forwards API requests to this port |
 | `WORKING_DIR` | `/root` | Root directory for workspaces |
 | `MAX_ITERATIONS` | `50` | Max tool-call iterations per mission |
 | `MAX_PARALLEL_MISSIONS` | `1` | Number of missions that can run concurrently |
+
+`PORT` does not change the address you open in your browser: Compose publishes
+host port 3000 to Caddy's port 80. To use a different host port, edit the
+`ports` mapping in `docker-compose.yml` (for example, `"8080:80"`) and open
+`http://localhost:8080`.
 
 ### Enabling container workspaces
 
@@ -157,6 +165,13 @@ docker compose up -d
 | Port conflict on 3000 | Change the port mapping (e.g. `"8080:80"`) in `docker-compose.yml` |
 | Build takes too long | Rust compilation is the bottleneck (~5–10 min first time). Subsequent builds use Docker layer caching. |
 | Backend not starting | Check logs with `docker compose logs -f sandboxed-sh` |
+
+If an older Windows checkout reports `exec /entrypoint.sh: no such file or directory`,
+the entrypoint may still have CRLF line endings. After updating the repository,
+save any local changes to `docker/entrypoint.sh`, then run
+`git restore --source=HEAD --worktree -- docker/entrypoint.sh` to check it out
+with LF endings and rebuild with `docker compose build`. Fresh checkouts use LF
+for shell scripts automatically.
 
 ## Comparison with native installation
 
