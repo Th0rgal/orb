@@ -15,7 +15,9 @@
 //! Configuration (all optional, env):
 //! `BOAT_API_KEY` (enables the feature), `SANDBOXED_MANAGED_ENABLED`,
 //! `SANDBOXED_MANAGED_DAILY_CAP_USD` (20; `none` = unlimited),
-//! `SANDBOXED_MANAGED_MAX_CONCURRENT` (6; `none` = unlimited), `SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES` (60),
+//! `SANDBOXED_MANAGED_MAX_CONCURRENT` (100; `none` = unlimited),
+//! `SANDBOXED_MANAGED_BOAT_MAX_CONCURRENT` (100; `none` = unlimited),
+//! `SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES` (60),
 //! `SANDBOXED_MANAGED_AUTO_EXTEND_MINUTES` (30; 0 = off),
 //! `SANDBOXED_MANAGED_MAX_TTL_MINUTES` (720), `SANDBOXED_MANAGED_DEFAULT_SIZE`
 //! (small), `SANDBOXED_MANAGED_MAX_SIZE` (xlarge), `SANDBOXED_MANAGED_IMAGE`
@@ -394,13 +396,18 @@ pub fn size_for(cpu: Option<u32>, ram_gb: Option<u32>) -> Option<SizeSpec> {
 
 // ---------------------------------------------------------------- settings
 
+/// Default global concurrent VM ceiling for `boat.dev` (and default global pool ceiling).
+pub const DEFAULT_BOAT_MAX_CONCURRENT: usize = 100;
+/// Upper bound on an operator-configured per-provider global concurrent VM cap.
+pub const MAX_GLOBAL_PROVIDER_CONCURRENT: usize = 1000;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedSettings {
     pub enabled: bool,
     pub provider: String,
     /// `None` = no daily dollar cap (explicit `none` only; default $20).
     pub daily_cap_usd: Option<f64>,
-    /// `None` = no concurrency cap (explicit `none` only; default 6).
+    /// `None` = no concurrency cap (explicit `none` only; default 100).
     pub max_concurrent: Option<usize>,
     pub default_ttl_minutes: u64,
     pub max_ttl_minutes: u64,
@@ -477,6 +484,37 @@ pub fn optional_limit<T: std::str::FromStr + PartialOrd + Default>(
     )
 }
 
+/// Parse an optional per-provider env limit (`SANDBOXED_MANAGED_<PROVIDER>_MAX_CONCURRENT`)
+/// for providers that have no built-in cap by default (`None` unless set to a positive integer).
+pub fn optional_provider_env_limit(raw: Option<&str>) -> Option<usize> {
+    let raw = raw.map(str::trim).filter(|r| !r.is_empty())?;
+    if ["none", "unlimited", "off"].contains(&raw.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    raw.parse::<usize>().ok().filter(|v| *v > 0)
+}
+
+/// Built-in/env global concurrent VM ceiling for `provider` before stored settings overrides.
+/// `boat` defaults to `DEFAULT_BOAT_MAX_CONCURRENT` (100); other providers default to `None`.
+pub fn default_provider_max_concurrent(provider: &str) -> Option<usize> {
+    match provider {
+        "boat" => optional_limit(
+            std::env::var("SANDBOXED_MANAGED_BOAT_MAX_CONCURRENT")
+                .ok()
+                .as_deref(),
+            DEFAULT_BOAT_MAX_CONCURRENT,
+        ),
+        "hetzner" | "vastai" | "scaleway" => {
+            let key = format!(
+                "SANDBOXED_MANAGED_{}_MAX_CONCURRENT",
+                provider.to_ascii_uppercase()
+            );
+            optional_provider_env_limit(std::env::var(&key).ok().as_deref())
+        }
+        _ => None,
+    }
+}
+
 impl ManagedSettings {
     pub fn from_env(provider_configured: bool) -> Self {
         let enabled = match std::env::var("SANDBOXED_MANAGED_ENABLED").ok().as_deref() {
@@ -520,7 +558,7 @@ impl ManagedSettings {
                 std::env::var("SANDBOXED_MANAGED_MAX_CONCURRENT")
                     .ok()
                     .as_deref(),
-                6,
+                DEFAULT_BOAT_MAX_CONCURRENT,
             ),
             default_ttl_minutes: env_parse::<u64>("SANDBOXED_MANAGED_DEFAULT_TTL_MINUTES")
                 .unwrap_or(60)
@@ -1134,6 +1172,40 @@ struct StoredProviderEntry {
     region: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_concurrent: Option<usize>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    max_concurrent_unlimited: bool,
+}
+
+fn deserialize_optional_nullable_usize<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<usize>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        None | Some(serde_json::Value::Null) => Ok(Some(None)),
+        Some(serde_json::Value::Number(num)) => {
+            if let Some(u) = num.as_u64() {
+                usize::try_from(u)
+                    .map(|n| Some(Some(n)))
+                    .map_err(serde::de::Error::custom)
+            } else if let Some(f) = num.as_f64() {
+                if f.is_finite() && f >= 0.0 && f.fract() == 0.0 && f <= usize::MAX as f64 {
+                    Ok(Some(Some(f as usize)))
+                } else {
+                    Err(serde::de::Error::custom("expected non-negative integer"))
+                }
+            } else {
+                Err(serde::de::Error::custom("expected non-negative integer"))
+            }
+        }
+        _ => Err(serde::de::Error::custom(
+            "expected integer or null for max_concurrent",
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1146,6 +1218,10 @@ pub struct ProviderUpdateRequest {
     pub region: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Global concurrent live VM ceiling for this provider (`Some(Some(n))` = cap at `n`,
+    /// `Some(None)` = explicit unlimited (`null`), `None` = leave unchanged).
+    #[serde(default, deserialize_with = "deserialize_optional_nullable_usize")]
+    pub max_concurrent: Option<Option<usize>>,
 }
 
 pub fn mask_key_hint(secret: &str) -> String {
@@ -1336,6 +1412,8 @@ pub struct ProviderCatalogEntry {
     pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<usize>,
     pub sizes: Vec<SizeSpec>,
 }
 
@@ -1573,6 +1651,25 @@ impl ManagedManager {
             .cloned()
     }
 
+    /// Effective global concurrent live VM ceiling for `provider` (`None` = unlimited).
+    pub fn provider_max_concurrent(&self, provider: &str) -> Option<usize> {
+        let id = provider.trim().to_ascii_lowercase();
+        if let Some(st) = self
+            .stored_providers
+            .read()
+            .ok()
+            .and_then(|m| m.get(&id).cloned())
+        {
+            if st.max_concurrent_unlimited {
+                return None;
+            }
+            if let Some(n) = st.max_concurrent {
+                return Some(n);
+            }
+        }
+        default_provider_max_concurrent(&id)
+    }
+
     pub fn provider_catalog(&self) -> Vec<ProviderCatalogEntry> {
         let Ok(map) = self.providers.read() else {
             return Vec::new();
@@ -1599,6 +1696,7 @@ impl ManagedManager {
             let enabled = !disabled.contains(id);
             let meta = metas.get(id);
             let st = stored.get(id);
+            let max_concurrent = self.provider_max_concurrent(id);
             if let Some(p) = map.get(id) {
                 out.push(ProviderCatalogEntry {
                     provider: id.to_string(),
@@ -1611,6 +1709,7 @@ impl ManagedManager {
                     key_hint: meta.and_then(|m| m.key_hint.clone()),
                     region: meta.and_then(|m| m.region.clone()),
                     project_id: meta.and_then(|m| m.project_id.clone()),
+                    max_concurrent,
                     sizes: p.sizes().to_vec(),
                 });
             } else {
@@ -1625,6 +1724,7 @@ impl ManagedManager {
                     key_hint: None,
                     region: st.and_then(|s| s.region.clone()),
                     project_id: st.and_then(|s| s.project_id.clone()),
+                    max_concurrent,
                     sizes: fallback_sizes.to_vec(),
                 });
             }
@@ -1649,6 +1749,7 @@ impl ManagedManager {
                     key_hint: meta.and_then(|m| m.key_hint.clone()),
                     region: meta.and_then(|m| m.region.clone()),
                     project_id: meta.and_then(|m| m.project_id.clone()),
+                    max_concurrent: self.provider_max_concurrent(id),
                     sizes: p.sizes().to_vec(),
                 });
             }
@@ -1908,11 +2009,11 @@ impl ManagedManager {
             }
         }
         for id in CANONICAL_PROVIDERS {
-            let should_sync = self
-                .stored_providers
-                .read()
-                .is_ok_and(|m| m.contains_key(id))
-                || self.has_base_credential(id);
+            let should_sync = self.stored_providers.read().is_ok_and(|m| {
+                m.get(id).is_some_and(|s| {
+                    s.encrypted_api_key.is_some() || s.region.is_some() || s.project_id.is_some()
+                })
+            }) || self.has_base_credential(id);
             if should_sync {
                 self.sync_provider_from_sources(id);
             }
@@ -1961,6 +2062,7 @@ impl ManagedManager {
         }
 
         let mut changed_stored = false;
+        let mut changed_credentials = false;
         let mut entry = self
             .stored_providers
             .read()
@@ -1983,6 +2085,7 @@ impl ManagedManager {
                 entry.key_hint = Some(mask_key_hint(trimmed));
             }
             changed_stored = true;
+            changed_credentials = true;
         }
         if let Some(raw_region) = patch.region {
             let trimmed = raw_region.trim();
@@ -1992,6 +2095,7 @@ impl ManagedManager {
                 Some(trimmed.to_string())
             };
             changed_stored = true;
+            changed_credentials = true;
         }
         if let Some(raw_proj) = patch.project_id {
             let trimmed = raw_proj.trim();
@@ -2001,13 +2105,38 @@ impl ManagedManager {
                 Some(trimmed.to_string())
             };
             changed_stored = true;
+            changed_credentials = true;
+        }
+        if let Some(next_max) = patch.max_concurrent {
+            match next_max {
+                Some(n) => {
+                    if !(1..=MAX_GLOBAL_PROVIDER_CONCURRENT).contains(&n) {
+                        return Err(ManagedError::new(
+                            "invalid_limit",
+                            400,
+                            format!(
+                                "max_concurrent must be between 1 and {MAX_GLOBAL_PROVIDER_CONCURRENT} (or null for unlimited)"
+                            ),
+                        ));
+                    }
+                    entry.max_concurrent = Some(n);
+                    entry.max_concurrent_unlimited = false;
+                }
+                None => {
+                    entry.max_concurrent = None;
+                    entry.max_concurrent_unlimited = true;
+                }
+            }
+            changed_stored = true;
         }
 
         if changed_stored {
             if let Ok(mut slot) = self.stored_providers.write() {
                 let is_empty = entry.encrypted_api_key.is_none()
                     && entry.region.is_none()
-                    && entry.project_id.is_none();
+                    && entry.project_id.is_none()
+                    && entry.max_concurrent.is_none()
+                    && !entry.max_concurrent_unlimited;
                 if is_empty {
                     slot.remove(&id);
                 } else {
@@ -2015,8 +2144,10 @@ impl ManagedManager {
                 }
             }
             self.persist_stored_providers();
-            self.sync_provider_from_sources(&id);
-            self.ensure_background_loops();
+            if changed_credentials {
+                self.sync_provider_from_sources(&id);
+                self.ensure_background_loops();
+            }
         }
 
         self.provider_catalog()
@@ -3422,7 +3553,7 @@ impl ManagedManager {
 
         // Wait for ready.
         let ready_timeout = if provider.uses_cloud_init_bootstrap() {
-            300
+            420
         } else {
             240
         };
@@ -3908,22 +4039,33 @@ impl ManagedManager {
         if m.ledger_closed {
             return;
         }
-        if let Ok(usage) = provider.usage(pid).await {
-            let closed = !usage.running && !m.state.is_live();
-            if let Some(m) = self
-                .update(id, |m| {
-                    m.cost_usd = m.cost_before_resume + usage.dollars;
-                    m.cost_is_metered = true;
+        match provider.usage(pid).await {
+            Ok(usage) => {
+                let closed = !usage.running && !m.state.is_live();
+                if let Some(m) = self
+                    .update(id, |m| {
+                        m.cost_usd = m.cost_before_resume + usage.dollars;
+                        m.cost_is_metered = true;
+                        if closed {
+                            m.ledger_closed = true;
+                        }
+                    })
+                    .await
+                {
                     if closed {
-                        m.ledger_closed = true;
+                        self.ledger("ledger_closed", &m);
                     }
-                })
-                .await
-            {
-                if closed {
+                }
+            }
+            Err(_) if !m.state.is_live() && provider.uses_cloud_init_bootstrap() => {
+                // Cloud providers (Hetzner, Vast.ai, Scaleway) erase the instance
+                // record immediately on `DELETE`; keep the accrued `estimated_cost`
+                // and close the ledger so the reaper stops polling a deleted ID.
+                if let Some(m) = self.update(id, |m| m.ledger_closed = true).await {
                     self.ledger("ledger_closed", &m);
                 }
             }
+            Err(_) => {}
         }
     }
 
@@ -4647,6 +4789,24 @@ impl ManagedManager {
                         "{shared_active} managed machines are running (max {max}); destroy one first"
                     ),
                 ));
+            }
+            if let Some(p_max) = self.provider_max_concurrent(provider) {
+                let prov_live = machines
+                    .iter()
+                    .filter(|m| {
+                        m.state.is_live() && m.cap_pool_id.is_none() && m.provider == provider
+                    })
+                    .count();
+                if prov_live >= p_max {
+                    return Err(ManagedError::new(
+                        "quota_exceeded",
+                        429,
+                        format!(
+                            "{prov_live} '{}' managed machines are running (provider max {p_max}); destroy one first",
+                            provider_display_name(provider)
+                        ),
+                    ));
+                }
             }
             Ok(None)
         }
@@ -5415,26 +5575,35 @@ pub(crate) fn cloud_bootstrap_script(
     image: &str,
 ) -> String {
     let core_url = core_url.trim_end_matches('/');
+    let gpu_label = if provider.eq_ignore_ascii_case("vastai")
+        || vastai::vastai_size_spec(size).is_some_and(|s| s.gpu.is_some())
+        || scaleway::scaleway_size_spec(size).is_some_and(|s| s.gpu.is_some())
+    {
+        ",gpu"
+    } else {
+        ""
+    };
     format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
 H=/var/lib/orb-node; B=/usr/local/bin; S=/usr/local/sbin; O=/home/user/.orb
-P=$B:/usr/sbin:/usr/bin:/sbin:/bin
+P=$B:/usr/local/cuda/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/conda/bin
 E="OPENCODE_TMPDIR=/tmp/opencode GIT_TERMINAL_PROMPT=0 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTOUPDATE=1 CODEX_DISABLE_UPDATE_CHECK=1 NO_UPDATE_NOTIFIER=1"
 q() {{ "$@" >/dev/null 2>&1; }}
 if q command -v apt-get; then
   n=0; for c in curl git python3 jq xz zstd runuser; do q command -v "$c" || n=1; done
-  [ -d /run/systemd/system ] && [ ! -e /usr/lib/systemd/user/dbus.socket ] && [ ! -e /lib/systemd/user/dbus.socket ] && n=1 || true
-  [ "$n" = 1 ] && export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -yqq curl ca-certificates git sudo python3 dbus-user-session jq xz-utils zstd util-linux
+  [ -d /run/systemd/system ] && [ ! -e /usr/lib/systemd/user/dbus.socket ] && [ ! -e /lib/systemd/user/dbus.socket ] && n=1 || :
+  [ "$n" = 1 ] && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq curl ca-certificates git sudo python3 dbus-user-session jq xz-utils zstd util-linux
 fi
-q id -u user || useradd -m -s /bin/bash user || true
-q id -u orbnode || useradd -r -m -d "$H" -s /bin/bash orbnode || true
-for g in sudo adm admin wheel docker lxd; do q gpasswd -d orbnode "$g" || true; done
+q id -u user || useradd -m -s /bin/bash user || :
+q id -u orbnode || useradd -r -m -d "$H" -s /bin/bash orbnode || :
+for g in sudo adm admin wheel docker lxd; do q gpasswd -d orbnode "$g" || :; done
+for g in video render; do q usermod -aG "$g" orbnode || :; done
 rm -f /etc/sudoers.d/orbnode
 install -d -m 0755 "$B" "$S" /opt/sandboxed-tools
 install -d -m 0750 -o orbnode -g orbnode "$H" "$H/work" "$H/work/caches"
 install -d -m 0700 -o user -g user "$O" || mkdir -p -m 0700 "$O"
-chmod 0750 /home/user 2>/dev/null || true
+chmod 0750 /home/user 2>/dev/null || :
 A=$O/auth; printf 'header = "Authorization: Bearer %s"\n' '{enroll_token}' >"$A"; chmod 0600 "$A"
 trap 'rm -f "$A"' EXIT
 U="{core_url}/api/managed-machines/bootstrap-binary/{machine_id}?binary="
@@ -5445,8 +5614,7 @@ orb_fetch provision-script "$O/provision.sh" 0700
 orb_fetch update-node-codex "$S/update-node-codex" 0755
 orb_fetch update-node-harnesses "$S/update-node-harnesses" 0755
 rm -f "$A"
-for h in opencode claude codex; do [ -x "$B/$h" ] || python3 "$S/update-node-harnesses" --only "$h" --probe-user orbnode; done
-[ -x "$B/grok" ] || python3 "$S/update-node-harnesses" --only grok --probe-user orbnode || true
+for h in opencode claude codex grok; do [ -x "$B/$h" ] || python3 "$S/update-node-harnesses" --only "$h" --probe-user orbnode || :; done
 cat >"$O/enroll.env" <<'EOF'
 SANDBOXED_NODE_DIAL_CORE_URL={core_url}
 SANDBOXED_NODE_MANAGED_ID={machine_id}
@@ -5455,10 +5623,10 @@ SANDBOXED_NODE_ID={node_id}
 SANDBOXED_NODE_CAPACITY={capacity}
 SANDBOXED_NODE_JOB_MEMORY_BYTES={job_memory}
 SANDBOXED_NODE_WORK_DIR=/var/lib/orb-node/work
-SANDBOXED_NODE_LABELS=managed,trust=managed,provider={provider},size={size},image={image},lean
+SANDBOXED_NODE_LABELS=managed,trust=managed,provider={provider},size={size},image={image},lean{gpu_label}
 EOF
 chmod 0600 "$O/enroll.env"
-bash "$O/provision.sh" || true
+bash "$O/provision.sh" || :
 rm -rf "$H/node.cred" "$H/work/managed-auth"
 if q command -v systemctl && [ -d /run/systemd/system ]; then
   UID_N=$(id -u orbnode)
@@ -5473,16 +5641,17 @@ WorkingDirectory=$H
 EnvironmentFile=$O/enroll.env
 Environment=HOME=$H PATH=$P XDG_RUNTIME_DIR=/run/user/${{UID_N}} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${{UID_N}}/bus $E
 NoNewPrivileges=true
-ExecStartPre=+/bin/sh -c 'loginctl enable-linger orbnode; systemctl start user@${{UID_N}}.service || true; for _ in \$\$(seq 100); do [ -S /run/user/${{UID_N}}/bus ] && exit 0; sleep 0.2; done; echo user bus missing >&2; exit 1'
+ExecStartPre=+/bin/sh -c 'loginctl enable-linger orbnode; systemctl start user@${{UID_N}}.service || :; for _ in \$\$(seq 100); do [ -S /run/user/${{UID_N}}/bus ] && exit 0; sleep 0.2; done; echo user bus missing >&2; exit 1'
 ExecStart=$B/sandboxed-node
 Restart=always
 RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload && systemctl enable orb-node.service && systemctl restart orb-node.service
+  systemctl daemon-reload && systemctl enable orb-node && systemctl restart orb-node
 else
-  nohup bash -c "set -a; . $O/enroll.env; set +a; cd $H; while true; do runuser -u orbnode -- env HOME=$H PATH=$P $E $B/sandboxed-node || true; sleep 2; done" >"$H/orb-node.log" 2>&1 &
+  L=${{LD_LIBRARY_PATH:-/usr/local/nvidia/lib:/usr/local/nvidia/lib64}}:/usr/local/cuda/lib64
+  nohup bash -c "set -a; . $O/enroll.env; set +a; cd $H; while :; do runuser -u orbnode -- env HOME=$H PATH=$P LD_LIBRARY_PATH=\"$L\" $E $B/sandboxed-node || :; sleep 2; done" >"$H/orb-node.log" 2>&1 &
 fi
 "#
     )

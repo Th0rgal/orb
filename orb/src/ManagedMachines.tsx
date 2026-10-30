@@ -9,7 +9,7 @@ import { pollWhileVisible } from "./poll";
 import { useNow } from "./time";
 import * as Ic from "./icons";
 import {
-  allowedSizes, budgetFull, budgetLeft, budgetLine, canStopMachine, costLine, credentialSourceLabel, isProviderEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
+  MANAGED_GROUP_PREVIEW_LIMIT, allowedSizes, budgetFull, budgetLeft, budgetLine, canStopMachine, costLine, credentialSourceLabel, groupMachinesByProvider, isProviderEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerGroupSummary, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
   isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent, updateManagedProvider,
   spendDayDetail, spendFraction, spendSummary, spendWeekday,
   machineOwner, reapLine, usd, usdPerHour, isStopped, resumeManagedMachine, listManagedSnapshots, deleteManagedSnapshot, snapshotLine, type ManagedSnapshot, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedProviderInfo, type ManagedProviderPatch, type ManagedSize,
@@ -160,19 +160,38 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
 
 function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onClose: () => void; onSaved: (updated: ManagedProviderInfo) => void }) {
   const name = () => p.provider.display_name || providerLabel(p.provider.provider);
+  const initialMax = p.provider.max_concurrent != null ? String(p.provider.max_concurrent) : "";
   const [apiKey, setApiKey] = createSignal("");
   const [region, setRegion] = createSignal(p.provider.region ?? "");
   const [projectId, setProjectId] = createSignal(p.provider.project_id ?? "");
+  const [maxConcurrent, setMaxConcurrent] = createSignal(initialMax);
   const [saving, setSaving] = createSignal(false);
   const [err, setErr] = createSignal<string | null>(null);
+  const maxChanged = () => maxConcurrent().trim() !== initialMax;
 
   const submit = async (patchOverride?: ManagedProviderPatch) => {
     setSaving(true); setErr(null);
     try {
+      let maxPatch: { max_concurrent?: number | null } = {};
+      if (!patchOverride && maxChanged()) {
+        const raw = maxConcurrent().trim();
+        if (!raw) {
+          maxPatch = { max_concurrent: null };
+        } else {
+          const parsed = Number(raw);
+          if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1000) {
+            setErr("Max concurrent VMs must be a whole number between 1 and 1000, or blank for unlimited.");
+            setSaving(false);
+            return;
+          }
+          maxPatch = { max_concurrent: parsed };
+        }
+      }
       const patch: ManagedProviderPatch = patchOverride ?? {
         ...(apiKey().trim() ? { api_key: apiKey().trim(), enabled: true } : {}),
         ...(p.provider.provider === "hetzner" || p.provider.provider === "scaleway" ? { region: region().trim() } : {}),
         ...(p.provider.provider === "scaleway" ? { project_id: projectId().trim() } : {}),
+        ...maxPatch,
       };
       const updated = await updateManagedProvider(p.provider.provider, patch);
       window.dispatchEvent(new CustomEvent("orb:managed-providers-changed", { detail: updated }));
@@ -191,11 +210,14 @@ function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onCl
         <DialogButton disabled={saving()} onClick={() => void submit({ api_key: "" })}>Remove saved key</DialogButton>
       </Show>
       <DialogButton disabled={saving()} onClick={close}>Cancel</DialogButton>
-      <DialogButton variant="primary" disabled={saving() || (!p.provider.configured && !apiKey().trim())} onClick={() => void submit()}>Save</DialogButton>
+      <DialogButton variant="primary" disabled={saving() || (!p.provider.configured && !apiKey().trim() && !maxChanged())} onClick={() => void submit()}>Save</DialogButton>
     </>}>
     <div class="managed-form">
       <Field label="API key" description={p.provider.configured ? `Leave blank to keep the current ${credentialSourceLabel(p.provider.credential_source).toLowerCase() || "saved"} key${p.provider.key_hint ? ` (${p.provider.key_hint})` : ""}.` : "API key or secret token used by Core to rent and reap machines."}>
         <input type="password" class="s-input" autocomplete="off" aria-label={`${name()} API key`} placeholder={p.provider.key_hint || "Paste API key"} value={apiKey()} onInput={e => setApiKey(e.currentTarget.value)} />
+      </Field>
+      <Field label="Max concurrent VMs" description="Global ceiling on simultaneous live VMs for this provider. Leave blank for unlimited.">
+        <input type="text" inputmode="numeric" class="s-input" aria-label="Max concurrent VMs" placeholder="Unlimited" value={maxConcurrent()} onInput={e => setMaxConcurrent(e.currentTarget.value)} />
       </Field>
       <Show when={p.provider.provider === "hetzner"}>
         <Field label="Default location" description="Preferred Hetzner Cloud location (falls back across fsn1, hel1, nbg1 if out of capacity).">
@@ -416,6 +438,8 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
   const [busy, setBusy] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal<string | null>(null);
   const [showRecent, setShowRecent] = createSignal(false);
+  const [providerOpen, setProviderOpen] = createSignal<Readonly<Record<string, boolean>>>({});
+  const [stoppedOpen, setStoppedOpen] = createSignal<boolean | null>(null);
   // Rows created from here: optimistic placeholders until the POST answers,
   // then the server id, so a later failure stays in view with Retry / Dismiss.
   const [pending, setPending] = createSignal<Pending[]>([]);
@@ -497,6 +521,8 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
   };
   const failedHere = createMemo(() => machines().filter(m => m.state === "failed" && watched().has(m.id)));
   const live = createMemo(() => [...pending().map(x => placeholder(x)), ...machines().filter(isLive), ...failedHere()]);
+  const liveGroups = createMemo(() => groupMachinesByProvider(live(), data()?.providers));
+  const isStoppedOpen = () => stoppedOpen() ?? (stopped().length <= MANAGED_GROUP_PREVIEW_LIMIT);
   const recent = createMemo(() => recentMachines(machines()).filter(m => !failedHere().includes(m)));
   const full = () => { const b = data()?.budget; return !!b && budgetFull(b); };
   const noUsableProvider = () => (data()?.providers?.length ?? 0) > 0 && !(data()!.providers!.some(isProviderUsable));
@@ -543,23 +569,44 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
       <Show when={actionError()}><ErrorNotice error={actionError()!} onDismiss={() => setActionError(null)} /></Show>
       <Show when={loadError()}><ErrorNotice title="Couldn’t refresh managed machines" error={loadError()!} /></Show>
       <div class="m-list s-card managed-list">
-        <For each={live().map(m => m.id)}>{id => { const m = () => live().find(x => x.id === id)!; return <Show when={live().some(x => x.id === id)}>
-          <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} activeJobs={activeJobsOf(m())} {...actions(m())} /></Show>; }}</For>
+        <For each={liveGroups().map(g => g.provider)}>{provider => {
+          const group = () => liveGroups().find(g => g.provider === provider)!;
+          const open = () => providerOpen()[provider] ?? true;
+          return <Show when={liveGroups().some(g => g.provider === provider)}>
+            <div class="managed-provider-group" data-provider={provider}>
+              <button type="button" class="managed-group-toggle" aria-expanded={open()} onClick={() => setProviderOpen(prev => ({ ...prev, [provider]: !open() }))}>
+                <span class="managed-group-title">{group().label}</span>
+                <span class="managed-group-meta">{providerGroupSummary(group().machines)}</span>
+                <span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span>
+              </button>
+              <Show when={open()}>
+                <div class="managed-group-scroll">
+                  <For each={group().machines.map(m => m.id)}>{id => { const m = () => group().machines.find(x => x.id === id)!; return <Show when={group().machines.some(x => x.id === id)}>
+                    <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} activeJobs={activeJobsOf(m())} {...actions(m())} /></Show>; }}</For>
+                </div>
+              </Show>
+            </div>
+          </Show>;
+        }}</For>
         <Show when={live().length === 0}><div class="m-note" style={{ padding: "10px 14px" }}>No managed machines running.</div></Show>
       </div>
       <Show when={stopped().length}>
-        <div class="m-note managed-stopped-head">Stopped · disk kept, nothing billed, resumable for 24 h</div>
-        <div class="m-list s-card managed-list managed-stopped">
-          <For each={stopped().map(m => m.id)}>{id => { const m = () => stopped().find(x => x.id === id)!; return <Show when={stopped().some(x => x.id === id)}>
-            <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} busy={busy() === id} onResume={() => void resume(m())} onDestroy={() => setConfirm(m())} /></Show>; }}</For>
-        </div>
+        <button type="button" class="s-btn sm quiet managed-recent-toggle managed-stopped-toggle" aria-expanded={isStoppedOpen()} onClick={() => setStoppedOpen(!isStoppedOpen())}>
+          <span class={`chev p-acc-chev ${isStoppedOpen() ? "open" : ""}`}>›</span>Stopped · disk kept, nothing billed, resumable for 24 h ({stopped().length})
+        </button>
+        <Show when={isStoppedOpen()}>
+          <div class="m-list s-card managed-list managed-stopped managed-bounded-scroll">
+            <For each={stopped().map(m => m.id)}>{id => { const m = () => stopped().find(x => x.id === id)!; return <Show when={stopped().some(x => x.id === id)}>
+              <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} busy={busy() === id} onResume={() => void resume(m())} onDestroy={() => setConfirm(m())} /></Show>; }}</For>
+          </div>
+        </Show>
       </Show>
       <ManagedSnapshots />
       <Show when={recent().length}>
         <button class="s-btn sm quiet managed-recent-toggle" aria-expanded={showRecent()} onClick={() => setShowRecent(!showRecent())}>
           <span class={`chev p-acc-chev ${showRecent() ? "open" : ""}`}>›</span>Recent · last 24 h ({recent().length})
         </button>
-        <Show when={showRecent()}><div class="m-list s-card managed-list managed-recent">
+        <Show when={showRecent()}><div class="m-list s-card managed-list managed-recent managed-bounded-scroll">
           <For each={recent().map(m => m.id)}>{id => { const m = () => recent().find(x => x.id === id)!; return <Show when={recent().some(x => x.id === id)}><ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} muted /></Show>; }}</For>
         </div></Show>
       </Show>
@@ -589,6 +636,8 @@ export function ManagedSnapshots(p: { load?: typeof listManagedSnapshots; remove
   const [snaps, setSnaps] = createSignal<ManagedSnapshot[] | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [confirm, setConfirm] = createSignal<ManagedSnapshot | null>(null);
+  const [open, setOpen] = createSignal<boolean | null>(null);
+  const isOpen = () => open() ?? ((snaps()?.length ?? 0) <= MANAGED_GROUP_PREVIEW_LIMIT);
   const load = async () => {
     try { setSnaps((await (p.load ?? listManagedSnapshots)()).snapshots); setError(null); }
     catch (e) {
@@ -606,22 +655,28 @@ export function ManagedSnapshots(p: { load?: typeof listManagedSnapshots; remove
     catch (e) { setSnaps(before); setError(`Couldn’t delete ${s.label}: ${managedError(e)}`); }
   };
   return <Show when={(snaps()?.length ?? 0) > 0 || error()}>
-    <div class="m-note managed-stopped-head">Snapshots · warm images agents start children from</div>
+    <Show when={(snaps()?.length ?? 0) > 0} fallback={<div class="m-note managed-stopped-head">Snapshots · warm images agents start children from</div>}>
+      <button type="button" class="s-btn sm quiet managed-recent-toggle managed-snapshots-toggle" aria-expanded={isOpen()} onClick={() => setOpen(!isOpen())}>
+        <span class={`chev p-acc-chev ${isOpen() ? "open" : ""}`}>›</span>Snapshots · warm images agents start children from ({snaps()?.length ?? 0})
+      </button>
+    </Show>
     <Show when={error()}><ErrorNotice error={error()!} onDismiss={() => setError(null)}><button class="s-btn sm" onClick={() => void load()}>Retry</button></ErrorNotice></Show>
-    <div class="m-list s-card managed-list managed-snapshots" aria-label="Managed snapshots">
-      <For each={snaps() ?? []}>{s => <div class="managed-row" data-state={s.status}>
-        <div class="managed-main">
-          <div class="managed-line1">
-            <span class="managed-status-icon"><Show when={s.status === "saving"} fallback={<span class={`m-dot ${s.status === "ready" ? "on" : "off"}`} />}><Ic.Spinner size={12} class="managed-spinner" /></Show></span>
-            <span class="managed-name">{s.label}</span>
-            <span class="managed-size-label">{sizeLabel(s.source_size)}</span>
-            <span class="managed-state" classList={{ "managed-error": s.status === "failed" }}>{s.status === "ready" ? "Ready" : s.status === "saving" ? "Saving…" : "Failed"}</span>
+    <Show when={isOpen() && (snaps()?.length ?? 0) > 0}>
+      <div class="m-list s-card managed-list managed-snapshots managed-bounded-scroll" aria-label="Managed snapshots">
+        <For each={snaps() ?? []}>{s => <div class="managed-row" data-state={s.status}>
+          <div class="managed-main">
+            <div class="managed-line1">
+              <span class="managed-status-icon"><Show when={s.status === "saving"} fallback={<span class={`m-dot ${s.status === "ready" ? "on" : "off"}`} />}><Ic.Spinner size={12} class="managed-spinner" /></Show></span>
+              <span class="managed-name">{s.label}</span>
+              <span class="managed-size-label">{sizeLabel(s.source_size)}</span>
+              <span class="managed-state" classList={{ "managed-error": s.status === "failed" }}>{s.status === "ready" ? "Ready" : s.status === "saving" ? "Saving…" : "Failed"}</span>
+            </div>
+            <div class="managed-line2"><span class="managed-spec">{snapshotLine(s)}</span></div>
           </div>
-          <div class="managed-line2"><span class="managed-spec">{snapshotLine(s)}</span></div>
-        </div>
-        <div class="managed-actions"><button class="s-btn sm quiet danger" aria-label={`Delete snapshot ${s.label}`} onClick={() => setConfirm(s)}>Delete</button></div>
-      </div>}</For>
-    </div>
+          <div class="managed-actions"><button class="s-btn sm quiet danger" aria-label={`Delete snapshot ${s.label}`} onClick={() => setConfirm(s)}>Delete</button></div>
+        </div>}</For>
+      </div>
+    </Show>
     <Show when={confirm()}>{s => <ConfirmDialog title={`Delete snapshot ${s().label}?`} destructive action="Delete snapshot"
       description="Agents can no longer start machines from it. This cannot be undone." onClose={() => setConfirm(null)} onConfirm={() => void remove(s())} />}</Show>
   </Show>;

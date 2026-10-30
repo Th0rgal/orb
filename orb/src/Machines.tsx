@@ -5,8 +5,8 @@ import { ResourceHistory, appendSamples, type ResourceSample } from "./ResourceH
 import { LocalMachine } from "./LocalMachine";
 import { ManagedMachines } from "./ManagedMachines";
 import { providerLabel } from "./managedMachineModel";
-import { MACHINES, isManagedNode, managedFleetLabel, nodeProvider, nodeSize, type Machine } from "./machines/nodes";
-import { For, Show, createSignal, createEffect, untrack, onCleanup, onMount } from "solid-js";
+import { MACHINES, MANAGED_FLEET_COLLAPSE_AFTER, groupManagedNodesByProvider, isManagedNode, managedFleetGroupSummary, nodeProvider, nodeSize, type Machine } from "./machines/nodes";
+import { For, Show, createSignal, createMemo, createEffect, untrack, onCleanup, onMount } from "solid-js";
 import { pollWhileVisible } from "./poll";
 import * as Ic from "./icons";
 import { readPalomaPub } from "./pubKey";
@@ -69,6 +69,8 @@ function MachinesPage() {
   const [pub, setPub] = createSignal("");
   const [copied, setCopied] = createSignal(false);
   const [nodes, setNodes] = createSignal<RemoteNodeView[] | null>(null);
+  const [fleetGroupOpen, setFleetGroupOpen] = createSignal<Readonly<Record<string, boolean>>>({});
+  const managedFleetGroups = createMemo(() => groupManagedNodesByProvider(nodes() ?? []));
   const destroyedNodes = new Set<string>();
   const dropNodes = (ids: string[]) => { ids.forEach(id => destroyedNodes.add(id)); setNodes(ns => ns && ns.filter(n => !destroyedNodes.has(n.id))); void refresh(); };
 
@@ -146,10 +148,24 @@ function MachinesPage() {
         <Show when={isConnected()}>
           <FleetRow core={core()} live={live()} history={history()} />
           <For each={(nodes() ?? []).filter(n => !isManagedNode(n)).map(n => n.id)}>{id => <FleetRow node={nodes()?.find(n => n.id === id)} />}</For>
-          <Show when={nodes()?.some(isManagedNode)}>
-            <div class="machine-section-label fleet-group-label">{managedFleetLabel(nodes() ?? [])}</div>
-            <For each={(nodes() ?? []).filter(isManagedNode).map(n => n.id)}>{id => <FleetRow node={nodes()?.find(n => n.id === id)} />}</For>
-          </Show>
+          <For each={managedFleetGroups().map(g => g.provider)}>{provider => {
+            const group = () => managedFleetGroups().find(g => g.provider === provider)!;
+            const open = () => fleetGroupOpen()[provider] ?? (group().nodes.length <= MANAGED_FLEET_COLLAPSE_AFTER);
+            return <Show when={managedFleetGroups().some(g => g.provider === provider)}>
+              <div class="fleet-provider-group" data-provider={provider}>
+                <button type="button" class="fleet-group-toggle" aria-expanded={open()} onClick={() => setFleetGroupOpen(prev => ({ ...prev, [provider]: !open() }))}>
+                  <span class="machine-section-label fleet-group-label">{group().label}</span>
+                  <span class="fleet-group-meta">{managedFleetGroupSummary(group().nodes)}</span>
+                  <span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span>
+                </button>
+                <Show when={open()}>
+                  <div class="managed-group-scroll fleet-group-scroll">
+                    <For each={group().nodes.map(n => n.id)}>{id => <FleetRow node={nodes()?.find(n => n.id === id)} />}</For>
+                  </div>
+                </Show>
+              </div>
+            </Show>;
+          }}</For>
           <Show when={nodes()?.length === 0}>
             <div class="m-note" style={{ padding: "6px 8px" }}>No remote nodes registered.</div>
           </Show>

@@ -131,6 +131,7 @@
       "display_name": "boat.dev",
       "enabled": true,
       "key_hint": "••••1234",
+      "max_concurrent": 100,
       "provider": "boat",
       "sizes": [
         {

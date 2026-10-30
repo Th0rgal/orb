@@ -43,16 +43,60 @@ export const isManagedNode = (node: { id?: string; labels?: readonly string[] | 
 /** Cloud provider of a managed node ("boat", "hetzner", "vastai", "scaleway"), when known. */
 export const nodeProvider = (node: { id?: string; labels?: readonly string[] | null } | null | undefined): string | undefined =>
   node ? parseLabelsProvider(node.labels) ?? (node.id ? providers().get(node.id) : undefined) : undefined;
+/** Auto-collapse managed provider groups in the Remote fleet card once they exceed 3 VMs. */
+export const MANAGED_FLEET_COLLAPSE_AFTER = 3;
+
+export function managedProviderFleetLabel(provider?: string | null): string {
+  const key = (provider ?? "boat").trim().toLowerCase() || "boat";
+  if (key === "boat") return "Managed (boat.dev)";
+  if (key === "hetzner") return "Managed (Hetzner)";
+  if (key === "vastai") return "Managed (Vast.ai)";
+  if (key === "scaleway") return "Managed (Scaleway)";
+  return `Managed (${provider})`;
+}
+
+export interface ManagedFleetGroup<N> {
+  provider: string;
+  label: string;
+  nodes: N[];
+}
+
+/** Group managed fleet nodes by provider in canonical order. */
+export function groupManagedNodesByProvider<N extends { id?: string; labels?: readonly string[] | null }>(
+  nodes: readonly N[],
+): ManagedFleetGroup<N>[] {
+  const buckets = new Map<string, N[]>();
+  for (const n of nodes) {
+    if (!isManagedNode(n)) continue;
+    const key = (nodeProvider(n) ?? "boat").trim().toLowerCase() || "boat";
+    const list = buckets.get(key);
+    if (list) list.push(n);
+    else buckets.set(key, [n]);
+  }
+  const order = ["boat", "hetzner", "vastai", "scaleway"];
+  for (const key of buckets.keys()) {
+    if (!order.includes(key)) order.push(key);
+  }
+  return order
+    .filter(key => (buckets.get(key)?.length ?? 0) > 0)
+    .map(key => ({ provider: key, label: managedProviderFleetLabel(key), nodes: buckets.get(key)! }));
+}
+
+/** Compact summary for a managed fleet provider header: "16 online · 15 active" or "1 online". */
+export function managedFleetGroupSummary(nodes: readonly { status?: string | null; active_jobs?: number | null }[]): string {
+  const online = nodes.filter(n => n.status === "online").length;
+  const active = nodes.reduce((sum, n) => sum + (n.active_jobs ?? 0), 0);
+  const head = online === nodes.length ? `${online} online` : `${online}/${nodes.length} online`;
+  return active > 0 ? `${head} · ${active} active` : head;
+}
+
 /** Group heading for managed fleet nodes: "Managed (boat.dev)", "Managed (Hetzner)", or "Managed cloud". */
 export function managedFleetLabel(nodes: readonly ({ id?: string; labels?: readonly string[] | null } | null | undefined)[]): string {
   const managed = nodes.filter(isManagedNode);
-  const seen = new Set(managed.map(n => nodeProvider(n) ?? "boat"));
+  const seen = new Set(managed.map(n => (nodeProvider(n) ?? "boat").trim().toLowerCase() || "boat"));
   if (seen.size <= 1) {
     const [only] = seen;
-    if (!only || only === "boat") return "Managed (boat.dev)";
-    if (only === "hetzner") return "Managed (Hetzner)";
-    if (only === "vastai") return "Managed (Vast.ai)";
-    if (only === "scaleway") return "Managed (Scaleway)";
+    return managedProviderFleetLabel(only);
   }
   return "Managed cloud";
 }

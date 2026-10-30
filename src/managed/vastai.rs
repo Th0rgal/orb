@@ -1,11 +1,15 @@
 //! Vast.ai GPU marketplace implementation of [`super::ManagedProvider`].
 //!
-//! Uses Vast.ai's v1 API (`https://cloud.vast.ai/api/v1/`) — `/api/v0/` is
-//! deprecated (`HTTP 410`). Searches verified on-demand CUDA offers matching
-//! the requested GPU class (`rtx4090`, `a100`, `h100`, `l40s`, or explicit
-//! `spec.gpu`) under `max_hourly_usd`, rents with `label: spec.name`
-//! (`orb-managed-<id>`) and `onstart` script enrolling `orb-node` over Core's
-//! reverse HTTP relay, and destroys via `DELETE /instances/{id}/`.
+//! Vast.ai currently splits its REST surface across two API versions:
+//! - `/api/v1/instances/` for listing instances (`GET /api/v0/instances/` is `HTTP 410`).
+//! - `/api/v0/` for offer search (`POST /bundles/`), rental (`PUT /asks/{id}/`),
+//!   and per-instance inspection/teardown (`GET|DELETE /instances/{id}/`).
+//!
+//! Searches verified on-demand CUDA offers matching the requested GPU class
+//! (`rtx4090`, `a100`, `h100`, `l40s`, or explicit `spec.gpu`) under
+//! `max_hourly_usd`, rents with `label: spec.name` (`orb-managed-<id>`) and
+//! `onstart` script enrolling `orb-node` over Core's reverse HTTP relay, and
+//! destroys via `DELETE /api/v0/instances/{id}/`.
 
 use std::time::Duration;
 
@@ -14,7 +18,7 @@ use serde_json::{json, Value};
 
 use super::{ManagedProvider, ProviderMachine, ProviderUsage, SizeSpec, SpawnSpec};
 
-pub const DEFAULT_API_BASE: &str = "https://cloud.vast.ai/api/v1";
+pub const DEFAULT_API_BASE: &str = "https://cloud.vast.ai/api/v0";
 
 pub const VASTAI_SIZES: [SizeSpec; 4] = [
     SizeSpec {
@@ -89,27 +93,39 @@ pub fn vastai_size_spec(raw: &str) -> Option<SizeSpec> {
 #[derive(Clone)]
 pub struct VastAiProvider {
     http: reqwest::Client,
-    base: String,
+    v0_base: String,
+    v1_base: String,
     key: String,
 }
 
 impl std::fmt::Debug for VastAiProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VastAiProvider")
-            .field("base", &self.base)
+            .field("v0_base", &self.v0_base)
+            .field("v1_base", &self.v1_base)
             .finish()
     }
 }
 
 impl VastAiProvider {
     pub fn new(base: impl Into<String>, key: impl Into<String>) -> Self {
+        let trimmed = base.into().trim_end_matches('/').to_string();
+        let (v0_base, v1_base) = if let Some(root) = trimmed
+            .strip_suffix("/api/v0")
+            .or_else(|| trimmed.strip_suffix("/api/v1"))
+        {
+            (format!("{root}/api/v0"), format!("{root}/api/v1"))
+        } else {
+            (trimmed.clone(), trimmed)
+        };
         Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .connect_timeout(Duration::from_secs(10))
                 .build()
                 .unwrap_or_default(),
-            base: base.into().trim_end_matches('/').to_string(),
+            v0_base,
+            v1_base,
             key: key.into(),
         }
     }
@@ -126,15 +142,16 @@ impl VastAiProvider {
         Some(Self::new(base, key.trim()))
     }
 
-    async fn call(
+    async fn call_base(
         &self,
+        base: &str,
         method: reqwest::Method,
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, String> {
         let mut req = self
             .http
-            .request(method.clone(), format!("{}{}", self.base, path))
+            .request(method.clone(), format!("{base}{path}"))
             .bearer_auth(&self.key);
         if let Some(b) = body {
             req = req.json(&b);
@@ -156,6 +173,24 @@ impl VastAiProvider {
             return Ok(Value::Null);
         }
         serde_json::from_str(&text).map_err(|e| format!("vastai {path}: bad JSON: {e}"))
+    }
+
+    async fn call_v0(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, String> {
+        self.call_base(&self.v0_base, method, path, body).await
+    }
+
+    async fn call_v1(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, String> {
+        self.call_base(&self.v1_base, method, path, body).await
     }
 }
 
@@ -287,13 +322,26 @@ fn instance_from(v: &Value) -> Option<ProviderMachine> {
                 .map(|n| n.to_string())
                 .or_else(|| x.as_str().map(str::to_string))
         })?;
-    let state = inst
+    let actual = inst
         .get("actual_status")
-        .or_else(|| inst.get("cur_state"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let cur = inst
+        .get("cur_state")
         .or_else(|| inst.get("intended_status"))
         .and_then(Value::as_str)
-        .unwrap_or("loading")
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let state = match (actual, cur) {
+        (Some(a), _) => a,
+        // Right after `PUT /asks/{id}/`, Vast.ai sets `cur_state: "running"`
+        // while `actual_status` is still `null` and layers are downloading.
+        // Never treat desired `"running"` as ready until `actual_status` says so.
+        (None, Some(c)) if matches!(c, "stopped" | "exited" | "destroyed" | "offline") => c,
+        _ => "loading",
+    }
+    .to_string();
     let name = inst
         .get("label")
         .and_then(Value::as_str)
@@ -341,7 +389,7 @@ impl ManagedProvider for VastAiProvider {
         let (min_cpu, min_ram_gb, max_dph) = spec_floors(spec);
         let query = search_bundles_body(spec);
         let offers_resp = self
-            .call(reqwest::Method::POST, "/bundles/", Some(query))
+            .call_v0(reqwest::Method::POST, "/bundles/", Some(query))
             .await?;
         let offers = offers_resp
             .get("offers")
@@ -375,7 +423,7 @@ impl ManagedProvider for VastAiProvider {
         let created = if let Some(pref_id) =
             spec.preferred_offer_id.as_deref().filter(|s| !s.is_empty())
         {
-            self.call(
+            self.call_v0(
                 reqwest::Method::PUT,
                 &format!("/asks/{pref_id}/"),
                 Some(create_body),
@@ -385,7 +433,7 @@ impl ManagedProvider for VastAiProvider {
             let (min_cpu, min_ram_gb, max_dph) = spec_floors(spec);
             let query = search_bundles_body(spec);
             let offers_resp = self
-                .call(reqwest::Method::POST, "/bundles/", Some(query))
+                .call_v0(reqwest::Method::POST, "/bundles/", Some(query))
                 .await?;
             let offers = offers_resp
                 .get("offers")
@@ -407,7 +455,7 @@ impl ManagedProvider for VastAiProvider {
                 )
             })?;
             let offer_id = quote.offer_id.unwrap_or_default();
-            self.call(
+            self.call_v0(
                 reqwest::Method::PUT,
                 &format!("/asks/{offer_id}/"),
                 Some(create_body),
@@ -432,7 +480,7 @@ impl ManagedProvider for VastAiProvider {
 
     async fn get(&self, provider_id: &str) -> Result<ProviderMachine, String> {
         let v = self
-            .call(
+            .call_v0(
                 reqwest::Method::GET,
                 &format!("/instances/{provider_id}/"),
                 None,
@@ -443,17 +491,40 @@ impl ManagedProvider for VastAiProvider {
     }
 
     async fn list(&self) -> Result<Vec<ProviderMachine>, String> {
-        let v = self.call(reqwest::Method::GET, "/instances/", None).await?;
         let mut out = Vec::new();
-        if let Some(items) = v.get("instances").and_then(Value::as_array) {
-            out.extend(items.iter().filter_map(instance_from));
+        let mut seen_tokens = std::collections::HashSet::new();
+        let mut next_token: Option<String> = None;
+        for _ in 0..10 {
+            let path = match &next_token {
+                Some(tok) => {
+                    let enc: String =
+                        url::form_urlencoded::byte_serialize(tok.as_bytes()).collect();
+                    format!("/instances/?next_token={enc}")
+                }
+                None => "/instances/".to_string(),
+            };
+            let v = self.call_v1(reqwest::Method::GET, &path, None).await?;
+            if let Some(items) = v.get("instances").and_then(Value::as_array) {
+                out.extend(items.iter().filter_map(instance_from));
+            }
+            match v
+                .get("next_token")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(tok) if seen_tokens.insert(tok.to_string()) => {
+                    next_token = Some(tok.to_string());
+                }
+                _ => break,
+            }
         }
         Ok(out)
     }
 
     async fn destroy(&self, provider_id: &str) -> Result<(), String> {
         match self
-            .call(
+            .call_v0(
                 reqwest::Method::DELETE,
                 &format!("/instances/{provider_id}/"),
                 None,
@@ -461,7 +532,9 @@ impl ManagedProvider for VastAiProvider {
             .await
         {
             Ok(_) => Ok(()),
-            Err(e) if e.contains("HTTP 404") => Ok(()),
+            // Treat 404 as idempotent ONLY when Vast.ai confirms `no_such_instance`,
+            // never on a generic route `"Not found"` 404 (which would leak billing).
+            Err(e) if e.contains("HTTP 404") && e.contains("no_such_instance") => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -490,13 +563,20 @@ impl ManagedProvider for VastAiProvider {
 
     async fn usage(&self, provider_id: &str) -> Result<ProviderUsage, String> {
         let v = self
-            .call(
+            .call_v0(
                 reqwest::Method::GET,
                 &format!("/instances/{provider_id}/"),
                 None,
             )
             .await?;
-        let inst = v.get("instances").unwrap_or(&v);
+        let inst = match v.get("instances") {
+            Some(Value::Null) => return Err("vastai usage: instance deleted".into()),
+            Some(inner) => inner,
+            None => &v,
+        };
+        if !inst.is_object() {
+            return Err("vastai usage: no instance".into());
+        }
         let dph = inst.get("dph_total").and_then(Value::as_f64).unwrap_or(0.0);
         let start = inst.get("start_date").and_then(Value::as_f64);
         let now_s = chrono::Utc::now().timestamp() as f64;

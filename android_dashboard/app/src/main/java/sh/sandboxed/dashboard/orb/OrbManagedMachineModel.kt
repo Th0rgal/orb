@@ -67,7 +67,14 @@ data class ManagedProviderInfo(
     val credentialSource: String? = null,
     val keyHint: String? = null,
     val region: String? = null,
-    val projectId: String? = null
+    val projectId: String? = null,
+    val maxConcurrent: Int? = null
+)
+
+data class ManagedProviderGroup(
+    val provider: String,
+    val label: String,
+    val machines: List<ManagedMachine>
 )
 
 data class ManagedBudget(
@@ -137,7 +144,8 @@ object OrbManagedMachines {
             credentialSource = OrbJSON.str(d, "credential_source"),
             keyHint = OrbJSON.str(d, "key_hint"),
             region = OrbJSON.str(d, "region"),
-            projectId = OrbJSON.str(d, "project_id")
+            projectId = OrbJSON.str(d, "project_id"),
+            maxConcurrent = OrbJSON.int(d, "max_concurrent")
         )
     }
 
@@ -288,7 +296,8 @@ object OrbManagedMachines {
             if (p.enabled) "Configured" else "Disabled",
             cred,
             p.region.orEmpty(),
-            if (!p.projectId.isNullOrEmpty()) "proj ${p.projectId}" else ""
+            if (!p.projectId.isNullOrEmpty()) "proj ${p.projectId}" else "",
+            if ((p.maxConcurrent ?: 0) > 0) "up to ${p.maxConcurrent} VMs" else ""
         ).filter { it.isNotEmpty() }.joinToString(" · ")
     }
 
@@ -341,6 +350,61 @@ object OrbManagedMachines {
         "vastai" -> "Vast.ai"
         "scaleway" -> "Scaleway"
         else -> provider ?: "boat.dev"
+    }
+
+    const val GROUP_PREVIEW_LIMIT = 5
+
+    fun machineProviderKey(provider: String?): String {
+        val key = (provider ?: "").trim().lowercase(Locale.US)
+        return key.ifEmpty { "boat" }
+    }
+
+    fun providerDisplayLabel(provider: String?, providers: List<ManagedProviderInfo> = emptyList()): String {
+        val key = machineProviderKey(provider)
+        val found = providers.firstOrNull { machineProviderKey(it.provider) == key }?.displayName?.trim()
+        return if (!found.isNullOrEmpty()) found else providerLabel(key)
+    }
+
+    fun groupMachinesByProvider(
+        machines: List<ManagedMachine>,
+        providers: List<ManagedProviderInfo> = emptyList()
+    ): List<ManagedProviderGroup> {
+        val buckets = LinkedHashMap<String, MutableList<ManagedMachine>>()
+        for (m in machines) {
+            val key = machineProviderKey(m.provider)
+            buckets.getOrPut(key) { mutableListOf() }.add(m)
+        }
+        val order = mutableListOf<String>()
+        fun push(raw: String?) {
+            val key = machineProviderKey(raw)
+            if (key !in order) order.add(key)
+        }
+        for (p in providers) push(p.provider)
+        for (p in listOf("boat", "hetzner", "vastai", "scaleway")) push(p)
+        for (key in buckets.keys) push(key)
+        return order.mapNotNull { key ->
+            val list = buckets[key]?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            ManagedProviderGroup(
+                provider = key,
+                label = providerDisplayLabel(key, providers),
+                machines = list
+            )
+        }
+    }
+
+    fun providerGroupSummary(machines: List<ManagedMachine>): String {
+        val running = machines.filter { isLive(it) }
+        val rate = machines
+            .filter { it.state == "online" || it.state == "provisioning" || it.state == "enrolling" }
+            .sumOf { it.usdPerHour }
+        if (running.isNotEmpty()) {
+            return "${running.size} running" + if (rate > 0.0) " · ${usdPerHour(rate)}" else ""
+        }
+        val stoppedCount = machines.count { isStopped(it) }
+        if (stoppedCount > 0 && stoppedCount == machines.size) {
+            return "$stoppedCount stopped"
+        }
+        return "${machines.size} ${if (machines.size == 1) "machine" else "machines"}"
     }
 
     fun sectionTitle(providers: List<ManagedProviderInfo>, machines: List<ManagedMachine>): String {

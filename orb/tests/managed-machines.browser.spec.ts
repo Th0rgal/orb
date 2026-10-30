@@ -12,15 +12,24 @@ const iso = (offsetMin: number) => new Date(Date.now() + offsetMin * 60_000).toI
 const view = (o: Record<string, unknown>) => ({ provider: "boat", provider_id: "bx_7f3k2", image: "sandboxed-node:2026.10", size: "medium", cpu: 4, ram_gb: 8,
   state: "online", created_at: iso(-50), expires_at: iso(70), cost_usd: 0.1, usd_per_hour: 0.12, ledger_closed: false, ...o });
 
-type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light"; spend?: unknown[]; stopped?: boolean; withProviders?: boolean };
+type Opts = { unlimited?: boolean; managed?: "404" | "disabled"; createError?: unknown; holdCreate?: boolean; holdDelete?: boolean; settings?: boolean | "404"; theme?: "dark" | "light"; spend?: unknown[]; stopped?: boolean; withProviders?: boolean; largeFleet?: boolean };
 async function mock(page: Page, opts: Opts = {}) {
-  const providers = opts.withProviders ? [
-    { provider: "boat", display_name: "boat.dev", configured: true, enabled: true, credential_source: "bitwarden", key_hint: "••••1234", supports_snapshots: true, supports_free_stop: true, sizes },
-    { provider: "hetzner", display_name: "Hetzner Cloud", configured: false, enabled: true, supports_snapshots: false, supports_free_stop: false, sizes: [{ size: "cpx32", cpu: 4, ram_gb: 8, disk_gb: 160, usd_per_hour: 0.062 }] },
+  const providers = (opts.withProviders || opts.largeFleet) ? [
+    { provider: "boat", display_name: "boat.dev", configured: true, enabled: true, credential_source: "bitwarden", key_hint: "••••1234", max_concurrent: 100, supports_snapshots: true, supports_free_stop: true, sizes },
+    { provider: "hetzner", display_name: "Hetzner Cloud", configured: !!opts.largeFleet, enabled: true, supports_snapshots: false, supports_free_stop: false, sizes: [{ size: "cpx32", cpu: 4, ram_gb: 8, disk_gb: 160, usd_per_hour: 0.062 }] },
     { provider: "vastai", display_name: "Vast.ai", configured: false, enabled: true, supports_snapshots: false, supports_free_stop: false, sizes: [{ size: "rtx4090", cpu: 16, ram_gb: 64, disk_gb: 120, usd_per_hour: 0.45, gpu: "RTX 4090" }] },
     { provider: "scaleway", display_name: "Scaleway", configured: false, enabled: false, supports_snapshots: false, supports_free_stop: false, sizes: [{ size: "PRO2-S", cpu: 4, ram_gb: 16, disk_gb: 80, usd_per_hour: 0.088 }] },
   ] as Record<string, unknown>[] : undefined;
-  const machines: Record<string, unknown>[] = [
+  const machines: Record<string, unknown>[] = opts.largeFleet ? [
+    ...Array.from({ length: 12 }, (_, i) => view({
+      id: `mmb${i}`, name: `xlarge-${String.fromCharCode(97 + i)}`, node_id: `managed-mmb${i}`,
+      provider: "boat", size: "xl", cpu: 16, ram_gb: 32, usd_per_hour: 0.2, cost_usd: 0.4,
+    })),
+    ...Array.from({ length: 2 }, (_, i) => view({
+      id: `mmh${i}`, name: `cpx32-${String.fromCharCode(97 + i)}`, node_id: `managed-mmh${i}`,
+      provider: "hetzner", size: "cpx32", cpu: 4, ram_gb: 8, usd_per_hour: 0.06, cost_usd: 0.1,
+    })),
+  ] : [
     view({ id: "mm1", name: "medium-a", node_id: "managed-mm1", owner_mission_id: "4f2a9c1e-0000-4000-8000-000000000001", reason: "Lean build" }),
     view({ id: "mm0", name: "medium-b", node_id: "managed-mm0", state: "destroyed", destroyed_at: iso(-120), cost_usd: 0.37, ledger_closed: true }),
   ];
@@ -73,6 +82,10 @@ async function mock(page: Page, opts: Opts = {}) {
       }
       if (typeof body.region === "string") pr.region = body.region || undefined;
       if (typeof body.project_id === "string") pr.project_id = body.project_id || undefined;
+      if ("max_concurrent" in body) {
+        if (body.max_concurrent == null) delete pr.max_concurrent;
+        else pr.max_concurrent = body.max_concurrent;
+      }
       return route.fulfill({ json: pr });
     }
     if (path.startsWith("/api/managed-machines")) {
@@ -103,7 +116,7 @@ async function mock(page: Page, opts: Opts = {}) {
     const live = machines.filter(m => m.state !== "destroyed" && m.state !== "failed" && m.state !== "stopped");
     const json = path === "/api/remote-nodes" ? { enabled: true, remote_launch: { typed: true, harnesses: ["claudecode"], proxy_url_configured: true }, nodes: [
         { id: "spark", status: "online", labels: [], base_url: "", cpu_total: 20 },
-        ...live.map(m => ({ id: m.node_id, display_name: m.name, status: "online", labels: ["managed", "boat"], base_url: "", cpu_total: m.cpu, mem_total_bytes: (m.ram_gb as number) * 1024 ** 3 })),
+        ...live.map(m => ({ id: m.node_id, display_name: m.name, status: "online", active_jobs: opts.largeFleet && m.provider === "boat" ? 1 : 0, labels: ["managed", m.provider && m.provider !== "boat" ? `provider=${m.provider}` : "boat"], base_url: "", cpu_total: m.cpu, mem_total_bytes: (m.ram_gb as number) * 1024 ** 3 })),
       ] }
       : path === "/api/ai/providers" ? [{ id: "antigravity", name: "Antigravity subscription", provider_type: "antigravity", uses_oauth: true, has_oauth: true, credential_owner: "cli_proxy", status: { type: "connected" } }]
       : path === "/api/projects" ? { projects: [{ slug: "test", title: "Test" }] }
@@ -405,18 +418,19 @@ test("machine providers can be configured and toggled in Machines and Settings",
   await openMachines(page);
   const card = page.getByRole("region", { name: "Machine providers" });
   await expect(card.locator(".managed-provider-row")).toHaveCount(4);
-  await expect(card.locator(".managed-provider-row[data-provider=boat]")).toContainText("Configured · Bitwarden ••••1234");
+  await expect(card.locator(".managed-provider-row[data-provider=boat]")).toContainText("Configured · Bitwarden ••••1234 · up to 100 VMs");
   await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Not configured");
   await expect(card.locator(".managed-provider-row[data-provider=scaleway]")).toContainText("Disabled · Not configured");
 
-  // Configure Hetzner Cloud with an API key and default location.
+  // Configure Hetzner Cloud with an API key, concurrency ceiling, and default location.
   await card.getByRole("button", { name: "Configure Hetzner Cloud" }).click();
   const cfg = page.getByRole("dialog", { name: "Configure Hetzner Cloud" });
   await cfg.getByLabel("Hetzner Cloud API key").fill("hz-live-token-9876");
+  await cfg.getByLabel("Max concurrent VMs").fill("25");
   await cfg.getByLabel("Default location").fill("hel1");
   await cfg.getByRole("button", { name: "Save" }).click();
   await expect(cfg).toHaveCount(0);
-  await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Configured · Settings ••••9876 · hel1");
+  await expect(card.locator(".managed-provider-row[data-provider=hetzner]")).toContainText("Configured · Settings ••••9876 · hel1 · up to 25 VMs");
   await expect(page.getByRole("heading", { name: "Managed cloud" })).toBeVisible();
 
   // New managed machine dialog now offers both boat.dev and Hetzner Cloud.
@@ -440,4 +454,46 @@ test("machine providers can be configured and toggled in Machines and Settings",
   const settingsCard = page.getByRole("region", { name: "Machine providers" });
   await expect(settingsCard.locator(".managed-provider-row")).toHaveCount(4);
   await expect(settingsCard.getByRole("switch", { name: "Enable Hetzner Cloud" })).toHaveAttribute("aria-checked", "false");
+});
+
+test("large multi-provider fleets group per provider with collapsible headers and bounded scroll", async ({ page }) => {
+  await mock(page, { largeFleet: true });
+  await openMachines(page);
+
+  // Remote fleet card: >3 VMs on boat.dev auto-collapse; <=3 VMs on Hetzner stay expanded.
+  const boatFleet = page.locator(".fleet-provider-group[data-provider=boat]");
+  const hzFleet = page.locator(".fleet-provider-group[data-provider=hetzner]");
+  await expect(boatFleet.locator(".fleet-group-toggle")).toHaveAttribute("aria-expanded", "false");
+  await expect(boatFleet.locator(".fleet-group-meta")).toHaveText("12 online · 12 active");
+  await expect(hzFleet.locator(".fleet-group-toggle")).toHaveAttribute("aria-expanded", "true");
+  await expect(hzFleet.locator(".fleet-group-meta")).toHaveText("2 online");
+
+  await boatFleet.locator(".fleet-group-toggle").click();
+  await expect(boatFleet.locator(".fleet-group-toggle")).toHaveAttribute("aria-expanded", "true");
+  const fleetMetrics = await boatFleet.locator(".fleet-group-scroll").evaluate(el => ({
+    clientHeight: el.clientHeight,
+    scrollHeight: el.scrollHeight,
+  }));
+  expect(fleetMetrics.clientHeight).toBeLessThanOrEqual(315);
+  expect(fleetMetrics.scrollHeight).toBeGreaterThan(fleetMetrics.clientHeight);
+
+  // Managed cloud section: grouped per provider, bounded scroll, independently collapsible.
+  const boatGroup = page.locator(".managed-provider-group[data-provider=boat]");
+  const hzGroup = page.locator(".managed-provider-group[data-provider=hetzner]");
+  await expect(boatGroup.locator(".managed-group-title")).toHaveText("boat.dev");
+  await expect(boatGroup.locator(".managed-group-meta")).toHaveText("12 running · $2.40/h");
+  await expect(hzGroup.locator(".managed-group-title")).toHaveText("Hetzner Cloud");
+  await expect(hzGroup.locator(".managed-group-meta")).toHaveText("2 running · $0.12/h");
+
+  const managedMetrics = await boatGroup.locator(".managed-group-scroll").evaluate(el => ({
+    clientHeight: el.clientHeight,
+    scrollHeight: el.scrollHeight,
+  }));
+  expect(managedMetrics.clientHeight).toBeLessThanOrEqual(345);
+  expect(managedMetrics.scrollHeight).toBeGreaterThan(managedMetrics.clientHeight);
+
+  await boatGroup.locator(".managed-group-toggle").click();
+  await expect(boatGroup.locator(".managed-group-toggle")).toHaveAttribute("aria-expanded", "false");
+  await expect(boatGroup.locator(".managed-group-scroll")).toHaveCount(0);
+  await expect(hzGroup.locator(".managed-row")).toHaveCount(2);
 });

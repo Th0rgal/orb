@@ -4117,6 +4117,24 @@ select.orb-select-native:disabled { cursor: default; }
 .spend-chart.loading .spend-col { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .spend-skel, .spend-bar.skel { animation: none; } .spend-bar { transition: none; } }
 .managed-stopped-head { margin: 14px 0 6px; }
+.fleet-provider-group, .managed-provider-group { border-bottom: 1px solid var(--stroke-soft); }
+.s-card > .fleet-provider-group:last-child, .managed-list > .managed-provider-group:last-child { border-bottom: 0; }
+.fleet-group-toggle, .managed-group-toggle {
+  width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border: 0;
+  background: color-mix(in srgb, var(--fg) 2%, transparent); color: var(--fg-2); text-align: left;
+  font: 500 12.5px/16px var(--sans); cursor: pointer;
+}
+.fleet-group-toggle:hover, .managed-group-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+.fleet-group-toggle:focus-visible, .managed-group-toggle:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
+.fleet-group-toggle .fleet-group-label { padding: 0; border-top: 0; }
+.managed-group-title { font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fleet-group-meta, .managed-group-meta { margin-left: auto; font: 11.5px/16px var(--sans); color: var(--fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.managed-group-scroll { border-top: 1px solid var(--stroke-soft); max-height: 340px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.fleet-group-scroll { max-height: 310px; }
+.managed-bounded-scroll { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.managed-snapshots.managed-bounded-scroll { max-height: 260px; }
+.managed-stopped-toggle, .managed-snapshots-toggle { margin-top: 10px; }
+.managed-stopped, .managed-snapshots { margin-top: 4px; }
 
 /* Folder uploads reuse the background-upload row; the file list wraps below it. */
 .composer-bg-upload-row.folder-upload { flex-wrap: wrap; }

@@ -14,7 +14,11 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.key
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandMore
@@ -85,6 +89,8 @@ fun OrbManagedMachinesBlock(
     var details by remember { mutableStateOf<ManagedMachine?>(null) }
     var creating by remember { mutableStateOf(false) }
     var showRecent by remember { mutableStateOf(false) }
+    var collapsedProviders by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var stoppedOpenOverride by remember { mutableStateOf<Boolean?>(null) }
     var busyProvider by remember { mutableStateOf<String?>(null) }
     var editingProvider by remember { mutableStateOf<ManagedProviderInfo?>(null) }
 
@@ -330,8 +336,9 @@ fun OrbManagedMachinesBlock(
         loadError?.let { Text("Couldn’t refresh managed machines. $it", color = OrbStyle.warning, fontSize = 12.sp) }
         if (confirm == null) actionError?.let { Text(it, color = OrbStyle.warning, fontSize = 12.sp) }
 
+        val liveGroups = OrbManagedMachines.groupMachinesByProvider(live, d.providers)
         ManagedCard {
-            if (live.isEmpty()) {
+            if (liveGroups.isEmpty()) {
                 Text(
                     text = "No managed machines running.",
                     color = OrbStyle.textMuted,
@@ -339,45 +346,126 @@ fun OrbManagedMachinesBlock(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp)
                 )
             }
-            live.forEachIndexed { idx, m ->
-                ManagedMachineRow(
-                    m = m,
-                    fetchedAt = fetchedAt,
-                    now = now,
-                    busy = busyId == m.id,
-                    muted = false,
-                    canStop = OrbManagedMachines.canStop(m, d.providers),
-                    onExtend = { extend(m) },
-                    onStop = { stop(m) },
-                    onResume = {},
-                    onDestroy = { actionError = null; confirm = m },
-                    onDetails = { details = m }
-                )
-                if (idx < live.lastIndex) {
-                    HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+            liveGroups.forEachIndexed { groupIdx, group ->
+                val isOpen = group.provider !in collapsedProviders
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.White.copy(alpha = 0.02f))
+                        .orbPressClickable {
+                            collapsedProviders = if (isOpen) collapsedProviders + group.provider else collapsedProviders - group.provider
+                        }
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                        .testTag("managed.group.${group.provider}"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = group.label,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = OrbManagedMachines.providerGroupSummary(group.machines),
+                        color = OrbStyle.textMuted,
+                        fontSize = 12.sp
+                    )
+                    Icon(
+                        imageVector = if (isOpen) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = OrbStyle.textMuted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                if (isOpen) {
+                    HorizontalDivider(color = OrbStyle.border)
+                    key(group.provider) {
+                        val scrollState = rememberScrollState()
+                        val listModifier = if (group.machines.size > OrbManagedMachines.GROUP_PREVIEW_LIMIT) {
+                            Modifier.fillMaxWidth().heightIn(max = 340.dp).verticalScroll(scrollState)
+                        } else {
+                            Modifier.fillMaxWidth()
+                        }
+                        Column(modifier = listModifier) {
+                            group.machines.forEachIndexed { idx, m ->
+                                ManagedMachineRow(
+                                    m = m,
+                                    fetchedAt = fetchedAt,
+                                    now = now,
+                                    busy = busyId == m.id,
+                                    muted = false,
+                                    canStop = OrbManagedMachines.canStop(m, d.providers),
+                                    onExtend = { extend(m) },
+                                    onStop = { stop(m) },
+                                    onResume = {},
+                                    onDestroy = { actionError = null; confirm = m },
+                                    onDetails = { details = m }
+                                )
+                                if (idx < group.machines.lastIndex) {
+                                    HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+                if (groupIdx < liveGroups.lastIndex) {
+                    HorizontalDivider(color = OrbStyle.border)
                 }
             }
         }
 
         if (stopped.isNotEmpty()) {
-            Text("Stopped · disk kept, nothing billed, resumable for 24 h", color = OrbStyle.textMuted, fontSize = 12.sp)
-            ManagedCard {
-                stopped.forEachIndexed { idx, m ->
-                    ManagedMachineRow(
-                        m = m,
-                        fetchedAt = fetchedAt,
-                        now = now,
-                        busy = busyId == m.id,
-                        muted = false,
-                        canStop = false,
-                        onExtend = {},
-                        onStop = {},
-                        onResume = { resume(m) },
-                        onDestroy = { actionError = null; confirm = m },
-                        onDetails = { details = m }
-                    )
-                    if (idx < stopped.lastIndex) {
-                        HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+            val isStoppedOpen = stoppedOpenOverride ?: (stopped.size <= OrbManagedMachines.GROUP_PREVIEW_LIMIT)
+            Row(
+                modifier = Modifier
+                    .orbPressClickable { stoppedOpenOverride = !isStoppedOpen }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = if (isStoppedOpen) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = OrbStyle.textMuted,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    "Stopped · disk kept, nothing billed, resumable for 24 h (${stopped.size})",
+                    color = OrbStyle.textMuted,
+                    fontSize = 12.sp
+                )
+            }
+            if (isStoppedOpen) {
+                ManagedCard {
+                    val scrollState = rememberScrollState()
+                    val listModifier = if (stopped.size > OrbManagedMachines.GROUP_PREVIEW_LIMIT) {
+                        Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(scrollState)
+                    } else {
+                        Modifier.fillMaxWidth()
+                    }
+                    Column(modifier = listModifier) {
+                        stopped.forEachIndexed { idx, m ->
+                            ManagedMachineRow(
+                                m = m,
+                                fetchedAt = fetchedAt,
+                                now = now,
+                                busy = busyId == m.id,
+                                muted = false,
+                                canStop = false,
+                                onExtend = {},
+                                onStop = {},
+                                onResume = { resume(m) },
+                                onDestroy = { actionError = null; confirm = m },
+                                onDetails = { details = m }
+                            )
+                            if (idx < stopped.lastIndex) {
+                                HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+                            }
+                        }
                     }
                 }
             }
@@ -401,13 +489,21 @@ fun OrbManagedMachinesBlock(
             }
             if (showRecent) {
                 ManagedCard {
-                    recent.forEachIndexed { idx, m ->
-                        ManagedMachineRow(
-                            m = m, fetchedAt = fetchedAt, now = now, busy = false, muted = true,
-                            canStop = false, onExtend = {}, onStop = {}, onResume = {}, onDestroy = {}, onDetails = { details = m }
-                        )
-                        if (idx < recent.lastIndex) {
-                            HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+                    val scrollState = rememberScrollState()
+                    val listModifier = if (recent.size > OrbManagedMachines.GROUP_PREVIEW_LIMIT) {
+                        Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(scrollState)
+                    } else {
+                        Modifier.fillMaxWidth()
+                    }
+                    Column(modifier = listModifier) {
+                        recent.forEachIndexed { idx, m ->
+                            ManagedMachineRow(
+                                m = m, fetchedAt = fetchedAt, now = now, busy = false, muted = true,
+                                canStop = false, onExtend = {}, onStop = {}, onResume = {}, onDestroy = {}, onDetails = { details = m }
+                            )
+                            if (idx < recent.lastIndex) {
+                                HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
+                            }
                         }
                     }
                 }
@@ -756,22 +852,42 @@ private fun ManagedMachineRow(
 private fun ManagedConfigureProviderDialog(
     provider: ManagedProviderInfo,
     onDismiss: () -> Unit,
-    onSave: suspend (Map<String, Any>) -> Unit
+    onSave: suspend (Map<String, Any?>) -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val initialMax = provider.maxConcurrent?.toString().orEmpty()
     var apiKey by remember(provider.provider) { mutableStateOf("") }
     var region by remember(provider.provider) { mutableStateOf(provider.region.orEmpty()) }
     var projectId by remember(provider.provider) { mutableStateOf(provider.projectId.orEmpty()) }
+    var maxConcurrent by remember(provider.provider) { mutableStateOf(initialMax) }
     var saving by remember { mutableStateOf(false) }
     var err by remember { mutableStateOf<String?>(null) }
+    val maxChanged = maxConcurrent.trim() != initialMax
 
-    fun submit(overridePatch: Map<String, Any>? = null) {
+    fun submit(overridePatch: Map<String, Any?>? = null) {
         if (saving) return
+        var parsedMax: Int? = null
+        var includeMax = false
+        if (overridePatch == null && maxChanged) {
+            val raw = maxConcurrent.trim()
+            if (raw.isEmpty()) {
+                includeMax = true
+                parsedMax = null
+            } else {
+                val n = raw.toIntOrNull()
+                if (n == null || n !in 1..1000) {
+                    err = "Max concurrent VMs must be between 1 and 1000, or blank for unlimited."
+                    return
+                }
+                includeMax = true
+                parsedMax = n
+            }
+        }
         saving = true
         err = null
         scope.launch {
             try {
-                val patch = overridePatch ?: buildMap {
+                val patch: Map<String, Any?> = overridePatch ?: buildMap {
                     val trimmedKey = apiKey.trim()
                     if (trimmedKey.isNotEmpty()) {
                         put("api_key", trimmedKey)
@@ -782,6 +898,9 @@ private fun ManagedConfigureProviderDialog(
                     }
                     if (provider.provider == "scaleway") {
                         put("project_id", projectId.trim())
+                    }
+                    if (includeMax) {
+                        put("max_concurrent", parsedMax)
                     }
                 }
                 onSave(patch)
@@ -815,6 +934,11 @@ private fun ManagedConfigureProviderDialog(
                     onValueChange = { apiKey = it },
                     secret = true
                 )
+                OrbMiniField(
+                    label = "Max concurrent VMs (blank = unlimited)",
+                    value = maxConcurrent,
+                    onValueChange = { maxConcurrent = it }
+                )
                 if (provider.provider == "hetzner") {
                     OrbMiniField(
                         label = "Default location (fsn1, hel1, nbg1)",
@@ -844,7 +968,7 @@ private fun ManagedConfigureProviderDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = !saving && (provider.configured || apiKey.trim().isNotEmpty()),
+                enabled = !saving && (provider.configured || apiKey.trim().isNotEmpty() || maxChanged),
                 onClick = { submit() }
             ) { Text("Save") }
         },

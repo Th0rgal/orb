@@ -34,7 +34,10 @@ via `env_crypto`), environment variables, or Bitwarden Secrets Manager
 3. Operators can inspect, configure, and individually enable/disable each
    provider via `GET /api/managed-machines/providers` and
    `PUT /api/managed-machines/providers/:provider` (`disabled_providers` in
-   `managed_settings.json`). Disabling a provider refuses new `spawn`, `fork`,
+   `managed_settings.json`, plus optional per-provider `max_concurrent` in
+   `managed_providers.json`; `boat` defaults to `100` via
+   `SANDBOXED_MANAGED_BOAT_MAX_CONCURRENT`, matching the `100`-VM default of
+   `SANDBOXED_MANAGED_MAX_CONCURRENT`). Disabling a provider refuses new `spawn`, `fork`,
    `resume`, and sibling reuse (`409 provider_disabled`) while keeping the
    reaper and reconciler active so any already-live VMs are still metered and
    destroyed cleanly.

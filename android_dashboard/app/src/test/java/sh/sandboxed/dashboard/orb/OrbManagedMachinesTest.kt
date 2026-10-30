@@ -271,7 +271,8 @@ class OrbManagedMachinesTest {
         assertEquals(listOf(true, true, false, false), r.providers.map { it.configured })
         assertEquals(listOf(true, true, true, false), r.providers.map { OrbManagedMachines.isProviderEnabled(it) })
         assertEquals(listOf(true, true, false, false), r.providers.map { OrbManagedMachines.isProviderUsable(it) })
-        assertEquals("Configured · Bitwarden ••••1234", OrbManagedMachines.providerStatusLine(r.providers[0]))
+        assertEquals(100, r.providers[0].maxConcurrent)
+        assertEquals("Configured · Bitwarden ••••1234 · up to 100 VMs", OrbManagedMachines.providerStatusLine(r.providers[0]))
         assertEquals("Configured · Settings ••••5678 · fsn1", OrbManagedMachines.providerStatusLine(r.providers[1]))
         assertEquals("Not configured", OrbManagedMachines.providerStatusLine(r.providers[2]))
         assertEquals("Disabled · Not configured", OrbManagedMachines.providerStatusLine(r.providers[3]))
@@ -284,5 +285,29 @@ class OrbManagedMachinesTest {
         assertEquals("hetzner", r.machines[0].provider)
         assertEquals("cpx42", r.machines[0].size)
         assertFalse(OrbManagedMachines.canStop(r.machines[0], r.providers))
+    }
+
+    @Test
+    fun groupsMachinesByProviderAndSummarises() {
+        val r = OrbManagedMachines.parse(OrbSpec.dict("fixtures/managed-machines-response.json"))
+        val hetzner = r.machines[0].copy(id = "h1", provider = "hetzner", usdPerHour = 0.12, state = "online")
+        val boat1 = hetzner.copy(id = "b1", provider = "boat", usdPerHour = 0.2)
+        val boat2 = hetzner.copy(id = "b2", provider = null, usdPerHour = 0.072)
+        val groups = OrbManagedMachines.groupMachinesByProvider(listOf(hetzner, boat1, boat2), r.providers)
+        assertEquals(listOf("boat", "hetzner"), groups.map { it.provider })
+        assertEquals(listOf("boat.dev", "Hetzner Cloud"), groups.map { it.label })
+        assertEquals(listOf(listOf("b1", "b2"), listOf("h1")), groups.map { g -> g.machines.map { it.id } })
+        assertEquals(
+            listOf("2 running · $0.27/h", "1 running · $0.12/h"),
+            groups.map { OrbManagedMachines.providerGroupSummary(it.machines) }
+        )
+        assertEquals(
+            "2 stopped",
+            OrbManagedMachines.providerGroupSummary(listOf(boat1.copy(state = "stopped"), boat2.copy(state = "stopped")))
+        )
+        assertEquals(
+            "1 machine",
+            OrbManagedMachines.providerGroupSummary(listOf(boat1.copy(state = "failed", usdPerHour = 0.0)))
+        )
     }
 }
