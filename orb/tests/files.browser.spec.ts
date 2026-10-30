@@ -74,9 +74,9 @@ test("Cursor-style files preserve chat, resolve references and navigate Markdown
   );
   await expect(page.locator(".file-panel")).toBeVisible();
   await page.locator('.file-preview').click({position:{x:30,y:100}});
-  await page.keyboard.press('Meta+b');
+  await page.keyboard.press('Meta+Shift+b');
   await expect(page.getByRole('navigation',{name:'File explorer'})).toHaveCount(0);
-  await page.keyboard.press('Meta+b');
+  await page.keyboard.press('Meta+Shift+b');
   await expect(page.getByRole('navigation',{name:'File explorer'})).toBeVisible();
   await page.getByRole('textbox',{name:'Draft'}).focus();
   await page.keyboard.press('Meta+b');
@@ -93,7 +93,7 @@ test("Cursor-style files preserve chat, resolve references and navigate Markdown
   await expect(page.locator('.find-count')).toHaveText(/1 \/ /);
   await find.press('Escape');
   await expect(find).not.toBeVisible();
-  await page.keyboard.press('Meta+Shift+f');
+  await page.keyboard.press('Meta+\\');
   await expect(page.locator('.main')).not.toBeVisible();
   await page.evaluate(()=>(window as any).openOverlayTest());
   await expect(page.getByRole('dialog',{name:'Rename example'})).toBeVisible();
@@ -115,7 +115,7 @@ test("Cursor-style files preserve chat, resolve references and navigate Markdown
   await expect(page.locator('.file-panel.maximized')).toBeVisible();
   await expect(page.getByRole('heading',{name:'Pareto — Implementation brief'})).toBeVisible();
 
-  await page.keyboard.press('Meta+Shift+f');
+  await page.keyboard.press('Meta+\\');
   await expect(page.locator('.main')).toBeVisible();
   await expect(page.getByRole('textbox',{name:'Draft'})).toHaveValue('Keep my draft');
   await page.keyboard.press('Meta+j');

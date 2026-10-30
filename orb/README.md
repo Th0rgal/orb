@@ -11,9 +11,9 @@ pnpm tauri build    # release binary
 ```
 
 Shortcuts (`src/keyboardShortcuts.ts` & `docs/KEYBOARD_SHORTCUTS.md`):
-- `⌘1` / `⌘N` new agent · `⌘2` cloud agent · `⌘3` machines · `⌘4` providers · `⌘5` projects
-- `⌘B` sidebar · `⌘J` files panel · `⌘⇧J` `/btw` side agent · `⌘P` file palette
-- `⌘[` / `⌘]` history · `⌘F` / `⌘⇧F` find · `⌘/` markdown source/preview · `⌘,` settings · `Esc` back
+- `⌘1` / `⌘N` new agent · `⌘I` inbox · `⌘2` cloud agent · `⌘3` machines · `⌘4` inference · `⌘5` projects
+- `⌘B` sidebar · `⌘J` files panel · `⌘⇧B` file tree · `⌘K` (or `⌘⇧J`) `/btw` side agent · `⌘P` file palette
+- `⌘[` / `⌘]` history · `⌘F` find in pane · `⌘⇧F` search all conversations · `⌘\` focus/expand · `⌘⇧E` split · `⌘/` markdown source/preview · `⌘,` settings · `Esc` back
 
 Start a draft with `/goal <objective>` for autonomous multi-turn goal execution, `/plan <task>` for native interactive planning (Claude Code and Codex), or `/btw <question>` to ask a side agent in the same workspace without interrupting the main run. Remote launches follow the
 `remote_launch` capability advertised by `GET /api/remote-nodes`; harnesses the

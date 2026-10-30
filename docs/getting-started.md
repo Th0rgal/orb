@@ -62,7 +62,7 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **Core**
 4. Optional composer prefixes and mentions:
    - `/plan <task>` — Native interactive planning mode (Claude Code and Codex).
    - `/goal <objective>` — Multi-turn autonomous goal execution.
-   - `/btw <question>` (or `⌘⇧J`) — Open an independent side-agent conversation in the same workspace.
+   - `/btw <question>` (or `⌘K` / `⌘⇧J`) — Open an independent side-agent conversation in the same workspace.
    - `@context/<path>` — Reference live synchronized project files.
 
 ---

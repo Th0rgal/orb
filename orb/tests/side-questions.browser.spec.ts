@@ -150,15 +150,29 @@ test('resizing the side panel keeps the visible conversation paragraph anchored'
  await expect(page.locator('main')).not.toHaveAttribute('data-panel-resizing','true');
 });
 
-test('side question toggles with Meta+Shift+J and shares expand and restore shortcuts with Files',async({page})=>{
+test('side question toggles and focuses with Meta+K (and Meta+Shift+J) and shares expand/restore shortcuts with Files',async({page})=>{
  await page.goto('/tests/side-questions.html');
- await page.keyboard.press('Meta+Shift+j');
+ const isMac = await page.evaluate(() => /mac|iphone|ipad|ipod/i.test(navigator.platform));
+ const btwChord = isMac ? 'Meta+k' : 'Control+k';
+ const legacyChord = isMac ? 'Meta+Shift+j' : 'Control+Shift+j';
+ const expandChord = isMac ? 'Meta+\\' : 'Control+\\';
+
+ await page.keyboard.press(btwChord);
  await expect(page.locator('.btw-sidebar')).toBeVisible();
- await page.keyboard.press('Meta+Shift+j');
+ await expect(page.getByPlaceholder('Ask a side question…')).toBeFocused();
+
+ // When focus moves away from the side composer, Meta+K brings focus back instead of closing; pressing again closes.
+ await page.getByPlaceholder('Send follow-up').focus();
+ await page.keyboard.press(btwChord);
+ await expect(page.locator('.btw-sidebar')).toBeVisible();
+ await expect(page.getByPlaceholder('Ask a side question…')).toBeFocused();
+ await page.keyboard.press(btwChord);
  await expect(page.locator('.btw-sidebar')).not.toBeVisible();
- await page.keyboard.press('Meta+Shift+j');
+
+ // Legacy Meta+Shift+J still toggles too.
+ await page.keyboard.press(legacyChord);
  await expect(page.locator('.btw-sidebar')).toBeVisible();
- await page.keyboard.press('Meta+Shift+f');
+ await page.keyboard.press(expandChord);
  await expect(page.locator('.btw-sidebar')).toHaveClass(/maximized/);
  const panelTop=await page.locator('.btw-sidebar').evaluate(el=>el.getBoundingClientRect().top);
  await expect.poll(()=>page.locator('.btw-sidebar .btw-panel').evaluate(el=>el.getBoundingClientRect().top)).toBe(panelTop);

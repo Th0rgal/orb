@@ -19,7 +19,15 @@ import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
 import {MentionProjectContext} from "./PromptEditor";
 import { startLocalWakeups } from "./localWakeups";
 import { startClientDelegations } from "./clientDelegations";
-import { isSearchShortcut, navigationShortcut, searchShortcutLabel, shortcutLabel } from "./keyboardShortcuts";
+import {
+  hasPrimaryModifier,
+  isFindShortcut,
+  isSearchShortcut,
+  navigationShortcut,
+  searchShortcutLabel,
+  shortcutLabel,
+  sidebarShortcutLabel,
+} from "./keyboardShortcuts";
 import {preferSparkAdministration} from "./machineDestinations";
 import { CloudAgentPage } from "./CloudAgents";
 import { monitorSoftware } from "./softwareInventory";
@@ -735,7 +743,10 @@ export default function App() {
 
   const onKey = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.isComposing) return;
-    if (isSearchShortcut(e)) {
+    const sidebarFocused =
+      isFindShortcut(e) &&
+      !!document.getElementById("orb-sidebar")?.contains(document.activeElement);
+    if (isSearchShortcut(e) || sidebarFocused) {
       if (searchOpen()) {
         e.preventDefault();
         searchInputEl?.focus({ preventScroll: true });
@@ -782,7 +793,7 @@ export default function App() {
       }
       return;
     }
-    if (e.metaKey && e.key === "/") {
+    if (hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && e.key === "/") {
       // Core-hosted reference files render through ProjectFileView.
       if (currentProjectFile()) {
         e.preventDefault();
@@ -790,9 +801,10 @@ export default function App() {
       }
       return;
     }
-    if (!e.metaKey) return;
-    if (e.key === "n") (e.preventDefault(), open(null));
-    else if (e.key === "b") (e.preventDefault(), setSidebar(!sidebar()));
+    if (!hasPrimaryModifier(e) || e.altKey || e.shiftKey) return;
+    const key = e.key.toLowerCase();
+    if (key === "n") (e.preventDefault(), open(null));
+    else if (key === "b") (e.preventDefault(), setSidebar(!sidebar()));
     else if (e.key === ",") (e.preventDefault(), onSettings() ? leaveSettings() : openSettings());
     else if (e.key === "[") (e.preventDefault(), nav(-1));
     else if (e.key === "]") (e.preventDefault(), nav(1));
@@ -965,7 +977,7 @@ export default function App() {
   return (
     <div class={`app ${onSettings() ? "settings-view" : ""} ${sidebar() ? "" : "sb-hidden"}`} style={{ "--sb-w": `${onSettings() ? 220 : sbWidth()}px` }}>
       <MentionProjectContext.Provider value={()=>openMission()?.project??currentController()?.slug??effectiveNewProject()}>
-      <FilePanelProvider scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }}>
+      <FilePanelProvider scope={{ mission: fileScopeMission() ?? undefined, project: currentController()?.slug, controller: currentController()?.id }} sidebar={sidebar} onSetSidebar={setSidebar}>
       <button class="sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebar(false)} tabIndex={-1} />
       <aside id="orb-sidebar" class="sidebar">
         <div class="sb-top" data-tauri-drag-region />
@@ -1105,7 +1117,7 @@ export default function App() {
 
       <header class="titlebar" data-tauri-drag-region>
         <div class="tb-left">
-          <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title="Toggle sidebar (⌘B)" onClick={() => setSidebar(!sidebar())}>
+          <button class="icon-btn" aria-label="Toggle sidebar" aria-expanded={sidebar()} aria-controls="orb-sidebar" title={`Toggle sidebar (${sidebarShortcutLabel()})`} onClick={() => setSidebar(!sidebar())}>
             <Ic.SidebarIcon />
           </button>
           <button class="icon-btn" aria-label="Search conversations" title={`Search (${searchShortcutLabel()})`} onClick={openSearch}>
