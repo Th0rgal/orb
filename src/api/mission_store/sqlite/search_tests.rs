@@ -630,6 +630,233 @@ async fn resumes_interrupted_backfill_reconciles_concurrent_writes_and_exceeds_2
 }
 
 #[tokio::test]
+async fn excludes_intermediate_narration_thoughts_and_automatic_wakes_while_keeping_final_messages()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteMissionStore::new(dir.path().to_path_buf(), "alice-final-only")
+        .await
+        .unwrap();
+
+    let mission = store
+        .create_mission(
+            Some("Final messages only search audit"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // 1. Genuine user prompt.
+    let user_msg_id = Uuid::new_v4();
+    store
+        .log_event(
+            mission.id,
+            &AgentEvent::UserMessage {
+                id: user_msg_id,
+                content: "GenuineUserPrompt_7101 please inspect the fallback handler".to_string(),
+                queued: false,
+                mission_id: Some(mission.id),
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // 2. Thinking trace + intermediate narration bubble BEFORE a work tool call.
+    store
+        .log_event(
+            mission.id,
+            &AgentEvent::Thinking {
+                content: "PrivateThoughtTrace_7102 checking internal branches".to_string(),
+                done: true,
+                mission_id: Some(mission.id),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .log_event(
+            mission.id,
+            &AgentEvent::TextOp {
+                mission_id: mission.id,
+                bubble_id: "opencode:narration-1".to_string(),
+                ops: vec![
+                    TextOp::Snapshot {
+                        revision: 1,
+                        text: "IntermediateNarration_7103 let me read the file first.".to_string(),
+                    },
+                    TextOp::Finalize,
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .log_event(
+            mission.id,
+            &AgentEvent::ToolCall {
+                tool_call_id: "call_work_1".to_string(),
+                name: "read_file".to_string(),
+                args: serde_json::json!({ "path": "src/fallback.rs" }),
+                mission_id: Some(mission.id),
+            },
+        )
+        .await
+        .unwrap();
+
+    // 3. Final assistant bubble AFTER the work tool call + joined closing receipt.
+    store
+        .log_event(
+            mission.id,
+            &AgentEvent::TextOp {
+                mission_id: mission.id,
+                bubble_id: "opencode:final-2".to_string(),
+                ops: vec![
+                    TextOp::Snapshot {
+                        revision: 1,
+                        text: "FinalAgentAnswer_7104 fixed the fallback race.".to_string(),
+                    },
+                    TextOp::Finalize,
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .log_event(
+            mission.id,
+            &AgentEvent::AssistantMessage {
+                id: Uuid::new_v4(),
+                content: "IntermediateNarration_7103 let me read the file first.FinalAgentAnswer_7104 fixed the fallback race."
+                    .to_string(),
+                success: true,
+                cost_cents: 0,
+                cost_source: crate::agents::CostSource::Unknown,
+                usage: None,
+                model: None,
+                model_normalized: None,
+                mission_id: Some(mission.id),
+                shared_files: None,
+                resumable: true,
+                completion_evidence: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // 4. Automatic coordinator wakeups / recovery / resume prompts must never index as user messages.
+    for (source, auto_body) in [
+        (
+            Some("background-task".to_string()),
+            "AutoWakePrompt_7105 background shell exited".to_string(),
+        ),
+        (
+            None,
+            "[Automatic recovery] AutoRecoveryPrompt_7106".to_string(),
+        ),
+        (
+            None,
+            "Background task `t1` (`cargo check`) finished. (No captured output was available.) AutoLegacyWake_7107\n\nContinue from here."
+                .to_string(),
+        ),
+    ] {
+        store
+            .log_event(
+                mission.id,
+                &AgentEvent::UserMessage {
+                    id: Uuid::new_v4(),
+                    content: auto_body,
+                    queued: false,
+                    mission_id: Some(mission.id),
+                    source,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // 5. Assistant message followed by a standalone orchestration tool (`start_mission`) stays searchable.
+    store
+        .log_event(
+            mission.id,
+            &AgentEvent::TextOp {
+                mission_id: mission.id,
+                bubble_id: "opencode:orch-msg-3".to_string(),
+                ops: vec![
+                    TextOp::Snapshot {
+                        revision: 1,
+                        text: "OrchestrationLeadIn_7108 launching worker mission.".to_string(),
+                    },
+                    TextOp::Finalize,
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .log_event(
+            mission.id,
+            &AgentEvent::ToolCall {
+                tool_call_id: "call_orch_1".to_string(),
+                name: "mcp__sandboxed__start_mission".to_string(),
+                args: serde_json::json!({ "title": "Worker check" }),
+                mission_id: Some(mission.id),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Check both live incremental state AND full batch rebuild state!
+    for pass in ["incremental", "reconciled"] {
+        if pass == "reconciled" {
+            store.rebuild_search_index().await.unwrap();
+        }
+        for excluded in [
+            "PrivateThoughtTrace_7102",
+            "IntermediateNarration_7103",
+            "AutoWakePrompt_7105",
+            "AutoRecoveryPrompt_7106",
+            "AutoLegacyWake_7107",
+        ] {
+            let res = store
+                .search_conversations(&ConversationSearchQuery {
+                    query: excluded.to_string(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(
+                res.hits.is_empty(),
+                "{pass}: {excluded} must not appear in message search"
+            );
+        }
+
+        for included in [
+            "GenuineUserPrompt_7101",
+            "FinalAgentAnswer_7104",
+            "OrchestrationLeadIn_7108",
+        ] {
+            let res = store
+                .search_conversations(&ConversationSearchQuery {
+                    query: included.to_string(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                res.hits.len(),
+                1,
+                "{pass}: {included} must appear exactly once in message search"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 #[ignore = "synthetic 12k-conversation / 200k-message benchmark; run explicitly with --ignored --nocapture"]
 async fn search_benchmark_12k_conversations_200k_messages() {
     let dir = tempfile::tempdir().unwrap();

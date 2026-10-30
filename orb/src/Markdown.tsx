@@ -410,8 +410,19 @@ function parseBlocks(src: string): Block[] {
 /** Freeze only completed blocks; fences keep blank lines inside the active tail. */
 /** Search the same block content without mounting historical Markdown. */
 export function markdownText(source:string):string{
- const plain=(text:string):string=>text.replace(RICH_TAG,(tag,type:string,attrs:string,inner:string|undefined,off:number)=>parseRichTag(type,attrs,inner,richTagSpan(tag,type,attrs,off,text.length))?.label??tag).replace(/\*\*(.+?)\*\*|`([^`]+)`|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)/g,(_match,bold,code,label)=>bold!==undefined?plain(bold):code??plain(label));
- const blockText=(block:Block):string=>block.t==='hr'?'':block.t==='pre'?block.text:block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(it=>typeof it==='string'?plain(it):[plain(it.text),...(it.sub?.map(blockText)??[])].filter(Boolean).join('\n')).join('\n'):block.t==='table'?[block.heads,...block.rows].map(row=>row.map(plain).join('')).join('\n'):plain(block.text);
+ const plain=(text:string):string=>text.replace(RICH_TAG,(tag,type:string,attrs:string,inner:string|undefined,off:number)=>parseRichTag(type,attrs,inner,richTagSpan(tag,type,attrs,off,text.length))?.label??tag).replace(/(?<!\\)(?:\*\*(.+?)\*\*|`([^`]+)`|!\[([^\]]*)\]\(([^)\s]+)\)|\[((?:`[^`\n]*`|[^\]`\n])+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)\)|(:codex-file-citation\{(?:[^"{}]|"(?:\\.|[^"\\])*")*\})|\*([^*\n]+)\*)/g,(match,bold,code,_alt,imgSrc,label,_href,citation,italic)=>{
+  if(citation!==undefined){
+   const quoted=[...citation.matchAll(/([a-z_]+)\s*=\s*("(?:\\.|[^"\\])*")/g)].find(a=>a[1]==='path')?.[2];
+   try{const path=quoted?JSON.parse(quoted):undefined;if(path)return path.split('/').pop()||path;}catch{}
+   return citation;
+  }
+  if(imgSrc!==undefined)return /^https?:\/\//i.test(imgSrc)||!/^(?!file:)[a-z][a-z0-9+.-]*:/i.test(imgSrc)?'':match;
+  if(bold!==undefined)return plain(bold);
+  if(italic!==undefined)return plain(italic);
+  if(code!==undefined)return code;
+  return plain(label);
+ }).replace(/\\([\\`*_[\]{}()#+.!|>$-])/g,'$1');
+ const blockText=(block:Block):string=>block.t==='hr'?'':block.t==='pre'?(isMermaidLang(block.lang)&&!block.open?'':block.text):block.t==='quote'?markdownText(block.text):(block.t==='ul'||block.t==='ol')?block.items.map(it=>typeof it==='string'?plain(it):[plain(it.text),...(it.sub?.map(blockText)??[])].filter(Boolean).join('\n')).join('\n'):block.t==='table'?[...(block.heads.some(h=>h!=='')?[block.heads]:[]),...block.rows].flatMap(row=>row.map(plain)).filter(Boolean).join('\n'):plain(block.text);
  return parseMarkdown(source).map(blockText).filter(Boolean).join('\n');
 }
 
@@ -798,7 +809,7 @@ function renderBlockSlot(block: () => Block, compact?: boolean): JSX.Element {
 // Parsed blocks of recently shown messages: rows that remount while a long
 // transcript scrolls skip re-parsing. Blocks are immutable data.
 const parsedMessages = new Map<string, Block[]>();
-export function MdView(p: { text: string; compact?: boolean }) {
+export function MdView(p: { text: string; compact?: boolean; searchable?: boolean }) {
   const parse = incrementalMarkdown();
   let parsedOnce = false;
   const blocks = createMemo(() => {
@@ -811,7 +822,7 @@ export function MdView(p: { text: string; compact?: boolean }) {
     return out;
   });
   return (
-    <div class={`md ${p.compact ? "md-compact" : ""}`}>
+    <div class={`md ${p.compact ? "md-compact" : ""}`} data-find-message={p.searchable ? "" : undefined}>
       <Index each={blocks()}>{(b) => renderBlockSlot(b, p.compact)}</Index>
     </div>
   );

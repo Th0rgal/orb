@@ -38,7 +38,7 @@ import { TurnRecap } from "../TurnRecap";
 import { Transcript, UserTurn, applyStreamEvent, applyStreamEvents, type StreamItem } from "../Transcript";
 import { cacheRemember } from "../pageCache";
 import { antigravityBaseModel, defaultEffortLabel, effortLabel, normalizeEffort, supportedEfforts } from "../effort";
-import { retainTranscript, loadOlderTranscript, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscript, peekTranscriptHeight, putTranscript, putTranscriptHeight, putTranscriptItems, transcriptVersion } from "../missionCache";
+import { retainTranscript, loadOlderTranscript, prepareTranscriptSearch, refreshTranscript, loadTranscript, peekReadyTranscript, peekTranscript, peekTranscriptHeight, putTranscript, putTranscriptHeight, putTranscriptItems, transcriptVersion } from "../missionCache";
 import { ConversationSkeleton, DelayedTranscriptSkeleton, ActivitySkeleton } from "../Skeleton";
 import { visibleTranscript, removeUsers, mapUsers, reuseUnchanged } from "../transcriptModel";
 import { pollWhileVisible } from "../poll";
@@ -492,8 +492,18 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     })().finally(()=>olderPending=undefined);
     return olderPending;
   };
+  const needsPrepareSearch=()=>{
+    if(!p.id||disposed)return false;
+    const ready=peekReadyTranscript(p.id);
+    return Boolean(ready?.hasOlder&&!ready.spineComplete);
+  };
   const prepareSearch=async(signal:AbortSignal)=>{
-    while(!disposed&&!signal.aborted&&peekReadyTranscript(p.id)?.hasOlder)await loadOlder();
+    if(!p.id||disposed||signal.aborted||!needsPrepareSearch())return;
+    const snap=await prepareTranscriptSearch(p.id,signal);
+    if(disposed||signal.aborted)return;
+    let next=heldAfterHistory(snap.stream,liveEvents).reduce((state,event)=>applyStreamEvent(state,event),snap.items);
+    for(const item of items())if(item.kind==='user'&&item.queued&&item.messageId)next=applyStreamEvent(next,{type:'user_message',data:{id:item.messageId,content:item.text,queued:true}});
+    setItems(next);
   };
   // Core rewrites a local run's reply in place and never streams it, so a
   // transcript read mid-run stays partial. Re-read once the native worker
@@ -1124,7 +1134,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
             <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
               <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">

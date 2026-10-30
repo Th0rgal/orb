@@ -261,6 +261,17 @@ function BackgroundWakeRow(p: { wake: BackgroundWake }) {
   );
 }
 
+export function userMessageText(raw: string, source?: string): string | null {
+  if ((source && AUTOMATIC_SOURCES.has(source)) || backgroundWake(raw, source) || isAutomaticRecovery(raw) || isResumePrompt(raw)) return null;
+  const fork = forkContext(raw);
+  if (fork && fork.request === undefined) return null;
+  const presented = messagePresentation(fork?.request ?? raw);
+  const imgs = messageImages(presented.text);
+  const goal = goalDraft(imgs.text);
+  if (goal.kind === "goal") return goal.objective;
+  return planObjective(imgs.text) ?? imgs.text;
+}
+
 export function UserTurn(p: { messageKey?: string; text: string; images?: DraftImage[]; source?: string; attached?: boolean; pending?: boolean; /** Handed to the agent; its turn has not started yet. */ sending?: boolean; onSend?: (text: string) => boolean | Promise<boolean> }) {
   const fork = createMemo(() => forkContext(p.text));
   // An edited message's request is the bubble; its history collapses above it.
@@ -316,7 +327,7 @@ export function UserTurn(p: { messageKey?: string; text: string; images?: DraftI
           <For each={context().messages}>{m => <div class="fork-context-message"><small>{m.role === "user" ? "You" : m.role === "assistant" ? "Assistant" : "Context"}</small><p>{m.content}</p></div>}</For>
         </details>}
       </Show>
-      <Show when={editable()}><span>{goal().kind === "goal" ? (goal() as { objective: string }).objective : plan() ?? images().text}</span></Show>
+      <Show when={editable()}><span data-find-message={!p.source || !AUTOMATIC_SOURCES.has(p.source) ? "" : undefined}>{goal().kind === "goal" ? (goal() as { objective: string }).objective : plan() ?? images().text}</span></Show>
       <Show when={p.attached || presentation().attached}><small class="user-context">Attached context</small></Show>
       <Show when={editable() && p.onSend}><button class="icon-btn prompt-edit" aria-label="Edit prompt" onClick={edit}><Ic.PencilIcon size={14} /></button></Show>
       </>}>
@@ -655,7 +666,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
   );
 }
 
-export function Transcript(p: { sizeKey?: string; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader }) {
+export function Transcript(p: { sizeKey?: string; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; needsPrepareSearch?:()=>boolean; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -716,7 +727,7 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
     if(next.length<prev.length||prev.some((row,i)=>row!==next[i]&&row.key!==next[i].key)){setTurns(reconcile(next,{key:'key'}));return;}
     batch(()=>{for(let i=0;i<next.length;i++)if(next[i]!==prev[i])setTurns(i,reconcile(next[i],{key:'key'}));});
   });
-  const searchText=(turn:{items:Grouped[]})=>turn.items.map(item=>item.kind==='work'?item.items.map(t=>t.kind==='think'?t.text:t.kind==='text'?markdownText(t.text):`${t.name} ${resultText(t.args)} ${resultText(t.result)}`).join('\n'):item.kind==='tool'?`${item.name} ${resultText(item.result)}`:item.kind==='text'?markdownText(item.text):item.text).join('\n');
+  const searchText=(turn:{items:Grouped[]})=>turn.items.map(item=>item.kind==='user'?(reminders().has(item.key)?'':userMessageText(item.text,item.source)??''):item.kind==='text'?markdownText(remoteLog(item.text).text):'').filter(Boolean).join('\n');
   // Rough height of a turn before it is first measured, from its text: rows
   // paged in above the reader start close to their real size, so the scroll
   // correction when they are measured is small instead of hundreds of px.
@@ -725,7 +736,7 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
   const turnTip = useTooltip<TurnTiming>(TURN_TIP_ID, t => <><div class="row-tip-title">{turnDate(t.completedAt)}</div><Show when={t.workedMs !== undefined}><div class="row-tip-meta">Worked for {workedFor(t.workedMs!)}</div></Show></>, { placement: "top-end", width: 200, class: "turn-tip" });
   return (
     <TurnTipContext.Provider value={turnTip}><FollowUpsContext.Provider value={followUps}>
-      <ToolCallLoaderContext.Provider value={p.loadToolCall}><DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
+      <ToolCallLoaderContext.Provider value={p.loadToolCall}><DisclosureState.Provider value={disclosures}><VirtualTurns items={turnStore} estimate={estimateTurn} text={searchText} prepare={p.prepareSearch} needsPrepare={p.needsPrepareSearch} sizeKey={p.sizeKey}>{turn=><For each={turn.items}>
         {(item) => {
           switch (item.kind) {
             case "work":
@@ -823,8 +834,8 @@ function AssistantText(p: { text: string; live?: boolean; timing?: TurnTiming })
     }
   };
   return <>
-    <Show when={!p.live} fallback={<FileReferenceContext.Provider value={undefined}><MdView text={content().text} compact /></FileReferenceContext.Provider>}>
-      <FileReferenceContext.Provider value={references}><MdView text={content().text} compact /></FileReferenceContext.Provider>
+    <Show when={!p.live} fallback={<FileReferenceContext.Provider value={undefined}><MdView text={content().text} compact searchable /></FileReferenceContext.Provider>}>
+      <FileReferenceContext.Provider value={references}><MdView text={content().text} compact searchable /></FileReferenceContext.Provider>
     </Show>
     <Show when={content().details}><details class="legacy-log"><summary>Original execution log</summary><pre>{content().details}</pre></details></Show>
     <Show when={content().text.trim()}>

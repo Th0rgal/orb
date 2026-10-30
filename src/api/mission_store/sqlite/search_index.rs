@@ -17,7 +17,7 @@ use std::sync::Weak;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-pub(crate) const SEARCH_SCHEMA_VERSION: u32 = 1;
+pub(crate) const SEARCH_SCHEMA_VERSION: u32 = 2;
 const BACKFILL_BATCH_SIZE: usize = 50;
 const FTS_CANDIDATE_CAP: usize = 240;
 const MAX_TOOL_SUMMARY_BYTES: usize = 4096;
@@ -417,6 +417,91 @@ fn upsert_search_doc(conn: &Connection, mission_id: &str, doc: &DesiredDoc) -> R
     Ok(())
 }
 
+const RESUME_PROMPT_EXACT: &str = "Your previous turn was interrupted before it finished. Check what is already done, then continue from there. Do not redo finished work.";
+
+pub(crate) fn is_automatic_user_message(content: &str, metadata: &serde_json::Value) -> bool {
+    if let Some(source) = metadata.get("source").and_then(|v| v.as_str()) {
+        if matches!(
+            source,
+            "background-task"
+                | "scheduler"
+                | "idle-worker-watchdog"
+                | "transport_auto_resume"
+                | "remote-build-terminal"
+                | "task-board"
+        ) {
+            return true;
+        }
+    }
+    if metadata.get("backgroundWake").is_some()
+        || metadata.get("resumePrompt").and_then(|v| v.as_bool()) == Some(true)
+    {
+        return true;
+    }
+    let trimmed = content.trim();
+    if trimmed == RESUME_PROMPT_EXACT {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("[automatic recovery]")
+        || lower.starts_with("[automatic resume after a usage limit]")
+    {
+        return true;
+    }
+    if trimmed.starts_with("Background task `") && trimmed.ends_with("\n\nContinue from here.") {
+        return true;
+    }
+    false
+}
+
+pub(crate) fn is_orchestration_tool_name(tool_name: Option<&str>) -> bool {
+    let Some(raw) = tool_name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let lower = raw.to_ascii_lowercase();
+    let mut n = lower.strip_prefix("functions.").unwrap_or(&lower);
+    if n.starts_with("mcp__") {
+        if let Some(idx) = n.rfind("__") {
+            if idx > 3 {
+                n = &n[idx + 2..];
+            }
+        }
+    }
+    if let Some(idx) = n.rfind('.') {
+        n = &n[idx + 1..];
+    }
+    if let Some(idx) = n.rfind(':') {
+        n = &n[idx + 1..];
+    }
+    n = n.strip_prefix("mcp_").unwrap_or(n);
+    for root in ["sandboxed", "orchestrator", "paloma"] {
+        if let Some(mut rest) = n.strip_prefix(root) {
+            while let Some(next) = rest
+                .strip_prefix("_sh")
+                .or_else(|| rest.strip_prefix("-sh"))
+                .or_else(|| rest.strip_prefix("_assistant"))
+                .or_else(|| rest.strip_prefix("-assistant"))
+                .or_else(|| rest.strip_prefix("_orchestrator"))
+                .or_else(|| rest.strip_prefix("-orchestrator"))
+            {
+                rest = next;
+            }
+            if let Some(stripped) = rest.strip_prefix('_').or_else(|| rest.strip_prefix('-')) {
+                n = stripped;
+                break;
+            }
+        }
+    }
+    matches!(
+        n,
+        "start_mission"
+            | "create_mission"
+            | "spawn_worker"
+            | "spawn_managed_machine"
+            | "destroy_managed_machine"
+    )
+}
+
 pub(crate) fn is_generated_remote_job_status_text(
     content: &str,
     metadata: &serde_json::Value,
@@ -533,7 +618,9 @@ pub(crate) fn on_event_persisted(
 
     match event_type {
         "user_message" => {
-            if metadata.get("queued").and_then(|v| v.as_bool()) == Some(true) {
+            if metadata.get("queued").and_then(|v| v.as_bool()) == Some(true)
+                || is_automatic_user_message(resolved_content, metadata)
+            {
                 return Ok(());
             }
             let body = resolved_content.trim();
@@ -656,10 +743,23 @@ pub(crate) fn on_event_persisted(
             )
         }
         "tool_call" => {
+            let turn_anchor = current_turn_anchor_seq(conn, &mid, sequence)?;
+            // Assistant text emitted before a work tool call in the same turn is
+            // intermediate narration folded into WorkFold, not a final agent message.
+            if !is_orchestration_tool_name(tool_name) {
+                conn.execute(
+                    "DELETE FROM mission_search_docs
+                     WHERE mission_id = ?1
+                       AND role = 'assistant'
+                       AND sequence >= ?2
+                       AND sequence < ?3",
+                    params![&mid, turn_anchor, sequence],
+                )
+                .map_err(|e| e.to_string())?;
+            }
             let Some(summary) = extract_safe_tool_target(tool_name, resolved_content) else {
                 return Ok(());
             };
-            let turn_anchor = current_turn_anchor_seq(conn, &mid, sequence)?;
             let locator = format!("turn:tools:{turn_anchor}");
             let doc_key = format!("{mid}:{locator}");
             let existing: Option<(Option<i64>, String)> = conn
@@ -724,19 +824,45 @@ fn is_turn_native_receipt(
 ) -> Result<bool, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT body_text
-             FROM mission_search_docs
+            "SELECT content, content_file, event_id, metadata
+             FROM mission_events
              WHERE mission_id = ?1
                AND sequence >= ?2
-               AND locator LIKE 'msg:bubble:%'
+               AND event_type = 'assistant_message_canonical'
              ORDER BY sequence ASC",
         )
         .map_err(|e| e.to_string())?;
-    let bubbles = stmt
-        .query_map(params![mid, turn_anchor_seq], |r| r.get::<_, String>(0))
+    let rows = stmt
+        .query_map(params![mid, turn_anchor_seq], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    let mut bubbles = Vec::new();
+    for (inline, file, event_id, meta_raw) in rows {
+        let metadata: serde_json::Value = meta_raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let bubble_id = metadata
+            .get("bubble_id")
+            .and_then(|v| v.as_str())
+            .or(event_id.as_deref())
+            .unwrap_or("text_delta_latest");
+        if bubble_id.starts_with("antigravity:") || bubble_id.starts_with("opencode:") {
+            let text = SqliteMissionStore::load_content(inline.as_deref(), file.as_deref());
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                bubbles.push(trimmed.to_string());
+            }
+        }
+    }
     if bubbles.is_empty() {
         return Ok(false);
     }
@@ -744,7 +870,7 @@ fn is_turn_native_receipt(
         return Ok(true);
     }
     let joined = bubbles.join("");
-    Ok(joined.trim() == trimmed_reply)
+    Ok(joined.trim() == trimmed_reply || bubbles.join("\n\n").trim() == trimmed_reply)
 }
 
 /// Incremental hook invoked inside `sqlite_cloud::save` transaction so cloud
@@ -1022,6 +1148,7 @@ fn load_and_fold_mission_events(
     let mut docs = Vec::new();
     let mut turn_anchor_seq: i64 = 0;
     let mut turn_native_bubbles: Vec<String> = Vec::new();
+    let mut turn_pending_assistant: Vec<DesiredDoc> = Vec::new();
     let mut turn_pending_canonical: Option<DesiredDoc> = None;
     let mut turn_tools: Vec<String> = Vec::new();
     let mut turn_tools_first_seq: Option<i64> = None;
@@ -1029,11 +1156,13 @@ fn load_and_fold_mission_events(
 
     let flush_turn = |docs: &mut Vec<DesiredDoc>,
                       anchor_seq: i64,
+                      pending_assistant: &mut Vec<DesiredDoc>,
                       pending_canonical: &mut Option<DesiredDoc>,
                       tools: &mut Vec<String>,
                       tools_first_seq: &mut Option<i64>,
                       tools_ts: &mut String,
                       native_bubbles: &mut Vec<String>| {
+        docs.append(pending_assistant);
         if let Some(canon) = pending_canonical.take() {
             docs.push(canon);
         }
@@ -1073,6 +1202,7 @@ fn load_and_fold_mission_events(
                 flush_turn(
                     &mut docs,
                     turn_anchor_seq,
+                    &mut turn_pending_assistant,
                     &mut turn_pending_canonical,
                     &mut turn_tools,
                     &mut turn_tools_first_seq,
@@ -1080,6 +1210,9 @@ fn load_and_fold_mission_events(
                     &mut turn_native_bubbles,
                 );
                 turn_anchor_seq = seq;
+                if is_automatic_user_message(&content, &metadata) {
+                    continue;
+                }
                 let body = content.trim();
                 if body.is_empty() {
                     continue;
@@ -1113,8 +1246,9 @@ fn load_and_fold_mission_events(
                 if bubble_id.starts_with("antigravity:") || bubble_id.starts_with("opencode:") {
                     turn_native_bubbles.push(body.to_string());
                     let locator = format!("msg:bubble:{bubble_id}");
-                    docs.push(DesiredDoc {
-                        doc_key: format!("{mission_id}:{locator}"),
+                    let doc_key = format!("{mission_id}:{locator}");
+                    let next_doc = DesiredDoc {
+                        doc_key: doc_key.clone(),
                         locator,
                         role: "assistant".to_string(),
                         sequence: Some(seq),
@@ -1122,7 +1256,15 @@ fn load_and_fold_mission_events(
                         timestamp: ts,
                         title_text: String::new(),
                         body_text: body.to_string(),
-                    });
+                    };
+                    if let Some(existing) = turn_pending_assistant
+                        .iter_mut()
+                        .find(|d| d.doc_key == doc_key)
+                    {
+                        *existing = next_doc;
+                    } else {
+                        turn_pending_assistant.push(next_doc);
+                    }
                 } else {
                     turn_pending_canonical = Some(DesiredDoc {
                         doc_key: format!("{mission_id}:turn_reply:{turn_anchor_seq}"),
@@ -1149,7 +1291,8 @@ fn load_and_fold_mission_events(
                 }
                 if !turn_native_bubbles.is_empty() {
                     let is_receipt = turn_native_bubbles.last().map(|s| s.as_str()) == Some(body)
-                        || turn_native_bubbles.join("").trim() == body;
+                        || turn_native_bubbles.join("").trim() == body
+                        || turn_native_bubbles.join("\n\n").trim() == body;
                     if is_receipt {
                         continue;
                     }
@@ -1159,7 +1302,7 @@ fn load_and_fold_mission_events(
                     Some(id) => format!("msg:id:{id}"),
                     None => format!("msg:seq:{seq}"),
                 };
-                docs.push(DesiredDoc {
+                turn_pending_assistant.push(DesiredDoc {
                     doc_key: format!("{mission_id}:{locator}"),
                     locator,
                     role: "assistant".to_string(),
@@ -1171,6 +1314,10 @@ fn load_and_fold_mission_events(
                 });
             }
             "tool_call" => {
+                if !is_orchestration_tool_name(tool_name.as_deref()) {
+                    turn_pending_assistant.clear();
+                    turn_pending_canonical = None;
+                }
                 if let Some(summary) = extract_safe_tool_target(tool_name.as_deref(), &content) {
                     let current_len: usize = turn_tools.iter().map(|s| s.len() + 1).sum();
                     if !turn_tools.iter().any(|existing| existing == &summary)
@@ -1191,6 +1338,7 @@ fn load_and_fold_mission_events(
     flush_turn(
         &mut docs,
         turn_anchor_seq,
+        &mut turn_pending_assistant,
         &mut turn_pending_canonical,
         &mut turn_tools,
         &mut turn_tools_first_seq,
