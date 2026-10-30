@@ -535,6 +535,8 @@ export default function SearchDialog(p: SearchDialogProps) {
 
   const handleDialogKeyDown = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.isComposing || composing) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.tagName === "SELECT") return;
     const count = activeItemsCount();
     if (e.key === "ArrowDown") {
       if (count > 0) {
@@ -555,12 +557,7 @@ export default function SearchDialog(p: SearchDialogProps) {
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "BUTTON" || target.tagName === "SELECT") &&
-        !target.hasAttribute("data-cs-index")
-      ) {
+      if (target && target.tagName === "BUTTON" && !target.hasAttribute("data-cs-index")) {
         return;
       }
       if (count > 0) {
@@ -1222,52 +1219,82 @@ export default function SearchDialog(p: SearchDialogProps) {
                               </Match>
 
                               <Match when={previewData()}>
-                                {ctx => (
-                                  <>
-                                    <Show when={!ctx().target_found && hit().locator !== "title"}>
-                                      <div class="sd-stale-note" role="status">
-                                        Passage updated since indexing — showing latest context.
-                                      </div>
-                                    </Show>
-                                    <Show
-                                      when={ctx().messages.length > 0}
-                                      fallback={
-                                        <div class="sd-preview-quiet">
-                                          No messages recorded in this conversation yet.
+                                {ctx => {
+                                  const fallbackTurns = () => {
+                                    const local = p.recentMissions.find(
+                                      m => m.id === hit().mission_id,
+                                    );
+                                    return local ? recentTurns(local) : [];
+                                  };
+                                  return (
+                                    <>
+                                      <Show when={!ctx().target_found && hit().locator !== "title"}>
+                                        <div class="sd-stale-note" role="status">
+                                          Passage updated since indexing — showing latest context.
                                         </div>
-                                      }
-                                    >
-                                      <div class="sd-turn-stream">
-                                        <For each={ctx().messages}>
-                                          {msg => (
-                                            <div
-                                              class="sd-turn"
-                                              classList={{
-                                                "is-target":
-                                                  msg.is_target && hit().locator !== "title",
-                                              }}
-                                            >
-                                              <div class="sd-turn-meta">
-                                                <span class="sd-turn-role">
-                                                  {roleLabel(msg.role)}
-                                                </span>
-                                                <span class="sd-turn-time">
-                                                  {formatShortDate(msg.timestamp)}
-                                                </span>
+                                      </Show>
+                                      <Show
+                                        when={ctx().messages.length > 0}
+                                        fallback={
+                                          <Show
+                                            when={fallbackTurns().length > 0}
+                                            fallback={
+                                              <div class="sd-preview-quiet">
+                                                {hit().locator === "title"
+                                                  ? "Press Enter to open this conversation."
+                                                  : "No messages recorded in this conversation yet."}
                                               </div>
-                                              <div class="sd-turn-body">
-                                                <HighlightedText
-                                                  text={clampPreviewContent(msg.content)}
-                                                  highlights={msg.highlights}
-                                                />
-                                              </div>
+                                            }
+                                          >
+                                            <div class="sd-turn-stream">
+                                              <For each={fallbackTurns()}>
+                                                {turn => (
+                                                  <div class="sd-turn">
+                                                    <div class="sd-turn-meta">
+                                                      <span class="sd-turn-role">
+                                                        {roleLabel(turn.role)}
+                                                      </span>
+                                                    </div>
+                                                    <div class="sd-turn-body">{turn.text}</div>
+                                                  </div>
+                                                )}
+                                              </For>
                                             </div>
-                                          )}
-                                        </For>
-                                      </div>
-                                    </Show>
-                                  </>
-                                )}
+                                          </Show>
+                                        }
+                                      >
+                                        <div class="sd-turn-stream">
+                                          <For each={ctx().messages}>
+                                            {msg => (
+                                              <div
+                                                class="sd-turn"
+                                                classList={{
+                                                  "is-target":
+                                                    msg.is_target && hit().locator !== "title",
+                                                }}
+                                              >
+                                                <div class="sd-turn-meta">
+                                                  <span class="sd-turn-role">
+                                                    {roleLabel(msg.role)}
+                                                  </span>
+                                                  <span class="sd-turn-time">
+                                                    {formatShortDate(msg.timestamp)}
+                                                  </span>
+                                                </div>
+                                                <div class="sd-turn-body">
+                                                  <HighlightedText
+                                                    text={clampPreviewContent(msg.content)}
+                                                    highlights={msg.highlights}
+                                                  />
+                                                </div>
+                                              </div>
+                                            )}
+                                          </For>
+                                        </div>
+                                      </Show>
+                                    </>
+                                  );
+                                }}
                               </Match>
                             </Switch>
                           </div>
