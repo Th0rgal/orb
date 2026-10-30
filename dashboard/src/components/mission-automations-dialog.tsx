@@ -290,6 +290,16 @@ export function MissionAutomationsDialog({
   const [expandedAutomationId, setExpandedAutomationId] = useState<string | null>(null);
   const [executions, setExecutions] = useState<AutomationExecution[]>([]);
   const [executionsLoading, setExecutionsLoading] = useState(false);
+  const [executionsError, setExecutionsError] = useState<string | null>(null);
+  const executionsRequestId = useRef(0);
+
+  useEffect(() => {
+    setExpandedAutomationId(null);
+    setExecutions([]);
+    setExecutionsError(null);
+    setExecutionsLoading(false);
+    return () => { executionsRequestId.current += 1; };
+  }, [open, missionId]);
 
   // -- Clipboard --
   const [copiedWebhookId, setCopiedWebhookId] = useState<string | null>(null);
@@ -757,22 +767,34 @@ export function MissionAutomationsDialog({
     }
   };
 
-  const handleToggleExecutions = async (automationId: string) => {
-    if (expandedAutomationId === automationId) {
-      setExpandedAutomationId(null);
-      setExecutions([]);
-      return;
-    }
-    setExpandedAutomationId(automationId);
+  const loadExecutions = async (automationId: string) => {
+    const requestId = ++executionsRequestId.current;
+    setExecutions([]);
+    setExecutionsError(null);
     setExecutionsLoading(true);
     try {
       const data = await getAutomationExecutions(automationId);
-      setExecutions(data);
-    } catch {
-      setExecutions([]);
+      if (executionsRequestId.current === requestId) setExecutions(data);
+    } catch (error) {
+      if (executionsRequestId.current === requestId) {
+        setExecutionsError(error instanceof Error ? error.message : 'Failed to load execution history');
+      }
     } finally {
-      setExecutionsLoading(false);
+      if (executionsRequestId.current === requestId) setExecutionsLoading(false);
     }
+  };
+
+  const handleToggleExecutions = (automationId: string) => {
+    if (expandedAutomationId === automationId) {
+      executionsRequestId.current += 1;
+      setExpandedAutomationId(null);
+      setExecutions([]);
+      setExecutionsError(null);
+      setExecutionsLoading(false);
+      return;
+    }
+    setExpandedAutomationId(automationId);
+    void loadExecutions(automationId);
   };
 
   const handleCopyWebhookUrl = (url: string, automationId: string) => {
@@ -1527,6 +1549,11 @@ export function MissionAutomationsDialog({
                             {executionsLoading ? (
                               <div className="text-xs text-white/40 py-2">
                                 Loading executions...
+                              </div>
+                            ) : executionsError ? (
+                              <div role="alert" className="text-xs text-white/50 py-2">
+                                <p>{executionsError}</p>
+                                <button onClick={() => void loadExecutions(automation.id)} className="mt-2 underline">Retry execution history</button>
                               </div>
                             ) : executions.length === 0 ? (
                               <div className="text-xs text-white/30 py-2">
