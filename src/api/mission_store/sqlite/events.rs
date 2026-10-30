@@ -640,7 +640,7 @@ impl SqliteMissionStore {
         mission_id: Uuid,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let limit = limit.clamp(1, 50_000) as i64;
         tokio::task::spawn_blocking(move || {
@@ -992,7 +992,7 @@ impl SqliteMissionStore {
         before_ts: Option<&str>,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let before_ts = before_ts.map(|s| s.to_string());
         let limit = limit.min(500) as i64;
 
@@ -1063,7 +1063,7 @@ impl SqliteMissionStore {
         mission_id: Uuid,
         tool_call_id: &str,
     ) -> Result<Vec<StoredEvent>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let tool_call_id = tool_call_id.to_string();
 
@@ -1123,7 +1123,7 @@ impl SqliteMissionStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let limit = limit as i64;
 
@@ -1162,7 +1162,7 @@ impl SqliteMissionStore {
         if tool_call_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let ids = tool_call_ids.to_vec();
 
@@ -1214,7 +1214,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn max_event_sequence(&self, mission_id: Uuid) -> Result<i64, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
 
         tokio::task::spawn_blocking(move || {
@@ -1241,7 +1241,7 @@ impl SqliteMissionStore {
         if n == 0 {
             return Ok(None);
         }
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let types: Vec<String> = anchor_types.iter().map(|s| s.to_string()).collect();
         // OFFSET is zero-based: the Nth-most-recent row is at offset N-1.
@@ -1274,7 +1274,7 @@ impl SqliteMissionStore {
         mission_id: Uuid,
         event_types: Option<&[&str]>,
     ) -> Result<usize, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let types: Option<Vec<String>> =
             event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
@@ -1311,7 +1311,7 @@ impl SqliteMissionStore {
         mission_id: Uuid,
         event_types: Option<&[&str]>,
     ) -> Result<HashMap<String, usize>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mid = mission_id.to_string();
         let types: Option<Vec<String>> =
             event_types.map(|t| t.iter().map(|s| s.to_string()).collect());

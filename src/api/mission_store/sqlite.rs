@@ -158,8 +158,43 @@ pub struct SqliteMissionStore {
 const PALOMA_DECISIONS_KEPT: i64 = 10_000;
 const PALOMA_DECISION_PRUNE_EVERY: i64 = 500;
 
-/// Read connections opened next to the writer.
-const READ_CONNECTIONS: usize = 4;
+/// Default read connections opened next to the writer (`SANDBOXED_SQLITE_READ_CONNECTIONS`).
+#[cfg(not(test))]
+const DEFAULT_READ_CONNECTIONS: usize = 16;
+#[cfg(test)]
+const DEFAULT_READ_CONNECTIONS: usize = 4;
+
+fn sqlite_read_connections() -> usize {
+    std::env::var("SANDBOXED_SQLITE_READ_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_READ_CONNECTIONS)
+}
+
+fn configure_sqlite_connection(conn: &Connection, is_reader: bool) -> Result<(), String> {
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
+    // In WAL mode, synchronous = NORMAL is crash-safe and avoids fsyncing on
+    // every single event/usage write; cache_size = -65536 gives a 64 MiB page
+    // cache instead of SQLite's 2 MiB default on multi-GB mission databases.
+    #[cfg(not(test))]
+    let pragmas = "PRAGMA synchronous = NORMAL;
+                   PRAGMA temp_store = MEMORY;
+                   PRAGMA cache_size = -32768;
+                   PRAGMA mmap_size = 268435456;
+                   PRAGMA wal_autocheckpoint = 4000;";
+    #[cfg(test)]
+    let pragmas = "PRAGMA synchronous = NORMAL;
+                   PRAGMA temp_store = MEMORY;";
+    conn.execute_batch(pragmas)
+        .map_err(|e| format!("Failed to configure SQLite pragmas: {}", e))?;
+    if is_reader {
+        conn.pragma_update(None, "query_only", true)
+            .map_err(|e| format!("Failed to make the connection read-only: {}", e))?;
+    }
+    Ok(())
+}
 
 impl SqliteMissionStore {
     /// A connection for a query that only reads committed state.
@@ -424,8 +459,7 @@ impl SqliteMissionStore {
             // timeout, the second writer's DDL fails with SQLITE_BUSY and aborts
             // store init (→ silent in-memory fallback). Make concurrent writers
             // wait for the lock instead.
-            conn.busy_timeout(std::time::Duration::from_secs(10))
-                .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
+            configure_sqlite_connection(&conn, false)?;
 
             // Run schema
             conn.execute_batch(cloud::SCHEMA)
@@ -443,16 +477,12 @@ impl SqliteMissionStore {
                 .map_err(|e| format!("Failed to install transfer cleanup: {e}"))?;
             let needs_search_backfill = search_index::ensure_schema(&conn)?;
 
-            let mut readers = Vec::with_capacity(READ_CONNECTIONS);
-            for _ in 0..READ_CONNECTIONS {
+            let read_pool_size = sqlite_read_connections();
+            let mut readers = Vec::with_capacity(read_pool_size);
+            for _ in 0..read_pool_size {
                 let reader = Connection::open(&db_path)
                     .map_err(|e| format!("Failed to open SQLite read connection: {}", e))?;
-                reader
-                    .busy_timeout(std::time::Duration::from_secs(10))
-                    .map_err(|e| format!("Failed to set busy_timeout: {}", e))?;
-                reader
-                    .pragma_update(None, "query_only", true)
-                    .map_err(|e| format!("Failed to make the connection read-only: {}", e))?;
+                configure_sqlite_connection(&reader, true)?;
                 readers.push(Arc::new(Mutex::new(reader)));
             }
 
