@@ -461,6 +461,10 @@ struct ConsultModelParams {
     workspace_id: Option<String>,
     #[serde(default)]
     remote_node_id: Option<String>,
+    #[serde(default)]
+    managed_from_snapshot: Option<String>,
+    #[serde(default)]
+    managed_ttl_minutes: Option<u64>,
 }
 
 fn normalize_model_token(raw: &str) -> String {
@@ -1784,7 +1788,7 @@ impl AssistantMcp {
             ToolDefinition { name: "get_cloud_execution".into(), description: "Read a bounded page of durable hosted turns, external identities and results. Defaults to the latest turn and 4096 characters per result/detail; prompts are omitted. Pass offset=0 to read from the beginning. Follow page.next_offset for subsequent turns. To continue text, select that turn with offset and limit=1, then pass its text_slices field's next_offset as text_offset. Character offsets are Unicode scalar values. Poll the last unfinished turn again until terminal; revision changes as execution advances. Artifact/branch payloads are omitted; counts are included. Transport loss is not completion.".into(), input_schema: json!({"type":"object","required":["mission_id"],"properties":{"mission_id":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":5},"text_offset":{"type":"integer","minimum":0},"text_limit":{"type":"integer","minimum":1,"maximum":8192},"include_prompt":{"type":"boolean"}}}) },
             ToolDefinition {
                 name: "start_mission".to_string(),
-                description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. To consult another model (review, second opinion, very hard read-only question), use consult_model instead: it creates the read-only opencode child (same project and machine, writer=false) and resolves short model aliases. For compatibility, a native agent name (codex/claudecode/antigravity/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
+                description: "Start a new attempt on a work item. Pass project+track (the durable item) together with a stable idempotency_key; the server atomically declares/revises the track, reserves its owner lease, links the mission, and supersedes the previous owner. Retrying the same logical dispatch MUST reuse the key. Missions are attempts, not the work itself — use get_project_tasks for the declared roadmap and its separate unplanned_attempts. Set backend explicitly when possible. Child/subagent missions default to Boat (auto-managed, falling back to auto across least-loaded static nodes when Boat is disabled or the harness lacks managed auth); pass remote_node_id=\"same\" only when the child must share or fork the parent's uncommitted local workspace on the same machine. For Codex GPT-5.6/5.5/5.4, set fast_mode=true to request the native fast service tier; this consumes ChatGPT credits faster. To consult another model (review, second opinion, very hard read-only question), use consult_model instead: it creates the read-only opencode child (same project, Boat auto-managed by default or remote_node_id=\"same\", writer=false) and resolves short model aliases. For compatibility, a native agent name (codex/claudecode/antigravity/grok) selects the matching backend when backend is omitted; ordinary library agent names do not. Pass project/track/intent/github_pr/tags so the mission carries structured metadata (so watchdogs/dashboards don't have to parse the title). Reviewers and certifiers must use writer=false: the server tags them pr-readonly and blocks git/gh mutations. Any PR-changing mission must use writer=true; the API rejects concurrent writers for the same PR and automatically runs writers in persistent /goal mode so a normal one-turn model stop cannot masquerade as completion. Codex native /goal objectives are limited to 4000 Unicode characters, including automatically promoted writer prompts; provide a bounded objective and put supporting detail in referenced artifacts. Oversized objectives are rejected before dispatch and are never truncated.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["title", "prompt"],
@@ -1830,15 +1834,18 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "consult_model".to_string(),
-                description: "Ask another model a question (review, second opinion, very hard read-only question) without hand-building a mission. Creates a child mission in the caller's project, on the caller's machine and workspace, with backend=opencode, model_override=<provider>/<model> and writer=false (pr-readonly) unless read_only=false. `model` is a full <provider>/<model> id or a short alias (gpt-6-astra, fable-5.1, opus-5.5); unknown or ambiguous names are rejected with the valid ids. It returns {mission_id} at once and never waits: poll get_consult_result(mission_id) until it returns the answer.".to_string(),
+                description: "Ask another model a question (review, second opinion, very hard read-only question) without hand-building a mission. Creates a child mission in the caller's project with backend=opencode, model_override=<provider>/<model> and writer=false (pr-readonly) unless read_only=false. Subagents run on Boat (auto-managed, or auto across least-loaded static nodes when Boat is disabled) by default rather than occupying the caller's machine; Boat VMs start clean (seeing committed/PR/snapshot state), so pass remote_node_id=\"same\" only when uncommitted local workspace files must be inspected in place. `model` is a full <provider>/<model> id or a short alias (gpt-6-astra, fable-5.1, opus-5.5); unknown or ambiguous names are rejected with the valid ids. It returns {mission_id} at once and never waits: poll get_consult_result(mission_id) until it returns the answer.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["model", "question"],
                     "properties": {
                         "model": {"type": "string", "description": "<provider>/<model> (e.g. openai/gpt-6-astra) or a short alias (gpt-6-astra, fable-5.1, opus-5.5)."},
                         "question": {"type": "string", "description": "The question, with all context the consultant needs."},
-                        "files": {"type": "array", "items": {"type": "string"}, "description": "Paths (in the shared workspace) the consultant must read."},
+                        "files": {"type": "array", "items": {"type": "string"}, "description": "Paths the consultant must read. Boat VMs (the default placement) start clean and see committed/PR/snapshot state only; pass remote_node_id=\"same\" when inspecting uncommitted local workspace files in place."},
                         "read_only": {"type": "boolean", "description": "Default true (writer=false, pr-readonly). false lets the consultant write."},
+                        "remote_node_id": {"type": "string", "description": "Optional placement override: omit for Boat (\"auto-managed\", falling back to \"auto\" if Boat is disabled), pass \"auto-managed:<size>\" or \"auto\" or a registered node id, or pass \"same\" to share/fork the parent's uncommitted local workspace on the same machine."},
+                        "managed_from_snapshot": {"type": "string", "description": "Only with Boat (auto-managed): start the consultant's VM from this project snapshot (list_managed_snapshots), or \"none\" for the base image. When omitted, the newest ready project snapshot is selected automatically if one exists."},
+                        "managed_ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Only with auto-managed: initial machine TTL in minutes (default 60, auto-extended while busy)."},
                         "title": {"type": "string"},
                         "project": {"type": "string", "description": "Defaults to the calling mission's project."},
                         "github_pr": {"type": "string", "description": "PR under review (owner/repo#123), if any."},
@@ -2639,7 +2646,20 @@ impl AssistantMcp {
             }
             None
         } else {
-            resolve_default_workspace_id(params.workspace_id)
+            let child_elsewhere = params.parent_mission_id.is_some()
+                && params.workspace_id.is_none()
+                && !params
+                    .remote_node_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|r| {
+                        r.eq_ignore_ascii_case(crate::api::control::worker_location::SAME_NODE)
+                    });
+            if child_elsewhere {
+                None
+            } else {
+                resolve_default_workspace_id(params.workspace_id)
+            }
         };
         let backend = params
             .backend
@@ -2680,81 +2700,6 @@ impl AssistantMcp {
             }
             None => None,
         };
-        let mut managed_machine = Value::Null;
-        let mut managed_reused = false;
-        let auto_managed = params
-            .remote_node_id
-            .as_deref()
-            .and_then(parse_auto_managed_spec);
-        if let Some((provider, size)) = auto_managed {
-            // Validate the launch (model, harness auth, caps, budget) before
-            // renting: a rejected child must never cost a VM.
-            let check = self
-                .api_post(
-                    "/api/control/missions",
-                    json!({
-                        "validate_only": true,
-                        "title": params.title,
-                        "parent_mission_id": params.parent_mission_id,
-                        "remote_node_id": params.remote_node_id,
-                        "backend": backend,
-                        "model_override": params.model_override,
-                        "model_effort": params.model_effort,
-                        "fast_mode": params.fast_mode.unwrap_or(false),
-                        "prompt": prompt,
-                        "project": params.project,
-                        "track": params.track,
-                        "idempotency_key": params.idempotency_key,
-                        "github_pr": params.github_pr,
-                        "writer": writer,
-                        "tags": tags,
-                        "budget_usd": params.budget_usd,
-                        "origin": if started_by_mission { "mission" } else { "hermes" },
-                        "origin_session_id": origin_session_id,
-                    }),
-                )
-                .await?;
-            let status = check.status();
-            let text = check.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(format!(
-                    "start_mission rejected before renting a managed VM (nothing was created or billed): {text}"
-                ));
-            }
-            let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            if parsed["valid"].as_bool() != Some(true) && parsed["id"].as_str().is_some() {
-                // Idempotent replay of an existing mission: nothing to rent.
-                return Ok(json!({ "mission": parsed }));
-            }
-            let spawned = self
-                .spawn_managed_machine_with(
-                    SpawnManagedParams {
-                        provider,
-                        // Mission placement requires an enrolled worker. Never inherit
-                        // raw mode from a snapshot and rent an unusable machine.
-                        provisioning_mode: Some(crate::managed::ProvisioningMode::Worker),
-                        size,
-                        cpu: None,
-                        ram_gb: None,
-                        gpu: None,
-                        arch: None,
-                        max_hourly_usd: None,
-                        allow_24h_commitment: params.managed_allow_24h_commitment,
-                        ttl_minutes: params.managed_ttl_minutes,
-                        image: None,
-                        reason: Some(format!("start_mission: {}", params.title)),
-                        from_snapshot: params.managed_from_snapshot.clone(),
-                        owner_mission_id: None,
-                    },
-                    params.parent_mission_id.map(|id| id.to_string()),
-                    params.budget_usd,
-                    true,
-                )
-                .await?;
-            params.remote_node_id = spawned["node_id"].as_str().map(str::to_string);
-            managed_reused = spawned["machine"]["reused"].as_bool() == Some(true);
-            managed_machine = spawned["machine"].clone();
-        }
         let mut body = json!({
             "title": params.title,
             "parent_mission_id": params.parent_mission_id,
@@ -2792,15 +2737,25 @@ impl AssistantMcp {
             "origin": if started_by_mission { "mission" } else { "hermes" },
             "origin_session_id": origin_session_id,
             "attachments": params.attachments,
-            // The VM rented above serves this new mission: Core makes the
-            // mission its owner (the caller becomes the requester).
-            "claim_managed_machine_id": managed_machine["id"].as_str(),
+            "managed_ttl_minutes": params.managed_ttl_minutes,
+            "managed_from_snapshot": params.managed_from_snapshot,
+            "managed_allow_24h_commitment": params.managed_allow_24h_commitment,
             "budget_usd": params.budget_usd,
         });
         if let Some(cloud) = params.cloud {
             body["cloud"] = cloud;
         }
-        let created = self.api_post("/api/control/missions", body).await;
+        // Server-side `auto-managed` provisioning waits for the VM to boot and
+        // enroll (typically 20-90s; cloud-init up to ~420s), so give it the same
+        // 420s ceiling `managed_request` used previously.
+        let create_timeout = body["remote_node_id"]
+            .as_str()
+            .and_then(crate::api::control::parse_auto_managed_spec)
+            .map(|_| std::time::Duration::from_secs(420))
+            .or_else(|| started_by_mission.then(|| std::time::Duration::from_secs(420)));
+        let created = self
+            .api_post_with_timeout("/api/control/missions", body, create_timeout)
+            .await;
         let created = match created {
             Ok(response) if response.status().is_success() => response
                 .json::<Value>()
@@ -2813,37 +2768,21 @@ impl AssistantMcp {
             )),
             Err(error) => Err(error),
         };
-        let mission = match created {
+        let mut mission = match created {
             Ok(mission) if mission["id"].as_str().is_some() => mission,
-            other => {
-                // Do not leave a rented VM behind for a mission that never
-                // started (a reused sibling VM is released to its grace).
-                let mut leaked_rented_vm = false;
-                if let (Some(id), false) = (managed_machine["id"].as_str(), managed_reused) {
-                    if self
-                        .managed_request(
-                            reqwest::Method::DELETE,
-                            format!("/api/managed-machines/{id}?reason=launch_failed"),
-                            None,
-                        )
-                        .await
-                        .is_err()
-                    {
-                        leaked_rented_vm = true;
-                    }
-                }
-                let err = match other {
-                    Err(e) => e,
-                    Ok(_) => "Created mission response did not include an id".to_string(),
-                };
-                if leaked_rented_vm {
-                    return Err(format!(
-                        "Outcome unconfirmed: rented VM cleanup failed after launch rejection: {err}"
-                    ));
-                }
-                return Err(err);
-            }
+            Err(e) => return Err(e),
+            Ok(_) => return Err("Created mission response did not include an id".to_string()),
         };
+        let mut managed_machine = Value::Null;
+        let mut managed_reused = false;
+        if let Some(obj) = mission.as_object_mut() {
+            if let Some(m) = obj.remove("managed_machine") {
+                managed_machine = m;
+            }
+            if let Some(r) = obj.remove("reused_idle_machine").and_then(|v| v.as_bool()) {
+                managed_reused = r;
+            }
+        }
         if managed_machine.is_null() {
             Ok(json!({ "mission": mission }))
         } else {
@@ -2885,6 +2824,15 @@ impl AssistantMcp {
             .title
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| format!("Consult {model}"));
+        let same_host = params.workspace_id.is_some()
+            || params
+                .remote_node_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|r| {
+                    r.eq_ignore_ascii_case(crate::api::control::worker_location::SAME_NODE)
+                });
+        let has_files = params.files.iter().any(|f| !f.trim().is_empty());
         let started = self
             .start_mission(StartMissionParams {
                 parent_mission_id: params.parent_mission_id,
@@ -2894,8 +2842,8 @@ impl AssistantMcp {
                 prompt: consult_prompt(&params.question, &params.files, read_only),
                 workspace_id: params.workspace_id,
                 remote_node_id: params.remote_node_id,
-                managed_ttl_minutes: None,
-                managed_from_snapshot: None,
+                managed_ttl_minutes: params.managed_ttl_minutes,
+                managed_from_snapshot: params.managed_from_snapshot,
                 managed_allow_24h_commitment: None,
                 budget_usd: None,
                 backend: Some("opencode".into()),
@@ -2926,13 +2874,19 @@ impl AssistantMcp {
             .ok_or("Created mission response did not include an id")?
             .to_string();
         let status = started["mission"]["status"].as_str().unwrap_or("pending");
-        Ok(json!({
+        let mut out = json!({
             "mission_id": mission_id,
             "model": model,
             "status": status,
             "read_only": read_only,
             "next": format!("Poll get_consult_result(mission_id=\"{mission_id}\") until done=true; it returns the consultant's answer."),
-        }))
+        });
+        if has_files && !same_host {
+            out["placement_note"] = json!(
+                "Boat/remote VMs start clean and see committed/PR/snapshot state only. Pass remote_node_id=\"same\" when uncommitted local workspace files must be inspected in place."
+            );
+        }
+        Ok(out)
     }
 
     /// Non-blocking read of a consult_model mission's answer.
@@ -5935,6 +5889,19 @@ mod tests {
             )
             .await
             .unwrap();
+        let relocated = assistant
+            .handle_call(
+                "consult_model",
+                json!({
+                    "model": "fable-5.1", "question": "Review committed code",
+                    "files": ["docs/plan.md"], "idempotency_key": "k2",
+                    "parent_mission_id": parent, "caller": "mission",
+                    "project": "orb", "remote_node_id": "auto-managed:small",
+                    "managed_from_snapshot": "warm-snap", "managed_ttl_minutes": 30
+                }),
+            )
+            .await
+            .unwrap();
         let unknown = assistant
             .handle_call("consult_model", json!({"model": "gpt-9", "question": "q"}))
             .await
@@ -5942,12 +5909,17 @@ mod tests {
         task.abort();
         assert_eq!(out["mission_id"], "11111111-1111-1111-1111-111111111111");
         assert_eq!(out["model"], "anthropic/claude-fable-5-1");
+        assert!(out["placement_note"].is_null());
         assert!(out["next"].as_str().unwrap().contains("get_consult_result"));
+        assert!(relocated["placement_note"]
+            .as_str()
+            .unwrap()
+            .contains("remote_node_id=\"same\""));
         assert!(unknown.contains("openai/gpt-6-astra"), "{unknown}");
         let requests = state.requests.lock().unwrap();
         assert_eq!(
             requests.len(),
-            1,
+            2,
             "an unknown model never creates a mission"
         );
         let (path, body) = &requests[0];
@@ -5963,6 +5935,12 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("consult-model")));
+
+        let (_, relocated_body) = &requests[1];
+        assert_eq!(relocated_body["remote_node_id"], "auto-managed:small");
+        assert_eq!(relocated_body["managed_from_snapshot"], "warm-snap");
+        assert_eq!(relocated_body["managed_ttl_minutes"], 30);
+        assert!(relocated_body["workspace_id"].is_null());
     }
 
     #[tokio::test]
@@ -7649,32 +7627,9 @@ mod tests {
 
 /// Parse `auto-managed`, `auto-managed:<size>`, `auto-managed:<provider>`, or
 /// `auto-managed:<provider>:<size>` into `(provider, size)`.
+#[cfg(test)]
 fn parse_auto_managed_spec(raw: &str) -> Option<(Option<String>, Option<String>)> {
-    let trimmed = raw.trim();
-    if !trimmed.to_ascii_lowercase().starts_with("auto-managed") {
-        return None;
-    }
-    let Some((_, rest)) = trimmed.split_once(':') else {
-        return Some((None, None));
-    };
-    let rest = rest.trim();
-    if rest.is_empty() {
-        return Some((None, None));
-    }
-    if let Some((provider, size)) = rest.split_once(':') {
-        let p = provider.trim().to_ascii_lowercase();
-        let s = size.trim();
-        return Some((
-            (!p.is_empty()).then_some(p),
-            (!s.is_empty()).then(|| s.to_string()),
-        ));
-    }
-    let lower = rest.to_ascii_lowercase();
-    if matches!(lower.as_str(), "boat" | "hetzner" | "vastai" | "scaleway") {
-        Some((Some(lower), None))
-    } else {
-        Some((None, Some(rest.to_string())))
-    }
+    crate::api::control::parse_auto_managed_spec(raw)
 }
 
 /// `list_managed_machines` summary: live machines with the fields an agent

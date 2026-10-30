@@ -156,9 +156,90 @@ pub async fn resolved_client_owner(
     }))
 }
 
+pub const SAME_NODE: &str = "same";
+
+/// Resolve the default `remote_node_id` for a native child mission whose caller
+/// omitted `remote_node_id`: Boat (`"auto-managed"`) when managed Boat
+/// provisioning is configured/enabled and the child harness passes managed auth
+/// precheck; otherwise `"auto"` (fleet-wide least-loaded static scheduler),
+/// never pinning to the parent's host.
+pub fn default_child_remote_node_id(
+    state: &AppState,
+    user_id: &str,
+    effective_backend: &str,
+) -> &'static str {
+    let manager = state.managed();
+    let boat_ready = manager
+        .as_deref()
+        .is_some_and(crate::managed::ManagedManager::is_boat_enabled);
+    if boat_ready
+        && super::mission_create::managed_backend_auth_precheck(
+            effective_backend,
+            manager.as_deref(),
+            user_id,
+        )
+        .is_ok()
+    {
+        "auto-managed"
+    } else {
+        "auto"
+    }
+}
+
+fn child_effective_backend(req: &CreateMissionRequest, parent_backend: &str) -> String {
+    if let Some(b) = req
+        .backend
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return b.to_string();
+    }
+    if let Some(a) = req
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let mut agent = Some(a.to_string());
+        let mut inferred = None;
+        if super::apply_native_backend_agent_selector(&mut agent, &mut inferred).is_ok() {
+            if let Some(b) = inferred {
+                return b;
+            }
+        }
+    }
+    if let Some(prefixed) = req
+        .model_override
+        .as_deref()
+        .and_then(super::native_backend_prefix)
+    {
+        return prefixed.to_string();
+    }
+    parent_backend.to_string()
+}
+
+#[cfg(test)]
 pub async fn inherit(
     state: &AppState,
     control: &ControlState,
+    req: &mut CreateMissionRequest,
+) -> Result<(), String> {
+    let inferred_user = state
+        .control
+        .sessions
+        .read()
+        .await
+        .iter()
+        .find(|(_, session)| Arc::ptr_eq(&session.mission_store, &control.mission_store))
+        .map(|(id, _)| id.clone());
+    inherit_for_user(state, control, inferred_user.as_deref(), req).await
+}
+
+pub async fn inherit_for_user(
+    state: &AppState,
+    control: &ControlState,
+    user_id: Option<&str>,
     req: &mut CreateMissionRequest,
 ) -> Result<(), String> {
     let Some(id) = req.parent_mission_id else {
@@ -169,15 +250,65 @@ pub async fn inherit(
         .get_mission(id)
         .await?
         .ok_or("Parent mission no longer exists")?;
+    let effective_backend = child_effective_backend(req, &parent.backend);
     // Placement overrides do not change the worker's project or harness defaults.
     req.project = req.project.take().or(parent.project.project.clone());
     req.config_profile = req.config_profile.take().or(parent.config_profile.clone());
-    req.backend = req.backend.take().or(Some(parent.backend.clone()));
-    if req.remote_node_id.is_some() || req.placement.is_some() {
+    req.backend = req.backend.take().or(Some(effective_backend.clone()));
+    if req.placement.is_some() {
         return Ok(());
     }
-    // Callers such as assistant-mcp always send their default workspace; a
-    // child runs where its parent runs unless a destination says otherwise.
+    let requested_remote = req
+        .remote_node_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let explicit_same = requested_remote
+        .as_deref()
+        .is_some_and(|r| r.eq_ignore_ascii_case(SAME_NODE));
+    if requested_remote.is_none() {
+        machine_transfer::guard(&control.mission_store, id).await?;
+        let target = default_child_remote_node_id(state, user_id.unwrap_or(""), &effective_backend);
+        req.remote_node_id = Some(target.into());
+        // A relocated child starts in the target node's default workspace,
+        // never sharing or occupying the parent's host directory.
+        req.workspace_id = None;
+        req.working_directory = None;
+        return Ok(());
+    }
+    if !explicit_same {
+        // Explicit remote node requested: if the gateway already stamped both
+        // the parent's workspace and the parent's exact remote node (from an
+        // accepted `"same"` action), attach same-host fork/working_directory
+        // inheritance; otherwise run cleanly on the target node.
+        if req.workspace_id == Some(parent.workspace_id) {
+            machine_transfer::guard(&control.mission_store, id).await?;
+            let parent_remote_node = if let Some(transfer) =
+                machine_transfer::committed(&control.mission_store, id).await?
+            {
+                match transfer.destination {
+                    crate::api::mission_store::transfer::Machine::Node { id } => Some(id),
+                    _ => None,
+                }
+            } else {
+                remote_grok::placement(&state.config.working_dir, &control.mission_store, id)
+                    .await?
+                    .map(|r| r.node_id)
+            };
+            if parent_remote_node.as_deref() == requested_remote.as_deref() {
+                req.remote_node_id = None;
+            } else {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+    } else {
+        req.remote_node_id = None;
+    }
+    // Explicit `"same"` co-location: run where the parent runs and share/fork
+    // its workspace.
     if let Some(requested) = req.workspace_id.filter(|id| *id != parent.workspace_id) {
         tracing::info!(
             parent = %id,

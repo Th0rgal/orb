@@ -167,6 +167,18 @@ pub struct AppState {
     /// Attention items per project slug as of the last `/api/projects/overview`
     /// read; the next read diffs against it to record resolutions.
     pub attention_snapshot: RwLock<HashMap<String, std::collections::HashSet<String>>>,
+    /// Optional per-state managed VM manager override (falls back to `managed::global()`).
+    pub managed: std::sync::RwLock<Option<Arc<crate::managed::ManagedManager>>>,
+}
+
+impl AppState {
+    pub fn managed(&self) -> Option<Arc<crate::managed::ManagedManager>> {
+        self.managed
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(crate::managed::global)
+    }
 }
 
 /// Start the HTTP server.
@@ -568,6 +580,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         validation,
         projects,
         attention_snapshot: RwLock::new(HashMap::new()),
+        managed: std::sync::RwLock::new(None),
     });
 
     state.control.bind_admission_state(&state);

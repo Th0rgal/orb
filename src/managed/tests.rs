@@ -4007,3 +4007,128 @@ async fn vastai_splits_v0_and_v1_routes_and_guards_destroy_and_null_usage() {
 
     srv.abort();
 }
+
+#[tokio::test]
+async fn dispatch_reservation_reuses_unclaimed_vm_and_clears_on_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let vm = m
+        .spawn(SpawnRequest {
+            wait: Some(false),
+            ttl_minutes: Some(60),
+            owner_mission_id: None,
+            owner_user_id: Some("t1".into()),
+            requested_by_mission_id: Some("parent-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if m.get(&vm.id).await.unwrap().provider_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let vm = m
+        .update(&vm.id, |x| {
+            x.state = MachineState::Online;
+            x.last_busy_at = Some(Utc::now());
+        })
+        .await
+        .unwrap();
+    m.record_dispatch_reservation("t1", "dispatch:parent-1:key-1", &vm.id)
+        .await;
+
+    // Retrying with the same `(tenant, parent, idempotency_key)` before claim
+    // reuses the exact pre-spawned VM requested by `parent-1`.
+    let reused = m
+        .take_unclaimed_for_dispatch("t1", Some("parent-1"), "dispatch:parent-1:key-1")
+        .await
+        .expect("should reuse unclaimed reservation");
+    assert_eq!(reused.id, vm.id);
+
+    // Re-record to test tenant/parent isolation: another tenant or wrong parent
+    // cannot hijack the reservation (and invalid lookups drop stale keys).
+    assert!(m
+        .take_unclaimed_for_dispatch("t2", Some("parent-1"), "dispatch:parent-1:key-1")
+        .await
+        .is_none());
+    assert!(m
+        .take_unclaimed_for_dispatch("t1", Some("other-parent"), "dispatch:parent-1:key-1")
+        .await
+        .is_none());
+    m.record_dispatch_reservation("t1", "dispatch:parent-1:key-1", &vm.id)
+        .await;
+
+    // Once claimed for the child mission, the reservation is cleared and the VM
+    // cannot be multiplexed onto a second concurrent child.
+    let claimed = m
+        .claim_for_mission(&vm.id, "child-1", Some("parent-1"), Some("t1"))
+        .await
+        .unwrap();
+    assert_eq!(claimed.owner_mission_id.as_deref(), Some("child-1"));
+    assert_eq!(claimed.requested_by_mission_id.as_deref(), Some("parent-1"));
+    assert!(m
+        .take_unclaimed_for_dispatch("t1", Some("parent-1"), "dispatch:parent-1:key-1")
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn newest_ready_worker_snapshot_is_project_and_tenant_scoped_and_none_opts_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = settings();
+    st.max_concurrent = None;
+    let (m, _) = manager(dir.path(), st);
+    let vm = online_machine(&m, "owner").await;
+    let s1 = m
+        .snapshot_machine(&vm.id, "older", Some("orb"), None, Some("t1"))
+        .await
+        .unwrap();
+    let s2 = m
+        .snapshot_machine(&vm.id, "newer", Some("orb"), None, Some("t1"))
+        .await
+        .unwrap();
+    let _s3 = m
+        .snapshot_machine(&vm.id, "saving-snap", Some("orb"), None, Some("t1"))
+        .await
+        .unwrap();
+    {
+        let mut snaps = m.snapshots.lock().await;
+        snaps[0].status = "ready".into();
+        snaps[0].created_at = Utc::now() - chrono::Duration::minutes(10);
+        snaps[1].status = "ready".into();
+        snaps[1].created_at = Utc::now() - chrono::Duration::minutes(1);
+        // snaps[2] stays "saving" and must be ignored.
+    }
+    assert_ne!(s1.name, s2.name);
+    assert_eq!(
+        m.newest_ready_worker_snapshot(Some("t1"), Some("orb"))
+            .await,
+        Some(s2.name.clone())
+    );
+    assert_eq!(
+        m.newest_ready_worker_snapshot(Some("t1"), Some("other"))
+            .await,
+        None
+    );
+    assert_eq!(
+        m.newest_ready_worker_snapshot(Some("t2"), Some("orb"))
+            .await,
+        None
+    );
+
+    // Explicit `"none"` / `"base"` opts out of warm snapshot selection and boots clean base image.
+    let clean = m
+        .spawn(SpawnRequest {
+            from_snapshot: Some("none".into()),
+            snapshot_project: Some("orb".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(clean.image, "orb-node-base");
+    assert_eq!(clean.source_snapshot, None);
+}

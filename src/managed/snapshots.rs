@@ -202,6 +202,26 @@ impl ManagedManager {
         all
     }
 
+    /// Newest `ready` worker snapshot visible to `(tenant, project)`, if any.
+    pub async fn newest_ready_worker_snapshot(
+        &self,
+        tenant: Option<&str>,
+        project: Option<&str>,
+    ) -> Option<String> {
+        let project = project.map(str::trim).filter(|p| !p.is_empty())?;
+        self.snapshots
+            .lock()
+            .await
+            .iter()
+            .filter(|s| {
+                s.status == "ready"
+                    && s.provisioning_mode.is_worker()
+                    && snapshot_visible(s, tenant, Some(project))
+            })
+            .max_by_key(|s| s.created_at)
+            .map(|s| s.name.clone())
+    }
+
     /// Image, source snapshot and fork source for a spawn request.
     pub(super) async fn resolve_source(
         &self,
@@ -249,11 +269,9 @@ impl ManagedManager {
             let mode = ProvisioningMode::inherit(req.provisioning_mode, src.provisioning_mode)?;
             return Ok((src.image.clone(), None, Some((src.id.clone(), pid)), mode));
         }
-        if let Some(name) = req
-            .from_snapshot
-            .as_deref()
-            .filter(|n| !n.trim().is_empty())
-        {
+        if let Some(name) = req.from_snapshot.as_deref().map(str::trim).filter(|n| {
+            !n.is_empty() && !n.eq_ignore_ascii_case("none") && !n.eq_ignore_ascii_case("base")
+        }) {
             let mut snaps = self.snapshots.lock().await;
             let snap = snaps
                 .iter_mut()

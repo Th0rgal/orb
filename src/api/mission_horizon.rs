@@ -106,11 +106,182 @@ pub async fn replacement_chain(
     Ok((earlier, later))
 }
 
+/// Optional remote-node context allowing `absorb` to immediately cancel any
+/// in-flight or queued remote job belonging to a superseded mission so orphan
+/// workers (`consult_model` / remote child attempts) release their node slot.
+pub struct RemoteSupersedeContext<'a> {
+    pub working_dir: &'a Path,
+    pub remote_nodes: &'a crate::remote_node::RemoteNodeSettings,
+    pub fleet: &'a std::sync::Arc<crate::remote_node::FleetMonitor>,
+}
+
+async fn cancel_superseded_remote_jobs(
+    store: &dyn MissionStore,
+    prior: &Mission,
+    remote: &RemoteSupersedeContext<'_>,
+) {
+    crate::api::control::usage_limit_wait::update_remote_wait(remote.working_dir, prior.id, |_| {
+        None
+    })
+    .await;
+
+    let handles = match crate::remote_node::job_ledger::load(remote.working_dir).await {
+        Ok(handles) => handles,
+        Err(error) => {
+            tracing::warn!(
+                mission_id = %prior.id,
+                ?error,
+                "could not read remote job ledger while superseding mission"
+            );
+            return;
+        }
+    };
+    let client = crate::remote_node::RemoteNodeClient::default();
+    for handle in handles.into_iter().filter(|h| h.mission_id == prior.id) {
+        if crate::managed::node_provably_gone(&handle.node_id).await {
+            let _ = super::control::finish_remote_job_lease(
+                store,
+                prior.id,
+                handle.job_id,
+                "superseded",
+            )
+            .await;
+            let _ = store
+                .complete_scheduled_remote_job(
+                    prior.id,
+                    handle.job_id,
+                    Some(false),
+                    Some("superseded".to_string()),
+                )
+                .await;
+            let _ = crate::remote_node::job_ledger::finalize(
+                remote.working_dir,
+                handle.job_id,
+                "cancelled",
+                None,
+            )
+            .await;
+            continue;
+        }
+
+        let Some(node) = remote.remote_nodes.node(&handle.node_id).cloned() else {
+            tracing::warn!(
+                mission_id = %prior.id,
+                job_id = %handle.job_id,
+                node_id = %handle.node_id,
+                "superseded remote job node config unavailable; poll loop will cancel if attached"
+            );
+            continue;
+        };
+        let Some(shared_token) = crate::remote_node::node_token(&node.token_env)
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+        else {
+            tracing::warn!(
+                mission_id = %prior.id,
+                job_id = %handle.job_id,
+                node_id = %handle.node_id,
+                "superseded remote job node token unavailable; poll loop will cancel if attached"
+            );
+            continue;
+        };
+
+        let cancel_res = client
+            .cancel_job_with_reason(&node, &shared_token, handle.job_id, "core", "superseded")
+            .await;
+        if let Err(ref error) = cancel_res {
+            tracing::warn!(
+                mission_id = %prior.id,
+                job_id = %handle.job_id,
+                node_id = %node.id,
+                ?error,
+                "superseded remote job cancel request failed; poll/untracked observer will retry"
+            );
+        }
+
+        let confirmed_terminal = match client.get_job(&node, &shared_token, handle.job_id).await {
+            Ok(status) if crate::remote_node::job_state_confirms_termination(&status.state) => {
+                Some(status)
+            }
+            Err(error) if error.is_not_found() && cancel_res.is_ok() => Some(
+                crate::remote_node::missing_job_cancelled(prior.id, handle.job_id),
+            ),
+            _ => None,
+        };
+
+        let lease_owner = super::control::remote_job_lease_owner(handle.job_id);
+        let active_run = store.get_active_mission_run(prior.id).await.ok().flatten();
+        let owns_active_lease = active_run
+            .as_ref()
+            .is_some_and(|run| run.owner_actor_id == lease_owner);
+
+        if let Some(status) = confirmed_terminal {
+            let _ = store
+                .complete_scheduled_remote_job(
+                    prior.id,
+                    handle.job_id,
+                    Some(status.state == "succeeded"),
+                    (status.state != "succeeded").then(|| "superseded".to_string()),
+                )
+                .await;
+            let _ = super::control::finish_remote_job_lease(
+                store,
+                prior.id,
+                handle.job_id,
+                "superseded",
+            )
+            .await;
+            if crate::remote_node::job_ledger::finalize_with_artifacts(
+                remote.working_dir,
+                handle.job_id,
+                &status.state,
+                status.exit_code,
+                status.artifacts.clone(),
+            )
+            .await
+            .is_ok()
+            {
+                remote
+                    .fleet
+                    .record_outcome(crate::remote_node::DispatchOutcome {
+                        mission_id: prior.id,
+                        node_id: node.id,
+                        job_id: Some(handle.job_id),
+                        state: status.state,
+                        exit_code: status.exit_code,
+                        error: status.error,
+                        started_at: handle.started_at,
+                        finished_at: Some(chrono::Utc::now()),
+                    });
+            }
+        } else if !owns_active_lease {
+            // No live `poll_remote_job` owns a run lease for this handle (e.g.
+            // tentative handle or detached handle); spawn background retry
+            // cancellation so the node slot is guaranteed to be released.
+            super::control::spawn_untracked_remote_job_cancellation_with_reason(
+                std::sync::Arc::clone(remote.fleet),
+                node,
+                shared_token,
+                prior.id,
+                handle.job_id,
+                handle.started_at,
+                remote.working_dir.to_path_buf(),
+                "superseded",
+            );
+        }
+    }
+}
+
 /// Mark `prior` as replaced by `successor`: tag it (`superseded` +
-/// `superseded_by:<id>`), move its child missions under the successor and,
-/// when no run is live, acknowledge it so it leaves the attention horizon.
-/// Idempotent.
-async fn absorb(store: &dyn MissionStore, prior: &Mission, successor: Uuid) -> Result<(), String> {
+/// `superseded_by:<id>`), move its child missions under the successor, cancel
+/// any active/queued remote job, and when no run is live, acknowledge it so it
+/// leaves the attention horizon. Idempotent.
+async fn absorb(
+    store: &dyn MissionStore,
+    prior: &Mission,
+    successor: Uuid,
+    remote: Option<&RemoteSupersedeContext<'_>>,
+) -> Result<(), String> {
     let mut tags = prior.project.tags.clone();
     if !tags.iter().any(|tag| tag == SUPERSEDED_TAG) {
         tags.push(SUPERSEDED_TAG.to_string());
@@ -157,6 +328,9 @@ async fn absorb(store: &dyn MissionStore, prior: &Mission, successor: Uuid) -> R
     if !moved.is_empty() {
         tracing::info!(prior = %prior.id, %successor, count = moved.len(), "moved workers to the superseding mission");
     }
+    if let Some(remote) = remote {
+        cancel_superseded_remote_jobs(store, prior, remote).await;
+    }
     if store.get_active_mission_run(prior.id).await?.is_none() {
         if let Err(error) = store
             .update_mission_status(prior.id, MissionStatus::Acknowledged)
@@ -181,6 +355,15 @@ pub async fn supersede_explicit(
     new_mission: &Mission,
     prior_id: Uuid,
 ) -> Result<(), String> {
+    supersede_explicit_with_remote(store, new_mission, prior_id, None).await
+}
+
+pub async fn supersede_explicit_with_remote(
+    store: &dyn MissionStore,
+    new_mission: &Mission,
+    prior_id: Uuid,
+    remote: Option<&RemoteSupersedeContext<'_>>,
+) -> Result<(), String> {
     if prior_id == new_mission.id {
         return Err("a mission cannot supersede itself".to_string());
     }
@@ -201,7 +384,7 @@ pub async fn supersede_explicit(
             prior.project.project, new_mission.project.project
         ));
     }
-    absorb(store, &prior, new_mission.id).await
+    absorb(store, &prior, new_mission.id, remote).await
 }
 
 fn role_label(role: WriterRole) -> Option<&'static str> {
@@ -218,6 +401,14 @@ fn role_label(role: WriterRole) -> Option<&'static str> {
 pub async fn supersede_prior_attempts(
     store: &dyn MissionStore,
     new_mission: &Mission,
+) -> Result<Vec<Uuid>, String> {
+    supersede_prior_attempts_with_remote(store, new_mission, None).await
+}
+
+pub async fn supersede_prior_attempts_with_remote(
+    store: &dyn MissionStore,
+    new_mission: &Mission,
+    remote: Option<&RemoteSupersedeContext<'_>>,
 ) -> Result<Vec<Uuid>, String> {
     let Some(project) = new_mission
         .project
@@ -255,7 +446,7 @@ pub async fn supersede_prior_attempts(
         if prior.id == new_mission.id || writer_role(&prior) != role {
             continue;
         }
-        absorb(store, &prior, new_mission.id).await?;
+        absorb(store, &prior, new_mission.id, remote).await?;
         absorbed.push(prior.id);
     }
     Ok(absorbed)
@@ -1197,5 +1388,203 @@ mod tests {
             .await
             .unwrap();
         assert!(earlier.is_empty() && later.is_empty());
+    }
+
+    #[tokio::test]
+    async fn superseding_attempt_cancels_active_remote_job_and_acknowledges_mission() {
+        use axum::{
+            extract::{Path as AxumPath, State as AxumState},
+            http::HeaderMap,
+            routing::{get, post},
+            Json, Router,
+        };
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct FakeNodeState {
+            cancels: Mutex<Vec<(Uuid, String, String)>>,
+            state: Mutex<String>,
+        }
+
+        let node_state = Arc::new(FakeNodeState {
+            cancels: Mutex::new(Vec::new()),
+            state: Mutex::new("queued".to_string()),
+        });
+        let app_state = Arc::clone(&node_state);
+        let app =
+            Router::new()
+                .route(
+                    "/jobs/:id/cancel",
+                    post(
+                        |AxumState(st): AxumState<Arc<FakeNodeState>>,
+                         AxumPath(id): AxumPath<Uuid>,
+                         headers: HeaderMap| async move {
+                            let actor = headers
+                                .get("x-sandboxed-cancel-actor")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            let reason = headers
+                                .get("x-sandboxed-cancel-reason")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            st.cancels.lock().unwrap().push((id, actor, reason));
+                            *st.state.lock().unwrap() = "cancelled".to_string();
+                            Json(crate::remote_node::CancelJobResponse {
+                                job_id: id,
+                                state: "cancelled".to_string(),
+                                cancel_requested: true,
+                            })
+                        },
+                    ),
+                )
+                .route(
+                    "/jobs/:id",
+                    get(
+                        |AxumState(st): AxumState<Arc<FakeNodeState>>,
+                         AxumPath(id): AxumPath<Uuid>| async move {
+                            let cur = st.state.lock().unwrap().clone();
+                            Json(crate::remote_node::NodeJobStatus {
+                                cancellation: None,
+                                job_id: id,
+                                mission_id: Uuid::nil(),
+                                state: cur.clone(),
+                                exit_code: (cur == "cancelled").then_some(130),
+                                created_at: chrono::Utc::now().to_rfc3339(),
+                                started_at: None,
+                                finished_at: (cur == "cancelled")
+                                    .then(|| chrono::Utc::now().to_rfc3339()),
+                                error: None,
+                                log_tail: None,
+                                artifacts: Vec::new(),
+                            })
+                        },
+                    ),
+                )
+                .with_state(app_state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            crate::api::mission_store::SqliteMissionStore::new(
+                dir.path().to_path_buf(),
+                "test-user",
+            )
+            .await
+            .unwrap(),
+        );
+        let prior = seed(
+            &store,
+            "consult-attempt-1",
+            "orb",
+            "review-track",
+            MissionStatus::Active,
+            &[],
+        )
+        .await;
+        let successor = seed(
+            &store,
+            "consult-attempt-2",
+            "orb",
+            "review-track",
+            MissionStatus::Pending,
+            &[],
+        )
+        .await;
+
+        let job_id = Uuid::new_v4();
+        let token_env = format!("SANDBOXED_TEST_SUPERSEDE_TOKEN_{}", Uuid::new_v4().simple());
+        std::env::set_var(&token_env, "test-node-secret");
+
+        crate::remote_node::job_ledger::record(
+            dir.path(),
+            crate::remote_node::job_ledger::JobHandle {
+                mission_id: prior.id,
+                node_id: "babylon".to_string(),
+                job_id,
+                started_at: chrono::Utc::now(),
+                submission_sequence: 0,
+                accepted_at: Some(chrono::Utc::now()),
+                heartbeat_at: Some(chrono::Utc::now()),
+                disk_reservation_bytes: 0,
+                kind: crate::remote_node::job_ledger::JobHandleKind::Mission,
+                identity: None,
+                wait_for_completion: None,
+                wake_on_terminal: false,
+            },
+        )
+        .await
+        .unwrap();
+        let run = store
+            .begin_mission_run(
+                prior.id,
+                &super::super::control::remote_job_lease_owner(job_id),
+                Some("remote-node:babylon"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_active_mission_run(prior.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .run_id,
+            run.run_id
+        );
+
+        let remote_nodes = crate::remote_node::RemoteNodeSettings {
+            enabled: true,
+            nodes: vec![crate::remote_node::RemoteNodeConfig {
+                id: "babylon".to_string(),
+                base_url: format!("http://{addr}"),
+                token_env: token_env.clone(),
+                labels: None,
+            }],
+        };
+        let fleet = Arc::new(crate::remote_node::FleetMonitor::new());
+        let remote_ctx = RemoteSupersedeContext {
+            working_dir: dir.path(),
+            remote_nodes: &remote_nodes,
+            fleet: &fleet,
+        };
+
+        let absorbed =
+            supersede_prior_attempts_with_remote(store.as_ref(), &successor, Some(&remote_ctx))
+                .await
+                .unwrap();
+        std::env::remove_var(&token_env);
+        server.abort();
+
+        assert_eq!(absorbed, vec![prior.id]);
+        let cancels = node_state.cancels.lock().unwrap().clone();
+        assert_eq!(
+            cancels,
+            vec![(job_id, "core".to_string(), "superseded".to_string())]
+        );
+        assert!(
+            crate::remote_node::job_ledger::load(dir.path())
+                .await
+                .unwrap()
+                .is_empty(),
+            "superseded job ledger handle must be finalized"
+        );
+        assert!(
+            store
+                .get_active_mission_run(prior.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "superseded remote job run lease must be finished"
+        );
+        let updated_prior = store.get_mission(prior.id).await.unwrap().unwrap();
+        assert_eq!(updated_prior.status, MissionStatus::Acknowledged);
+        assert_eq!(superseded_by(&updated_prior), Some(successor.id));
     }
 }

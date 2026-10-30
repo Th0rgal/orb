@@ -118,6 +118,15 @@ pub struct CreateMissionRequest {
     /// owner, and the parent its requester.
     #[serde(default)]
     pub claim_managed_machine_id: Option<String>,
+    /// Optional initial TTL (minutes) when Core resolves `auto-managed` server-side.
+    #[serde(default)]
+    pub managed_ttl_minutes: Option<u64>,
+    /// Optional Boat project snapshot name when Core resolves `auto-managed` server-side.
+    #[serde(default)]
+    pub managed_from_snapshot: Option<String>,
+    /// Explicit confirmation for 24h minimum-lease hardware with `auto-managed:scaleway:M2-*`.
+    #[serde(default)]
+    pub managed_allow_24h_commitment: Option<bool>,
     /// Optional managed-machine spending budget (USD) for this mission and
     /// its descendants. Under an ancestor budget it is a sub-budget and must
     /// fit the ancestor pool's remaining amount.
@@ -317,7 +326,7 @@ pub(super) fn normalize_model_override_for_backend(
     Some(trimmed.to_string())
 }
 
-pub(super) fn native_backend_prefix(raw_model: &str) -> Option<&str> {
+pub(crate) fn native_backend_prefix(raw_model: &str) -> Option<&str> {
     let (prefix, model_id) = raw_model.trim().split_once('/')?;
     if model_id.trim().is_empty() {
         return None;
@@ -345,7 +354,7 @@ pub(super) fn native_backend_agent(raw_agent: &str) -> Option<&'static str> {
 /// must not reach the native CLI (Claude Code would otherwise receive e.g.
 /// `--agent claudecode`). OpenCode remains the exception because it can have a
 /// real library agent named `codex`.
-pub(super) fn apply_native_backend_agent_selector(
+pub(crate) fn apply_native_backend_agent_selector(
     agent: &mut Option<String>,
     backend: &mut Option<String>,
 ) -> Result<(), String> {
@@ -1008,13 +1017,35 @@ pub(in crate::api) async fn create_mission_inner(
         attachments: None,
         placement: None,
         claim_managed_machine_id: None,
+        managed_ttl_minutes: None,
+        managed_from_snapshot: None,
+        managed_allow_24h_commitment: None,
         budget_usd: None,
         validate_only: None,
         extra: Default::default(),
     });
 
     let parent_control = control_for_user(&state, &user).await;
-    worker_location::inherit(&state, &parent_control, &mut req)
+    // A mission started from the Hermes session of a mission (`orb_<id>`,
+    // a Hermes cloud agent calling start_mission) is that mission's child.
+    // Unlike shared chat sessions, an `orb_<id>` session belongs to exactly
+    // one mission, so it is real lineage. Resolve before `worker_location::inherit`
+    // so child placement defaults apply uniformly.
+    if req.parent_mission_id.is_none() && req.supersedes_mission_id.is_none() {
+        if let Some(caller) = req
+            .origin_session_id
+            .as_deref()
+            .and_then(crate::managed::lifecycle::mission_of_orb_session)
+        {
+            if matches!(
+                parent_control.mission_store.get_mission(caller).await,
+                Ok(Some(_))
+            ) {
+                req.parent_mission_id = Some(caller);
+            }
+        }
+    }
+    worker_location::inherit_for_user(&state, &parent_control, Some(&user.id), &mut req)
         .await
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     // A replacement continues the same conversation, so it stays under the
@@ -1031,12 +1062,6 @@ pub(in crate::api) async fn create_mission_inner(
                     .copied();
         }
     }
-
-    // A mission started from the Hermes session of a mission (`orb_<id>`,
-    // a Hermes cloud agent calling start_mission) is that mission's child.
-    // Unlike shared chat sessions, an `orb_<id>` session belongs to exactly
-    // one mission, so it is real lineage. Without this the child (and the
-    // managed VM rented for it) was top-level and ownerless.
     if req.parent_mission_id.is_none() {
         if let Some(caller) = req
             .origin_session_id
@@ -1970,13 +1995,29 @@ pub(in crate::api) async fn create_mission_inner(
             ));
         }
         if is_auto_managed(node_id) {
-            // The VM does not exist yet: only a pre-rent validation may name
-            // `auto-managed`; start_mission rents it, then creates for real.
             if req.validate_only != Some(true) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "auto-managed placement is resolved by start_mission; pass the rented machine's node id".to_string(),
-                ));
+                let Some(manager) = state.managed() else {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Managed machine provisioning is not configured for auto-managed placement"
+                            .to_string(),
+                    ));
+                };
+                let (provider, _) = parse_auto_managed_spec(node_id).unwrap_or((None, None));
+                let target_provider = provider
+                    .or_else(|| manager.default_provider().map(|p| p.name().to_string()))
+                    .unwrap_or_else(|| manager.settings.provider.clone());
+                if manager.settings.core_url.is_none()
+                    || !manager.is_provider_enabled(&target_provider)
+                    || manager.provider_for(&target_provider).is_none()
+                {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "Managed provider '{target_provider}' is disabled or unconfigured for auto-managed placement"
+                        ),
+                    ));
+                }
             }
         } else if node_id.eq_ignore_ascii_case("auto") {
             // Capacity-aware auto placement, resolved BEFORE the mission is
@@ -2043,7 +2084,7 @@ pub(in crate::api) async fn create_mission_inner(
 
     if let (Some(node_id), Some(plan)) = (remote_node_id.as_deref(), remote_plan.as_ref()) {
         if is_auto_managed(node_id) {
-            managed_auth_precheck(plan, crate::managed::global().as_deref(), &user.id)
+            managed_auth_precheck(plan, state.managed().as_deref(), &user.id)
                 .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
         } else {
             remote_grok::require_node_managed_auth(&state, node_id, plan)
@@ -2109,7 +2150,7 @@ pub(in crate::api) async fn create_mission_inner(
     if let Some(amount) = req.budget_usd {
         crate::managed::budget::validate_amount(amount)
             .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
-        if let (Some(parent), Some(manager)) = (req.parent_mission_id, crate::managed::global()) {
+        if let (Some(parent), Some(manager)) = (req.parent_mission_id, state.managed()) {
             if let Some(pool) =
                 crate::api::mission_budget::pool_for(&control.mission_store, parent, &user.id).await
             {
@@ -2137,6 +2178,55 @@ pub(in crate::api) async fn create_mission_inner(
             Json(serde_json::json!({ "valid": true })),
         ));
     }
+    let mut rented_managed: Option<(crate::managed::ManagedMachine, bool)> = None;
+    if let Some((provider, size)) = remote_node_id.as_deref().and_then(parse_auto_managed_spec) {
+        let spawn_req = crate::managed::SpawnRequest {
+            provider,
+            provisioning_mode: Some(crate::managed::ProvisioningMode::Worker),
+            size,
+            cpu: None,
+            ram_gb: None,
+            gpu: None,
+            arch: None,
+            max_hourly_usd: None,
+            allow_24h_commitment: req.managed_allow_24h_commitment,
+            ttl_minutes: req.managed_ttl_minutes,
+            image: None,
+            reason: Some(format!(
+                "start_mission: {}",
+                title.as_deref().unwrap_or("subagent")
+            )),
+            from_snapshot: req.managed_from_snapshot.clone(),
+            fork_of: None,
+            snapshot_project: req.project.clone(),
+            owner_mission_id: None,
+            owner_user_id: Some(user.id.clone()),
+            requested_by_mission_id: req.parent_mission_id.map(|id| id.to_string()),
+            root_mission_id: None,
+            budget_pool_id: None,
+            cap_lineage: Vec::new(),
+            sub_budget_usd: req.budget_usd,
+            reuse_idle: Some(true),
+            wait: Some(true),
+        };
+        let (machine, reused) = crate::api::managed_machines::spawn_for_inner(
+            &state,
+            &user,
+            spawn_req,
+            req.project.clone(),
+            dispatch_tag.as_deref(),
+            true,
+        )
+        .await
+        .map_err(|e| {
+            let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            (status, format!("{}: {}", e.error, e.message))
+        })?;
+        remote_node_id = Some(machine.node_id.clone());
+        req.remote_node_id = Some(machine.node_id.clone());
+        req.claim_managed_machine_id = Some(machine.id.clone());
+        rented_managed = Some((machine, reused));
+    }
     if let Err(error) = control
         .cmd_tx
         .send(ControlCommand::CreateMission {
@@ -2163,15 +2253,24 @@ pub(in crate::api) async fn create_mission_inner(
         })
         .await
     {
+        if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed()) {
+            let _ = manager.destroy(&machine.id, "launch_failed").await;
+        }
         return Err(session_unavailable(error));
     }
 
     let mut mission = match rx.await {
         Ok(Ok(mission)) => mission,
         Ok(Err(error)) => {
+            if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed()) {
+                let _ = manager.destroy(&machine.id, "launch_failed").await;
+            }
             return Err(internal_error(error));
         }
         Err(error) => {
+            if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed()) {
+                let _ = manager.destroy(&machine.id, "launch_failed").await;
+            }
             return Err(recv_failed(error));
         }
     };
@@ -2183,7 +2282,7 @@ pub(in crate::api) async fn create_mission_inner(
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty()),
-        crate::managed::global(),
+        state.managed(),
     ) {
         // The requester is the server-resolved parent (gateway-attributed or
         // derived from the caller's `orb_<id>` session), and only when it
@@ -2226,7 +2325,7 @@ pub(in crate::api) async fn create_mission_inner(
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty()),
-        crate::managed::global(),
+        state.managed(),
     ) {
         let pool =
             crate::api::mission_budget::pool_for(&control.mission_store, mission.id, &user.id)
@@ -2243,6 +2342,11 @@ pub(in crate::api) async fn create_mission_inner(
             )
             .await;
             manager.set_machine_cap_pool(machine, cap_pool).await;
+        }
+        if let Some((ref mut rented, _)) = rented_managed {
+            if let Some(updated_machine) = manager.get(machine).await {
+                *rented = updated_machine;
+            }
         }
     }
 
@@ -2557,9 +2661,15 @@ pub(in crate::api) async fn create_mission_inner(
         if let Some(v) = tags {
             mission.project.tags = v;
         }
-        if let Err(error) = super::super::mission_horizon::supersede_prior_attempts(
+        let remote_supersede = super::super::mission_horizon::RemoteSupersedeContext {
+            working_dir: &state.config.working_dir,
+            remote_nodes: &state.config.remote_nodes,
+            fleet: &state.fleet,
+        };
+        if let Err(error) = super::super::mission_horizon::supersede_prior_attempts_with_remote(
             control.mission_store.as_ref(),
             &mission,
+            Some(&remote_supersede),
         )
         .await
         {
@@ -2571,10 +2681,16 @@ pub(in crate::api) async fn create_mission_inner(
         }
     }
     if let Some(prior_id) = req.supersedes_mission_id {
-        if let Err(error) = super::super::mission_horizon::supersede_explicit(
+        let remote_supersede = super::super::mission_horizon::RemoteSupersedeContext {
+            working_dir: &state.config.working_dir,
+            remote_nodes: &state.config.remote_nodes,
+            fleet: &state.fleet,
+        };
+        if let Err(error) = super::super::mission_horizon::supersede_explicit_with_remote(
             control.mission_store.as_ref(),
             &mission,
             prior_id,
+            Some(&remote_supersede),
         )
         .await
         {
@@ -2801,10 +2917,26 @@ pub(in crate::api) async fn create_mission_inner(
                 worker_location::mark_initialized(&control.mission_store, &mut updated)
                     .await
                     .map_err(internal_error)?;
-                let value = mission_create_response(&state, &control, updated).await?;
+                let mut value = mission_create_response(&state, &control, updated).await?;
+                if let Some((machine, reused)) = rented_managed {
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert(
+                            "managed_machine".to_string(),
+                            serde_json::to_value(machine).unwrap_or(serde_json::Value::Null),
+                        );
+                        obj.insert(
+                            "reused_idle_machine".to_string(),
+                            serde_json::Value::Bool(reused),
+                        );
+                    }
+                }
                 return Ok((headers, Json(value)));
             }
             Err(message) => {
+                if let (Some((machine, false)), Some(manager)) = (&rented_managed, state.managed())
+                {
+                    let _ = manager.destroy(&machine.id, "launch_failed").await;
+                }
                 let _ = control
                     .mission_store
                     .update_mission_status_with_reason(
@@ -2906,23 +3038,55 @@ pub(super) fn remote_dispatch_is_scheduled_for_future(
 
 /// `auto-managed` / `auto-managed:<size>`: a VM start_mission rents.
 pub(crate) fn is_auto_managed(node_id: &str) -> bool {
-    node_id.to_ascii_lowercase().starts_with("auto-managed")
+    node_id
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("auto-managed")
 }
 
-/// Harness auth a fresh `orb-node-base` VM can satisfy, decided before the
-/// VM is rented: the image has no grok login, and the owner's Antigravity
-/// sign-in is projected only when the operator allows it.
-pub(crate) fn managed_auth_precheck(
-    plan: &RemoteHarnessPlan,
+/// Parse `auto-managed`, `auto-managed:<size>`, `auto-managed:<provider>`, or
+/// `auto-managed:<provider>:<size>` into `(provider, size)`.
+pub(crate) fn parse_auto_managed_spec(raw: &str) -> Option<(Option<String>, Option<String>)> {
+    let trimmed = raw.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("auto-managed") {
+        return None;
+    }
+    let Some((_, rest)) = trimmed.split_once(':') else {
+        return Some((None, None));
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some((None, None));
+    }
+    if let Some((provider, size)) = rest.split_once(':') {
+        let p = provider.trim().to_ascii_lowercase();
+        let s = size.trim();
+        return Some((
+            (!p.is_empty()).then_some(p),
+            (!s.is_empty()).then(|| s.to_string()),
+        ));
+    }
+    let lower = rest.to_ascii_lowercase();
+    if matches!(lower.as_str(), "boat" | "hetzner" | "vastai" | "scaleway") {
+        Some((Some(lower), None))
+    } else {
+        Some((None, Some(rest.to_string())))
+    }
+}
+
+/// Backend-level managed VM auth check used both by pre-rent validation and by
+/// child default placement (`auto-managed` vs `auto` fallback).
+pub(crate) fn managed_backend_auth_precheck(
+    backend_id: &str,
     manager: Option<&crate::managed::ManagedManager>,
     user_id: &str,
 ) -> Result<(), String> {
-    match plan {
-        RemoteHarnessPlan::Grok { .. } => Err(format!(
+    match backend_id.trim().to_ascii_lowercase().as_str() {
+        "grok" => Err(format!(
             "{}: managed VMs (orb-node-base) have no grok login; pick claudecode, codex or opencode (with model_override) for auto-managed",
             remote_grok::REMOTE_AUTH_REQUIRED
         )),
-        RemoteHarnessPlan::Antigravity { .. } => {
+        "antigravity" => {
             let allowed = manager.is_some_and(|m| m.runtime_settings().antigravity_on_managed)
                 && crate::managed::antigravity_owner_allowed(
                     Some(user_id),
@@ -2938,6 +3102,23 @@ pub(crate) fn managed_auth_precheck(
                     remote_grok::REMOTE_AUTH_REQUIRED
                 ))
             }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Harness auth a fresh `orb-node-base` VM can satisfy, decided before the
+/// VM is rented: the image has no grok login, and the owner's Antigravity
+/// sign-in is projected only when the operator allows it.
+pub(crate) fn managed_auth_precheck(
+    plan: &RemoteHarnessPlan,
+    manager: Option<&crate::managed::ManagedManager>,
+    user_id: &str,
+) -> Result<(), String> {
+    match plan {
+        RemoteHarnessPlan::Grok { .. } => managed_backend_auth_precheck("grok", manager, user_id),
+        RemoteHarnessPlan::Antigravity { .. } => {
+            managed_backend_auth_precheck("antigravity", manager, user_id)
         }
         _ => Ok(()),
     }
