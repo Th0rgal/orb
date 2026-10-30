@@ -4,8 +4,9 @@ import { createSignal } from 'solid-js';
 import { Composer } from '../src/composer/Composer';
 import { SideQuestions, type SideQuestionsHandle } from '../src/SideQuestionPanel';
 import { askSide, boundedHistory, sideContext } from '../src/sideQuestionClient';
-const serverReconcile=vi.hoisted(()=>({fn:async(_parent:string,local:any[])=>({history:local})}));
-vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:async()=>{},reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+const serverReconcile=vi.hoisted(()=>({fn:async(_parent:string,local:any[])=>({history:local} as {history:any[];activeSession?:any;latest?:string})}));
+const watchMock=vi.hoisted(()=>({fn:async(_parent:string,_signal:AbortSignal,_receive:(e:any)=>void)=>{}}));
+vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -14,7 +15,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -253,4 +254,65 @@ it('keeps a question that was not sent as a pending bubble whose Retry resends i
  await screen.findByText('Sent at last.');
  expect(fetch).toHaveBeenCalledTimes(2);
  expect(screen.queryByText('Question not sent')).toBeNull();
+});
+
+it('reconnects to an active server /btw run on remount without flashing Side question interrupted',async()=>{
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey('0c532a32-2fb5-4fd6-ba6b-b9820d12c097'),{
+  history:[],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Analyze editablePaths trap and turbo-lean usage',answer:'',error:''},
+ });
+ let finishReconcile!:(res:{history:any[];activeSession?:any;latest?:string})=>void;
+ serverReconcile.fn=()=>new Promise(resolve=>{finishReconcile=resolve;});
+ let finishWatch!:(answer:string)=>void;
+ watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(resolve=>{
+  receive({type:'start',model:'opencode · builtin/smart'});
+  finishWatch=answer=>{receive({type:'done',answer});resolve();};
+ });
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="0c532a32-2fb5-4fd6-ba6b-b9820d12c097" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await screen.findByText('Reconnecting…')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ finishReconcile({
+  history:[],
+  activeSession:{id:'634505a6-4371-4fa1-91c2-7bbcc62bdb6f',question:'Analyze editablePaths trap and turbo-lean usage',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0},
+  latest:'634505a6-4371-4fa1-91c2-7bbcc62bdb6f',
+ });
+ expect(await screen.findByText('Starting side agent…')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+ serverReconcile.fn=async()=>({
+  history:[{id:'s1',question:'Analyze editablePaths trap and turbo-lean usage',answer:'Complete consensus prompt ready.'}],
+  latest:'634505a6-4371-4fa1-91c2-7bbcc62bdb6f',
+ });
+ finishWatch('Complete consensus prompt ready.');
+ expect(await screen.findByText('Complete consensus prompt ready.')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+});
+
+it('clears a previously persisted Side question interrupted banner when Core reports the side session is still active',async()=>{
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey('stale-error-active'),{
+  history:[],
+  draft:'',
+  model:'opencode · builtin/smart',
+  open:true,
+  docked:true,
+  pending:{question:'Analyze editablePaths',answer:'',error:'Side question interrupted. Retry to request a complete answer.'},
+ });
+ serverReconcile.fn=async()=>({
+  history:[],
+  activeSession:{id:'634505a6-live',question:'Analyze editablePaths',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0},
+  latest:'634505a6-live',
+ });
+ watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(()=>{
+  receive({type:'start',model:'opencode · builtin/smart'});
+ });
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="stale-error-active" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ expect(await screen.findByText('Starting side agent…')).toBeTruthy();
+ expect(screen.queryByText(/Side question interrupted/)).toBeNull();
 });

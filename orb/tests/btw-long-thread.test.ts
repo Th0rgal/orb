@@ -4,7 +4,7 @@ vi.mock('../src/api',async original=>({...await original<typeof import('../src/a
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),streamMission:vi.fn(()=>vi.fn())}));
 import {api,getMission} from '../src/api';
 import {getMissionEvents} from '../src/stream';
-import {reconcileBtwServerHistory,watchBtw,btwSession} from '../src/btwAgent';
+import {reconcileBtwServerHistory,resetBtwThreadCache,watchBtw,btwSession} from '../src/btwAgent';
 import {sideQuestionKey} from '../src/sideQuestionStorage';
 
 const events=longThreadEvents();
@@ -20,7 +20,7 @@ beforeEach(()=>{
  vi.mocked(api).mockImplementation(async(path:string)=>path.startsWith('/api/control/missions?tag=')?[longThreadMission()] as any:[] as any);
  vi.mocked(getMission).mockImplementation(async()=>longThreadMission() as any);
 });
-afterEach(()=>{vi.unstubAllGlobals();localStorage.clear();vi.clearAllMocks();});
+afterEach(()=>{resetBtwThreadCache();vi.unstubAllGlobals();localStorage.clear();vi.clearAllMocks();});
 
 it('reads a thread longer than one event page to its end, newest last',async()=>{
  expect(events.length).toBeGreaterThan(400);

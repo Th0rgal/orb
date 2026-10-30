@@ -56,13 +56,17 @@ Local runs use the ordinary client-run protocol with a distinct run and harness
 session identity. Remote runs use the regular mission runner.
 
 The panel stores its conversation and child mission identity in connection-scoped
-local storage. Reload reconnects to the stored child. Closing the panel hides it;
-Stop cancels only the side agent. `.btw-thread` uses the shared `createPinnedScroll`
-owner (`overflow-anchor: none` + `scrollKeeper` during panel divider drags) so
-narrowing or resizing the side panel keeps a bottom-pinned side conversation at
-the bottom and preserves the top visible line when scrolled up. Local execution
-still requires the owning Orb process/computer. Clearing local application storage
-loses the panel association; cross-device history discovery is not implemented yet.
+local storage and reconciles history and active runs across the parent's `fork-of:`
+chain from Core (`btw-parent:<id>`). Reloading or switching conversations reconnects
+to an active Core side session without interrupting it, caches finished side threads
+by `(activity, status)`, and retries transient poll errors while watching; see
+[`docs/specs/side-questions.md`](specs/side-questions.md) for the state and
+reconciliation invariants. Closing the panel hides it; Stop cancels only the side
+agent. `.btw-thread` uses the shared `createPinnedScroll` owner
+(`overflow-anchor: none` + `scrollKeeper` during panel divider drags) so narrowing
+or resizing the side panel keeps a bottom-pinned side conversation at the bottom and
+preserves the top visible line when scrolled up. Local execution still requires the
+owning Orb process/computer.
 
 Verification: frontend unit tests cover separate child creation, continuation,
 local placement, and cancellation; WebKit tests cover panel persistence and
