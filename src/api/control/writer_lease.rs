@@ -476,7 +476,7 @@ pub(super) fn find_existing_pr_writer_in_sqlite(
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| format!("open {} read-only: {error}", path.display()))?;
     connection
-        .busy_timeout(std::time::Duration::from_secs(2))
+        .busy_timeout(std::time::Duration::from_secs(10))
         .map_err(|error| error.to_string())?;
     let table_columns = |table: &str| -> Result<std::collections::HashSet<String>, String> {
         let mut statement = connection

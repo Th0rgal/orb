@@ -270,7 +270,7 @@ fn columns(conn: &Connection, table: &str) -> Result<HashSet<String>, String> {
 fn read_sqlite(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), String> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(2))
+    conn.busy_timeout(std::time::Duration::from_secs(10))
         .map_err(|e| e.to_string())?;
     let cols = columns(&conn, "missions")?;
     let optional = |name: &str| {

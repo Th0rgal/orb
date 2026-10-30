@@ -1,0 +1,73 @@
+    Finished `test` profile [unoptimized] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-763bfa3d650eefea)
+
+running 2 tests
+test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
+test stateful_tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
+
+running 1 test
+test orb_spec::tests::host_orb_wire_machine_patch_and_fd_bounds_gates_verified ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
+
+running 1 test
+test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 1.48s
+
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
+
+running 1 test
+test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
+
+running 1 test
+test api::control::control_queue::native_schedule_pool_tests::outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
+
+running 1 test
+test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
+
+running 1 test
+test api::privilege_broker::tests::auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
+
+running 1 test
+test managed::tests::resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
+
+running 1 test
+test api::control::tests::stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
+

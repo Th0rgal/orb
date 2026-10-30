@@ -85,7 +85,7 @@ pub fn route(p: &AIProvider) -> Route {
 /// observation. A partial response supplements, rather than replaces, fallback.
 /// Google models granted per key that `models.list` never returns.
 const GOOGLE_EARLY_ACCESS_MODELS: &[(&str, &str)] =
-    &[("gemini-4-argon-eap", "Gemini 4 Argon (early access)")];
+    &[("gemini-4-carbon-eap", "Gemini 4 Carbon (early access)")];
 
 pub fn record_result(
     o: &mut Observation,
@@ -468,7 +468,7 @@ mod tests {
         let (url, task) = server(
             Router::new()
                 .route("/v1beta/models", get(|| async { Json(serde_json::json!({"models":[{"name":"models/gemini-3.1-pro-preview","displayName":"Gemini 3.1 Pro","supportedGenerationMethods":["generateContent"]}]})) }))
-                .route("/v1beta/models/gemini-4-argon-eap", get(|headers: HeaderMap| async move {
+                .route("/v1beta/models/gemini-4-carbon-eap", get(|headers: HeaderMap| async move {
                     if headers.get("x-goog-api-key").and_then(|v| v.to_str().ok()) == Some("allowlisted") { axum::http::StatusCode::OK } else { axum::http::StatusCode::NOT_FOUND }
                 })),
         )
@@ -481,7 +481,7 @@ mod tests {
         other.id = uuid::Uuid::new_v4();
         other.api_key = Some("regular".into());
         let state = refresh(root.path(), vec![p.clone(), other]).await.unwrap();
-        let has_argon: Vec<bool> = state
+        let has_carbon: Vec<bool> = state
             .connections
             .iter()
             .map(|o| {
@@ -490,11 +490,15 @@ mod tests {
                     .unwrap()
                     .models
                     .iter()
-                    .any(|m| m.id == "gemini-4-argon-eap")
+                    .any(|m| m.id == "gemini-4-carbon-eap")
             })
             .collect();
         // Only the allowlisted key gets it; the regular key keeps the listed models only.
-        assert_eq!(has_argon.iter().filter(|x| **x).count(), 1, "{has_argon:?}");
+        assert_eq!(
+            has_carbon.iter().filter(|x| **x).count(),
+            1,
+            "{has_carbon:?}"
+        );
         assert_eq!(state.connections.len(), 2);
         task.abort();
     }

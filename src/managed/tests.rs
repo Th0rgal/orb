@@ -33,6 +33,7 @@ fn live_reaper(m: &ManagedManager) {
     m.set_runtime_settings(RuntimeSettings {
         antigravity_on_managed: true,
         reaper_dry_run: false,
+        ..Default::default()
     });
 }
 
@@ -821,6 +822,7 @@ async fn antigravity_setting_owner_and_wipe_on_destroy() {
     m.set_runtime_settings(RuntimeSettings {
         antigravity_on_managed: false,
         reaper_dry_run: false,
+        ..Default::default()
     });
     assert!(!m.antigravity_allowed(&mine.node_id).await, "setting off");
     // Persisted across restarts.
@@ -830,6 +832,7 @@ async fn antigravity_setting_owner_and_wipe_on_destroy() {
     m.set_runtime_settings(RuntimeSettings {
         antigravity_on_managed: true,
         reaper_dry_run: false,
+        ..Default::default()
     });
     m.mark_antigravity_projected(&mine.node_id).await;
     m.destroy(&mine.id, "test").await.unwrap();
@@ -1079,6 +1082,7 @@ async fn dry_run_records_but_never_destroys_except_ttl() {
     m.set_runtime_settings(RuntimeSettings {
         antigravity_on_managed: true,
         reaper_dry_run: true,
+        ..Default::default()
     });
     let done = online_machine(&m, "owner-done").await;
     let expired = online_machine(&m, "owner-live").await;
@@ -1283,6 +1287,7 @@ async fn reconcile_dry_run_keeps_orphans() {
     m.set_runtime_settings(RuntimeSettings {
         antigravity_on_managed: true,
         reaper_dry_run: true,
+        ..Default::default()
     });
     *fake.listed.lock().unwrap() = vec![ProviderMachine {
         provider_id: "bx_orphan".into(),
@@ -1611,14 +1616,22 @@ async fn provision_runs_the_script_before_starting_the_node() {
         .await
         .unwrap();
     for _ in 0..200 {
-        if fake.execs.lock().unwrap().len() >= 2 {
+        if fake.execs.lock().unwrap().len() >= 3 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let execs = fake.execs.lock().unwrap().clone();
     assert!(execs[0].contains("provision.sh"), "{execs:?}");
-    assert!(execs[1].contains("systemctl restart orb-node"), "{execs:?}");
+    assert!(
+        execs[1].contains("rm -rf /var/lib/orb-node/node.cred")
+            && !execs[1].contains("systemctl restart"),
+        "{execs:?}"
+    );
+    assert!(
+        execs[2].contains("systemctl restart orb-node") && !execs[2].contains("node.cred"),
+        "{execs:?}"
+    );
     let _ = m.destroy(&machine.id, "test").await;
 }
 
@@ -2994,36 +3007,54 @@ fn cloud_bootstrap_script_configures_user_bus_and_harnesses_within_onstart_budge
 #[tokio::test]
 async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
     let dir = tempfile::tempdir().unwrap();
-    let boat_p: Arc<dyn ManagedProvider> =
-        Arc::new(boat::BoatProvider::new("http://127.0.0.1:9", "boat-k"));
-    let hz_p: Arc<dyn ManagedProvider> =
-        Arc::new(hetzner::HetznerProvider::new("http://127.0.0.1:9", "hz-k"));
-    let m = Arc::new(ManagedManager::new(
-        settings(),
-        Some(boat_p),
-        dir.path(),
-        3000,
-    ));
-    m.register_provider(hz_p);
+    let m = Arc::new(ManagedManager::new(settings(), None, dir.path(), 3000));
+    m.register_base_credential("boat", "bitwarden", "boat-secret-1234", None, None);
+    m.update_provider_config(
+        "hetzner",
+        ProviderUpdateRequest {
+            enabled: Some(true),
+            api_key: Some("hz-secret-5678".into()),
+            region: Some("fsn1".into()),
+            project_id: None,
+        },
+    )
+    .unwrap();
+    m.update_provider_config(
+        "scaleway",
+        ProviderUpdateRequest {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let catalog = m.provider_catalog();
     assert_eq!(catalog.len(), 4);
     assert_eq!(catalog[0].provider, "boat");
     assert_eq!(catalog[0].display_name, "boat.dev");
     assert!(catalog[0].configured);
+    assert!(catalog[0].enabled);
+    assert_eq!(catalog[0].credential_source.as_deref(), Some("bitwarden"));
+    assert_eq!(catalog[0].key_hint.as_deref(), Some("••••1234"));
     assert!(catalog[0].supports_free_stop);
     assert!(catalog[0].supports_snapshots);
 
     assert_eq!(catalog[1].provider, "hetzner");
     assert_eq!(catalog[1].display_name, "Hetzner Cloud");
     assert!(catalog[1].configured);
+    assert!(catalog[1].enabled);
+    assert_eq!(catalog[1].credential_source.as_deref(), Some("settings"));
+    assert_eq!(catalog[1].key_hint.as_deref(), Some("••••5678"));
+    assert_eq!(catalog[1].region.as_deref(), Some("fsn1"));
     assert!(!catalog[1].supports_free_stop);
     assert!(!catalog[1].supports_snapshots);
 
     assert_eq!(catalog[2].provider, "vastai");
     assert!(!catalog[2].configured);
+    assert!(catalog[2].enabled);
     assert_eq!(catalog[3].provider, "scaleway");
     assert!(!catalog[3].configured);
+    assert!(!catalog[3].enabled);
     assert!(
         catalog[3]
             .sizes
@@ -3040,25 +3071,25 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         .with_timezone(&Utc);
     let sample_machine = ManagedMachine {
         id: "mm1001".into(),
-        name: "cpx41-a".into(),
+        name: "cpx42-a".into(),
         provider: "hetzner".into(),
         provider_id: Some("42001".into()),
         node_id: "managed-mm1001".into(),
         provisioning_mode: ProvisioningMode::Worker,
         antigravity_projected: false,
         image: "ubuntu-24.04".into(),
-        size: "cpx41".into(),
+        size: "cpx42".into(),
         cpu: 8,
         ram_gb: 16,
-        disk_gb: 240,
-        usd_per_hour: 0.05,
+        disk_gb: 320,
+        usd_per_hour: 0.12,
         state: MachineState::Online,
         created_at: t0,
         expires_at: t1,
         online_at: Some(t0),
         destroyed_at: None,
         destroy_reason: None,
-        cost_usd: 0.025,
+        cost_usd: 0.06,
         cost_is_metered: false,
         owner_kind: Some("mission".into()),
         requested_by_mission_id: None,
@@ -3095,8 +3126,8 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         providers: catalog,
         machines: vec![sample_machine.clone()],
         budget: BudgetView {
-            spent_today_usd: 0.025,
-            committed_usd: 0.075,
+            spent_today_usd: 0.06,
+            committed_usd: 0.18,
             daily_cap_usd: Some(50.0),
             active: 1,
             max_concurrent: Some(16),
@@ -3116,4 +3147,219 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         serde_json::from_str(&std::fs::read_to_string(&fixture_path).expect("read fixture"))
             .expect("parse fixture");
     assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn provider_enable_disable_and_encrypted_config_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake_p: Arc<dyn ManagedProvider> = Arc::new(FakeProvider::default());
+    let m = Arc::new(ManagedManager::new(
+        settings(),
+        Some(Arc::clone(&fake_p)),
+        dir.path(),
+        3000,
+    ));
+    m.register_base_credential("hetzner", "bitwarden", "bw-hetzner-key-9999", None, None);
+
+    // Settings override encrypts secret on disk, never writes raw plaintext, and wins over bitwarden.
+    let updated = m
+        .update_provider_config(
+            "hetzner",
+            ProviderUpdateRequest {
+                enabled: Some(true),
+                api_key: Some("ui-hetzner-secret-abcd".into()),
+                region: Some("hel1".into()),
+                project_id: None,
+            },
+        )
+        .unwrap();
+    assert!(updated.configured);
+    assert!(updated.enabled);
+    assert_eq!(updated.credential_source.as_deref(), Some("settings"));
+    assert_eq!(updated.key_hint.as_deref(), Some("••••abcd"));
+    assert_eq!(updated.region.as_deref(), Some("hel1"));
+
+    let on_disk =
+        std::fs::read_to_string(dir.path().join(".sandboxed-sh/managed_providers.json")).unwrap();
+    assert!(!on_disk.contains("ui-hetzner-secret-abcd"));
+    let parsed: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+    let stored = parsed["hetzner"]["encrypted_api_key"].as_str().unwrap();
+    assert!(crate::library::env_crypto::is_encrypted(stored));
+
+    // Clearing the settings override falls back to the Bitwarden credential while keeping region override.
+    let cleared = m
+        .update_provider_config(
+            "hetzner",
+            ProviderUpdateRequest {
+                api_key: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(cleared.configured);
+    assert_eq!(cleared.credential_source.as_deref(), Some("bitwarden"));
+    assert_eq!(cleared.key_hint.as_deref(), Some("••••9999"));
+    assert_eq!(cleared.region.as_deref(), Some("hel1"));
+
+    // Disabling Hetzner blocks new spawns with 409 provider_disabled, while provider_for remains live for reaping.
+    let disabled = m
+        .update_provider_config(
+            "hetzner",
+            ProviderUpdateRequest {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!disabled.enabled);
+    assert!(m.provider_for("hetzner").is_some());
+
+    let err = m
+        .spawn(SpawnRequest {
+            provider: Some("hetzner".into()),
+            size: Some("cpx32".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error, "provider_disabled");
+    assert_eq!(err.status, 409);
+
+    // Reloading from disk preserves both disabled_providers and encrypted provider overrides.
+    let m2 = Arc::new(ManagedManager::new(settings(), None, dir.path(), 3000));
+    m2.load().await;
+    m2.update_provider_config(
+        "scaleway",
+        ProviderUpdateRequest {
+            enabled: Some(true),
+            api_key: Some("scw-secret-xyz1234".into()),
+            region: Some("nl-ams-1".into()),
+            project_id: Some("proj-uuid-1".into()),
+        },
+    )
+    .unwrap();
+    let m3 = Arc::new(ManagedManager::new(settings(), None, dir.path(), 3000));
+    m3.load().await;
+    assert!(!m3.is_provider_enabled("hetzner"));
+    let scw = m3
+        .provider_catalog()
+        .into_iter()
+        .find(|p| p.provider == "scaleway")
+        .unwrap();
+    assert!(scw.configured);
+    assert_eq!(scw.credential_source.as_deref(), Some("settings"));
+    assert_eq!(scw.key_hint.as_deref(), Some("••••1234"));
+    assert_eq!(scw.region.as_deref(), Some("nl-ams-1"));
+    assert_eq!(scw.project_id.as_deref(), Some("proj-uuid-1"));
+}
+
+#[tokio::test]
+async fn reconcile_closes_vanished_destroying_rows_even_when_list_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, _) = manager(dir.path(), settings());
+    let online = online_machine(&m, "owner-online").await;
+    let stuck = online_machine(&m, "owner-destroying").await;
+    m.update(&stuck.id, |row| {
+        row.state = MachineState::Destroying;
+        row.destroy_reason = Some("stopped: owner_interrupted_idle".into());
+        row.error = Some("destroy failed: HTTP 403 api_key_action_forbidden".into());
+    })
+    .await;
+
+    // First pass: neither closed yet.
+    let r1 = m.reconcile_once().await.unwrap();
+    assert_eq!(r1["vanished_rows"], serde_json::json!([]));
+    assert_eq!(
+        m.get(&stuck.id).await.unwrap().state,
+        MachineState::Destroying
+    );
+    assert_eq!(m.get(&online.id).await.unwrap().state, MachineState::Online);
+
+    // Second pass with empty list: Destroying closes as vanished, Online stays protected.
+    let r2 = m.reconcile_once().await.unwrap();
+    assert_eq!(r2["vanished_rows"], serde_json::json!([stuck.id.clone()]));
+    let closed = m.get(&stuck.id).await.unwrap();
+    assert_eq!(closed.state, MachineState::Destroyed);
+    assert!(closed.ledger_closed);
+    assert_eq!(m.get(&online.id).await.unwrap().state, MachineState::Online);
+}
+
+#[test]
+fn retryable_exec_error_matches_transient_sandbox_proxy_faults() {
+    assert!(super::is_retryable_exec_error(
+        "boat POST /sandboxes/bx_123/commands -> HTTP 502 sandbox_direct_failed: Failed to execute command in sandbox"
+    ));
+    assert!(super::is_retryable_exec_error(
+        "HTTP 503 Service Unavailable"
+    ));
+    assert!(!super::is_retryable_exec_error("exit code 1"));
+    assert!(!super::is_retryable_exec_error("HTTP 403 forbidden"));
+}
+
+#[test]
+fn resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences() {
+    use crate::orb_spec::ResourceLedgerOp;
+
+    let r0 = super::evaluate_resource_ledger_gate(
+        ResourceLedgerOp::Reserve,
+        0,
+        1,
+        2,
+        400,
+        300,
+        1_000,
+        10,
+        100,
+    );
+    assert!(r0.admitted);
+    assert_eq!(r0.next_reserved_slots, 1);
+    assert_eq!(r0.next_active_slots, 1);
+
+    let over_cap = super::evaluate_resource_ledger_gate(
+        ResourceLedgerOp::Reserve,
+        1,
+        1,
+        2,
+        400,
+        100,
+        1_000,
+        10,
+        100,
+    );
+    assert!(!over_cap.admitted);
+    assert_eq!(over_cap.next_reserved_slots, 1);
+
+    let act = super::evaluate_resource_ledger_gate(
+        ResourceLedgerOp::ActivateReserved,
+        1,
+        1,
+        2,
+        700,
+        0,
+        1_000,
+        20,
+        100,
+    );
+    assert!(act.admitted);
+    assert_eq!(act.next_reserved_slots, 0);
+    assert_eq!(act.next_active_slots, 2);
+
+    let reap = super::evaluate_resource_ledger_gate(
+        ResourceLedgerOp::ReapExpired,
+        1,
+        0,
+        2,
+        700,
+        0,
+        1_000,
+        100,
+        100,
+    );
+    assert!(reap.admitted);
+    assert_eq!(reap.next_reserved_slots, 0);
+
+    let snap = super::resource_ledger_shadow_counter().snapshot("orb_resource_ledger_step");
+    assert!(snap.total_events >= 4);
+    assert_eq!(snap.total_divergences, 0);
 }

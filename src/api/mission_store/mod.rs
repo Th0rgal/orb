@@ -93,12 +93,19 @@ static CURSOR_PAGE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCo
 static SIDEBAR_MERGE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
     std::sync::OnceLock::new();
 
+static HIERARCHY_MERGE_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
 pub fn cursor_page_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
     CURSOR_PAGE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
 }
 
 pub fn sidebar_merge_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
     SIDEBAR_MERGE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+pub fn hierarchy_merge_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    HIERARCHY_MERGE_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
 }
 
 /// Evaluate `orb_cursor_page_step` (`cursor_pagination_exclusive_no_gap_no_dup`,
@@ -151,6 +158,44 @@ pub fn evaluate_sidebar_merge_gate(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_hierarchy_merge_gate(
+    current_epoch: u64,
+    incoming_epoch: u64,
+    archive_epoch: u64,
+    cur_archived: bool,
+    cur_superseded: bool,
+    is_partial_patch: bool,
+    parent_presence: crate::orb_spec::FieldPresenceTag,
+    cur_parent_ord: u32,
+    inc_parent_ord: u32,
+    inc_archive: bool,
+    inc_unarchive: bool,
+    inc_supersede: bool,
+    host_admitted: bool,
+    host_next_parent_ord: u32,
+) -> crate::orb_spec::HierarchyMergeStepVerdict {
+    crate::orb_spec::observe_hierarchy_merge_shadow(
+        crate::orb_spec::HierarchyMergeStepInput {
+            current_epoch,
+            incoming_epoch,
+            archive_epoch,
+            cur_archived,
+            cur_superseded,
+            is_partial_patch,
+            parent_presence,
+            cur_parent_ord,
+            inc_parent_ord,
+            inc_archive,
+            inc_unarchive,
+            inc_supersede,
+        },
+        host_admitted,
+        host_next_parent_ord,
+        hierarchy_merge_shadow_counter(),
+    )
+}
+
 /// Reconciles an incoming page of missions into an existing sidebar mission list
 /// using `orb_sidebar_merge_step`:
 /// - Never creates duplicate mission rows (`unique_sidebar`).
@@ -184,6 +229,71 @@ pub fn reconcile_sidebar_missions_page(
 
         if let Some(pos) = out.iter().position(|m| m.id == inc.id) {
             let ex_ms = parse_ms(&out[pos].updated_at);
+            let cur_sup = out[pos].project.tags.iter().any(|t| t == SUPERSEDED_TAG);
+            let cur_arch = cur_sup
+                || matches!(
+                    out[pos].status,
+                    crate::api::control::events::MissionStatus::Acknowledged
+                        | crate::api::control::events::MissionStatus::Completed
+                );
+            let inc_sup = inc.project.tags.iter().any(|t| t == SUPERSEDED_TAG);
+            let inc_arch = inc_sup
+                || matches!(
+                    inc.status,
+                    crate::api::control::events::MissionStatus::Acknowledged
+                        | crate::api::control::events::MissionStatus::Completed
+                );
+            let cur_parent_ord = out[pos]
+                .parent_mission_id
+                .map(|id| (id.as_u128() as u32).max(1))
+                .unwrap_or(0);
+            let inc_parent_ord = inc
+                .parent_mission_id
+                .map(|id| (id.as_u128() as u32).max(1))
+                .unwrap_or(0);
+            let parent_presence = match (is_partial_page, inc.parent_mission_id.is_some()) {
+                (_, true) => crate::orb_spec::FieldPresenceTag::Present,
+                (true, false) => crate::orb_spec::FieldPresenceTag::Omitted,
+                (false, false) => crate::orb_spec::FieldPresenceTag::Cleared,
+            };
+            let inc_unarch = !inc_arch && cur_arch && !cur_sup && !inc_sup;
+            let archive_epoch = if cur_arch { ex_ms } else { 0 };
+            let next_sup = cur_sup || inc_sup;
+            let epoch_fresh = if is_partial_page {
+                inc_ms > ex_ms
+            } else {
+                inc_ms >= ex_ms
+            };
+            let unarchive_allowed = !next_sup && inc_unarch && !inc_arch && inc_ms > archive_epoch;
+            let sup_blocks = cur_sup && !inc_sup;
+            let arch_blocks = cur_arch && !next_sup && !inc_arch && !unarchive_allowed;
+            let host_admitted = epoch_fresh && !sup_blocks && !arch_blocks;
+            let host_next_parent_ord = if !host_admitted {
+                cur_parent_ord
+            } else {
+                match (is_partial_page, parent_presence) {
+                    (true, crate::orb_spec::FieldPresenceTag::Omitted) => cur_parent_ord,
+                    (_, crate::orb_spec::FieldPresenceTag::Present) => inc_parent_ord,
+                    _ => 0,
+                }
+            };
+            let hier_verdict = evaluate_hierarchy_merge_gate(
+                ex_ms,
+                inc_ms,
+                archive_epoch,
+                cur_arch,
+                cur_sup,
+                is_partial_page,
+                parent_presence,
+                cur_parent_ord,
+                inc_parent_ord,
+                inc_arch,
+                inc_unarch,
+                inc_sup,
+                host_admitted,
+                host_next_parent_ord,
+            );
+            let preserved_parent = out[pos].parent_mission_id;
             let verdict = evaluate_sidebar_merge_gate(
                 inc_ord,
                 inc_ord,
@@ -199,11 +309,19 @@ pub fn reconcile_sidebar_missions_page(
                     out.remove(pos);
                 }
                 crate::orb_spec::SidebarMergeAction::UpdateExistingInPlace => {
-                    out[pos] = inc.clone();
+                    if hier_verdict.admitted {
+                        let mut merged = inc.clone();
+                        if is_partial_page && merged.parent_mission_id.is_none() {
+                            merged.parent_mission_id = preserved_parent;
+                        }
+                        out[pos] = merged;
+                    }
                 }
                 crate::orb_spec::SidebarMergeAction::RetainExistingNewer => {}
                 crate::orb_spec::SidebarMergeAction::InsertNewUnique => {
-                    out[pos] = inc.clone();
+                    if hier_verdict.admitted {
+                        out[pos] = inc.clone();
+                    }
                 }
             }
         } else {
@@ -6722,9 +6840,56 @@ mod harness_session_tests {
 
         let cur_snap = cursor_page_shadow_counter().snapshot("orb_cursor_page_step");
         let side_snap = sidebar_merge_shadow_counter().snapshot("orb_sidebar_merge_step");
+        let hier_snap =
+            super::hierarchy_merge_shadow_counter().snapshot("orb_hierarchy_merge_step");
         assert!(cur_snap.total_events >= 6);
         assert_eq!(cur_snap.total_divergences, 0);
         assert!(side_snap.total_events >= 5);
         assert_eq!(side_snap.total_divergences, 0);
+        assert!(hier_snap.total_events >= 2);
+        assert_eq!(hier_snap.total_divergences, 0);
+
+        let cleared_parent = super::evaluate_hierarchy_merge_gate(
+            100,
+            200,
+            0,
+            false,
+            false,
+            true,
+            crate::orb_spec::FieldPresenceTag::Cleared,
+            7,
+            0,
+            false,
+            false,
+            false,
+            true,
+            0,
+        );
+        assert!(cleared_parent.admitted);
+        assert_eq!(cleared_parent.next_parent_ord, 0);
+        let sup_sticky = super::evaluate_hierarchy_merge_gate(
+            200,
+            300,
+            200,
+            true,
+            true,
+            false,
+            crate::orb_spec::FieldPresenceTag::Present,
+            7,
+            9,
+            false,
+            true,
+            false,
+            false,
+            7,
+        );
+        assert!(!sup_sticky.admitted);
+        assert!(sup_sticky.next_superseded);
+        assert_eq!(
+            super::hierarchy_merge_shadow_counter()
+                .snapshot("orb_hierarchy_merge_step")
+                .total_divergences,
+            0
+        );
     }
 }

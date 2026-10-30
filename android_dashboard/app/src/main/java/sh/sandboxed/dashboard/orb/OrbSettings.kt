@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Check
@@ -53,6 +55,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -67,6 +70,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -87,7 +93,11 @@ enum class OrbSettingsRoute {
     Section,
     Fido,
     Backend,
+    FallbackChains,
     Providers,
+    ProxyKeys,
+    Skills,
+    Assistant,
     Machines,
     Inbox,
     Secrets,
@@ -109,8 +119,16 @@ fun OrbSettingsSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var route by remember { mutableStateOf(initialRoute) }
     var section by remember { mutableStateOf(OrbSettingsSection.of(initialRoute)) }
-    // A page returns to its section; the section returns to the list.
-    val back = { route = if (route != OrbSettingsRoute.Section && section != null) OrbSettingsRoute.Section else OrbSettingsRoute.Root }
+    // A page returns to its section unless the section has only one page, which returns directly to Root.
+    val back = {
+        val sec = section
+        if (route != OrbSettingsRoute.Section && sec != null && sec.pages.size > 1) {
+            route = OrbSettingsRoute.Section
+        } else {
+            section = null
+            route = OrbSettingsRoute.Root
+        }
+    }
     val pendingSecrets by core.pendingSecretRequests.collectAsState()
     val settingsContext = LocalContext.current
     remember(settingsContext) { OrbBtwSettings.init(settingsContext); true }
@@ -142,6 +160,13 @@ fun OrbSettingsSheet(
         contentColor = Color.White,
         dragHandle = null
     ) {
+        val sheetView = LocalView.current
+        SideEffect {
+            (sheetView.parent as? DialogWindowProvider)?.window?.let { win ->
+                WindowCompat.getInsetsController(win, sheetView).isAppearanceLightStatusBars = false
+                WindowCompat.getInsetsController(win, sheetView).isAppearanceLightNavigationBars = false
+            }
+        }
         TrackPage("settings", UsageTelemetry.Surface.Sheet)
         TrackPage(
             "settings." + when (route) {
@@ -154,7 +179,7 @@ fun OrbSettingsSheet(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(680.dp)
+                .fillMaxHeight(0.92f)
                 .background(OrbStyle.background)
         ) {
             when (route) {
@@ -199,9 +224,17 @@ fun OrbSettingsSheet(
                                     title = sec.label,
                                     subtitle = if (sec == OrbSettingsSection.Security && pendingSecrets > 0) {
                                         "$pendingSecrets access request${if (pendingSecrets == 1) "" else "s"} waiting"
-                                    } else sec.subtitle,
+                                    } else sec.mobileSummary,
                                     attention = sec in attention,
-                                    onClick = { section = sec; route = OrbSettingsRoute.Section }
+                                    onClick = {
+                                        if (sec.pages.size == 1) {
+                                            section = sec
+                                            route = sec.pages[0].third
+                                        } else {
+                                            section = sec
+                                            route = OrbSettingsRoute.Section
+                                        }
+                                    }
                                 )
                             }
                         }
@@ -214,7 +247,7 @@ fun OrbSettingsSheet(
                             .fillMaxSize()
                             .verticalScroll(androidx.compose.foundation.rememberScrollState())
                             .padding(horizontal = 20.dp, vertical = 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Icon(
@@ -233,7 +266,6 @@ fun OrbSettingsSheet(
                             )
                             Spacer(modifier = Modifier.width(40.dp))
                         }
-                        Text(text = sec.subtitle, color = OrbStyle.textMuted, fontSize = 13.sp)
                         OrbSettingsGroup {
                             sec.pages.forEachIndexed { i, (_, label, target) ->
                                 if (i > 0) HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 52.dp))
@@ -250,16 +282,28 @@ fun OrbSettingsSheet(
                 OrbSettingsRoute.Backend -> {
                     OrbSetupView(
                         core = core,
-                        title = "Backend",
+                        title = "Account",
                         onBack = back,
                         onConnected = back
                     )
+                }
+                OrbSettingsRoute.FallbackChains -> {
+                    OrbRoutingSettingsPage(core = core, onBack = back)
                 }
                 OrbSettingsRoute.Providers -> {
                     OrbProvidersSettingsPage(
                         core = core,
                         onBack = back
                     )
+                }
+                OrbSettingsRoute.ProxyKeys -> {
+                    OrbProxyKeysSettingsPage(core = core, onBack = back)
+                }
+                OrbSettingsRoute.Skills -> {
+                    OrbSkillsSettingsPage(core = core, onBack = back)
+                }
+                OrbSettingsRoute.Assistant -> {
+                    OrbHermesSettingsPage(core = core, onBack = back)
                 }
                 OrbSettingsRoute.Secrets -> {
                     OrbSecretsSettingsPage(
@@ -320,20 +364,24 @@ private fun OrbSettingsGroup(content: @Composable () -> Unit) {
 }
 
 private fun sectionIcon(section: OrbSettingsSection): ImageVector = when (section) {
-    OrbSettingsSection.Account -> Icons.Default.Dns
-    OrbSettingsSection.Models -> Icons.Default.Key
+    OrbSettingsSection.Account -> Icons.Default.Person
+    OrbSettingsSection.Models -> Icons.Default.Memory
     OrbSettingsSection.Agents -> Icons.Default.Psychology
     OrbSettingsSection.Security -> Icons.Default.Lock
-    OrbSettingsSection.Notifications -> Icons.Default.Terminal
+    OrbSettingsSection.Notifications -> Icons.Default.Notifications
 }
 
 private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: Int, nodes: Int): String = when (route) {
     OrbSettingsRoute.Backend -> baseURL.ifEmpty { "Not connected" }
+    OrbSettingsRoute.FallbackChains -> "Ordered fallback chains and provider health"
     OrbSettingsRoute.Providers -> "$providers configured"
+    OrbSettingsRoute.ProxyKeys -> "OpenAI-compatible router keys"
+    OrbSettingsRoute.Skills -> "Shared Library skills"
+    OrbSettingsRoute.Assistant -> "Hermes coordinator model, memory & persona"
     OrbSettingsRoute.Machines -> "$nodes nodes"
     OrbSettingsRoute.Inbox -> if (OrbInboxSettings.aiSummary) "AI Overview · ${OrbInboxSettings.model}" else "AI Overview off"
-    OrbSettingsRoute.Secrets -> "Approval devices, Fleet Bunker Mode, privileged and mission access"
-    OrbSettingsRoute.Bitwarden -> "Token, default project, secrets, default access"
+    OrbSettingsRoute.Secrets -> "Fleet Bunker Mode, devices, approvals & grants"
+    OrbSettingsRoute.Bitwarden -> "Bitwarden Secrets Manager vault"
     OrbSettingsRoute.Fido -> "Biometric approvals · trust window ${OrbFidoSettings.trust.minutes.let { if (it <= 0) "off" else "$it min" }}"
     OrbSettingsRoute.Dictation -> OrbDictationSettings.stored.let {
         if (it.isEmpty()) "Device language (${OrbDictationSettings.name(OrbDictationSettings.deviceLanguage)})" else OrbDictationSettings.name(it)

@@ -1,8 +1,8 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-3a60fa9db1975f4a)
+   Compiling orb-spec v1.3.0 (/var/lib/sandboxed-node/work/ca15b275-1886-42e3-bf8d-e1a8582f8304/orb/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 1.68s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-763bfa3d650eefea)
 
 running 36 tests
-test kmp_suffix_prefix_overlap_matches_naive_across_1024_multibyte_utf8_cases ... ok
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
 test privilege_bunker_deploy_tests::deploy_gate_allows_dev_zero_touch_and_requires_session_grant_on_prod ... ok
 test privilege_bunker_deploy_tests::privilege_step_enforces_biometric_session_clock_and_bunker_fence ... ok
@@ -17,6 +17,7 @@ test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ..
 test shadow::tests::phase6_scroll_epoch_and_client_parity_replays ... ok
 test shadow::tests::shadow_runner_classifies_exact_matches_and_known_legacy_bugs ... ok
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
+test stateful_tests::kmp_suffix_prefix_overlap_matches_naive_across_1024_multibyte_utf8_cases ... ok
 test stateful_tests::stream_simd_isa_gated_scanner_matches_scalar_across_1024_differential_inputs ... ok
 test stateful_tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 test stats_settle_tests::settle_adds_once_ignores_replays_and_saturates ... ok

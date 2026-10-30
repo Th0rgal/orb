@@ -156,8 +156,22 @@ impl ScalewayProvider {
         secret_key: impl Into<String>,
         project_id: Option<String>,
     ) -> Self {
-        let default_zone = std::env::var("SCALEWAY_DEFAULT_ZONE")
-            .ok()
+        Self::with_config(
+            base,
+            secret_key,
+            project_id,
+            std::env::var("SCALEWAY_DEFAULT_ZONE").ok(),
+        )
+    }
+
+    pub fn with_config(
+        base: impl Into<String>,
+        secret_key: impl Into<String>,
+        project_id: Option<String>,
+        default_zone: Option<String>,
+    ) -> Self {
+        let default_zone = default_zone
+            .map(|z| z.trim().to_string())
             .filter(|z| !z.trim().is_empty())
             .unwrap_or_else(|| "fr-par-1".into());
         Self {
@@ -169,9 +183,19 @@ impl ScalewayProvider {
             base: base.into().trim_end_matches('/').to_string(),
             secret_key: secret_key.into(),
             project_id: tokio::sync::OnceCell::new(),
-            configured_project_id: project_id.filter(|p| !p.trim().is_empty()),
+            configured_project_id: project_id
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
             default_zone,
         }
+    }
+
+    pub fn default_zone(&self) -> &str {
+        &self.default_zone
+    }
+
+    pub fn configured_project_id(&self) -> Option<&str> {
+        self.configured_project_id.as_deref()
     }
 
     pub fn from_env() -> Option<Self> {

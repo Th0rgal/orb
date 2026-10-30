@@ -53,7 +53,7 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "src/api/control/fork.rs",
@@ -61,15 +61,15 @@
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "17e61215c1295e37cc6113b305358d86aa54799039869ba555e02947076294ee"
+          "sha256": "3f130ef43a66ac77ce59d787a9106c2b4c62d0b3404f1677bc6c7717e0499657"
         },
         {
           "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-          "sha256": "52d8dedea0737aaf117fe88285bd7f7f1a184d8dbe6c3afb50b299427088472e"
+          "sha256": "082a440779ec2a63d6e15900c1b2bac38acbecc7babd0808346ee587b64306c2"
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "1745d8651f1ae06b147611373ce7e129a817679891e21ddb44d9ea6cd599d7d8"
+          "sha256": "1b4ed61e0f7eaa55c6d4bd4bcd4a60607286b6c5b49d4b62e8394a06d8d53d85"
         }
       ],
       "execution": {
@@ -127,11 +127,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-          "sha256": "a4880ef69f88d765797289cee5077981b6ab9357067ef666bf0967ab233bd0e3"
+          "sha256": "688d47552006447d3df52d947cdfaec7bed3041082fd9d72f693a18a67a264db"
         },
         {
           "path": "src/api/control/fork.rs",
@@ -197,11 +197,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -209,7 +209,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
+          "sha256": "6412f76e6e83a5d95aa1828fc9ae18bc38bb9998d329715a3055d6818c7ba704"
         }
       ],
       "execution": {
@@ -260,11 +260,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -272,7 +272,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
+          "sha256": "6412f76e6e83a5d95aa1828fc9ae18bc38bb9998d329715a3055d6818c7ba704"
         }
       ],
       "execution": {
@@ -318,11 +318,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -330,7 +330,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
+          "sha256": "6412f76e6e83a5d95aa1828fc9ae18bc38bb9998d329715a3055d6818c7ba704"
         }
       ],
       "execution": {
@@ -376,11 +376,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -388,7 +388,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
+          "sha256": "6412f76e6e83a5d95aa1828fc9ae18bc38bb9998d329715a3055d6818c7ba704"
         }
       ],
       "execution": {
@@ -439,11 +439,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -451,11 +451,11 @@
         },
         {
           "path": "src/api/privilege_broker.rs",
-          "sha256": "a98f8c8259b52175b8b0fd94a1ff34ceb761f7ab795b17235b42311aebf75c38"
+          "sha256": "a25392ea9a5dfe7b4f704136679570faacebb86b3518f2132ec965c8e65fdcbb"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "d046e47b9d86f04b59300be695de9f22b0631be2ac60321cdd99d334d575427a"
+          "sha256": "d8168abd11519ec7fdd7dabdb7bf8e54e056080da063cbe592087fc22699ceec"
         }
       ],
       "execution": {
@@ -506,11 +506,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -518,11 +518,11 @@
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "17e61215c1295e37cc6113b305358d86aa54799039869ba555e02947076294ee"
+          "sha256": "3f130ef43a66ac77ce59d787a9106c2b4c62d0b3404f1677bc6c7717e0499657"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "d046e47b9d86f04b59300be695de9f22b0631be2ac60321cdd99d334d575427a"
+          "sha256": "d8168abd11519ec7fdd7dabdb7bf8e54e056080da063cbe592087fc22699ceec"
         }
       ],
       "execution": {
@@ -583,11 +583,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "src/api/mission_access.rs",
@@ -595,7 +595,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "d046e47b9d86f04b59300be695de9f22b0631be2ac60321cdd99d334d575427a"
+          "sha256": "d8168abd11519ec7fdd7dabdb7bf8e54e056080da063cbe592087fc22699ceec"
         }
       ],
       "execution": {
@@ -641,19 +641,19 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "src/api/proxy.rs",
-          "sha256": "5949c77312ffad00afd1b376fb0165150126b65c681ef74b12ac50bf93bc02e1"
+          "sha256": "0859b6c4e46fd175b1adee93b99d2594e2a8a36656019499c533f602acc1abc9"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "d046e47b9d86f04b59300be695de9f22b0631be2ac60321cdd99d334d575427a"
+          "sha256": "d8168abd11519ec7fdd7dabdb7bf8e54e056080da063cbe592087fc22699ceec"
         }
       ],
       "execution": {
@@ -704,19 +704,19 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "src/api/proxy.rs",
-          "sha256": "5949c77312ffad00afd1b376fb0165150126b65c681ef74b12ac50bf93bc02e1"
+          "sha256": "0859b6c4e46fd175b1adee93b99d2594e2a8a36656019499c533f602acc1abc9"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "d046e47b9d86f04b59300be695de9f22b0631be2ac60321cdd99d334d575427a"
+          "sha256": "d8168abd11519ec7fdd7dabdb7bf8e54e056080da063cbe592087fc22699ceec"
         }
       ],
       "execution": {
@@ -777,11 +777,11 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "src/remote_node/job_ledger.rs",
@@ -789,7 +789,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "d046e47b9d86f04b59300be695de9f22b0631be2ac60321cdd99d334d575427a"
+          "sha256": "d8168abd11519ec7fdd7dabdb7bf8e54e056080da063cbe592087fc22699ceec"
         }
       ],
       "execution": {
@@ -826,6 +826,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/orb_spec.rs",
+          "symbol": "apply_host_wire_patch"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/orb_spec.rs",
+          "symbol": "host_orb_wire_machine_patch_and_fd_bounds_gates_verified"
         }
       ],
       "sources": [
@@ -835,24 +845,28 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
+          "path": "src/orb_spec.rs",
+          "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -884,6 +898,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/orb_spec.rs",
+          "symbol": "step_host_wire_machine"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/orb_spec.rs",
+          "symbol": "host_orb_wire_machine_patch_and_fd_bounds_gates_verified"
         }
       ],
       "sources": [
@@ -893,24 +917,28 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
+          "path": "src/orb_spec.rs",
+          "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -947,6 +975,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/mission_store/mod.rs",
+          "symbol": "evaluate_hierarchy_merge_gate"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/mission_store/mod.rs",
+          "symbol": "phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences"
         }
       ],
       "sources": [
@@ -956,32 +994,36 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
-          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+          "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
-        },
-        {
           "path": "lean/Orb/StatefulMutantSuite.lean",
           "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        },
+        {
+          "path": "src/api/mission_store/mod.rs",
+          "sha256": "381b9d63aa4bbd258815c56af043d7000bf13e7609417ed956c557c68890ccf3"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -1018,6 +1060,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/remote_grok.rs",
+          "symbol": "evaluate_transcript_fold_gate"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/remote_grok.rs",
+          "symbol": "phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences"
         }
       ],
       "sources": [
@@ -1027,32 +1079,36 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
-          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+          "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
-        },
-        {
           "path": "lean/Orb/StatefulMutantSuite.lean",
           "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        },
+        {
+          "path": "src/api/control/remote_grok.rs",
+          "sha256": "e54e4abfe91e7476968c8f56574d9cd82926c8bef6de166c65bc46248ff35fba"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -1089,6 +1145,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/control_queue.rs",
+          "symbol": "evaluate_outbox_crash_reconcile_gate"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/control_queue.rs",
+          "symbol": "outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences"
         }
       ],
       "sources": [
@@ -1098,32 +1164,36 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
-          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+          "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
-        },
-        {
           "path": "lean/Orb/StatefulMutantSuite.lean",
           "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        },
+        {
+          "path": "src/api/control/control_queue.rs",
+          "sha256": "d2ab615e41547a9ac36d6fa38ebc924d6e6838f8e55f6bfe2addb79c123ff456"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -1160,6 +1230,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/provider_health.rs",
+          "symbol": "evaluate_provider_attempt_gate"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/provider_health.rs",
+          "symbol": "provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences"
         }
       ],
       "sources": [
@@ -1169,32 +1249,36 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
-          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+          "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
-        },
-        {
           "path": "lean/Orb/StatefulMutantSuite.lean",
           "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        },
+        {
+          "path": "src/provider_health.rs",
+          "sha256": "1a32406b84f635676967e76bdf55fc5b41e9ce91c4e7296e5f85a5c97c9c73eb"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -1231,6 +1315,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/privilege_broker.rs",
+          "symbol": "evaluate_auth_toctou_gate"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/privilege_broker.rs",
+          "symbol": "auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences"
         }
       ],
       "sources": [
@@ -1240,32 +1334,36 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
-          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+          "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
-        },
-        {
           "path": "lean/Orb/StatefulMutantSuite.lean",
           "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        },
+        {
+          "path": "src/api/privilege_broker.rs",
+          "sha256": "a25392ea9a5dfe7b4f704136679570faacebb86b3518f2132ec965c8e65fdcbb"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -1307,6 +1405,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/managed/mod.rs",
+          "symbol": "evaluate_resource_ledger_gate"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/managed/tests.rs",
+          "symbol": "resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences"
         }
       ],
       "sources": [
@@ -1316,32 +1424,40 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
-          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+          "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
-        },
-        {
           "path": "lean/Orb/StatefulMutantSuite.lean",
           "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        },
+        {
+          "path": "src/managed/mod.rs",
+          "sha256": "106f688964b33c28b9e6377c7f519c86e66c5c1c10eea259482463d750523f7e"
+        },
+        {
+          "path": "src/managed/tests.rs",
+          "sha256": "75fe9f27772b5630991c99ad782cda558c0b5b2c25e21dab17ae936c4b7166f9"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -1383,6 +1499,16 @@
           "kind": "host_test",
           "path": "crates/orb-spec/src/shadow.rs",
           "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+        },
+        {
+          "kind": "host_observer",
+          "path": "src/api/control/streaming.rs",
+          "symbol": "evaluate_stream_bounded_commit_gate"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/api/control/tests.rs",
+          "symbol": "stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences"
         }
       ],
       "sources": [
@@ -1392,7 +1518,7 @@
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "990e7f3c11f7c485ca4593b4d874d29da2dc88a821bae42493116ddf9a9c3a04"
+          "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
         },
         {
           "path": "lean/Orb/Stream.lean",
@@ -1400,28 +1526,36 @@
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
-          "sha256": "b17220dbf5e9b9566f3e79a6fd37182b00e787e573ae5558d036fadca284722f"
+          "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "a730c87f2195b5b4f521e895f456a5b7d864b8aafbb21a98170fcc956ffa91cf"
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
           "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
         },
         {
-          "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "5afe64e10dafdd9328f0b6fdba6505e3dec68db22f1bbb63b487cc1d37da6f5f"
-        },
-        {
           "path": "lean/Orb/StatefulMutantSuite.lean",
           "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+        },
+        {
+          "path": "src/api/control/streaming.rs",
+          "sha256": "105bffecc49bfd502c23e0afb4e292b947d0616b8cdf90d77fbd543827324031"
+        },
+        {
+          "path": "src/api/control/tests.rs",
+          "sha256": "b2b374f074b685ed1eb92d6129b7f45befa970db56c5ec64925695ddb7e5467a"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
         }
       ],
       "execution": {
-        "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib -- --test-threads=1",
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
         "exit_code": 0,
         "result": "TESTED_LOCAL"
       },
@@ -1433,6 +1567,51 @@
       "blockers": [
         "DOM/Markdown incremental rendering in desktop/iOS/Android clients is not yet cut over to orb_stream_bounded_commit_step.",
         "UTF-8 codepoint boundary alignment around forced checkpoints is handled by host string slicing."
+      ]
+    },
+    "leansys_verify_fd_bounds": {
+      "status": "partial",
+      "claim": "Local host fd-bounds tests verify non-truncating u64-to-u32 descriptor validation and positive 31-bit descriptor bounds via leansys_verify_fd_bounds.",
+      "links": [
+        {
+          "kind": "host_observer",
+          "path": "src/orb_spec.rs",
+          "symbol": "verify_host_fd_bounds"
+        },
+        {
+          "kind": "host_test",
+          "path": "src/orb_spec.rs",
+          "symbol": "host_orb_wire_machine_patch_and_fd_bounds_gates_verified"
+        }
+      ],
+      "sources": [
+        {
+          "path": "crates/orb-spec/src/lib.rs",
+          "sha256": "fc8215b2a28d59e7edcb06814736c10984bc0444f7137070e5ff0e2872b883a0"
+        },
+        {
+          "path": "src/orb_spec.rs",
+          "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+        },
+        {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "sha256": "d40f9e4e0e4982436caa2d2ba5a5bc2d33fa84c1af27ad3ac247d947e7f89e29"
+        }
+      ],
+      "execution": {
+        "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+        "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+        "exit_code": 0,
+        "result": "TESTED_LOCAL"
+      },
+      "assumptions": [
+        "The receipt records local x86_64 Linux execution against the listed source hashes.",
+        "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+        "No native mobile or WASM target execution is established by this receipt."
+      ],
+      "blockers": [
+        "POSIX syscall return-value extraction and close-on-exec flag management remain in host Rust/libc.",
+        "LeanSys.Spec theorem metadata is tracked in the upstream lean-sys repository rather than lean/Orb/Spec.lean."
       ]
     }
   }

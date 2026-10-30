@@ -1,9 +1,8 @@
 import { createSignal } from "solid-js";
 import { connectionVersion, listQueuedMessages } from "./api";
-import { applyStreamEvent, buildTranscript, type StreamItem } from "./transcriptModel";
+import { applyStreamEvent, applyStreamEvents, buildTranscript, type StreamItem } from "./transcriptModel";
 import { getMissionEventPage, getMissionEventPreview, storedToStream, type StoredEvent, type StreamEvent } from "./stream";
-import { applyStreamEvents, buildTranscript, type StreamItem } from "./transcriptModel";
-import { getMissionEventPage, getMissionEventPreview, storedToStream, type StreamEvent } from "./stream";import { cacheDelete, cachePeek, cachePut } from "./pageCache";
+import { cacheDelete, cachePeek, cachePut } from "./pageCache";
 
 export type TranscriptSnap = { activity?: string; items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; detailsPending?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
 

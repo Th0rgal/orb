@@ -476,6 +476,16 @@ def cmd_refresh_node(args):
         upload(sid, binary, f'{STAGE}/sandboxed-node')
         upload(sid, mcp, f'{STAGE}/sandboxed-mcp')
         script = f'''set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+need=()
+for p in gh ripgrep fd-find clang llvm lld pkg-config libssl-dev; do
+  dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
+done
+if [ "${{#need[@]}}" -gt 0 ]; then
+  sudo apt-get update -qq || true
+  sudo apt-get install -y -qq --no-install-recommends "${{need[@]}}"
+fi
+[ -x /usr/bin/fdfind ] && sudo ln -sfn /usr/bin/fdfind /opt/orb/bin/fd
 echo '{sha256_file(binary)}  {STAGE}/sandboxed-node' | sha256sum -c -
 echo '{sha256_file(mcp)}  {STAGE}/sandboxed-mcp' | sha256sum -c -
 sudo install -m0755 -o root -g root {STAGE}/sandboxed-node /opt/orb/bin/sandboxed-node
@@ -484,7 +494,7 @@ sudo ln -sfn /opt/orb/bin/sandboxed-mcp /usr/local/bin/sandboxed-mcp
 sudo python3 -c 'import json,sys,datetime;p="/etc/orb/image-manifest.json";m=json.load(open(p));m["node_version"]=sys.argv[1];m["node_sha256"]=sys.argv[2];m["mcp_sha256"]=sys.argv[3];m["node_refreshed_at"]=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ");open(p,"w").write(json.dumps(m,indent=2,sort_keys=True))' '{version}' '{sha256_file(binary)}' '{sha256_file(mcp)}'
 rm -rf {STAGE}
 jq .node_version /etc/orb/image-manifest.json'''
-        if run(sid, script, timeout=120)['exitCode'] != 0:
+        if run(sid, script, timeout=300)['exitCode'] != 0:
             raise RuntimeError('binary swap failed')
         if not smoke_in(sid):
             raise RuntimeError(f'smoke failed in {sid}; alias not moved')

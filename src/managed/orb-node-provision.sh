@@ -63,5 +63,31 @@ mkdir -p /etc/systemd/system/orb-node.service.d
     echo "Environment=PATH=$CACHES/cargo/bin:$CACHES/elan/bin:$ORB_BIN:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   fi
 } > /etc/systemd/system/orb-node.service.d/10-orb-provision.conf
+# 4. Ensure orb-node's job database schema is up to date before starting the
+#    daemon (older snapshots / base images may hold a pre-cancellation_json
+#    jobs.db or run a pre-baked binary whose open() ignored SQLITE_BUSY).
+systemctl stop orb-node.service 2>/dev/null || true
+install -d -m 0750 -o "$NODE_USER" -g "$NODE_USER" "$NODE_HOME" "$NODE_HOME/work"
+python3 - "$NODE_HOME/work/jobs.db" <<'PY'
+import sqlite3, sys
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path, timeout=10.0)
+conn.execute("PRAGMA journal_mode = WAL")
+conn.execute(
+    "CREATE TABLE IF NOT EXISTS jobs ("
+    "id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, payload_json TEXT NOT NULL, "
+    "state TEXT NOT NULL, exit_code INTEGER, created_at TEXT NOT NULL, "
+    "started_at TEXT, finished_at TEXT, log_path TEXT, error TEXT, "
+    "artifacts_json TEXT, cancellation_json TEXT)"
+)
+cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+for col in ("artifacts_json", "cancellation_json"):
+    if col not in cols:
+        conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
+conn.commit()
+conn.close()
+PY
+chown "$NODE_USER:$NODE_USER" "$NODE_HOME/work/jobs.db"* 2>/dev/null || true
+
 systemctl daemon-reload
 echo "orb-provision ok ms=$(ms) rustup=$([ -x "$CACHES/cargo/bin/rustup" ] && echo yes || echo no)"

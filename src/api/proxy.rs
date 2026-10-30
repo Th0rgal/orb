@@ -337,19 +337,40 @@ fn cooldown_retry_after_secs() -> u64 {
 }
 
 fn cooldown_error_response_with_retry_after(chain_id: &str, retry_after_secs: u64) -> Response {
-    let mut response = error_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        format!(
-            "All providers in chain '{}' are currently in cooldown or unconfigured",
-            chain_id
-        ),
-        "rate_limit_exceeded",
-    );
-    let retry_after = retry_after_secs
+    let unclamped_secs = retry_after_secs.max(1);
+    let now = chrono::Utc::now();
+    let until = now + chrono::Duration::seconds(unclamped_secs.min(i64::MAX as u64) as i64);
+    let until_rfc3339 = until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let body = serde_json::json!({
+        "error": {
+            "message": format!(
+                "All providers in chain '{}' are currently in cooldown until {} ({}s remaining)",
+                chain_id, until_rfc3339, unclamped_secs
+            ),
+            "type": "rate_limit_exceeded",
+            "code": "rate_limit_exceeded",
+            "resets_at": until.timestamp(),
+            "resets_in_seconds": unclamped_secs,
+            "cooldown_until": until_rfc3339,
+        }
+    });
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    // Keep standard `Retry-After` capped at 60s so AI SDK / OpenCode clients
+    // do not abort the turn on `maxRetryDelay`, while `X-Cooldown-*` headers
+    // and the JSON error body carry the exact unclamped reset window for scripts.
+    let retry_after = unclamped_secs
         .clamp(1, MAX_COOLDOWN_RETRY_AFTER_SECS)
         .to_string();
     if let Ok(value) = HeaderValue::from_str(&retry_after) {
         response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&until_rfc3339) {
+        response.headers_mut().insert("x-cooldown-reset", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&unclamped_secs.to_string()) {
+        response
+            .headers_mut()
+            .insert("x-cooldown-remaining-secs", value);
     }
     response
 }
@@ -431,6 +452,162 @@ static KIMI_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
         );
         tokio::sync::Semaphore::new(n)
     });
+
+/// Per-account concurrency semaphores for Google Gemini accounts.
+/// Opening 15+ concurrent reasoning calls on one Google account causes upstream
+/// stalls/timeouts; capping each Google account (`PROXY_GOOGLE_MAX_CONCURRENCY`,
+/// default 10) keeps latency healthy, spills burst traffic onto the secondary
+/// Google account immediately, and queues excess callers cleanly in FIFO order.
+pub(crate) fn google_max_concurrency() -> usize {
+    std::env::var("PROXY_GOOGLE_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(10)
+}
+
+fn proxy_queue_timeout(via_cloudflare: bool) -> std::time::Duration {
+    if via_cloudflare {
+        let secs = std::env::var("PROXY_CF_QUEUE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(30);
+        return std::time::Duration::from_secs(secs);
+    }
+    let secs = std::env::var("PROXY_QUEUE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(180);
+    std::time::Duration::from_secs(secs)
+}
+
+static GOOGLE_ACCOUNT_CONCURRENCY: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<uuid::Uuid, Arc<tokio::sync::Semaphore>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+pub(crate) fn google_account_semaphore(account_id: uuid::Uuid) -> Arc<tokio::sync::Semaphore> {
+    let mut map = GOOGLE_ACCOUNT_CONCURRENCY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    Arc::clone(
+        map.entry(account_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(google_max_concurrency()))),
+    )
+}
+
+/// Hold `permit` for the lifetime of an SSE body stream so streaming calls
+/// occupy their per-account concurrency slot until completion or client drop.
+fn with_concurrency_permit<S>(
+    inner: S,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> impl futures::Stream<Item = S::Item>
+where
+    S: futures::Stream + Send + 'static,
+    S::Item: Send + 'static,
+{
+    async_stream::stream! {
+        let _permit = permit;
+        let mut inner = std::pin::pin!(inner);
+        while let Some(item) = inner.next().await {
+            yield item;
+        }
+    }
+}
+
+/// Acquire a per-account concurrency slot for `entries[entry_idx]` across the
+/// contiguous `(provider_id, model_id)` sibling group `entries[entry_idx..group_end]`.
+///
+/// 1. Tries `try_acquire_owned()` in priority order (`entry_idx` first — e.g.
+///    `GEMINI_API_KEY` #1, `thomas.marchand44@gmail.com` #2). If #1 has free
+///    capacity (`< 5` inflight), #1 wins immediately; if #1 is at `5/5` and #2
+///    has free capacity, #2 is rotated into `entry_idx` with 0ms wait.
+/// 2. If every healthy account in the group is at `5/5`, awaits the first
+///    account in the group to release a slot (bounded by `queue_timeout`),
+///    rotating the winner into `entry_idx`. Returns `Err(())` on queue timeout.
+fn is_google_concurrency_sibling(
+    head: &crate::provider_health::ResolvedEntry,
+    other: &crate::provider_health::ResolvedEntry,
+) -> bool {
+    if head.provider_id == other.provider_id && head.model_id == other.model_id {
+        return true;
+    }
+    let is_carbon = |e: &crate::provider_health::ResolvedEntry| {
+        let m = e.model_id.to_ascii_lowercase();
+        (e.provider_id == "google" && m.contains("gemini-4-carbon"))
+            || (e.provider_id == "antigravity" && m.starts_with("agy-model-"))
+    };
+    let is_argon = |e: &crate::provider_health::ResolvedEntry| {
+        let m = e.model_id.to_ascii_lowercase();
+        (e.provider_id == "google" && m.contains("gemini-4-argon"))
+            || (e.provider_id == "antigravity" && (m.contains("gemini-4-argon") || m == "agy-demo"))
+    };
+    (is_carbon(head) && is_carbon(other)) || (is_argon(head) && is_argon(other))
+}
+
+fn entry_has_routable_proxy_credentials(entry: &crate::provider_health::ResolvedEntry) -> bool {
+    let ptype = ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
+    has_routable_proxy_credentials(ptype, entry.api_key.is_some(), entry.has_oauth)
+}
+
+async fn acquire_google_group_permit(
+    entries: &mut [crate::provider_health::ResolvedEntry],
+    entry_idx: usize,
+    queue_timeout: std::time::Duration,
+    is_routable: impl Fn(&crate::provider_health::ResolvedEntry) -> bool,
+) -> Result<(tokio::sync::OwnedSemaphorePermit, std::time::Duration), std::time::Duration> {
+    let head = entries[entry_idx].clone();
+    let mut group_end = entry_idx + 1;
+    while group_end < entries.len() && is_google_concurrency_sibling(&head, &entries[group_end]) {
+        group_end += 1;
+    }
+
+    // Fast path: pick the highest-priority sibling account with an immediate slot.
+    for candidate_idx in entry_idx..group_end {
+        if !is_routable(&entries[candidate_idx]) {
+            continue;
+        }
+        let sem = google_account_semaphore(entries[candidate_idx].account_id);
+        if let Ok(permit) = sem.try_acquire_owned() {
+            if candidate_idx > entry_idx {
+                entries[entry_idx..=candidate_idx].rotate_right(1);
+            }
+            return Ok((permit, std::time::Duration::ZERO));
+        }
+    }
+
+    // Slow path: all sibling accounts are at max concurrency — race their FIFO
+    // semaphores and wake as soon as any account finishes a request.
+    let wait_start = std::time::Instant::now();
+    let mut waiters = Vec::new();
+    for (offset, candidate) in entries[entry_idx..group_end].iter().enumerate() {
+        let candidate_idx = entry_idx + offset;
+        if !is_routable(candidate) {
+            continue;
+        }
+        let sem = google_account_semaphore(candidate.account_id);
+        waiters.push(Box::pin(async move {
+            (candidate_idx, sem.acquire_owned().await)
+        }));
+    }
+    if waiters.is_empty() {
+        let sem = google_account_semaphore(entries[entry_idx].account_id);
+        return match tokio::time::timeout(queue_timeout, sem.acquire_owned()).await {
+            Ok(Ok(permit)) => Ok((permit, wait_start.elapsed())),
+            _ => Err(wait_start.elapsed()),
+        };
+    }
+    match tokio::time::timeout(queue_timeout, futures::future::select_all(waiters)).await {
+        Ok(((winner_idx, Ok(permit)), _, _)) => {
+            if winner_idx > entry_idx {
+                entries[entry_idx..=winner_idx].rotate_right(1);
+            }
+            Ok((permit, wait_start.elapsed()))
+        }
+        _ => Err(wait_start.elapsed()),
+    }
+}
 
 /// Default base URL for OpenAI-compatible providers.
 ///
@@ -628,6 +805,8 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/responses", post(responses))
         .route("/messages", post(anthropic_messages))
         .route("/capabilities", get(list_capabilities))
+        .route("/cooldowns", get(list_proxy_cooldowns))
+        .route("/cooldowns/clear", post(clear_proxy_cooldowns))
         .route("/deferred/:id", get(get_deferred_request))
         .route("/deferred/:id", delete(cancel_deferred_request))
         .route("/models", axum::routing::get(list_models))
@@ -969,6 +1148,77 @@ async fn list_capabilities(
     .into_response()
 }
 
+async fn list_proxy_cooldowns(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
+        return resp;
+    }
+    let snapshots = state.health_tracker.get_all_health().await;
+    let active_cooldowns: Vec<_> = snapshots
+        .iter()
+        .filter(|s| !s.is_healthy)
+        .cloned()
+        .collect();
+    let inflight = super::proxy_timing::inflight_snapshot();
+    Json(serde_json::json!({
+        "object": "cooldowns",
+        "google_max_concurrency_per_account": google_max_concurrency(),
+        "active_cooldowns": active_cooldowns,
+        "accounts": snapshots,
+        "inflight": inflight,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct ClearProxyCooldownRequest {
+    #[serde(default)]
+    account_id: Option<uuid::Uuid>,
+}
+
+async fn clear_proxy_cooldowns(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+    body: Option<Json<ClearProxyCooldownRequest>>,
+) -> Response {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
+        return resp;
+    }
+    let target = body.and_then(|Json(req)| req.account_id);
+    match target {
+        Some(account_id) => {
+            state.health_tracker.clear_cooldown(account_id).await;
+            if let Some(account) = state.ai_providers.get(account_id).await {
+                if let Some(key) = crate::provider_health::store_account_subscription_key(
+                    account.provider_type,
+                    &account,
+                ) {
+                    state.health_tracker.clear_subscription_cooldown(&key).await;
+                }
+            }
+            for pool in ["gemini", "gemini-eap", "claude-gpt"] {
+                crate::account_limits::shared().clear(&format!("{account_id}:{pool}"));
+            }
+            Json(serde_json::json!({
+                "cleared": true,
+                "scope": "account",
+                "account_id": account_id,
+            }))
+            .into_response()
+        }
+        None => {
+            state.health_tracker.clear_all_cooldowns().await;
+            Json(serde_json::json!({
+                "cleared": true,
+                "scope": "all",
+            }))
+            .into_response()
+        }
+    }
+}
+
 async fn list_models(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
@@ -1117,6 +1367,10 @@ async fn routable_direct_catalog_models(
 ) -> Vec<crate::api::providers::CatalogModelOption> {
     let standard_accounts =
         crate::api::ai_providers::read_standard_accounts(&state.config.working_dir);
+    // Check credential/configuration routability rather than transient
+    // cooldowns so temporary backoffs never make configured models vanish
+    // from `/v1/models`.
+    let unfiltered_health = crate::provider_health::ProviderHealthTracker::new();
     let mut routable = Vec::new();
     for model in models {
         if !model.configured {
@@ -1132,7 +1386,7 @@ async fn routable_direct_catalog_models(
                 &[entry],
                 &state.ai_providers,
                 &standard_accounts,
-                &state.health_tracker,
+                &unfiltered_health,
             )
             .await;
         if entries.iter().any(|entry| {
@@ -2172,7 +2426,20 @@ async fn native_protocol_proxy(
             !native_first_byte_locked && (entry_idx as u32) < native_chain_length,
         );
         native_first_byte_locked = pool_verdict.first_byte_locked_next;
+        let attempt_verdict = crate::provider_health::evaluate_provider_attempt_gate(
+            0,
+            cand_ord,
+            entry_idx as u32,
+            native_chain_length.max(1),
+            native_first_byte_locked,
+            u8::from(entry_idx > 0),
+            now_epoch,
+            0,
+            now_epoch.saturating_add(300),
+            true,
+        );
         if !pool_verdict.emit_dispatch_effect
+            || !attempt_verdict.admitted
             || native_account_ordinals.uuid_of(pool_verdict.dispatched_account_id)
                 != Some(entry.account_id)
         {
@@ -2950,6 +3217,10 @@ fn client_stream_response(
                                 "Upstream stalled before any output reached the client; re-routing transparently"
                             );
                             cell.note_transparent_retry();
+                            // Drop the stalled upstream body stream before re-routing so
+                            // any per-account concurrency permit held by `data` is
+                            // released immediately instead of deadlocking the retry.
+                            data = Body::empty().into_data_stream();
                             // Keep the client alive while the reroute waits for its
                             // own first content.
                             let mut pending = std::pin::pin!(super::proxy_timing::scope(
@@ -3382,7 +3653,98 @@ async fn chat_completions_routed(
         std::collections::HashSet::new();
     let mut waterfall_first_byte_locked = false;
     let mut waterfall_account_ordinals = crate::provider_health::AccountOrdinalTable::new();
-    for (entry_idx, entry) in entries.iter().enumerate() {
+    let via_cloudflare = headers.contains_key("cf-ray");
+    let queue_timeout = proxy_queue_timeout(via_cloudflare);
+    let mut skip_saturated_head: Option<crate::provider_health::ResolvedEntry> = None;
+    for entry_idx in 0..entries.len() {
+        if let Some(ref sat_head) = skip_saturated_head {
+            if is_google_concurrency_sibling(sat_head, &entries[entry_idx]) {
+                continue;
+            }
+            skip_saturated_head = None;
+        }
+
+        // For Google & Antigravity Carbon EAP, acquire a per-account concurrency
+        // slot across the sibling account group (`GEMINI_API_KEY` first,
+        // `thomas.marchand44@gmail.com` second). When #1 hits max concurrency
+        // (default 5), traffic spills immediately onto #2; when both are at 5/5,
+        // callers wait in FIFO order for whichever account frees a slot first.
+        let initial_provider_type =
+            ProviderType::from_id(&entries[entry_idx].provider_id).unwrap_or(ProviderType::Custom);
+        let mut queue_waited = std::time::Duration::ZERO;
+        let mut concurrency_permit = if matches!(
+            initial_provider_type,
+            ProviderType::Google | ProviderType::Antigravity
+        ) {
+            if !has_routable_proxy_credentials(
+                initial_provider_type,
+                entries[entry_idx].api_key.is_some(),
+                entries[entry_idx].has_oauth,
+            ) {
+                continue;
+            }
+            match acquire_google_group_permit(
+                &mut entries,
+                entry_idx,
+                queue_timeout,
+                entry_has_routable_proxy_credentials,
+            )
+            .await
+            {
+                Ok((permit, waited)) => {
+                    queue_waited = waited;
+                    if !waited.is_zero() {
+                        if let Some(cell) = super::proxy_timing::current() {
+                            cell.add_queue_wait(waited);
+                        }
+                        // Re-verify health after waiting in the queue: an active
+                        // call may have tripped a 429/spend-cap cooldown right
+                        // before releasing this slot.
+                        let selected = &entries[entry_idx];
+                        let sub_cooling = match selected.subscription_key.as_ref() {
+                            Some(k) => {
+                                state
+                                    .health_tracker
+                                    .any_subscription_cooldown_active(std::slice::from_ref(k))
+                                    .await
+                            }
+                            None => false,
+                        };
+                        if !state.health_tracker.is_healthy(selected.account_id).await
+                            || state.health_tracker.pool_is_cooling(
+                                &selected.provider_id,
+                                selected.account_id,
+                                &selected.model_id,
+                            )
+                            || sub_cooling
+                        {
+                            drop(permit);
+                            rate_limit_count += 1;
+                            continue;
+                        }
+                    }
+                    Some(permit)
+                }
+                Err(waited) => {
+                    if let Some(cell) = super::proxy_timing::current() {
+                        cell.add_queue_wait(waited);
+                    }
+                    tracing::warn!(
+                        provider = %entries[entry_idx].provider_id,
+                        model = %entries[entry_idx].model_id,
+                        waited_secs = waited.as_secs_f64(),
+                        "Google per-account concurrency queue timed out; skipping group without cooling accounts"
+                    );
+                    skip_saturated_head = Some(entries[entry_idx].clone());
+                    rate_limit_count += 1;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        let entry = &entries[entry_idx];
         let now_epoch = chrono::Utc::now().timestamp().max(0) as u64;
         let cand_ord = waterfall_account_ordinals.intern(entry.account_id);
         let pool_verdict = crate::provider_health::observe_account_candidate_shadow(
@@ -3400,19 +3762,44 @@ async fn chat_completions_routed(
             !waterfall_first_byte_locked && (entry_idx as u32) < chain_length.max(1),
         );
         waterfall_first_byte_locked = pool_verdict.first_byte_locked_next;
+        let attempt_verdict = crate::provider_health::evaluate_provider_attempt_gate(
+            0,
+            cand_ord,
+            entry_idx as u32,
+            chain_length.max(1),
+            waterfall_first_byte_locked,
+            u8::from(entry_idx > 0),
+            now_epoch,
+            0,
+            now_epoch.saturating_add(300),
+            true,
+        );
         if !pool_verdict.emit_dispatch_effect
+            || !attempt_verdict.admitted
             || waterfall_account_ordinals.uuid_of(pool_verdict.dispatched_account_id)
                 != Some(entry.account_id)
         {
             break;
         }
         // Gemini thinking models may think silently for a long time before
-        // their first chunk; they get a longer first-token limit.
-        let first_token_timeout =
-            reliability::first_token_timeout_for(&entry.provider_id, &entry.model_id);
-        // Non-builtin prefixes are custom providers referenced by their
-        // sanitized name (e.g. "spark"); they all route as `Custom` through the
-        // OpenAI-compatible path using the account's `base_url`.
+        // their first chunk; direct endpoints (e.g. orbrouter.thomas.md) get a
+        // 240s budget while Cloudflare orange-cloud requests keep
+        // `queue_waited + first_token_timeout` inside the 90s budget (< 100s cliff).
+        let raw_first_token_timeout = reliability::first_token_timeout_for_request(
+            &entry.provider_id,
+            &entry.model_id,
+            via_cloudflare,
+        );
+        let first_token_timeout = if via_cloudflare && !queue_waited.is_zero() {
+            raw_first_token_timeout
+                .saturating_sub(queue_waited)
+                .max(std::time::Duration::from_secs(15))
+        } else {
+            raw_first_token_timeout
+        };
+        // Recompute `provider_type` from `entry` after `acquire_google_group_permit`,
+        // which may have rotated an `antigravity/agy-model-*` Carbon EAP sibling
+        // into `entries[entry_idx]`.
         let provider_type =
             ProviderType::from_id(&entry.provider_id).unwrap_or(ProviderType::Custom);
 
@@ -3479,6 +3866,25 @@ async fn chat_completions_routed(
             ProviderType::Antigravity | ProviderType::MuseCode
         ) && entry.has_oauth
             && super::oauth_owner::management_enabled();
+        let is_google_api_key_entry = provider_type == ProviderType::Google
+            && ((!entry.has_oauth && entry.api_key.is_some())
+                || (entry.account_id
+                    == crate::provider_health::stable_provider_uuid("google-cli-proxy")
+                    && !crate::api::ai_providers::cli_proxy_config_gemini_keys().is_empty()));
+        if is_google_api_key_entry
+            && !crate::model_policy::is_google_api_key_allowed_model(&entry.model_id)
+        {
+            let msg = crate::model_policy::google_api_key_disallowed_message(&entry.model_id);
+            tracing::warn!(
+                provider = %entry.provider_id,
+                model = %entry.model_id,
+                account_id = %entry.account_id,
+                "Blocked non-Carbon model on Google API key route"
+            );
+            transport_validation_errors.push(msg);
+            client_error_count += 1;
+            continue;
+        }
         let use_google_api_adapter = provider_type == ProviderType::Google
             && !entry.has_oauth
             && entry.api_key.is_some()
@@ -3486,6 +3892,7 @@ async fn chat_completions_routed(
         let use_google_oauth_cli_proxy_adapter = provider_type == ProviderType::Google
             && entry.has_oauth
             && entry.api_key.is_none()
+            && entry.account_id == crate::provider_health::stable_provider_uuid("google-cli-proxy")
             && crate::api::ai_providers::google_cli_proxy_account_available();
         let use_google_oauth_adapter = provider_type == ProviderType::Google
             && entry.has_oauth
@@ -4047,10 +4454,13 @@ async fn chat_completions_routed(
                             retries,
                             "Anthropic SSE stream failed or returned empty completion before first content chunk; trying next entry"
                         );
-                        let cooldown = state
-                            .health_tracker
-                            .record_entry_failure(entry, reason, None)
-                            .await;
+                        let cooldown_secs = record_peek_failure_cooldown(
+                            &state.health_tracker,
+                            entry,
+                            reason,
+                            &detail,
+                        )
+                        .await;
                         pending_fallback_events.push(crate::provider_health::FallbackEvent {
                             timestamp: chrono::Utc::now(),
                             chain_id: chain_id.clone(),
@@ -4058,7 +4468,7 @@ async fn chat_completions_routed(
                             from_model: entry.model_id.clone(),
                             from_account_id: entry.account_id,
                             reason,
-                            cooldown_secs: Some(cooldown.as_secs_f64()),
+                            cooldown_secs,
                             to_provider: None,
                             latency_ms: Some(elapsed_ms),
                             attempt_number: (entry_idx + 1) as u32,
@@ -4141,7 +4551,10 @@ async fn chat_completions_routed(
                 return (
                     status,
                     response_headers,
-                    Body::from_stream(sse_error_terminated(tracked_stream)),
+                    Body::from_stream(with_concurrency_permit(
+                        sse_error_terminated(tracked_stream),
+                        concurrency_permit.take(),
+                    )),
                 )
                     .into_response();
             }
@@ -4499,7 +4912,10 @@ async fn chat_completions_routed(
                         return (
                             status,
                             response_headers,
-                            Body::from_stream(sse_error_terminated(tracked_stream)),
+                            Body::from_stream(with_concurrency_permit(
+                                sse_error_terminated(tracked_stream),
+                                concurrency_permit.take(),
+                            )),
                         )
                             .into_response();
                     }
@@ -4552,10 +4968,13 @@ async fn chat_completions_routed(
                             retries,
                             "Google SSE stream failed or returned empty completion before first content chunk; trying next entry"
                         );
-                        let cooldown = state
-                            .health_tracker
-                            .record_entry_failure(entry, reason, None)
-                            .await;
+                        let cooldown_secs = record_peek_failure_cooldown(
+                            &state.health_tracker,
+                            entry,
+                            reason,
+                            &detail,
+                        )
+                        .await;
                         pending_fallback_events.push(crate::provider_health::FallbackEvent {
                             timestamp: chrono::Utc::now(),
                             chain_id: chain_id.clone(),
@@ -4563,7 +4982,7 @@ async fn chat_completions_routed(
                             from_model: entry.model_id.clone(),
                             from_account_id: entry.account_id,
                             reason,
-                            cooldown_secs: Some(cooldown.as_secs_f64()),
+                            cooldown_secs,
                             to_provider: None,
                             latency_ms: Some(elapsed_ms),
                             attempt_number: (entry_idx + 1) as u32,
@@ -5206,7 +5625,10 @@ async fn chat_completions_routed(
                     return (
                         status,
                         response_headers,
-                        Body::from_stream(sse_error_terminated(tracked_stream)),
+                        Body::from_stream(with_concurrency_permit(
+                            sse_error_terminated(tracked_stream),
+                            concurrency_permit.take(),
+                        )),
                     )
                         .into_response();
                 }
@@ -5221,10 +5643,9 @@ async fn chat_completions_routed(
                         retries,
                         "OpenAI SSE stream failed or returned empty completion before first content chunk; trying next entry"
                     );
-                    let cooldown = state
-                        .health_tracker
-                        .record_entry_failure(entry, reason, None)
-                        .await;
+                    let cooldown_secs =
+                        record_peek_failure_cooldown(&state.health_tracker, entry, reason, &detail)
+                            .await;
                     pending_fallback_events.push(crate::provider_health::FallbackEvent {
                         timestamp: chrono::Utc::now(),
                         chain_id: chain_id.clone(),
@@ -5232,7 +5653,7 @@ async fn chat_completions_routed(
                         from_model: entry.model_id.clone(),
                         from_account_id: entry.account_id,
                         reason,
-                        cooldown_secs: Some(cooldown.as_secs_f64()),
+                        cooldown_secs,
                         to_provider: None,
                         latency_ms: Some(elapsed_ms),
                         attempt_number: (entry_idx + 1) as u32,
@@ -5299,6 +5720,38 @@ async fn chat_completions_routed(
                                 }
                                 _ => server_error_count += 1,
                             }
+                            continue;
+                        }
+                        if let Some(detail) = openai_json_content_filter_refusal(&v) {
+                            let elapsed_ms = request_start.elapsed().as_millis() as u64;
+                            tracing::warn!(
+                                provider = %entry.provider_id,
+                                account_id = %entry.account_id,
+                                model = %entry.model_id,
+                                detail = %detail,
+                                "Upstream returned 200 content-filter refusal, trying next entry"
+                            );
+                            let cooldown_secs = record_peek_failure_cooldown(
+                                &state.health_tracker,
+                                entry,
+                                CooldownReason::ClientError,
+                                &detail,
+                            )
+                            .await;
+                            pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                                timestamp: chrono::Utc::now(),
+                                chain_id: chain_id.clone(),
+                                from_provider: entry.provider_id.clone(),
+                                from_model: entry.model_id.clone(),
+                                from_account_id: entry.account_id,
+                                reason: CooldownReason::ClientError,
+                                cooldown_secs,
+                                to_provider: None,
+                                latency_ms: Some(elapsed_ms),
+                                attempt_number: (entry_idx + 1) as u32,
+                                chain_length,
+                            });
+                            client_error_count += 1;
                             continue;
                         }
                     }
@@ -5513,6 +5966,14 @@ async fn chat_completions_routed(
         // (and resume) until the quota comes back.
         if let Some(limit) = chain_usage_limit(&state, &chain_entries, &standard_accounts).await {
             return usage_limit_response(NativeProtocol::Responses, &chain_id, &limit);
+        }
+        let tried_ids: Vec<uuid::Uuid> = entries.iter().map(|e| e.account_id).collect();
+        if let Some(remaining) = state
+            .health_tracker
+            .min_remaining_cooldown(&tried_ids)
+            .await
+        {
+            return cooldown_error_response_with_retry_after(&chain_id, remaining.as_secs().max(1));
         }
         cooldown_error_response(&chain_id)
     }
@@ -8420,6 +8881,8 @@ pub(crate) fn is_gemini_thinking_model(model: &str) -> bool {
         .unwrap_or(model)
         .to_ascii_lowercase();
     m.contains("argon")
+        || m.contains("carbon")
+        || m.starts_with("agy-model-")
         || m.starts_with("gemini-2.5")
         || m.starts_with("gemini-3")
         || m.starts_with("gemini-4")
@@ -8634,11 +9097,175 @@ fn extract_openai_message_text(content: Option<&serde_json::Value>) -> String {
     }
 }
 
+const CONTENT_FILTER_DETAIL_PREFIX: &str = "content_filter:";
+const GEMINI_CANNED_FILTER_PREFIX: &str = "This request was blocked by Gemini's filters.";
+
+fn is_per_request_content_filter_detail(detail: &str) -> bool {
+    detail.starts_with(CONTENT_FILTER_DETAIL_PREFIX)
+}
+
+fn is_canned_gemini_filter_text(text: &str) -> bool {
+    text.trim_start().starts_with(GEMINI_CANNED_FILTER_PREFIX)
+}
+
+fn is_google_content_filter_finish_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII"
+    )
+}
+
+#[derive(Default)]
+struct CannedFilterAccumulator {
+    text: String,
+    saw_non_text_output: bool,
+}
+
+enum CannedFilterPeek {
+    NoOutput,
+    HoldPrefix,
+    SafeOutput,
+    Refusal(String),
+}
+
+impl CannedFilterAccumulator {
+    fn has_buffered_output(&self) -> bool {
+        self.saw_non_text_output || !self.text.is_empty()
+    }
+
+    fn evaluate(&self) -> CannedFilterPeek {
+        if self.saw_non_text_output {
+            return CannedFilterPeek::SafeOutput;
+        }
+        if self.text.is_empty() {
+            return CannedFilterPeek::NoOutput;
+        }
+        let trimmed = self.text.trim_start();
+        if trimmed.is_empty() {
+            if self.text.len() <= 64 {
+                return CannedFilterPeek::HoldPrefix;
+            }
+            return CannedFilterPeek::SafeOutput;
+        }
+        if trimmed.starts_with(GEMINI_CANNED_FILTER_PREFIX) {
+            return CannedFilterPeek::Refusal(format!(
+                "{CONTENT_FILTER_DETAIL_PREFIX} Gemini canned safety filter refusal"
+            ));
+        }
+        if GEMINI_CANNED_FILTER_PREFIX.starts_with(trimmed) {
+            return CannedFilterPeek::HoldPrefix;
+        }
+        CannedFilterPeek::SafeOutput
+    }
+
+    fn observe_google(&mut self, resp: &serde_json::Value) -> CannedFilterPeek {
+        if let Some(parts) = resp
+            .get("candidates")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|v| v.as_array())
+        {
+            for part in parts {
+                if part.get("functionCall").is_some() {
+                    self.saw_non_text_output = true;
+                }
+                if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+                    self.text.push_str(t);
+                }
+            }
+        }
+        self.evaluate()
+    }
+
+    fn observe_openai(&mut self, parsed: &serde_json::Value) -> CannedFilterPeek {
+        if let Some(choices) = parsed.get("choices").and_then(|v| v.as_array()) {
+            for choice in choices {
+                let Some(delta) = choice.get("delta") else {
+                    continue;
+                };
+                if delta
+                    .get("reasoning_content")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| !t.is_empty())
+                    || delta
+                        .get("reasoning")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|t| !t.is_empty())
+                    || delta
+                        .get("tool_calls")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|arr| !arr.is_empty())
+                    || delta.get("function_call").is_some_and(|v| !v.is_null())
+                    || delta.get("audio").is_some_and(|v| !v.is_null())
+                {
+                    self.saw_non_text_output = true;
+                }
+                if let Some(t) = delta.get("content").and_then(|v| v.as_str()) {
+                    self.text.push_str(t);
+                }
+            }
+        }
+        self.evaluate()
+    }
+}
+
+fn openai_json_content_filter_refusal(parsed: &serde_json::Value) -> Option<String> {
+    let choice = parsed
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())?;
+    let msg = choice.get("message");
+    let text = msg
+        .map(|m| extract_openai_message_text(m.get("content")))
+        .unwrap_or_default();
+    if is_canned_gemini_filter_text(&text) {
+        return Some(format!(
+            "{CONTENT_FILTER_DETAIL_PREFIX} Gemini canned safety filter refusal"
+        ));
+    }
+    let has_tools = msg
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| !arr.is_empty());
+    if text.is_empty()
+        && !has_tools
+        && choice.get("finish_reason").and_then(|v| v.as_str()) == Some("content_filter")
+    {
+        return Some(format!(
+            "{CONTENT_FILTER_DETAIL_PREFIX} finish_reason=content_filter"
+        ));
+    }
+    None
+}
+
+async fn record_peek_failure_cooldown(
+    health_tracker: &crate::provider_health::ProviderHealthTracker,
+    entry: &crate::provider_health::ResolvedEntry,
+    reason: CooldownReason,
+    detail: &str,
+) -> Option<f64> {
+    if is_per_request_content_filter_detail(detail) {
+        if let Some(cell) = crate::api::proxy_timing::current() {
+            cell.attempt_failure("content_filter");
+        }
+        None
+    } else {
+        Some(
+            health_tracker
+                .record_entry_failure(entry, reason, None)
+                .await
+                .as_secs_f64(),
+        )
+    }
+}
+
 fn finish_reason_from_google(s: Option<&str>) -> &'static str {
     match s.unwrap_or("STOP") {
         "STOP" => "stop",
         "MAX_TOKENS" => "length",
-        "SAFETY" | "RECITATION" | "BLOCKLIST" => "content_filter",
+        other if is_google_content_filter_finish_reason(other) => "content_filter",
         _ => "stop",
     }
 }
@@ -8682,6 +9309,11 @@ fn translate_google_json_to_openai(
                 }));
             }
         }
+    }
+    if is_canned_gemini_filter_text(&content) && tool_calls.is_empty() {
+        return Err(format!(
+            "{CONTENT_FILTER_DETAIL_PREFIX} Gemini canned safety filter refusal"
+        ));
     }
     let finish_reason_raw = candidate.get("finishReason").and_then(|v| v.as_str());
     let finish_reason = finish_reason_from_google(finish_reason_raw.or(Some("STOP")));
@@ -8759,23 +9391,6 @@ fn translate_google_json_to_openai(
     Ok((bytes, Some((prompt_tokens, completion_tokens))))
 }
 
-fn google_sse_payload_has_output(resp: &serde_json::Value) -> bool {
-    resp.get("candidates")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|v| v.as_array())
-        .is_some_and(|parts| {
-            parts.iter().any(|part| {
-                part.get("text")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|t| !t.is_empty())
-                    || part.get("functionCall").is_some()
-            })
-        })
-}
-
 #[cfg(test)]
 async fn peek_google_sse_stream<S, E>(
     inner: S,
@@ -8802,6 +9417,7 @@ where
     let mut peek_buf = Vec::<u8>::new();
     let mut scanned = 0usize;
     let mut last_empty_reason: Option<String> = None;
+    let mut filter_acc = CannedFilterAccumulator::default();
 
     const MAX_PEEK_BYTES: usize = 64 * 1024;
     while peek_buf.len() < MAX_PEEK_BYTES {
@@ -8832,6 +9448,9 @@ where
                         continue;
                     };
                     if payload == b"[DONE]" {
+                        if filter_acc.has_buffered_output() {
+                            return Ok((peek_buf, stream));
+                        }
                         return Err((
                             CooldownReason::ServerError,
                             last_empty_reason
@@ -8859,12 +9478,21 @@ where
                         .and_then(|v| v.as_str())
                     {
                         return Err((
-                            CooldownReason::ServerError,
-                            format!("promptFeedback.blockReason={}", block_reason),
+                            CooldownReason::ClientError,
+                            format!(
+                                "{CONTENT_FILTER_DETAIL_PREFIX} promptFeedback.blockReason={}",
+                                block_reason
+                            ),
                         ));
                     }
-                    if google_sse_payload_has_output(resp) {
-                        return Ok((peek_buf, stream));
+                    match filter_acc.observe_google(resp) {
+                        CannedFilterPeek::Refusal(detail) => {
+                            return Err((CooldownReason::ClientError, detail));
+                        }
+                        CannedFilterPeek::SafeOutput => {
+                            return Ok((peek_buf, stream));
+                        }
+                        CannedFilterPeek::HoldPrefix | CannedFilterPeek::NoOutput => {}
                     }
                     if let Some(fr) = resp
                         .get("candidates")
@@ -8873,6 +9501,15 @@ where
                         .and_then(|c| c.get("finishReason"))
                         .and_then(|v| v.as_str())
                     {
+                        if is_google_content_filter_finish_reason(fr) {
+                            return Err((
+                                CooldownReason::ClientError,
+                                format!("{CONTENT_FILTER_DETAIL_PREFIX} finishReason={}", fr),
+                            ));
+                        }
+                        if filter_acc.has_buffered_output() {
+                            return Ok((peek_buf, stream));
+                        }
                         last_empty_reason = Some(format!("empty candidate finishReason={}", fr));
                     }
                 }
@@ -8884,6 +9521,9 @@ where
                 ));
             }
             None => {
+                if filter_acc.has_buffered_output() {
+                    return Ok((peek_buf, stream));
+                }
                 return Err((
                     CooldownReason::ServerError,
                     last_empty_reason.unwrap_or_else(|| {
@@ -8894,37 +9534,6 @@ where
         }
     }
     Ok((peek_buf, stream))
-}
-
-fn openai_sse_payload_has_output(parsed: &serde_json::Value) -> bool {
-    parsed
-        .get("choices")
-        .and_then(|v| v.as_array())
-        .is_some_and(|choices| {
-            choices.iter().any(|choice| {
-                let Some(delta) = choice.get("delta") else {
-                    return false;
-                };
-                delta
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|t| !t.is_empty())
-                    || delta
-                        .get("reasoning_content")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|t| !t.is_empty())
-                    || delta
-                        .get("reasoning")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|t| !t.is_empty())
-                    || delta
-                        .get("tool_calls")
-                        .and_then(|v| v.as_array())
-                        .is_some_and(|arr| !arr.is_empty())
-                    || delta.get("function_call").is_some_and(|v| !v.is_null())
-                    || delta.get("audio").is_some_and(|v| !v.is_null())
-            })
-        })
 }
 
 #[cfg(test)]
@@ -8953,6 +9562,7 @@ where
     let mut peek_buf = Vec::<u8>::new();
     let mut scanned = 0usize;
     let mut last_empty_reason: Option<String> = None;
+    let mut filter_acc = CannedFilterAccumulator::default();
 
     const MAX_PEEK_BYTES: usize = 64 * 1024;
     while peek_buf.len() < MAX_PEEK_BYTES {
@@ -8986,6 +9596,9 @@ where
                         .map(|s| s.trim().as_bytes())
                         .unwrap_or(payload);
                     if payload_trimmed == b"[DONE]" {
+                        if filter_acc.has_buffered_output() {
+                            return Ok((peek_buf, stream));
+                        }
                         return Err((
                             CooldownReason::ServerError,
                             last_empty_reason
@@ -9008,8 +9621,14 @@ where
                             .to_string();
                         return Err((reason, msg));
                     }
-                    if openai_sse_payload_has_output(&parsed) {
-                        return Ok((peek_buf, stream));
+                    match filter_acc.observe_openai(&parsed) {
+                        CannedFilterPeek::Refusal(detail) => {
+                            return Err((CooldownReason::ClientError, detail));
+                        }
+                        CannedFilterPeek::SafeOutput => {
+                            return Ok((peek_buf, stream));
+                        }
+                        CannedFilterPeek::HoldPrefix | CannedFilterPeek::NoOutput => {}
                     }
                     if let Some(fr) = parsed
                         .get("choices")
@@ -9026,6 +9645,17 @@ where
                         if fr == "length" {
                             return Ok((peek_buf, stream));
                         }
+                        if fr == "content_filter" {
+                            return Err((
+                                CooldownReason::ClientError,
+                                format!(
+                                    "{CONTENT_FILTER_DETAIL_PREFIX} finish_reason=content_filter"
+                                ),
+                            ));
+                        }
+                        if filter_acc.has_buffered_output() {
+                            return Ok((peek_buf, stream));
+                        }
                         last_empty_reason = Some(format!("empty choice finish_reason={}", fr));
                     }
                 }
@@ -9037,6 +9667,9 @@ where
                 ));
             }
             None => {
+                if filter_acc.has_buffered_output() {
+                    return Ok((peek_buf, stream));
+                }
                 return Err((
                     CooldownReason::ServerError,
                     last_empty_reason
@@ -10372,6 +11005,258 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("60")
         );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-cooldown-remaining-secs")
+                .and_then(|value| value.to_str().ok()),
+            Some("3600")
+        );
+        assert!(response.headers().get("x-cooldown-reset").is_some());
+    }
+
+    #[tokio::test]
+    async fn cooldown_error_body_reports_exact_cooldown_end_time() {
+        let response = cooldown_error_response_with_retry_after("google/gemini-4-carbon-eap", 240);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"]["resets_in_seconds"], 240);
+        assert!(json["error"]["cooldown_until"].as_str().is_some());
+        assert!(json["error"]["resets_at"].as_i64().is_some());
+    }
+
+    #[tokio::test]
+    async fn google_group_permit_prioritizes_primary_spills_to_secondary_and_queues() {
+        let primary_id = uuid::Uuid::new_v4();
+        let secondary_id = uuid::Uuid::new_v4();
+        let cap = google_max_concurrency();
+        let make_entries = || {
+            vec![
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: primary_id,
+                    api_key: Some("AIza-primary".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: secondary_id,
+                    api_key: None,
+                    has_oauth: true,
+                    base_url: None,
+                    subscription_key: None,
+                },
+            ]
+        };
+
+        // 1..=cap go to primary (GEMINI_API_KEY)
+        let mut primary_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (permit, waited) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                entry_has_routable_proxy_credentials,
+            )
+            .await
+            .unwrap();
+            assert_eq!(entries[0].account_id, primary_id);
+            assert!(waited.is_zero());
+            primary_permits.push(permit);
+        }
+
+        // (cap + 1)..=(2 * cap) spill immediately to secondary (thomas.marchand44@gmail.com)
+        let mut secondary_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (permit, waited) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                entry_has_routable_proxy_credentials,
+            )
+            .await
+            .unwrap();
+            assert_eq!(entries[0].account_id, secondary_id);
+            assert_eq!(entries[1].account_id, primary_id);
+            assert!(waited.is_zero());
+            secondary_permits.push(permit);
+        }
+
+        // Next request queues until secondary frees 1 slot, then picks secondary!
+        let releaser = secondary_permits.pop().unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            drop(releaser);
+        });
+        let mut entries = make_entries();
+        let (_queued_permit, waited) = acquire_google_group_permit(
+            &mut entries,
+            0,
+            std::time::Duration::from_secs(2),
+            entry_has_routable_proxy_credentials,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries[0].account_id, secondary_id);
+        assert!(waited >= std::time::Duration::from_millis(15));
+    }
+
+    #[tokio::test]
+    async fn acquire_google_group_permit_rotates_cross_provider_carbon_eap_sibling() {
+        let cap = google_max_concurrency();
+        let google_id = uuid::Uuid::new_v4();
+        let agy_id = uuid::Uuid::new_v4();
+        let make_entries = || {
+            vec![
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: google_id,
+                    api_key: Some("key-primary".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "antigravity".into(),
+                    model_id: "agy-model-high".into(),
+                    account_id: agy_id,
+                    api_key: None,
+                    has_oauth: true,
+                    base_url: None,
+                    subscription_key: None,
+                },
+            ]
+        };
+        let has_cred =
+            |e: &crate::provider_health::ResolvedEntry| e.api_key.is_some() || e.has_oauth;
+
+        let mut google_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (permit, _) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                has_cred,
+            )
+            .await
+            .unwrap();
+            assert_eq!(entries[0].provider_id, "google");
+            google_permits.push(permit);
+        }
+
+        let mut entries = make_entries();
+        let (_spill_permit, waited) = acquire_google_group_permit(
+            &mut entries,
+            0,
+            std::time::Duration::from_secs(1),
+            has_cred,
+        )
+        .await
+        .unwrap();
+        assert!(waited.is_zero());
+        assert_eq!(entries[0].account_id, agy_id);
+        assert_eq!(entries[0].provider_id, "antigravity");
+        assert_eq!(entries[0].model_id, "agy-model-high");
+        assert_eq!(
+            ProviderType::from_id(&entries[0].provider_id),
+            Some(ProviderType::Antigravity)
+        );
+        assert!(proxy_queue_timeout(true) <= std::time::Duration::from_secs(30));
+        assert!(proxy_queue_timeout(false) >= std::time::Duration::from_secs(180));
+    }
+
+    #[tokio::test]
+    async fn argon_sibling_group_spills_within_argon_without_crossing_into_carbon() {
+        let cap = google_max_concurrency();
+        let argon_google_id = uuid::Uuid::new_v4();
+        let argon_agy_id = uuid::Uuid::new_v4();
+        let carbon_google_id = uuid::Uuid::new_v4();
+        let make_entries = || {
+            vec![
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-argon".into(),
+                    account_id: argon_google_id,
+                    api_key: Some("key-argon".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "antigravity".into(),
+                    model_id: "gemini-4-argon-high".into(),
+                    account_id: argon_agy_id,
+                    api_key: None,
+                    has_oauth: true,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: carbon_google_id,
+                    api_key: Some("key-carbon".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+            ]
+        };
+        let has_cred =
+            |e: &crate::provider_health::ResolvedEntry| e.api_key.is_some() || e.has_oauth;
+
+        let mut primary_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (p, _) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                has_cred,
+            )
+            .await
+            .unwrap();
+            assert_eq!(entries[0].account_id, argon_google_id);
+            primary_permits.push(p);
+        }
+
+        // Next request spills to antigravity Argon, never Carbon.
+        let mut secondary_permits = Vec::new();
+        for _ in 0..cap {
+            let mut entries = make_entries();
+            let (p, waited) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                has_cred,
+            )
+            .await
+            .unwrap();
+            assert!(waited.is_zero());
+            assert_eq!(entries[0].account_id, argon_agy_id);
+            secondary_permits.push(p);
+        }
+
+        // When both Argon accounts are full, Argon waits on Argon instead of spilling to Carbon.
+        let mut entries = make_entries();
+        let timed_out = acquire_google_group_permit(
+            &mut entries,
+            0,
+            std::time::Duration::from_millis(20),
+            has_cred,
+        )
+        .await;
+        assert!(timed_out.is_err());
     }
 
     #[test]
@@ -12163,6 +13048,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canned_gemini_filter_and_content_filter_fail_over_without_retry_or_cooldown() {
+        let canned_openai_sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries.\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let reopened = std::sync::atomic::AtomicU32::new(0);
+        let policy = reliability::RetryPolicy::immediate(2);
+        let (result, retries) = open_sse_with_retry(
+            sse(&[canned_openai_sse]),
+            PeekKind::OpenAi,
+            |_: &(CooldownReason, String)| {
+                reopened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Some(sse(&[HELLO])) }
+            },
+            &policy,
+            std::time::Duration::from_secs(5),
+            ("antigravity", "agy-model-high"),
+        )
+        .await;
+        let Err((reason, detail)) = result else {
+            panic!("canned filter refusal must fail over");
+        };
+        assert!(matches!(reason, CooldownReason::ClientError));
+        assert!(is_per_request_content_filter_detail(&detail));
+        assert_eq!(retries, 0);
+        assert_eq!(reopened.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let tracker = crate::provider_health::ProviderHealthTracker::new();
+        let entry = crate::provider_health::ResolvedEntry {
+            provider_id: "antigravity".to_string(),
+            model_id: "agy-model-high".to_string(),
+            account_id: uuid::Uuid::new_v4(),
+            api_key: None,
+            has_oauth: true,
+            base_url: None,
+            subscription_key: None,
+        };
+        let cooldown = record_peek_failure_cooldown(&tracker, &entry, reason, &detail).await;
+        assert!(
+            cooldown.is_none(),
+            "content filter must not cool down account"
+        );
+        assert!(tracker.is_healthy(entry.account_id).await);
+
+        let google_blocked =
+            "data: {\"promptFeedback\":{\"blockReason\":\"PROHIBITED_CONTENT\"}}\n\n";
+        let (g_res, g_retries) = open_sse_with_retry(
+            sse(&[google_blocked]),
+            PeekKind::Google,
+            |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
+            &policy,
+            std::time::Duration::from_secs(5),
+            ("google", "gemini-4-carbon-eap"),
+        )
+        .await;
+        let Err((g_reason, g_detail)) = g_res else {
+            panic!("Google PROHIBITED_CONTENT must fail over");
+        };
+        assert!(matches!(g_reason, CooldownReason::ClientError));
+        assert!(is_per_request_content_filter_detail(&g_detail));
+        assert_eq!(g_retries, 0);
+
+        let normal_sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Here is why Gemini's filters exist.\"},\"finish_reason\":null}]}\n\n";
+        assert!(peek_openai_sse_stream(sse(&[normal_sse])).await.is_ok());
+
+        // Multi-delta split canned refusal across separate SSE events (OpenAI + Google)
+        // must buffer the prefix and still fail over cleanly without committing or retrying.
+        let split_openai = sse(&[
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"This request was\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" blocked by Gemini's filters. Please rephrase.\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let (split_oa_res, split_oa_retries) = open_sse_with_retry(
+            split_openai,
+            PeekKind::OpenAi,
+            |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
+            &policy,
+            std::time::Duration::from_secs(5),
+            ("antigravity", "agy-model-high"),
+        )
+        .await;
+        let Err((split_oa_reason, split_oa_detail)) = split_oa_res else {
+            panic!("multi-delta OpenAI canned refusal must fail over");
+        };
+        assert!(matches!(split_oa_reason, CooldownReason::ClientError));
+        assert!(is_per_request_content_filter_detail(&split_oa_detail));
+        assert_eq!(split_oa_retries, 0);
+
+        let split_google = sse(&[
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"This request was\"}]}}]}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" blocked by Gemini's filters.\"}]}}]}\n\n",
+        ]);
+        let (split_g_res, split_g_retries) = open_sse_with_retry(
+            split_google,
+            PeekKind::Google,
+            |_: &(CooldownReason, String)| async { Some(sse(&[HELLO])) },
+            &policy,
+            std::time::Duration::from_secs(5),
+            ("google", "gemini-4-carbon-eap"),
+        )
+        .await;
+        let Err((split_g_reason, split_g_detail)) = split_g_res else {
+            panic!("multi-delta Google canned refusal must fail over");
+        };
+        assert!(matches!(split_g_reason, CooldownReason::ClientError));
+        assert!(is_per_request_content_filter_detail(&split_g_detail));
+        assert_eq!(split_g_retries, 0);
+
+        // A valid short answer that is a strict prefix of the canned refusal (e.g. "This")
+        // must be released on finish_reason / [DONE] rather than treated as an empty stream.
+        let short_prefix_valid = sse(&[
+            "data: {\"choices\":[{\"delta\":{\"content\":\"This\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let (short_peek, _) = peek_openai_sse_stream(short_prefix_valid)
+            .await
+            .expect("valid short strict-prefix answer must be released");
+        assert!(String::from_utf8(short_peek).unwrap().contains("\"This\""));
+
+        let non_stream_canned = serde_json::json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "This request was blocked by Gemini's filters. Please try rephrasing." },
+                "finish_reason": "stop"
+            }]
+        });
+        assert!(openai_json_content_filter_refusal(&non_stream_canned).is_some());
+
+        let google_canned_json = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [{ "text": "This request was blocked by Gemini's filters." }] },
+                "finishReason": "STOP"
+            }]
+        });
+        assert!(translate_google_json_to_openai(
+            &serde_json::to_vec(&google_canned_json).unwrap(),
+            "gemini-4-carbon-eap",
+            0
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
     async fn sse_error_event_never_leaks_urls_or_keys() {
         let leaky = "error sending request for url (https://generativelanguage.googleapis.com/v1beta/models/x:streamGenerateContent?alt=sse&key=AIzaSECRETKEY123) via http://user:pw@10.0.0.7:8317/v1";
         for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::Other] {
@@ -13447,6 +14478,8 @@ mod latency_tests {
         let tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
         let cell = TimingCell::new("builtin/smart", true);
         let account = uuid::Uuid::new_v4();
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let initial_permit = sem.clone().try_acquire_owned().unwrap();
         // First stream: role + reasoning, then silence past the idle limit.
         let stalled = crate::api::proxy_timing::scope(cell.clone(), async {
             cell.attempt_start("xai", "grok-4.7", account);
@@ -13461,15 +14494,25 @@ mod latency_tests {
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/event-stream")
-                .body(Body::from_stream(sse_error_terminated(tracked)))
+                .body(Body::from_stream(with_concurrency_permit(
+                    sse_error_terminated(tracked),
+                    Some(initial_permit),
+                )))
                 .unwrap()
         })
         .await;
         let calls = Arc::new(std::sync::Mutex::new(Vec::<Option<ExcludedEntry>>::new()));
         let seen = calls.clone();
+        let sem_for_retry = sem.clone();
         let reroute: StallRetry = Arc::new(move |exclude| {
             seen.lock().unwrap().push(exclude);
-            Box::pin(async {
+            // Stalled stream must have dropped its permit before reroute starts.
+            let retry_permit = sem_for_retry
+                .clone()
+                .try_acquire_owned()
+                .expect("stalled stream permit must be released before reroute");
+            Box::pin(async move {
+                let _hold = retry_permit;
                 // The reroute itself waits 40 s for its first content.
                 tokio::time::sleep(Duration::from_secs(40)).await;
                 sse_response(vec![(

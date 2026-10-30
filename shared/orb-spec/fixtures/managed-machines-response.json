@@ -1,7 +1,7 @@
 {
   "budget": {
     "active": 1,
-    "committed_usd": 0.075,
+    "committed_usd": 0.18,
     "daily_cap_usd": 50.0,
     "default_size": "small",
     "default_ttl_minutes": 60,
@@ -9,7 +9,7 @@
     "max_concurrent": 16,
     "max_size": "xlarge",
     "max_ttl_minutes": 720,
-    "spent_today_usd": 0.025
+    "spent_today_usd": 0.06
   },
   "daily_spend": [
     {
@@ -53,16 +53,16 @@
       "missions": [
         {
           "mission_id": "550e8400-e29b-41d4-a716-446655440000",
-          "usd": 0.025
+          "usd": 0.06
         }
       ],
       "sizes": [
         {
-          "size": "cpx41",
-          "usd": 0.025
+          "size": "cpx42",
+          "usd": 0.06
         }
       ],
-      "usd": 0.025
+      "usd": 0.06
     }
   ],
   "enabled": true,
@@ -76,13 +76,13 @@
       "budget_pool_id": null,
       "cost_before_resume": 0.0,
       "cost_is_metered": false,
-      "cost_usd": 0.025,
+      "cost_usd": 0.06,
       "cpu": 8,
       "created_at": "2026-10-29T10:00:00Z",
       "deletable_at": null,
       "destroy_reason": null,
       "destroyed_at": null,
-      "disk_gb": 240,
+      "disk_gb": 320,
       "error": null,
       "expires_at": "2026-10-29T12:00:00Z",
       "fork_source_provider_id": null,
@@ -92,7 +92,7 @@
       "image": "ubuntu-24.04",
       "last_busy_at": "2026-10-29T10:00:00Z",
       "ledger_closed": false,
-      "name": "cpx41-a",
+      "name": "cpx42-a",
       "node_id": "managed-mm1001",
       "online_at": "2026-10-29T10:00:00Z",
       "owner_kind": "mission",
@@ -113,19 +113,22 @@
       "root_mission_id": "550e8400-e29b-41d4-a716-446655440000",
       "run_started_at": null,
       "secrets_wiped": false,
-      "size": "cpx41",
+      "size": "cpx42",
       "source_snapshot": null,
       "state": "online",
       "stopped_at": null,
       "stopped_by_reaper": false,
-      "usd_per_hour": 0.05
+      "usd_per_hour": 0.12
     }
   ],
   "provider": "boat",
   "providers": [
     {
       "configured": true,
+      "credential_source": "bitwarden",
       "display_name": "boat.dev",
+      "enabled": true,
+      "key_hint": "••••1234",
       "provider": "boat",
       "sizes": [
         {
@@ -166,32 +169,36 @@
     },
     {
       "configured": true,
+      "credential_source": "settings",
       "display_name": "Hetzner Cloud",
+      "enabled": true,
+      "key_hint": "••••5678",
       "provider": "hetzner",
+      "region": "fsn1",
       "sizes": [
         {
           "arch": "x86_64",
-          "cpu": 3,
+          "cpu": 2,
           "disk_gb": 80,
           "ram_gb": 4,
-          "size": "cpx21",
-          "usd_per_hour": 0.015
+          "size": "cpx22",
+          "usd_per_hour": 0.034
         },
         {
           "arch": "x86_64",
           "cpu": 4,
           "disk_gb": 160,
           "ram_gb": 8,
-          "size": "cpx31",
-          "usd_per_hour": 0.027
+          "size": "cpx32",
+          "usd_per_hour": 0.062
         },
         {
           "arch": "x86_64",
           "cpu": 8,
-          "disk_gb": 240,
+          "disk_gb": 320,
           "ram_gb": 16,
-          "size": "cpx41",
-          "usd_per_hour": 0.05
+          "size": "cpx42",
+          "usd_per_hour": 0.12
         },
         {
           "arch": "arm64",
@@ -203,11 +210,19 @@
         },
         {
           "arch": "x86_64",
+          "cpu": 12,
+          "disk_gb": 480,
+          "ram_gb": 24,
+          "size": "cpx52",
+          "usd_per_hour": 0.174
+        },
+        {
+          "arch": "x86_64",
           "cpu": 16,
-          "disk_gb": 360,
+          "disk_gb": 640,
           "ram_gb": 32,
-          "size": "cpx51",
-          "usd_per_hour": 0.102
+          "size": "cpx62",
+          "usd_per_hour": 0.225
         },
         {
           "arch": "x86_64",
@@ -215,7 +230,15 @@
           "disk_gb": 240,
           "ram_gb": 32,
           "size": "ccx33",
-          "usd_per_hour": 0.105
+          "usd_per_hour": 0.244
+        },
+        {
+          "arch": "x86_64",
+          "cpu": 16,
+          "disk_gb": 360,
+          "ram_gb": 64,
+          "size": "ccx43",
+          "usd_per_hour": 0.484
         }
       ],
       "supports_free_stop": false,
@@ -224,6 +247,7 @@
     {
       "configured": false,
       "display_name": "Vast.ai",
+      "enabled": true,
       "provider": "vastai",
       "sizes": [
         {
@@ -269,6 +293,7 @@
     {
       "configured": false,
       "display_name": "Scaleway",
+      "enabled": false,
       "provider": "scaleway",
       "sizes": [
         {

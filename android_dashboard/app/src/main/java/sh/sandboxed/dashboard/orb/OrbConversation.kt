@@ -340,7 +340,7 @@ object OrbTimelineBuilder {
                             parseToolStep(tc, tc.raw)?.let { pendingWork.add(it) }
                         }
                     }
-                    if (text.isNotEmpty() && text.trim() !in narrationSet) {
+                    if (text.isNotEmpty() && !OrbActivityCompaction.isPlaceholderTurn(text) && text.trim() !in narrationSet) {
                         lastAssistantTurnIndex = turns.size
                         turns.add(OrbTurn.Assistant("a-$idx-${msg.id}", text, ts))
                     }
@@ -2360,6 +2360,7 @@ fun OrbConversationPage(
                             val selectedWorkspaceName = remember(selectedWorkspaceId, workspaces) {
                                 workspaces.firstOrNull { (it.str("id") ?: it.id) == selectedWorkspaceId }
                                     ?.str("name", "title", "slug")
+                                    ?.replace(Regex("-[0-9a-f]{8}$"), "")
                             }
                             Row(
                                 modifier = Modifier

@@ -3714,6 +3714,25 @@
       "model": "LeanSys.Spec.verifyIsaSelection"
     },
     {
+      "name": "leansys_verify_fd_bounds",
+      "ret": "uint8_t",
+      "params": [
+        {
+          "name": "rawWord",
+          "type": "uint64_t"
+        },
+        {
+          "name": "fdOut",
+          "type": "uint32_t"
+        }
+      ],
+      "jni": {
+        "method": "leansysVerifyFdBounds",
+        "ret": "jint"
+      },
+      "model": "LeanSys.Spec.verifyFdBounds"
+    },
+    {
       "name": "orb_vm_lifecycle_step",
       "ret": "uint32_t",
       "params": [

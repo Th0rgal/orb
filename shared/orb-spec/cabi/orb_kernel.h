@@ -126,6 +126,7 @@ uint8_t leansys_verify_worker_budget(uint64_t, uint64_t, uint64_t, uint64_t, uin
 uint8_t leansys_verify_page_aligned_buffer(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint8_t leansys_select_isa(uint64_t, uint64_t, uint8_t, uint8_t);
 uint8_t leansys_verify_isa_selection(uint64_t, uint64_t, uint8_t, uint8_t);
+uint8_t leansys_verify_fd_bounds(uint64_t, uint32_t);
 uint32_t orb_vm_lifecycle_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 uint32_t orb_vm_claim_step(uint8_t, uint8_t, uint8_t, uint8_t);
 uint32_t orb_compute_secret_gate(uint8_t, uint8_t, uint8_t, uint8_t);

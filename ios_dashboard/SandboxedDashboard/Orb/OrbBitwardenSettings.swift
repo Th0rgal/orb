@@ -34,11 +34,6 @@ struct OrbBitwardenSettings: View {
     @State private var editingSecret: OrbEditingSecret?
     @State private var deletingSecret: OrbJSON?
 
-    @State private var devices: [OrbJSON] = []
-    @State private var approvalMode = ""
-    @State private var enrollmentCode = ""
-    @State private var enrolledHere = false
-
     private var filteredSecrets: [OrbJSON] {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return secrets }
@@ -166,15 +161,15 @@ struct OrbBitwardenSettings: View {
             Spacer()
             ZStack {
                 Circle()
-                    .fill(Color.accentColor.opacity(0.14))
+                    .fill(Color.white.opacity(0.10))
                     .frame(width: 68, height: 68)
                 Image(systemName: OrbBiometric.symbolName)
                     .font(.system(size: 30, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Color.white)
             }
-            Text("Secrets Locked")
+            Text("Secrets Vault Locked")
                 .font(.headline)
-            Text("Authenticate with \(biometryName) to view or manage your Bitwarden Secrets Manager credentials and mission access.")
+            Text("Authenticate with \(biometryName) to view or manage Bitwarden Secrets Manager keys.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -195,7 +190,7 @@ struct OrbBitwardenSettings: View {
                     if authenticating {
                         ProgressView()
                             .controlSize(.small)
-                            .tint(.white)
+                            .tint(.black)
                     } else {
                         Image(systemName: OrbBiometric.symbolName)
                     }
@@ -204,8 +199,8 @@ struct OrbBitwardenSettings: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
-                .background(Color.accentColor)
-                .foregroundStyle(.white)
+                .background(Color.white)
+                .foregroundStyle(.black)
                 .clipShape(Capsule())
             }
             .disabled(authenticating)
@@ -249,49 +244,6 @@ struct OrbBitwardenSettings: View {
                         .controlSize(.small)
                     }
                     .padding(.vertical, 2)
-
-                    ForEach(devices, id: \.selfID) { d in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(d["name"].text + (d["public_key"].text == OrbApprovalKey.publicKey ? " (this iPhone)" : ""))
-                                    .font(.caption.weight(.medium))
-                                Text("Approval device · \(d["platform"].text)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("Remove", role: .destructive) {
-                                Task {
-                                    do {
-                                        _ = try await OrbApprovalKey.signedCall(
-                                            "/api/approvals/devices/\(d["id"].text)", method: "DELETE",
-                                            summary: "Remove approval device \(d["name"].text)")
-                                    } catch {
-                                        if let msg = OrbBiometric.friendlyError(error) { self.error = msg }
-                                    }
-                                    await loadDevices()
-                                }
-                            }
-                            .font(.caption)
-                            .buttonStyle(.borderless)
-                        }
-                    }
-
-                    if !enrolledHere {
-                        if approvalMode == "enforce" {
-                            TextField("One-time code from Core host", text: $enrollmentCode)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .font(.caption)
-                        }
-                        Button {
-                            Task { await enroll() }
-                        } label: {
-                            Label("Enroll this iPhone (\(biometryName))", systemImage: OrbBiometric.symbolName)
-                                .font(.caption.weight(.semibold))
-                        }
-                        .disabled(approvalMode == "enforce" && enrollmentCode.trimmingCharacters(in: .whitespaces).count < 8)
-                    }
 
                     if !grants.isEmpty {
                         // Collapsed by default; the choice is remembered on this device.
@@ -390,16 +342,10 @@ struct OrbBitwardenSettings: View {
     }
 
     private var accountSummaryBadge: String {
-        var parts: [String] = []
-        if enrolledHere {
-            parts.append("iPhone enrolled")
-        } else if !devices.isEmpty {
-            parts.append("\(devices.count) device\(devices.count == 1 ? "" : "s")")
-        }
         if !grants.isEmpty {
-            parts.append("\(grants.count) grant\(grants.count == 1 ? "" : "s")")
+            return "\(grants.count) grant\(grants.count == 1 ? "" : "s")"
         }
-        return parts.joined(separator: " · ")
+        return status["configured"] == .bool(true) ? "Connected" : ""
     }
 
     @ViewBuilder
@@ -606,7 +552,7 @@ struct OrbBitwardenSettings: View {
                     : (projs.first?["id"].text ?? defaultProj)
                 selectedProjectId = target
                 await loadSecrets(projectId: target)
-                showAccountDetails = !enrolledHere && approvalMode == "enforce"
+                showAccountDetails = false
             } else {
                 projects = []
                 secrets = []
@@ -632,29 +578,6 @@ struct OrbBitwardenSettings: View {
         }
     }
 
-    private func loadDevices() async {
-        guard let d = try? await client.call("/api/approvals/devices") else { return }
-        devices = d["devices"].items
-        approvalMode = d["mode"].text
-        let mine = OrbApprovalKey.publicKey
-        let match = devices.first { mine != nil && $0["public_key"].text == mine }
-        OrbApprovalKey.deviceId = match?["id"].text
-        enrolledHere = match != nil
-    }
-
-    private func enroll() async {
-        do {
-            try await OrbApprovalKey.enroll(code: enrollmentCode)
-            enrollmentCode = ""
-            OrbHaptics.success()
-        } catch {
-            if let msg = OrbBiometric.friendlyError(error) {
-                self.error = msg
-            }
-        }
-        await loadDevices()
-    }
-
     // Browsing a project must not change any binding: bindings grant missions access.
     private func selectProject(_ projectId: String) async {
         await loadSecrets(projectId: projectId)
@@ -663,7 +586,6 @@ struct OrbBitwardenSettings: View {
     private func loadBroker() async {
         guard let snap = try? await client.call("/api/bitwarden/broker") else { return }
         requests = snap["requests"].items.filter { $0["status"].text == "pending" }
-        await loadDevices()
         grants = snap["grants"].items
     }
 

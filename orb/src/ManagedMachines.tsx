@@ -1,4 +1,4 @@
-import { For, Index, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Index, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { api, connectionVersion, isConnected, type RemoteNodeView } from "./api";
 import { swallow } from "./log";
 import { PopupMenu, type MenuEntry } from "./Menu";
@@ -9,10 +9,10 @@ import { pollWhileVisible } from "./poll";
 import { useNow } from "./time";
 import * as Ic from "./icons";
 import {
-  allowedSizes, budgetFull, budgetLeft, budgetLine, canStopMachine, costLine, managedSectionTitle, providerLabel, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
-  isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent,
+  allowedSizes, budgetFull, budgetLeft, budgetLine, canStopMachine, costLine, credentialSourceLabel, isProviderEnabled, isProviderUsable, listManagedProviders, managedSectionTitle, providerLabel, providerStatusLine, sizeLabel, specLine, stopManagedMachine, ttlFraction, ttlShort, createManagedMachine, destroyManagedMachine, estimateCost, extendManagedMachine, isLive,
+  isStarting, listManagedMachines, liveCost, machineName, managedNodeIds, managedError, minutesLabel, recentMachines, sizeSpec, stateLabel, ttlLeft, ttlUrgent, updateManagedProvider,
   spendDayDetail, spendFraction, spendSummary, spendWeekday,
-  machineOwner, reapLine, usd, usdPerHour, isStopped, resumeManagedMachine, listManagedSnapshots, deleteManagedSnapshot, snapshotLine, type ManagedSnapshot, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedSize,
+  machineOwner, reapLine, usd, usdPerHour, isStopped, resumeManagedMachine, listManagedSnapshots, deleteManagedSnapshot, snapshotLine, type ManagedSnapshot, type CreateManagedMachine, type DailySpend, type ManagedBudget, type ManagedMachine, type ManagedMachinesResponse, type ManagedProviderInfo, type ManagedProviderPatch, type ManagedSize,
 } from "./managedMachineModel";
 
 const openMission = (id: string) => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: `m:${id}` }));
@@ -158,12 +158,185 @@ function ManagedRow(p: { m: ManagedMachine; fetchedAt: number; disk?: number | n
   </div>;
 }
 
+function ConfigureMachineProviderDialog(p: { provider: ManagedProviderInfo; onClose: () => void; onSaved: (updated: ManagedProviderInfo) => void }) {
+  const name = () => p.provider.display_name || providerLabel(p.provider.provider);
+  const [apiKey, setApiKey] = createSignal("");
+  const [region, setRegion] = createSignal(p.provider.region ?? "");
+  const [projectId, setProjectId] = createSignal(p.provider.project_id ?? "");
+  const [saving, setSaving] = createSignal(false);
+  const [err, setErr] = createSignal<string | null>(null);
+
+  const submit = async (patchOverride?: ManagedProviderPatch) => {
+    setSaving(true); setErr(null);
+    try {
+      const patch: ManagedProviderPatch = patchOverride ?? {
+        ...(apiKey().trim() ? { api_key: apiKey().trim(), enabled: true } : {}),
+        ...(p.provider.provider === "hetzner" || p.provider.provider === "scaleway" ? { region: region().trim() } : {}),
+        ...(p.provider.provider === "scaleway" ? { project_id: projectId().trim() } : {}),
+      };
+      const updated = await updateManagedProvider(p.provider.provider, patch);
+      window.dispatchEvent(new CustomEvent("orb:managed-providers-changed", { detail: updated }));
+      p.onSaved(updated);
+      p.onClose();
+    } catch (e) {
+      setErr(managedError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <Dialog title={`Configure ${name()}`} description="Credentials are encrypted on Core and never returned to clients." persistent onClose={p.onClose}
+    footer={close => <>
+      <Show when={p.provider.credential_source === "settings"}>
+        <DialogButton disabled={saving()} onClick={() => void submit({ api_key: "" })}>Remove saved key</DialogButton>
+      </Show>
+      <DialogButton disabled={saving()} onClick={close}>Cancel</DialogButton>
+      <DialogButton variant="primary" disabled={saving() || (!p.provider.configured && !apiKey().trim())} onClick={() => void submit()}>Save</DialogButton>
+    </>}>
+    <div class="managed-form">
+      <Field label="API key" description={p.provider.configured ? `Leave blank to keep the current ${credentialSourceLabel(p.provider.credential_source).toLowerCase() || "saved"} key${p.provider.key_hint ? ` (${p.provider.key_hint})` : ""}.` : "API key or secret token used by Core to rent and reap machines."}>
+        <input type="password" class="s-input" autocomplete="off" aria-label={`${name()} API key`} placeholder={p.provider.key_hint || "Paste API key"} value={apiKey()} onInput={e => setApiKey(e.currentTarget.value)} />
+      </Field>
+      <Show when={p.provider.provider === "hetzner"}>
+        <Field label="Default location" description="Preferred Hetzner Cloud location (falls back across fsn1, hel1, nbg1 if out of capacity).">
+          <input type="text" class="s-input" aria-label="Default location" placeholder="fsn1" value={region()} onInput={e => setRegion(e.currentTarget.value)} />
+        </Field>
+      </Show>
+      <Show when={p.provider.provider === "scaleway"}>
+        <Field label="Default zone" description="Scaleway availability zone (for example fr-par-1 or nl-ams-1).">
+          <input type="text" class="s-input" aria-label="Default zone" placeholder="fr-par-1" value={region()} onInput={e => setRegion(e.currentTarget.value)} />
+        </Field>
+        <Field label="Project ID" description="Scaleway project UUID that owns spawned instances.">
+          <input type="text" class="s-input" aria-label="Project ID" placeholder="00000000-0000-0000-0000-000000000000" value={projectId()} onInput={e => setProjectId(e.currentTarget.value)} />
+        </Field>
+      </Show>
+      <Show when={err()}><ErrorNotice error={err()!} /></Show>
+    </div>
+  </Dialog>;
+}
+
+/** Per-provider status, optimistic Enable/Disable switch, and credential configuration. */
+export function MachineProvidersCard(p: { providers?: readonly ManagedProviderInfo[]; inSettings?: boolean; onUpdated?: (updated: ManagedProviderInfo) => void } = {}) {
+  const [standalone, setStandalone] = createSignal<ManagedProviderInfo[] | null>(null);
+  const [busyProvider, setBusyProvider] = createSignal<string | null>(null);
+  const [err, setErr] = createSignal<{ message: string; retry?: () => void } | null>(null);
+  const [editing, setEditing] = createSignal<ManagedProviderInfo | null>(null);
+  const [localOverrides, setLocalOverrides] = createSignal<ReadonlyMap<string, ManagedProviderInfo>>(new Map());
+
+  const loadStandalone = async () => {
+    if (p.providers !== undefined || !isConnected()) return;
+    try {
+      const list = await listManagedProviders();
+      setStandalone(list);
+    } catch {
+      /* keep last good snapshot */
+    }
+  };
+
+  createEffect(on(connectionVersion, () => {
+    setLocalOverrides(new Map());
+    if (p.providers === undefined) { setStandalone(null); void loadStandalone(); }
+  }));
+
+  onMount(() => {
+    if (p.providers === undefined && isConnected()) void loadStandalone();
+    const onChanged = (ev: Event) => {
+      const updated = (ev as CustomEvent<ManagedProviderInfo>).detail;
+      if (!updated?.provider) return;
+      if (p.providers === undefined) setStandalone(list => list ? list.map(x => x.provider === updated.provider ? updated : x) : list);
+    };
+    window.addEventListener("orb:managed-providers-changed", onChanged);
+    onCleanup(() => window.removeEventListener("orb:managed-providers-changed", onChanged));
+  });
+
+  const rows = createMemo(() => {
+    const base = p.providers ?? standalone() ?? [];
+    const over = localOverrides();
+    return base.map(pr => over.get(pr.provider) ?? pr);
+  });
+
+  const applyUpdate = (updated: ManagedProviderInfo) => {
+    setLocalOverrides(m => { const next = new Map(m); next.set(updated.provider, updated); return next; });
+    if (p.providers === undefined) setStandalone(list => list ? list.map(x => x.provider === updated.provider ? updated : x) : list);
+    p.onUpdated?.(updated);
+  };
+
+  const toggle = async (pr: ManagedProviderInfo, targetEnabled = !isProviderEnabled(pr)) => {
+    const previous = pr;
+    const optimistic: ManagedProviderInfo = { ...pr, enabled: targetEnabled };
+    setErr(null);
+    setBusyProvider(pr.provider);
+    setLocalOverrides(m => new Map(m).set(pr.provider, optimistic));
+    try {
+      const saved = await updateManagedProvider(pr.provider, { enabled: targetEnabled });
+      window.dispatchEvent(new CustomEvent("orb:managed-providers-changed", { detail: saved }));
+      applyUpdate(saved);
+    } catch (e) {
+      setLocalOverrides(m => {
+        const next = new Map(m);
+        next.set(pr.provider, previous);
+        return next;
+      });
+      setErr({
+        message: `Couldn’t update ${pr.display_name || providerLabel(pr.provider)}: ${managedError(e)}`,
+        retry: () => void toggle(previous, targetEnabled),
+      });
+    } finally {
+      setBusyProvider(null);
+    }
+  };
+
+  return <Show when={isConnected() && rows().length > 0}>
+    <section class={p.inSettings ? "s-sec" : "managed-providers-sec"} aria-label="Machine providers">
+      <h3 class={p.inSettings ? undefined : "s-section-title"}>Machine providers</h3>
+      <Show when={err()}>{item => <ErrorNotice error={item().message} onDismiss={() => setErr(null)}>
+        <Show when={item().retry}><button type="button" class="s-btn sm" onClick={() => item().retry?.()}>Retry</button></Show>
+      </ErrorNotice>}</Show>
+      <div class="m-list s-card managed-providers-card">
+        <For each={rows().map(r => r.provider)}>{id => {
+          const pr = () => rows().find(r => r.provider === id)!;
+          const label = () => pr().display_name || providerLabel(pr().provider);
+          return <Show when={rows().some(r => r.provider === id)}>
+            <div class="managed-provider-row" data-provider={id}>
+              <span class={`m-dot ${isProviderUsable(pr()) ? "on" : ""}`} />
+              <div class="managed-provider-info">
+                <div class="s-row-title">{label()}</div>
+                <div class="s-row-desc">{providerStatusLine(pr())}</div>
+              </div>
+              <div class="managed-provider-actions">
+                <button
+                  type="button"
+                  class={`toggle ${isProviderEnabled(pr()) ? "on" : ""}`}
+                  role="switch"
+                  aria-checked={isProviderEnabled(pr())}
+                  aria-label={`Enable ${label()}`}
+                  disabled={busyProvider() === id}
+                  onClick={() => void toggle(pr())}
+                />
+                <button
+                  type="button"
+                  class="s-btn sm quiet"
+                  aria-label={`Configure ${label()}`}
+                  onClick={() => setEditing(pr())}
+                >
+                  {pr().configured ? "Configure" : "Set up"}
+                </button>
+              </div>
+            </div>
+          </Show>;
+        }}</For>
+      </div>
+      <Show when={editing()}>{target => <ConfigureMachineProviderDialog provider={target()} onClose={() => setEditing(null)} onSaved={applyUpdate} />}</Show>
+    </section>
+  </Show>;
+}
+
 function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => void; onCreate: (request: CreateManagedMachine, size: ManagedSize) => void }) {
-  const configuredProviders = () => (p.data.providers ?? []).filter(pr => pr.configured);
-  const initialProvider = configuredProviders().find(pr => pr.provider === "boat")?.provider ?? configuredProviders()[0]?.provider ?? "boat";
+  const usableProviders = () => (p.data.providers ?? []).filter(isProviderUsable);
+  const initialProvider = usableProviders().find(pr => pr.provider === "boat")?.provider ?? usableProviders()[0]?.provider ?? "boat";
   const [provider, setProvider] = createSignal(initialProvider);
   const sizes = createMemo(() => {
-    const pr = configuredProviders().find(x => x.provider === provider());
+    const pr = usableProviders().find(x => x.provider === provider());
     if (pr && pr.provider !== "boat") return pr.sizes;
     return allowedSizes(pr?.sizes ?? p.data.sizes, p.data.budget.max_size);
   });
@@ -174,8 +347,8 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
     setProvider(next);
     setAllow24h(false);
     const list = next === "boat"
-      ? allowedSizes(configuredProviders().find(x => x.provider === "boat")?.sizes ?? p.data.sizes, p.data.budget.max_size)
-      : (configuredProviders().find(x => x.provider === next)?.sizes ?? []);
+      ? allowedSizes(usableProviders().find(x => x.provider === "boat")?.sizes ?? p.data.sizes, p.data.budget.max_size)
+      : (usableProviders().find(x => x.provider === next)?.sizes ?? []);
     setSize(list.find(s => s.size === p.data.budget.default_size)?.size ?? list[0]?.size ?? "");
   };
   const chosen = () => sizes().find(s => s.size === size());
@@ -199,10 +372,10 @@ function NewManagedMachine(p: { data: ManagedMachinesResponse; onClose: () => vo
   return <Dialog title="New managed machine" description={`A ${providerLabel(provider())} machine that joins the fleet and is reaped automatically when idle or when its time runs out.`} persistent onClose={p.onClose}
     footer={close => <><DialogButton onClick={close}>Cancel</DialogButton><DialogButton variant="primary" disabled={!chosen() || (requires24h() && !allow24h())} onClick={submit}>Create machine</DialogButton></>}>
     <div class="managed-form">
-      <Show when={configuredProviders().length > 1}>
+      <Show when={usableProviders().length > 1}>
         <Field label="Provider">
           <div class="managed-providers" role="radiogroup" aria-label="Provider">
-            <For each={configuredProviders()}>{pr => <button type="button" role="radio" aria-checked={pr.provider === provider()} class={`s-btn sm ${pr.provider === provider() ? "" : "quiet"}`} onClick={() => selectProvider(pr.provider)}>
+            <For each={usableProviders()}>{pr => <button type="button" role="radio" aria-checked={pr.provider === provider()} class={`s-btn sm ${pr.provider === provider() ? "" : "quiet"}`} onClick={() => selectProvider(pr.provider)}>
               {pr.display_name || providerLabel(pr.provider)}
             </button>}</For>
           </div>
@@ -261,6 +434,9 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
   onMount(() => {
     if (isConnected()) void refresh();
     onCleanup(pollWhileVisible(() => (isConnected() ? refresh() : undefined), 15000, "managed"));
+    const onProvidersChanged = () => { if (isConnected()) void refresh(); };
+    window.addEventListener("orb:managed-providers-changed", onProvidersChanged);
+    onCleanup(() => window.removeEventListener("orb:managed-providers-changed", onProvidersChanged));
   });
   const replace = (m: ManagedMachine) => setData(d => d && { ...d, machines: [m, ...d.machines.filter(x => x.id !== m.id)] });
   const machines = createMemo(() => (data()?.machines ?? []).map(m => destroying().has(m.id) && isLive(m) ? { ...m, state: "destroying" } : m));
@@ -323,6 +499,7 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
   const live = createMemo(() => [...pending().map(x => placeholder(x)), ...machines().filter(isLive), ...failedHere()]);
   const recent = createMemo(() => recentMachines(machines()).filter(m => !failedHere().includes(m)));
   const full = () => { const b = data()?.budget; return !!b && budgetFull(b); };
+  const noUsableProvider = () => (data()?.providers?.length ?? 0) > 0 && !(data()!.providers!.some(isProviderUsable));
   const diskOf = (m: Pick<ManagedMachine, "size" | "provider">) => {
     const pr = data()?.providers?.find(x => x.provider === (m.provider || "boat"));
     const d = (pr?.sizes ?? data()?.sizes)?.find(s => s.size === m.size)?.disk_gb ?? null;
@@ -341,43 +518,58 @@ export function ManagedMachines(p: { nodes?: readonly RemoteNodeView[] | null; o
     };
   };
 
-  return <Show when={isConnected() && data()?.enabled}>
-    <div class="managed-head">
-      <h3 class="s-section-title">{managedSectionTitle(data()!.providers, data()!.machines)}</h3>
-      <button class="s-btn sm quiet" disabled={full()} title={full() ? "Daily budget or machine limit reached" : undefined} onClick={() => setCreating(true)}><Ic.PlusIcon size={14} />New managed machine</button>
-    </div>
-    <Show when={data()!.daily_spend} fallback={<div class="m-note managed-budget">{budgetLine(data()!.budget)}</div>}>
-      {days => <SpendChart days={days()} budget={data()!.budget} />}
+  return <Show when={isConnected() && data()}>
+    <Show when={(data()!.providers?.length ?? 0) > 0}>
+      <MachineProvidersCard
+        providers={data()!.providers!}
+        onUpdated={updated => {
+          setData(d => d && d.providers ? {
+            ...d,
+            enabled: d.enabled || updated.configured,
+            providers: d.providers.map(x => x.provider === updated.provider ? updated : x),
+          } : d);
+          void refresh();
+        }}
+      />
     </Show>
-    <Show when={actionError()}><ErrorNotice error={actionError()!} onDismiss={() => setActionError(null)} /></Show>
-    <Show when={loadError()}><ErrorNotice title="Couldn’t refresh managed machines" error={loadError()!} /></Show>
-    <div class="m-list s-card managed-list">
-      <For each={live().map(m => m.id)}>{id => { const m = () => live().find(x => x.id === id)!; return <Show when={live().some(x => x.id === id)}>
-        <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} activeJobs={activeJobsOf(m())} {...actions(m())} /></Show>; }}</For>
-      <Show when={live().length === 0}><div class="m-note" style={{ padding: "10px 14px" }}>No managed machines running.</div></Show>
-    </div>
-    <Show when={stopped().length}>
-      <div class="m-note managed-stopped-head">Stopped · disk kept, nothing billed, resumable for 24 h</div>
-      <div class="m-list s-card managed-list managed-stopped">
-        <For each={stopped().map(m => m.id)}>{id => { const m = () => stopped().find(x => x.id === id)!; return <Show when={stopped().some(x => x.id === id)}>
-          <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} busy={busy() === id} onResume={() => void resume(m())} onDestroy={() => setConfirm(m())} /></Show>; }}</For>
+    <Show when={data()!.enabled}>
+      <div class="managed-head">
+        <h3 class="s-section-title">{managedSectionTitle(data()!.providers, data()!.machines)}</h3>
+        <button class="s-btn sm quiet" disabled={full() || noUsableProvider()} title={noUsableProvider() ? "Enable and configure a machine provider first" : full() ? "Daily budget or machine limit reached" : undefined} onClick={() => setCreating(true)}><Ic.PlusIcon size={14} />New managed machine</button>
       </div>
+      <Show when={data()!.daily_spend} fallback={<div class="m-note managed-budget">{budgetLine(data()!.budget)}</div>}>
+        {days => <SpendChart days={days()} budget={data()!.budget} />}
+      </Show>
+      <Show when={actionError()}><ErrorNotice error={actionError()!} onDismiss={() => setActionError(null)} /></Show>
+      <Show when={loadError()}><ErrorNotice title="Couldn’t refresh managed machines" error={loadError()!} /></Show>
+      <div class="m-list s-card managed-list">
+        <For each={live().map(m => m.id)}>{id => { const m = () => live().find(x => x.id === id)!; return <Show when={live().some(x => x.id === id)}>
+          <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} activeJobs={activeJobsOf(m())} {...actions(m())} /></Show>; }}</For>
+        <Show when={live().length === 0}><div class="m-note" style={{ padding: "10px 14px" }}>No managed machines running.</div></Show>
+      </div>
+      <Show when={stopped().length}>
+        <div class="m-note managed-stopped-head">Stopped · disk kept, nothing billed, resumable for 24 h</div>
+        <div class="m-list s-card managed-list managed-stopped">
+          <For each={stopped().map(m => m.id)}>{id => { const m = () => stopped().find(x => x.id === id)!; return <Show when={stopped().some(x => x.id === id)}>
+            <ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} busy={busy() === id} onResume={() => void resume(m())} onDestroy={() => setConfirm(m())} /></Show>; }}</For>
+        </div>
+      </Show>
+      <ManagedSnapshots />
+      <Show when={recent().length}>
+        <button class="s-btn sm quiet managed-recent-toggle" aria-expanded={showRecent()} onClick={() => setShowRecent(!showRecent())}>
+          <span class={`chev p-acc-chev ${showRecent() ? "open" : ""}`}>›</span>Recent · last 24 h ({recent().length})
+        </button>
+        <Show when={showRecent()}><div class="m-list s-card managed-list managed-recent">
+          <For each={recent().map(m => m.id)}>{id => { const m = () => recent().find(x => x.id === id)!; return <Show when={recent().some(x => x.id === id)}><ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} muted /></Show>; }}</For>
+        </div></Show>
+      </Show>
+      <Show when={creating()}>
+        <NewManagedMachine data={data()!} onClose={() => setCreating(false)} onCreate={(r, size) => void create(r, size)} />
+      </Show>
+      <Show when={confirm()}>{m => <ConfirmDialog title={`Destroy ${machineName(m())}?`} destructive action="Destroy"
+        description={`The ${m().size} machine and everything on it are deleted now${m().owner_mission_id ? `, and mission ${m().owner_mission_id!.slice(0, 8)} loses it` : ""}. Cost so far: ${usd(liveCost(m(), fetchedAt()))}.`}
+        onClose={() => setConfirm(null)} onConfirm={() => void destroy(m())} />}</Show>
     </Show>
-    <ManagedSnapshots />
-    <Show when={recent().length}>
-      <button class="s-btn sm quiet managed-recent-toggle" aria-expanded={showRecent()} onClick={() => setShowRecent(!showRecent())}>
-        <span class={`chev p-acc-chev ${showRecent() ? "open" : ""}`}>›</span>Recent · last 24 h ({recent().length})
-      </button>
-      <Show when={showRecent()}><div class="m-list s-card managed-list managed-recent">
-        <For each={recent().map(m => m.id)}>{id => { const m = () => recent().find(x => x.id === id)!; return <Show when={recent().some(x => x.id === id)}><ManagedRow m={m()} fetchedAt={fetchedAt()} disk={diskOf(m())} muted /></Show>; }}</For>
-      </div></Show>
-    </Show>
-    <Show when={creating()}>
-      <NewManagedMachine data={data()!} onClose={() => setCreating(false)} onCreate={(r, size) => void create(r, size)} />
-    </Show>
-    <Show when={confirm()}>{m => <ConfirmDialog title={`Destroy ${machineName(m())}?`} destructive action="Destroy"
-      description={`The ${m().size} machine and everything on it are deleted now${m().owner_mission_id ? `, and mission ${m().owner_mission_id!.slice(0, 8)} loses it` : ""}. Cost so far: ${usd(liveCost(m(), fetchedAt()))}.`}
-      onClose={() => setConfirm(null)} onConfirm={() => void destroy(m())} />}</Show>
   </Show>;
 }
 

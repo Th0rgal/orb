@@ -122,6 +122,7 @@ pub const EXPORTS: &[&str] = &[
     "leansys_verify_page_aligned_buffer",
     "leansys_select_isa",
     "leansys_verify_isa_selection",
+    "leansys_verify_fd_bounds",
     "orb_vm_lifecycle_step",
     "orb_vm_claim_step",
     "orb_compute_secret_gate",

@@ -39,7 +39,15 @@ struct OrbSelection {
         switch node {
         case "dgx-spark": return "spark"
         case "dgx-spark-admin": return "spark·admin"
-        default: return node
+        default:
+            if let dash = node.lastIndex(of: "-") {
+                let suffix = node[node.index(after: dash)...]
+                let prefix = String(node[..<dash])
+                if !prefix.isEmpty && suffix.count == 8 && suffix.allSatisfy({ $0.isHexDigit }) {
+                    return prefix
+                }
+            }
+            return node
         }
     }
     private static func shortModelName(_ raw: String, harness: String) -> String {

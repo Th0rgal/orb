@@ -1,6 +1,43 @@
 import {batch} from "solid-js";
 import { api, clearConnection, getApiUrl, getJwt, connectionVersion } from "./api";
 import { streamLoad, timed } from "./diagnostics";
+import { orbStreamBoundedCommitStep } from "./orbKernel";
+
+export const STREAM_MAX_OPEN_TAIL_BYTES = 16_384;
+
+export type StreamTailCommitState = {
+  totalBytes: number;
+  committedBytes: number;
+  checkpointBytes: number;
+};
+
+export function advanceStreamBoundedCommit(
+  state: StreamTailCommitState,
+  chunkBytes: number,
+  rawCommitBytes: number,
+  maxOpenTailBytes = STREAM_MAX_OPEN_TAIL_BYTES,
+): StreamTailCommitState & { admitted: boolean; checkpointForced: boolean } {
+  const newLen = state.totalBytes + Math.max(0, Math.floor(chunkBytes));
+  const clampedCommit = Math.max(state.committedBytes, Math.min(newLen, Math.max(0, Math.floor(rawCommitBytes))));
+  const verdict = orbStreamBoundedCommitStep(
+    state.totalBytes,
+    state.committedBytes,
+    state.checkpointBytes,
+    newLen,
+    clampedCommit,
+    maxOpenTailBytes,
+  );
+  if (!verdict.admitted) {
+    return { ...state, admitted: false, checkpointForced: false };
+  }
+  return {
+    totalBytes: newLen,
+    committedBytes: clampedCommit,
+    checkpointBytes: verdict.nextCheckpoint,
+    admitted: true,
+    checkpointForced: verdict.checkpointForced,
+  };
+}
 
 export interface StoredEvent {
   id: number;
@@ -215,14 +252,17 @@ export function streamMission(
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let tailState: StreamTailCommitState = { totalBytes: 0, committedBytes: 0, checkpointBytes: 0 };
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        let idx = buffer.indexOf("\n\n"), frames = 0;
+        const decoded = decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        buffer += decoded;
+        let idx = buffer.indexOf("\n\n"), frames = 0, consumedChars = 0;
         while (idx !== -1) {
           const raw = buffer.slice(0, idx);
           buffer = buffer.slice(idx + 2);
+          consumedChars += idx + 2;
           idx = buffer.indexOf("\n\n");
           let eventType = "message";
           let data = "";
@@ -246,6 +286,11 @@ export function streamMission(
             /* malformed frame — skip */
           }
         }
+        tailState = advanceStreamBoundedCommit(
+          tailState,
+          decoded.length,
+          tailState.committedBytes + consumedChars,
+        );
         streamLoad(`mission ${missionId?.slice(0, 8) ?? "presentation"}`, frames, value.byteLength);
       }
       flush();

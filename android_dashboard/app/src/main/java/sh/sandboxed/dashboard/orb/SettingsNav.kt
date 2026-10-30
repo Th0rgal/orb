@@ -14,6 +14,16 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
     Security("security", "Security", "Who can approve risky actions, Fleet Bunker Mode, privileged access and secrets."),
     Notifications("notifications", "Notifications", "What reaches your Inbox and when Orb tells you.");
 
+    /** Concise 1-line summary shown on root mobile Settings rows (never truncates mid-sentence). */
+    val mobileSummary: String
+        get() = when (this) {
+            Account -> "Server, sign-in & diagnostics"
+            Models -> "Providers, routing, usage & keys"
+            Agents -> "Skills, Assistant & machines"
+            Security -> "Approvals, Bunker Mode & secrets"
+            Notifications -> "Inbox & alert preferences"
+        }
+
     /** Page id, label and route; ids shared with desktop keep desktop's label. */
     val pages: List<Triple<String, String, OrbSettingsRoute>>
         get() = when (this) {
@@ -24,10 +34,14 @@ enum class OrbSettingsSection(val id: String, val label: String, val subtitle: S
                 Triple("debug", "Advanced", OrbSettingsRoute.DebugInfo),
             )
             Models -> listOf(
-                Triple("providers", "Providers", OrbSettingsRoute.Providers),
+                Triple("routing", "Fallback Chains", OrbSettingsRoute.FallbackChains),
+                Triple("routing-providers", "Providers", OrbSettingsRoute.Providers),
                 Triple("usage-settings", "Usage", OrbSettingsRoute.Usage),
+                Triple("routing-keys", "API Keys", OrbSettingsRoute.ProxyKeys),
             )
             Agents -> listOf(
+                Triple("skills-settings", "Skills", OrbSettingsRoute.Skills),
+                Triple("hermes-settings", "Assistant", OrbSettingsRoute.Assistant),
                 Triple("btw-settings", "Quick questions (/btw)", OrbSettingsRoute.SideQuestions),
                 Triple("machines", "Machines", OrbSettingsRoute.Machines),
             )

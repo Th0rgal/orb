@@ -1125,6 +1125,11 @@ pub(super) async fn observe_untracked_remote_job_cancellation(
                     }
                 }
                 Ok(_) => consecutive_missing = 0,
+                Err(_) if crate::managed::node_provably_gone(&node.id).await => {
+                    terminal = Some(crate::remote_node::missing_job_cancelled(
+                        mission_id, job_id,
+                    ));
+                }
                 Err(_) => {}
             }
         }
@@ -1710,15 +1715,39 @@ pub(super) async fn settle_job_on_gone_node(
     store: &dyn MissionStore,
     handle: &crate::remote_node::job_ledger::JobHandle,
 ) -> Result<bool, String> {
-    if !crate::managed::node_provably_gone(&handle.node_id).await {
+    settle_job_on_gone_node_by_id(
+        working_dir,
+        store,
+        handle.mission_id,
+        handle.job_id,
+        &handle.node_id,
+    )
+    .await
+}
+
+pub(super) async fn settle_job_on_gone_node_by_id(
+    working_dir: &std::path::Path,
+    store: &dyn MissionStore,
+    mission_id: Uuid,
+    job_id: Uuid,
+    node_id: &str,
+) -> Result<bool, String> {
+    if !crate::managed::node_provably_gone(node_id).await {
         return Ok(false);
     }
-    let (mission_id, job_id) = (handle.mission_id, handle.job_id);
     // The ledger is global; only the store that owns the mission may settle
     // its job. Another tenant's store must not touch it.
     if store.get_mission(mission_id).await?.is_none() {
         return Ok(false);
     }
+    store
+        .complete_scheduled_remote_job(
+            mission_id,
+            job_id,
+            Some(false),
+            Some(REMOTE_NODE_GONE.to_string()),
+        )
+        .await?;
     finish_remote_job_lease(store, mission_id, job_id, REMOTE_NODE_GONE).await?;
     if store
         .get_mission(mission_id)
@@ -1738,7 +1767,7 @@ pub(super) async fn settle_job_on_gone_node(
     crate::remote_node::job_ledger::finalize(working_dir, job_id, "failed", None)
         .await
         .map_err(|e| e.to_string())?;
-    tracing::warn!(%mission_id, %job_id, node = %handle.node_id,
+    tracing::warn!(%mission_id, %job_id, node = %node_id,
         "remote job settled as lost: its managed node is destroyed");
     Ok(true)
 }
@@ -2212,6 +2241,37 @@ pub(super) async fn poll_remote_job(
         };
         match observation {
             Err(err) => {
+                if crate::managed::node_provably_gone(&node.id).await {
+                    match settle_job_on_gone_node_by_id(
+                        ledger_dir,
+                        owner.mission_store.as_ref(),
+                        mission_id,
+                        job_id,
+                        &node.id,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            fleet.record_outcome(outcome(
+                                "failed",
+                                None,
+                                Some(REMOTE_NODE_GONE.into()),
+                                true,
+                            ));
+                            return;
+                        }
+                        Ok(false) => {}
+                        Err(settle_err) => {
+                            tracing::warn!(
+                                %mission_id,
+                                %job_id,
+                                node = %node.id,
+                                error = %settle_err,
+                                "failed to settle remote job on destroyed managed node; retrying"
+                            );
+                        }
+                    }
+                }
                 failures = failures.saturating_add(1);
                 if failures >= MAX_CONSECUTIVE_FAILURES {
                     if inactive_status.is_some() {

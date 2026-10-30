@@ -1,51 +1,13 @@
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.77s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.34s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3595 filtered out; finished in 5.58s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 1.87s
 
-warning: unused `axum::Json` that must be used
-     --> src/api/control/dispatch_admission_tests.rs:14789:5
-      |
-14789 | /     cancel_mission(
-14790 | |         State(h.state.clone()),
-14791 | |         Extension(h.user.clone()),
-14792 | |         Path(mission.id),
-14793 | |     )
-14794 | |     .await
-14795 | |     .unwrap();
-      | |_____________^
-      |
-      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
-help: use `let _ = ...` to ignore the resulting value
-      |
-14789 |     let _ = cancel_mission(
-      |     +++++++
-
-warning: `sandboxed_sh` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.13s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -63,14 +25,15 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3582 filtered out; finished in 0.06s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3643 filtered out; finished in 0.37s
 
-    Finished `test` profile [unoptimized] target(s) in 0.05s
-     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-80ea7278ce92855a)
+   Compiling orb-spec v1.3.0 (/var/lib/sandboxed-node/work/ca15b275-1886-42e3-bf8d-e1a8582f8304/orb/crates/orb-spec)
+    Finished `test` profile [unoptimized] target(s) in 0.20s
+     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-fa82f6df88eb163f)
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.00s
 

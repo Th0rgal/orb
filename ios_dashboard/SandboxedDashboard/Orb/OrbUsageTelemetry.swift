@@ -276,8 +276,19 @@ struct OrbUsageTelemetrySettings: View {
                 Text("Off by default. Orb sends which screens you use, approvals (method and wait time, never what was approved) and a few actions to your own hub. Prompts are only included when you turn that on.")
             }
             Section("Hub") {
-                TextField("Namespace", text: $namespace).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Hub URL", text: $hubURL).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                LabeledContent("Namespace") {
+                    TextField("personal", text: $namespace)
+                        .multilineTextAlignment(.trailing)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+                LabeledContent("Hub URL") {
+                    TextField("https://…", text: $hubURL)
+                        .multilineTextAlignment(.trailing)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                }
                 SecureField(telemetry.status.tokenConfigured ? "Token (configured)" : "Token", text: $token)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("Save") {

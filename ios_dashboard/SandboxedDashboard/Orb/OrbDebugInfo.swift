@@ -9,6 +9,7 @@ struct OrbDebugInfoView: View {
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var copied = false
     @State private var cleared = false
+    @State private var selectedError: OrbActivityDetailItem?
 
     static var version: String {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -93,20 +94,58 @@ struct OrbDebugInfoView: View {
                 .accessibilityIdentifier("debug.clear-caches")
             }
             Section {
-                if ring.entries.isEmpty {
+                let coalesced = OrbActivityCompaction.coalesceErrors(
+                    ring.entries.reversed().map { entry in
+                        OrbActivityCompaction.ErrorInput(
+                            category: entry.category.rawValue,
+                            summary: entry.status.map { "HTTP \($0)" } ?? entry.path,
+                            detail: "\(entry.path)\n\(entry.message)",
+                            at: entry.time.timeIntervalSince1970
+                        )
+                    }
+                )
+                if coalesced.isEmpty {
                     Text("No errors recorded since launch.").foregroundStyle(OrbStyle.textSecondary)
                 }
-                ForEach(ring.entries.reversed()) { entry in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text(entry.category.rawValue).font(.caption.weight(.semibold))
-                            if let status = entry.status { Text("HTTP \(status)").font(.caption.monospacedDigit()).foregroundStyle(OrbStyle.error) }
-                            Spacer()
-                            Text(entry.time, style: .time).font(.caption).foregroundStyle(OrbStyle.textMuted)
+                ForEach(coalesced) { item in
+                    let parts = item.detail.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+                    let pathLine = parts.first ?? ""
+                    let msgLine = parts.count > 1 ? parts[1] : ""
+                    Button {
+                        selectedError = OrbActivityDetailItem(
+                            title: "\(item.category) · \(item.summary)" + (item.count > 1 ? " (×\(item.count))" : ""),
+                            subtitle: Date(timeIntervalSince1970: item.at).formatted(date: .abbreviated, time: .standard),
+                            body: item.detail
+                        )
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(item.category).font(.caption.weight(.semibold))
+                                if item.summary.hasPrefix("HTTP ") {
+                                    Text(item.summary).font(.caption.monospacedDigit()).foregroundStyle(OrbStyle.error)
+                                }
+                                if item.count > 1 {
+                                    Text("×\(item.count)")
+                                        .font(.caption2.weight(.bold).monospacedDigit())
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(Color.white.opacity(0.10), in: Capsule())
+                                }
+                                Spacer()
+                                Text(Date(timeIntervalSince1970: item.at), style: .time)
+                                    .font(.caption)
+                                    .foregroundStyle(OrbStyle.textMuted)
+                            }
+                            if !pathLine.isEmpty {
+                                Text(pathLine).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
+                            }
+                            if !msgLine.isEmpty {
+                                Text(msgLine).font(.caption).foregroundStyle(OrbStyle.textSecondary).lineLimit(1)
+                            }
                         }
-                        Text(entry.path).font(.caption.monospaced()).lineLimit(2)
-                        Text(entry.message).font(.caption).foregroundStyle(OrbStyle.textSecondary).lineLimit(3)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 }
             } header: {
                 HStack {
@@ -118,6 +157,9 @@ struct OrbDebugInfoView: View {
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Debug info").navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $selectedError) { item in
+            OrbActivityDetailSheet(item: item)
+        }
         .task {
             _ = try? await OrbCore.shared.checkHealth()
             await OrbNotificationCenter.shared.refreshAuthorizationStatus()

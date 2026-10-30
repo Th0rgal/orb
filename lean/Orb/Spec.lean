@@ -3789,6 +3789,124 @@ theorem node_gc_emergency_evicts_hot_cache
     cases hun : decide (hot < r3) <;>
     (simp only [hr, hc1, hc2, hun, Bool.not_true, Bool.not_false, Bool.false_eq_true, Bool.and_false, ↓reduceIte]
      decide)
+-- ===========================================================================
+-- Wave 13: Multi-Provider Managed Compute Governance — Working-Owner Idle Reap,
+--          Minimum-Commitment (`deletable_at`) Deferral, Lineage Claims & Secret Confinement
+-- ===========================================================================
+
+structure VmClaimCheck where
+  isLive         : UInt8
+  sameTenant     : UInt8
+  ownerNone      : UInt8
+  ownerInLineage : UInt8
+  deriving Repr, DecidableEq
+
+def vmClaimMetaGate : MetaGateSpec VmClaimCheck
+    (fun c => (c.isLive == 1 && c.sameTenant == 1 && (c.ownerNone == 1 || c.ownerInLineage == 1)) = true) where
+  gate c := (vmClaimStep c.isLive c.sameTenant c.ownerNone c.ownerInLineage &&& 256) != 0
+  sound c h := by
+    unfold vmClaimStep at h
+    split at h <;> (simp_all; try contradiction)
+  complete c h := by
+    unfold vmClaimStep
+    simp [h]
+    decide
+  posWitness := ⟨1, 1, 0, 1⟩
+  negWitness := ⟨1, 0, 1, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 84 (`ScopedAuthority` — `orb_vm_claim_step`): Non-live machines (`isLive = 0`), cross-tenant
+    callers (`sameTenant = 0`), and unrelated missions (`ownerNone = 0 ∧ ownerInLineage = 0`) are strictly
+    rejected (`512`), while same-tenant unowned or lineage-owned live machines are admitted (`257`). -/
+theorem vm_claim_enforces_liveness_tenant_and_lineage
+    (live tenant ownNone inLin : UInt8) :
+    vmClaimStep 0 tenant ownNone inLin = 512 ∧
+    vmClaimStep live 0 ownNone inLin = 512 ∧
+    vmClaimStep live tenant 0 0 = 512 ∧
+    vmClaimStep 1 1 1 inLin = 257 ∧
+    vmClaimStep 1 1 ownNone 1 = 257 := by
+  unfold vmClaimStep
+  repeat (first | constructor | split | decide | simp_all)
+
+structure ComputeSecretCheck where
+  isCoreReservedComputeKey   : UInt8
+  callerOnManagedNode        : UInt8
+  isAllowlistedManagedSecret : UInt8
+  operatorBreakGlass         : UInt8
+  deriving Repr, DecidableEq
+
+def computeSecretMetaGate : MetaGateSpec ComputeSecretCheck
+    (fun s => (!(s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) &&
+               !(s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0)) = true) where
+  gate s :=
+    (computeSecretGate
+      s.isCoreReservedComputeKey s.callerOnManagedNode
+      s.isAllowlistedManagedSecret s.operatorBreakGlass &&& 256) != 0
+  sound s h := by
+    unfold computeSecretGate at h
+    cases hc : (s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) <;>
+      cases hm : (s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0) <;>
+      (simp_all; try contradiction)
+  complete s h := by
+    unfold computeSecretGate
+    cases hc : (s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) <;>
+      cases hm : (s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0) <;>
+      (simp_all; try decide)
+  posWitness := ⟨0, 1, 1, 0⟩
+  negWitness := ⟨1, 0, 1, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Corollary 85 (`ScopedAuthority` — `orb_compute_secret_gate`): Core-reserved cloud provider API keys
+    (`isCoreReservedComputeKey = 1`) without operator break-glass (`operatorBreakGlass = 0`) and non-allowlisted
+    secrets requested from untrusted managed nodes (`callerOnManagedNode = 1 ∧ isAllowlistedManagedSecret = 0`)
+    are unconditionally rejected (`512`). -/
+theorem compute_secret_gate_confines_provider_keys_and_managed_nodes
+    (reserved managed allowlisted breakGlass : UInt8) :
+    computeSecretGate 1 managed allowlisted 0 = 512 ∧
+    computeSecretGate reserved 1 0 breakGlass = 512 ∧
+    computeSecretGate 0 0 allowlisted breakGlass = 257 ∧
+    computeSecretGate 0 1 1 breakGlass = 257 := by
+  unfold computeSecretGate
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 86 (`ClockDiscipline` & `ConservedResource` — `orb_vm_lifecycle_step`):
+    1. A busy non-expired VM (`busy = 1, ttlExpired = 0`) or an unloaded/unknown owner (`ownerClass = 0, ttlExpired = 0`)
+       is always kept (`0`).
+    2. Whenever a minimum billing commitment is still active (`minDeletePending = 1`, e.g. Scaleway Apple Silicon
+       24-hour `deletable_at`), `destroy (259)` is never emitted (`(res &&& 0xFF) != 3`); expired TTLs defer into
+       `schedule | deferForMinLease` (`65537`).
+    3. An idle VM owned by a `Working` parent (`ownerClass = 1, workingIdleEnabled = 1`) schedules (`1`) before
+       idle expiry and destroys (`259`) once `graceOrIdleElapsed = 1` and `minDeletePending = 0`.
+    4. An idle VM owned by a `Waiting` mission (`ownerClass = 2, graceOrIdleElapsed = 1`) stops (`258`) on
+       free-stop providers (`supportsFreeStop = 1`) and destroys (`259`) on billing-while-stopped providers (`0`). -/
+theorem vm_lifecycle_protects_busy_reaps_working_idle_and_defers_min_lease
+    (own grace workEn freeStop minDel : UInt8) :
+    vmLifecycleStep own 1 0 grace workEn freeStop minDel = 0 ∧
+    vmLifecycleStep 0 0 0 grace workEn freeStop minDel = 0 ∧
+    vmLifecycleStep own 1 1 grace workEn freeStop 1 = 65537 ∧
+    vmLifecycleStep 1 0 0 0 1 freeStop minDel = 1 ∧
+    vmLifecycleStep 1 0 0 1 1 freeStop 0 = 259 ∧
+    vmLifecycleStep 2 0 0 1 workEn 1 minDel = 258 ∧
+    vmLifecycleStep 2 0 0 1 workEn 0 0 = 259 := by
+  unfold vmLifecycleStep
+  repeat (first | constructor | split | decide | simp_all)
+
+/-- Corollary 87 (`ProjectionStability` — `orb_machine_action_admitted`): A `stopped (6)` machine never meters
+    live cost (`bit 16 == 0`) or counts as live (`bit 0 == 0`), always sets `isStopped` (`bit 24 == 16777216`),
+    and enables `canResume` (`bit 25 == 33554432`) when idle and unmuted (`50331648`). -/
+theorem machine_action_stopped_retains_without_live_billing
+    (busy muted : UInt8) :
+    (machineActionAdmitted 6 busy muted &&& 1) = 0 ∧
+    (machineActionAdmitted 6 busy muted &&& 65536) = 0 ∧
+    (machineActionAdmitted 6 busy muted &&& 16777216) = 16777216 ∧
+    machineActionAdmitted 6 0 0 = 50331648 ∧
+    machineActionAdmitted 6 1 muted = 16777216 := by
+  unfold machineActionAdmitted
+  repeat (first | constructor | split | decide | simp_all)
+
+-- ===========================================================================
 -- Wave 12 (P4): Compositional State-Machine & Arena Patch ABI (`OrbMachine` / `OrbWire`)
 -- ===========================================================================
 
@@ -4622,121 +4740,6 @@ def transcriptFoldMetaStepSpec :
   }
   sameStep := ⟨rfl, rfl⟩
 
--- Wave 13: Multi-Provider Managed Compute Governance — Working-Owner Idle Reap,
---          Minimum-Commitment (`deletable_at`) Deferral, Lineage Claims & Secret Confinement
--- ===========================================================================
-
-structure VmClaimCheck where
-  isLive         : UInt8
-  sameTenant     : UInt8
-  ownerNone      : UInt8
-  ownerInLineage : UInt8
-  deriving Repr, DecidableEq
-
-def vmClaimMetaGate : MetaGateSpec VmClaimCheck
-    (fun c => (c.isLive == 1 && c.sameTenant == 1 && (c.ownerNone == 1 || c.ownerInLineage == 1)) = true) where
-  gate c := (vmClaimStep c.isLive c.sameTenant c.ownerNone c.ownerInLineage &&& 256) != 0
-  sound c h := by
-    unfold vmClaimStep at h
-    split at h <;> (simp_all; try contradiction)
-  complete c h := by
-    unfold vmClaimStep
-    simp [h]
-    decide
-  posWitness := ⟨1, 1, 0, 1⟩
-  negWitness := ⟨1, 0, 1, 1⟩
-  nonVacuous := rfl
-  tight      := rfl
-
-/-- Corollary 84 (`ScopedAuthority` — `orb_vm_claim_step`): Non-live machines (`isLive = 0`), cross-tenant
-    callers (`sameTenant = 0`), and unrelated missions (`ownerNone = 0 ∧ ownerInLineage = 0`) are strictly
-    rejected (`512`), while same-tenant unowned or lineage-owned live machines are admitted (`257`). -/
-theorem vm_claim_enforces_liveness_tenant_and_lineage
-    (live tenant ownNone inLin : UInt8) :
-    vmClaimStep 0 tenant ownNone inLin = 512 ∧
-    vmClaimStep live 0 ownNone inLin = 512 ∧
-    vmClaimStep live tenant 0 0 = 512 ∧
-    vmClaimStep 1 1 1 inLin = 257 ∧
-    vmClaimStep 1 1 ownNone 1 = 257 := by
-  unfold vmClaimStep
-  repeat (first | constructor | split | decide | simp_all)
-
-structure ComputeSecretCheck where
-  isCoreReservedComputeKey   : UInt8
-  callerOnManagedNode        : UInt8
-  isAllowlistedManagedSecret : UInt8
-  operatorBreakGlass         : UInt8
-  deriving Repr, DecidableEq
-
-def computeSecretMetaGate : MetaGateSpec ComputeSecretCheck
-    (fun s => (!(s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) &&
-               !(s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0)) = true) where
-  gate s :=
-    (computeSecretGate
-      s.isCoreReservedComputeKey s.callerOnManagedNode
-      s.isAllowlistedManagedSecret s.operatorBreakGlass &&& 256) != 0
-  sound s h := by
-    unfold computeSecretGate at h
-    cases hc : (s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) <;>
-      cases hm : (s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0) <;>
-      (simp_all; try contradiction)
-  complete s h := by
-    unfold computeSecretGate
-    cases hc : (s.isCoreReservedComputeKey == 1 && s.operatorBreakGlass == 0) <;>
-      cases hm : (s.callerOnManagedNode == 1 && s.isAllowlistedManagedSecret == 0) <;>
-      (simp_all; try decide)
-  posWitness := ⟨0, 1, 1, 0⟩
-  negWitness := ⟨1, 0, 1, 0⟩
-  nonVacuous := rfl
-  tight      := rfl
-
-/-- Corollary 85 (`ScopedAuthority` — `orb_compute_secret_gate`): Core-reserved cloud provider API keys
-    (`isCoreReservedComputeKey = 1`) without operator break-glass (`operatorBreakGlass = 0`) and non-allowlisted
-    secrets requested from untrusted managed nodes (`callerOnManagedNode = 1 ∧ isAllowlistedManagedSecret = 0`)
-    are unconditionally rejected (`512`). -/
-theorem compute_secret_gate_confines_provider_keys_and_managed_nodes
-    (reserved managed allowlisted breakGlass : UInt8) :
-    computeSecretGate 1 managed allowlisted 0 = 512 ∧
-    computeSecretGate reserved 1 0 breakGlass = 512 ∧
-    computeSecretGate 0 0 allowlisted breakGlass = 257 ∧
-    computeSecretGate 0 1 1 breakGlass = 257 := by
-  unfold computeSecretGate
-  repeat (first | constructor | split | decide | simp_all)
-
-/-- Corollary 86 (`ClockDiscipline` & `ConservedResource` — `orb_vm_lifecycle_step`):
-    1. A busy non-expired VM (`busy = 1, ttlExpired = 0`) or an unloaded/unknown owner (`ownerClass = 0, ttlExpired = 0`)
-       is always kept (`0`).
-    2. Whenever a minimum billing commitment is still active (`minDeletePending = 1`, e.g. Scaleway Apple Silicon
-       24-hour `deletable_at`), `destroy (259)` is never emitted (`(res &&& 0xFF) != 3`); expired TTLs defer into
-       `schedule | deferForMinLease` (`65537`).
-    3. An idle VM owned by a `Working` parent (`ownerClass = 1, workingIdleEnabled = 1`) schedules (`1`) before
-       idle expiry and destroys (`259`) once `graceOrIdleElapsed = 1` and `minDeletePending = 0`.
-    4. An idle VM owned by a `Waiting` mission (`ownerClass = 2, graceOrIdleElapsed = 1`) stops (`258`) on
-       free-stop providers (`supportsFreeStop = 1`) and destroys (`259`) on billing-while-stopped providers (`0`). -/
-theorem vm_lifecycle_protects_busy_reaps_working_idle_and_defers_min_lease
-    (own grace workEn freeStop minDel : UInt8) :
-    vmLifecycleStep own 1 0 grace workEn freeStop minDel = 0 ∧
-    vmLifecycleStep 0 0 0 grace workEn freeStop minDel = 0 ∧
-    vmLifecycleStep own 1 1 grace workEn freeStop 1 = 65537 ∧
-    vmLifecycleStep 1 0 0 0 1 freeStop minDel = 1 ∧
-    vmLifecycleStep 1 0 0 1 1 freeStop 0 = 259 ∧
-    vmLifecycleStep 2 0 0 1 workEn 1 minDel = 258 ∧
-    vmLifecycleStep 2 0 0 1 workEn 0 0 = 259 := by
-  unfold vmLifecycleStep
-  repeat (first | constructor | split | decide | simp_all)
-
-/-- Corollary 87 (`ProjectionStability` — `orb_machine_action_admitted`): A `stopped (6)` machine never meters
-    live cost (`bit 16 == 0`) or counts as live (`bit 0 == 0`), always sets `isStopped` (`bit 24 == 16777216`),
-    and enables `canResume` (`bit 25 == 33554432`) when idle and unmuted (`50331648`). -/
-theorem machine_action_stopped_retains_without_live_billing
-    (busy muted : UInt8) :
-    (machineActionAdmitted 6 busy muted &&& 1) = 0 ∧
-    (machineActionAdmitted 6 busy muted &&& 65536) = 0 ∧
-    (machineActionAdmitted 6 busy muted &&& 16777216) = 16777216 ∧
-    machineActionAdmitted 6 0 0 = 50331648 ∧
-    machineActionAdmitted 6 1 muted = 16777216 := by
-  unfold machineActionAdmitted
-  repeat (first | constructor | split | decide | simp_all)
 theorem applyTranscriptFoldEvent_replay_eq_live
     (s : TranscriptFoldState) (ev : TranscriptEventPayload) :
     applyTranscriptFoldEvent 1 s ev = applyTranscriptFoldEvent 0 s ev := rfl

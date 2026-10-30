@@ -51,6 +51,11 @@ pub fn protected_routes() -> Router<Arc<AppState>> {
             "/api/managed-machines/settings",
             get(get_settings).put(put_settings),
         )
+        .route("/api/managed-machines/providers", get(get_providers))
+        .route(
+            "/api/managed-machines/providers/:provider",
+            axum::routing::put(put_provider),
+        )
         .route("/api/managed-machines/snapshots", get(list_snapshots))
         .route(
             "/api/managed-machines/snapshots/:name",
@@ -227,6 +232,7 @@ async fn spawn_for(
         && req.reuse_idle == Some(true)
         && req.from_snapshot.is_none()
         && req.fork_of.is_none()
+        && m.is_provider_enabled(&target_provider)
     {
         if let (Some(parent), Ok((spec, _))) = (
             charged,
@@ -444,6 +450,27 @@ async fn get_settings() -> Response {
     match manager() {
         Ok(m) => Json(m.runtime_settings()).into_response(),
         Err(r) => r,
+    }
+}
+
+async fn get_providers() -> Response {
+    match manager() {
+        Ok(m) => Json(json!({ "providers": m.provider_catalog() })).into_response(),
+        Err(r) => r,
+    }
+}
+
+async fn put_provider(
+    Path(provider): Path<String>,
+    Json(patch): Json<crate::managed::ProviderUpdateRequest>,
+) -> Response {
+    let m = match manager() {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    match m.update_provider_config(&provider, patch) {
+        Ok(entry) => Json(entry).into_response(),
+        Err(e) => err(e),
     }
 }
 
