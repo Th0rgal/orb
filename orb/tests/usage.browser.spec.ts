@@ -30,7 +30,7 @@ test("Usage details (from Providers) shows router attribution over a selectable 
     } });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Providers", exact: true }).click();
+  await page.getByRole("button", { name: "Inference", exact: true }).click();
   await page.getByRole("button", { name: "Usage history", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Usage" })).toHaveAttribute("aria-selected", "true");
   await page.getByLabel("Group by").selectOption("model");

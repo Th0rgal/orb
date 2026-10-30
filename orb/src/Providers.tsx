@@ -6,7 +6,7 @@ import {CloudProviders} from './CloudProviders';
 import {ProviderUsageChip, ProviderUsageMeter} from './ProviderUsageMeter';
 import { Dynamic } from "solid-js/web";
 import { quotaStatus, usageChips, codingPlanWindows, kimiWindows, codexWindowLabel, effectiveProviderStatus, hasProviderUsageDetails, sharedAnthropicOrganizations, usageLimitStatus, usageWindows, verificationUrl } from "./providerUsage";
-import { PopupMenu } from "./Menu";
+import { Menu, MenuList, type MenuEntry } from "./Menu";
 import { ProviderLogo } from "./ProviderLogo";
 import { ErrorNotice } from "./ErrorNotice";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
@@ -165,14 +165,20 @@ export function Providers() {
       when={isConnected()}
       fallback={
         <div class="page">
-          <div class="page-head"><h2>Providers</h2></div>
-          <p class="s-lead">Providers are configured in Core — connect in Settings → Backend to see them.</p>
+          <div class="page-head"><h2>Inference</h2></div>
+          <p class="s-lead">Inference accounts and API keys are configured in Core — connect in Settings → Account to see them.</p>
         </div>
       }
     >
       <Show when={live()} fallback={<div class="page">
-        <div class="page-head"><h2>Providers</h2></div>
-        <Show when={loading()}><p class="s-lead shimmer" role="status">Loading providers…</p></Show>
+        <div class="page-head"><h2>Inference</h2></div>
+        <Show when={loading()}>
+          <div class="s-card p-skeleton-card" role="status" aria-label="Loading inference accounts">
+            <div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo" /><div class="p-sk-lines"><span class="sk-bar p-sk-title" /><span class="sk-bar p-sk-sub" /></div></div>
+            <div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo" /><div class="p-sk-lines"><span class="sk-bar p-sk-title" /><span class="sk-bar p-sk-sub" /></div></div>
+            <div class="s-row p-skeleton-row"><span class="sk-bar p-sk-logo" /><div class="p-sk-lines"><span class="sk-bar p-sk-title" /><span class="sk-bar p-sk-sub" /></div></div>
+          </div>
+        </Show>
         <Show when={loadError()}>{error => <ErrorNotice title="Could not load providers" error={error()}>
           <button class="s-btn" onClick={() => void reloadRemote()}>Try again</button>
         </ErrorNotice>}</Show>
@@ -205,10 +211,16 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   const [removing, setRemoving] = createSignal<AIProvider | null>(null);
   const [removeBusy, setRemoveBusy] = createSignal(false);
   const [removeError, setRemoveError] = createSignal<string | null>(null);
+  const [openIds, setOpenIds] = createSignal<Set<string>>(new Set());
+  const setRowOpen = (id: string, nextOpen: boolean) => setOpenIds(prev => {
+    const next = new Set(prev);
+    if (nextOpen) next.add(id); else next.delete(id);
+    return next;
+  });
   const remove = async () => {
     const account = removing(); if (!account || removeBusy()) return;
     setRemoveBusy(true);
-    try { await api(`/api/ai/providers/${encodeURIComponent(account.id)}`, {method: "DELETE"}); setRemoving(null); p.onRefresh(); }
+    try { await api(`/api/ai/providers/${encodeURIComponent(account.id)}`, {method: "DELETE"}); setRowOpen(account.id, false); setRemoving(null); p.onRefresh(); }
     catch (error) { setRemoveError(String(error)); }
     finally { setRemoveBusy(false); }
   };
@@ -299,12 +311,15 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   return (
     <div class="page">
       <div class="page-head">
-        <h2>Providers</h2>
+        <h2>Inference</h2>
+        <button class="s-btn quiet" onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "usage-settings" }))}>
+          <Ic.UsageIcon size={13} /> Usage history
+        </button>
         <button class="s-btn" disabled={p.loading} onClick={() => { void refreshUsage().catch(swallow("providers.usage")); p.onRefresh(); }}>
-          Refresh
+          <Ic.RefreshIcon size={13} /> Refresh
         </button>
       </div>
-      <p class="s-lead">Configured providers from the connected Core backend. <button class="link-btn" onClick={() => window.dispatchEvent(new CustomEvent("orb:open-page", { detail: "usage-settings" }))}>Usage history</button></p>
+      <p class="s-lead">Subscriptions, cloud connectors, and API keys on the connected Core backend.</p>
       <Show when={p.loadError}>{error => <ErrorNotice title="Could not refresh providers" error={error()}>
         <button class="s-btn" onClick={p.onRefresh}>Try again</button>
       </ErrorNotice>}</Show>
@@ -315,10 +330,10 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={oauth().length === 0}>
-            <div class="s-row"><div class="s-row-desc">No OAuth providers configured.</div></div>
+            <div class="s-row"><div class="s-row-desc">No subscription accounts connected.</div></div>
           </Show>
         </div>
       </section>
@@ -328,7 +343,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           <h3>Model connections</h3>
           <p class="s-row-desc p-section-description">Model access through connected credentials, separate from subscription accounts.</p>
           <div class="s-card">
-            <For each={modelConnections()}>{a => <LiveRow a={a} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}</For>
+            <For each={modelConnections()}>{a => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}</For>
           </div>
         </section>
       </Show>
@@ -339,10 +354,10 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
-            <div class="s-row"><div class="s-row-desc">No API key providers configured.</div></div>
+            <div class="s-row"><div class="s-row-desc">No API keys configured.</div></div>
           </Show>
         </div>
       </section>
@@ -953,10 +968,10 @@ function RankControls(p: { rank: AccountRank; name: string; title: string }) {
       <span class="p-rank-grip" draggable="true" title="Drag onto another account to change the order" aria-hidden="true"
         onDragStart={e => { e.dataTransfer?.setData(RANK_DRAG_TYPE, String(r().index)); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}>⠿</span>
       <button type="button" class="icon-btn" aria-label={`Try ${p.name} earlier`} disabled={r().index === 0} onClick={() => r().move(r().index - 1)}>
-        <Ic.ArrowUpIcon size={13} />
+        <Ic.FindPrevIcon size={13} />
       </button>
       <button type="button" class="icon-btn" aria-label={`Try ${p.name} later`} disabled={r().index === r().count - 1} onClick={() => r().move(r().index + 1)}>
-        <span class="routing-down"><Ic.ArrowUpIcon size={13} /></span>
+        <Ic.FindNextIcon size={13} />
       </button>
       </div>
     </div>
@@ -965,7 +980,7 @@ function RankControls(p: { rank: AccountRank; name: string; title: string }) {
 
 const RANK_DRAG_TYPE = "application/x-orb-account-rank";
 
-function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
+function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boolean) => void; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
   const quota = () => p.usage ? quotaStatus(usageWindows(p.usage)) : null;
@@ -979,9 +994,12 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
     : stLabel();
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
-  const expandable = () => !!p.rank || status() === "out_of_credit" || status() === "auth_failed" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
-  const [open, setOpen] = createSignal(a.provider_type === "antigravity");
-  const [menu, setMenu] = createSignal<{x:number;y:number} | null>(null);
+  const expandable = () => !!p.rank || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
+  const [localOpen, setLocalOpen] = createSignal(false);
+  const open = () => p.open ?? localOpen();
+  const setOpen = (nextOpen: boolean) => p.onOpenChange ? p.onOpenChange(nextOpen) : setLocalOpen(nextOpen);
+  const [menu, setMenu] = createSignal(false);
+  let menuBtn!: HTMLButtonElement;
   const [dropping, setDropping] = createSignal(false);
   const needsAuth = () => ["needs_reauth", "needs_auth"].includes(status());
   const [checking, setChecking] = createSignal(false);
@@ -999,8 +1017,29 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
     : p.usage?.codex_plan_type || p.usage?.xai_plan || p.usage?.kimi_plan || p.usage?.zai_plan ? `${p.usage!.codex_plan_type || p.usage!.xai_plan || p.usage!.kimi_plan || p.usage!.zai_plan}`
     : p.usage?.muse_plan || p.usage?.mistral_plan || undefined;
   const title = () => a.provider_type === "antigravity" ? "Google Antigravity" : a.provider_type === "google" ? (a.has_api_key && !a.has_oauth ? "Gemini API" : "Gemini model access") : email() ? a.name.replace(`(${email()})`, "").trim() : a.name;
+  const menuItems = (): MenuEntry[] => {
+    const authItems: MenuEntry[] = status() === "needs_verification"
+      ? [{ kind: "item", label: "Verify account", icon: Ic.ExternalIcon, onClick: verify }, { kind: "item", label: "Check again", icon: Ic.RefreshIcon, onClick: () => void checkAgain() }]
+      : p.onEditKey
+      ? [{ kind: "item", label: "Edit API key", icon: Ic.PencilIcon, onClick: p.onEditKey }]
+      : canReconnect()
+      ? [{ kind: "item", label: needsAuth() ? "Reconnect" : "Re-authenticate", icon: Ic.RefreshIcon, onClick: p.onReconnect }]
+      : [];
+    const rankItems: MenuEntry[] = [
+      ...(p.rank && p.rank.index > 0 ? [{ kind: "item" as const, label: "Try earlier", icon: Ic.FindPrevIcon, onClick: () => p.rank!.move(p.rank!.index - 1) }] : []),
+      ...(p.rank && p.rank.index < p.rank.count - 1 ? [{ kind: "item" as const, label: "Try later", icon: Ic.FindNextIcon, onClick: () => p.rank!.move(p.rank!.index + 1) }] : []),
+    ];
+    return [
+      ...authItems,
+      ...(authItems.length > 0 ? [{ kind: "sep" as const }] : []),
+      ...rankItems,
+      ...(rankItems.length > 0 ? [{ kind: "sep" as const }] : []),
+      { kind: "item", label: a.enabled === false ? "Enable" : "Disable", icon: a.enabled === false ? Ic.CheckIcon : Ic.BanIcon, onClick: () => p.onToggle(a.enabled === false) },
+      ...(p.onRemove ? [{ kind: "sep" as const }, { kind: "item" as const, label: "Remove provider…", icon: Ic.TrashIcon, danger: true, onClick: p.onRemove }] : []),
+    ];
+  };
   return (
-    <div class="p-acc-wrap" classList={{ "p-drop": dropping() }}
+    <div class="p-acc-wrap" classList={{ "p-drop": dropping(), "is-disabled": a.enabled === false }}
       onDragOver={e => { if (p.rank && e.dataTransfer?.types.includes(RANK_DRAG_TYPE)) { e.preventDefault(); setDropping(true); } }}
       onDragLeave={() => setDropping(false)}
       onDrop={e => { setDropping(false); const from = e.dataTransfer?.getData(RANK_DRAG_TYPE); if (p.rank && from) { e.preventDefault(); if (Number(from) !== p.rank.index) p.rank.move(p.rank.index); } }}>
@@ -1022,20 +1061,14 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
         <Show when={!open() && p.usage && !p.usage!.error}>
           <UsageSummary usage={p.usage!} />
         </Show>
-        <Show when={expandable()}><span class={`chev p-acc-chev ${open() ? "open" : ""}`}>›</span></Show>
+        <Show when={expandable()}><span class={`chev p-acc-chev ${open() ? "open" : ""}`} aria-hidden="true"><Ic.ChevronRight size={14} /></span></Show>
       </Dynamic>
       <Show when={mistralSubscription() && !open() && p.usage?.mistral_usage_session !== "connected"}>
         <button class="s-btn quiet" aria-label="View Mistral monthly usage" onClick={() => void openExternalUrl("https://admin.mistral.ai/subscription")}>Monthly usage ↗</button>
       </Show>
-      <Show when={true}><button class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={!!menu()} onClick={e => { const r=e.currentTarget.getBoundingClientRect(); setMenu({x:r.right-170,y:r.bottom+4}); }}><span aria-hidden="true">···</span></button></Show>
+      <button ref={el => { menuBtn = el; }} class="icon-btn p-account-menu" aria-label={`Actions for ${a.name}`} aria-haspopup="menu" aria-expanded={menu()} onClick={() => setMenu(m => !m)}><Ic.DotsIcon size={16} /></button>
       </div>
-      <Show when={menu()}>{position => <PopupMenu {...position()} onClose={()=>setMenu(null)} items={[
-        ...(status() === "needs_verification" ? [{kind:"item" as const,label:"Verify account",onClick:verify},{kind:"item" as const,label:"Check again",onClick:() => void checkAgain()}] : p.onEditKey ? [{kind:"item" as const,label:"Edit API key",icon:Ic.PencilIcon,onClick:p.onEditKey}] : canReconnect() ? [{kind:"item" as const,label:needsAuth()?"Reconnect":"Re-authenticate",onClick:p.onReconnect}] : []),
-        ...(p.rank && p.rank.index > 0 ? [{kind:"item" as const,label:"Try earlier",onClick:()=>p.rank!.move(p.rank!.index - 1)}] : []),
-        ...(p.rank && p.rank.index < p.rank.count - 1 ? [{kind:"item" as const,label:"Try later",onClick:()=>p.rank!.move(p.rank!.index + 1)}] : []),
-        {kind:"item" as const,label:a.enabled===false?"Enable":"Disable",onClick:()=>p.onToggle(a.enabled===false)},
-        ...(p.onRemove ? [{kind:"item" as const,label:"Remove provider…",onClick:p.onRemove}] : []),
-      ]} />}</Show>
+      <Show when={menu()}><Menu label="Actions" anchor={menuBtn} placement="bottom-end" width={196} class="popup-menu" onClose={() => setMenu(false)}><MenuList items={menuItems()} onPick={() => setMenu(false)} /></Menu></Show>
       <Show when={open() && expandable()}>
         <div class="p-acc-body">
           <Show when={p.rank}>{r => <RankControls rank={r()} name={email() ?? a.name} title={title()} />}</Show>

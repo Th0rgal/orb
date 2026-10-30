@@ -83,9 +83,9 @@ test("a saved old page id reopens in its new section", async ({ page }) => {
   await expect(page.getByRole("tab", { name: "Local agents" })).toHaveAttribute("aria-selected", "true");
 });
 
-test("Providers links to usage history, which opens the Models › Usage tab", async ({ page }) => {
+test("Inference links to usage history, which opens the Models › Usage tab", async ({ page }) => {
   await setup(page);
-  await page.getByRole("button", { name: "Providers", exact: true }).click();
+  await page.getByRole("button", { name: "Inference", exact: true }).click();
   await page.getByRole("button", { name: "Usage history", exact: true }).click();
   await expect(title(page)).toHaveText("Models");
   await expect(page.locator('[data-settings-section="models"]')).toHaveAttribute("aria-current", "page");

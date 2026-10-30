@@ -191,7 +191,8 @@ for (const theme of ["dark", "light"] as const) test.describe(theme, () => {
   test("Antigravity card covers managed machines with a toggle", async ({ page }) => {
     const api = await mock(page, { theme });
     await page.goto("/");
-    await page.getByRole("button", { name: "Providers", exact: true }).click();
+    await page.getByRole("button", { name: "Inference", exact: true }).click();
+    await page.getByRole("button", { name: /Google Antigravity/ }).click();
     const native = page.getByRole("region", { name: "Antigravity execution", exact: true });
     await expect(native.getByRole("status")).toHaveAttribute("title", new RegExp("^" + "Available on Core, spark + managed machines".replace(/[+]/g, "\\+") + "\\."));
     const toggle = native.getByRole("switch", { name: "Antigravity on managed machines" });
@@ -273,7 +274,8 @@ test("older backends: no names, no settings, no managed endpoint", async ({ page
   await openMachines(page);
   await expect(page.getByRole("button", { name: /spark online/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Managed (boat.dev)" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Providers", exact: true }).click();
+  await page.getByRole("button", { name: "Inference", exact: true }).click();
+  await page.getByRole("button", { name: /Google Antigravity/ }).click();
   const native = page.getByRole("region", { name: "Antigravity execution", exact: true });
   await expect(native.getByRole("status")).toHaveAttribute("title", new RegExp("^" + "Available on Core, spark".replace(/[+]/g, "\\+") + "\\."));
   await expect(native.getByRole("switch")).toHaveCount(0);

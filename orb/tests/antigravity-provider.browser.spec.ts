@@ -21,9 +21,11 @@ for (const theme of ['dark', 'light']) test(`provider accounts and machine detai
     return route.fulfill({ json: body });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Providers', exact: true }).click();
+  await page.getByRole('button', { name: 'Inference', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const native = page.getByRole('region', { name: 'Antigravity execution', exact: true });
+  await expect(native).toHaveCount(0);
+  await page.getByRole('button', { name: /Google Antigravity Subscription account/ }).click();
   await expect(native.getByRole('status')).toHaveText('Available on Core +1');
   await expect(native.getByRole('status')).toHaveAttribute('title', /Available on Core, old-agent/);
   await expect(native.getByLabel('Antigravity machine')).toHaveCount(0);
@@ -52,7 +54,7 @@ test('provider failures recover with the keyboard and keep the list on a failed 
     return route.fulfill({json:path === '/api/ai/providers' ? [{id:'mistral',name:'Mistral Vibe',provider_type:'mistral',enabled:true,uses_oauth:true,status:{type:'connected'}}] : []});
   });
   await page.goto('/');
-  await page.getByRole('button',{name:'Providers',exact:true}).click();
+  await page.getByRole('button',{name:'Inference',exact:true}).click();
   await expect(page.getByRole('alert')).toContainText('Could not load providers');
   await expect(page.getByText('Loading providers…')).toHaveCount(0);
   fail = false;
@@ -72,7 +74,7 @@ for (const theme of ['dark','light']) test(`Mistral monthly usage uses a clear c
   await page.addInitScript(theme => { localStorage.setItem('orb.apiUrl',location.origin); localStorage.setItem('orb.jwt','test'); localStorage.setItem('orb-theme',theme); },theme);
   await page.route('**/api/**',route => route.fulfill({json:new URL(route.request().url()).pathname==='/api/ai/providers'?[{id:'mistral',name:'Mistral Vibe',provider_type:'mistral',enabled:true,uses_oauth:true,status:{type:'connected'}}]:[]}));
   await page.goto('/');
-  await page.getByRole('button',{name:'Providers',exact:true}).click();
+  await page.getByRole('button',{name:'Inference',exact:true}).click();
   await expect(page.getByRole('button',{name:'View Mistral monthly usage'})).toBeVisible();
   await page.getByRole('button',{name:/Mistral Vibe Connected/}).click();
   await expect(page.getByText(/monthly Vibe allowance only in its console/)).toBeVisible();
@@ -101,7 +103,7 @@ test('Mistral monthly usage renders once the console session is connected', asyn
     return route.fulfill({json:[]});
   });
   await page.goto('/');
-  await page.getByRole('button',{name:'Providers',exact:true}).click();
+  await page.getByRole('button',{name:'Inference',exact:true}).click();
   await expect(page.getByText('Chat · Individual')).toBeVisible();
   await expect(page.locator('.p-acc .p-st')).toHaveCount(0);
   await expect(page.getByRole('button',{name:'View Mistral monthly usage'})).toHaveCount(0);
@@ -125,7 +127,8 @@ for (const theme of ['dark','light']) test(`Antigravity quota groups show shared
     return route.fulfill({json:[]});
   });
   await page.goto('/');
-  await page.getByRole('button',{name:'Providers',exact:true}).click();
+  await page.getByRole('button',{name:'Inference',exact:true}).click();
+  await page.getByRole('button',{name:/Google Antigravity Near limit/}).click();
   const groups = page.locator('.provider-usage-group');
   await expect(groups).toHaveCount(2);
   await expect(groups.locator('.provider-usage-group-title')).toHaveText(['Gemini','Claude & GPT']);

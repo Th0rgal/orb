@@ -33,15 +33,15 @@ async function open(page: Page, theme: string, width: number) {
     return route.fulfill({ json: body });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Providers', exact: true }).click();
+  await page.getByRole('button', { name: 'Inference', exact: true }).click();
   await page.setViewportSize({ width, height: 900 });
   const toggle = page.getByRole('button', { name: 'Toggle sidebar' });
   if (width < 700 && await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();
-  // Antigravity rows open expanded; collapse them to see the summary chips.
+  // Subscription rows open collapsed by default, showing compact summary chips.
   for (const email of ['thomas.her3sy@gmail.com', 'thomas.marchand.44@gmail.com']) {
     const row = page.locator('.p-acc-btn', { hasText: email });
     await expect(row).toBeVisible();
-    if (await row.getAttribute('aria-expanded') === 'true') await row.click();
+    await expect(row).toHaveAttribute('aria-expanded', 'false');
   }
 }
 

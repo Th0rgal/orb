@@ -2,7 +2,7 @@ import {For,Show,createSignal,createEffect,on,onCleanup,onMount} from 'solid-js'
 import {cloudAccounts,cloudAccountLabel,cloudNames,type CloudAccount,type CloudProvider} from './cloudAgentApi';
 import {api,connectionVersion,openExternalUrl} from './api';
 import {ProviderUsageMeter} from './ProviderUsageMeter';
-import {FlaskIcon} from './icons';
+import {ChevronRight,FlaskIcon} from './icons';
 import {ProviderLogo} from './ProviderLogo';
 import {mergeById,pollWhileVisible} from './poll';
 import './providerUsage.css';
@@ -44,7 +44,7 @@ function CloudProviderRow(p:{provider:CloudProvider;accounts:CloudAccount[];usag
  const label=()=>p.accounts.length>1?`${available()} of ${p.accounts.length} profiles available`:cloudAccountStatus(p.accounts[0]);
  const visit=async()=>{try{await openExternalUrl(dashboards[p.provider]!);setError('');}catch(e){setError(String(e));}};
  return <div class="p-acc-wrap"><button class="s-row p-acc p-acc-btn" aria-expanded={open()} onClick={()=>setOpen(!open())}>
-  <ProviderLogo type={p.provider}/><div class="s-row-text"><div class="s-row-title cloud-provider-title">{cloudNames[p.provider]}<Show when={p.accounts.some(a=>a.experimental)}><span class="cloud-experimental-icon" title="Experimental connector" aria-label="Experimental connector"><FlaskIcon size={14}/></span></Show></div><div class="s-row-desc"><span class={`p-st ${available()?'connected':'needs_reauth'}`}>{label()}</span></div></div><span class={`chev p-acc-chev ${open()?'open':''}`}>›</span>
+  <ProviderLogo type={p.provider}/><div class="s-row-text"><div class="s-row-title cloud-provider-title">{cloudNames[p.provider]}<Show when={p.accounts.some(a=>a.experimental)}><span class="cloud-experimental-icon" title="Experimental connector" aria-label="Experimental connector"><FlaskIcon size={14}/></span></Show></div><div class="s-row-desc"><span class={`p-st ${available()?'connected':'needs_reauth'}`}>{label()}</span></div></div><span class={`chev p-acc-chev ${open()?'open':''}`} aria-hidden="true"><ChevronRight size={14}/></span>
  </button><Show when={open()}><div class="p-acc-body">
   <Show when={p.accounts.length>1}><div class="cloud-provider-profiles"><For each={p.accounts}>{account=><div class="cloud-provider-profile"><span>{cloudAccountLabel(account)}<Show when={account.label.match(/[^\s·]+@[^\s·]+/)?.[0]}> · {account.label.match(/[^\s·]+@[^\s·]+/)?.[0]}</Show></span><span class={`p-st ${account.available?'connected':'needs_reauth'}`} title={account.reason}>{cloudAccountStatus(account)}</span></div>}</For></div></Show>
   <Show when={p.accounts.length===1&&!p.accounts[0].available}><p class="cloud-provider-note">{p.accounts[0].reason}</p></Show>

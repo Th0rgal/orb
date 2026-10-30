@@ -113,8 +113,10 @@ it("an account Google wants verified asks for verification, not re-authenticatio
     : url.endsWith("/providers/usage") ? { entries: { new: refused } } : {})));
   vi.stubGlobal("fetch", fetch);
   const ui = render(() => <Providers />);
-  await waitFor(() => expect(ui.container.textContent).toContain("Google requires you to verify this account."));
+  await waitFor(() => expect(ui.container.textContent).toContain("Verification required"));
   expect(ui.container.textContent).not.toContain("Auth failed");
+  (ui.container.querySelector(".p-acc-btn") as HTMLButtonElement).click();
+  await waitFor(() => expect(ui.container.textContent).toContain("Google requires you to verify this account."));
   expect(ui.getByRole("button", { name: "Verify account ↗" })).toBeTruthy();
   ui.getByRole("button", { name: "Check again" }).click();
   await waitFor(() => expect(ui.container.textContent).not.toContain("Google requires you to verify this account."));

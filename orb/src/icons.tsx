@@ -253,6 +253,16 @@ export const RunningDots = () => (
 export const PauseIcon = (p: P) => (
   <I {...p} sw={1.6}><path d="M5.5 4v8M10.5 4v8" /></I>
 );
+export const BanIcon = (p: P) => (
+  <I {...p}><circle cx="8" cy="8" r="5.5" /><path d="m4.1 4.1 7.8 7.8" /></I>
+);
+
+export const FindPrevIcon = (p: P) => (
+  <I {...p} sw={1.25}><path d="M8 12.6V3.4M4.4 7 8 3.4 11.6 7" /></I>
+);
+export const FindNextIcon = (p: P) => (
+  <I {...p} sw={1.25}><path d="M8 3.4v9.2M4.4 9 8 12.6 11.6 9" /></I>
+);
 
 /** Core: stacked server rack. Workers: a single compute unit. */
 export const CoreServerIcon = (p: P) => (

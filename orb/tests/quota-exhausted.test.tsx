@@ -39,8 +39,7 @@ it("shows a compact status with pool details and highlights only the spent chip"
   const { container } = render(() => <Providers />);
   await waitFor(() => expect(container.querySelector(".p-st")?.textContent).toBe("Limit reached"));
   expect(container.querySelector(".p-st")?.getAttribute("title")).toBe("Gemini quota exhausted");
-  // Collapse the row (Antigravity opens expanded) to see the summary chips.
-  (container.querySelector(".p-acc-btn") as HTMLButtonElement).click();
+  expect(container.querySelector(".p-acc-btn")?.getAttribute("aria-expanded")).toBe("false");
   await waitFor(() => expect(container.querySelectorAll(".p-usage.compact .p-usage-chip")).toHaveLength(2));
   const chips = [...container.querySelectorAll(".p-usage.compact .p-usage-chip")];
   expect(chips.map(c => c.classList.contains("exhausted"))).toEqual([true, false]);

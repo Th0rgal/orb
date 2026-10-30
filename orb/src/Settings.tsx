@@ -176,7 +176,7 @@ function BackendTab() {
         </Show>
         <Row
           title={isConnected() ? "Connected" : "Not connected"}
-          desc={isConnected() ? `Signed in to ${getApiUrl()}.` : "Connect to enable live Machines, Providers and missions."}
+          desc={isConnected() ? `Signed in to ${getApiUrl()}.` : "Connect to enable live Machines, Inference and missions."}
         >
           <Show
             when={isConnected()}

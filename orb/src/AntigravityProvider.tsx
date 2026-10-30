@@ -1,4 +1,5 @@
 import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, onMount } from "solid-js";
+import { ChevronRight } from "./icons";
 import { connectionVersion, getRemoteNodes, listNodeAntigravityModels } from "./api";
 import { isManagedNode } from "./machines/nodes";
 import { getManagedSettings, managedError, putManagedSettings } from "./managedMachineModel";
@@ -94,7 +95,7 @@ export function AntigravityProvider() {
         </Show>
         <Show when={models().length}>
           <button class="p-native-models-toggle" aria-expanded={showModels()} aria-controls={modelsId} onClick={() => setShowModels(!showModels())}>
-            {showModels() ? "Hide models" : `${models().length} ${models().length === 1 ? "model" : "models"} available`}<span class={`chev p-acc-chev ${showModels() ? "open" : ""}`}>›</span>
+            {showModels() ? "Hide models" : `${models().length} ${models().length === 1 ? "model" : "models"} available`}<span class={`chev p-acc-chev ${showModels() ? "open" : ""}`} aria-hidden="true"><ChevronRight size={13} /></span>
           </button>
         </Show>
       </div>

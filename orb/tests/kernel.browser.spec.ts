@@ -127,8 +127,8 @@ test("mounted application executes shared WASM projections across transcript, In
   await expect(page.locator(".st-text table tbody tr")).toHaveCount(2);
   await expect(page.locator(".st-text").getByText("orb_kernel.wasm", { exact: true })).toBeVisible();
 
-  // Providers exercises orb_usage_limit_status ("Approaching limit · weekly 91%").
-  await page.getByRole("button", { name: "Providers", exact: true }).click();
+  // Inference exercises orb_usage_limit_status ("Approaching limit · weekly 91%").
+  await page.getByRole("button", { name: "Inference", exact: true }).click();
   await page.getByRole("button", { name: /ops@example\.com/ }).first().click();
   await expect(page.getByTestId("usage-limit-status")).toHaveText("Approaching limit · weekly 91%");
   expect(pageErrors).toEqual([]);
