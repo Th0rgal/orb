@@ -17,7 +17,12 @@ async function setup(page:Page, opts:{failMove?:string; deleteRunning?:boolean; 
     if(req.method()==='POST' && path.endsWith('/project')) {
       writes.push(id); await gate;
       if(id===opts.failMove) return route.fulfill({status:409,body:'Mission is locked'});
-      const body=req.postDataJSON();missions=missions.map(m=>m.id===id?{...m,project:body.project,tags:body.tags}:m);
+      const body=req.postDataJSON();
+      missions=missions.map(m=>{
+        if(m.id===id) return {...m,project:body.project,tags:body.tags};
+        if(body.include_descendants && m.parent_mission_id===id) return {...m,project:body.project,tags:m.tags.filter((t:string)=>!t.startsWith('orb-folder:'))};
+        return m;
+      });
       return route.fulfill({json:{ok:true}});
     }
     if(req.method()==='POST' && path.endsWith('/cancel')) { cancels.push(id); missions=missions.map(m=>m.id===id?{...m,status:'interrupted'}:m); return route.fulfill({json:{ok:true}}); }
@@ -128,14 +133,166 @@ test('Cmd+X/Cmd+V moves the open mission once across projects despite stale deta
   await expect(tree.locator('.mission-cut')).toHaveCount(1);
   const destination=tree.getByRole('button',{name:'Other',exact:true});
   await destination.click();await destination.focus();await page.keyboard.press('Meta+v');
-  await expect.poll(()=>writes.length).toBe(2); // parent plus launched child
+  await expect.poll(()=>writes).toEqual([P]); // single atomic root subtree write (no standalone child write)
   await expect(row).toHaveCount(1);
   await expect(tree.locator('.row.project.contains-current')).toHaveAttribute('data-drop-project','other');
   release();
   await expect.poll(()=>missions().find(m=>m.id===P)?.project).toBe('other');
+  await expect.poll(()=>missions().find(m=>m.id===C)?.project).toBe('other');
   await expect(tree.locator('.mission-cut')).toHaveCount(0);
   await page.clock.fastForward(31_000);
   await expect(row).toHaveCount(1);
   await expect(tree.locator('.row.project.contains-current')).toHaveAttribute('data-drop-project','other');
   await expect(tree.getByRole('button',{name:'Show the 1 mission launched by Pareto'})).toHaveCount(1);
+});
+
+test('split cross-project subtree uses distinct placeholder keys and heals via macOS ClipboardEvent cut/paste onto a mission row', async ({page}) => {
+  const C2='00000000-0000-0000-0000-0000000000a4', OTHER_M='00000000-0000-0000-0000-0000000000a5';
+  await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+  let missions:M[]=[
+    {id:P,title:'evm.fast',status:'active',project:'assistant',tags:[],history:[],updated_at:'2026-10-20T07:00:00Z'},
+    {id:C,title:'Worker 1',status:'completed',project:'assistant',tags:[],history:[],updated_at:'2026-10-20T05:00:00Z',parent_mission_id:P},
+    {id:C2,title:'Worker 2',status:'completed',project:'ethereum',tags:[],history:[],updated_at:'2026-10-20T05:30:00Z',parent_mission_id:P},
+    {id:OTHER_M,title:'snark.fast',status:'completed',project:'ethereum',tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'},
+  ];
+  const bodies:Array<{id:string;body:Record<string,unknown>}>=[];
+  await page.route('**/api/**',async route=>{
+    const req=route.request(),url=new URL(req.url()),path=url.pathname,id=path.split('/')[4];
+    if(req.method()==='POST' && path.endsWith('/project')) {
+      const body=req.postDataJSON();
+      bodies.push({id,body});
+      missions=missions.map(m=>{
+        if(m.id===id) return {...m,project:body.project,tags:body.tags};
+        if(body.include_descendants && m.parent_mission_id===id) return {...m,project:body.project,tags:m.tags.filter(t=>!t.startsWith('orb-folder:'))};
+        return m;
+      });
+      return route.fulfill({json:{ok:true}});
+    }
+    const json=path==='/api/projects'?{projects:[{slug:'assistant',title:'Assistant'},{slug:'ethereum',title:'Ethereum'}]}
+      :path==='/api/control/missions'?missions.filter(m=>!url.searchParams.has('project')||m.project===url.searchParams.get('project'))
+      :path.startsWith('/api/control/missions/')?missions.find(m=>m.id===id)??{}
+      :path.endsWith('/files')?{entries:[]}:path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
+    await route.fulfill({json});
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:'Assistant',exact:true}).click();
+  await page.getByRole('button',{name:'Ethereum',exact:true}).click();
+  const tree=page.getByRole('tree',{name:'Projects',exact:true});
+  // Canonical row in Assistant and cross-project placeholder in Ethereum have distinct keys and do not double-highlight.
+  await expect(tree.locator(`[data-tree-id="m:${P}"]`)).toHaveCount(1);
+  await expect(tree.locator(`[data-tree-id="mp:ethereum:${P}"]`)).toHaveCount(1);
+  const canonicalBtn=tree.locator(`[data-tree-id="m:${P}"] button.row.agent`);
+  await canonicalBtn.click();
+  await expect(tree.locator('button.row.agent.active')).toHaveCount(1);
+
+  // Dispatch native macOS AppKit-style ClipboardEvent('cut') on canonical row, then ClipboardEvent('paste') on a mission row inside Ethereum.
+  const cutPayload=await canonicalBtn.evaluate(el=>{
+    const dt=new DataTransfer();
+    const ev=new ClipboardEvent('cut',{bubbles:true,cancelable:true,clipboardData:dt});
+    el.dispatchEvent(ev);
+    return dt.getData('text/plain');
+  });
+  expect(cutPayload).toContain('orb:cut-mission:');
+  await expect(tree.locator('.mission-cut')).toHaveCount(1);
+
+  const ethRow=tree.getByRole('button',{name:'snark.fast',exact:true});
+  await ethRow.evaluate((el,text)=>{
+    const dt=new DataTransfer();
+    dt.setData('text/plain',text);
+    const ev=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt});
+    el.dispatchEvent(ev);
+  },cutPayload);
+
+  await expect.poll(()=>bodies.some(b=>b.id===P && b.body.project==='ethereum' && b.body.include_descendants===true)).toBe(true);
+  await expect(tree.locator(`[data-tree-id="mp:ethereum:${P}"]`)).toHaveCount(0);
+  await expect(tree.locator(`[data-tree-id="m:${P}"]`)).toHaveCount(1);
+  await expect(tree.getByRole('button',{name:'Show the 2 missions launched by evm.fast'})).toBeVisible();
+});
+
+test('pointer drag-and-drop and right-click Move here on a destination mission row transfer across projects', async ({page}) => {
+  const {tree,release,missions}=await setup(page,{crossProject:true});
+  release();
+  await tree.getByRole('button',{name:'Other',exact:true}).click();
+  const fredrik=tree.getByRole('button',{name:'Fredrik',exact:true});
+  const otherHeader=tree.getByRole('button',{name:'Other',exact:true});
+  const srcBox=(await fredrik.boundingBox())!;
+  const dstBox=(await otherHeader.boundingBox())!;
+
+  await page.mouse.move(srcBox.x+20,srcBox.y+10);
+  await page.mouse.down();
+  await page.mouse.move(dstBox.x+20,dstBox.y+10,{steps:5});
+  await expect(tree.locator('.row.project[data-drop-project="other"]')).toHaveClass(/drop-active/);
+  await page.mouse.up();
+
+  await expect.poll(()=>missions().find(m=>m.id===F)?.project).toBe('other');
+  await expect(tree.locator('.row.project.drop-active')).toHaveCount(0);
+
+  // Move Fredrik back to Verity by right-clicking Pareto (a mission row inside Verity) and choosing "Move here".
+  await fredrik.click({button:'right'});
+  await page.getByRole('menuitem',{name:'Move',exact:true}).click();
+  await tree.getByRole('button',{name:'Pareto',exact:true}).click({button:'right'});
+  await page.getByRole('menuitem',{name:'Move here',exact:true}).click();
+  await expect.poll(()=>missions().find(m=>m.id===F)?.project).toBe('verity');
+});
+
+test('when system clipboard write is refused, paste prefers the active local cut over a stale system clipboard reference', async ({page}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('orb.apiUrl',location.origin);
+    localStorage.setItem('orb.jwt','test');
+    Object.defineProperty(navigator,'clipboard',{
+      configurable:true,
+      value:{writeText:async()=>{throw new DOMException('Refused','NotAllowedError');}},
+    });
+  });
+  let filesByProject:Record<string,string[]>={verity:['a.md','b.md'],other:[]};
+  const transfers:Array<{from:string;to:string;path:string;destination:string}>=[];
+  await page.route('**/api/**',async route=>{
+    const req=route.request(),url=new URL(req.url()),path=url.pathname;
+    if(req.method()==='POST' && path.includes('/file/transfer')) {
+      const parts=path.split('/'),from=parts[3],to=parts[6]??from,body=req.postDataJSON();
+      transfers.push({from,to,path:body.path,destination:body.destination});
+      filesByProject[from]=(filesByProject[from]??[]).filter(f=>f!==body.path);
+      filesByProject[to]=[...(filesByProject[to]??[]),body.destination];
+      return route.fulfill({json:{ok:true}});
+    }
+    const slug=path.split('/')[3];
+    const json=path==='/api/projects'?{projects:[{slug:'verity',title:'Verity'},{slug:'other',title:'Other'}]}
+      :path==='/api/control/missions'?[]
+      :path.endsWith('/files')?{entries:((url.searchParams.get('path')??'')===''?(filesByProject[slug]??[]).map(name=>({name,kind:'file'})):[])}
+      :path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
+    await route.fulfill({json});
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:'Verity',exact:true}).click();
+  await page.getByRole('button',{name:'Other',exact:true}).click();
+  const tree=page.getByRole('tree',{name:'Projects',exact:true});
+
+  // Cut a.md via native ClipboardEvent('cut') so the system clipboard receives a valid reference to a.md.
+  const fileABtn=tree.locator('[data-tree-id="pf:verity:a.md"] button.row');
+  const staleSystemPayload=await fileABtn.evaluate(el=>{
+    const dt=new DataTransfer();
+    el.dispatchEvent(new ClipboardEvent('cut',{bubbles:true,cancelable:true,clipboardData:dt}));
+    return dt.getData('text/plain');
+  });
+  expect(staleSystemPayload).toContain('orb:file:');
+
+  // Now cut b.md from the context menu; navigator.clipboard.writeText rejects, leaving staleSystemPayload in the OS clipboard.
+  await tree.locator('[data-tree-id="pf:verity:b.md"] button.row').click({button:'right'});
+  await page.getByRole('menuitem',{name:'Cut',exact:true}).click();
+
+  // Paste onto Other using a native ClipboardEvent carrying the stale a.md payload: b.md must move, not a.md.
+  const otherBtn=tree.getByRole('button',{name:'Other',exact:true});
+  const dispatchPaste=async()=>otherBtn.evaluate((el,text)=>{
+    const dt=new DataTransfer();
+    dt.setData('text/plain',text);
+    el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt}));
+  },staleSystemPayload);
+
+  await dispatchPaste();
+  await expect.poll(()=>transfers).toEqual([{from:'verity',to:'other',path:'b.md',destination:'b.md'}]);
+
+  // A second paste with the still-stale OS clipboard payload must not resurrect the superseded a.md cut.
+  await dispatchPaste();
+  await page.waitForTimeout(150);
+  expect(transfers).toEqual([{from:'verity',to:'other',path:'b.md',destination:'b.md'}]);
 });

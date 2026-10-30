@@ -32,9 +32,9 @@ the new values.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DEV_MODE` | `true` | Set to `false` in production to enforce authentication |
-| `DASHBOARD_PASSWORD` | `change-me` | Password for dashboard login |
-| `JWT_SECRET` | `change-me-to-a-long-random-string` | Secret used to sign JWT tokens |
+| `DEV_MODE` | `false` | Authentication is enforced by default. Local-only `DEV_MODE=true` is refused unless `HOST` is loopback |
+| `DASHBOARD_PASSWORD` | _(required)_ | Strong password for dashboard login (placeholder values are rejected) |
+| `JWT_SECRET` | _(required)_ | Long random secret used to sign JWT tokens (`openssl rand -hex 32`) |
 | `JWT_TTL_DAYS` | `30` | How long JWT tokens remain valid |
 | `SANDBOXED_SH_USERS` | _(unset)_ | Optional JSON array for multi-user auth (overrides `DASHBOARD_PASSWORD`) |
 
@@ -49,15 +49,15 @@ the new values.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HOST` | `0.0.0.0` | Bind address for the backend |
+| `HOST` | `127.0.0.1` | Bind address for the backend inside the container (Caddy proxies `:80` to `localhost:$PORT`) |
 | `PORT` | `3000` | Backend listen port inside the container; Caddy forwards API requests to this port |
 | `WORKING_DIR` | `/root` | Root directory for workspaces |
 | `MAX_ITERATIONS` | `50` | Max tool-call iterations per mission |
 | `MAX_PARALLEL_MISSIONS` | `1` | Number of missions that can run concurrently |
 
 `PORT` does not change the address you open in your browser: Compose publishes
-host port 3000 to Caddy's port 80. To use a different host port, edit the
-`ports` mapping in `docker-compose.yml` (for example, `"8080:80"`) and open
+host port 3000 (`127.0.0.1:3000:80`) to Caddy's port 80. To use a different host port, edit the
+`ports` mapping in `docker-compose.yml` (for example, `"127.0.0.1:8080:80"`) and open
 `http://localhost:8080`.
 
 ### Enabling container workspaces
@@ -125,7 +125,7 @@ The multi-stage build produces a single image with everything pre-installed:
 
 The Docker image serves HTTP on port 80. For production with TLS, use an external reverse proxy:
 
-1. **Bind to localhost only** — change the port mapping in `docker-compose.yml`:
+1. **Keep the port bound to localhost** — `docker-compose.yml` binds loopback by default:
    ```yaml
    ports:
      - "127.0.0.1:3000:80"
@@ -162,7 +162,7 @@ docker compose up -d
 |---|---|
 | Container workspaces not working | Uncomment `privileged: true` and `cgroup: host` in `docker-compose.yml` |
 | Permission denied on SSH keys | Ensure `~/.ssh` on the host is readable by your user |
-| Port conflict on 3000 | Change the port mapping (e.g. `"8080:80"`) in `docker-compose.yml` |
+| Port conflict on 3000 | Change the port mapping (e.g. `"127.0.0.1:8080:80"`) in `docker-compose.yml` |
 | Build takes too long | Rust compilation is the bottleneck (~5–10 min first time). Subsequent builds use Docker layer caching. |
 | Backend not starting | Check logs with `docker compose logs -f sandboxed-sh` |
 

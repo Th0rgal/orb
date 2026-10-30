@@ -292,7 +292,11 @@ export function MissionAutomationsDialog({
   const [intervalValue, setIntervalValue] = useState('5');
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>('minutes');
   const [startImmediately, setStartImmediately] = useState(true);
-  const [stopPolicyType, setStopPolicyType] = useState<'when_failing_consecutively' | 'never'>('when_failing_consecutively');
+  const [stopPolicyType, setStopPolicyType] = useState<'when_failing_consecutively' | 'never' | 'when_all_issues_closed_and_prs_merged'>('when_failing_consecutively');
+  const [stopRepository, setStopRepository] = useState('');
+  const repository = stopRepository.trim();
+  const isRepositoryValid = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\/[a-zA-Z0-9_.-]+$/.test(repository) &&
+    !['.', '..'].includes(repository.split('/')[1]);
   const [failureLimit, setFailureLimit] = useState('2');
   const failureCount = Number(failureLimit);
   // Core counts consecutive failures from the latest 20 executions.
@@ -702,6 +706,10 @@ export function MissionAutomationsDialog({
       toast.error('Enter a whole number from 1 to 20 for consecutive failures');
       return;
     }
+    if (stopPolicyType === 'when_all_issues_closed_and_prs_merged' && !isRepositoryValid) {
+      toast.error('Enter a GitHub repository as owner/repo');
+      return;
+    }
 
     // Build command source
     let command_source: CommandSource;
@@ -758,6 +766,8 @@ export function MissionAutomationsDialog({
       trigger,
       stop_policy: stopPolicyType === 'when_failing_consecutively'
         ? { type: 'when_failing_consecutively', count: failureCount }
+        : stopPolicyType === 'when_all_issues_closed_and_prs_merged'
+        ? { type: 'when_all_issues_closed_and_prs_merged', repo: repository }
         : { type: 'never' },
       fresh_session: freshSession,
       ...(Object.keys(vars).length > 0 ? { variables: vars } : {}),
@@ -780,6 +790,7 @@ export function MissionAutomationsDialog({
       setIntervalValue('5');
       setIntervalUnit('minutes');
       setStopPolicyType('when_failing_consecutively');
+      setStopRepository('');
       setFailureLimit('2');
       setFreshSession('keep');
       setNextSessionId('');
@@ -954,7 +965,8 @@ export function MissionAutomationsDialog({
     triggerKind === 'agent_finished' ||
     intervalSeconds > 0;
   const isStopPolicyValid = commandSourceType === 'native_loop' ||
-    stopPolicyType !== 'when_failing_consecutively' || isFailureLimitValid;
+    (stopPolicyType === 'when_failing_consecutively' ? isFailureLimitValid :
+      stopPolicyType === 'when_all_issues_closed_and_prs_merged' ? isRepositoryValid : true);
   const allowCreate = !!missionId && !creating && isCommandValid && isTriggerValid && isStopPolicyValid;
 
   const isMissionDataReady = !!missionId && loadedMissionId === missionId;
@@ -1265,6 +1277,8 @@ export function MissionAutomationsDialog({
                       setStopPolicyType(
                         e.target.value === 'when_failing_consecutively'
                           ? 'when_failing_consecutively'
+                          : e.target.value === 'when_all_issues_closed_and_prs_merged'
+                          ? 'when_all_issues_closed_and_prs_merged'
                           : 'never'
                       )
                     }
@@ -1277,7 +1291,30 @@ export function MissionAutomationsDialog({
                     <option value="never" className="bg-[#1a1a1a]">
                       Never
                     </option>
+                    <option value="when_all_issues_closed_and_prs_merged" className="bg-[#1a1a1a]">
+                      When no issues or PRs are open
+                    </option>
                   </select>
+                  {stopPolicyType === 'when_all_issues_closed_and_prs_merged' && (
+                    <div className="mt-2">
+                      <label htmlFor="automation-stop-repository" className="block text-xs text-white/50 mb-1.5">
+                        GitHub repository
+                      </label>
+                      <input
+                        id="automation-stop-repository"
+                        type="text"
+                        placeholder="owner/repo"
+                        value={stopRepository}
+                        onChange={(e) => setStopRepository(e.target.value)}
+                        aria-invalid={!isRepositoryValid}
+                        aria-describedby="automation-stop-repository-help"
+                        className={cn(selectClass, 'w-full')}
+                      />
+                      <p id="automation-stop-repository-help" className="mt-1 text-[11px] text-white/40">
+                        Enter a public GitHub repository as owner/repo. Stops when no issues or pull requests remain open, including PRs closed without merging.
+                      </p>
+                    </div>
+                  )}
                   {stopPolicyType === 'when_failing_consecutively' && (
                     <div className="mt-2">
                       <label htmlFor="automation-failure-limit" className="block text-xs text-white/50 mb-1.5">
@@ -1301,7 +1338,9 @@ export function MissionAutomationsDialog({
                     </div>
                   )}
                   <div className="mt-1 text-[11px] text-white/30">
-                    Auto-disables this automation after repeated failures. Use &quot;Never&quot; for automations that should keep running.
+                    {stopPolicyType === 'when_failing_consecutively'
+                      ? 'Auto-disables this automation after repeated failures.'
+                      : stopPolicyType === 'never' ? 'This automation keeps running until you disable it.' : null}
                   </div>
                 </div>
 

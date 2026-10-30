@@ -1812,59 +1812,66 @@ impl SqliteMissionStore {
             let before = params.before.unwrap_or(2).min(12);
             let after = params.after.unwrap_or(2).min(12);
 
-            // Cloud passage lookup
-            if params.locator.starts_with("cloud:") {
-                let raw_cloud: Option<String> = conn
-                    .query_row(
-                        "SELECT data FROM cloud_executions WHERE mission_id = ?1",
-                        params![&mid],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(|e| e.to_string())?;
-                if let Some(raw) = raw_cloud {
-                    if let Ok(exec) = serde_json::from_str::<CloudExecution>(&raw) {
-                        let mut cloud_msgs: Vec<DesiredDoc> = Vec::new();
-                        for turn in exec.turns {
-                            if !turn.prompt.trim().is_empty() {
-                                cloud_msgs.push(DesiredDoc {
-                                    doc_key: String::new(),
-                                    locator: format!("cloud:{}:prompt", turn.key),
-                                    role: "user".to_string(),
-                                    sequence: None,
-                                    event_id: Some(turn.key.clone()),
-                                    timestamp: updated_at.clone(),
-                                    title_text: String::new(),
-                                    body_text: turn.prompt.trim().to_string(),
-                                });
-                            }
-                            if let Some(ans) = turn
-                                .result
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                            {
-                                cloud_msgs.push(DesiredDoc {
-                                    doc_key: String::new(),
-                                    locator: format!("cloud:{}:answer", turn.key),
-                                    role: "assistant".to_string(),
-                                    sequence: None,
-                                    event_id: Some(turn.key),
-                                    timestamp: updated_at.clone(),
-                                    title_text: String::new(),
-                                    body_text: ans.to_string(),
-                                });
-                            }
+            let mut cloud_turn_keys = HashSet::new();
+            let mut cloud_msgs: Vec<DesiredDoc> = Vec::new();
+            if let Some(raw_cloud) = conn
+                .query_row(
+                    "SELECT data FROM cloud_executions WHERE mission_id = ?1",
+                    params![&mid],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+            {
+                if let Ok(exec) = serde_json::from_str::<CloudExecution>(&raw_cloud) {
+                    for turn in exec.turns {
+                        cloud_turn_keys.insert(turn.key.clone());
+                        if !turn.prompt.trim().is_empty() {
+                            cloud_msgs.push(DesiredDoc {
+                                doc_key: String::new(),
+                                locator: format!("cloud:{}:prompt", turn.key),
+                                role: "user".to_string(),
+                                sequence: None,
+                                event_id: Some(turn.key.clone()),
+                                timestamp: updated_at.clone(),
+                                title_text: String::new(),
+                                body_text: turn.prompt.trim().to_string(),
+                            });
                         }
-                        let target_pos =
-                            cloud_msgs.iter().position(|m| m.locator == params.locator);
-                        let (slice, target_found) = slice_context_docs(
+                        if let Some(ans) = turn
+                            .result
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            cloud_msgs.push(DesiredDoc {
+                                doc_key: String::new(),
+                                locator: format!("cloud:{}:answer", turn.key),
+                                role: "assistant".to_string(),
+                                sequence: None,
+                                event_id: Some(turn.key),
+                                timestamp: updated_at.clone(),
+                                title_text: String::new(),
+                                body_text: ans.to_string(),
+                            });
+                        }
+                    }
+                    if params.locator.starts_with("cloud:") || params.locator == "title" {
+                        let target_pos = if params.locator == "title" {
+                            cloud_msgs.len().checked_sub(1)
+                        } else {
+                            cloud_msgs.iter().position(|m| m.locator == params.locator)
+                        };
+                        let (slice, mut target_found) = slice_context_docs(
                             &cloud_msgs,
                             target_pos,
                             before,
                             after,
                             &highlight_terms,
                         );
+                        if params.locator == "title" {
+                            target_found = true;
+                        }
                         return Ok(Some(PassageContextResponse {
                             mission_id,
                             title,
@@ -1884,23 +1891,6 @@ impl SqliteMissionStore {
 
             // Resolve target sequence in `mission_events` without scanning the full table.
             let resolved_seq = resolve_locator_sequence(&conn, &mid, &params)?;
-
-            let mut cloud_turn_keys = HashSet::new();
-            if let Some(raw_cloud) = conn
-                .query_row(
-                    "SELECT data FROM cloud_executions WHERE mission_id = ?1",
-                    params![&mid],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(|e| e.to_string())?
-            {
-                if let Ok(exec) = serde_json::from_str::<CloudExecution>(&raw_cloud) {
-                    for t in exec.turns {
-                        cloud_turn_keys.insert(t.key);
-                    }
-                }
-            }
 
             let max_seq: i64 = conn
                 .query_row(

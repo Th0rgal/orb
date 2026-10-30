@@ -6047,7 +6047,7 @@ pub(crate) fn service_deploy_env(
         .unwrap_or_else(|| "/root".to_string());
     Ok(ServiceDeployEnv {
         working_dir: working_dir.into(),
-        host: get("HOST").unwrap_or_else(|| "0.0.0.0".to_string()),
+        host: get("HOST").unwrap_or_else(|| crate::config::DEFAULT_HOST.to_string()),
         port,
         repo_path_override: get("SANDBOXED_SH_REPO_PATH").or_else(|| get("SANDBOXED_REPO_PATH")),
     })

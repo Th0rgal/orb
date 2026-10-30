@@ -8,7 +8,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { assertFolderHasNoWork, moveFolderWork, copyFileReference, readFileReference, copyCronReference, readCronReference, copyItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -17,7 +17,7 @@ import { ProviderLogo } from "./ProviderLogo";
 import { ContextBadge } from "./ContextBadge";
 import { ContextHistory } from "./ContextHistory";
 import { readProjectFileVersion } from "./projectContext";
-import { moveMissions, planMissionMoves } from "./missionMove";
+import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "./missionMove";
 import { RunningWorkers, deleteDescendants, descendantsSentence, runningWorkerIds } from "./deleteRunning";
 import { ForkMission } from "./ForkMission";
 const MissionSettings = lazy(() => import("./MissionSettings").then(m => ({ default: m.MissionSettings })));
@@ -34,6 +34,7 @@ import { MdSource, MdView, mdSource, setMdSource } from "./Markdown";
 import { missionDestination } from "./missionLaunch";
 import {
   api,
+  getApiUrl,
   isConnected,
   ApiError,
   cancelMission,
@@ -69,7 +70,14 @@ import {
 import { CronGlyph, untilLabel } from "./Controller";
 import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
 import { PopupMenu, type MenuEntry } from "./Menu";
-import { copyText } from "./clipboard";
+import {
+  copyText,
+  isClipboardReferenceRetired,
+  isUnsyncedClipboard,
+  retireActiveClipboardReference,
+  retireClipboardReference,
+  writeClipboardReference,
+} from "./clipboard";
 import { CronForm } from "./ControllerSettings";
 import { getProjectCronFromJob } from "./cronSchema";
 import { loadTranscript, prefetchTranscript } from "./missionCache";
@@ -79,7 +87,7 @@ import { type TreeRow } from "./treeModel";
 import { deletingIds, setDeletingIds, createTreeSelection } from "./tree/selection";
 import { createArchivePager } from "./tree/archivePager";
 import { createMissionMoves } from "./tree/moves";
-import { createProjectTree, missionFolder, type Node, type RowData } from "./tree/TreeView";
+import { createProjectTree, missionFolder, missionIdFromTreeId, type Node, type RowData } from "./tree/TreeView";
 import { MachineBadge, missionMachine, missionCopyId, rowDetail, ROW_TIP_ID, launchedToggle as launchedToggleView, type RowTipContent } from "./tree/missionRow";
 import { FileSkeleton } from "./Skeleton";
 import { isPartialList, mergeMission, reconcileMissionList, type Misses, resolvedParents, withHierarchy } from "./missionHierarchy";
@@ -175,6 +183,7 @@ export function LiveProjectsSection(p: {
   const allKnownMissions = (): Mission[] => {
     const byId = new Map<string, Mission>();
     for (const m of archivedMissions()) byId.set(m.id, m);
+    for (const m of resolvedParents<Mission>()) byId.set(m.id, m);
     for (const m of Object.values(missions).flat()) byId.set(m.id, m);
     const current = currentMission();
     if (current && !byId.has(current.id)) byId.set(current.id, current);
@@ -210,7 +219,7 @@ export function LiveProjectsSection(p: {
   const [fileError, setFileError] = createSignal<string | null>(null);
   const [makingFile, setMakingFile] = createSignal(false);
   /** The context menu targets the selected group without opening its conversation. */
-  const [missionMenu, setMissionMenu] = createSignal<{ x: number; y: number; mission: Mission } | null>(null);
+  const [missionMenu, setMissionMenu] = createSignal<{ x: number; y: number; mission: Mission; slug: string; folder: string } | null>(null);
   const [settingsMission, setSettingsMission] = createSignal<Mission | null>(null);
   /** Title of any loaded mission (children and pool owners in Mission settings). */
   const loadedTitle = (id: string) => {
@@ -250,7 +259,7 @@ export function LiveProjectsSection(p: {
     createArchivePager({ revision: () => missionRevision, archiving, deleted: deletedInSession, currentConnection: version => currentConnection(version) });
   const { setSelectedTreeIds, setSelectedAgents, selectionActive, setSelectionActive, selectedTreeSet, selectedRowIds, selectionAnchor, setSelectionAnchor, clickSelectableRow, selectedFor, selectedTreeFor } =
     createTreeSelection({ visibleNodes: () => [...tree(), ...(archivesOpen() ? archiveNodes() : [])] });
-  const { cutId, setCutId, pendingMoves, setPendingMoves, beginMove, pasteMission, isMoving, hasCutClipboard } = createMissionMoves({
+  const { cutId, setCutId, pendingMoves, setPendingMoves, beginMove, moveDirect, pasteMission, isMoving, hasCutClipboard, hasUnsyncedCutClipboard } = createMissionMoves({
     allKnownMissions: () => allKnownMissions(),
     leaveProjects: (id, keep) => leaveProjects(id, keep),
     revealDestination: (slug, path) => { setExpanded(slug, true); if (path) setExpanded(`${slug}:${path}`, true); },
@@ -265,7 +274,7 @@ export function LiveProjectsSection(p: {
   onCleanup(() => {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined; }
   });
-  const clickAgent = (e: MouseEvent, id: string) => clickSelectableRow(e, `m:${id}`, () => p.open(`m:${id}`));
+  const clickAgent = (e: MouseEvent, id: string, treeId = `m:${id}`) => clickSelectableRow(e, treeId, () => p.open(`m:${id}`));
   const removeRows = (ids: readonly string[]) => {
     const removed = new Set(ids);
     if (!removed.size) return;
@@ -278,7 +287,7 @@ export function LiveProjectsSection(p: {
         }
       }
       removeArchived(removed);
-      setSelectedTreeIds(current => current.some(x => x.startsWith("m:") && removed.has(x.slice(2))) ? current.filter(x => !x.startsWith("m:") || !removed.has(x.slice(2))) : current);
+      setSelectedTreeIds(current => current.some(x => { const mid = missionIdFromTreeId(x); return !!mid && removed.has(mid); }) ? current.filter(x => { const mid = missionIdFromTreeId(x); return !mid || !removed.has(mid); }) : current);
     });
   };
   const removeRow = (id: string) => removeRows([id]);
@@ -294,7 +303,7 @@ export function LiveProjectsSection(p: {
     setDeleteTargets(current => current.some(id => removed.has(id)) ? current.filter(id => !removed.has(id)) : current);
     setPendingMoves(current => current.some(id => removed.has(id)) ? current.filter(id => !removed.has(id)) : current);
     if (cutId() && removed.has(cutId()!)) setCutId(null);
-    { const anchor = selectionAnchor(); if (anchor && anchor.startsWith("m:") && removed.has(anchor.slice(2))) setSelectionAnchor(null); }
+    { const anchor = selectionAnchor(), mid = anchor ? missionIdFromTreeId(anchor) : null; if (mid && removed.has(mid)) setSelectionAnchor(null); }
     if (p.onDeleted) p.onDeleted(ids);
     else if (ids.some(id => p.selected() === `m:${id}`)) p.open(null);
   };
@@ -489,7 +498,7 @@ export function LiveProjectsSection(p: {
         if (!next.length) setSelectionActive(false);
         return next;
       });
-      { const anchor = selectionAnchor(); if (anchor && anchor.startsWith("m:") && targetSet.has(anchor.slice(2))) setSelectionAnchor(null); }
+      { const anchor = selectionAnchor(), mid = anchor ? missionIdFromTreeId(anchor) : null; if (mid && targetSet.has(mid)) setSelectionAnchor(null); }
       setPendingMoves(current => current.some(id => targetSet.has(id)) ? current.filter(id => !targetSet.has(id)) : current);
       if (cutId() && targetSet.has(cutId()!)) setCutId(null);
       if (missionMenu() && targetSet.has(missionMenu()!.mission.id)) {
@@ -512,13 +521,17 @@ export function LiveProjectsSection(p: {
       void runDeleteWorker(version);
     }
   };
-  const startMoveSelection = (id: string) => {
+  const startMoveSelection = (id: string, clipboardData?: DataTransfer | null) => {
     setFileClipboard("");
     setCutCron(null);
     const ids = [...selectedFor(id)];
     if (!ids.length) return;
-    if (ids.length === 1) { setPendingMoves([]); beginMove(id); }
-    else { setPendingMoves(ids); setCutId(ids[0]); setActionError(null); }
+    if (ids.length === 1) { setPendingMoves([]); beginMove(id, clipboardData); }
+    else {
+      retireActiveClipboardReference();
+      if (clipboardData) clipboardData.setData("text/plain", makeCutMission(ids[0]));
+      setPendingMoves(ids); setCutId(ids[0]); setActionError(null);
+    }
   };
   const [forkTarget, setForkTarget] = createSignal<{ anchor?: HTMLButtonElement; mission: Mission } | null>(null);
   const [makingCron, setMakingCron] = createSignal(false);
@@ -539,7 +552,7 @@ export function LiveProjectsSection(p: {
     for (const item of cutItems()) {
       if (item.kind === "file" && `pf:${item.slug}:${item.path}` === treeId) return true;
       if (item.kind === "cron" && `pc:${item.slug}:${item.id}` === treeId) return true;
-      if (item.kind === "mission" && `m:${item.id}` === treeId) return true;
+      if (item.kind === "mission" && missionIdFromTreeId(treeId) === item.id) return true;
     }
     return false;
   };
@@ -599,17 +612,15 @@ export function LiveProjectsSection(p: {
     } catch (e) { if (version === connectionVersion()) { if (fileAction()) setFileActionError(String(e)); else setActionError(String(e)); } }
     finally { setFileBusy(false); }
   };
-  const copyFile = async (slug: string, path: string, copy: boolean, directory = false) => {
-    const version = connectionVersion(); setFileMenu(null); setActionMenu(null); setMultiSelectMenu(null);
-    try {
-      const text = await copyFileReference(slug, path, copy, directory);
-      if (version !== connectionVersion()) return;
-      setFileClipboard(text); setCutId(null); setPendingMoves([]); setCutCron(null); setActionError(null);
-    } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+  const copyFile = async (slug: string, path: string, copy: boolean, directory = false, clipboardData?: DataTransfer | null) => {
+    setFileMenu(null); setActionMenu(null); setMultiSelectMenu(null);
+    const text = makeFileReference(slug, path, copy, directory);
+    setCutId(null); setPendingMoves([]); setCutCron(null); setFileClipboard(text); setActionError(null);
+    await writeClipboardReference(text, clipboardData);
   };
   const pasteFile = async (slug: string, path: string, text: string) => {
     const item = readFileReference(text), version = connectionVersion();
-    if (!item || fileBusy() || text === consumedFileClipboard) return;
+    if (!item || fileBusy() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     try {
       const other = item.slug !== slug;
@@ -624,7 +635,7 @@ export function LiveProjectsSection(p: {
       if (item.copy) await transfer();
       else await moveOptimistically(moveKey, { kind: "file", fromProject: item.slug, toProject: slug, path: destination, fromPath: item.path, directory: item.directory }, transfer, fileBaseName(item.path));
       if (version !== connectionVersion()) return;
-      if (!item.copy) { consumedFileClipboard = text; setFileClipboard(""); }
+      if (!item.copy) { consumedFileClipboard = text; retireClipboardReference(text); setFileClipboard(""); }
       await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(slug, path, true)]);
       if (!item.copy) settleMove(moveKey);
       setExpanded(path ? `${slug}:${path}` : slug, true);
@@ -767,15 +778,16 @@ export function LiveProjectsSection(p: {
     };
     window.addEventListener("orb:project-created", onProjectCreated);
     const onMissionMoved = (event: Event) => {
-      const { id, project, tags } = (event as CustomEvent<{ id: string; project: string; tags: string[] }>).detail;
+      const { id, project, tags } = (event as CustomEvent<{ id: string; project: string; tags?: string[] }>).detail;
       const prior = allKnownMissions().find(m => m.id === id);
       if (!prior) return;
       // Commit the successful write before waiting for any project refresh.
       // Reads launched before this acknowledgement may still contain A.
+      const nextTags = tags ?? (prior.tags ?? []).filter(t => !t.startsWith("orb-folder:"));
       missionRevision++;
       batch(() => {
         leaveProjects(id, project);
-        const updated = mergeMission(prior, { id, project, tags }, "partial");
+        const updated = mergeMission(prior, { id, project, tags: nextTags }, "partial");
         setMissions(project, rows => [updated, ...(rows ?? []).filter(m => m.id !== id)]);
       });
     };
@@ -1120,26 +1132,28 @@ export function LiveProjectsSection(p: {
     window.dispatchEvent(new CustomEvent("orb:cron-changed", { detail: { slug: fromSlug, id, targetSlug: toSlug, folder: trimmedFolder } }));
     bumpProjects();
   };
-  const startCutCron = async (slug: string, id: string, name: string, folder = "") => {
-    const version = connectionVersion();
+  const startCutCron = async (slug: string, id: string, name: string, folder = "", clipboardData?: DataTransfer | null) => {
     setControllerMenu(null); setActionMenu(null); setMultiSelectMenu(null);
-    try {
-      const text = await copyCronReference(slug, id, name, folder);
-      if (version !== connectionVersion()) return;
-      setFileClipboard(text); setCutId(null); setPendingMoves([]); setCutCron({ slug, id, name }); setActionError(null);
-    } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+    const text = makeCronReference(slug, id, name, folder);
+    setCutId(null); setPendingMoves([]); setCutCron({ slug, id, name }); setFileClipboard(text); setActionError(null);
+    await writeClipboardReference(text, clipboardData);
   };
   const pasteCron = async (toSlug: string, folder: string, fromText?: string) => {
-    const ref = fromText ? readCronReference(fromText) : null;
+    const ref = fromText && !isClipboardReferenceRetired(fromText) ? readCronReference(fromText) : null;
     const item = ref ?? cutCron();
-    if (!item || movingCron() || (fromText && fromText === consumedFileClipboard)) return;
+    if (!item || movingCron() || (fromText && (fromText === consumedFileClipboard || isClipboardReferenceRetired(fromText)))) return;
     setActionMenu(null);
     setMovingCron(true);
     setActionError(null);
     try {
       await performMoveCron(item.slug, item.id, toSlug, folder);
-      if (fromText) consumedFileClipboard = fromText;
-      if (readCronReference(fileClipboard())?.id === item.id) setFileClipboard("");
+      if (fromText) { consumedFileClipboard = fromText; retireClipboardReference(fromText); }
+      const currentClip = fileClipboard();
+      if (readCronReference(currentClip)?.id === item.id) {
+        consumedFileClipboard = currentClip;
+        retireClipboardReference(currentClip);
+        setFileClipboard("");
+      }
       setCutCron(null);
     } catch (e) {
       setActionError(`Couldn’t move cron: ${e instanceof Error ? e.message : String(e)}`);
@@ -1154,6 +1168,25 @@ export function LiveProjectsSection(p: {
       if (child) return child;
     }
   };
+  /** Resolve any live project-tree row to its enclosing `(project, folder)` destination. */
+  const resolveTreeDestination = (treeId: string, nodes: Node[] = tree(), enclosingFolder = ""): { slug: string; path: string } | null => {
+    for (const node of nodes) {
+      const d = node.data;
+      if (node.id === treeId) {
+        if (d.kind === "project") return { slug: d.slug, path: "" };
+        if (d.kind === "folder") return { slug: d.slug, path: d.path ?? "" };
+        if (d.kind === "note") return { slug: d.slug, path: d.path ?? enclosingFolder };
+        if (d.kind === "file") return { slug: d.slug, path: fileParent(d.path ?? "") };
+        if (d.kind === "cron" || d.kind === "mission") return { slug: d.slug, path: enclosingFolder };
+        return null;
+      }
+      if (node.children?.length) {
+        const found = resolveTreeDestination(treeId, node.children, d.kind === "folder" ? (d.path ?? "") : enclosingFolder);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
   const treeIdToClipboardItem = (treeId: string): ClipboardItem | null => {
     const row = findNodeById(treeId);
     if (row) {
@@ -1161,7 +1194,8 @@ export function LiveProjectsSection(p: {
       if (row.kind === "cron" && !row.controller && row.job?.id) return { kind: "cron", slug: row.slug, id: row.job.id, name: row.label, ...(row.job.folder ? { folder: row.job.folder } : {}) };
       if (row.kind === "mission" && row.mission) return { kind: "mission", id: row.mission.id };
     }
-    if (treeId.startsWith("m:")) return { kind: "mission", id: treeId.slice(2) };
+    const mid = missionIdFromTreeId(treeId);
+    if (mid) return { kind: "mission", id: mid };
     if (treeId.startsWith("pc:")) {
       const rest = treeId.slice(3), sep = rest.indexOf(":");
       if (sep > 0) {
@@ -1181,35 +1215,36 @@ export function LiveProjectsSection(p: {
     }
     return null;
   };
-  const copySelectedItems = async (treeIds: string[], copy: boolean) => {
+  const copySelectedItems = async (treeIds: string[], copy: boolean, clipboardData?: DataTransfer | null) => {
     const items = treeIds.map(treeIdToClipboardItem).filter((x): x is ClipboardItem => !!x);
     if (!items.length) return;
     if (copy && items.some(i => i.kind !== "file")) return;
     // If all items are missions and !copy, preserve the existing pendingMoves path so Move N agents works identically.
     if (!copy && items.every(i => i.kind === "mission")) {
-      const ids = items.map(i => (i as { kind: "mission"; id: string }).id);
+      const ids = [...new Set(items.map(i => (i as { kind: "mission"; id: string }).id))];
       setMultiSelectMenu(null); setActionMenu(null); setFileMenu(null); setControllerMenu(null);
       setFileClipboard(""); setCutCron(null);
-      if (ids.length === 1) { setPendingMoves([]); beginMove(ids[0]); }
-      else { setPendingMoves(ids); setCutId(ids[0]); setActionError(null); }
+      if (ids.length === 1) { setPendingMoves([]); beginMove(ids[0], clipboardData); }
+      else {
+        retireActiveClipboardReference();
+        if (clipboardData) clipboardData.setData("text/plain", makeCutMission(ids[0]));
+        setPendingMoves(ids); setCutId(ids[0]); setActionError(null);
+      }
       return;
     }
     if (items.length === 1) {
       const single = items[0];
-      if (single.kind === "file") { await copyFile(single.slug, single.path, copy, !!single.directory); return; }
-      if (single.kind === "cron" && !copy) { await startCutCron(single.slug, single.id, single.name, single.folder); return; }
+      if (single.kind === "file") { await copyFile(single.slug, single.path, copy, !!single.directory, clipboardData); return; }
+      if (single.kind === "cron" && !copy) { await startCutCron(single.slug, single.id, single.name, single.folder, clipboardData); return; }
     }
-    const version = connectionVersion();
     setMultiSelectMenu(null); setActionMenu(null); setFileMenu(null); setControllerMenu(null); setMissionMenu(null);
-    try {
-      const text = await copyItemsReference(items, copy);
-      if (version !== connectionVersion()) return;
-      setFileClipboard(text); setCutId(null); setPendingMoves([]); setCutCron(null); setActionError(null);
-    } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+    const text = makeItemsReference(items, copy);
+    setCutId(null); setPendingMoves([]); setCutCron(null); setFileClipboard(text); setActionError(null);
+    await writeClipboardReference(text, clipboardData);
   };
   const pasteItems = async (targetSlug: string, targetPath: string, text: string) => {
     const bundle = readItemsReference(text), version = connectionVersion();
-    if (!bundle || fileBusy() || movingCron() || isMoving() || text === consumedFileClipboard) return;
+    if (!bundle || fileBusy() || movingCron() || isMoving() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     // Show every moved item at its destination at once; each is settled or
     // reverted as its own request finishes (see moves.ts).
@@ -1297,14 +1332,16 @@ export function LiveProjectsSection(p: {
         const plans = [...byFolder].map(([dest, ids]) => planMissionMoves(ids, targetSlug, dest, allKnownMissions()));
         const missionFailures = (await Promise.all(plans.map(plan => moveMissions(plan, targetSlug)))).flat();
         for (const f of missionFailures) failures.push(`${f.id.slice(0, 8)}: ${f.error instanceof Error ? f.error.message : String(f.error)}`);
-        await loadMissions(targetSlug);
         const failedIds = new Set(missionFailures.map(f => f.id));
         for (const step of plans.flat()) if (!failedIds.has(step.id)) leaveProjects(step.id, targetSlug);
+        const fromSlugs = new Set(plans.flat().filter(s => !failedIds.has(s.id) && s.from && s.from !== targetSlug).map(s => s.from!));
+        await Promise.all([loadMissions(targetSlug), ...[...fromSlugs].map(s => loadMissions(s))]);
       }
       if (version !== connectionVersion()) return;
       setExpanded(targetPath ? `${targetSlug}:${targetPath}` : targetSlug, true);
       if (!bundle.copy && !failures.length) {
         consumedFileClipboard = text;
+        retireClipboardReference(text);
         setFileClipboard("");
       }
       if (failures.length) setActionError(failures.join("; "));
@@ -1366,6 +1403,19 @@ export function LiveProjectsSection(p: {
     }
     return entries;
   };
+  const pasteMenuEntries = (slug: string, path: string): MenuEntry[] => {
+    if (!slug) return [];
+    const closeMenus = () => { setActionMenu(null); setMissionMenu(null); setControllerMenu(null); setFileMenu(null); setMultiSelectMenu(null); };
+    const singleFileClip = readFileReference(fileClipboard());
+    const singleCronClip = readCronReference(fileClipboard());
+    const multiClip = readItemsReference(fileClipboard());
+    const out: MenuEntry[] = [];
+    if (singleFileClip) out.push({ kind: "item", label: singleFileClip.directory ? "Paste folder" : "Paste file", icon: Ic.PasteIcon, onClick: () => { closeMenus(); void pasteFile(slug, path, fileClipboard()); } });
+    else if (multiClip && multiClip.items.length) out.push({ kind: "item", label: "Paste", icon: Ic.PasteIcon, onClick: () => { closeMenus(); void pasteItems(slug, path, fileClipboard()); } });
+    else if (singleCronClip || cutCron()) out.push({ kind: "item", label: "Paste", icon: Ic.PasteIcon, onClick: () => { closeMenus(); void pasteCron(slug, path, singleCronClip ? fileClipboard() : undefined); } });
+    if (cutId()) out.push({ kind: "item", label: pendingMoves().length > 1 ? `Move ${pendingMoves().length} agents here` : "Move here", icon: Ic.PasteIcon, onClick: () => { closeMenus(); pasteMission(slug, path); } });
+    return out;
+  };
   /** Folders organize both reference files and executable work. */
   const menuItems = (slug: string, path: string): MenuEntry[] => {
     const items: MenuEntry[] = [
@@ -1376,25 +1426,7 @@ export function LiveProjectsSection(p: {
       ...(path ? [{ kind: "item" as const, label: "New file", icon: Ic.FileIcon, onClick: () => beginFile(slug, path) }] : []),
       { kind: "item", label: "New folder", icon: Ic.FolderIcon, onClick: () => beginFolder(slug, path) },
     ];
-    const singleFileClip = readFileReference(fileClipboard());
-    const singleCronClip = readCronReference(fileClipboard());
-    const multiClip = readItemsReference(fileClipboard());
-    if (singleFileClip) items.push(
-      { kind: "sep" },
-      { kind: "item", label: singleFileClip.directory ? "Paste folder" : "Paste file", icon: Ic.PasteIcon, onClick: () => void pasteFile(slug, path, fileClipboard()) },
-    );
-    else if (multiClip && multiClip.items.length) items.push(
-      { kind: "sep" },
-      { kind: "item", label: "Paste", icon: Ic.PasteIcon, onClick: () => void pasteItems(slug, path, fileClipboard()) },
-    );
-    else if (singleCronClip || cutCron()) items.push(
-      { kind: "sep" },
-      { kind: "item", label: "Paste", icon: Ic.PasteIcon, onClick: () => void pasteCron(slug, path, singleCronClip ? fileClipboard() : undefined) },
-    );
-    if (cutId()) items.push(
-      { kind: "sep" },
-      { kind: "item", label: pendingMoves().length > 1 ? `Move ${pendingMoves().length} agents here` : "Move here", icon: Ic.PasteIcon, onClick: () => pasteMission(slug, path) },
-    );
+    for (const entry of pasteMenuEntries(slug, path)) items.push({ kind: "sep" }, entry);
     if (path) items.push(
       { kind: "sep" },
       { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(slug, path, "rename", true) },
@@ -1552,9 +1584,9 @@ export function LiveProjectsSection(p: {
     if (!restore) batch(() => {
       const sel = p.selected();
       if (sel?.startsWith("m:") && targetIds.has(sel.slice(2))) p.open(null);
-      setSelectedTreeIds(current => current.some(x => x.startsWith("m:") && targetIds.has(x.slice(2))) ? current.filter(x => !x.startsWith("m:") || !targetIds.has(x.slice(2))) : current);
-      const anchor = selectionAnchor();
-      if (anchor?.startsWith("m:") && targetIds.has(anchor.slice(2))) setSelectionAnchor(null);
+      setSelectedTreeIds(current => current.some(x => { const mid = missionIdFromTreeId(x); return !!mid && targetIds.has(mid); }) ? current.filter(x => { const mid = missionIdFromTreeId(x); return !mid || !targetIds.has(mid); }) : current);
+      const anchor = selectionAnchor(), mid = anchor ? missionIdFromTreeId(anchor) : null;
+      if (mid && targetIds.has(mid)) setSelectionAnchor(null);
     });
     updateStatus(() => status);
     try {
@@ -1668,27 +1700,35 @@ export function LiveProjectsSection(p: {
     setArchiveMenu({ x: e.clientX, y: e.clientY, slug });
   };
   /** Fork the clicked mission without changing the currently open conversation. */
-  const missionMenuItems = (mission: Mission, x: number, y: number): MenuEntry[] => selectedFor(mission.id).length > 1 ? [
-    {kind: "item", label: `Move ${selectedFor(mission.id).length} agents`, icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id)},
-    {kind: "item", label: `Archive ${selectedFor(mission.id).length} conversations`, icon: Ic.ArchiveIcon, onClick: () => void archiveSelection(mission.id)},
-    {kind: "item", label: `Delete ${selectedFor(mission.id).length} agents…`, icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([...selectedFor(mission.id)])},
-    ...(isArchived(mission) ? [{ kind: "sep" as const }, ...archiveDeleteMenuItems()] : []),
-  ] : [
-    {kind: "item", label: "Delete agent…", icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([mission.id])},
-    ...(!mission.backend?.startsWith("cloud_") ? [{ kind: "item" as const, label: "Transfer to another agent", icon: Ic.BranchIcon, openOnHover: true, onClick: (anchor?: HTMLButtonElement) => { setForkTarget({ mission, anchor }); } }] : []),
-    ...(isReopenable(mission.status)
-      ? [{ kind: "item" as const, label: isArchived(mission) ? "Restore" : "Reopen", icon: Ic.ReopenIcon, onClick: () => void reopenConversation(mission) }] : []),
-    { kind: "item", label: "Move", icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id) },
-    { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginMissionRename(mission) },
-    { kind: "item", label: "Copy mission ID", icon: Ic.CopyIcon, onClick: () => void copyMissionId(mission) },
-    { kind: "item", label: "Mission settings…", icon: Ic.SlidersIcon, onClick: () => { setMissionMenu(null); setSettingsMission(mission); } },
-    ...(isArchivable(mission.status)
-      ? [{ kind: "item" as const, label: "Archive", icon: Ic.ArchiveIcon, onClick: () => void archiveConversation(mission) }]
-      : []),
-  ];
+  const missionMenuItems = (mission: Mission, slug: string, folder: string): MenuEntry[] => {
+    const pasteEntries = !isArchived(mission) && !(cutId() === mission.id && pendingMoves().length <= 1 && !fileClipboard() && !cutCron() && (mission.project ?? "") === slug && missionFolder(mission) === folder)
+      ? pasteMenuEntries(slug, folder)
+      : [];
+    const pasteSection: MenuEntry[] = pasteEntries.length ? [...pasteEntries, { kind: "sep" }] : [];
+    return selectedFor(mission.id).length > 1 ? [
+      ...pasteSection,
+      {kind: "item", label: `Move ${selectedFor(mission.id).length} agents`, icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id)},
+      {kind: "item", label: `Archive ${selectedFor(mission.id).length} conversations`, icon: Ic.ArchiveIcon, onClick: () => void archiveSelection(mission.id)},
+      {kind: "item", label: `Delete ${selectedFor(mission.id).length} agents…`, icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([...selectedFor(mission.id)])},
+      ...(isArchived(mission) ? [{ kind: "sep" as const }, ...archiveDeleteMenuItems()] : []),
+    ] : [
+      ...pasteSection,
+      {kind: "item", label: "Delete agent…", icon: Ic.TrashIcon, danger: true, onClick: () => setDeleteTargets([mission.id])},
+      ...(!mission.backend?.startsWith("cloud_") ? [{ kind: "item" as const, label: "Transfer to another agent", icon: Ic.BranchIcon, openOnHover: true, onClick: (anchor?: HTMLButtonElement) => { setForkTarget({ mission, anchor }); } }] : []),
+      ...(isReopenable(mission.status)
+        ? [{ kind: "item" as const, label: isArchived(mission) ? "Restore" : "Reopen", icon: Ic.ReopenIcon, onClick: () => void reopenConversation(mission) }] : []),
+      { kind: "item", label: "Move", icon: Ic.CutIcon, onClick: () => startMoveSelection(mission.id) },
+      { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginMissionRename(mission) },
+      { kind: "item", label: "Copy mission ID", icon: Ic.CopyIcon, onClick: () => void copyMissionId(mission) },
+      { kind: "item", label: "Mission settings…", icon: Ic.SlidersIcon, onClick: () => { setMissionMenu(null); setSettingsMission(mission); } },
+      ...(isArchivable(mission.status)
+        ? [{ kind: "item" as const, label: "Archive", icon: Ic.ArchiveIcon, onClick: () => void archiveConversation(mission) }]
+        : []),
+    ];
+  };
   /** Right-click handler shared by every agent row. Suppresses the native menu
    * and the sidebar-wide one without opening a different conversation. */
-  const onMissionContext = (e: MouseEvent, mission: Mission) => {
+  const onMissionContext = (e: MouseEvent, mission: Mission, treeId = `m:${mission.id}`, slug = mission.project ?? "", folder = missionFolder(mission)) => {
     e.preventDefault();
     e.stopPropagation();
     if (deletingIds().has(mission.id)) return;
@@ -1699,14 +1739,13 @@ export function LiveProjectsSection(p: {
     setMultiSelectMenu(null);
     setForkTarget(null);
     setSelectionActive(true);
-    const treeId = `m:${mission.id}`;
     if (!selectedTreeSet().has(treeId)) { setSelectedTreeIds([treeId]); setSelectionAnchor(treeId); }
     const group = selectedTreeFor(treeId);
-    if (group.length > 1 && group.some(id => !id.startsWith("m:"))) {
+    if (group.length > 1 && group.some(id => !missionIdFromTreeId(id))) {
       setMultiSelectMenu({ x: e.clientX, y: e.clientY, treeIds: group });
       return;
     }
-    setMissionMenu({ x: e.clientX, y: e.clientY, mission });
+    setMissionMenu({ x: e.clientX, y: e.clientY, mission, slug, folder });
   };
   let intentTimer: ReturnType<typeof setTimeout> | undefined;
   const cancelIntent = () => clearTimeout(intentTimer);
@@ -1737,55 +1776,104 @@ export function LiveProjectsSection(p: {
     if (next) loadDir(slug, path);
   };
 
+  const performCutOrCopy = (treeId: string, copy: boolean, clipboardData?: DataTransfer | null): boolean => {
+    const row = findNodeById(treeId);
+    if (!row) return false;
+    const group = selectionActive() && selectedTreeSet().has(treeId) ? selectedTreeFor(treeId) : [treeId];
+    if (group.length > 1) {
+      if (copy && group.some(tid => !tid.startsWith("pf:"))) return false;
+      void copySelectedItems(group, copy, clipboardData);
+      return true;
+    }
+    if (row.kind === "file" || row.kind === "folder") {
+      void copyFile(row.slug, row.path!, copy, row.kind === "folder", clipboardData);
+      return true;
+    }
+    if (!copy && row.kind === "cron" && !row.controller && row.job?.id) {
+      void startCutCron(row.slug, row.job.id, row.label, row.job.folder ?? "", clipboardData);
+      return true;
+    }
+    if (!copy && row.mission && !deletingIds().has(row.mission.id)) {
+      startMoveSelection(row.mission.id, clipboardData);
+      return true;
+    }
+    if (copy) {
+      setCutId(null); setPendingMoves([]); setCutCron(null);
+    }
+    return false;
+  };
+  const applyPastePayload = (destSlug: string, destPath: string, text?: string): boolean => {
+    if (pendingMoves().length > 1) {
+      if (text) retireClipboardReference(text);
+      pasteMission(destSlug, destPath);
+      return true;
+    }
+    const localClip = fileClipboard();
+    const hasActiveLocalFileClip = !!localClip && localClip !== consumedFileClipboard && !isClipboardReferenceRetired(localClip);
+    if (hasActiveLocalFileClip && isUnsyncedClipboard(localClip)) {
+      if (text && text !== localClip) retireClipboardReference(text);
+      if (readItemsReference(localClip)) { void pasteItems(destSlug, destPath, localClip); return true; }
+      if (readFileReference(localClip)) { void pasteFile(destSlug, destPath, localClip); return true; }
+      if (readCronReference(localClip)) { void pasteCron(destSlug, destPath, localClip); return true; }
+    }
+    if (hasUnsyncedCutClipboard()) {
+      if (text) retireClipboardReference(text);
+      pasteMission(destSlug, destPath);
+      return true;
+    }
+    if (text && !isClipboardReferenceRetired(text)) {
+      if (readItemsReference(text)) { void pasteItems(destSlug, destPath, text); return true; }
+      if (readFileReference(text)) { void pasteFile(destSlug, destPath, text); return true; }
+      if (readCronReference(text)) { void pasteCron(destSlug, destPath, text); return true; }
+      if (readCutMission(text, getApiUrl())) { pasteMission(destSlug, destPath, text); return true; }
+    }
+    if (hasActiveLocalFileClip) {
+      if (readItemsReference(localClip)) { void pasteItems(destSlug, destPath, localClip); return true; }
+      if (readFileReference(localClip)) { void pasteFile(destSlug, destPath, localClip); return true; }
+      if (readCronReference(localClip)) { void pasteCron(destSlug, destPath, localClip); return true; }
+    }
+    if (cutCron()) { void pasteCron(destSlug, destPath); return true; }
+    if (hasCutClipboard() || cutId()) {
+      pasteMission(destSlug, destPath, text && !isClipboardReferenceRetired(text) ? text : undefined);
+      return true;
+    }
+    return false;
+  };
   const moveKey = (event: KeyboardEvent) => {
-    if (event.key === "Escape") { if (cutFile() || cutItems().length || readCronReference(fileClipboard())) consumedFileClipboard = fileClipboard(); setFileClipboard(""); setSelectedTreeIds([]); setSelectionActive(false); setPendingMoves([]); setCutId(null); setCutCron(null); setSelectionAnchor(null); return; }
+    if (event.key === "Escape") {
+      const prevClip = fileClipboard();
+      if (cutFile() || cutItems().length || readCronReference(prevClip)) {
+        consumedFileClipboard = prevClip;
+        retireClipboardReference(prevClip);
+      } else if (isUnsyncedClipboard(prevClip)) {
+        retireClipboardReference(prevClip);
+      }
+      setFileClipboard(""); setSelectedTreeIds([]); setSelectionActive(false); setPendingMoves([]); setCutId(null); setCutCron(null); setSelectionAnchor(null);
+      return;
+    }
     if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
     const target = event.target as HTMLElement;
     if (target.closest('input, textarea, [contenteditable="true"]')) return;
     const id = target.closest<HTMLElement>('.tree-entry')?.dataset.treeId;
     if (!id) return;
-    const row = findNodeById(id);
-    if (!row) return;
     const key = event.key.toLowerCase();
     if (key === "x" || key === "c") {
-      const group = selectionActive() && selectedTreeSet().has(id) ? selectedTreeFor(id) : [id];
-      if (group.length > 1) {
-        if (key === "c" && group.some(tid => !tid.startsWith("pf:"))) return;
-        event.preventDefault(); event.stopPropagation();
-        void copySelectedItems(group, key === "c");
-        return;
-      }
-      if (row.kind === "file" || row.kind === "folder") {
-        event.preventDefault(); event.stopPropagation();
-        void copyFile(row.slug, row.path!, key === "c", row.kind === "folder");
-      } else if (key === "x" && row.kind === "cron" && !row.controller && row.job?.id) {
-        event.preventDefault(); event.stopPropagation();
-        void startCutCron(row.slug, row.job.id, row.label, row.job.folder ?? "");
-      } else if (key === "x" && row.mission && !deletingIds().has(row.mission.id)) {
-        setFileClipboard(""); setCutCron(null);
-        event.preventDefault(); event.stopPropagation();
-        startMoveSelection(row.mission.id);
-      } else if (key === "c") {
-        setCutId(null); setPendingMoves([]); setCutCron(null);
-      }
-    } else if (key === "v" && (row.kind === "project" || row.kind === "folder")) {
+      if (performCutOrCopy(id, key === "c")) { event.preventDefault(); event.stopPropagation(); }
+    } else if (key === "v") {
+      const dest = resolveTreeDestination(id);
+      if (!dest) return;
       event.preventDefault(); event.stopPropagation();
-      const destSlug = row.slug, destPath = row.path ?? "";
+      const { slug: destSlug, path: destPath } = dest;
       if (pendingMoves().length > 1) { pasteMission(destSlug, destPath); return; }
       const version = connectionVersion();
       void navigator.clipboard.readText().then(text => {
         if (version !== connectionVersion()) return;
-        if (readItemsReference(text)) void pasteItems(destSlug, destPath, text);
-        else if (readFileReference(text)) void pasteFile(destSlug, destPath, text);
-        else if (readCronReference(text)) void pasteCron(destSlug, destPath, text);
-        else if (cutCron()) void pasteCron(destSlug, destPath);
-        else pasteMission(destSlug, destPath, text);
+        const usable = isClipboardReferenceRetired(text) ? undefined : text;
+        if (!applyPastePayload(destSlug, destPath, usable)) pasteMission(destSlug, destPath, usable);
       }, () => {
         // Clipboard read refused (no permission or gesture): fall back to in-app cuts.
         if (version !== connectionVersion()) return;
-        if (cutCron()) void pasteCron(destSlug, destPath);
-        else if (hasCutClipboard()) pasteMission(destSlug, destPath);
-        else setActionError("Clipboard access was refused. Use Move here from the menu.");
+        if (!applyPastePayload(destSlug, destPath)) setActionError("Clipboard access was refused. Use Move here from the menu.");
       });
     }
   };
@@ -1797,13 +1885,165 @@ export function LiveProjectsSection(p: {
     }
   };
   let dropTree:HTMLDivElement|undefined;
+  let pointerPos: { x: number; y: number } | null = null;
+  let cancelActiveDrag: (() => void) | undefined;
+  onCleanup(() => cancelActiveDrag?.());
   const [importing,setImporting]=createSignal(false),[importStatus,setImportStatus]=createSignal('');
   const [pendingLargeImport, setPendingLargeImport] = createSignal<{
     slug: string;
     folder: string;
     files: Array<{ source: UploadSource; size: number }>;
   } | null>(null);
-  const dropAt=(x:number,y:number)=>{const el=document.elementFromPoint(x,y)?.closest<HTMLElement>('[data-drop-project]');return el&&dropTree?.contains(el)?el:undefined;};
+  const dropContainerElement = (slug: string, folder: string): HTMLElement | undefined => {
+    if (!dropTree) return undefined;
+    const containerId = folder ? `pf:${slug}:${folder}` : `project:${slug}`;
+    for (const entry of dropTree.querySelectorAll<HTMLElement>(".tree-entry")) {
+      if (entry.dataset.treeId === containerId) return entry.querySelector<HTMLElement>("[data-drop-project]") ?? undefined;
+    }
+    return undefined;
+  };
+  const dropAt = (x: number, y: number): HTMLElement | undefined => {
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || !dropTree?.contains(hit)) return undefined;
+    const direct = hit.closest<HTMLElement>("[data-drop-project]");
+    if (direct && dropTree.contains(direct)) return direct;
+    const entry = hit.closest<HTMLElement>(".tree-entry");
+    const dest = entry?.dataset.treeId ? resolveTreeDestination(entry.dataset.treeId) : null;
+    return dest ? dropContainerElement(dest.slug, dest.path) : undefined;
+  };
+  const startRowDrag = (e: PointerEvent) => {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const target = e.target as HTMLElement | null;
+    if (!target || target.closest(".row-action, .launched-toggle, input, textarea, [contenteditable='true']")) return;
+    const entry = target.closest<HTMLElement>(".tree-entry");
+    if (!entry || !dropTree?.contains(entry) || entry.querySelector("button:disabled")) return;
+    const treeId = entry.dataset.treeId;
+    if (!treeId) return;
+    const row = findNodeById(treeId, tree());
+    if (!row) return;
+    const movable = (row.kind === "mission" && !!row.mission && !deletingIds().has(row.mission.id))
+      || (row.kind === "cron" && !row.controller && !!row.job?.id)
+      || ((row.kind === "file" || row.kind === "folder") && !!row.path);
+    if (!movable) return;
+    cancelActiveDrag?.();
+    const startX = e.clientX, startY = e.clientY;
+    let dragging = false;
+    let highlighted: HTMLElement | undefined;
+    const prevUserSelect = document.body.style.userSelect;
+    const clearHighlight = () => { highlighted?.classList.remove("drop-active"); highlighted = undefined; };
+    const finish = () => {
+      clearHighlight();
+      if (dragging) document.body.style.userSelect = prevUserSelect;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("keydown", onKey, true);
+      cancelActiveDrag = undefined;
+    };
+    const onKey = (ke: KeyboardEvent) => {
+      if (ke.key === "Escape" && dragging) { ke.preventDefault(); ke.stopPropagation(); finish(); }
+    };
+    const onMove = (me: PointerEvent) => {
+      if (!dragging) {
+        if (Math.hypot(me.clientX - startX, me.clientY - startY) < 6) return;
+        dragging = true;
+        document.body.style.userSelect = "none";
+      }
+      const next = dropAt(me.clientX, me.clientY);
+      if (next !== highlighted) {
+        clearHighlight();
+        highlighted = next;
+        highlighted?.classList.add("drop-active");
+      }
+    };
+    const onUp = (ue: PointerEvent) => {
+      const wasDragging = dragging;
+      const dropEl = wasDragging ? dropAt(ue.clientX, ue.clientY) : undefined;
+      finish();
+      if (!wasDragging) return;
+      const eatClick = (ce: MouseEvent) => { ce.preventDefault(); ce.stopPropagation(); };
+      window.addEventListener("click", eatClick, true);
+      setTimeout(() => window.removeEventListener("click", eatClick, true), 0);
+      if (!dropEl?.dataset.dropProject) return;
+      const destSlug = dropEl.dataset.dropProject, destPath = dropEl.dataset.dropFolder ?? "";
+      const group = selectionActive() && selectedTreeSet().has(treeId) ? selectedTreeFor(treeId) : [treeId];
+      const items = group.map(treeIdToClipboardItem).filter((x): x is ClipboardItem => !!x);
+      if (!items.length) return;
+      if (items.every(i => i.kind === "mission")) {
+        const ids = [...new Set(items.map(i => (i as { kind: "mission"; id: string }).id))];
+        const known = allKnownMissions();
+        const plan = planMissionMoves(ids, destSlug, destPath, known);
+        const changed = plan.some(step => {
+          const m = known.find(x => x.id === step.id);
+          return !m || (m.project ?? "") !== destSlug || missionFolder(m) !== step.folder;
+        });
+        if (!changed) return;
+        moveDirect(ids, destSlug, destPath);
+        return;
+      }
+      if (items.length === 1 && items[0].kind === "cron") {
+        const c = items[0];
+        if (c.slug === destSlug && (c.folder ?? "") === destPath) return;
+        if (!movingCron()) {
+          setMovingCron(true); setActionError(null);
+          void performMoveCron(c.slug, c.id, destSlug, destPath)
+            .catch(err => setActionError(`Couldn’t move cron: ${err instanceof Error ? err.message : String(err)}`))
+            .finally(() => setMovingCron(false));
+        }
+        return;
+      }
+      if (items.some(i => i.kind === "file" && i.directory && i.slug === destSlug && (destPath === i.path || destPath.startsWith(`${i.path}/`)))) return;
+      if (items.length === 1 && items[0].kind === "file" && items[0].slug === destSlug && fileParent(items[0].path) === destPath) return;
+      void pasteItems(destSlug, destPath, makeItemsReference(items, false));
+    };
+    cancelActiveDrag = finish;
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", finish);
+    window.addEventListener("keydown", onKey, true);
+  };
+  onMount(() => {
+    const editableTarget = (t: EventTarget | null) =>
+      t instanceof Element && !!t.closest('input, textarea, [contenteditable="true"], [role="dialog"], dialog');
+    const onCutOrCopy = (event: ClipboardEvent) => {
+      if (editableTarget(event.target)) return;
+      if (!(window.getSelection()?.isCollapsed ?? true)) return;
+      const copy = event.type === "copy";
+      const entryId = event.target instanceof Element ? event.target.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined;
+      const fallbackId = !entryId && (event.target === document.body || event.target === document.documentElement)
+        ? (selectionActive() ? (selectionAnchor() ?? [...(selectedRowIds() ?? [])][0]) : (!copy && p.selected()?.startsWith("m:") ? p.selected()! : undefined))
+        : undefined;
+      const treeId = entryId ?? fallbackId;
+      if (treeId && performCutOrCopy(treeId, copy, event.clipboardData)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    const onPasteEvent = (event: ClipboardEvent) => {
+      if (editableTarget(event.target)) return;
+      const entryId = event.target instanceof Element ? event.target.closest<HTMLElement>(".tree-entry")?.dataset.treeId : undefined;
+      let dest = entryId ? resolveTreeDestination(entryId) : null;
+      if (!dest && (event.target === document.body || event.target === document.documentElement)) {
+        const hoverEl = pointerPos ? dropAt(pointerPos.x, pointerPos.y) : undefined;
+        if (hoverEl?.dataset.dropProject) dest = { slug: hoverEl.dataset.dropProject, path: hoverEl.dataset.dropFolder ?? "" };
+        else if (selectionAnchor()) dest = resolveTreeDestination(selectionAnchor()!);
+      }
+      if (!dest) return;
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      if (applyPastePayload(dest.slug, dest.path, text)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    document.addEventListener("cut", onCutOrCopy);
+    document.addEventListener("copy", onCutOrCopy);
+    document.addEventListener("paste", onPasteEvent);
+    onCleanup(() => {
+      document.removeEventListener("cut", onCutOrCopy);
+      document.removeEventListener("copy", onCutOrCopy);
+      document.removeEventListener("paste", onPasteEvent);
+    });
+  });
   const runImportFiles = async (slug: string, folder: string, sources: UploadSource[], confirmedLarge = false) => {
     const version = connectionVersion();
     setImporting(true); setImportStatus('Importing files to shared context…'); setActionError(null);
@@ -1987,11 +2227,12 @@ export function LiveProjectsSection(p: {
       </button>{launchedToggle(row, d)}</>;
     }
     const deleting = () => d.mission ? deletingIds().has(d.mission.id) : false;
+    const isMissionCut = () => !!d.mission && (!d.placeholder || !expanded[d.mission.project ?? ""]) && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id) || isItemCut(row.id));
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined]));
     return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
       onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
-      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${d.mission && (d.mission.id === cutId() || pendingMoves().includes(d.mission.id) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission ? (!deleting() && (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id)) ? "active" : "" : (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id) ? "active" : ""}`} {...tip}
-      onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(swallow("projectFiles.hoverTranscript")); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } onMissionContext(e, d.mission); } else {
+      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${d.mission ? (!deleting() && (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id)) ? "active" : "" : (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id) ? "active" : ""}`} {...tip}
+      onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(swallow("projectFiles.hoverTranscript")); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } const dest = resolveTreeDestination(row.id); onMissionContext(e, d.mission, row.id, dest?.slug ?? (isArchived(d.mission) ? "" : d.slug), dest?.path ?? ""); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setMultiSelectMenu(null);
         setSelectionActive(true);
         if (!selectedTreeSet().has(row.id)) { setSelectedTreeIds([row.id]); setSelectionAnchor(row.id); }
@@ -2001,7 +2242,7 @@ export function LiveProjectsSection(p: {
           return;
         }
         setFileMenu({ slug: d.slug, path: d.path!, x: e.clientX, y: e.clientY });
-      } }} onClick={e => { if (d.mission) { if (deleting()) return; clickAgent(e, d.mission.id); } else { clickSelectableRow(e, row.id, () => p.open(row.id)); } }}>
+      } }} onClick={e => { if (d.mission) { if (deleting()) return; clickAgent(e, d.mission.id, row.id); } else { clickSelectableRow(e, row.id, () => p.open(row.id)); } }}>
       <span class={`row-ico glyph ${d.mission ? "mission-lead" : ""}`}><Show when={d.mission} fallback={<Ic.FileIcon />}>{m => <Show when={isArchived(m())} fallback={<MissionGlyph missionId={m().id} status={presentedStatus(m())} unread={isMissionUnread(m(), currentMission()?.id, Boolean(pendingMissionInteraction(m().id)))} continuation={m().continuation} identity={m().backend?.startsWith("cloud_") ? <ProviderLogo type={m().backend!} /> : undefined} />}><SidebarIcon.MessageCircle size={15} /></Show>}</Show></span>
       <span class="row-label">{d.label}</span><Show when={d.version}><span class="row-version-tag">earlier</span></Show><Show when={!d.launched && !d.versions}><MachineBadge name={d.mission ? missionMachine(d.mission) : undefined} /></Show>
     </button>
@@ -2053,7 +2294,7 @@ export function LiveProjectsSection(p: {
           );
         }}
       </For>
-      <div ref={dropTree} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectedRowIds()} render={renderRow} /></div>
+      <div ref={dropTree} onPointerDown={startRowDrag} onPointerMove={e => { pointerPos = { x: e.clientX, y: e.clientY }; }} onPointerLeave={() => { pointerPos = null; }} onDragOver={e=>{if(!Array.from(e.dataTransfer?.types??[]).includes('Files'))return;e.preventDefault();const target=dropAt(e.clientX,e.clientY);dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));target?.classList.add('drop-active');if(e.dataTransfer)e.dataTransfer.dropEffect=target?'copy':'none';}} onDragLeave={e=>{if(!dropTree?.contains(e.relatedTarget as globalThis.Node))dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));}} onDrop={e=>{e.preventDefault();e.stopPropagation();dropTree?.querySelectorAll('.drop-active').forEach(el=>el.classList.remove('drop-active'));const target=dropAt(e.clientX,e.clientY);if(target)void importFiles(Array.from(e.dataTransfer?.files??[]).map(file=>({name:file.name,file})),target);}} onKeyDown={moveKey}><SidebarTree nodes={tree()} label="Projects" selected={p.selected()} selectedIds={selectedRowIds()} render={renderRow} /></div>
       <Show when={projects().length === 0 && !error()}>
         <div class="row note">No projects on the core backend.</div>
       </Show>
@@ -2101,14 +2342,18 @@ export function LiveProjectsSection(p: {
       )}</Show>
       <Show when={archiveMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={archiveDeleteMenuItems(menu.slug)} onClose={() => setArchiveMenu(null)} />}</Show>
       <Show when={multiSelectMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={multiSelectMenuItems(menu.treeIds)} onClose={() => setMultiSelectMenu(null)} />}</Show>
-      <Show when={controllerMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} items={[
-        ...(menu.controller ? [{kind:"item" as const,label:menu.archived ? "Restore" : "Archive",icon:menu.archived ? Ic.ReopenIcon : Ic.ArchiveIcon,onClick:()=>void archiveController(menu.slug,menu.archived)},{kind:"sep" as const}] : []),
-        ...(!menu.controller && menu.id ? [
-          {kind:"item" as const,label:"Move",icon:Ic.CutIcon,onClick:()=>void startCutCron(menu.slug,menu.id!,menu.name,menu.folder ?? "")},
-          {kind:"sep" as const},
-        ] : []),
-        {kind:"item",label:"Delete…",icon:Ic.TrashIcon,danger:true,onClick:()=>{setControllerMenu(null);setDeleteCronError(null);setDeleteCronTarget({slug:menu.slug,id:menu.id,name:menu.name,controller:menu.controller});}}
-      ]} onClose={()=>setControllerMenu(null)} />}</Show>
+      <Show when={controllerMenu()} keyed>{menu => {
+        const paste = !menu.archived ? pasteMenuEntries(menu.slug, menu.folder ?? "") : [];
+        return <PopupMenu x={menu.x} y={menu.y} focus={false} items={[
+          ...(paste.length ? [...paste, { kind: "sep" as const }] : []),
+          ...(menu.controller ? [{kind:"item" as const,label:menu.archived ? "Restore" : "Archive",icon:menu.archived ? Ic.ReopenIcon : Ic.ArchiveIcon,onClick:()=>void archiveController(menu.slug,menu.archived)},{kind:"sep" as const}] : []),
+          ...(!menu.controller && menu.id ? [
+            {kind:"item" as const,label:"Move",icon:Ic.CutIcon,onClick:()=>void startCutCron(menu.slug,menu.id!,menu.name,menu.folder ?? "")},
+            {kind:"sep" as const},
+          ] : []),
+          {kind:"item",label:"Delete…",icon:Ic.TrashIcon,danger:true,onClick:()=>{setControllerMenu(null);setDeleteCronError(null);setDeleteCronTarget({slug:menu.slug,id:menu.id,name:menu.name,controller:menu.controller});}}
+        ]} onClose={()=>setControllerMenu(null)} />;
+      }}</Show>
       <Show when={deleteCronTarget()} keyed>{target => {
         const count = target.items && target.items.length > 1 ? target.items.length : 1;
         return (
@@ -2127,15 +2372,19 @@ export function LiveProjectsSection(p: {
           />
         );
       }}</Show>
-      <Show when={fileMenu()} keyed>{menu => <PopupMenu x={menu.x} y={menu.y} focus={false} onClose={() => setFileMenu(null)} items={[
-        { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(menu.slug, menu.path, "rename") },
-        { kind: "item", label: "Move…", icon: Ic.FolderIcon, onClick: () => beginFileAction(menu.slug, menu.path, "move") },
-        { kind: "sep" },
-        { kind: "item", label: "Cut", icon: Ic.CutIcon, onClick: () => void copyFile(menu.slug, menu.path, false) },
-        { kind: "item", label: "Copy", icon: Ic.CopyIcon, onClick: () => void copyFile(menu.slug, menu.path, true) },
-        { kind: "sep" },
-        { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => beginFileAction(menu.slug, menu.path, "delete") },
-      ]} />}</Show>
+      <Show when={fileMenu()} keyed>{menu => {
+        const paste = pasteMenuEntries(menu.slug, fileParent(menu.path));
+        return <PopupMenu x={menu.x} y={menu.y} focus={false} onClose={() => setFileMenu(null)} items={[
+          ...(paste.length ? [...paste, { kind: "sep" as const }] : []),
+          { kind: "item", label: "Rename", icon: Ic.PencilIcon, onClick: () => beginFileAction(menu.slug, menu.path, "rename") },
+          { kind: "item", label: "Move…", icon: Ic.FolderIcon, onClick: () => beginFileAction(menu.slug, menu.path, "move") },
+          { kind: "sep" },
+          { kind: "item", label: "Cut", icon: Ic.CutIcon, onClick: () => void copyFile(menu.slug, menu.path, false) },
+          { kind: "item", label: "Copy", icon: Ic.CopyIcon, onClick: () => void copyFile(menu.slug, menu.path, true) },
+          { kind: "sep" },
+          { kind: "item", label: "Delete…", icon: Ic.TrashIcon, danger: true, onClick: () => beginFileAction(menu.slug, menu.path, "delete") },
+        ]} />;
+      }}</Show>
       <Show when={fileAction()} keyed>{target => <Show when={target.kind === "delete"} fallback={
         <NameDialog allowEmpty={target.kind === "move"} title={`${target.kind === "rename" ? "Rename" : "Move"} ${target.directory ? "folder" : "file"}`} hint={target.kind === "move" ? "Destination folder within this project. Leave empty for the project root." : target.directory ? `${target.path} — its files, agents and crons keep their place inside.` : target.path}
           label={target.kind === "rename" ? (target.directory ? "Folder name" : "File name") : "Destination folder"} value={fileActionValue()} onInput={setFileActionValue}
@@ -2149,7 +2398,7 @@ export function LiveProjectsSection(p: {
         {m => <MissionSettings missionId={m().id} title={m().title ?? `Agent ${m().id.slice(0, 8)}`} titleOf={loadedTitle} onClose={() => setSettingsMission(null)} />}
       </Show>
       <Show when={missionMenu()}>
-        {(menu) => <PopupMenu x={menu().x} y={menu().y} focus={false} items={missionMenuItems(menu().mission, menu().x, menu().y)} onDismissSubmenu={() => setForkTarget(null)} onClose={() => { setForkTarget(null); setMissionMenu(null); }}>
+        {(menu) => <PopupMenu x={menu().x} y={menu().y} focus={false} items={missionMenuItems(menu().mission, menu().slug, menu().folder)} onDismissSubmenu={() => setForkTarget(null)} onClose={() => { setForkTarget(null); setMissionMenu(null); }}>
           <Show when={forkTarget()}>{target =>
             <ForkMission mission={target().mission} choices={p.forkChoices?.(target().mission) ?? p.harnessChoices} onOpen={() => p.onForkOpen?.(target().mission)} destination={missionDestination(target().mission)}
               anchor={target().anchor} onClose={() => setForkTarget(null)}

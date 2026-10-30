@@ -13449,6 +13449,895 @@ async fn queued_followup_is_delivered_after_running_project_move() {
 }
 
 #[tokio::test]
+async fn running_forked_mission_without_writer_tag_moves_across_projects_and_folders() {
+    let h = Harness::new().await;
+    let m = h.writer(MissionStatus::Active, None).await;
+    let generated = crate::api::track_leases::generated_track_key(&m.id.to_string());
+    let base_tags = vec![
+        format!("fork-workspace:{}", Uuid::new_v4()),
+        format!("fork-of:{}", Uuid::new_v4()),
+    ];
+    h.state
+        .projects
+        .release_leases_for_attempt(&m.id.to_string())
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            m.id,
+            MissionProjectPatch {
+                track: Some(Some(generated.clone())),
+                tags: Some(base_tags.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_deferred_goal(m.id, Some("Implement PR #244 and push branch".into()))
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", &generated, None, None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&crate::api::track_leases::lease_request(
+            "lido",
+            &generated,
+            &m.id.to_string(),
+            "writer",
+            None,
+        ))
+        .unwrap();
+    h.control
+        .mission_store
+        .begin_mission_run(m.id, "running-actor", None)
+        .await
+        .unwrap();
+
+    // Moving into a folder within the same project succeeds while running.
+    let mut folder_tags = base_tags.clone();
+    folder_tags.push("orb-folder:Audits".into());
+    let (status, body) =
+        patch_project(&h, m.id, json!({"project":"lido", "tags": folder_tags})).await;
+    assert!(status.is_success(), "{body}");
+
+    // Moving across projects succeeds while running without injecting pr-writer.
+    let (status, body) =
+        patch_project(&h, m.id, json!({"project":"verity", "tags": base_tags})).await;
+    assert!(status.is_success(), "{body}");
+    let after = h
+        .control
+        .mission_store
+        .get_mission(m.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.project.project.as_deref(), Some("verity"));
+    assert_eq!(after.project.tags, base_tags);
+    let leases = live_for(&h, m.id);
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].slug, "verity");
+    assert_eq!(leases[0].mode, "writer");
+}
+
+#[tokio::test]
+async fn terminal_and_superseded_workers_sharing_track_move_without_taking_live_leases() {
+    let h = Harness::new().await;
+    let w_superseded = h.writer(MissionStatus::Acknowledged, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&w_superseded.id.to_string())
+        .unwrap();
+    let w_completed = h.writer(MissionStatus::Completed, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&w_completed.id.to_string())
+        .unwrap();
+    let w_live = h.writer(MissionStatus::Active, None).await;
+    h.control
+        .mission_store
+        .begin_mission_run(w_live.id, "running-actor", None)
+        .await
+        .unwrap();
+
+    for m in [&w_superseded, &w_completed, &w_live] {
+        let (status, body) = patch_project(
+            &h,
+            m.id,
+            json!({"project":"verity", "tags": m.project.tags}),
+        )
+        .await;
+        assert!(status.is_success(), "move {} failed: {body}", m.id);
+        let after = h
+            .control
+            .mission_store
+            .get_mission(m.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.project.project.as_deref(), Some("verity"));
+    }
+    assert!(live_for(&h, w_superseded.id).is_empty());
+    assert!(live_for(&h, w_completed.id).is_empty());
+    let live_leases = live_for(&h, w_live.id);
+    assert_eq!(live_leases.len(), 1);
+    assert_eq!(live_leases[0].slug, "verity");
+}
+
+#[tokio::test]
+async fn project_move_with_include_descendants_moves_entire_subtree_and_strips_child_folders() {
+    let h = Harness::new().await;
+    let parent = h.writer(MissionStatus::Completed, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&parent.id.to_string())
+        .unwrap();
+    let child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let grandchild = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("sub-worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(child.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let forked_sibling = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("forked conversation"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    for (id, tags) in [
+        (
+            child.id,
+            vec![
+                "pr-writer".to_string(),
+                "orb-folder:Old".to_string(),
+                "disk-reservation-v1:legacy-lease".to_string(),
+            ],
+        ),
+        (grandchild.id, vec!["pr-readonly".to_string()]),
+        (forked_sibling.id, vec![format!("fork-of:{}", parent.id)]),
+    ] {
+        h.control
+            .mission_store
+            .update_mission_project(
+                id,
+                MissionProjectPatch {
+                    project: Some(Some("lido".into())),
+                    track: Some(Some("trio-reserve1".into())),
+                    tags: Some(tags),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        h.control
+            .mission_store
+            .update_mission_status(id, MissionStatus::Completed)
+            .await
+            .unwrap();
+    }
+
+    let (status, body) = patch_project(
+        &h,
+        parent.id,
+        json!({"project":"verity", "tags":["pr-writer","orb-folder:Audits"], "include_descendants": true}),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+
+    let p_after = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let c_after = h
+        .control
+        .mission_store
+        .get_mission(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let g_after = h
+        .control
+        .mission_store
+        .get_mission(grandchild.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let f_after = h
+        .control
+        .mission_store
+        .get_mission(forked_sibling.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p_after.project.project.as_deref(), Some("verity"));
+    assert!(p_after
+        .project
+        .tags
+        .contains(&"orb-folder:Audits".to_string()));
+    assert_eq!(c_after.project.project.as_deref(), Some("verity"));
+    assert_eq!(
+        c_after.project.tags,
+        vec![
+            "pr-writer".to_string(),
+            "disk-reservation-v1:legacy-lease".to_string(),
+        ]
+    );
+    assert_eq!(g_after.project.project.as_deref(), Some("verity"));
+    assert_eq!(g_after.project.tags, vec!["pr-readonly".to_string()]);
+    // Independent forked conversations are versions, not launched sub-missions.
+    assert_eq!(f_after.project.project.as_deref(), Some("lido"));
+}
+
+#[tokio::test]
+async fn project_move_with_include_descendants_rolls_back_subtree_on_descendant_conflict() {
+    let h = Harness::new().await;
+    // Active parent on its own generated track in `lido`.
+    let parent = h.writer(MissionStatus::Active, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&parent.id.to_string())
+        .unwrap();
+    let parent_track = super::super::track_leases::generated_track_key(&parent.id.to_string());
+    h.control
+        .mission_store
+        .update_mission_project(
+            parent.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some(parent_track.clone())),
+                tags: Some(vec!["pr-writer".into(), "orb-folder:RootOrig".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", &parent_track, Some("parent"), None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&super::super::track_leases::lease_request(
+            "lido",
+            &parent_track,
+            &parent.id.to_string(),
+            "writer",
+            Some("test-parent-lease"),
+        ))
+        .unwrap();
+    // Plant an uncommitted individual `project-edit` receipt with a provisional
+    // lease on `stale-provisional`: subtree transfer must recover it before
+    // capturing `prior_track_lease` so rollback restores `lido`, not `stale-provisional`.
+    let parent_stored = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut stale_after = parent_stored.project.clone();
+    stale_after.project = Some("stale-provisional".into());
+    h.state
+        .projects
+        .absorb_track("stale-provisional", &parent_track, Some("parent"), None)
+        .unwrap();
+    let stale_lease_req = super::super::track_leases::lease_request(
+        "stale-provisional",
+        &parent_track,
+        &parent.id.to_string(),
+        "writer",
+        Some("test-stale-provisional-lease"),
+    );
+    h.state
+        .projects
+        .begin_dispatch_admission(
+            &parent.id.to_string(),
+            &json!({
+                "phase": "project-edit",
+                "before": {"project": parent_stored.project},
+                "after": {"project": stale_after},
+            }),
+            Some(&stale_lease_req),
+        )
+        .unwrap();
+
+    // First child: completed, moves cleanly before the conflicting sibling.
+    let child_ok = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker-ok"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child_ok.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some("wave-ok".into())),
+                tags: Some(vec!["pr-writer".into(), "orb-folder:ChildOrig".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(child_ok.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+
+    // Second child: active writer on `contested-track` in `lido`.
+    let child_conflict = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker-conflict"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child_conflict.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some("contested-track".into())),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(child_conflict.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", "contested-track", Some("contested"), None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&super::super::track_leases::lease_request(
+            "lido",
+            "contested-track",
+            &child_conflict.id.to_string(),
+            "writer",
+            Some("test-child-conflict-lease"),
+        ))
+        .unwrap();
+
+    // Another live mission already owns `contested-track` in destination `verity`.
+    let blocker = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("blocker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(blocker.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("verity", "contested-track", Some("contested"), None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&super::super::track_leases::lease_request(
+            "verity",
+            "contested-track",
+            &blocker.id.to_string(),
+            "writer",
+            Some("test-blocker-lease"),
+        ))
+        .unwrap();
+
+    let (status, body) = patch_project(
+        &h,
+        parent.id,
+        json!({"project":"verity", "tags":["pr-writer","orb-folder:Audits"], "include_descendants": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    // Root and preceding sibling must be rolled back to `lido` with original tags and leases.
+    let p_after = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let ok_after = h
+        .control
+        .mission_store
+        .get_mission(child_ok.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let conflict_after = h
+        .control
+        .mission_store
+        .get_mission(child_conflict.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p_after.project.project.as_deref(), Some("lido"));
+    assert_eq!(
+        p_after.project.tags,
+        vec!["pr-writer".to_string(), "orb-folder:RootOrig".to_string()]
+    );
+    assert_eq!(ok_after.project.project.as_deref(), Some("lido"));
+    assert_eq!(
+        ok_after.project.tags,
+        vec!["pr-writer".to_string(), "orb-folder:ChildOrig".to_string()]
+    );
+    assert_eq!(conflict_after.project.project.as_deref(), Some("lido"));
+
+    let parent_leases: Vec<_> = h
+        .state
+        .projects
+        .live_leases(None)
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.attempt_id == parent.id.to_string())
+        .collect();
+    assert_eq!(parent_leases.len(), 1);
+    assert_eq!(parent_leases[0].slug, "lido");
+    assert_eq!(parent_leases[0].track, parent_track);
+    assert!(h.state.projects.subtree_project_edits().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn project_move_with_include_descendants_recovers_after_mid_subtree_crash() {
+    let h = Harness::new().await;
+    let parent = h.writer(MissionStatus::Active, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&parent.id.to_string())
+        .unwrap();
+    let parent_track = super::super::track_leases::generated_track_key(&parent.id.to_string());
+    h.control
+        .mission_store
+        .update_mission_project(
+            parent.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some(parent_track.clone())),
+                tags: Some(vec!["pr-writer".into(), "orb-folder:BeforeCrash".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.state
+        .projects
+        .absorb_track("lido", &parent_track, Some("parent"), None)
+        .unwrap();
+    h.state
+        .projects
+        .acquire_track_lease(&super::super::track_leases::lease_request(
+            "lido",
+            &parent_track,
+            &parent.id.to_string(),
+            "writer",
+            Some("pre-crash-parent"),
+        ))
+        .unwrap();
+
+    let child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child.id,
+            MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                track: Some(Some("wave-crash".into())),
+                tags: Some(vec!["pr-readonly".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(child.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+
+    // Persist the pre-crash subtree receipt, then simulate a crash right after
+    // the root committed to `verity` (metadata + lease moved, child still in `lido`).
+    let parent_before = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let child_before = h
+        .control
+        .mission_store
+        .get_mission(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let receipt = json!([
+        {
+            "id": parent.id,
+            "title": parent_before.title,
+            "before": parent_before.project,
+            "prior_track_lease": {
+                "slug": "lido",
+                "track": parent_track,
+                "mode": "writer",
+            },
+            "undo_tag_remove": ["orb-folder:Audits"],
+            "undo_tag_add": ["orb-folder:BeforeCrash"],
+        },
+        {
+            "id": child.id,
+            "title": child_before.title,
+            "before": child_before.project,
+            "prior_track_lease": null,
+            "undo_tag_remove": [],
+            "undo_tag_add": [],
+        }
+    ]);
+    h.state
+        .projects
+        .save_subtree_project_edit(&parent.id.to_string(), &receipt)
+        .unwrap();
+    h.state
+        .projects
+        .move_track_lease(
+            Some(("lido", &parent_track)),
+            "verity",
+            &parent_track,
+            &parent.id.to_string(),
+            "writer",
+            parent_before.title.as_deref(),
+            None,
+        )
+        .unwrap();
+    // Simulate concurrent server-owned `worker-initialized-v1` tags arriving
+    // after snapshot capture on both root and child: rollback must reverse only
+    // transfer-owned tag deltas and preserve `worker-initialized-v1`.
+    h.control
+        .mission_store
+        .update_mission_project(
+            parent.id,
+            MissionProjectPatch {
+                project: Some(Some("verity".into())),
+                tags: Some(vec![
+                    "pr-writer".into(),
+                    "orb-folder:Audits".into(),
+                    "worker-initialized-v1".into(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            child.id,
+            MissionProjectPatch {
+                tags: Some(vec!["pr-readonly".into(), "worker-initialized-v1".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Startup/periodic `recover_sweep` rolls back the partially committed subtree and clears the journal.
+    dispatch_admission::recover_sweep(&h.state).await.unwrap();
+    assert!(h.state.projects.subtree_project_edits().unwrap().is_empty());
+
+    let p_recovered = h
+        .control
+        .mission_store
+        .get_mission(parent.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let c_recovered = h
+        .control
+        .mission_store
+        .get_mission(child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(p_recovered.project.project.as_deref(), Some("lido"));
+    assert_eq!(
+        p_recovered.project.tags,
+        vec![
+            "pr-writer".to_string(),
+            "worker-initialized-v1".to_string(),
+            "orb-folder:BeforeCrash".to_string(),
+        ]
+    );
+    assert_eq!(c_recovered.project.project.as_deref(), Some("lido"));
+    assert_eq!(
+        c_recovered.project.tags,
+        vec![
+            "pr-readonly".to_string(),
+            "worker-initialized-v1".to_string(),
+        ]
+    );
+    let leases: Vec<_> = h
+        .state
+        .projects
+        .live_leases(None)
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.attempt_id == parent.id.to_string())
+        .collect();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].slug, "lido");
+    assert_eq!(leases[0].track, parent_track);
+}
+
+#[tokio::test]
+async fn project_move_with_include_descendants_discovers_unloaded_callback_subtree() {
+    if isolated_track_http_test(
+        "project_move_with_include_descendants_discovers_unloaded_callback_subtree",
+    ) {
+        return;
+    }
+    let h = Harness::new().await;
+    let parent = h.writer(MissionStatus::Completed, None).await;
+    h.state
+        .projects
+        .release_leases_for_attempt(&parent.id.to_string())
+        .unwrap();
+
+    let worker = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let callback_child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("callback follow-up"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_mission_origin(callback_child.id, "hermes", Some("cb-unloaded"))
+        .await
+        .unwrap();
+    let callback_grandchild = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("callback sub-worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(callback_child.id),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let hermes_db = h.state.config.working_dir.join("hermes-state.db");
+    {
+        let conn = rusqlite::Connection::open(&hermes_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions(id TEXT, source TEXT, origin_json TEXT);
+             CREATE TABLE messages(session_id TEXT, role TEXT, content TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES('cb-unloaded','webhook','{\"chat_id\":\"webhook:mission-complete:w1\"}')",
+            [],
+        )
+        .unwrap();
+        let prompt = format!(
+            "A sandboxed.sh mission changed status: worker (id: {}, status: completed).",
+            worker.id
+        );
+        conn.execute(
+            "INSERT INTO messages VALUES('cb-unloaded','user',?1)",
+            [&prompt],
+        )
+        .unwrap();
+    }
+    std::env::set_var("HERMES_STATE_DB", &hermes_db);
+
+    for (id, tags) in [
+        (worker.id, vec!["pr-readonly".to_string()]),
+        (
+            callback_child.id,
+            vec![
+                "pr-readonly".to_string(),
+                "orb-folder:StaleCallback".to_string(),
+            ],
+        ),
+        (callback_grandchild.id, vec!["pr-readonly".to_string()]),
+    ] {
+        h.control
+            .mission_store
+            .update_mission_project(
+                id,
+                MissionProjectPatch {
+                    project: Some(Some("lido".into())),
+                    track: Some(Some("wave-cb".into())),
+                    tags: Some(tags),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        h.control
+            .mission_store
+            .update_mission_status(id, MissionStatus::Completed)
+            .await
+            .unwrap();
+    }
+
+    // Omit `descendant_ids` completely: Core must discover the unloaded Hermes
+    // callback child (and its launched worker) directly from the store.
+    let (status, body) = patch_project(
+        &h,
+        parent.id,
+        json!({"project":"verity", "tags":["pr-writer"], "include_descendants": true}),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+
+    for id in [
+        parent.id,
+        worker.id,
+        callback_child.id,
+        callback_grandchild.id,
+    ] {
+        let after = h
+            .control
+            .mission_store
+            .get_mission(id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.project.project.as_deref(), Some("verity"), "id={id}");
+    }
+    let cb_after = h
+        .control
+        .mission_store
+        .get_mission(callback_child.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cb_after.project.tags, vec!["pr-readonly".to_string()]);
+}
+
+#[tokio::test]
 async fn auto_managed_launch_is_validated_before_any_vm_is_rented() {
     // Boat review 2026-10-24: four VMs were rented and destroyed because the
     // child launch failed after the VM existed (REMOTE_MODEL_REQUIRED,

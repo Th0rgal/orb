@@ -17,7 +17,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     response::IntoResponse,
     Json,
 };
@@ -736,21 +736,6 @@ pub async fn init_monitoring_workspaces(workspaces: SharedWorkspaceStore) {
     tracing::info!("Monitoring container metrics collection enabled");
 }
 
-/// Extract JWT from WebSocket subprotocol header
-fn extract_jwt_from_protocols(headers: &HeaderMap) -> Option<String> {
-    let raw = headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())?;
-    for part in raw.split(',').map(|s| s.trim()) {
-        if let Some(rest) = part.strip_prefix("jwt.") {
-            if !rest.is_empty() {
-                return Some(rest.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// WebSocket endpoint for streaming system metrics
 pub async fn monitoring_ws(
     ws: WebSocketUpgrade,
@@ -759,15 +744,9 @@ pub async fn monitoring_ws(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let _ = params.interval_ms;
-    // Enforce auth in non-dev mode
-    if state.config.auth.auth_required(state.config.dev_mode) {
-        let token = match extract_jwt_from_protocols(&headers) {
-            Some(t) => t,
-            None => return (StatusCode::UNAUTHORIZED, "Missing websocket JWT").into_response(),
-        };
-        if !auth::verify_token_for_config(&token, &state.config) {
-            return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
-        }
+    if let Err((status, message)) = auth::authenticate_websocket_protocols(&headers, &state.config)
+    {
+        return (status, message).into_response();
     }
 
     ws.protocols(["sandboxed"])

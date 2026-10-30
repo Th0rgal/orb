@@ -71,13 +71,13 @@ Create `/etc/sandboxed-sh/sandboxed-sh.env` (the backend also probes `/etc/open_
 
 ```bash
 mkdir -p /etc/sandboxed-sh
-cat > /etc/sandboxed-sh/sandboxed-sh.env << 'EOF'
+cat > /etc/sandboxed-sh/sandboxed-sh.env << EOF
 HOST=127.0.0.1
 PORT=3000
 WORKING_DIR=/root
 DEV_MODE=false
-DASHBOARD_PASSWORD=change-me-to-something-strong
-JWT_SECRET=change-me-to-a-long-random-string
+DASHBOARD_PASSWORD=<set-a-strong-password>
+JWT_SECRET=$(openssl rand -hex 32)
 SANDBOXED_OAUTH_OWNER=cli-proxy
 EOF
 chmod 0600 /etc/sandboxed-sh/sandboxed-sh.env

@@ -25,7 +25,38 @@
 //! Note: The agent has **full system access**. It can read/write any file, execute any command,
 //! and search anywhere on the machine. The `WORKING_DIR` is just the default for relative paths.
 
+pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 3000;
+
+/// Returns `true` iff `host` resolves strictly to a loopback bind target
+/// (`127.0.0.0/8`, `::1`, `[::1]`, or `localhost`).
+pub fn is_loopback_host(host: &str) -> bool {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    if unbracketed.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    unbracketed
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn is_placeholder_secret(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "change-me"
+            | "changeme"
+            | "change-me-to-something-strong"
+            | "change-me-to-a-long-random-string"
+            | "your-strong-password-here"
+    )
+}
 
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -336,11 +367,12 @@ pub struct UserAccount {
 
 impl AuthConfig {
     /// Whether auth is required for API requests.
+    ///
+    /// Authentication is always required unless `dev_mode` is explicitly enabled;
+    /// a misconfigured non-dev `AuthConfig` fails closed rather than silently
+    /// disabling authentication.
     pub fn auth_required(&self, dev_mode: bool) -> bool {
-        matches!(
-            self.auth_mode(dev_mode),
-            AuthMode::SingleTenant | AuthMode::MultiUser
-        )
+        !dev_mode
     }
 
     /// Determine the current auth mode.
@@ -351,7 +383,15 @@ impl AuthConfig {
         if !self.users.is_empty() {
             return AuthMode::MultiUser;
         }
-        if self.dashboard_password.is_some() && self.jwt_secret.is_some() {
+        if self
+            .dashboard_password
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            && self
+                .jwt_secret
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
             return AuthMode::SingleTenant;
         }
         AuthMode::Disabled
@@ -438,7 +478,11 @@ impl Config {
                 }
             });
 
-        let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let host = std::env::var("HOST")
+            .ok()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| DEFAULT_HOST.to_string());
 
         let port = std::env::var("PORT")
             .unwrap_or_else(|_| DEFAULT_PORT.to_string())
@@ -533,8 +577,14 @@ impl Config {
             .unwrap_or_else(|| vec!["sandboxed://auth/callback".to_string()]);
 
         let auth = AuthConfig {
-            dashboard_password: std::env::var("DASHBOARD_PASSWORD").ok(),
-            jwt_secret: std::env::var("JWT_SECRET").ok(),
+            dashboard_password: std::env::var("DASHBOARD_PASSWORD")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            jwt_secret: std::env::var("JWT_SECRET")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             jwt_ttl_days: std::env::var("JWT_TTL_DAYS")
                 .ok()
                 .map(|v| {
@@ -559,48 +609,7 @@ impl Config {
                 .filter(|s| !s.is_empty()),
         };
 
-        // In non-dev mode, require auth secrets to be set.
-        if !dev_mode {
-            match auth.auth_mode(dev_mode) {
-                AuthMode::MultiUser => {
-                    if auth.users.is_empty() {
-                        return Err(ConfigError::MissingEnvVar(
-                            "SANDBOXED_USERS or SANDBOXED_SH_USERS".to_string(),
-                        ));
-                    }
-                    if auth.jwt_secret.is_none() {
-                        return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
-                    }
-                    if auth
-                        .users
-                        .iter()
-                        .any(|u| u.username.trim().is_empty() || u.password.trim().is_empty())
-                    {
-                        return Err(ConfigError::InvalidValue(
-                            "SANDBOXED_USERS/SANDBOXED_SH_USERS".to_string(),
-                            "username/password must be non-empty".to_string(),
-                        ));
-                    }
-                }
-                AuthMode::SingleTenant => {
-                    if auth.dashboard_password.is_none() {
-                        return Err(ConfigError::MissingEnvVar("DASHBOARD_PASSWORD".to_string()));
-                    }
-                    if auth.jwt_secret.is_none() {
-                        return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
-                    }
-                }
-                AuthMode::Disabled => {
-                    // Provide a more specific error message when partial config exists
-                    if auth.dashboard_password.is_some() && auth.jwt_secret.is_none() {
-                        return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
-                    }
-                    return Err(ConfigError::MissingEnvVar(
-                        "DASHBOARD_PASSWORD or SANDBOXED_SH_USERS".to_string(),
-                    ));
-                }
-            }
-        }
+        validate_auth_and_bind(&auth, &host, dev_mode)?;
 
         let context = ContextConfig::from_env();
 
@@ -699,7 +708,7 @@ impl Config {
         Self {
             default_model: None,
             working_dir,
-            host: "127.0.0.1".to_string(),
+            host: DEFAULT_HOST.to_string(),
             port: DEFAULT_PORT,
             max_iterations: 50,
             stale_mission_hours: 2,
@@ -722,6 +731,118 @@ impl Config {
             remote_nodes: crate::remote_node::RemoteNodeSettings::default(),
         }
     }
+
+    /// Validate authentication and listener bind invariants before serving.
+    pub fn validate_runtime_security(&self) -> Result<(), ConfigError> {
+        validate_auth_and_bind(&self.auth, &self.host, self.dev_mode)
+    }
+}
+
+fn validate_auth_and_bind(
+    auth: &AuthConfig,
+    host: &str,
+    dev_mode: bool,
+) -> Result<(), ConfigError> {
+    if dev_mode {
+        if !is_loopback_host(host) {
+            return Err(ConfigError::InvalidValue(
+                "DEV_MODE".to_string(),
+                format!(
+                    "DEV_MODE=true disables authentication and is only permitted when HOST is loopback (127.0.0.1, ::1, or localhost), got HOST={}",
+                    host
+                ),
+            ));
+        }
+        return Ok(());
+    }
+
+    // In non-dev mode, require non-empty, non-placeholder auth secrets.
+    match auth.auth_mode(false) {
+        AuthMode::MultiUser => {
+            if auth.users.is_empty() {
+                return Err(ConfigError::MissingEnvVar(
+                    "SANDBOXED_USERS or SANDBOXED_SH_USERS".to_string(),
+                ));
+            }
+            let jwt_secret = auth
+                .jwt_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ConfigError::MissingEnvVar("JWT_SECRET".to_string()))?;
+            if is_placeholder_secret(jwt_secret) {
+                return Err(ConfigError::InvalidValue(
+                    "JWT_SECRET".to_string(),
+                    "must not use an example placeholder value when DEV_MODE=false".to_string(),
+                ));
+            }
+            if auth
+                .users
+                .iter()
+                .any(|u| u.username.trim().is_empty() || u.password.trim().is_empty())
+            {
+                return Err(ConfigError::InvalidValue(
+                    "SANDBOXED_USERS/SANDBOXED_SH_USERS".to_string(),
+                    "username/password must be non-empty".to_string(),
+                ));
+            }
+            if auth
+                .users
+                .iter()
+                .any(|u| is_placeholder_secret(&u.password))
+            {
+                return Err(ConfigError::InvalidValue(
+                    "SANDBOXED_USERS/SANDBOXED_SH_USERS".to_string(),
+                    "user password must not use an example placeholder value when DEV_MODE=false"
+                        .to_string(),
+                ));
+            }
+        }
+        AuthMode::SingleTenant => {
+            let password = auth
+                .dashboard_password
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ConfigError::MissingEnvVar("DASHBOARD_PASSWORD".to_string()))?;
+            if is_placeholder_secret(password) {
+                return Err(ConfigError::InvalidValue(
+                    "DASHBOARD_PASSWORD".to_string(),
+                    "must not use an example placeholder value when DEV_MODE=false".to_string(),
+                ));
+            }
+            let jwt_secret = auth
+                .jwt_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ConfigError::MissingEnvVar("JWT_SECRET".to_string()))?;
+            if is_placeholder_secret(jwt_secret) {
+                return Err(ConfigError::InvalidValue(
+                    "JWT_SECRET".to_string(),
+                    "must not use an example placeholder value when DEV_MODE=false".to_string(),
+                ));
+            }
+        }
+        AuthMode::Disabled => {
+            if auth
+                .dashboard_password
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+                && auth
+                    .jwt_secret
+                    .as_deref()
+                    .is_none_or(|s| s.trim().is_empty())
+            {
+                return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
+            }
+            return Err(ConfigError::MissingEnvVar(
+                "DASHBOARD_PASSWORD or SANDBOXED_SH_USERS".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_bool(value: &str) -> Result<bool, String> {
@@ -742,7 +863,10 @@ fn upgrade_legacy_anthropic_default_model(model: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::upgrade_legacy_anthropic_default_model;
+    use super::{
+        is_loopback_host, upgrade_legacy_anthropic_default_model, validate_auth_and_bind,
+        AuthConfig, AuthMode, ConfigError, UserAccount,
+    };
 
     #[test]
     fn upgrades_legacy_anthropic_default_model() {
@@ -758,5 +882,106 @@ mod tests {
             upgrade_legacy_anthropic_default_model("claude-sonnet-5".to_string()),
             "claude-sonnet-5"
         );
+    }
+
+    #[test]
+    fn loopback_host_classification() {
+        for allowed in [
+            "127.0.0.1",
+            "127.0.0.2",
+            "::1",
+            "[::1]",
+            "localhost",
+            "LOCALHOST",
+        ] {
+            assert!(
+                is_loopback_host(allowed),
+                "expected {allowed} to be loopback"
+            );
+        }
+        for denied in [
+            "",
+            "0.0.0.0",
+            "::",
+            "[::]",
+            "192.168.1.10",
+            "10.0.0.2",
+            "example.com",
+        ] {
+            assert!(
+                !is_loopback_host(denied),
+                "expected {denied} to be non-loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_mode_refuses_non_loopback_bind() {
+        let auth = AuthConfig::default();
+        assert!(validate_auth_and_bind(&auth, "127.0.0.1", true).is_ok());
+        assert!(validate_auth_and_bind(&auth, "::1", true).is_ok());
+        assert!(validate_auth_and_bind(&auth, "[::1]", true).is_ok());
+        assert!(validate_auth_and_bind(&auth, "localhost", true).is_ok());
+
+        for non_loopback in ["0.0.0.0", "::", "[::]", "192.168.1.5", "orb.example.com"] {
+            let err = validate_auth_and_bind(&auth, non_loopback, true)
+                .expect_err("dev_mode must reject non-loopback bind");
+            assert!(matches!(err, ConfigError::InvalidValue(ref k, _) if k == "DEV_MODE"));
+        }
+    }
+
+    #[test]
+    fn non_dev_mode_rejects_empty_and_placeholder_secrets() {
+        let empty = AuthConfig {
+            dashboard_password: Some("   ".to_string()),
+            jwt_secret: Some("   ".to_string()),
+            ..AuthConfig::default()
+        };
+        assert_eq!(empty.auth_mode(false), AuthMode::Disabled);
+        assert!(matches!(
+            validate_auth_and_bind(&empty, "127.0.0.1", false),
+            Err(ConfigError::MissingEnvVar(_))
+        ));
+
+        let placeholder_pw = AuthConfig {
+            dashboard_password: Some("change-me".to_string()),
+            jwt_secret: Some("real-random-jwt-secret-value-12345".to_string()),
+            ..AuthConfig::default()
+        };
+        assert!(matches!(
+            validate_auth_and_bind(&placeholder_pw, "127.0.0.1", false),
+            Err(ConfigError::InvalidValue(ref k, _)) if k == "DASHBOARD_PASSWORD"
+        ));
+
+        let placeholder_jwt = AuthConfig {
+            dashboard_password: Some("strong-unique-passphrase".to_string()),
+            jwt_secret: Some("change-me-to-a-long-random-string".to_string()),
+            ..AuthConfig::default()
+        };
+        assert!(matches!(
+            validate_auth_and_bind(&placeholder_jwt, "0.0.0.0", false),
+            Err(ConfigError::InvalidValue(ref k, _)) if k == "JWT_SECRET"
+        ));
+
+        let placeholder_user = AuthConfig {
+            jwt_secret: Some("real-random-jwt-secret-value-12345".to_string()),
+            users: vec![UserAccount {
+                id: "admin".to_string(),
+                username: "admin".to_string(),
+                password: "change-me".to_string(),
+            }],
+            ..AuthConfig::default()
+        };
+        assert!(matches!(
+            validate_auth_and_bind(&placeholder_user, "0.0.0.0", false),
+            Err(ConfigError::InvalidValue(ref k, _)) if k == "SANDBOXED_USERS/SANDBOXED_SH_USERS"
+        ));
+
+        let valid = AuthConfig {
+            dashboard_password: Some("strong-unique-passphrase".to_string()),
+            jwt_secret: Some("real-random-jwt-secret-value-12345".to_string()),
+            ..AuthConfig::default()
+        };
+        assert!(validate_auth_and_bind(&valid, "0.0.0.0", false).is_ok());
     }
 }

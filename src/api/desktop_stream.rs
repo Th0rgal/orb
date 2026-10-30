@@ -35,22 +35,6 @@ pub struct StreamParams {
     pub quality: Option<u32>,
 }
 
-/// Extract JWT from WebSocket subprotocol header
-fn extract_jwt_from_protocols(headers: &HeaderMap) -> Option<String> {
-    let raw = headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())?;
-    // Client sends: ["sandboxed", "jwt.<token>"]
-    for part in raw.split(',').map(|s| s.trim()) {
-        if let Some(rest) = part.strip_prefix("jwt.") {
-            if !rest.is_empty() {
-                return Some(rest.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// WebSocket endpoint for streaming desktop as MJPEG
 pub async fn desktop_stream_ws(
     ws: WebSocketUpgrade,
@@ -58,15 +42,9 @@ pub async fn desktop_stream_ws(
     Query(params): Query<StreamParams>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Enforce auth in non-dev mode
-    if state.config.auth.auth_required(state.config.dev_mode) {
-        let token = match extract_jwt_from_protocols(&headers) {
-            Some(t) => t,
-            None => return (StatusCode::UNAUTHORIZED, "Missing websocket JWT").into_response(),
-        };
-        if !auth::verify_token_for_config(&token, &state.config) {
-            return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
-        }
+    if let Err((status, message)) = auth::authenticate_websocket_protocols(&headers, &state.config)
+    {
+        return (status, message).into_response();
     }
 
     // Validate display/session format. The public API keeps the historical
