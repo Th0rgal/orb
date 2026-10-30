@@ -1922,7 +1922,7 @@
           },
           {
             "path": "src/api/privilege_broker.rs",
-            "sha256": "2b38fc4ac6f8699a74709d05b15e1e5314f25c96b708d544aa38c28df810cfb6"
+            "sha256": "4453e7b774a85b99a05faab31a2b6bfe962de52f4448f0158d736a6247007a1a"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
@@ -2790,7 +2790,7 @@
           },
           {
             "path": "src/api/privilege_broker.rs",
-            "sha256": "2b38fc4ac6f8699a74709d05b15e1e5314f25c96b708d544aa38c28df810cfb6"
+            "sha256": "4453e7b774a85b99a05faab31a2b6bfe962de52f4448f0158d736a6247007a1a"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",

@@ -1,13 +1,13 @@
 # Managed native harnesses
 
-Core, Ashur, Babylon, Nippur, old-agent and DGX Spark use native executables
+Core, Ashur, Babylon, Nippur, Uruk, Nimrud and DGX Spark use native executables
 under `/opt/sandboxed-tools/<harness>/<version>/`. Public commands in
 `/usr/local/bin` switch atomically after version/help probes as `sandboxed-node`.
 No running harness is stopped, and no login credentials are copied.
 
 Validated stable versions on 22 September 2026: OpenCode 1.18.32, Claude Code
 2.1.278, Codex 0.155.1, Grok 1.0.40. Gemini CLI was removed from Core and
-old-agent and disabled in production backend configuration; historical missions
+Uruk (`old-agent`) and disabled in production backend configuration; historical missions
 and Google provider credentials are retained.
 
 Install the two Python scripts and systemd units:

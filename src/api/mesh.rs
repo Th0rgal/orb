@@ -844,7 +844,7 @@ pub fn compute_node_enforcer_verdict(
 }
 
 /// Public read-only convergence snapshot polled by `orb-bunker-enforcer` on every fleet node
-/// (`ashur`, `babylon`, `nippur`, `old-agent`, `dgx-spark`, `thomas-md`, `polymath`, `maven-repo`, `watchtower`).
+/// (`ashur`, `babylon`, `nippur`, `uruk`, `nimrud`, `dgx-spark`, `thomas-md`, `polymath`, `maven-repo`, `watchtower`).
 pub async fn bunker_convergence_snapshot(
     app_state: &AppState,
     node: Option<&str>,

@@ -53,7 +53,7 @@ it("shows only the administration entry when both DGX services exist",async()=>{
   expect(screen.queryByRole("menuitem",{name:/^dgx-spark /})).toBeNull();
 });
 
-it.each(['ashur','babylon','nippur','old-agent','dgx-spark-admin','sepolia'])('keeps Claude Code and its model selectable on %s',async id=>{
+it.each(['ashur','babylon','nippur','uruk','nimrud','dgx-spark-admin','sepolia'])('keeps Claude Code and its model selectable on %s',async id=>{
   vi.spyOn(transfers,'inspectTransfer').mockResolvedValue({version:1,actions:[],destinations:[{machine:{kind:'node',id},label:id,available:true,harnesses:['codex','claudecode']}]});
   const claude={...mission,backend:'claudecode',model_override:'claude-opus-5-5'};
   const all=[...choices,{backend:{id:'claudecode',name:'Claude Code'},models:[{value:'claude-opus-5-5',label:'Opus 5.5'}]}];

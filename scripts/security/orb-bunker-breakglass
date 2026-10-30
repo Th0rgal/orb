@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Paloma / Orb Breakglass SSH Bunker Recovery Utility (Wave 10)
 # Allows Thomas to recover any node (`dgx-spark`, `agent-core`, `ashur`, `babylon`,
-# `nippur`, `old-agent`, `thomas-md`) and the entire Paloma fleet from Bunker Mode
+# `nippur`, `uruk`, `nimrud`, `thomas-md`) and the entire Paloma fleet from Bunker Mode
 # over breakglass SSH (`sudo orb-bunker-breakglass unbunker`) even if no mobile/web
 # client is reachable.
 set -euo pipefail

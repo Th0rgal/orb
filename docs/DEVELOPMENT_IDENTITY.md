@@ -49,13 +49,13 @@ before enrollment. Core's private configuration is
   "known_hosts": "/etc/sandboxed-sh/development-identity/known_hosts",
   "skill": "/root/.sandboxed-sh/library/skill/development-identity/SKILL.md",
   "library_revision": "<published-library-commit>",
-  "ssh_hosts": [{"alias":"old-agent", "hostname":"95.216.112.253", "user":"root"}],
+  "ssh_hosts": [{"alias":"uruk", "hostname":"95.216.112.253", "user":"root"}],
   "python": "/usr/bin/python3",
   "script": "/usr/local/lib/sandboxed-sh/development_identity.py",
   "ssh_identity": "/var/lib/hermes-assistant/.ssh/paloma",
   "api_url": "http://127.0.0.1:3000",
   "api_token_file": "/run/paloma-development-identity/api-token",
-  "targets": [{"name":"old-agent", "ssh":"root@95.216.112.253", "user":"sandboxed-node", "root":"/var/lib/sandboxed-node/.config/sandboxed-sh/development-identity"}]
+  "targets": [{"name":"uruk", "ssh":"root@95.216.112.253", "user":"sandboxed-node", "root":"/var/lib/sandboxed-node/.config/sandboxed-sh/development-identity"}]
 }
 ```
 
@@ -164,7 +164,7 @@ state independently of the agent's report.
 
 ## Current rollout
 
-The configured fleet is Core, Ashur, Babylon, Nippur, old-agent, DGX Spark and
+The configured fleet is Core, Ashur, Babylon, Nippur, Uruk, Nimrud, DGX Spark and
 its separate `spark-admin` execution account, plus Thomas's Mac. Core has
 separate roots for its node user, backend, root operations and Hermes. Ben's
 independent installation is outside this fleet.
