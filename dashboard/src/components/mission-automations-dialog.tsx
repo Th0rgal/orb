@@ -272,6 +272,17 @@ export function MissionAutomationsDialog({
   const failureCount = Number(failureLimit);
   // Core counts consecutive failures from the latest 20 executions.
   const isFailureLimitValid = Number.isInteger(failureCount) && failureCount >= 1 && failureCount <= 20;
+  const [customRetries, setCustomRetries] = useState(false);
+  const [retryCount, setRetryCount] = useState('3');
+  const [retryDelay, setRetryDelay] = useState('60');
+  const [retryMultiplier, setRetryMultiplier] = useState('2');
+  const retries = Number(retryCount);
+  const delay = Number(retryDelay);
+  const multiplier = Number(retryMultiplier);
+  const isRetryCountValid = retryCount.trim() !== '' && Number.isInteger(retries) && retries >= 0 && retries <= 10;
+  const isRetryDelayValid = retryDelay.trim() !== '' && Number.isInteger(delay) && delay >= 1 && delay <= 3600;
+  const isRetryMultiplierValid = retryMultiplier.trim() !== '' && Number.isFinite(multiplier) && multiplier >= 1 && multiplier <= 5;
+  const isRetryConfigValid = !customRetries || (isRetryCountValid && (retries === 0 || (isRetryDelayValid && isRetryMultiplierValid)));
   const [freshSession, setFreshSession] = useState<'always' | 'keep' | 'switch'>('keep');
   const [nextSessionId, setNextSessionId] = useState('');
   const [variables, setVariables] = useState<Array<{ key: string; value: string }>>([]);
@@ -565,6 +576,11 @@ export function MissionAutomationsDialog({
       return;
     }
 
+    if (!isRetryConfigValid) {
+      toast.error('Enter valid message delivery retry settings');
+      return;
+    }
+
     // Build command source
     const content = inlinePrompt.trim();
     if (!content) {
@@ -614,6 +630,11 @@ export function MissionAutomationsDialog({
         ? { type: 'when_all_issues_closed_and_prs_merged', repo: repository }
         : { type: 'never' },
       fresh_session: freshSession,
+      ...(customRetries ? { retry_config: {
+        max_retries: retries,
+        retry_delay_seconds: retries === 0 ? 60 : delay,
+        backoff_multiplier: retries === 0 ? 2 : multiplier,
+      } } : {}),
       ...(Object.keys(vars).length > 0 ? { variables: vars } : {}),
       start_immediately: startImmediately,
     };
@@ -634,6 +655,10 @@ export function MissionAutomationsDialog({
       setStopPolicyType('when_failing_consecutively');
       setStopRepository('');
       setFailureLimit('2');
+      setCustomRetries(false);
+      setRetryCount('3');
+      setRetryDelay('60');
+      setRetryMultiplier('2');
       setFreshSession('keep');
       setNextSessionId('');
       setVariables([]);
@@ -807,7 +832,7 @@ export function MissionAutomationsDialog({
   const isStopPolicyValid = commandSourceType === 'native_loop' ||
     (stopPolicyType === 'when_failing_consecutively' ? isFailureLimitValid :
       stopPolicyType === 'when_all_issues_closed_and_prs_merged' ? isRepositoryValid : true);
-  const allowCreate = !!missionId && !creating && isCommandValid && isTriggerValid && isStopPolicyValid;
+  const allowCreate = !!missionId && !creating && isCommandValid && isTriggerValid && isStopPolicyValid && (commandSourceType === 'native_loop' || isRetryConfigValid);
 
   const isMissionDataReady = !!missionId && loadedMissionId === missionId;
   const showLoadingPlaceholder = !!missionId && (!isMissionDataReady || (loading && !hasLoaded));
@@ -1136,6 +1161,38 @@ export function MissionAutomationsDialog({
                       ? 'Auto-disables this automation after repeated failures.'
                       : stopPolicyType === 'never' ? 'This automation keeps running until you disable it.' : null}
                   </div>
+                </div>
+
+                <div>
+                  <label className="flex items-center gap-2 text-xs text-white/50">
+                    <input type="checkbox" checked={customRetries} onChange={(e) => setCustomRetries(e.target.checked)} />
+                    Customize message delivery retries
+                  </label>
+                  <p className="mt-1 text-[11px] text-white/40">
+                    Retries sending the prompt when delivery fails; does not retry failed agent runs.
+                    Default: 3 retries, 60 seconds initial delay, 2x backoff.
+                  </p>
+                  {customRetries && (
+                    <div className="mt-2 space-y-2">
+                      {[
+                        { id: 'retry-count', label: 'Maximum delivery retries', value: retryCount, set: setRetryCount, min: 0, max: 10, step: 1, valid: isRetryCountValid },
+                        ...(retries === 0 ? [] : [
+                          { id: 'retry-delay', label: 'Initial retry delay (seconds)', value: retryDelay, set: setRetryDelay, min: 1, max: 3600, step: 1, valid: isRetryDelayValid },
+                          { id: 'retry-multiplier', label: 'Retry backoff multiplier', value: retryMultiplier, set: setRetryMultiplier, min: 1, max: 5, step: 'any', valid: isRetryMultiplierValid },
+                        ]),
+                      ].map((field) => (
+                        <div key={field.id}>
+                          <label htmlFor={field.id} className="block text-xs text-white/50 mb-1.5">{field.label}</label>
+                          <input id={field.id} type="number" value={field.value} min={field.min} max={field.max} step={field.step}
+                            onChange={(e) => field.set(e.target.value)} aria-invalid={!field.valid}
+                            aria-describedby={`${field.id}-help`} className={cn(selectClass, 'w-full')} />
+                          <p id={`${field.id}-help`} className="mt-1 text-[11px] text-white/40">
+                            {field.id === 'retry-count' ? 'Whole number from 0 to 10; 0 disables retries.' : field.id === 'retry-delay' ? 'Whole number from 1 to 3600 seconds.' : 'Number from 1 to 5; 1 keeps the delay constant.'}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div>
