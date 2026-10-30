@@ -132,6 +132,10 @@ The Docker image serves HTTP on port 80. For production with TLS, use an externa
    ```
 
 2. **Set up a reverse proxy** on the host (Caddy, Nginx, etc.) with TLS pointing to `localhost:3000`.
+   Use the [streaming-safe proxy configuration](install-native.md#101-caddy-recommended---automatic-https)
+   and [SSE troubleshooting steps](install-native.md#104-terminal-stuck-at-connecting).
+   The container's Caddy configuration disables API response buffering, but an
+   external proxy or CDN must also forward events without buffering them.
 
 3. **Harden the environment** in `.env`:
    ```bash
