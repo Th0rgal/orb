@@ -73,7 +73,9 @@ pub(super) async fn cancel_tree(
         }
     }
     let mut conn = store.lock()?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
     for id in seen {
         tx.execute("UPDATE remote_message_queue SET state='cancelled' WHERE user_id=?1 AND mission_id=?2 AND state='waiting' AND (json_extract(payload,'$.job_id') IS NULL OR json_extract(payload,'$.delivery_abandonable')=1)", params![user,id.to_string()]).map_err(|e| e.to_string())?;
     }
@@ -392,7 +394,9 @@ pub(super) fn start(state: std::sync::Weak<AppState>) {
 /// node job: that delivery may have been accepted and must not be reordered.
 pub(super) fn promote(store: &ProjectsStore, user: &str, id: Uuid) -> Result<Uuid, String> {
     let mut conn = store.lock()?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
     let (mission, bound): (String, bool) = tx
         .query_row(
             "SELECT mission_id, json_extract(payload,'$.job_id') IS NOT NULL FROM remote_message_queue WHERE user_id=?1 AND message_id=?2 AND state='waiting'",

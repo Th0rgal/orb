@@ -1312,7 +1312,9 @@ impl SqliteMissionStore {
         let now = now_string();
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
             let ids: Vec<Uuid> = {
                 let mut stmt = tx
                     .prepare(
@@ -1464,7 +1466,7 @@ impl SqliteMissionStore {
 
         tokio::task::spawn_blocking(move || {
             let mut connection = conn.blocking_lock();
-            let conn = connection.transaction().map_err(|e| e.to_string())?;
+            let conn = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let (old_backend, old_session): (String, Option<String>) = conn.query_row(
                 "SELECT COALESCE(backend, 'opencode'), session_id FROM missions WHERE id = ?1",
                 params![id_str], |row| Ok((row.get(0)?, row.get(1)?)),
