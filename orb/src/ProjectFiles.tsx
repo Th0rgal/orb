@@ -18,7 +18,7 @@ import { ContextBadge } from "./ContextBadge";
 import { ContextHistory } from "./ContextHistory";
 import { readProjectFileVersion } from "./projectContext";
 import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "./missionMove";
-import { RunningWorkers, deleteDescendants, descendantsSentence, runningWorkerIds } from "./deleteRunning";
+import { RunningWorkers, deleteDescendants, descendantsSentence, pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from "./deleteRunning";
 import { ForkMission } from "./ForkMission";
 const MissionSettings = lazy(() => import("./MissionSettings").then(m => ({ default: m.MissionSettings })));
 import { ErrorNotice, ErrorDialog } from "./ErrorNotice";
@@ -347,8 +347,19 @@ export function LiveProjectsSection(p: {
   const stopWorkers = async (ids: readonly string[]) => {
     await Promise.all(ids.map(wid => cancelMission(wid)));
   };
+  const acknowledgeMissions = async (ids: readonly string[], version: number) => {
+    for (const pausedId of ids) {
+      await api(`/api/control/missions/${encodeURIComponent(pausedId)}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "acknowledged" }),
+      });
+      if (version !== connectionVersion()) return false;
+    }
+    return true;
+  };
   /** DELETE `id`; with `stop`, a 409 naming a running worker cancels it and retries. */
-  const deleteMissionStopping = async (id: string, stop: boolean) => {
+  const deleteMissionStopping = async (id: string, stop: boolean, version: number) => {
     for (let attempt = 0; ; attempt++) {
       try {
         // Core refuses to delete descendants unless asked: only a delete whose
@@ -356,10 +367,24 @@ export function LiveProjectsSection(p: {
         const cascade = descendantsConfirmed.has(id) ? "?include_descendants=true" : "";
         return await api<{deleted_ids?: string[]}>(`/api/control/missions/${id}${cascade}`, {method: "DELETE"});
       } catch (error) {
-        const blocking = error instanceof ApiError && error.status === 409 ? runningWorkerIds(error.detail) : [];
-        if (!blocking.length || attempt >= 3) throw error;
-        if (!stop) throw new RunningWorkers(blocking);
-        await stopWorkers(blocking);
+        if (error instanceof ApiError && error.status === 409) {
+          if (requiresDescendantOptIn(error.detail)) {
+            descendantsConfirmed.add(id);
+            throw error;
+          }
+          const paused = pausedMissionIds(error.detail);
+          if (paused.length && attempt < 3) {
+            if (!await acknowledgeMissions(paused, version)) return undefined;
+            continue;
+          }
+          const blocking = runningWorkerIds(error.detail);
+          if (blocking.length && attempt < 3) {
+            if (!stop) throw new RunningWorkers(blocking);
+            await stopWorkers(blocking);
+            continue;
+          }
+        }
+        throw error;
       }
     }
   };
@@ -391,30 +416,32 @@ export function LiveProjectsSection(p: {
           const known = allKnownMissions();
           const knownById = new Map(known.map(m => [m.id, m]));
           const subtree = missionSubtree(known, [id]);
-          const mission = await api<Mission>(`/api/control/missions/${id}`);
-          if (version !== connectionVersion()) break;
-          // Preserve live running agents. DELETE also checks all descendants
-          // against the current server runner registry.
+          const mission = knownById.get(id);
+          // Preserve live running agents. DELETE also checks the root and all
+          // descendants against Core's authoritative execution ownership snapshot.
           const live = (status: string) => ["active", "waiting_background"].includes(status);
-          if (live(mission.status)) throw new Error("Stop or finish this agent before deleting it.");
+          if (mission && live(mission.status)) throw new Error("Stop or finish this agent before deleting it.");
           const runningChildren = subtree.filter(m => m.id !== id && live(m.status)).map(m => m.id);
           if (runningChildren.length && !stopApproved.has(id)) throw new RunningWorkers(runningChildren);
           if (runningChildren.length) await stopWorkers(runningChildren);
           if (version !== connectionVersion()) break;
           const pausedIds = [
-            ...(mission.status === "paused" ? [id] : []),
+            ...(mission?.status === "paused" ? [id] : []),
             ...subtree.filter(m => m.id !== id && m.status === "paused").map(m => m.id),
           ];
-          for (const pausedId of pausedIds) {
-            await api(`/api/control/missions/${encodeURIComponent(pausedId)}/status`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ status: "acknowledged" }),
-            });
-            if (version !== connectionVersion()) break;
-          }
+          if (pausedIds.length && !await acknowledgeMissions(pausedIds, version)) break;
           if (version !== connectionVersion()) break;
-          const result = await deleteMissionStopping(id, stopApproved.has(id));
+          let result: {deleted_ids?: string[]} | undefined;
+          try {
+            result = await deleteMissionStopping(id, stopApproved.has(id), version);
+          } catch (error) {
+            // If `id` was still running on the server despite a stale sidebar row,
+            // match the root guard message instead of offering "Stop and delete" for `id` itself.
+            if (error instanceof RunningWorkers && error.ids.length === 1 && error.ids[0] === id) {
+              throw new Error("Stop or finish this agent before deleting it.");
+            }
+            throw error;
+          }
           if (version !== connectionVersion()) break;
           const serverDeleted = new Set(result?.deleted_ids ?? []);
           for (const extraId of subtree.map(m => m.id)) {

@@ -2807,7 +2807,8 @@ impl AssistantMcp {
                 .await
                 .map_err(|error| format!("Failed to parse created mission: {error}")),
             Ok(response) => Err(format!(
-                "Failed to create mission: {}",
+                "Failed to create mission ({}): {}",
+                response.status(),
                 response.text().await.unwrap_or_default()
             )),
             Err(error) => Err(error),
@@ -2817,19 +2818,30 @@ impl AssistantMcp {
             other => {
                 // Do not leave a rented VM behind for a mission that never
                 // started (a reused sibling VM is released to its grace).
+                let mut leaked_rented_vm = false;
                 if let (Some(id), false) = (managed_machine["id"].as_str(), managed_reused) {
-                    let _ = self
+                    if self
                         .managed_request(
                             reqwest::Method::DELETE,
                             format!("/api/managed-machines/{id}?reason=launch_failed"),
                             None,
                         )
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        leaked_rented_vm = true;
+                    }
                 }
-                return Err(match other {
+                let err = match other {
                     Err(e) => e,
                     Ok(_) => "Created mission response did not include an id".to_string(),
-                });
+                };
+                if leaked_rented_vm {
+                    return Err(format!(
+                        "Outcome unconfirmed: rented VM cleanup failed after launch rejection: {err}"
+                    ));
+                }
+                return Err(err);
             }
         };
         if managed_machine.is_null() {
@@ -3068,8 +3080,9 @@ impl AssistantMcp {
         params.identity.add_to(&mut body);
         let response = self.api_post("/api/control/message", body).await?;
         if !response.status().is_success() {
+            let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("Failed to send message: {text}"));
+            return Err(format!("Failed to send message ({status}): {text}"));
         }
         response
             .json()
@@ -3226,8 +3239,9 @@ impl AssistantMcp {
             .api_post(&format!("/api/control/missions/{id}/cancel"), json!({}))
             .await?;
         if !response.status().is_success() {
+            let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("Failed to cancel mission: {text}"));
+            return Err(format!("Failed to cancel mission ({status}): {text}"));
         }
         let receipt: Value = response
             .json()
@@ -3304,8 +3318,11 @@ impl AssistantMcp {
         // for a confirmed state transition.
         let response = self
             .api_get(&format!("/api/control/missions/{id}/digest"))
-            .await?;
-        let digest = Self::response_value(response, "Verify mission ACK").await?;
+            .await
+            .map_err(|e| format!("Mission ACK mutation succeeded but readback failed: {e}"))?;
+        let digest = Self::response_value(response, "Verify mission ACK")
+            .await
+            .map_err(|e| format!("Mission ACK mutation succeeded but readback failed: {e}"))?;
         let mission = digest.get("mission").unwrap_or(&digest);
         if mission.get("status").and_then(Value::as_str) != Some("acknowledged") {
             return Err(

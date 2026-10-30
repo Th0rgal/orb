@@ -16541,3 +16541,311 @@ async fn external_mcp_session_gates_missionless_issuance_and_approval_liveness()
     .unwrap();
     assert_eq!(secret_broker.pending_count().await, 0);
 }
+
+#[tokio::test]
+async fn delete_mission_allows_quiescent_awaiting_user_unscheduled_pending_and_cloud_and_releases_track_lease(
+) {
+    let h = Harness::new().await;
+
+    // 1. Quiescent `AwaitingUser` mission holding a project track lease.
+    let awaiting = h.writer(MissionStatus::AwaitingUser, None).await;
+    assert_eq!(h.state.projects.live_leases(Some("lido")).unwrap().len(), 1);
+    let _ = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(awaiting.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(awaiting.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        h.state
+            .projects
+            .live_leases(Some("lido"))
+            .unwrap()
+            .is_empty(),
+        "deleting a mission must release any held track lease"
+    );
+
+    // 2. Unscheduled blank `Pending` mission (`deferred_goal = None`).
+    let pending = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("blank draft"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status, MissionStatus::Pending);
+    let _ = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(pending.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(pending.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    // 3. Settled cloud conversation (`workspace_id = Uuid::nil()`, `backend = "cloud_openai"`).
+    let cloud = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("cloud conversation"),
+            Some(Uuid::nil()),
+            None,
+            None,
+            None,
+            Some("cloud_openai"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(cloud.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+    let _ = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(cloud.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert!(h
+        .control
+        .mission_store
+        .get_mission(cloud.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn delete_mission_refuses_active_paused_and_scheduled_pending_with_actionable_409() {
+    let h = Harness::new().await;
+
+    // 1. Parent with an Active child (`include_descendants = true`) -> RunningWorkerIds 409.
+    let parent = h.writer(MissionStatus::Completed, None).await;
+    let active_child = h
+        .control
+        .mission_store
+        .create_mission_with_parent(
+            Some("active worker"),
+            Some(parent.workspace_id),
+            None,
+            None,
+            None,
+            false,
+            Some("test-no-execution"),
+            None,
+            Some(parent.id),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(active_child.id, MissionStatus::Active)
+        .await
+        .unwrap();
+    let err = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Query(DeleteMissionQuery {
+            include_descendants: Some(true),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::CONFLICT);
+    assert!(
+        err.1.contains(&format!(
+            "Cannot delete a running mission or worker ({})",
+            active_child.id
+        )),
+        "unexpected error: {}",
+        err.1
+    );
+
+    // 2. Paused child -> Paused 409 naming the paused mission ID.
+    h.control
+        .mission_store
+        .update_mission_status(active_child.id, MissionStatus::Paused)
+        .await
+        .unwrap();
+    let err = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(parent.id),
+        Query(DeleteMissionQuery {
+            include_descendants: Some(true),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::CONFLICT);
+    assert!(
+        err.1.contains(&format!(
+            "Cannot delete a paused mission ({})",
+            active_child.id
+        )),
+        "unexpected error: {}",
+        err.1
+    );
+
+    // 3. Pending mission with a scheduled `deferred_goal` -> queued/scheduled 409.
+    let scheduled = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("scheduled pending"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .set_deferred_goal(scheduled.id, Some("run scheduled follow-up".into()))
+        .await
+        .unwrap();
+    let err = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(scheduled.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::CONFLICT);
+    assert!(
+        err.1.contains("queued or scheduled work"),
+        "unexpected error: {}",
+        err.1
+    );
+}
+
+#[tokio::test]
+async fn delete_mission_not_blocked_by_deterministic_mcp_rejection() {
+    use crate::control_mcp::{gateway, Role};
+
+    let h = Harness::new().await;
+    let completed = h.writer(MissionStatus::Completed, None).await;
+    let unrelated = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("lean-light parent"),
+            None,
+            None,
+            None,
+            None,
+            Some("test-no-execution"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_status(unrelated.id, MissionStatus::Completed)
+        .await
+        .unwrap();
+
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            project: None,
+            role: Role::Operator,
+            mission_id: Some(completed.id),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+
+    // `resume_mission` on an already Completed mission fails deterministically with 400/409.
+    let accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "resume_mission".into(),
+            arguments: json!({
+                "mission_id": completed.id,
+                "idempotency_key": "reject-completed-resume",
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(accepted["ok"], true, "{accepted}");
+    let action_id = accepted["result"]["action_id"].as_str().unwrap();
+
+    let mut receipt = Value::Null;
+    for _ in 0..100 {
+        receipt = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({ "action_id": action_id }),
+            }),
+        )
+        .await
+        .0["result"]
+            .clone();
+        if !matches!(receipt["state"].as_str(), Some("queued" | "dispatching")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(receipt["state"], "rejected", "{receipt}");
+    assert_eq!(receipt["error"]["accepted"], "no", "{receipt}");
+
+    // Neither the unrelated mission nor the target mission is poisoned by `reconciliation_required`.
+    let _ = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(unrelated.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap();
+    let _ = delete_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(completed.id),
+        Query(DeleteMissionQuery::default()),
+    )
+    .await
+    .unwrap();
+}

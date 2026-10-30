@@ -8,6 +8,15 @@ export function runningWorkerIds(detail: string): string[] {
   if (!/cannot delete a running/i.test(detail)) return [];
   return [...new Set(detail.match(UUID) ?? [])];
 }
+/** Paused mission ids from Core's 409 "Cannot delete a paused mission (<id>). Resume or cancel it first." */
+export function pausedMissionIds(detail: string): string[] {
+  if (!/cannot delete a paused mission/i.test(detail)) return [];
+  return [...new Set(detail.match(UUID) ?? [])];
+}
+/** True when Core refused deletion because unloaded/archived descendants require `?include_descendants=true`. */
+export function requiresDescendantOptIn(detail: string): boolean {
+  return /include_descendants=true/i.test(detail);
+}
 
 type Row = { id: string; title?: string | null; status: string; parent_mission_id?: string | null; callback_parent_mission_id?: string | null };
 export type DeleteDescendant = { id: string; title: string; running: boolean };

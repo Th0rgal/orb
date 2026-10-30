@@ -1177,12 +1177,14 @@ struct OrbHome: View {
         let allIDs = Array(Set(targetIDs + subtree.map(\.id)))
         deletingArchiveIDs.formUnion(allIDs)
         deleteTargets = []
+        let knownByID = Dictionary(uniqueKeysWithValues: archivedMissions.map { ($0.id, $0) })
+        let pausedUUIDRegex = try? NSRegularExpression(pattern: "[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", options: [.caseInsensitive])
         var failures: [String] = []
         var affectedProjects: Set<String> = []
         for id in targetIDs {
             do {
-                let mission = try await api.call("/api/control/missions/\(OrbCore.escape(id))")
-                let status = mission["status"].text
+                let known = knownByID[id]
+                let status = known?.state ?? ""
                 if ["active", "waiting_background"].contains(status) {
                     failures.append("\(id.prefix(8)): Stop or finish this agent before deleting it.")
                     continue
@@ -1194,8 +1196,26 @@ struct OrbHome: View {
                         body: .object(["status": .string("acknowledged")])
                     )
                 }
-                _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))", method: "DELETE")
-                let slug = mission["project"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+                for attempt in 0..<4 {
+                    do {
+                        _ = try await api.call("/api/control/missions/\(OrbCore.escape(id))?include_descendants=true", method: "DELETE")
+                        break
+                    } catch let http as OrbHTTPError where http.status == 409 && attempt < 3 && http.detail.localizedCaseInsensitiveContains("cannot delete a paused mission") {
+                        let range = NSRange(http.detail.startIndex..<http.detail.endIndex, in: http.detail)
+                        let pausedIDs = (pausedUUIDRegex?.matches(in: http.detail, range: range) ?? []).compactMap { match -> String? in
+                            Range(match.range, in: http.detail).map { String(http.detail[$0]) }
+                        }
+                        guard !pausedIDs.isEmpty else { throw http }
+                        for pid in Set(pausedIDs) {
+                            _ = try await api.call(
+                                "/api/control/missions/\(OrbCore.escape(pid))/status",
+                                method: "POST",
+                                body: .object(["status": .string("acknowledged")])
+                            )
+                        }
+                    }
+                }
+                let slug = (known?.raw["project"].text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if !slug.isEmpty { affectedProjects.insert(slug) }
                 OrbReadCache.invalidate("mission:\(id)")
             } catch let http as OrbHTTPError where http.status == 404 {

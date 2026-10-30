@@ -5,9 +5,15 @@ pressure produce inventory proposals; they never grant filesystem permission.
 Unknown `mission-*` directories and legacy `.deleted-mission-*` quarantine names
 are retained, including when the complete mission index has no matching owner.
 
-Conversation DELETE preserves source directories. It refuses live/unconfirmed jobs
+Conversation DELETE preserves source directories. It refuses live/unconfirmed jobs,
+active runs/remote handles/actor assignments, queued or deferred schedules, paused
+missions (`FLEET-004`), active machine transfers, uncommitted dispatch admissions,
 and outstanding purge receipts; recovery history remains until permission is
-revoked/restored or purge finishes. Existing descendants opt-in still applies.
+revoked/restored or purge finishes. Unlike physical workspace purge (`holds_track`),
+conversation DELETE permits removing quiescent `awaiting_user` and unscheduled
+`pending` conversations once all execution, queue, and schedule handles are settled,
+and releases any project track lease held by the deleted conversation. Existing
+descendants opt-in still applies.
 
 ## Explicit discard contract
 
@@ -109,9 +115,16 @@ arguments and legacy scope names cannot prove physical disjointness. Remote job
 termination without node-local proof also retains data regardless of display status.
 
 Conversation deletion checks accepted actions against the full deletion set
-(including descendants), under the same admission fence. It retains issuer,
-parent (including the existing `orb_<uuid>` origin-session inference), superseded
-and explicit target missions for queued, dispatching and
+(including descendants), under the same admission fence. Deterministic pre-commit
+MCP rejections (invalid arguments, state preconditions, `4xx` HTTP responses, and
+cleaned-up launch rejections) settle as `state = "rejected"` (`accepted = "no"`)
+rather than `reconciliation_required`; startup recovery reclassifies historical
+deterministic rejections while preserving crash-recovery (`result IS NULL`),
+transport, `5xx`, and post-mutation readback uncertainty as `reconciliation_required`.
+Every registered `mutation: true` MCP tool has explicit dependency scoping in
+`require_history_deletable`: it retains issuer, parent (including the existing
+`orb_<uuid>` origin-session inference), `owner_mission_id`, `inspect <uuid>` status
+references, superseded and explicit target missions for queued, dispatching and
 uncertain actions. Replacement launches also retain their inherited successor
 parent, resolved with the same helper used by mission creation; failed store
 reads or an overlong successor chain refuse deletion. Unrelated actions with audited dependencies do not block

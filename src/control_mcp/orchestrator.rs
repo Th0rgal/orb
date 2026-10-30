@@ -1757,9 +1757,10 @@ impl OrchestratorMcp {
             "mission_id":self.mission_id,"path":params.path,"branch":params.branch,"base":params.base,"repo_path":params.repo_path
         })).await?;
         if result["success"] != true {
-            return Err(
-                "Workspace worktree creation failed; inspect its target before retrying".into(),
-            );
+            let detail = result["error"]
+                .as_str()
+                .unwrap_or("Workspace worktree creation failed");
+            return Err(format!("Workspace worktree rejected: {detail}"));
         }
         Ok(result)
     }
@@ -1791,6 +1792,13 @@ impl OrchestratorMcp {
 
         let mut registered = Vec::with_capacity(params.tasks.len());
         let mut worktrees_created = Vec::new();
+        let fail = |msg: String, created_any: bool| -> String {
+            if created_any {
+                format!("Outcome unconfirmed after creating worktree: {msg}")
+            } else {
+                msg
+            }
+        };
         for spec in params.tasks {
             // Same operator policy as create_worker_mission: workers never
             // burn Claude tokens.
@@ -1801,10 +1809,13 @@ impl OrchestratorMcp {
                     .map(|m| m.to_ascii_lowercase().contains("claude"))
                     .unwrap_or(false);
             if spec.backend.trim().is_empty() || (is_claude && !claude_allowed) {
-                return Err(format!(
-                    "task `{}`: specify an explicit non-Claude backend (got `{}`) — \
-                     use codex, opencode, or grok (operator policy)",
-                    spec.task_key, spec.backend
+                return Err(fail(
+                    format!(
+                        "task `{}`: specify an explicit non-Claude backend (got `{}`) — \
+                         use codex, opencode, or grok (operator policy)",
+                        spec.task_key, spec.backend
+                    ),
+                    !worktrees_created.is_empty(),
                 ));
             }
 
@@ -1816,10 +1827,16 @@ impl OrchestratorMcp {
                         base: wt.base.clone(),
                         repo_path: wt.repo_path.clone(),
                     })
-                    .await?;
+                    .await
+                    .map_err(|e| fail(e, !worktrees_created.is_empty()))?;
                 let path = result["path"]
                     .as_str()
-                    .ok_or("Missing worktree path receipt")?
+                    .ok_or_else(|| {
+                        fail(
+                            "Missing worktree path receipt".to_string(),
+                            !worktrees_created.is_empty(),
+                        )
+                    })?
                     .to_string();
                 worktrees_created
                     .push(json!({"task_key":spec.task_key,"path":path,"branch":wt.branch}));
@@ -1832,7 +1849,8 @@ impl OrchestratorMcp {
                 (spec.working_directory.clone(), None, None)
             };
             if let Some(wd) = working_directory.as_deref() {
-                validate_working_directory_visible_to_worker(wd)?;
+                validate_working_directory_visible_to_worker(wd)
+                    .map_err(|e| fail(e, !worktrees_created.is_empty()))?;
             }
 
             let mut registered_task = json!({
@@ -1901,15 +1919,20 @@ impl OrchestratorMcp {
                 &format!("/api/control/missions/{}/board/tasks", self.mission_id),
                 json!({ "tasks": registered }),
             )
-            .await?;
+            .await
+            .map_err(|e| fail(e, !worktrees_created.is_empty()))?;
         if !response.status().is_success() {
+            let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("Failed to register board tasks: {}", text));
+            return Err(fail(
+                format!("Failed to register board tasks ({status}): {text}"),
+                !worktrees_created.is_empty(),
+            ));
         }
         let mut board: Value = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse board response: {}", e))?;
+            .map_err(|e| fail(format!("Failed to parse board response: {e}"), true))?;
         if let Some(obj) = board.as_object_mut() {
             obj.insert("worktrees_created".to_string(), json!(worktrees_created));
             if !spec_warnings.is_empty() {
@@ -2019,8 +2042,9 @@ impl OrchestratorMcp {
             )
             .await?;
         if !response.status().is_success() {
+            let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("Verdict failed: {}", text));
+            return Err(format!("Verdict failed ({status}): {text}"));
         }
         response
             .json::<Value>()
