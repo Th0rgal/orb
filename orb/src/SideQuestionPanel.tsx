@@ -84,7 +84,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   const missionId=p.mission;
   let resync:(()=>void)|undefined;
   const watchActive=(agent:NonNullable<ReturnType<typeof btwSession>>)=>{
-   const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setError('');
+   const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setError('');setNotSent(false);
    void watchBtw(missionId,controller.signal,event=>{
     if(stale||controller.signal.aborted)return;
     if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
@@ -107,19 +107,20 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setAnswer(saved?.pending?.answer&&!isSyntheticRemoteAssistantNote(saved.pending.answer)?saved.pending.answer:'');
   let launching:Promise<void>|undefined;
   try{if('btwLaunchPending' in btwMod&&typeof btwMod.btwLaunchPending==='function')launching=btwMod.btwLaunchPending(missionId);}catch{}
-  const rawSavedError = saved?.pending?.error || 'Side question interrupted. Retry to request a complete answer.';
-  const normalizedSavedError = rawSavedError.includes('Check its activity for tool errors') && btwActivities(missionId).length === 0
-   ? rawSavedError.replace('Check its activity for tool errors, then retry.', 'The model returned an empty completion without running any tools; retry to start a clean side session.')
+  let reconcileServer:typeof btwMod.reconcileBtwServerHistory|undefined;
+  try{if('reconcileBtwServerHistory' in btwMod)reconcileServer=btwMod.reconcileBtwServerHistory;}catch{}
+  const hasReconcile=typeof reconcileServer==='function';
+  const interruptedError='Side question interrupted. Retry to request a complete answer.';
+  const rawSavedError=saved?.pending?.error||'';
+  const normalizedSavedError=rawSavedError.includes('Check its activity for tool errors')&&btwActivities(missionId).length===0
+   ? rawSavedError.replace('Check its activity for tool errors, then retry.','The model returned an empty completion without running any tools; retry to start a clean side session.')
    : rawSavedError;
-  setError(saved?.pending && !launching ? normalizedSavedError : '');
+  setError(saved?.pending&&!launching?(normalizedSavedError||(hasReconcile?'':interruptedError)):'');
   setNotSent(!!saved?.pending?.notSent&&!launching);
   // Retry after a restart resends under the same id, so Core can drop a copy.
   if(saved?.pending?.turnId)setTurnId(saved.pending.turnId as ReturnType<typeof crypto.randomUUID>);
   setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
   setQueue(saved?.queue??[]);
-  setLoadedKey(current);
-  // Never delay the tab for it: a fork's earlier history fills an empty tab when it arrives.
-  if(!saved)void inheritSideQuestion(missionId).then(earlier=>{if(!stale&&key()===current&&earlier&&!history().length&&!busy())setHistory(earlier.history.filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()})));});
   const agent=btwSession(missionId);
   const lastSaved=saved?.history.at(-1);
   const lastAnswer=lastSaved?.answer;
@@ -127,29 +128,37 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   const syntheticReply=lastAnswer!==undefined&&isSyntheticRemoteAssistantNote(lastAnswer)&&!saved?.pending;
   if(emptyReply){setHistory(rows=>rows.slice(0,-1));setQuestion(lastSaved!.question);setAnswer('');setNarration([]);}
   if(syntheticReply){setQuestion(lastSaved!.question);setAnswer('');setNarration([]);if(!agent?.active)setError('Side question was interrupted before the agent answered. Retry to request a complete answer.');}
+  let awaitingServerPending=false;
   if(launching){
    setBusy(true);setRunStatus('Starting side agent…');
    void launching.then(()=>{
     if(stale||key()!==current)return;
     const launched=btwSession(missionId);
     if(launched?.active)watchActive(launched);
-    else{setBusy(false);setError('Side question interrupted. Retry to request a complete answer.');}
+    else{setBusy(false);setError(interruptedError);}
    });
   }else if(agent&&(agent.active||emptyReply)){
    watchActive(agent);
+  }else if(saved?.pending&&!normalizedSavedError&&hasReconcile){
+   // An in-flight side turn runs on Core across panel unmounts and mission switches;
+   // reconcile with Core before claiming the answer was interrupted.
+   awaitingServerPending=true;
+   setBusy(true);setRunStatus('Reconnecting…');
   }
+  setLoadedKey(current);
+  // Never delay the tab for it: a fork's earlier history fills an empty tab when it arrives.
+  if(!saved)void inheritSideQuestion(missionId).then(earlier=>{if(!stale&&key()===current&&earlier&&!history().length&&!busy())setHistory(earlier.history.filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()})));});
   if(saved?.open)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
-  let reconcileServer:typeof btwMod.reconcileBtwServerHistory|undefined;
-  try{if('reconcileBtwServerHistory' in btwMod)reconcileServer=btwMod.reconcileBtwServerHistory;}catch{}
-  if(typeof reconcileServer==='function'){
-   const reconcile=reconcileServer;
+  if(hasReconcile){
+   const reconcile=reconcileServer!;
    // The newest thread stays live while the tab is open: a question asked on
    // a completed thread (another device, a restart) re-dispatches a job on
    // that same mission, and its answer must show without reopening the tab.
    let following='',stopFollow:(()=>void)|undefined,again:ReturnType<typeof setTimeout>|undefined;
+   let inFlight=0;
    // The live stream can sit on a dead cursor (sleep, proxy, reconnect):
-   // re-read Core periodically so the newest turns always arrive.
-   const poll=setInterval(()=>{if(!stale&&document.visibilityState!=='hidden')sync(history());},15000);
+   // re-read Core periodically so the newest turns always arrive without overlapping slow reads.
+   const poll=setInterval(()=>{if(!stale&&inFlight===0&&document.visibilityState!=='hidden')sync(history());},15000);
    onCleanup(()=>{stopFollow?.();clearTimeout(again);clearInterval(poll);});
    const follow=(id:string|undefined)=>{
     if(!id||id===following||stale)return;
@@ -161,25 +170,39 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    };
    let generation=0;
    // Only the newest read applies: an older, slower one never rolls back history.
-   const sync=(local:Parameters<typeof reconcile>[1])=>{const mine=++generation;void reconcile(missionId,local).then(reconciled=>{
-    if(stale||key()!==current||mine!==generation)return;
-    follow(reconciled.latest);
-    const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
-    if(changed)setHistory(reconciled.history);
-    const pendingQ=question().trim();
-    if(pendingQ&&error()&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
-     setError('');setQuestion('');setAnswer('');setNarration([]);
-    }
-    // A restored pending turn ("Starting side agent…") that Core has since
-    // answered is finished: show Core's answer instead of a stale spinner.
-    if(pendingQ&&busy()&&!asking&&!reconciled.activeSession&&reconciled.history.at(-1)?.question.trim()===pendingQ){
-     abort?.abort();setBusy(false);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());
-     queueMicrotask(sendNext);
-    }
-    if(reconciled.activeSession&&!busy()){
-     watchActive(reconciled.activeSession);
-    }
-   }).catch(swallow("sideQuestions.reconcile"));};
+   const sync=(local:Parameters<typeof reconcile>[1])=>{
+    const mine=++generation;inFlight++;
+    void reconcile(missionId,local).then(reconciled=>{
+     if(stale||key()!==current||mine!==generation)return;
+     follow(reconciled.latest);
+     const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
+     if(changed)setHistory(reconciled.history);
+     const pendingQ=question().trim();
+     if(pendingQ&&error()&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
+      setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);
+     }
+     // A restored pending turn ("Starting side agent…" or "Reconnecting…") that
+     // Core has since answered is finished: show Core's answer instead of a stale spinner.
+     if(pendingQ&&busy()&&!asking&&!reconciled.activeSession&&reconciled.history.some(h=>h.question.trim()===pendingQ)){
+      awaitingServerPending=false;
+      abort?.abort();setBusy(false);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());
+      queueMicrotask(sendNext);
+     }
+     if(reconciled.activeSession&&(!busy()||(awaitingServerPending&&!asking))){
+      awaitingServerPending=false;
+      watchActive(reconciled.activeSession);
+     }else if(awaitingServerPending&&!asking&&!reconciled.activeSession){
+      awaitingServerPending=false;
+      setBusy(false);setRunStatus('');setError(interruptedError);
+     }
+    }).catch(e=>{
+     if(!stale&&key()===current&&mine===generation&&awaitingServerPending&&!asking){
+      awaitingServerPending=false;
+      setBusy(false);setRunStatus('');setError(interruptedError);
+     }
+     swallow("sideQuestions.reconcile")(e);
+    }).finally(()=>{inFlight=Math.max(0,inFlight-1);});
+   };
    resync=()=>{if(!stale)sync(history());};
    sync(cleanHistory);
   }

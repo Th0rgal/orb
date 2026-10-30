@@ -165,8 +165,21 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
  try{
  while(!signal.aborted){
   if(version!==connectionVersion())throw new Error('Connection changed.');
-  const mission=await currentSide(parent,s,signal,version);attach();
-  const events=await getMissionEvents(s.id,{enough:rows=>rows.some(e=>e.event_type==='user_message')||(rows.at(-1)?.sequence??0)<=(s.afterSequence??0)});
+  let mission:Mission,events:StoredEvent[];
+  try{
+   mission=await currentSide(parent,s,signal,version);attach();
+   events=await getMissionEvents(s.id,{enough:rows=>rows.some(e=>e.event_type==='user_message')||(rows.at(-1)?.sequence??0)<=(s.afterSequence??0)});
+  }catch(error){
+   if(signal.aborted||connectionVersion()!==version||!isTransientNetworkError(error))throw error;
+   note('btw-watch-retry',{mission:s.id,error:error instanceof Error?`${error.name}: ${error.message}`.slice(0,200):String(error).slice(0,200)});
+   receive({type:'status',text:'Connection interrupted — reconnecting…'});
+   await new Promise<void>(resolve=>{
+    const timer=setTimeout(done,5000);
+    function done(){clearTimeout(timer);wake=undefined;resolve();}
+    wake=done;if(signal.aborted)done();
+   });
+   continue;
+  }
   if(signal.aborted||connectionVersion()!==version)return;
   receive({type:'status',text:btwQueueStatus(mission)});
   const reducer=new TranscriptReducer();let final:string|undefined;let delta:string|undefined;
@@ -262,7 +275,12 @@ export async function askBtwAgent(parent:string,question:string,context:string,h
    }
    try {
     current=await currentSide(parent,s,launchSignal,version);
-    if(ACTIVE.includes(current.status))throw new Error('The side agent is still running. Stop it before sending another question.');
+    if(ACTIVE.includes(current.status)){
+     if(!s.local&&s.question.trim()&&s.question.trim()===question.trim()){
+      s={...s,active:true};save(parent,s);accepted=true;return;
+     }
+     throw new Error('The side agent is still running. Stop it before sending another question.');
+    }
     s={...s,active:false};save(parent,s);
    } catch(error) {
     if(!(error instanceof ApiError)||error.status!==404)throw error;
@@ -390,6 +408,44 @@ export function btwThreadChain(parent:string):Promise<string[]>{
  return chain;
 }
 
+type ParsedBtwThread={stamp:string;turns:(SideExchange&{at:string})[];active?:BtwSession};
+const terminalThreadCache=new Map<string,ParsedBtwThread>();
+export function resetBtwThreadCache(){terminalThreadCache.clear();}
+const btwActivity=(m:Mission)=>(m as Mission&{last_activity_at?:string}).last_activity_at||m.updated_at||m.created_at||'';
+function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'stamp'>{
+ const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
+ const turns:(SideExchange&{at:string})[]=[];
+ let curQuestion='',curAt='',curSeq=0;
+ let curAnswers:string[]=[];let curFinal:string|undefined;let curDelta:string|undefined;
+ const flush=()=>{
+  const q=curQuestion.trim(),{answer:a,narration}=sideAnswer(curAnswers,curFinal);
+  // Stable per question event, so a re-read never renumbers a turn.
+  if(q&&a&&!isSyntheticRemoteAssistantNote(a))turns.push({id:`btw:${m.id}:${curSeq}`,question:q,answer:a,...(narration.length?{narration}:{}),at:curAt});
+  curQuestion='';curAnswers=[];curFinal=undefined;
+ };
+ for(const ev of ordered){
+  if(ev.event_type==='user_message'){
+   if(curQuestion)flush();
+   curAnswers=[];curFinal=undefined;curDelta=undefined;
+   curQuestion=extractBtwUserQuestion(ev.content);curAt=ev.timestamp||'';curSeq=ev.sequence;
+  }else if(ev.event_type==='text_delta'){
+   curDelta=ev.content;
+  }else if((ev.event_type==='assistant_message'||ev.event_type==='assistant_message_canonical')&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
+   const text=ev.event_type==='assistant_message'?repairedFinal(ev.content,curDelta).trim():ev.content.trim();
+   if(ev.event_type==='assistant_message')curFinal=text;
+   if(curAnswers.at(-1)!==text)curAnswers.push(text);
+  }
+ }
+ let active:BtwSession|undefined;
+ if(ACTIVE.includes(m.status)&&curQuestion){
+  const local=m.tags?.includes('placement:client')??false;
+  active={id:m.id,question:curQuestion,harness:m.backend||'opencode',model:m.model_override||'builtin/smart',local,active:true,baseline:0};
+ }else if(curQuestion){
+  flush();
+ }
+ return {turns,active};
+}
+
 export async function reconcileBtwServerHistory(parent:string,localHistory:SideExchange[],signal?:AbortSignal):Promise<{history:SideExchange[];activeSession?:BtwSession;latest?:string}>{
  const version=connectionVersion();
  let rows:Mission[]=[];
@@ -403,48 +459,54 @@ export async function reconcileBtwServerHistory(parent:string,localHistory:SideE
  const valid=rows.filter(m=>m&&typeof m.id==='string'&&Array.isArray(m.tags)&&chain.some(id=>m.tags!.includes(`btw-parent:${id}`))&&!m.tags.includes('superseded'));
  if(!valid.length)return {history:localHistory};
  const sorted=[...valid].sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
+ // Load newest/active threads first with bounded concurrency and memoize
+ // terminal threads so older multi-page /btw logs never delay live recovery.
+ const byId=new Map<string,Omit<ParsedBtwThread,'stamp'>>();
+ const prioritized=[...sorted].sort((a,b)=>{
+  const aLive=ACTIVE.includes(a.status)?1:0,bLive=ACTIVE.includes(b.status)?1:0;
+  return bLive-aLive||btwActivity(b).localeCompare(btwActivity(a));
+ });
+ let cursor=0;
+ await Promise.all(Array.from({length:Math.min(4,prioritized.length)},async()=>{
+  while(cursor<prioritized.length){
+   const m=prioritized[cursor++];
+   if(signal?.aborted||connectionVersion()!==version)return;
+   const live=ACTIVE.includes(m.status);
+   const cacheKey=`${version}:${m.id}`,stamp=`${btwActivity(m)}\u0000${m.status}`;
+   if(!live){
+    const hit=terminalThreadCache.get(cacheKey);
+    if(hit&&hit.stamp===stamp){byId.set(m.id,hit);continue;}
+   }else{
+    terminalThreadCache.delete(cacheKey);
+   }
+   // History, not transcript: the streamed text repairs a truncated final (repairedFinal).
+   let events:StoredEvent[];
+   try{events=await getMissionEvents(m.id,{view:'history'});}catch{continue;}
+   if(signal?.aborted||connectionVersion()!==version)return;
+   const parsed=parseBtwThread(m,events);
+   byId.set(m.id,parsed);
+   if(!live){
+    terminalThreadCache.set(cacheKey,{stamp,...parsed});
+    while(terminalThreadCache.size>256){
+     const oldest=terminalThreadCache.keys().next().value;
+     if(oldest===undefined)break;
+     terminalThreadCache.delete(oldest);
+    }
+   }
+  }
+ }));
+ if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
  const serverTurns:(SideExchange&{at:string})[]=[];
  let latestActive:BtwSession|undefined;
  for(const m of sorted){
-  if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
-  let events:StoredEvent[]=[];
-  // History, not transcript: the streamed text repairs a truncated final (repairedFinal).
-  try{events=await getMissionEvents(m.id,{view:'history'});}catch{continue;}
-  if(signal?.aborted||connectionVersion()!==version)return {history:localHistory};
-  const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
-  let curQuestion='',curAt='',curSeq=0;
-  let curAnswers:string[]=[];let curFinal:string|undefined;let curDelta:string|undefined;
-  const flush=()=>{
-   const q=curQuestion.trim(),{answer:a,narration}=sideAnswer(curAnswers,curFinal);
-   // Stable per question event, so a re-read never renumbers a turn.
-   if(q&&a&&!isSyntheticRemoteAssistantNote(a))serverTurns.push({id:`btw:${m.id}:${curSeq}`,question:q,answer:a,...(narration.length?{narration}:{}),at:curAt});
-   curQuestion='';curAnswers=[];curFinal=undefined;
-  };
-  for(const ev of ordered){
-   if(ev.event_type==='user_message'){
-    if(curQuestion)flush();
-    curAnswers=[];curFinal=undefined;curDelta=undefined;
-    curQuestion=extractBtwUserQuestion(ev.content);curAt=ev.timestamp||'';curSeq=ev.sequence;
-   }else if(ev.event_type==='text_delta'){
-    curDelta=ev.content;
-   }else if((ev.event_type==='assistant_message'||ev.event_type==='assistant_message_canonical')&&!isSyntheticRemoteAssistantNote(ev.content)&&ev.content.trim()){
-    const text=ev.event_type==='assistant_message'?repairedFinal(ev.content,curDelta).trim():ev.content.trim();
-    if(ev.event_type==='assistant_message')curFinal=text;
-    if(curAnswers.at(-1)!==text)curAnswers.push(text);
-   }
-  }
-  const isActive=ACTIVE.includes(m.status);
-  if(isActive&&curQuestion){
-   const local=m.tags?.includes('placement:client')??false;
-   latestActive={id:m.id,question:curQuestion,harness:m.backend||'opencode',model:m.model_override||'builtin/smart',local,active:true,baseline:0};
-  }else if(curQuestion){
-   flush();
-  }
+  const parsed=byId.get(m.id);
+  if(!parsed)continue;
+  serverTurns.push(...parsed.turns);
+  if(parsed.active)latestActive=parsed.active;
  }
  // The newest thread is the one with the latest activity: each /btw question
  // re-dispatches a job on the same mission, so an old thread can be the live one.
- const activity=(m:Mission)=>(m as Mission&{last_activity_at?:string}).last_activity_at||m.updated_at||m.created_at||'';
- const latest=[...sorted].sort((a,b)=>activity(a).localeCompare(activity(b))).at(-1);
+ const latest=[...sorted].sort((a,b)=>btwActivity(a).localeCompare(btwActivity(b))).at(-1);
  let existing=btwSession(parent);
  // A session saved as running whose thread Core reports finished (or that is
  // no longer listed) is stale: it must not pin the tab to an old thread.

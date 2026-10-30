@@ -1,13 +1,13 @@
 vi.mock('../src/btwContext',()=>({prepareBtwContext:vi.fn(async(_s:any,context:string)=>({context,cursor:{sequence:10,visibleHash:'hash'}}))}));
 import {it,expect,vi,afterEach} from 'vitest';
-import {askBtwAgent,btwSession,stopBtw,btwTurnEvents} from '../src/btwAgent';
+import {askBtwAgent,btwSession,resetBtwThreadCache,stopBtw,btwTurnEvents} from '../src/btwAgent';
 import {startLocal,localBinding} from '../src/localAgents';
 import {sideQuestionKey} from '../src/sideQuestionStorage';
 vi.mock('../src/localAgents',()=>({localBinding:vi.fn(()=>undefined),restoreLocalBindings:async()=>{},localAgentForLaunch:async()=>({id:'opencode',installed:true,path:'/bin/opencode'}),refreshLocalAgents:async()=>[{id:'opencode',installed:true,path:'/bin/opencode'}],rememberBinding:vi.fn(),startLocal:vi.fn(async()=>({run_id:'run',generation:1})),followLocal:vi.fn(async()=>({text:'Read fixture',done:true,exit_code:0})),stopLocal:vi.fn(),localActivities:()=>[],reconcileLocalRun:vi.fn(async()=>{}),recoverLocalLaunch:vi.fn(async()=>{}),localLiveText:()=> 'Read fixture'}));
 import {ApiError,api,getMission,sendMissionMessage,cancelMission} from '../src/api';
 vi.mock('../src/api',async original=>({...await original<typeof import('../src/api')>(),api:vi.fn(),getMission:vi.fn(),sendMissionMessage:vi.fn(),cancelMission:vi.fn(),appendClientTranscript:vi.fn(),setClientMissionStatus:vi.fn()}));
 vi.mock('../src/stream',async original=>({...await original<typeof import('../src/stream')>(),streamMission:vi.fn(()=>vi.fn()),getMissionEvents:vi.fn(async()=>[{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}])}));
-afterEach(async()=>{localStorage.clear();vi.clearAllMocks();const {getMissionEvents,streamMission}=await import('../src/stream');vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);vi.mocked(streamMission).mockImplementation(()=>vi.fn());});
+afterEach(async()=>{resetBtwThreadCache();localStorage.clear();vi.clearAllMocks();const {getMissionEvents,streamMission}=await import('../src/stream');vi.mocked(getMissionEvents).mockResolvedValue([{event_type:'assistant_message',content:'Actual response',sequence:1,id:1,timestamp:''}]);vi.mocked(streamMission).mockImplementation(()=>vi.fn());});
 it('creates a distinct side agent and never sends to the parent',async()=>{
  vi.mocked(getMission).mockImplementation(async(id)=>({id,status:id==='parent'?'active':'awaiting_user',history:[],tags:[],title:'Main',created_at:'',updated_at:''}));
  vi.mocked(api).mockResolvedValue({id:'child'});
@@ -749,4 +749,79 @@ it('does not resend once Core accepted the question',async()=>{
  const error=await askBtwAgent('sent-parent','Q','ctx',[],new AbortController().signal,()=>{},[],new AbortController().signal,'turn-3').catch(e=>e);
  expect(error.message).toBe('agent exploded');expect(error.notSent).toBeUndefined();
  expect(sendMissionMessage).toHaveBeenCalledTimes(1);
+});
+
+it('retries transient poll timeouts inside watchBtw instead of failing an active side question',async()=>{
+ vi.useFakeTimers();
+ const {RequestTimeoutError}=await import('../src/api');
+ const {getMissionEvents}=await import('../src/stream');
+ const {watchBtw}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('timeout-parent'),JSON.stringify({id:'timeout-side',question:'Analyze editablePaths',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
+ let polls=0;
+ vi.mocked(getMission).mockImplementation(async id=>{
+  polls++;
+  if(polls===1)throw new RequestTimeoutError();
+  return {id,status:polls<3?'active':'awaiting_user',history:[],tags:['btw-parent:timeout-parent'],title:null,created_at:'',updated_at:''} as any;
+ });
+ vi.mocked(getMissionEvents).mockImplementation(async()=>polls<3
+  ?[{id:1,sequence:1,event_type:'user_message',content:'Analyze editablePaths',timestamp:''}]
+  :[{id:1,sequence:1,event_type:'user_message',content:'Analyze editablePaths',timestamp:''},{id:2,sequence:2,event_type:'assistant_message',content:'Consensus answer ready.',timestamp:''}]);
+ const events:any[]=[];
+ const abort=new AbortController();
+ const watching=watchBtw('timeout-parent',abort.signal,e=>events.push(e));
+ try{
+  await vi.advanceTimersByTimeAsync(11000);
+  await watching;
+  expect(events).toContainEqual({type:'status',text:'Connection interrupted — reconnecting…'});
+  expect(events.at(-1)).toEqual({type:'done',answer:'Consensus answer ready.'});
+  expect(btwSession('timeout-parent')?.active).toBe(false);
+ }finally{abort.abort();await watching.catch(()=>{});vi.useRealTimers();}
+});
+
+it('reattaches watchBtw when Retry is clicked for the exact question already running on Core',async()=>{
+ const {getMissionEvents}=await import('../src/stream');
+ localStorage.setItem('agent:'+sideQuestionKey('retry-live-parent'),JSON.stringify({id:'live-side',question:'Analyze editablePaths',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0}));
+ let calls=0;
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:calls++===0?'active':'awaiting_user',history:[],tags:['btw-parent:retry-live-parent'],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(getMissionEvents).mockResolvedValue([{id:1,sequence:1,event_type:'user_message',content:'Analyze editablePaths',timestamp:''},{id:2,sequence:2,event_type:'assistant_message',content:'Finished live answer.',timestamp:''}]);
+ const events:any[]=[];
+ await askBtwAgent('retry-live-parent','Analyze editablePaths','ctx',[],new AbortController().signal,e=>events.push(e));
+ expect(api).not.toHaveBeenCalled();
+ expect(sendMissionMessage).not.toHaveBeenCalled();
+ expect(events.at(-1)).toEqual({type:'done',answer:'Finished live answer.'});
+});
+
+it('memoizes completed /btw threads across polls and discovers newest active threads first',async()=>{
+ const {reconcileBtwServerHistory}=await import('../src/btwAgent');
+ const {getMissionEvents}=await import('../src/stream');
+ const order:string[]=[];
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',tags:id==='fork-head'?['fork-of:fork-prev']:[],history:[],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(api).mockImplementation(async(path:string)=>{
+  if(path.includes(encodeURIComponent('btw-parent:fork-prev'))){
+   return Array.from({length:6},(_,i)=>({id:`old-${i}`,status:'completed',created_at:`2026-10-29T0${i}:00:00Z`,updated_at:`2026-10-29T0${i}:10:00Z`,backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:fork-prev'],history:[],title:null})) as any;
+  }
+  if(path.includes(encodeURIComponent('btw-parent:fork-head'))){
+   return [{id:'live-634505a6',status:'active',created_at:'2026-10-30T05:44:41Z',updated_at:'2026-10-30T05:46:09Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:fork-head'],history:[],title:null}] as any;
+  }
+  return [] as any;
+ });
+ vi.mocked(getMissionEvents).mockImplementation(async(id:string)=>{
+  order.push(id);
+  if(id==='live-634505a6')return [{id:1,sequence:1,event_type:'user_message',content:'Header\n\nCurrent request:\nAnalyze editablePaths',timestamp:'2026-10-30T05:44:43Z'}];
+  const idx=Number(id.split('-')[1]);
+  return [
+   {id:1,sequence:1,event_type:'user_message',content:`Header\n\nCurrent request:\nQ${idx}`,timestamp:`2026-10-29T0${idx}:00:01Z`},
+   {id:2,sequence:2,event_type:'assistant_message',content:`A${idx}`,timestamp:`2026-10-29T0${idx}:05:00Z`},
+  ];
+ });
+ const first=await reconcileBtwServerHistory('fork-head',[]);
+ expect(order[0]).toBe('live-634505a6');
+ expect(first.activeSession).toMatchObject({id:'live-634505a6',question:'Analyze editablePaths',active:true});
+ expect(first.history.map(h=>h.question)).toEqual(['Q0','Q1','Q2','Q3','Q4','Q5']);
+ order.length=0;
+ const second=await reconcileBtwServerHistory('fork-head',first.history);
+ // Terminal threads old-0..old-5 stay cached; only active live-634505a6 is re-fetched.
+ expect(order).toEqual(['live-634505a6']);
+ expect(second.history.map(h=>h.question)).toEqual(['Q0','Q1','Q2','Q3','Q4','Q5']);
+ expect(second.activeSession).toMatchObject({id:'live-634505a6',active:true});
 });
