@@ -849,6 +849,9 @@ impl MissionStore for SqliteMissionStore {
     async fn get_mission_metadata(&self, id: Uuid) -> Result<Option<Mission>, String> {
         SqliteMissionStore::get_mission_metadata(self, id).await
     }
+    async fn get_missions_metadata_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Mission>, String> {
+        SqliteMissionStore::get_missions_metadata_by_ids(self, ids).await
+    }
     async fn existing_mission_ids(
         &self,
         ids: &[Uuid],
@@ -1059,6 +1062,9 @@ impl MissionStore for SqliteMissionStore {
     }
     async fn delete_mission(&self, id: Uuid) -> Result<bool, String> {
         SqliteMissionStore::delete_mission(self, id).await
+    }
+    async fn delete_missions(&self, ids: &[Uuid]) -> Result<usize, String> {
+        SqliteMissionStore::delete_missions(self, ids).await
     }
     async fn delete_empty_untitled_missions_excluding(
         &self,

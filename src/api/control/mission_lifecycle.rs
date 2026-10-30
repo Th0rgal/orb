@@ -740,19 +740,29 @@ pub async fn delete_mission(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let _workspace_mutation = machine_transfer::workspace_mutation_lock(mission_id).await;
     let control = control_for_user(&state, &user).await;
+    if control
+        .mission_store
+        .get_mission_metadata(mission_id)
+        .await
+        .map_err(internal_error)?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
+    }
     let child_ids = collect_child_mission_ids(&control.mission_store, mission_id).await?;
     if !child_ids.is_empty() && query.include_descendants != Some(true) {
-        let mut descendants = Vec::with_capacity(child_ids.len());
-        for id in &child_ids {
-            if let Some(m) = control
-                .mission_store
-                .get_mission(*id)
-                .await
-                .map_err(internal_error)?
-            {
-                descendants.push(m);
-            }
-        }
+        let by_id: HashMap<Uuid, Mission> = control
+            .mission_store
+            .get_missions_metadata_by_ids(&child_ids)
+            .await
+            .map_err(internal_error)?
+            .into_iter()
+            .map(|m| (m.id, m))
+            .collect();
+        let descendants: Vec<Mission> = child_ids
+            .iter()
+            .filter_map(|id| by_id.get(id).cloned())
+            .collect();
         require_descendant_opt_in(mission_id, query.include_descendants, &descendants)?;
     }
     let mut ids_to_delete = HashSet::with_capacity(child_ids.len() + 1);
@@ -810,35 +820,59 @@ pub async fn delete_mission(
             "Mission descendants changed while deletion was waiting; retry".into(),
         ));
     }
-    for id in &ids_to_delete {
-        machine_transfer::guard(&control.mission_store, *id)
+    let mut ordered_ids = Vec::with_capacity(final_child_ids.len() + 1);
+    ordered_ids.push(mission_id);
+    ordered_ids.extend(final_child_ids.iter().copied());
+
+    for id in &ordered_ids {
+        machine_transfer::guard_active_transfer(&control.mission_store, *id)
             .await
             .map_err(|e| (StatusCode::CONFLICT, e))?;
         workspace_purge::require_history_deletable_locked(&state, *id)
             .map_err(|e| (StatusCode::CONFLICT, e))?;
-    }
-    // Durable jobs may outlive runners; fail closed before filesystem/history mutation.
-    for id in &ids_to_delete {
-        if crate::api::durable_jobs::has_unsettled_mission_jobs(&state, &user, *id)
-            .await
-            .map_err(|error| (StatusCode::CONFLICT, error))?
+        if state
+            .projects
+            .dispatch_admission(&id.to_string())
+            .map_err(internal_error)?
+            .is_some()
         {
             return Err((
                 StatusCode::CONFLICT,
-                "Workspace jobs are still running or uncertain; settle them before deleting".into(),
+                format!(
+                    "Mission ({id}) has an uncommitted dispatch admission; retry once settled."
+                ),
+            ));
+        }
+        if usage_limit_wait::remote_wait(&state.config.working_dir, *id)
+            .await
+            .is_some_and(|w| w.resume_at.is_some())
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("Mission ({id}) has a scheduled remote replay; cancel it before deleting."),
             ));
         }
     }
-    let mut mission_statuses = HashMap::new();
-    for id in &ids_to_delete {
-        if let Some(m) = control
-            .mission_store
-            .get_mission(*id)
-            .await
-            .map_err(internal_error)?
-        {
-            mission_statuses.insert(m.id, m.status);
-        }
+    // Durable jobs may outlive runners; fail closed before filesystem/history mutation.
+    if crate::api::durable_jobs::has_unsettled_missions_jobs(&state, &user, &ids_to_delete)
+        .await
+        .map_err(|error| (StatusCode::CONFLICT, error))?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Workspace jobs are still running or uncertain; settle them before deleting".into(),
+        ));
+    }
+    let missions_by_id: HashMap<Uuid, Mission> = control
+        .mission_store
+        .get_missions_metadata_by_ids(&ordered_ids)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|m| (m.id, m))
+        .collect();
+    if !missions_by_id.contains_key(&mission_id) {
+        return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
     }
     if control
         .mission_store
@@ -857,8 +891,8 @@ pub async fn delete_mission(
                                 | crate::api::cloud_agents::Phase::Submitting
                                 | crate::api::cloud_agents::Phase::Running
                                 | crate::api::cloud_agents::Phase::CancelRequested
-                        ) || mission_statuses.get(&e.mission_id)
-                            != Some(&MissionStatus::Acknowledged))
+                        ) || missions_by_id.get(&e.mission_id).map(|m| m.status)
+                            != Some(MissionStatus::Acknowledged))
                 })
         })
     {
@@ -867,15 +901,41 @@ pub async fn delete_mission(
     // The actor also takes DISPATCH_ADMISSION. Never RPC into it while
     // holding that mutex: persisted runs, accepted queues and assignment owners
     // provide the authoritative final check under the same admission fence.
-    let ownership = execution_ownership::snapshot(&state.control)
+    let ownership = execution_ownership::snapshot_for_ids(&state.control, &ids_to_delete)
         .await
         .map_err(internal_error)?;
-    for id in &ids_to_delete {
-        if ownership.holds_track(*id) != Some(false) {
-            return Err((
-                StatusCode::CONFLICT,
-                "Mission execution or accepted work is still unresolved".into(),
-            ));
+    for id in &ordered_ids {
+        match ownership.delete_blocker(*id) {
+            execution_ownership::DeleteBlocker::None => {}
+            execution_ownership::DeleteBlocker::Missing => {
+                if *id == mission_id {
+                    return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
+                }
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Mission descendants changed while deletion was waiting; retry".into(),
+                ));
+            }
+            execution_ownership::DeleteBlocker::Paused => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("Cannot delete a paused mission ({id}). Resume or cancel it first."),
+                ));
+            }
+            execution_ownership::DeleteBlocker::Running => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("Cannot delete a running mission or worker ({id}). Cancel it first."),
+                ));
+            }
+            execution_ownership::DeleteBlocker::ScheduledWork => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "Mission ({id}) has queued or scheduled work; cancel it before deleting."
+                    ),
+                ));
+            }
         }
     }
     let running = Vec::new();
@@ -899,6 +959,8 @@ pub async fn delete_mission(
 
     for id in &deleted_ids {
         clear_mission_metadata_refresh_state(*id);
+        usage_limit_wait::update_remote_wait(&state.config.working_dir, *id, |_| None).await;
+        let _ = state.projects.release_leases_for_attempt(&id.to_string());
     }
 
     let deleted_workspace_dir_count = deleted_workspace_dirs.len();
@@ -953,11 +1015,18 @@ pub(super) async fn delete_mission_with_child_ids(
     child_ids: Vec<Uuid>,
     running: &[super::super::mission_runner::RunningMissionInfo],
 ) -> Result<Vec<Uuid>, (StatusCode, String)> {
-    let Some(target) = mission_store
-        .get_mission(mission_id)
+    let mut ids_to_delete = Vec::with_capacity(child_ids.len() + 1);
+    ids_to_delete.push(mission_id);
+    ids_to_delete.extend(child_ids.iter().copied());
+
+    let by_id: HashMap<Uuid, Mission> = mission_store
+        .get_missions_metadata_by_ids(&ids_to_delete)
         .await
         .map_err(internal_error)?
-    else {
+        .into_iter()
+        .map(|m| (m.id, m))
+        .collect();
+    let Some(target) = by_id.get(&mission_id) else {
         return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
     };
 
@@ -973,10 +1042,18 @@ pub(super) async fn delete_mission_with_child_ids(
             ),
         ));
     }
-
-    let mut ids_to_delete = Vec::with_capacity(child_ids.len() + 1);
-    ids_to_delete.push(mission_id);
-    ids_to_delete.extend(child_ids.iter().copied());
+    if let Some(paused_child) = child_ids
+        .iter()
+        .find_map(|cid| by_id.get(cid).filter(|m| m.status == MissionStatus::Paused))
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Cannot delete a paused mission ({}). Resume or cancel it first.",
+                paused_child.id
+            ),
+        ));
+    }
 
     if let Some(running_mission) = running
         .iter()
@@ -991,18 +1068,15 @@ pub(super) async fn delete_mission_with_child_ids(
         ));
     }
 
-    for child_id in child_ids.iter().rev() {
-        mission_store
-            .delete_mission(*child_id)
-            .await
-            .map_err(internal_error)?;
-    }
+    let mut delete_sequence = Vec::with_capacity(child_ids.len() + 1);
+    delete_sequence.extend(child_ids.iter().rev().copied());
+    delete_sequence.push(mission_id);
 
-    let deleted = mission_store
-        .delete_mission(mission_id)
+    let removed_count = mission_store
+        .delete_missions(&delete_sequence)
         .await
         .map_err(internal_error)?;
-    if !deleted {
+    if removed_count == 0 {
         return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
     }
 
@@ -1039,17 +1113,20 @@ pub(super) async fn cleanup_mission_workspace_dirs_for_ids(
     child_ids: Vec<Uuid>,
     running: &[super::super::mission_runner::RunningMissionInfo],
 ) -> Result<Vec<String>, (StatusCode, String)> {
-    let Some(root_mission) = mission_store
-        .get_mission(mission_id)
-        .await
-        .map_err(internal_error)?
-    else {
-        return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
-    };
-
     let mut ids_to_delete = Vec::with_capacity(child_ids.len() + 1);
     ids_to_delete.push(mission_id);
     ids_to_delete.extend(child_ids.iter().copied());
+
+    let by_id: HashMap<Uuid, Mission> = mission_store
+        .get_missions_metadata_by_ids(&ids_to_delete)
+        .await
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|m| (m.id, m))
+        .collect();
+    if !by_id.contains_key(&mission_id) {
+        return Err((StatusCode::NOT_FOUND, "Mission not found".to_string()));
+    }
 
     if let Some(running_mission) = running
         .iter()
@@ -1064,17 +1141,10 @@ pub(super) async fn cleanup_mission_workspace_dirs_for_ids(
         ));
     }
 
-    let mut missions = Vec::with_capacity(ids_to_delete.len());
-    missions.push(root_mission);
-    for child_id in child_ids {
-        if let Some(child) = mission_store
-            .get_mission(child_id)
-            .await
-            .map_err(internal_error)?
-        {
-            missions.push(child);
-        }
-    }
+    let missions: Vec<Mission> = ids_to_delete
+        .iter()
+        .filter_map(|id| by_id.get(id).cloned())
+        .collect();
 
     // Check every descendant before touching any directory; paused children
     // must retain their workspace even when the parent is terminal.
@@ -1094,6 +1164,9 @@ pub(super) async fn cleanup_mission_workspace_dirs_for_ids(
     }
     let deleted_dirs = Vec::new();
     for mission in missions {
+        if !mission.requires_local_disk || mission.backend.starts_with("cloud_") {
+            continue;
+        }
         let Some(ws) = workspaces.get(mission.workspace_id).await else {
             // Do not finalize the database deletion when the workspace that
             // owns a mission's persisted placement cannot be consulted.  A

@@ -1295,14 +1295,27 @@ async fn run_accepted(
     if tool.handler == super::Handler::Workspace {
         return super::workspace_ops::execute(state, p, &call.name, arguments)
             .await
-            .map_err(|_| ToolError {
-                code: "execution_failed".into(),
-                message:
-                    "Workspace operation outcome is unconfirmed; inspect its target before retrying"
-                        .into(),
-                accepted: "unknown".into(),
-                retryable: false,
-                action_id: None,
+            .map_err(|error| {
+                let diag = super::assistant::safe_diagnostic(&error);
+                if super::actions::is_uncertain_workspace_error(&error) {
+                    ToolError {
+                        code: "execution_failed".into(),
+                        message: format!(
+                            "Workspace operation outcome is unconfirmed; inspect its target before retrying. {diag}"
+                        ),
+                        accepted: "unknown".into(),
+                        retryable: false,
+                        action_id: None,
+                    }
+                } else {
+                    ToolError {
+                        code: "execution_rejected".into(),
+                        message: diag,
+                        accepted: "no".into(),
+                        retryable: false,
+                        action_id: None,
+                    }
+                }
             });
     }
     let user = AuthUser {
@@ -1346,15 +1359,25 @@ async fn run_accepted(
         arguments,
     )
     .await
-    .map_err(|error| ToolError {
-        code: "execution_failed".into(),
-        message: format!(
-            "Outcome unconfirmed; inspect before retrying. {}",
-            super::assistant::safe_diagnostic(&error)
-        ),
-        accepted: "unknown".into(),
-        retryable: false,
-        action_id: None,
+    .map_err(|error| {
+        let diag = super::assistant::safe_diagnostic(&error);
+        if super::actions::is_uncertain_dispatch_error(&call.name, &error) {
+            ToolError {
+                code: "execution_failed".into(),
+                message: format!("Outcome unconfirmed; inspect before retrying. {diag}"),
+                accepted: "unknown".into(),
+                retryable: false,
+                action_id: None,
+            }
+        } else {
+            ToolError {
+                code: "execution_rejected".into(),
+                message: diag,
+                accepted: "no".into(),
+                retryable: false,
+                action_id: None,
+            }
+        }
     })
 }
 

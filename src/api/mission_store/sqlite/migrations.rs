@@ -717,7 +717,9 @@ impl SqliteMissionStore {
             CREATE INDEX IF NOT EXISTS idx_tsm_due
                 ON telegram_scheduled_messages(status, send_at);
             CREATE INDEX IF NOT EXISTS idx_tsm_channel
-                ON telegram_scheduled_messages(channel_id, status, send_at);",
+                ON telegram_scheduled_messages(channel_id, status, send_at);
+            CREATE INDEX IF NOT EXISTS idx_telegram_scheduled_messages_mission
+                ON telegram_scheduled_messages(source_mission_id);",
         )
         .map_err(|e| format!("Failed to create telegram_scheduled_messages table: {}", e))?;
 
@@ -743,7 +745,9 @@ impl SqliteMissionStore {
                 FOREIGN KEY (mission_id) REFERENCES missions(id) ON DELETE SET NULL
             );
             CREATE INDEX IF NOT EXISTS idx_tmem_channel_search
-                ON telegram_structured_memory(channel_id, normalized_label, updated_at DESC);",
+                ON telegram_structured_memory(channel_id, normalized_label, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_telegram_structured_memory_mission
+                ON telegram_structured_memory(mission_id);",
         )
         .map_err(|e| format!("Failed to create telegram_structured_memory table: {}", e))?;
 
@@ -835,7 +839,9 @@ impl SqliteMissionStore {
             CREATE INDEX IF NOT EXISTS idx_tae_channel_updated
                 ON telegram_action_executions(channel_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_tae_scheduled
-                ON telegram_action_executions(scheduled_message_id);",
+                ON telegram_action_executions(scheduled_message_id);
+            CREATE INDEX IF NOT EXISTS idx_telegram_action_executions_mission
+                ON telegram_action_executions(source_mission_id);",
         )
         .map_err(|e| format!("Failed to create telegram_action_executions table: {}", e))?;
 
@@ -856,7 +862,9 @@ impl SqliteMissionStore {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_tconv_channel_chat
                 ON telegram_conversations(channel_id, chat_id);
             CREATE INDEX IF NOT EXISTS idx_tconv_channel_updated
-                ON telegram_conversations(channel_id, updated_at DESC);",
+                ON telegram_conversations(channel_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_telegram_conversations_mission
+                ON telegram_conversations(mission_id);",
         )
         .map_err(|e| format!("Failed to create telegram_conversations table: {}", e))?;
 
@@ -884,7 +892,9 @@ impl SqliteMissionStore {
             CREATE INDEX IF NOT EXISTS idx_tconv_msg_conversation_created
                 ON telegram_conversation_messages(conversation_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_tconv_msg_chat_created
-                ON telegram_conversation_messages(channel_id, chat_id, created_at DESC);",
+                ON telegram_conversation_messages(channel_id, chat_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_telegram_conversation_messages_mission
+                ON telegram_conversation_messages(mission_id);",
         )
         .map_err(|e| format!("Failed to create telegram_conversation_messages table: {}", e))?;
 
@@ -919,7 +929,13 @@ impl SqliteMissionStore {
             CREATE INDEX IF NOT EXISTS idx_twf_channel_updated
                 ON telegram_workflows(channel_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_twf_target_status
-                ON telegram_workflows(channel_id, target_chat_id, status, updated_at DESC);",
+                ON telegram_workflows(channel_id, target_chat_id, status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_telegram_workflows_origin_mission
+                ON telegram_workflows(origin_mission_id);
+            CREATE INDEX IF NOT EXISTS idx_telegram_workflows_origin_conv
+                ON telegram_workflows(origin_conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_telegram_workflows_target_conv
+                ON telegram_workflows(target_conversation_id);",
         )
         .map_err(|e| format!("Failed to create telegram_workflows table: {}", e))?;
         for (col_name, col_type) in [
@@ -941,7 +957,9 @@ impl SqliteMissionStore {
                 FOREIGN KEY (conversation_id) REFERENCES telegram_conversations(id) ON DELETE SET NULL
             );
             CREATE INDEX IF NOT EXISTS idx_twf_events_workflow_created
-                ON telegram_workflow_events(workflow_id, created_at DESC);",
+                ON telegram_workflow_events(workflow_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_telegram_workflow_events_conv
+                ON telegram_workflow_events(conversation_id);",
         )
         .map_err(|e| format!("Failed to create telegram_workflow_events table: {}", e))?;
 

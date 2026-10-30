@@ -776,6 +776,43 @@ impl SqliteMissionStore {
         .map_err(|e| e.to_string())?
     }
 
+    pub(super) async fn get_missions_metadata_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<Mission>, String> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.reader();
+        let unique_ids: Vec<String> = {
+            let mut seen = std::collections::HashSet::with_capacity(ids.len());
+            ids.iter()
+                .filter(|id| seen.insert(**id))
+                .map(Uuid::to_string)
+                .collect()
+        };
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut out = Vec::with_capacity(unique_ids.len());
+            for chunk in unique_ids.chunks(500) {
+                let placeholders = vec!["?"; chunk.len()].join(",");
+                let sql = format!(
+                    "SELECT {MISSION_LIST_COLUMNS} FROM missions WHERE id IN ({placeholders})"
+                );
+                let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(chunk.iter()), row_to_mission)
+                    .map_err(|e| e.to_string())?;
+                for row in rows {
+                    out.push(row.map_err(|e| e.to_string())?);
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     pub(super) async fn existing_mission_ids(
         &self,
         ids: &[Uuid],
@@ -1942,6 +1979,33 @@ impl SqliteMissionStore {
         .await
         .map_err(|e| e.to_string())??;
         Ok(removed)
+    }
+
+    pub(super) async fn delete_missions(&self, ids: &[Uuid]) -> Result<usize, String> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.clone();
+        let id_strs: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let mut deleted = 0usize;
+            {
+                let mut stmt = tx
+                    .prepare("DELETE FROM missions WHERE id = ?1")
+                    .map_err(|e| e.to_string())?;
+                for id_str in &id_strs {
+                    deleted += stmt.execute(params![id_str]).map_err(|e| e.to_string())?;
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok::<usize, String>(deleted)
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     pub(super) async fn delete_empty_untitled_missions_excluding(

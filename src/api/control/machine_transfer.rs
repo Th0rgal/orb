@@ -133,6 +133,13 @@ pub(crate) async fn guard(store: &Arc<dyn MissionStore>, id: Uuid) -> Result<(),
     {
         return Err("Cloud conversations use their provider account; local harness and machine operations are unavailable".into());
     }
+    guard_active_transfer(store, id).await
+}
+
+pub(crate) async fn guard_active_transfer(
+    store: &Arc<dyn MissionStore>,
+    id: Uuid,
+) -> Result<(), String> {
     if store
         .machine_transfers(id)
         .await?

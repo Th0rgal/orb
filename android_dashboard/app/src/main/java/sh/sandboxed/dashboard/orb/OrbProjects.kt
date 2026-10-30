@@ -1447,21 +1447,34 @@ fun OrbProjectPage(
         scope.launch {
             runCatching {
                 val path = "/api/control/missions/${core.encodeComponent(mission.id)}"
-                val latest = orbTry(OrbLog.Category.Network, "core.fetchDict") { core.fetchDict(path) }.getOrElse { e ->
-                    if ((e as? OrbError)?.status == 404) emptyMap() else throw e
-                }
-                val status = (OrbJSON.str(latest, "status") ?: "").lowercase()
+                val status = (mission.str("status", "state") ?: "").lowercase()
                 if (status == "active" || status == "waiting_background") {
                     throw OrbError("Stop or finish this agent before deleting it.")
                 }
-                if (latest.isNotEmpty()) {
-                    if (status == "paused") {
-                        core.request("$path/status", method = "POST", body = mapOf("status" to "acknowledged"))
-                    }
+                if (status == "paused") {
+                    core.request("$path/status", method = "POST", body = mapOf("status" to "acknowledged"))
+                }
+                val uuidRegex = Regex("[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", RegexOption.IGNORE_CASE)
+                for (attempt in 0 until 4) {
                     try {
-                        core.request(path, method = "DELETE")
+                        core.request("$path?include_descendants=true", method = "DELETE")
+                        break
                     } catch (e: OrbError) {
-                        if (e.status != 404) throw e
+                        if (e.status == 404) break
+                        val detail = e.body ?: e.message
+                        if (e.status == 409 && attempt < 3 && detail.contains("cannot delete a paused mission", ignoreCase = true)) {
+                            val pausedIds = uuidRegex.findAll(detail).map { it.value }.distinct().toList()
+                            if (pausedIds.isEmpty()) throw e
+                            for (pid in pausedIds) {
+                                core.request(
+                                    "/api/control/missions/${core.encodeComponent(pid)}/status",
+                                    method = "POST",
+                                    body = mapOf("status" to "acknowledged")
+                                )
+                            }
+                            continue
+                        }
+                        throw e
                     }
                 }
                 OrbReadCache.saveRowsMemoryOnly("mission_msgs_${mission.id}", emptyList())

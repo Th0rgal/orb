@@ -28,10 +28,20 @@ pub(crate) struct Snapshot {
     owners: HashMap<Uuid, Vec<Owner>>,
     unresolved: HashSet<Uuid>,
     queued_assignments: HashSet<Uuid>,
+    deferred_goals: HashSet<Uuid>,
     /// Accepted remote handles per mission with the repository each one
     /// validates. `None` is a raw command or legacy handle whose target is
     /// unknown; it cannot prove that the mission is unrelated to any PR.
     remote: HashMap<Uuid, Vec<Option<String>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteBlocker {
+    None,
+    Missing,
+    Paused,
+    Running,
+    ScheduledWork,
 }
 
 /// `owner/repo` of a GitHub repository reference in any of the forms the
@@ -145,6 +155,50 @@ impl Snapshot {
                 native_goal_holds: native_holds,
             },
         ))
+    }
+
+    /// Conversation history deletion guard (`DELETE /api/control/missions/:id`).
+    ///
+    /// Unlike `holds_track` (which governs project track leases and physical
+    /// directory purge, where `AwaitingUser` and idle `Pending` conversations
+    /// hold a project track until archived), conversation deletion may remove
+    /// quiescent `AwaitingUser` and unscheduled `Pending` conversations once all
+    /// runs, remote handles, actor assignments, queued messages, and deferred
+    /// schedules are settled. `Paused` missions remain explicitly protected
+    /// (`FLEET-004`).
+    pub(crate) fn delete_blocker(&self, id: Uuid) -> DeleteBlocker {
+        let in_unresolved = self.unresolved.contains(&id);
+        let in_queued = self.queued_assignments.contains(&id);
+        let in_deferred = self.deferred_goals.contains(&id);
+        let owners = self.owners.get(&id);
+        if !in_unresolved && !in_queued && !in_deferred && owners.is_none() {
+            return DeleteBlocker::Missing;
+        }
+        if owners.is_some_and(|list| list.iter().any(|o| o.status == MissionStatus::Paused)) {
+            return DeleteBlocker::Paused;
+        }
+        let has_running_status = owners.is_some_and(|list| {
+            list.iter().any(|o| {
+                matches!(
+                    o.status,
+                    MissionStatus::Active | MissionStatus::WaitingBackground
+                )
+            })
+        });
+        if in_unresolved || has_running_status {
+            return DeleteBlocker::Running;
+        }
+        let scheduled_pending = owners.is_some_and(|list| {
+            list.iter().any(|o| {
+                o.status == MissionStatus::Pending
+                    && (in_deferred
+                        || o.reason.as_deref() == Some(usage_limit_wait::USAGE_LIMIT_WAIT_REASON))
+            })
+        });
+        if in_queued || scheduled_pending {
+            return DeleteBlocker::ScheduledWork;
+        }
+        DeleteBlocker::None
     }
 
     /// Every persisted owner counts, even archived missions. A different mission
@@ -369,9 +423,16 @@ fn read_file(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), Stri
         missions: HashMap<Uuid, Mission>,
         #[serde(default)]
         runs: HashMap<Uuid, MissionRun>,
+        #[serde(default)]
+        deferred_goals: HashMap<Uuid, String>,
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let file: FileSnapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    for (id, goal) in file.deferred_goals {
+        if !goal.trim().is_empty() {
+            snapshot.deferred_goals.insert(id);
+        }
+    }
     for mission in file.missions.into_values() {
         snapshot.mission(mission);
     }
@@ -382,6 +443,209 @@ fn read_file(path: &std::path::Path, snapshot: &mut Snapshot) -> Result<(), Stri
             .map(|run| run.mission_id),
     );
     Ok(())
+}
+
+fn read_sqlite_for_ids(
+    path: &std::path::Path,
+    target_ids: &HashSet<Uuid>,
+    snapshot: &mut Snapshot,
+) -> Result<(), String> {
+    if target_ids.is_empty() {
+        return Ok(());
+    }
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
+    let cols = columns(&conn, "missions")?;
+    let optional = |name: &str| {
+        if cols.contains(name) {
+            name.to_string()
+        } else {
+            "NULL".into()
+        }
+    };
+    let id_strs: Vec<String> = target_ids.iter().map(Uuid::to_string).collect();
+    for chunk in id_strs.chunks(500) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let query = format!(
+            "SELECT id,status,{},{},{},{},{},{},{} FROM missions WHERE id IN ({placeholders})",
+            optional("terminal_reason"),
+            optional("github_pr"),
+            optional("tags"),
+            optional("intent"),
+            optional("workspace_id"),
+            optional("working_directory"),
+            optional("deferred_goal"),
+        );
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (
+                id,
+                status,
+                reason,
+                pr,
+                tags,
+                intent,
+                workspace_id,
+                working_directory,
+                deferred_goal,
+            ) = row.map_err(|e| e.to_string())?;
+            let id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+            let status = serde_json::from_value(serde_json::Value::String(status))
+                .map_err(|e| e.to_string())?;
+            if deferred_goal
+                .as_deref()
+                .is_some_and(|g| !g.trim().is_empty())
+            {
+                snapshot.deferred_goals.insert(id);
+            }
+            let tags: Vec<String> = tags
+                .map(|t| serde_json::from_str(&t))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default();
+            snapshot.directories.push(DirectoryOwner {
+                id,
+                workspace_id: workspace_id
+                    .as_deref()
+                    .map(Uuid::parse_str)
+                    .transpose()
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or(Uuid::nil()),
+                working_directory,
+                directory_owner: fork_directory_owner(id, &tags),
+            });
+            let read_only =
+                crate::api::track_leases::lease_mode(None, &tags, intent.as_deref()) == "reader";
+            snapshot.owners.entry(id).or_default().push(Owner {
+                status,
+                reason,
+                pr,
+                pr_known: cols.contains("github_pr"),
+                read_only,
+            });
+        }
+    }
+    if !columns(&conn, "mission_runs")?.is_empty() {
+        for chunk in id_strs.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT mission_id FROM mission_runs WHERE execution_state <> 'terminal' AND mission_id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            for row in stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(|e| e.to_string())?
+            {
+                snapshot.unresolved.insert(
+                    Uuid::parse_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?,
+                );
+            }
+        }
+    }
+    if !columns(&conn, "control_queue")?.is_empty() {
+        let mut stmt = conn
+            .prepare("SELECT payload FROM control_queue")
+            .map_err(|e| e.to_string())?;
+        for row in stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+        {
+            snapshot.queue(&row.map_err(|e| e.to_string())?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Targeted ownership snapshot for `target_ids` (used by conversation deletion
+/// under `DISPATCH_ADMISSION` so deleting 1–200 missions never scans the entire
+/// 15,000+ mission table).
+pub(crate) async fn snapshot_for_ids(
+    hub: &ControlHub,
+    target_ids: &HashSet<Uuid>,
+) -> Result<Snapshot, String> {
+    let mut snapshot = Snapshot::default();
+    if target_ids.is_empty() {
+        return Ok(snapshot);
+    }
+    for handle in crate::remote_node::job_ledger::load(&hub.config.working_dir)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        if target_ids.contains(&handle.mission_id) {
+            snapshot
+                .remote
+                .entry(handle.mission_id)
+                .or_default()
+                .push(handle.identity.map(|identity| identity.repository));
+        }
+    }
+    snapshot.unresolved.extend(snapshot.remote.keys().copied());
+    for session in hub.all_sessions().await {
+        for id in session.assignment_owners.read().await.iter().copied() {
+            if target_ids.contains(&id) {
+                snapshot.unresolved.insert(id);
+            }
+        }
+    }
+    let id_vec: Vec<Uuid> = target_ids.iter().copied().collect();
+    let inventory = hub.mission_store_inventory().await?;
+    for store in inventory.live {
+        for run in store.list_active_mission_runs().await? {
+            if target_ids.contains(&run.mission_id) {
+                snapshot.unresolved.insert(run.mission_id);
+            }
+        }
+        snapshot.queue(&store.load_control_queue("").await?)?;
+        let missions = store.get_missions_metadata_by_ids(&id_vec).await?;
+        #[cfg(test)]
+        super::dispatch_admission_tests::after_ownership_page(&missions);
+        for mission in missions {
+            if mission.status == MissionStatus::Pending
+                && store
+                    .get_deferred_goal(mission.id)
+                    .await?
+                    .as_deref()
+                    .is_some_and(|g| !g.trim().is_empty())
+            {
+                snapshot.deferred_goals.insert(mission.id);
+            }
+            snapshot.mission(mission);
+        }
+    }
+    let targets = target_ids.clone();
+    tokio::task::spawn_blocking(move || {
+        for path in inventory.offline_sqlite {
+            read_sqlite_for_ids(&path, &targets, &mut snapshot)?;
+        }
+        for user in inventory.offline_file_users {
+            read_file(
+                &inventory.base_dir.join(format!("missions-{user}.json")),
+                &mut snapshot,
+            )?;
+        }
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub(crate) async fn snapshot(hub: &ControlHub) -> Result<Snapshot, String> {

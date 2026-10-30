@@ -238,7 +238,12 @@ pub(crate) fn require_history_deletable(
             }
             // These are canonical UUIDs, normalized/validated at acceptance.
             // Do not treat missing/invalid legacy targets as disjoint.
-            for field in ["mission_id", "parent_mission_id", "supersedes_mission_id"] {
+            for field in [
+                "mission_id",
+                "parent_mission_id",
+                "supersedes_mission_id",
+                "owner_mission_id",
+            ] {
                 if let Some(value) = args.get(field).filter(|v| !v.is_null()) {
                     let id = Uuid::parse_str(value.as_str()?).ok()?;
                     if mission_ids.contains(&id) {
@@ -250,9 +255,16 @@ pub(crate) fn require_history_deletable(
                 "resume_mission"
                 | "send_message_to_mission"
                 | "ask_mission"
+                | "answer_mission_question"
                 | "cancel_mission"
                 | "acknowledge_mission"
-                | "start_workspace_job" => {
+                | "adopt_mission"
+                | "link_mission_to_project"
+                | "update_mission_settings"
+                | "start_workspace_job"
+                | "create_worktree"
+                | "remove_worktree"
+                | "merge_branch" => {
                     Uuid::parse_str(args.get("mission_id")?.as_str()?).ok()?;
                 }
                 // New children depend on their issuer/parent and superseded
@@ -275,9 +287,12 @@ pub(crate) fn require_history_deletable(
                         return Some(false);
                     }
                 }
-                "schedule_wakeup" | "schedule_job_wakeup" => {
+                "schedule_wakeup" | "schedule_job_wakeup" | "plan_tasks" => {
                     p.mission_id?;
                 }
+                // Indirect worker board mutations resolve their worker from the
+                // board at dispatch time rather than carrying a mission UUID.
+                "reject_task" | "review_task" => return Some(false),
                 // Accept records a board verdict without resuming its worker,
                 // but deletion of its boss cascades to the task record.
                 // Keys are board-local: the issuer check above protects their
@@ -303,7 +318,49 @@ pub(crate) fn require_history_deletable(
                         return None;
                     }
                 }
-                "destroy_managed_machine" => {}
+                "cancel_workspace_job" => {
+                    Uuid::parse_str(args.get("job_id")?.as_str()?).ok()?;
+                }
+                "cancel_action" | "reconcile_action" => {
+                    Uuid::parse_str(args.get("action_id")?.as_str()?).ok()?;
+                }
+                "update_project_status" => {
+                    if crate::api::controller_honesty::parse_inspect_mission_id(
+                        args.get("next_action").and_then(Value::as_str),
+                    )
+                    .is_some_and(|id| mission_ids.contains(&id))
+                    {
+                        return Some(false);
+                    }
+                }
+                "spawn_managed_machine"
+                | "destroy_managed_machine"
+                | "extend_managed_machine"
+                | "snapshot_managed_machine"
+                | "delete_managed_snapshot"
+                | "fork_managed_machine"
+                | "stop_managed_machine"
+                | "resume_managed_machine"
+                | "exec_raw_managed_machine"
+                | "set_project_track"
+                | "accept_project_track_evidence"
+                | "reopen_project_track"
+                | "accept_project_track"
+                | "invalidate_project_track_evidence"
+                | "add_project_steer"
+                | "record_project_decision"
+                | "answer_project_decision"
+                | "plan_project_tasks"
+                | "update_project_task"
+                | "cancel_project_task"
+                | "set_project_grant"
+                | "create_workspace"
+                | "update_workspace"
+                | "delete_workspace"
+                | "save_workspace_template"
+                | "delete_workspace_template"
+                | "rebuild_workspace_from_template"
+                | "deploy_sandboxed_sh" => {}
                 _ => return None,
             }
             Some(true)
@@ -317,10 +374,190 @@ pub(crate) fn require_history_deletable(
     Ok(replacements)
 }
 
+fn has_http_status_in(message: &str, range: std::ops::RangeInclusive<u16>) -> bool {
+    for prefix in ["(", "HTTP "] {
+        let mut rest = message;
+        while let Some(pos) = rest.find(prefix) {
+            let after = &rest[pos + prefix.len()..];
+            if after.len() >= 3 && after.as_bytes()[..3].iter().all(u8::is_ascii_digit) {
+                let next_ok = after
+                    .as_bytes()
+                    .get(3)
+                    .is_none_or(|b| matches!(b, b' ' | b')' | b':'));
+                if next_ok {
+                    if let Ok(code) = after[..3].parse::<u16>() {
+                        if range.contains(&code) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            rest = after;
+        }
+    }
+    false
+}
+
+/// True when a workspace Git mutation (`create_worktree`, `remove_worktree`,
+/// `merge_branch`) may have reached the target machine or repository without a
+/// confirmed terminal receipt. Deterministic preflight/refusal errors return
+/// `false` so the action settles as `rejected` (`accepted = "no"`).
+pub(crate) fn is_uncertain_workspace_error(error: &str) -> bool {
+    error.contains("Node operation outcome unknown")
+        || error.contains("Workspace operation outcome unknown")
+        || error.contains("Invalid workspace receipt")
+        || error.contains("Workspace operation produced no valid receipt")
+        || error.contains("Backend diagnostic contained credentials")
+}
+
+/// True when an MCP mutation error leaves side effects unconfirmed and must
+/// hold the receipt in `reconciliation_required` (`accepted = "unknown"`).
+/// Deterministic validation, authorization, HTTP 4xx, and cleaned-up spawn
+/// rejections return `false` so the receipt settles as `rejected`.
+pub(crate) fn is_uncertain_dispatch_error(tool: &str, error: &str) -> bool {
+    let stripped = error
+        .strip_prefix("Outcome unconfirmed; inspect before retrying. ")
+        .or_else(|| {
+            error.strip_prefix(
+                "Workspace operation outcome is unconfirmed; inspect its target before retrying. ",
+            )
+        })
+        .unwrap_or(error)
+        .trim();
+    if matches!(tool, "create_worktree" | "remove_worktree" | "merge_branch") {
+        if stripped
+            == "Workspace operation outcome is unconfirmed; inspect its target before retrying"
+        {
+            return true;
+        }
+        return is_uncertain_workspace_error(stripped);
+    }
+    if stripped.is_empty()
+        || stripped.contains("Backend diagnostic contained credentials")
+        || stripped.contains("HTTP request failed:")
+        || stripped.contains("Failed to read ")
+        || stripped.contains("Failed to parse ")
+        || stripped.contains("Invalid cancellation receipt")
+        || stripped.contains("Cancellation outcome is unknown")
+        || stripped.contains("Invalid wake-up receipt:")
+        || stripped.contains("Created mission response did not include an id")
+        || stripped.contains("Mission ACK mutation succeeded")
+        || stripped.contains("Save workspace template succeeded")
+        || stripped.contains("Outcome unconfirmed")
+        || stripped.contains("SSE stream error:")
+        || stripped.contains("Deploy failed:")
+        || stripped.contains("Missing worktree path receipt")
+    {
+        return true;
+    }
+    if has_http_status_in(stripped, 500..=599) {
+        // Pre-commit / cleaned-up 5xx exceptions:
+        // - `disabled (503)`: managed-machines manager not initialised.
+        // - `provision_failed (502)` / `provision_failed (500)`: ManagedManager::spawn
+        //   destroys the failed sandbox before returning and never hands out a VM.
+        // - `No assistant LLM configured` (503): rejected before Ask thread creation.
+        // - Pre-fix `ask_mission` workspace resolution 500s: rejected before Ask LLM run.
+        if stripped.starts_with("disabled (503")
+            || stripped.starts_with("provision_failed (502")
+            || stripped.starts_with("provision_failed (500")
+            || (tool == "ask_mission"
+                && (stripped.contains("No assistant LLM configured")
+                    || stripped.contains("mission workspace is unavailable or not prepared:")
+                    || stripped.contains("persisted mission workspace root is unavailable:")
+                    || stripped.contains("explicit working_directory owner is unavailable")))
+        {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
 pub fn recover(conn: &Connection) -> Result<usize, String> {
     // Queued work can be safely started. Dispatched work cannot be blindly
     // replayed: a provider may have accepted it before Core lost the response.
-    conn.execute("UPDATE mcp_actions_v1 SET state='reconciliation_required',updated_at=CURRENT_TIMESTAMP WHERE state='dispatching'",[]).map_err(|e|e.to_string())
+    let recovered = conn
+        .execute(
+            "UPDATE mcp_actions_v1 SET state='reconciliation_required',updated_at=CURRENT_TIMESTAMP WHERE state='dispatching'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    reclassify_deterministic_rejections(conn)?;
+    Ok(recovered)
+}
+
+/// Settle historical `reconciliation_required` receipts that recorded a known
+/// deterministic pre-commit rejection before `run_accepted` distinguished
+/// `accepted = "no"` from `accepted = "unknown"`. Rows with `result IS NULL`
+/// (in-flight crash recovery) or genuine transport/5xx/readback uncertainty are
+/// never touched.
+fn reclassify_deterministic_rejections(conn: &Connection) -> Result<usize, String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_actions_v1')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Ok(0);
+    }
+    let rows: Vec<(String, String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, tool, result FROM mcp_actions_v1 WHERE state='reconciliation_required' AND result IS NOT NULL",
+            )
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| e.to_string())?;
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
+    let mut updates = Vec::new();
+    for (id, tool, raw_result) in rows {
+        let Ok(mut receipt) = serde_json::from_str::<Value>(&raw_result) else {
+            continue;
+        };
+        let Some(message) = receipt
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if is_uncertain_dispatch_error(&tool, &message) {
+            continue;
+        }
+        let clean = message
+            .strip_prefix("Outcome unconfirmed; inspect before retrying. ")
+            .unwrap_or(&message)
+            .to_string();
+        receipt["state"] = json!("rejected");
+        if let Some(err_obj) = receipt.get_mut("error").and_then(Value::as_object_mut) {
+            err_obj.insert("accepted".into(), json!("no"));
+            err_obj.insert("code".into(), json!("execution_rejected"));
+            err_obj.insert("message".into(), json!(clean));
+        }
+        updates.push((id, receipt.to_string()));
+    }
+    if updates.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let mut changed = 0usize;
+    for (id, updated_result) in updates {
+        changed += tx
+            .execute(
+                "UPDATE mcp_actions_v1 SET state='rejected', result=?1, updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND state='reconciliation_required' AND result IS NOT NULL",
+                params![updated_result, id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(changed)
 }
 
 #[cfg(test)]
@@ -712,5 +949,253 @@ mod tests {
         ext2.session_id = Uuid::new_v4();
         assert!(read(&conn, &ext2, ext1_id).is_err());
         assert_ne!(reserve(&conn, &ext2, &c).unwrap()["action_id"], ext1_id);
+    }
+
+    #[test]
+    fn every_registered_mutation_tool_has_explicit_history_delete_scoping() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        let target = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let ids = std::collections::HashSet::from([target]);
+        let issuer = Principal {
+            sub: "alice".into(),
+            username: "alice".into(),
+            role: Role::Operator,
+            mission_id: Some(other),
+            project: None,
+            action_run_generation: Some(1),
+            session_id: Uuid::new_v4(),
+            exp: usize::MAX,
+            client_kind: None,
+            client_label: None,
+            host_hint: None,
+        };
+        let mut mutation_tools: Vec<String> = super::super::registry()
+            .into_iter()
+            .filter(|t| t.mutation)
+            .map(|t| t.definition.name)
+            .collect();
+        mutation_tools.sort();
+        assert!(!mutation_tools.is_empty());
+
+        for tool in &mutation_tools {
+            let args = match tool.as_str() {
+                "cancel_workspace_job" => json!({"job_id": other}),
+                "cancel_action" | "reconcile_action" => json!({"action_id": other}),
+                "accept_task" => json!({"task_key": "k1"}),
+                "reject_task" | "review_task" => json!({"task_key": "k1", "feedback": "f"}),
+                name if matches!(
+                    name,
+                    "resume_mission"
+                        | "send_message_to_mission"
+                        | "ask_mission"
+                        | "answer_mission_question"
+                        | "cancel_mission"
+                        | "acknowledge_mission"
+                        | "adopt_mission"
+                        | "link_mission_to_project"
+                        | "update_mission_settings"
+                        | "start_workspace_job"
+                        | "create_worktree"
+                        | "remove_worktree"
+                        | "merge_branch"
+                ) =>
+                {
+                    json!({"mission_id": other})
+                }
+                _ => json!({}),
+            };
+            conn.execute("DELETE FROM mcp_actions_v1", []).unwrap();
+            conn.execute(
+                "INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state) VALUES('row',?1,'s','k','f',?2,?3,?4,'reconciliation_required')",
+                params![issuer.sub, serde_json::to_string(&issuer).unwrap(), tool, args.to_string()],
+            )
+            .unwrap();
+            let res = require_history_deletable(
+                &conn,
+                &issuer.sub,
+                &ids,
+                &std::collections::HashSet::new(),
+            );
+            if matches!(tool.as_str(), "reject_task" | "review_task") {
+                assert!(
+                    res.is_err(),
+                    "{tool} must conservatively block indirect worker lookup"
+                );
+            } else {
+                assert!(
+                    res.is_ok(),
+                    "registered mutation tool `{tool}` with disjoint args blocked history delete: {res:?}"
+                );
+            }
+        }
+
+        // `owner_mission_id` and `update_project_status` `inspect <uuid>` block matching targets.
+        let missionless = Principal {
+            mission_id: None,
+            ..issuer
+        };
+        conn.execute("DELETE FROM mcp_actions_v1", []).unwrap();
+        conn.execute(
+            "INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state) VALUES('vm',?1,'s','k1','f',?2,'spawn_managed_machine',?3,'reconciliation_required')",
+            params![
+                missionless.sub,
+                serde_json::to_string(&missionless).unwrap(),
+                json!({"owner_mission_id": target}).to_string()
+            ],
+        )
+        .unwrap();
+        assert!(require_history_deletable(
+            &conn,
+            &missionless.sub,
+            &ids,
+            &std::collections::HashSet::new()
+        )
+        .is_err());
+        conn.execute(
+            "UPDATE mcp_actions_v1 SET tool='update_project_status', arguments=?1 WHERE id='vm'",
+            [json!({"slug": "orb", "next_action": format!("inspect {target}")}).to_string()],
+        )
+        .unwrap();
+        assert!(require_history_deletable(
+            &conn,
+            &missionless.sub,
+            &ids,
+            &std::collections::HashSet::new()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn recover_reclassifies_deterministic_rejections_and_preserves_true_uncertainty() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        let p = principal();
+        let p_json = serde_json::to_string(&p).unwrap();
+
+        let insert = |id: &str, tool: &str, result: Option<Value>| {
+            conn.execute(
+                "INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state,result) VALUES(?1,?2,'s',?1,'f',?3,?4,'{}','reconciliation_required',?5)",
+                params![
+                    id,
+                    p.sub,
+                    p_json,
+                    tool,
+                    result.map(|v| v.to_string()),
+                ],
+            )
+            .unwrap();
+        };
+
+        // 1. Crash-recovered row (`result IS NULL`) MUST stay `reconciliation_required`.
+        insert("null-crash", "start_mission", None);
+        // 2. Network transport failure MUST stay `reconciliation_required`.
+        insert(
+            "net-timeout",
+            "send_message_to_mission",
+            Some(json!({
+                "action_id": "net-timeout",
+                "state": "reconciliation_required",
+                "error": {
+                    "code": "execution_failed",
+                    "accepted": "unknown",
+                    "retryable": false,
+                    "message": "Outcome unconfirmed; inspect before retrying. HTTP request failed: operation timed out"
+                }
+            })),
+        );
+        // 3. Provider 502 on VM destroy MUST stay `reconciliation_required`.
+        insert(
+            "destroy-502",
+            "destroy_managed_machine",
+            Some(json!({
+                "action_id": "destroy-502",
+                "state": "reconciliation_required",
+                "error": {
+                    "code": "execution_failed",
+                    "accepted": "unknown",
+                    "retryable": false,
+                    "message": "Outcome unconfirmed; inspect before retrying. provider_error (502 Bad Gateway): upstream error"
+                }
+            })),
+        );
+        // 4. Deterministic 409 resume rejection MUST reclassify to `rejected` (`accepted = "no"`).
+        insert(
+            "resume-409",
+            "resume_mission",
+            Some(json!({
+                "action_id": "resume-409",
+                "state": "reconciliation_required",
+                "error": {
+                    "code": "execution_failed",
+                    "accepted": "unknown",
+                    "retryable": false,
+                    "message": "Outcome unconfirmed; inspect before retrying. Failed to resume mission (409 Conflict): Cannot resume mission with status 'completed'."
+                }
+            })),
+        );
+        // 5. Cleaned-up `provision_failed (502)` on `spawn_managed_machine` MUST reclassify to `rejected`.
+        insert(
+            "spawn-prov-fail",
+            "spawn_managed_machine",
+            Some(json!({
+                "action_id": "spawn-prov-fail",
+                "state": "reconciliation_required",
+                "error": {
+                    "code": "execution_failed",
+                    "accepted": "unknown",
+                    "retryable": false,
+                    "message": "Outcome unconfirmed; inspect before retrying. provision_failed (502 Bad Gateway): sandbox did not enroll within 180s"
+                }
+            })),
+        );
+        // 6. Historical `ask_mission` unavailable-workspace 500 MUST reclassify to `rejected`.
+        insert(
+            "ask-ws-missing",
+            "ask_mission",
+            Some(json!({
+                "action_id": "ask-ws-missing",
+                "state": "reconciliation_required",
+                "error": {
+                    "code": "execution_failed",
+                    "accepted": "unknown",
+                    "retryable": false,
+                    "message": "Outcome unconfirmed; inspect before retrying. Failed to ask mission (500 Internal Server Error): mission workspace is unavailable or not prepared: /var/lib/sandboxed-sh/workspaces/missions/453427ed"
+                }
+            })),
+        );
+
+        recover(&conn).unwrap();
+
+        let state_of = |id: &str| -> (String, Option<Value>) {
+            let (st, res): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT state, result FROM mcp_actions_v1 WHERE id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            (st, res.map(|s| serde_json::from_str(&s).unwrap()))
+        };
+
+        assert_eq!(state_of("null-crash").0, "reconciliation_required");
+        assert_eq!(state_of("net-timeout").0, "reconciliation_required");
+        assert_eq!(state_of("destroy-502").0, "reconciliation_required");
+
+        for id in ["resume-409", "spawn-prov-fail", "ask-ws-missing"] {
+            let (st, receipt) = state_of(id);
+            let receipt = receipt.unwrap();
+            assert_eq!(st, "rejected", "{id}: {receipt}");
+            assert_eq!(receipt["state"], "rejected", "{id}");
+            assert_eq!(receipt["error"]["accepted"], "no", "{id}");
+            assert!(
+                !receipt["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Outcome unconfirmed"),
+                "{id}: {receipt}"
+            );
+        }
     }
 }

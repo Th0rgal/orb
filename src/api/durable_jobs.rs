@@ -1599,6 +1599,19 @@ pub(crate) async fn has_unsettled_mission_jobs(
     user: &AuthUser,
     mission_id: Uuid,
 ) -> Result<bool, String> {
+    let mut ids = std::collections::HashSet::with_capacity(1);
+    ids.insert(mission_id);
+    has_unsettled_missions_jobs(state, user, &ids).await
+}
+
+pub(crate) async fn has_unsettled_missions_jobs(
+    state: &Arc<AppState>,
+    user: &AuthUser,
+    mission_ids: &std::collections::HashSet<Uuid>,
+) -> Result<bool, String> {
+    if mission_ids.is_empty() {
+        return Ok(false);
+    }
     let mut entries = match tokio::fs::read_dir(jobs_root(state)).await {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -1618,7 +1631,9 @@ pub(crate) async fn has_unsettled_mission_jobs(
             .map_err(|_| "Cannot read workspace job receipt")?;
         let job: DurableJob =
             serde_json::from_slice(&bytes).map_err(|_| "Invalid workspace job receipt")?;
-        if job.started_by_mission_id == Some(mission_id)
+        if job
+            .started_by_mission_id
+            .is_some_and(|mid| mission_ids.contains(&mid))
             && authorize_job(state, user, &job).await.is_ok()
         {
             let job = refresh_job(state, job).await;

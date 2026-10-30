@@ -195,30 +195,9 @@ pub async fn ask_send(
 
     let ask_store = super::ask_store(&state.config).await.map_err(internal)?;
 
-    // Resolve or create the thread.
-    let is_new_thread = req.thread_id.is_none();
-    let thread = match req.thread_id {
-        Some(tid) => {
-            let t = ask_store
-                .get_thread(tid)
-                .await
-                .map_err(internal)?
-                .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
-            if t.mission_id != mission_id {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Thread does not belong to this mission".to_string(),
-                ));
-            }
-            t
-        }
-        None => ask_store
-            .create_thread(mission_id, Some(cfg.model.clone()))
-            .await
-            .map_err(internal)?,
-    };
-
-    // Resolve the live workspace + working directory for the bash tool.
+    // Resolve the live workspace + working directory before mutating ask_store
+    // so unavailable/remote mission workspaces reject cleanly with 409 without
+    // leaving an empty orphan thread or triggering ambiguous 500 reconciliation.
     let workspace = crate::workspace::resolve_workspace(
         &state.workspaces,
         &state.config,
@@ -234,7 +213,7 @@ pub async fn ask_send(
         mission_id,
         mission.parent_mission_id,
     )
-    .map_err(internal)?;
+    .map_err(|e| (StatusCode::CONFLICT, e))?;
 
     // Optional sandbox-copy isolation: writes go to a throwaway worktree/copy.
     let setup_exec = crate::workspace_exec::WorkspaceExec::new(workspace.clone());
@@ -250,6 +229,42 @@ pub async fn ask_send(
                 .to_string(),
         ));
     }
+
+    // Resolve or create the thread.
+    let is_new_thread = req.thread_id.is_none();
+    let thread = match req.thread_id {
+        Some(tid) => {
+            let t = ask_store
+                .get_thread(tid)
+                .await
+                .map_err(internal)?
+                .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
+            if t.mission_id != mission_id {
+                if let Some(dir) = &sandbox_dir {
+                    super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+                }
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Thread does not belong to this mission".to_string(),
+                ));
+            }
+            t
+        }
+        None => {
+            match ask_store
+                .create_thread(mission_id, Some(cfg.model.clone()))
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Some(dir) = &sandbox_dir {
+                        super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+                    }
+                    return Err(internal(e));
+                }
+            }
+        }
+    };
     let used_sandbox = sandbox_dir.is_some();
     let work_dir = sandbox_dir.clone().unwrap_or_else(|| base_work_dir.clone());
 
@@ -331,28 +346,6 @@ pub async fn ask_send_stream(
 
     let ask_store = super::ask_store(&state.config).await.map_err(internal)?;
 
-    let is_new_thread = req.thread_id.is_none();
-    let thread = match req.thread_id {
-        Some(tid) => {
-            let t = ask_store
-                .get_thread(tid)
-                .await
-                .map_err(internal)?
-                .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
-            if t.mission_id != mission_id {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Thread does not belong to this mission".to_string(),
-                ));
-            }
-            t
-        }
-        None => ask_store
-            .create_thread(mission_id, Some(cfg.model.clone()))
-            .await
-            .map_err(internal)?,
-    };
-
     let workspace = crate::workspace::resolve_workspace(
         &state.workspaces,
         &state.config,
@@ -368,7 +361,7 @@ pub async fn ask_send_stream(
         mission_id,
         mission.parent_mission_id,
     )
-    .map_err(internal)?;
+    .map_err(|e| (StatusCode::CONFLICT, e))?;
 
     // Optional sandbox-copy isolation (same as the synchronous path): set up a
     // throwaway worktree, run the streamed turn in it, tear it down after.
@@ -385,6 +378,41 @@ pub async fn ask_send_stream(
                 .to_string(),
         ));
     }
+
+    let is_new_thread = req.thread_id.is_none();
+    let thread = match req.thread_id {
+        Some(tid) => {
+            let t = ask_store
+                .get_thread(tid)
+                .await
+                .map_err(internal)?
+                .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
+            if t.mission_id != mission_id {
+                if let Some(dir) = &sandbox_dir {
+                    super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+                }
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Thread does not belong to this mission".to_string(),
+                ));
+            }
+            t
+        }
+        None => {
+            match ask_store
+                .create_thread(mission_id, Some(cfg.model.clone()))
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Some(dir) = &sandbox_dir {
+                        super::cleanup_sandbox(&setup_exec, &base_work_dir, dir).await;
+                    }
+                    return Err(internal(e));
+                }
+            }
+        }
+    };
     let used_sandbox = sandbox_dir.is_some();
     let work_dir = sandbox_dir.clone().unwrap_or_else(|| base_work_dir.clone());
 

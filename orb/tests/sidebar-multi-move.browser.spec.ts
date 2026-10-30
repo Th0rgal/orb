@@ -296,3 +296,56 @@ test('when system clipboard write is refused, paste prefers the active local cut
   await page.waitForTimeout(150);
   expect(transfers).toEqual([{from:'verity',to:'other',path:'b.md',destination:'b.md'}]);
 });
+
+test('deleting a parent with unloaded server-side descendants or paused child recovers cleanly without pre-DELETE transcript GETs', async ({page}) => {
+  await page.addInitScript(() => {localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+  const HIDDEN_PAUSED='00000000-0000-0000-0000-0000000000a9';
+  let visible=[{id:F,title:'Fredrik',status:'completed',project:'verity',tags:[],history:[],updated_at:'2026-10-20T06:00:00Z'}];
+  let hiddenPaused=true;
+  const transcriptGets:string[]=[];
+  const deleteSearches:string[]=[];
+  const acknowledged:string[]=[];
+  await page.route('**/api/**',async route=>{
+    const req=route.request(),url=new URL(req.url()),path=url.pathname,id=path.split('/')[4];
+    if(req.method()==='GET' && /^\/api\/control\/missions\/[^/]+$/.test(path)) {
+      transcriptGets.push(id);
+      return route.fulfill({json:visible.find(m=>m.id===id)??{}});
+    }
+    if(req.method()==='POST' && path.endsWith('/status')) {
+      acknowledged.push(id);
+      if(id===HIDDEN_PAUSED) hiddenPaused=false;
+      return route.fulfill({json:{ok:true}});
+    }
+    if(req.method()==='DELETE') {
+      deleteSearches.push(url.search);
+      if(url.searchParams.get('include_descendants')!=='true') {
+        return route.fulfill({status:409,body:`Mission ${id} has 1 descendant sessions: hidden (paused). Pass ?include_descendants=true to delete them with it.`});
+      }
+      if(hiddenPaused) {
+        return route.fulfill({status:409,body:`Cannot delete a paused mission (${HIDDEN_PAUSED}). Resume or cancel it first.`});
+      }
+      visible=[];
+      return route.fulfill({json:{deleted_ids:[HIDDEN_PAUSED,id]}});
+    }
+    const json=path==='/api/projects'?{projects:[{slug:'verity',title:'Verity'}]}
+      :path==='/api/control/missions'?visible
+      :path.endsWith('/files')?{entries:[]}
+      :path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
+    await route.fulfill({json});
+  });
+  await page.goto('/');await page.getByRole('button',{name:'Verity',exact:true}).click();
+  const tree=page.getByRole('tree',{name:'Projects',exact:true});
+  await tree.getByRole('button',{name:'Fredrik',exact:true}).click({button:'right'});
+  await page.getByRole('menuitem',{name:/^Delete/}).click();
+  const dialog=page.getByRole('dialog');
+  await dialog.getByRole('button',{name:'Delete',exact:true}).click();
+  // First attempt had unloaded descendants on the server: modal surfaces the refusal and remembers confirmation.
+  await expect(dialog).toContainText('1 descendant sessions');
+  await dialog.getByRole('button',{name:'Delete',exact:true}).click();
+  // Retry passes ?include_descendants=true, auto-acknowledges the hidden paused child, and completes deletion.
+  await expect(dialog).toHaveCount(0);
+  expect(transcriptGets).toEqual([]);
+  expect(acknowledged).toEqual([HIDDEN_PAUSED]);
+  expect(deleteSearches).toEqual(['','?include_descendants=true','?include_descendants=true']);
+  await expect(tree.getByRole('button',{name:'Fredrik',exact:true})).toHaveCount(0);
+});

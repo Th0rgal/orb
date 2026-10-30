@@ -3270,6 +3270,22 @@ pub trait MissionStore: Send + Sync {
         self.get_mission(id).await
     }
 
+    /// Read row metadata for a batch of mission IDs without loading transcript
+    /// history. Defaults to per-id [`Self::get_mission_metadata`] calls.
+    async fn get_missions_metadata_by_ids(&self, ids: &[Uuid]) -> Result<Vec<Mission>, String> {
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(m) = self.get_mission_metadata(id).await? {
+                out.push(m);
+            }
+        }
+        Ok(out)
+    }
+
     /// Return the subset of `ids` that exist in this store, without loading
     /// transcripts. Defaults to per-id [`Self::get_mission_metadata`] checks.
     async fn existing_mission_ids(
@@ -3311,6 +3327,18 @@ pub trait MissionStore: Send + Sync {
 
     /// Delete a mission.
     async fn delete_mission(&self, id: Uuid) -> Result<bool, String>;
+
+    /// Delete a batch of missions in order, returning the number of rows
+    /// deleted. Defaults to per-id [`Self::delete_mission`] calls.
+    async fn delete_missions(&self, ids: &[Uuid]) -> Result<usize, String> {
+        let mut count = 0;
+        for &id in ids {
+            if self.delete_mission(id).await? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
 
     /// Delete empty untitled missions, excluding the specified IDs.
     async fn delete_empty_untitled_missions_excluding(

@@ -25,7 +25,7 @@ it('removes folder classification when pasting at project root and propagates re
 
 import { moveMissions, planMissionMoves } from '../src/missionMove';
 import { pendingMoves, resetMoves } from '../src/moves';
-import { runningWorkerIds } from '../src/deleteRunning';
+import { pausedMissionIds, requiresDescendantOptIn, runningWorkerIds } from '../src/deleteRunning';
 const P='11111111-1111-1111-1111-111111111111', F='22222222-2222-2222-2222-222222222222', C='33333333-3333-3333-3333-333333333333', G='44444444-4444-4444-4444-444444444444';
 const known=[{id:P,project:'verity'},{id:F,project:'verity'},{id:C,project:'verity',parent_mission_id:P},{id:G,project:'verity',parent_mission_id:C}];
 it('plans every selected mission; inside a project the children follow their parent without writes',()=>{
@@ -51,9 +51,13 @@ it('moves two missions in parallel, and only the failed one rolls back',async()=
  expect(pendingMoves().get(`mission:${P}`)?.acceptedAt).toBeTypeOf('number');
  for (const call of vi.mocked(api).mock.calls) expect(JSON.parse(call[1]!.body as string).tags).toEqual(['keep','orb-folder:Audits']);
 });
-it('reads the running worker from Core’s 409 delete refusal',()=>{
+it('reads the running worker, paused mission, and descendant opt-in hints from Core’s 409 delete refusals',()=>{
  expect(runningWorkerIds(`Cannot delete a running mission or worker (${C}). Cancel it first.`)).toEqual([C]);
  expect(runningWorkerIds('Mission is locked')).toEqual([]);
+ expect(pausedMissionIds(`Cannot delete a paused mission (${C}). Resume or cancel it first.`)).toEqual([C]);
+ expect(pausedMissionIds(`Cannot delete a running mission or worker (${C}). Cancel it first.`)).toEqual([]);
+ expect(requiresDescendantOptIn(`Mission ${P} has 2 descendant sessions: a (completed), b (completed). Pass ?include_descendants=true to delete them with it.`)).toBe(true);
+ expect(requiresDescendantOptIn('Mission is locked')).toBe(false);
 });
 
 import { deleteDescendants, descendantsSentence } from '../src/deleteRunning';
