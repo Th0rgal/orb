@@ -5820,4 +5820,84 @@ theorem stream_bounded_commit_invalid_state_preserves_checkpoint :
     ((streamBoundedCommitStep 0 0 0 10 8 0 &&& 0xFFFFFFFF) &&& 256) = 0 ∧
     (streamBoundedCommitStep 0 0 0 10 8 0 >>> 32).toUInt32 = 0 := by
   decide
+
+structure VmCapCheck where
+  hasPoolOverride : UInt8
+  hasPoolMax      : UInt8
+  hasProviderMax  : UInt8
+  hasGlobalMax    : UInt8
+  ancestorBlocked : UInt8
+  sharedActive    : UInt32
+  globalMax       : UInt32
+  poolActive      : UInt32
+  poolMax         : UInt32
+  providerActive  : UInt32
+  providerMax     : UInt32
+  deriving Repr, DecidableEq
+
+def VmCapCheck.Admissible (s : VmCapCheck) : Bool :=
+  !(s.ancestorBlocked == 1) &&
+  if s.hasPoolOverride == 1 then
+    (s.hasPoolMax == 1 || s.hasProviderMax == 1) &&
+    (s.hasProviderMax == 0 || s.providerActive < s.providerMax) &&
+    (s.hasPoolMax == 0 || s.poolActive < s.poolMax)
+  else
+    (s.hasGlobalMax == 0 || s.sharedActive < s.globalMax)
+
+def vmCapMetaGate : MetaGateSpec VmCapCheck (fun s => VmCapCheck.Admissible s = true) where
+  gate s :=
+    (vmCapAdmit
+      s.hasPoolOverride s.hasPoolMax s.hasProviderMax s.hasGlobalMax s.ancestorBlocked
+      s.sharedActive s.globalMax s.poolActive s.poolMax s.providerActive s.providerMax &&& 256) != 0
+  sound s h := by
+    unfold VmCapCheck.Admissible
+    unfold vmCapAdmit at h
+    cases ha : (s.ancestorBlocked == 1) <;>
+      cases ho : (s.hasPoolOverride == 1) <;>
+      cases hm : (s.hasPoolMax == 1 || s.hasProviderMax == 1) <;>
+      cases hp : (s.hasProviderMax == 0 || decide (s.providerActive < s.providerMax)) <;>
+      cases hl : (s.hasPoolMax == 0 || decide (s.poolActive < s.poolMax)) <;>
+      cases hg : (s.hasGlobalMax == 0 || decide (s.sharedActive < s.globalMax)) <;>
+      (simp only [ha, ho, hm, hp, hl, hg] at h ⊢; revert h; decide)
+  complete s h := by
+    unfold VmCapCheck.Admissible at h
+    unfold vmCapAdmit
+    cases ha : (s.ancestorBlocked == 1) <;>
+      cases ho : (s.hasPoolOverride == 1) <;>
+      cases hm : (s.hasPoolMax == 1 || s.hasProviderMax == 1) <;>
+      cases hp : (s.hasProviderMax == 0 || decide (s.providerActive < s.providerMax)) <;>
+      cases hl : (s.hasPoolMax == 0 || decide (s.poolActive < s.poolMax)) <;>
+      cases hg : (s.hasGlobalMax == 0 || decide (s.sharedActive < s.globalMax)) <;>
+      (simp only [ha, ho, hm, hp, hl, hg] at h ⊢; revert h; decide)
+  posWitness := ⟨1, 0, 1, 1, 0, 16, 16, 0, 0, 0, 2⟩
+  negWitness := ⟨0, 0, 0, 1, 0, 16, 16, 0, 0, 0, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Scoped per-provider override (`hasPoolOverride = 1, hasProviderMax = 1`) with free provider
+    capacity (`providerActive < providerMax`) admits (`257`) even when the shared global pool is
+    saturated (`sharedActive = globalMax`), while an exhausted ancestor override (`ancestorBlocked = 1`)
+    or bound-free override (`hasPoolMax = 0 ∧ hasProviderMax = 0`) fails closed (`512`). -/
+theorem vm_cap_override_bypasses_saturated_global_and_fails_closed
+    (globalMax poolAct poolMx provAct provMx : UInt32)
+    (h_prov : decide (provAct < provMx) = true) :
+    vmCapAdmit 1 0 1 1 0 globalMax globalMax poolAct poolMx provAct provMx = 257 ∧
+    vmCapAdmit 1 0 1 1 1 globalMax globalMax poolAct poolMx provAct provMx = 512 ∧
+    vmCapAdmit 1 0 0 1 0 globalMax globalMax poolAct poolMx provAct provMx = 512 := by
+  unfold vmCapAdmit
+  simp [h_prov]
+
+/-- Setting `providerMax = 0` (`hasProviderMax = 1`) unconditionally blocks that provider (`512`)
+    for the mission subtree regardless of overall `poolMax` or global capacity. -/
+theorem vm_cap_zero_provider_limit_blocks_provider
+    (hasPoolMx hasGlob anc : UInt8) (shAct glMx plAct plMx prAct : UInt32) :
+    vmCapAdmit 1 hasPoolMx 1 hasGlob anc shAct glMx plAct plMx prAct 0 = 512 := by
+  unfold vmCapAdmit
+  have h_not_lt_zero : ¬ (prAct < (0 : UInt32)) := by
+    intro h
+    exact Nat.not_lt_zero prAct.toNat h
+  cases ha : (anc == 1) <;>
+    cases hm : (hasPoolMx == 1) <;>
+    simp_all
+
 end Orb.Spec

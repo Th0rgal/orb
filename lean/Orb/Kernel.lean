@@ -2335,4 +2335,37 @@ def streamBoundedCommitStep
   let hi32 : UInt32 :=
     if !(validCap && validMono) then prevCheckpoint else nextCheckpoint
   lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Managed VM Scoped Concurrency & Per-Provider Cap Gate (`orb_vm_cap_admit`):
+  Decides concurrency quota admission (`257 = 1 ||| 256` admit, `512` quota-reject) across
+  mission-scoped overrides and the shared global pool:
+  - `ancestorBlocked == 1`: a higher ancestor override in the mission's lineage is at capacity -> reject (`512`).
+  - When `hasPoolOverride == 1` (mission or nearest ancestor override covers this provider):
+    - must define at least one concrete bound (`hasPoolMax == 1 || hasProviderMax == 1`) so an
+      empty override never silently lifts concurrency bounds;
+    - requires `(hasProviderMax == 0 || providerActive < providerMax)` and
+      `(hasPoolMax == 0 || poolActive < poolMax)`;
+    - bypasses the shared global concurrency cap (`sharedActive < globalMax`).
+  - When `hasPoolOverride == 0`:
+    - requires `hasGlobalMax == 0 || sharedActive < globalMax`.
+-/
+@[inline, export orb_vm_cap_admit]
+def vmCapAdmit
+    (hasPoolOverride hasPoolMax hasProviderMax hasGlobalMax ancestorBlocked : UInt8)
+    (sharedActive globalMax poolActive poolMax providerActive providerMax : UInt32) : UInt32 :=
+  if ancestorBlocked == 1 then
+    512
+  else if hasPoolOverride == 1 then
+    if (hasPoolMax == 1 || hasProviderMax == 1) &&
+       (hasProviderMax == 0 || providerActive < providerMax) &&
+       (hasPoolMax == 0 || poolActive < poolMax) then
+      257
+    else
+      512
+  else if hasGlobalMax == 0 || sharedActive < globalMax then
+    257
+  else
+    512
+
 end Orb.Kernel

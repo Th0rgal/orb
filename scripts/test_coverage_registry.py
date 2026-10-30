@@ -80,6 +80,7 @@ class CoverageRegistryTests(unittest.TestCase):
                 "orb_resource_ledger_step",
                 "orb_stream_bounded_commit_step",
                 "leansys_verify_fd_bounds",
+                "orb_vm_cap_admit",
             },
         )
         for entry in partial:

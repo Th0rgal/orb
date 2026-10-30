@@ -2215,7 +2215,7 @@ pub(in crate::api) async fn create_mission_inner(
             tracing::warn!(mission_id = %mission.id, %error, "could not record the mission budget");
         }
     }
-    // The claimed machine charges to the new mission's pool.
+    // The claimed machine charges to the new mission's pool and concurrency cap pool.
     if let (Some(machine), Some(manager)) = (
         req.claim_managed_machine_id
             .as_deref()
@@ -2228,6 +2228,16 @@ pub(in crate::api) async fn create_mission_inner(
                 .await;
         if pool.is_some() {
             manager.set_machine_pool(machine, pool).await;
+        }
+        if let Some(m_row) = manager.get(machine).await {
+            let cap_pool = crate::api::mission_budget::cap_pool_for(
+                &control.mission_store,
+                mission.id,
+                &user.id,
+                &m_row.provider,
+            )
+            .await;
+            manager.set_machine_cap_pool(machine, cap_pool).await;
         }
     }
 

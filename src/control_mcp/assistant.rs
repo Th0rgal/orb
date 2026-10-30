@@ -333,6 +333,9 @@ struct ListManagedParams {
     /// Full rows (every field, last 24 h history) instead of the summary.
     #[serde(default)]
     verbose: Option<bool>,
+    /// Set by the gateway to the calling mission so `effective_vm_limits` is included.
+    #[serde(default)]
+    mission_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1724,7 +1727,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "list_managed_machines".to_string(),
-                description: "List live managed VMs across all configured providers (`boat`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, expires_at, reap_at, deletable_at, cost so far, plus configured providers, today's spend, running count and caps. Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
+                description: "List live managed VMs across all configured providers (`boat`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, expires_at, reap_at, deletable_at, cost so far, plus configured providers, today's spend, global running count/caps, and your mission's `effective_vm_limits` (which overrides the global concurrency cap when configured in Mission settings). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
                 input_schema: json!({"type": "object", "properties": {"verbose": {"type": "boolean", "description": "Full rows and history (large)."}}}),
             },
             ToolDefinition {
@@ -1759,7 +1762,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "get_budget".to_string(),
-                description: "Your mission's managed-VM spending budget: mode (own, pooled from an ancestor, or none = only the daily cap), the pool's budget, spent, reserved (min(TTL, 60 min) of each live VM), held by children's sub-budgets, remaining, the most you may grant a child (start_mission budget_usd), and each child's usage. Spawns, extensions and sub-budgets beyond the remaining amount are refused with budget_exceeded / sub_budget_exceeds_pool.".to_string(),
+                description: "Your mission's managed-VM spending budget and concurrency limits: `mode` (own, pooled from an ancestor, or none = only the daily cap), pool spend/reserved/remaining, `max_grant_usd`, `effective_vm_limits` (`source`: `mission` or `global`, `active`, `max_concurrent`, and per-provider `provider_limits` that bypass the global concurrency cap when set), and each child's usage.".to_string(),
                 input_schema: json!({"type": "object", "properties": {"mission_id": {"type": "string", "description": "Hermes only; missions always get their own."}}}),
             },
             ToolDefinition {
@@ -4613,9 +4616,26 @@ impl AssistantMcp {
             }
             "list_managed_machines" => {
                 let params: ListManagedParams = parse_params(arguments)?;
-                let list = self
+                let mut list = self
                     .managed_request(reqwest::Method::GET, "/api/managed-machines".into(), None)
                     .await?;
+                let eff = if let Some(mid) = params.mission_id.as_deref() {
+                    self.managed_request(
+                        reqwest::Method::GET,
+                        format!("/api/control/missions/{}/budget", urlencoding::encode(mid)),
+                        None,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|b| b.get("effective_vm_limits").cloned())
+                } else {
+                    None
+                };
+                if let Some(ref limits) = eff {
+                    if let Some(obj) = list.as_object_mut() {
+                        obj.insert("effective_vm_limits".to_string(), limits.clone());
+                    }
+                }
                 Ok(if params.verbose == Some(true) {
                     list
                 } else {
@@ -7998,6 +8018,7 @@ fn compact_managed_list(list: &Value) -> Value {
                         "deletable_at": m["deletable_at"],
                         "cost_usd": m["cost_usd"],
                         "budget_pool_id": m["budget_pool_id"],
+                        "cap_pool_id": m["cap_pool_id"],
                     })
                 })
                 .collect()
@@ -8008,14 +8029,20 @@ fn compact_managed_list(list: &Value) -> Value {
         .and_then(|d| d.last())
         .map(|d| d["usd"].clone())
         .unwrap_or(Value::Null);
-    json!({
+    let mut out = json!({
         "enabled": list["enabled"],
         "providers": list["providers"],
         "machines": machines,
         "budget": list["budget"],
         "spend_today_usd": today,
-        "hint": "verbose=true for full rows and history; get_budget for your mission's budget pool",
-    })
+        "hint": "verbose=true for full rows and history; get_budget for your mission's budget pool and concurrency overrides",
+    });
+    if let Some(eff) = list.get("effective_vm_limits") {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("effective_vm_limits".to_string(), eff.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]

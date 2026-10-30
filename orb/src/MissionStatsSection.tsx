@@ -46,9 +46,9 @@ export function MissionStatsSection(p: { missionId: string; titleOf?: (id: strin
       <StatTile label="Subagents" value={money(subagentsUsd)} />
       <StatTile label="Managed VMs" value={money(s => s.own.vm_usd)} />
     </div>
-    <BreakdownTable label="Spend by served model" columns={modelColumns} rows={last()?.own.models} rowKey={m => modelLabel(m)} empty="No model spend in this period." />
+    <BreakdownTable label="Spend by served model" columns={modelColumns} rows={last()?.own.models} rowKey={m => `${m.provider ?? ""}:${m.model}`} limit={6} maxHeight="216px" empty="No model spend in this period." />
     <Show when={last()?.children.length}>
-      <BreakdownTable label="Subagent spend" columns={childColumns} rows={last()?.children} rowKey={c => c.mission_id} />
+      <BreakdownTable label="Subagent spend" columns={childColumns} rows={last()?.children} rowKey={c => c.mission_id} limit={5} collapse={c => c.total_usd === 0} collapsedLabel="with $0 spend" maxHeight="216px" />
     </Show>
   </section>;
 }

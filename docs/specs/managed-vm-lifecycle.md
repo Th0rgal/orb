@@ -154,6 +154,47 @@ outer bound (`none` = unlimited). Budgets persist in
 `.sandboxed-sh/mission_budgets.json`; ledger events
 (`budget_pool_set`, `auto_extended`, `reused_idle`) go to the managed ledger.
 
+## Mission concurrency overrides (`vm_limits`, optional, off by default)
+
+Operators can configure `vm_limits` on any mission via `PUT
+/api/control/missions/:id/budget` (dashboard JWT only; `mcp1.*` agent tokens
+are rejected with `403`, and agents can only read via `get_budget` and
+`list_managed_machines`). Persisted alongside `BudgetPool` in
+`.sandboxed-sh/mission_budgets.json` (independent of whether `budget_usd` is
+set):
+
+- `max_concurrent`: optional subtree concurrent VM limit (`1..=128`);
+- `provider_max_concurrent`: optional map of canonical provider (`boat`,
+  `hetzner`, `vastai`, `scaleway`) to concurrent limit (`0..=128`; `0` blocks
+  that provider for the subtree). At least one of `max_concurrent` or a
+  provider entry must be present when `vm_limits` is enabled.
+
+Scoped vs. shared pool accounting (`orb_vm_cap_admit`):
+
+1. Resolve the nearest mission `L` in the target mission's lineage (`self` then
+   ancestors, same tenant) that defines `vm_limits`.
+2. If `L` covers `provider` (`L.max_concurrent.is_some()` or
+   `L.provider_max_concurrent.contains_key(provider)`), the VM is admitted into
+   **`L`'s dedicated cap pool** (`cap_pool_id = Some(L)`):
+   - checks `L`'s live count on `provider` `< provider_max` (when set) and `L`'s
+     live overridden count `< max_concurrent` (when set);
+   - checks every higher ancestor pool in the lineage that also covers
+     `provider`, so a child override can restrict a subtree (`<=` parent) but
+     never amplify an ancestor's cap;
+   - **bypasses the shared global `max_concurrent`**, and VMs with
+     `cap_pool_id.is_some()` do not consume slots in `shared_global_active`
+     when un-overridden missions spawn.
+3. Otherwise (`cap_pool_id = None`), admission checks
+   `shared_global_active < global.max_concurrent`.
+4. Enforced identically across `spawn` (fresh + `fork`), `resume`,
+   `take_idle_sibling_for_provider`, and `claim_for_mission`. Removing or
+   editing `vm_limits` re-attaches live VMs' `cap_pool_id` to the nearest
+   covering ancestor (or `None`).
+5. `GET /api/control/missions/:id/budget` and MCP `list_managed_machines`
+   surface `effective_vm_limits` (`mode`, `max_concurrent`, `active`, and
+   per-provider `active`/`max_concurrent`) so orchestrators see their dedicated
+   slots even when the shared global pool is full.
+
 ## Provisioning
 
 `provision` runs `src/managed/orb-node-provision.sh` as root before
@@ -267,6 +308,8 @@ decision for every live VM.
   (`machineActionMetaGate`, Corollary 82).
 - `orb_compute_secret_gate`: `CoreReserved` compute API key + untrusted managed
   node secret confinement (`computeSecretMetaGate`, Corollary 80).
+- `orb_vm_cap_admit`: scoped mission concurrency + per-provider cap override vs.
+  shared global pool admission with ancestor-cap monotonicity (`vmCapMetaGate`).
 
 ## Raw managed machines
 

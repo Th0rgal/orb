@@ -200,6 +200,7 @@ async fn spawn_for(
             });
         };
         req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission, &user.id).await;
+        req.cap_lineage = crate::api::mission_budget::lineage(&store, mission).await;
         req.snapshot_project = mission_row.project.project.clone();
         // Walk parent lineage (bounded) to record `root_mission_id`.
         let mut root = mission;
@@ -299,8 +300,9 @@ async fn reuse_idle_sibling(
     }
     let parent_id = parent.to_string();
     let machine = m
-        .take_idle_sibling_for_provider(
+        .take_idle_sibling_for_lineage(
             Some(provider),
+            &req.cap_lineage,
             &crate::managed::SiblingReuse {
                 size,
                 image: &image,
@@ -355,17 +357,18 @@ async fn set_owner(
     if let Err(r) = raw_owner_check(&m, &id, &user).await {
         return r;
     }
-    let exists = match state.control.loaded_mission_store(&user.id).await {
-        Some(store) => matches!(store.get_mission(body.owner_mission_id).await, Ok(Some(_))),
-        None => false,
+    let store = match state.control.loaded_mission_store(&user.id).await {
+        Some(store) if matches!(store.get_mission(body.owner_mission_id).await, Ok(Some(_))) => {
+            store
+        }
+        _ => {
+            return err(ManagedError {
+                error: "unknown_mission",
+                message: "Owner mission not found".into(),
+                status: 404,
+            });
+        }
     };
-    if !exists {
-        return err(ManagedError {
-            error: "unknown_mission",
-            message: "Owner mission not found".into(),
-            status: 404,
-        });
-    }
     match m
         .claim_for_mission(
             &id,
@@ -375,7 +378,22 @@ async fn set_owner(
         )
         .await
     {
-        Ok(machine) => Json(machine).into_response(),
+        Ok(machine) => {
+            let pool =
+                crate::api::mission_budget::pool_for(&store, body.owner_mission_id, &user.id).await;
+            if pool.is_some() {
+                m.set_machine_pool(&machine.id, pool).await;
+            }
+            let cap_pool = crate::api::mission_budget::cap_pool_for(
+                &store,
+                body.owner_mission_id,
+                &user.id,
+                &machine.provider,
+            )
+            .await;
+            m.set_machine_cap_pool(&machine.id, cap_pool).await;
+            Json(m.get(&machine.id).await.unwrap_or(machine)).into_response()
+        }
         Err(e) => err(e),
     }
 }
@@ -1161,6 +1179,7 @@ struct ResumeBody {
 }
 
 async fn resume(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::Extension(user): axum::Extension<crate::api::auth::AuthUser>,
     Path(id): Path<String>,
     body: Option<Json<ResumeBody>>,
@@ -1173,8 +1192,26 @@ async fn resume(
         Ok(x) => x,
         Err(r) => return r,
     };
+    let cap_lineage = match machine
+        .owner_mission_id
+        .as_deref()
+        .or(machine.requested_by_mission_id.as_deref())
+        .and_then(|mid| uuid::Uuid::parse_str(mid).ok())
+    {
+        Some(mid) => {
+            let store = crate::api::control::control_for_user(&state, &user)
+                .await
+                .mission_store;
+            crate::api::mission_budget::lineage(&store, mid).await
+        }
+        None => Vec::new(),
+    };
     match m
-        .resume(&machine.id, body.and_then(|b| b.0.ttl_minutes))
+        .resume_with_lineage(
+            &machine.id,
+            body.and_then(|b| b.0.ttl_minutes),
+            &cap_lineage,
+        )
         .await
     {
         Ok(x) => (StatusCode::ACCEPTED, Json(x)).into_response(),

@@ -561,6 +561,7 @@ fn managed_nodes_are_excluded_from_static_lookup() {
         ledger_closed: false,
         last_busy_at: None,
         budget_pool_id: None,
+        cap_pool_id: None,
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
@@ -960,6 +961,7 @@ fn spend_machine(
         ledger_closed: destroyed.is_some(),
         last_busy_at: None,
         budget_pool_id: None,
+        cap_pool_id: None,
         auto_extensions: 0,
         prior_pool_charges: Vec::new(),
         pool_spent_offset: 0.0,
@@ -1337,8 +1339,10 @@ async fn claim_rejects_cross_user_and_forged_requester() {
 fn pool(id: &str, usd: f64, parent: Option<&str>) -> budget::BudgetPool {
     budget::BudgetPool {
         mission_id: id.into(),
-        budget_usd: usd,
+        budget_usd: Some(usd),
         parent_pool_id: parent.map(Into::into),
+        vm_limits: None,
+        parent_cap_pool_id: None,
         owner_user_id: Some("t1".into()),
         updated_at: Utc::now(),
     }
@@ -1469,7 +1473,7 @@ async fn spawn_and_extend_respect_the_pool_and_sub_budgets() {
         .unwrap();
     let (m2, _) = manager(dir.path(), settings());
     m2.load().await;
-    assert_eq!(m2.budget_pools().await["root"].budget_usd, 3.0);
+    assert_eq!(m2.budget_pools().await["root"].budget_usd, Some(3.0));
 }
 
 #[tokio::test]
@@ -3102,6 +3106,7 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
         ledger_closed: false,
         last_busy_at: Some(t0),
         budget_pool_id: None,
+        cap_pool_id: None,
         auto_extensions: 0,
         stopped_at: None,
         stopped_by_reaper: false,
@@ -3130,6 +3135,7 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
             committed_usd: 0.18,
             daily_cap_usd: Some(50.0),
             active: 1,
+            shared_active: 1,
             max_concurrent: Some(16),
             default_ttl_minutes: 60,
             max_ttl_minutes: 720,
@@ -3362,4 +3368,354 @@ fn resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences() {
     let snap = super::resource_ledger_shadow_counter().snapshot("orb_resource_ledger_step");
     assert!(snap.total_events >= 4);
     assert_eq!(snap.total_divergences, 0);
+}
+
+struct NamedFakeProvider {
+    id: &'static str,
+    inner: FakeProvider,
+}
+
+impl NamedFakeProvider {
+    fn new(id: &'static str) -> Arc<dyn ManagedProvider> {
+        Arc::new(Self {
+            id,
+            inner: FakeProvider::default(),
+        })
+    }
+}
+
+#[async_trait]
+impl ManagedProvider for NamedFakeProvider {
+    fn name(&self) -> &'static str {
+        self.id
+    }
+    fn supports_free_stop(&self) -> bool {
+        true
+    }
+    fn supports_snapshots(&self) -> bool {
+        true
+    }
+    async fn spawn(&self, spec: &SpawnSpec) -> Result<ProviderMachine, String> {
+        self.inner.spawn(spec).await
+    }
+    async fn get(&self, provider_id: &str) -> Result<ProviderMachine, String> {
+        self.inner.get(provider_id).await
+    }
+    async fn list(&self) -> Result<Vec<ProviderMachine>, String> {
+        self.inner.list().await
+    }
+    async fn destroy(&self, provider_id: &str) -> Result<(), String> {
+        self.inner.destroy(provider_id).await
+    }
+    async fn extend(&self, provider_id: &str, ttl_seconds: u64) -> Result<(), String> {
+        self.inner.extend(provider_id, ttl_seconds).await
+    }
+    async fn write_file(&self, provider_id: &str, path: &str, content: &str) -> Result<(), String> {
+        self.inner.write_file(provider_id, path, content).await
+    }
+    async fn exec(
+        &self,
+        provider_id: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
+        self.inner.exec(provider_id, command, timeout_secs).await
+    }
+    async fn usage(&self, provider_id: &str) -> Result<ProviderUsage, String> {
+        self.inner.usage(provider_id).await
+    }
+}
+
+#[tokio::test]
+async fn mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = settings();
+    st.max_concurrent = Some(2);
+    st.daily_cap_usd = Some(100.0);
+    let boat = NamedFakeProvider::new("boat");
+    let vastai = NamedFakeProvider::new("vastai");
+    let m = Arc::new(ManagedManager::new(st, Some(boat), dir.path(), 3000));
+    m.providers.write().unwrap().insert("vastai".into(), vastai);
+
+    // Fill the global concurrency cap (2/2) with un-overridden boat VMs.
+    let g1 = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("evm-1".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let _g2 = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("evm-2".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(g1.cap_pool_id, None);
+
+    // Un-overridden Vast.ai spawn is blocked by global 2/2.
+    let blocked = m
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            owner_mission_id: Some("ecdsa".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["ecdsa".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(blocked.error, "quota_exceeded");
+    assert_eq!(blocked.status, 429);
+
+    // Configure per-provider override `vastai: 2` on `ecdsa` (leaving `boat` on global).
+    m.set_mission_vm_limits(
+        "ecdsa",
+        Some(budget::VmConcurrencyLimits {
+            max_concurrent: None,
+            provider_max_concurrent: std::collections::BTreeMap::from([("vastai".into(), 2)]),
+        }),
+        &["ecdsa".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    // `ecdsa` and its subagent `ecdsa-sub` can now spawn 2 Vast.ai GPUs despite global 2/2.
+    let v1 = m
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            owner_mission_id: Some("ecdsa".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["ecdsa".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(v1.cap_pool_id.as_deref(), Some("ecdsa"));
+
+    let v2 = m
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            owner_mission_id: Some("ecdsa-sub".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["ecdsa-sub".into(), "ecdsa".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(v2.cap_pool_id.as_deref(), Some("ecdsa"));
+
+    // 3rd Vast.ai GPU in `ecdsa`'s tree is rejected by the mission's `vastai: 2` cap.
+    let v3_err = m
+        .spawn(SpawnRequest {
+            provider: Some("vastai".into()),
+            size: Some("rtx4090".into()),
+            owner_mission_id: Some("ecdsa-sub".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["ecdsa-sub".into(), "ecdsa".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(v3_err.error, "quota_exceeded");
+    assert!(v3_err.message.contains("provider max 2"));
+
+    // Uncovered provider (`boat`) on `ecdsa` still respects the saturated global 2/2 pool.
+    let boat_err = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("ecdsa".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["ecdsa".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(boat_err.error, "quota_exceeded");
+
+    // Dedicated VMs do NOT consume global slots: destroying `g1` frees 1 global slot even with 3 live VMs total.
+    m.destroy(&g1.id, "done").await.unwrap();
+    let g3 = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("other".into()),
+            owner_user_id: Some("t1".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(g3.cap_pool_id, None);
+    assert_eq!(m.budget().await.active, 4);
+    assert_eq!(m.budget().await.shared_active, 2);
+
+    // View surfaces both mission override and global counts accurately.
+    let view = m
+        .mission_budget("ecdsa", &["ecdsa".into()], &["ecdsa-sub".into()], "t1")
+        .await;
+    assert_eq!(view.vm_limits_mode, "own");
+    assert_eq!(view.effective_vm_limits.source, "mission");
+    assert_eq!(view.effective_vm_limits.active, 2);
+    assert_eq!(view.effective_vm_limits.max_concurrent, None);
+    assert_eq!(view.effective_vm_limits.global_active, 2);
+    assert_eq!(view.effective_vm_limits.global_max_concurrent, Some(2));
+    assert_eq!(
+        view.effective_vm_limits.provider_limits,
+        vec![ProviderCapUsageView {
+            provider: "vastai".into(),
+            active: 2,
+            max_concurrent: 2,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = settings();
+    st.max_concurrent = Some(1);
+    st.daily_cap_usd = Some(100.0);
+    let boat = NamedFakeProvider::new("boat");
+    let hetzner = NamedFakeProvider::new("hetzner");
+    let m = Arc::new(ManagedManager::new(st, Some(boat), dir.path(), 3000));
+    m.providers
+        .write()
+        .unwrap()
+        .insert("hetzner".into(), hetzner);
+
+    m.set_mission_budget("root", Some(25.0), None, Some("t1".into()))
+        .await
+        .unwrap();
+    m.set_mission_vm_limits(
+        "root",
+        Some(budget::VmConcurrencyLimits {
+            max_concurrent: Some(3),
+            provider_max_concurrent: std::collections::BTreeMap::from([("hetzner".into(), 0)]),
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    // Clearing USD budget preserves `vm_limits`, and re-setting USD budget preserves `vm_limits`.
+    m.set_mission_budget("root", None, None, Some("t1".into()))
+        .await
+        .unwrap();
+    let v_after_clear = m.mission_budget("root", &["root".into()], &[], "t1").await;
+    assert_eq!(v_after_clear.mode, "none");
+    assert_eq!(v_after_clear.vm_limits_mode, "own");
+    assert_eq!(v_after_clear.effective_vm_limits.max_concurrent, Some(3));
+
+    m.set_mission_budget("root", Some(20.0), None, Some("t1".into()))
+        .await
+        .unwrap();
+
+    // Child cannot configure a sub-limit larger than ancestor's `max_concurrent` (3).
+    let over = m
+        .set_mission_vm_limits(
+            "child",
+            Some(budget::VmConcurrencyLimits {
+                max_concurrent: Some(5),
+                provider_max_concurrent: Default::default(),
+            }),
+            &["child".into(), "root".into()],
+            Some("root".into()),
+            Some("t1".into()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(over.error, "sub_limit_exceeds_pool");
+
+    // Child sets tighter `max_concurrent: 2` under `root`.
+    m.set_mission_vm_limits(
+        "child",
+        Some(budget::VmConcurrencyLimits {
+            max_concurrent: Some(2),
+            provider_max_concurrent: Default::default(),
+        }),
+        &["child".into(), "root".into()],
+        Some("root".into()),
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    // Ancestor `hetzner: 0` blocks Hetzner even under child's `max_concurrent: 2`.
+    let hz_err = m
+        .spawn(SpawnRequest {
+            provider: Some("hetzner".into()),
+            size: Some("cpx22".into()),
+            owner_mission_id: Some("child".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["child".into(), "root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(hz_err.error, "quota_exceeded");
+    assert!(hz_err.message.contains("disabled"));
+
+    // Lowering `root` to `max_concurrent: 1` immediately caps `child` at 1 at runtime.
+    m.set_mission_vm_limits(
+        "root",
+        Some(budget::VmConcurrencyLimits {
+            max_concurrent: Some(1),
+            provider_max_concurrent: std::collections::BTreeMap::from([("hetzner".into(), 0)]),
+        }),
+        &["root".into()],
+        None,
+        Some("t1".into()),
+    )
+    .await
+    .unwrap();
+
+    let _c1 = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("child".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["child".into(), "root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let c2_err = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            owner_mission_id: Some("child".into()),
+            owner_user_id: Some("t1".into()),
+            cap_lineage: vec!["child".into(), "root".into()],
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(c2_err.error, "quota_exceeded");
+    assert!(c2_err.message.contains("ancestor pool root"));
 }

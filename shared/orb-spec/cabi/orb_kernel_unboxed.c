@@ -13222,6 +13222,133 @@ goto v___jp_5758_;
 }
 }
 
+LEAN_EXPORT uint32_t orb_vm_cap_admit(uint8_t v_hasPoolOverride_5782_, uint8_t v_hasPoolMax_5783_, uint8_t v_hasProviderMax_5784_, uint8_t v_hasGlobalMax_5785_, uint8_t v_ancestorBlocked_5786_, uint32_t v_sharedActive_5787_, uint32_t v_globalMax_5788_, uint32_t v_poolActive_5789_, uint32_t v_poolMax_5790_, uint32_t v_providerActive_5791_, uint32_t v_providerMax_5792_){
+_start:
+{
+uint8_t v___x_5805_; uint8_t v___x_5806_;
+v___x_5805_ = 1;
+v___x_5806_ = lean_uint8_dec_eq(v_ancestorBlocked_5786_, v___x_5805_);
+if (v___x_5806_ == 0)
+{
+uint8_t v___x_5807_;
+v___x_5807_ = lean_uint8_dec_eq(v_hasPoolOverride_5782_, v___x_5805_);
+if (v___x_5807_ == 0)
+{
+uint8_t v___x_5808_; uint8_t v___x_5809_;
+v___x_5808_ = 0;
+v___x_5809_ = lean_uint8_dec_eq(v_hasGlobalMax_5785_, v___x_5808_);
+if (v___x_5809_ == 0)
+{
+uint8_t v___x_5810_;
+v___x_5810_ = lean_uint32_dec_lt(v_sharedActive_5787_, v_globalMax_5788_);
+if (v___x_5810_ == 0)
+{
+uint32_t v___x_5811_;
+v___x_5811_ = 512;
+return v___x_5811_;
+}
+else
+{
+uint32_t v___x_5812_;
+v___x_5812_ = 257;
+return v___x_5812_;
+}
+}
+else
+{
+uint32_t v___x_5813_;
+v___x_5813_ = 257;
+return v___x_5813_;
+}
+}
+else
+{
+uint8_t v___x_5814_;
+v___x_5814_ = lean_uint8_dec_eq(v_hasPoolMax_5783_, v___x_5805_);
+if (v___x_5814_ == 0)
+{
+uint8_t v___x_5815_;
+v___x_5815_ = lean_uint8_dec_eq(v_hasProviderMax_5784_, v___x_5805_);
+if (v___x_5815_ == 0)
+{
+uint32_t v___x_5816_;
+v___x_5816_ = 512;
+return v___x_5816_;
+}
+else
+{
+goto v___jp_5800_;
+}
+}
+else
+{
+goto v___jp_5800_;
+}
+}
+}
+else
+{
+uint32_t v___x_5817_;
+v___x_5817_ = 512;
+return v___x_5817_;
+}
+v___jp_5793_:
+{
+uint8_t v___x_5794_; uint8_t v___x_5795_;
+v___x_5794_ = 0;
+v___x_5795_ = lean_uint8_dec_eq(v_hasPoolMax_5783_, v___x_5794_);
+if (v___x_5795_ == 0)
+{
+uint8_t v___x_5796_;
+v___x_5796_ = lean_uint32_dec_lt(v_poolActive_5789_, v_poolMax_5790_);
+if (v___x_5796_ == 0)
+{
+uint32_t v___x_5797_;
+v___x_5797_ = 512;
+return v___x_5797_;
+}
+else
+{
+uint32_t v___x_5798_;
+v___x_5798_ = 257;
+return v___x_5798_;
+}
+}
+else
+{
+uint32_t v___x_5799_;
+v___x_5799_ = 257;
+return v___x_5799_;
+}
+}
+v___jp_5800_:
+{
+uint8_t v___x_5801_; uint8_t v___x_5802_;
+v___x_5801_ = 0;
+v___x_5802_ = lean_uint8_dec_eq(v_hasProviderMax_5784_, v___x_5801_);
+if (v___x_5802_ == 0)
+{
+uint8_t v___x_5803_;
+v___x_5803_ = lean_uint32_dec_lt(v_providerActive_5791_, v_providerMax_5792_);
+if (v___x_5803_ == 0)
+{
+uint32_t v___x_5804_;
+v___x_5804_ = 512;
+return v___x_5804_;
+}
+else
+{
+goto v___jp_5793_;
+}
+}
+else
+{
+goto v___jp_5793_;
+}
+}
+}
+}
+
 LEAN_EXPORT uint8_t leansys_verify_slice_bounds(uint64_t v_off_143_, uint64_t v_len_144_, uint64_t v_cap_145_){
 _start:
 {

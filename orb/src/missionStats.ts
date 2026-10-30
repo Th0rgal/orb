@@ -30,6 +30,9 @@ export function tokens(n: number): string {
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
-export const modelLabel = (m: Pick<ModelLine, "provider" | "model">) => m.provider ? `${m.provider}/${m.model}` : m.model;
+export const modelLabel = (m: Pick<ModelLine, "provider" | "model">) => {
+  const name = m.model.trim() || "Unknown model";
+  return m.provider ? `${m.provider}/${name}` : name;
+};
 /** Subagents' share = subtree − own (never negative). */
 export const subagentsUsd = (s: MissionStats) => Math.max(0, s.subtree_total_usd - s.own.total_usd);
