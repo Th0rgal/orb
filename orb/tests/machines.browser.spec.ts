@@ -55,7 +55,7 @@ test("collapsed providers show right-aligned used percentages and local monochro
     return route.fulfill({ json });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Providers", exact: true }).click();
+  await page.getByRole("button", { name: "Inference", exact: true }).click();
   const row = page.getByRole("button", { name: /^Anthropic example@example.com/ });
   await expect(row.getByText("0%", { exact: true })).toBeVisible();
   await expect(row.getByText("63%", { exact: true })).toBeVisible();

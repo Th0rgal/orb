@@ -22,12 +22,12 @@ test(`Antigravity quota chips never clip: ${theme} ${size}`, async ({ page }, in
     return route.fulfill({ json: body });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Providers', exact: true }).click();
+  await page.getByRole('button', { name: 'Inference', exact: true }).click();
   const row = page.getByRole('button', { name: /Google Antigravity/ });
   await expect(row.locator('.p-st')).toHaveText('Limit reached');
   await expect(row.locator('.p-st')).toHaveAttribute('title', 'Gemini quota exhausted');
   await expect(row).not.toContainText(/^Quota exhausted/);
-  await row.click();
+  await expect(row).toHaveAttribute('aria-expanded', 'false');
   await page.setViewportSize({ width, height: 700 });
   const toggle = page.getByRole('button', { name: 'Toggle sidebar' });
   if (size === 'narrow' && await toggle.getAttribute('aria-expanded') === 'true') await toggle.click();

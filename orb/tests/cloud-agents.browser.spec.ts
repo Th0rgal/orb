@@ -127,7 +127,7 @@ test('section shortcuts and real model variants use the shared menus',async({pag
  expect(launches[0].cloud.model).toBe('grok-4.6');
  expect(launches[0].cloud.model_params).toEqual([{id:'effort',value:'high'}]);
  await page.keyboard.press('Meta+3');await expect(page.getByRole('button',{name:'Machines',exact:true})).toHaveClass(/active/);
- await page.keyboard.press('Meta+4');await expect(page.getByRole('button',{name:'Providers',exact:true})).toHaveClass(/active/);
+ await page.keyboard.press('Meta+4');await expect(page.getByRole('button',{name:'Inference',exact:true})).toHaveClass(/active/);
  await page.keyboard.press('Meta+5');await expect(page.getByRole('button',{name:'Demo',exact:true})).toBeFocused();
 });
 

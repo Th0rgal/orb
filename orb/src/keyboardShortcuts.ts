@@ -4,7 +4,7 @@ export const navigationShortcuts = [
   {id:'inbox', code:'KeyI', label:'⌘I', title:'Inbox'},
   {id:'cloud-agent', code:'Digit2', label:'⌘2', title:'Cloud agent'},
   {id:'machines', code:'Digit3', label:'⌘3', title:'Machines'},
-  {id:'providers', code:'Digit4', label:'⌘4', title:'Providers'},
+  {id:'providers', code:'Digit4', label:'⌘4', title:'Inference'},
   {id:'projects', code:'Digit5', label:'⌘5', title:'Projects'},
 ] as const;
 export function navigationShortcut(event: KeyboardEvent) {

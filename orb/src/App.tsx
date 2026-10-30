@@ -993,8 +993,8 @@ export default function App() {
                   <span class="row-label">Machines</span><kbd aria-hidden="true">{shortcutLabel("machines")}</kbd>
                 </button>
                 <button class={`row ${selected() === "providers" ? "active" : ""}`} onClick={() => open("providers")}>
-                  <span class="row-ico"><Ic.ProvidersIcon /></span>
-                  <span class="row-label">Providers</span><kbd aria-hidden="true">{shortcutLabel("providers")}</kbd>
+                  <span class="row-ico"><Ic.CubeIcon /></span>
+                  <span class="row-label">Inference</span><kbd aria-hidden="true">{shortcutLabel("providers")}</kbd>
                 </button>
 
                 <Show
@@ -1127,7 +1127,7 @@ export default function App() {
               <span>Machines</span>
             </Match>
             <Match when={selected() === "providers"}>
-              <span>Providers</span>
+              <span>Inference</span>
             </Match>
             <Match when={selected() === "inbox"}><span>Inbox</span></Match>
             <Match when={selected() === "cloud-agent" && cloudLaunchTitle()}>{(title) => <span>{title().replace(/\s+/g, " ").slice(0, 80)}</span>}</Match>

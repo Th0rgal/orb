@@ -12,7 +12,7 @@ test.use({ browserName: process.env.ORB_TEST_BROWSER === 'webkit' ? 'webkit' : '
     :path==='/api/remote-nodes'?{nodes:[]}:path==='/api/projects'?{projects:[]}:[];
    return route.fulfill({json:body});
   });
-  await page.goto('/');await page.getByRole('button',{name:'Providers',exact:true}).click();
+  await page.goto('/');await page.getByRole('button',{name:'Inference',exact:true}).click();
   await page.setViewportSize({width,height:1000});
   if(width===480) {const toggle=page.getByRole('button',{name:'Toggle sidebar'});if(await toggle.getAttribute('aria-expanded')==='true') await toggle.click();}
   const openai=page.locator('.p-acc-wrap').filter({has:page.locator('.s-row-title',{hasText:'OpenAI'})});
@@ -21,6 +21,7 @@ test.use({ browserName: process.env.ORB_TEST_BROWSER === 'webkit' ? 'webkit' : '
   await expect(bar).toBeVisible();
   expect((await bar.boundingBox())!.width / (await row.boundingBox())!.width).toBeGreaterThan(0.55);
   const agy=page.locator('.p-acc-wrap').filter({has:page.locator('.s-row-title',{hasText:'Google Antigravity'})});
+  await agy.locator('.p-acc-btn').click();
   await expect(agy.locator('.provider-usage-unavailable')).toHaveText('WeeklyNot reported');
   await expect(agy.locator('.provider-usage-unavailable').getByRole('progressbar')).toHaveCount(0);
   const footer=agy.getByRole('region',{name:'Antigravity execution',exact:true});

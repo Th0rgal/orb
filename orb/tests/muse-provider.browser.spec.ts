@@ -23,7 +23,7 @@ test('Muse Code stays a subscription and explains an inactive account', async ({
   // on the dialog so it tests the error and does not contact a real account.
   await page.addInitScript(() => { window.open = () => null; });
   await page.goto('/');
-  await page.getByRole('button', {name:'Providers',exact:true}).click();
+  await page.getByRole('button', {name:'Inference',exact:true}).click();
   await page.getByRole('button', {name:'Add subscription account'}).click();
   await page.getByRole('radio', {name:/Muse Code/}).click();
   await page.getByRole('button', {name:'Continue in browser'}).click();

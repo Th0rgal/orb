@@ -24,10 +24,13 @@ for (const theme of ['dark', 'light']) test(`Antigravity account order is editab
     return route.fulfill({ json: path === '/api/projects' ? { projects: [] } : [] });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Providers', exact: true }).click();
+  await page.getByRole('button', { name: 'Inference', exact: true }).click();
   const emails = () => page.locator('.p-acc-wrap .p-account-email .sr-only').allTextContents();
   await expect.poll(emails).toEqual(['first@example.com', 'second@example.com']);
   await expect(page.locator('.p-rank')).toHaveText(['1st', '2nd']);
+  for (const email of ['first@example.com', 'second@example.com']) {
+    await page.locator('.p-acc-btn', { hasText: email }).click();
+  }
   await expect(page.getByRole('button', { name: 'Try first@example.com earlier' })).toBeDisabled();
 
   await page.getByRole('button', { name: 'Try second@example.com earlier' }).click();

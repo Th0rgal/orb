@@ -20,7 +20,7 @@ render(
           <nav class="sb-scroll">
             <button class="row">New Agent</button>
             <button class="row">Machines</button>
-            <button class="row">Providers</button>
+            <button class="row">Inference</button>
             <p class="file-muted">PROJECTS</p>
             <button class="row">Verity</button>
             <button class="row active">Pareto audit</button>

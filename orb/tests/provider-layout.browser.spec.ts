@@ -10,7 +10,8 @@ test('compact quota rows, separate account actions and API key add/edit',async({
   if(['POST','PUT'].includes(req.method())) {writes.push({method:req.method(),body:req.postDataJSON()});return route.fulfill({json:{}});}
   return route.fulfill({json:path==='/api/cloud/accounts'?[{id:'cursor-default',provider:'cursor_cloud',label:'Cursor Cloud',available:true,experimental:false}]:path==='/api/ai/providers'?accounts:path==='/api/ai/providers/usage'?{entries:{quota:usage}}:path.endsWith('/quota/usage')?usage:path==='/api/projects'?{projects:[]}:[]});
  });
- await page.goto('/');await page.getByRole('button',{name:'Providers',exact:true}).click();
+ await page.goto('/');await page.getByRole('button',{name:'Inference',exact:true}).click();
+ await expect(page.getByRole('heading',{name:'Inference',exact:true})).toBeVisible();
  const account=page.locator('.p-acc-wrap').filter({hasText:'person@example.com'});
  await account.locator('.p-acc-btn').click();
  await expect(account.getByRole('button',{name:'Reconnect',exact:true})).toHaveCount(0);
@@ -19,7 +20,18 @@ test('compact quota rows, separate account actions and API key add/edit',async({
  const row=await account.locator('.provider-usage-row').first().boundingBox();
  expect(row!.height).toBeLessThan(30);
  await expect(account.locator('.p-chip')).toHaveCount(0);
- await account.getByRole('button',{name:/Actions for/}).click();await expect(page.getByRole('menuitem',{name:'Re-authenticate'})).toBeVisible();await page.keyboard.press('Escape');
+ const menuBtn=account.getByRole('button',{name:/Actions for/});
+ await menuBtn.click();
+ const popup=page.getByRole('menu',{name:'Actions'});
+ await expect(popup.getByRole('menuitem',{name:'Re-authenticate'})).toBeVisible();
+ await expect(popup.getByRole('menuitem',{name:'Remove provider…'})).toHaveClass(/\bdanger\b/);
+ await expect(popup.getByRole('separator')).toHaveCount(2);
+ // The popup menu stays right-aligned inside the card instead of overflowing past it.
+ const cardBox=await account.locator('xpath=ancestor::div[contains(@class,"s-card")]').boundingBox();
+ const menuBox=await popup.boundingBox();
+ expect(menuBox!.x+menuBox!.width).toBeLessThanOrEqual(cardBox!.x+cardBox!.width+1);
+ if (process.env.ORB_REPORT_DIR) await page.screenshot({ path: `${process.env.ORB_REPORT_DIR}/inference-menu-dark.png`, animations: 'disabled', fullPage: true });
+ await menuBtn.click();await expect(popup).toHaveCount(0);
  await page.getByRole('button',{name:'Add API key',exact:true}).click();
  const dialog=page.getByRole('dialog');await dialog.locator('input').nth(0).fill('New account');await dialog.locator('input[type=password]').fill('test-only-secret');
  await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog).toHaveCount(0);

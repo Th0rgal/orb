@@ -18,7 +18,7 @@ for (const theme of ['dark', 'light']) test(`Anthropic subscriptions show per-ac
     return route.fulfill({ json: path === '/api/projects' ? { projects: [] } : [] });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Providers', exact: true }).click();
+  await page.getByRole('button', { name: 'Inference', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   for (const email of ['ben@example.com', 'thomas@example.com']) await page.getByRole('button', { name: new RegExp(email.replace('.', '\\.')) }).first().click();
   await expect(page.getByTestId('usage-limit-status')).toHaveText('Approaching limit · weekly 91%');
