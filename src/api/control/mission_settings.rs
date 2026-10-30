@@ -53,14 +53,15 @@ fn is_fork_of_parent(mission: &Mission, parent_id: Uuid) -> bool {
         .is_some_and(|title| title.to_ascii_lowercase().ends_with(" · fork"))
 }
 
-async fn collect_launched_descendant_ids(
+async fn collect_launched_descendants(
     mission_store: &Arc<dyn MissionStore>,
     root_id: Uuid,
     extra_candidates: &[Uuid],
-) -> Result<Vec<Uuid>, (StatusCode, String)> {
+) -> Result<(Vec<Uuid>, HashMap<Uuid, Mission>), (StatusCode, String)> {
     let mut visited = HashSet::from([root_id]);
     let mut stack = vec![root_id];
     let mut out = Vec::new();
+    let mut by_id = HashMap::new();
 
     let mut seen_candidates = HashSet::from([root_id]);
     let mut candidate_missions = Vec::new();
@@ -69,7 +70,7 @@ async fn collect_launched_descendant_ids(
             continue;
         }
         if let Some(m) = mission_store
-            .get_mission(cid)
+            .get_mission_metadata(cid)
             .await
             .map_err(internal_error)?
         {
@@ -82,20 +83,15 @@ async fn collect_launched_descendant_ids(
             }
         }
     }
-    // Discover Hermes webhook callback roots from a single store snapshot
-    // (`list_missions` orders by `updated_at DESC`, so offset paging could skip
-    // an active callback mission whose timestamp advances between pages).
+    // Discover Hermes webhook callback roots via a targeted metadata query
+    // rather than scanning every mission in the store.
     if super::super::projects_overview::hermes_state_db_path().is_some() {
-        let all_missions = mission_store
-            .list_missions(usize::MAX, 0)
+        let hermes_roots = mission_store
+            .list_hermes_root_missions()
             .await
             .map_err(internal_error)?;
-        for m in all_missions {
-            if m.parent_mission_id.is_none()
-                && m.origin.as_deref() == Some("hermes")
-                && m.origin_session_id.is_some()
-                && seen_candidates.insert(m.id)
-            {
+        for m in hermes_roots {
+            if seen_candidates.insert(m.id) {
                 candidate_missions.push(m);
             }
         }
@@ -112,25 +108,15 @@ async fn collect_launched_descendant_ids(
                 .get_child_missions(cur)
                 .await
                 .map_err(internal_error)?;
-            for summary in children {
-                if visited.contains(&summary.id) {
+            for child in children {
+                if visited.contains(&child.id) || is_fork_of_parent(&child, cur) {
                     continue;
                 }
-                // `SqliteMissionStore::get_child_missions` omits `project.tags`;
-                // load the full mission so `fork-of:<cur>` tags are honored.
-                let Some(child) = mission_store
-                    .get_mission(summary.id)
-                    .await
-                    .map_err(internal_error)?
-                else {
-                    continue;
-                };
-                if is_fork_of_parent(&child, cur) {
-                    continue;
-                }
-                if visited.insert(child.id) {
-                    out.push(child.id);
-                    stack.push(child.id);
+                let child_id = child.id;
+                if visited.insert(child_id) {
+                    by_id.insert(child_id, child);
+                    out.push(child_id);
+                    stack.push(child_id);
                 }
             }
         }
@@ -150,6 +136,7 @@ async fn collect_launched_descendant_ids(
                         .filter(|&pid| !is_fork_of_parent(m, pid))
                 });
             if parent.is_some_and(|p| visited.contains(&p)) && visited.insert(m.id) {
+                by_id.insert(m.id, m.clone());
                 out.push(m.id);
                 stack.push(m.id);
                 added_callback = true;
@@ -160,7 +147,7 @@ async fn collect_launched_descendant_ids(
         }
     }
 
-    Ok(out)
+    Ok((out, by_id))
 }
 
 fn folder_only_tag_diff(a: &[String], b: &[String]) -> bool {
@@ -291,15 +278,18 @@ fn map_dispatch_recovery_error(error: String) -> (StatusCode, String) {
     }
 }
 
-fn normalize_project_patch(patch: Option<Option<String>>) -> Option<Option<String>> {
+fn normalize_project_patch(
+    projects: &crate::api::projects_store::ProjectsStore,
+    patch: Option<Option<String>>,
+) -> Option<Option<String>> {
     normalize_string_patch(patch).map(|inner| {
         inner.map(|raw| {
-            let canonical = crate::api::projects_overview::canonicalize_project_slug(&raw);
+            let canonical = projects.resolve_project_slug(&raw);
             if canonical != raw {
                 tracing::info!(
                     from = %raw,
                     to = %canonical,
-                    "canonicalized mission project patch via routes.json alias"
+                    "canonicalized mission project patch via alias or roster title"
                 );
             }
             canonical
@@ -364,32 +354,43 @@ async fn resolve_project_edit_tags(
         &effective_tags,
         &current.project.tags,
     );
-    let deferred_goal = mission_store
-        .get_deferred_goal(current.id)
-        .await
-        .map_err(internal_error)?;
-    let initial_prompt = mission_store
-        .get_initial_user_message(current.id)
-        .await
-        .map_err(internal_error)?;
-    let initial_prompt_requests_writer = requested_pr_writer(
-        req.writer,
-        Some(&effective_tags),
-        effective_intent,
-        initial_prompt.as_deref(),
-    );
-    let deferred_goal_requests_writer = deferred_goal.as_deref().is_some_and(|goal| {
-        requested_pr_writer(
+    // When explicit `writer`, `"pr-readonly"`, `"pr-writer"`, or `intent`
+    // already determines `requested_pr_writer`, skip loading prompt/goal rows.
+    let has_decisive_writer_tag = effective_tags
+        .iter()
+        .any(|tag| tag == "pr-readonly" || tag == "pr-writer");
+    let becomes_writer = if req.writer.is_some() || has_decisive_writer_tag {
+        requested_pr_writer(req.writer, Some(&effective_tags), effective_intent, None)
+    } else if requested_pr_writer(req.writer, Some(&effective_tags), effective_intent, None) {
+        true
+    } else {
+        let deferred_goal = mission_store
+            .get_deferred_goal(current.id)
+            .await
+            .map_err(internal_error)?;
+        let initial_prompt = mission_store
+            .get_initial_user_message(current.id)
+            .await
+            .map_err(internal_error)?;
+        let initial_prompt_requests_writer = requested_pr_writer(
             req.writer,
             Some(&effective_tags),
             effective_intent,
-            Some(goal),
-        )
-    });
+            initial_prompt.as_deref(),
+        );
+        let deferred_goal_requests_writer = deferred_goal.as_deref().is_some_and(|goal| {
+            requested_pr_writer(
+                req.writer,
+                Some(&effective_tags),
+                effective_intent,
+                Some(goal),
+            )
+        });
+        initial_prompt_requests_writer || deferred_goal_requests_writer
+    };
     // Writer capability governs tracks even when PR metadata is absent.
     // Explicit promotion must replace a read-only tag before lease_mode sees it,
     // while pure project/folder moves keep capability tags untouched.
-    let becomes_writer = initial_prompt_requests_writer || deferred_goal_requests_writer;
     if could_change_writer_status {
         if becomes_writer {
             effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
@@ -428,6 +429,64 @@ struct PriorTrackLease {
     mode: String,
 }
 
+fn live_track_leases_by_attempt(
+    state: &Arc<AppState>,
+) -> Result<HashMap<String, PriorTrackLease>, (StatusCode, String)> {
+    let mut by_attempt = HashMap::new();
+    for lease in state.projects.live_leases(None).map_err(internal_error)? {
+        if lease.mutation_domain == "track" {
+            by_attempt.insert(
+                lease.attempt_id,
+                PriorTrackLease {
+                    slug: lease.slug,
+                    track: lease.track,
+                    mode: lease.mode,
+                },
+            );
+        }
+    }
+    Ok(by_attempt)
+}
+
+#[derive(Default)]
+struct SubtreeMoveContext {
+    ownership: Option<execution_ownership::Snapshot>,
+    remote_job_missions: Option<HashSet<Uuid>>,
+}
+
+impl SubtreeMoveContext {
+    async fn holds_track(&mut self, hub: &ControlHub, id: Uuid) -> Result<bool, String> {
+        if self.ownership.is_none() {
+            self.ownership = Some(execution_ownership::snapshot(hub).await?);
+        }
+        Ok(self
+            .ownership
+            .as_ref()
+            .expect("ownership loaded")
+            .holds_track(id)
+            != Some(false))
+    }
+
+    async fn remote_job_missions(
+        &mut self,
+        working_dir: &std::path::Path,
+    ) -> Result<&HashSet<Uuid>, String> {
+        if self.remote_job_missions.is_none() {
+            let ids = crate::remote_node::job_ledger::load(working_dir)
+                .await
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|h| h.mission_id)
+                .collect();
+            self.remote_job_missions = Some(ids);
+        }
+        Ok(self
+            .remote_job_missions
+            .as_ref()
+            .expect("remote jobs loaded"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MovedMissionSnapshot {
     id: Uuid,
@@ -443,32 +502,21 @@ struct MovedMissionSnapshot {
 }
 
 impl MovedMissionSnapshot {
-    fn capture(
-        state: &Arc<AppState>,
+    fn from_leases(
+        live_track_leases: &HashMap<String, PriorTrackLease>,
         mission: &Mission,
         undo_tag_remove: Vec<String>,
         undo_tag_add: Vec<String>,
-    ) -> Result<Self, (StatusCode, String)> {
+    ) -> Self {
         let attempt = mission.id.to_string();
-        let prior_track_lease = state
-            .projects
-            .live_leases(None)
-            .map_err(internal_error)?
-            .into_iter()
-            .rfind(|l| l.attempt_id == attempt && l.mutation_domain == "track")
-            .map(|l| PriorTrackLease {
-                slug: l.slug,
-                track: l.track,
-                mode: l.mode,
-            });
-        Ok(Self {
+        Self {
             id: mission.id,
             title: mission.title.clone(),
             before: mission.project.clone(),
-            prior_track_lease,
+            prior_track_lease: live_track_leases.get(&attempt).cloned(),
             undo_tag_remove,
             undo_tag_add,
-        })
+        }
     }
 }
 
@@ -537,7 +585,7 @@ async fn rollback_moved_missions(
             first_error.get_or_insert(rollback_err);
         }
 
-        match store.get_mission(snap.id).await {
+        match store.get_mission_metadata(snap.id).await {
             Ok(Some(cur)) => {
                 let tag_rollback_needed = snap
                     .undo_tag_remove
@@ -625,7 +673,7 @@ async fn recover_subtree_project_edits_in_store(
         let Ok(root_id) = Uuid::parse_str(&root_key) else {
             continue;
         };
-        if store.get_mission(root_id).await?.is_some() {
+        if store.get_mission_metadata(root_id).await?.is_some() {
             recover_subtree_project_edit_entry(state, store, &root_key, receipt).await?;
         }
     }
@@ -685,28 +733,47 @@ where
 
     if control
         .mission_store
-        .get_mission(id)
+        .get_mission_metadata(id)
         .await
         .map_err(internal_error)?
         .is_none()
     {
         return Err((StatusCode::NOT_FOUND, format!("Mission {} not found", id)));
     }
-    let descendant_ids =
-        collect_launched_descendant_ids(&control.mission_store, id, &extra_descendants).await?;
+    let (descendant_ids, mut descendant_missions) =
+        collect_launched_descendants(&control.mission_store, id, &extra_descendants).await?;
     // Reconcile any interrupted individual `mission_dispatch_admissions`
     // receipts on the root and every descendant BEFORE capturing rollback
     // snapshots so a stale provisional lease is never captured as prior state.
     for mid in std::iter::once(id).chain(descendant_ids.iter().copied()) {
-        dispatch_admission::recover_dispatch_single(&state, &control.mission_store, mid)
-            .await
-            .map_err(map_dispatch_recovery_error)?;
+        let had_receipt = state
+            .projects
+            .dispatch_admission(&mid.to_string())
+            .map_err(internal_error)?
+            .is_some();
+        if had_receipt {
+            dispatch_admission::recover_dispatch_single(&state, &control.mission_store, mid)
+                .await
+                .map_err(map_dispatch_recovery_error)?;
+            if mid != id {
+                if let Some(reloaded) = control
+                    .mission_store
+                    .get_mission_metadata(mid)
+                    .await
+                    .map_err(internal_error)?
+                {
+                    descendant_missions.insert(mid, reloaded);
+                } else {
+                    descendant_missions.remove(&mid);
+                }
+            }
+        }
     }
 
     let explicit_project_patch = req.project.is_some();
     let root_current = control
         .mission_store
-        .get_mission(id)
+        .get_mission_metadata(id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
@@ -723,25 +790,21 @@ where
         &root_current.project.tags,
         &resolved_root_tags.effective_tags,
     );
-    let root_snap = MovedMissionSnapshot::capture(
-        &state,
+    let live_leases = live_track_leases_by_attempt(&state)?;
+    let root_snap = MovedMissionSnapshot::from_leases(
+        &live_leases,
         &root_current,
         root_forward_tags.add,
         root_forward_tags.remove,
-    )?;
+    );
 
-    let planned_target_project = normalize_project_patch(req.project.clone())
+    let planned_target_project = normalize_project_patch(&state.projects, req.project.clone())
         .unwrap_or_else(|| root_current.project.project.clone());
     let children_may_move = planned_target_project.is_some() || explicit_project_patch;
     let mut planned_snapshots = vec![root_snap];
     if children_may_move {
         for &child_id in &descendant_ids {
-            if let Some(child) = control
-                .mission_store
-                .get_mission(child_id)
-                .await
-                .map_err(internal_error)?
-            {
+            if let Some(child) = descendant_missions.get(&child_id) {
                 if child.project.project == planned_target_project {
                     continue;
                 }
@@ -752,12 +815,12 @@ where
                     .filter(|t| t.starts_with("orb-folder:"))
                     .cloned()
                     .collect();
-                planned_snapshots.push(MovedMissionSnapshot::capture(
-                    &state,
-                    &child,
+                planned_snapshots.push(MovedMissionSnapshot::from_leases(
+                    &live_leases,
+                    child,
                     Vec::new(),
                     removed_folders,
-                )?);
+                ));
             }
         }
     }
@@ -769,16 +832,21 @@ where
         .save_subtree_project_edit(&root_key, &receipt_json)
         .map_err(internal_error)?;
 
-    let updated = match update_mission_project_locked(
+    let mut subtree_ctx = SubtreeMoveContext::default();
+    let updated = match update_mission_project_inner(
         is_actor_busy(id),
-        State(state.clone()),
-        Extension(user.clone()),
-        Path(id),
-        Json(req),
+        state.clone(),
+        user.clone(),
+        id,
+        req,
+        Some(root_current),
+        Some(&mut subtree_ctx),
+        true,
     )
     .await
     {
-        Ok(Json(updated)) => updated,
+        Ok(Some(updated)) => updated,
+        Ok(None) => return Err(internal_error("Updated mission response missing")),
         Err(err) => {
             if rollback_moved_missions(&state, &control.mission_store, &planned_snapshots[..1])
                 .await
@@ -794,25 +862,33 @@ where
 
     if updated.project.project.is_some() || explicit_project_patch {
         let target_project = updated.project.project.clone();
+        let mut planned_by_id: HashMap<Uuid, MovedMissionSnapshot> = planned_snapshots
+            .iter()
+            .skip(1)
+            .map(|s| (s.id, s.clone()))
+            .collect();
         let mut moved = vec![planned_snapshots[0].clone()];
         for child_id in descendant_ids {
-            let child = match control.mission_store.get_mission(child_id).await {
-                Ok(Some(child)) => child,
-                Ok(None) => continue,
-                Err(err) => {
-                    if rollback_moved_missions(&state, &control.mission_store, &moved)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = state.projects.clear_subtree_project_edit(&root_key);
+            let child = match descendant_missions.remove(&child_id) {
+                Some(child) => child,
+                None => match control.mission_store.get_mission_metadata(child_id).await {
+                    Ok(Some(child)) => child,
+                    Ok(None) => continue,
+                    Err(err) => {
+                        if rollback_moved_missions(&state, &control.mission_store, &moved)
+                            .await
+                            .is_ok()
+                        {
+                            let _ = state.projects.clear_subtree_project_edit(&root_key);
+                        }
+                        return Err(internal_error(err));
                     }
-                    return Err(internal_error(err));
-                }
+                },
             };
             if child.project.project == target_project {
                 continue;
             }
-            let child_snap = match planned_snapshots.iter().find(|s| s.id == child_id).cloned() {
+            let child_snap = match planned_by_id.remove(&child_id) {
                 Some(snap) => snap,
                 None => {
                     let removed_folders: Vec<String> = child
@@ -822,19 +898,12 @@ where
                         .filter(|t| t.starts_with("orb-folder:"))
                         .cloned()
                         .collect();
-                    match MovedMissionSnapshot::capture(&state, &child, Vec::new(), removed_folders)
-                    {
-                        Ok(snap) => snap,
-                        Err(err) => {
-                            if rollback_moved_missions(&state, &control.mission_store, &moved)
-                                .await
-                                .is_ok()
-                            {
-                                let _ = state.projects.clear_subtree_project_edit(&root_key);
-                            }
-                            return Err(err);
-                        }
-                    }
+                    MovedMissionSnapshot::from_leases(
+                        &live_leases,
+                        &child,
+                        Vec::new(),
+                        removed_folders,
+                    )
                 }
             };
             // Include the attempted child in `moved` before running its update:
@@ -844,7 +913,7 @@ where
             moved.push(child_snap);
             // Omit internal `disk-reservation-v1:` tags from the synthetic
             // request body so admission validation does not reject legacy
-            // rows; `update_mission_project_locked` re-attaches them from
+            // rows; `update_mission_project_inner` re-attaches them from
             // `current.project.tags` automatically.
             let child_tags: Vec<String> = child
                 .project
@@ -855,12 +924,12 @@ where
                 })
                 .cloned()
                 .collect();
-            if let Err(err) = update_mission_project_locked(
+            if let Err(err) = update_mission_project_inner(
                 is_actor_busy(child_id),
-                State(state.clone()),
-                Extension(user.clone()),
-                Path(child_id),
-                Json(UpdateMissionProjectRequest {
+                state.clone(),
+                user.clone(),
+                child_id,
+                UpdateMissionProjectRequest {
                     project: Some(target_project.clone()),
                     track: None,
                     intent: None,
@@ -871,7 +940,10 @@ where
                     next_check_at: None,
                     include_descendants: false,
                     descendant_ids: Vec::new(),
-                }),
+                },
+                Some(child),
+                Some(&mut subtree_ctx),
+                false,
             )
             .await
             {
@@ -900,18 +972,40 @@ pub(super) async fn update_mission_project_locked(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMissionProjectRequest>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
-    let control = control_for_user(&state, &user).await;
-    dispatch_admission::recover_dispatch_single(&state, &control.mission_store, id)
-        .await
-        .map_err(map_dispatch_recovery_error)?;
-    let current = control
-        .mission_store
-        .get_mission(id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
+    let updated = update_mission_project_inner(actor_busy, state, user, id, req, None, None, true)
+        .await?
+        .ok_or_else(|| internal_error("Updated mission response missing"))?;
+    Ok(Json(updated))
+}
 
-    let project = normalize_project_patch(req.project.clone());
+#[allow(clippy::too_many_arguments)]
+async fn update_mission_project_inner(
+    actor_busy: bool,
+    state: Arc<AppState>,
+    user: AuthUser,
+    id: Uuid,
+    req: UpdateMissionProjectRequest,
+    preloaded_current: Option<Mission>,
+    mut subtree_ctx: Option<&mut SubtreeMoveContext>,
+    load_response_mission: bool,
+) -> Result<Option<Mission>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let current = match preloaded_current {
+        Some(current) => current,
+        None => {
+            dispatch_admission::recover_dispatch_single(&state, &control.mission_store, id)
+                .await
+                .map_err(map_dispatch_recovery_error)?;
+            control
+                .mission_store
+                .get_mission_metadata(id)
+                .await
+                .map_err(internal_error)?
+                .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?
+        }
+    };
+
+    let project = normalize_project_patch(&state.projects, req.project.clone());
     let track = normalize_string_patch(req.track.clone());
     let intent = normalize_string_patch(req.intent.clone());
     let github_pr = normalize_string_patch(req.github_pr.clone());
@@ -969,6 +1063,7 @@ pub(super) async fn update_mission_project_locked(
     let effective_project = effective_string(&project, &current.project.project);
     let effective_track = effective_string(&track, &current.project.track);
     let project_changed = effective_project != current.project.project;
+    let mut cached_busy_reason: Option<Option<&'static str>> = None;
     // A pure project move (generated per-mission tracks and Orb folder tags
     // follow the mission) keeps the holder, mode, PR and real track. Leases
     // are only revalidated at turn start, so a running mission can move as
@@ -993,14 +1088,30 @@ pub(super) async fn update_mission_project_locked(
                 .map_err(internal_error)?
                 .is_none();
         let busy = if move_only {
-            dispatch_admission::busy_reason(&state, &control.mission_store, &current, actor_busy)
-                .await
-                .map_err(internal_error)?
+            let remote_jobs = match subtree_ctx.as_deref_mut() {
+                Some(ctx) => Some(
+                    ctx.remote_job_missions(&state.config.working_dir)
+                        .await
+                        .map_err(internal_error)?,
+                ),
+                None => None,
+            };
+            let reason = dispatch_admission::busy_reason_with_remote_jobs(
+                &state,
+                &control.mission_store,
+                &current,
+                actor_busy,
+                remote_jobs,
+            )
+            .await
+            .map_err(internal_error)?;
+            cached_busy_reason = Some(reason);
+            reason
         } else {
             None
         };
         if busy.is_some() {
-            if let Some(moved) = move_running_mission_project(
+            if let RunningMoveOutcome::Moved(moved) = move_running_mission_project(
                 &state,
                 &control.mission_store,
                 &current,
@@ -1021,10 +1132,11 @@ pub(super) async fn update_mission_project_locked(
                     desired_state: desired_state.clone(),
                     next_check_at: next_check_at.clone(),
                 },
+                load_response_mission,
             )
             .await?
             {
-                return Ok(Json(moved));
+                return Ok(moved.map(|m| *m));
             }
         }
     }
@@ -1034,9 +1146,34 @@ pub(super) async fn update_mission_project_locked(
         || !folder_only_tag_diff(&effective_tags, &current.project.tags)
         || effective_intent != current.project.intent
     {
-        dispatch_admission::require_quiescent(&state, &control.mission_store, &current, actor_busy)
-            .await
-            .map_err(|error| (StatusCode::CONFLICT, error))?;
+        let reason = match cached_busy_reason {
+            Some(reason) => reason,
+            None => {
+                let remote_jobs = match subtree_ctx.as_deref_mut() {
+                    Some(ctx) => Some(
+                        ctx.remote_job_missions(&state.config.working_dir)
+                            .await
+                            .map_err(internal_error)?,
+                    ),
+                    None => None,
+                };
+                dispatch_admission::busy_reason_with_remote_jobs(
+                    &state,
+                    &control.mission_store,
+                    &current,
+                    actor_busy,
+                    remote_jobs,
+                )
+                .await
+                .map_err(internal_error)?
+            }
+        };
+        if let Some(reason) = reason {
+            return Err((
+                StatusCode::CONFLICT,
+                dispatch_admission::format_busy_error(reason),
+            ));
+        }
     }
     let track_changed = track.is_some() || project_changed || could_change_writer_status;
     let mut lease_request = None;
@@ -1050,11 +1187,19 @@ pub(super) async fn update_mission_project_locked(
             .projects
             .absorb_track(slug, key, current.title.as_deref(), pr)
             .map_err(internal_error)?;
-        let holds_lease = execution_ownership::snapshot(&state.control)
-            .await
-            .map_err(internal_error)?
-            .holds_track(id)
-            != Some(false);
+        let holds_lease = match subtree_ctx {
+            Some(ctx) => ctx
+                .holds_track(&state.control, id)
+                .await
+                .map_err(internal_error)?,
+            None => {
+                execution_ownership::snapshot(&state.control)
+                    .await
+                    .map_err(internal_error)?
+                    .holds_track(id)
+                    != Some(false)
+            }
+        };
         if holds_lease {
             let mode = if becomes_writer {
                 "writer"
@@ -1157,13 +1302,16 @@ pub(super) async fn update_mission_project_locked(
         }
     }
 
+    if !load_response_mission {
+        return Ok(None);
+    }
     let updated = control
         .mission_store
         .get_mission(id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
-    Ok(Json(updated))
+    Ok(Some(updated))
 }
 
 pub(super) struct MoveTarget {
@@ -1176,8 +1324,13 @@ pub(super) struct MoveTarget {
     pub(super) next_check_at: Option<Option<String>>,
 }
 
+pub(super) enum RunningMoveOutcome {
+    ModeChange,
+    Moved(Option<Box<Mission>>),
+}
+
 /// Move a running mission to another project: transfer its track lease in
-/// one transaction, then persist the metadata. Returns `Ok(None)` when the
+/// one transaction, then persist the metadata. Returns `ModeChange` when the
 /// move would change the held lease mode (writer status), so the caller
 /// falls back to the quiescence-guarded identity change.
 pub(super) async fn move_running_mission_project(
@@ -1185,7 +1338,8 @@ pub(super) async fn move_running_mission_project(
     store: &Arc<dyn MissionStore>,
     current: &Mission,
     target: MoveTarget,
-) -> Result<Option<Mission>, (StatusCode, String)> {
+    load_response_mission: bool,
+) -> Result<RunningMoveOutcome, (StatusCode, String)> {
     use super::super::projects_store::MoveLeaseError;
     let id = current.id;
     let attempt = id.to_string();
@@ -1206,7 +1360,7 @@ pub(super) async fn move_running_mission_project(
             target.pr,
         ) {
             Ok((outcome, _)) => new_track = Some(outcome.key),
-            Err(MoveLeaseError::ModeChange { .. }) => return Ok(None),
+            Err(MoveLeaseError::ModeChange { .. }) => return Ok(RunningMoveOutcome::ModeChange),
             Err(error @ MoveLeaseError::Conflict { .. }) => {
                 let MoveLeaseError::Conflict {
                     ref project,
@@ -1275,12 +1429,15 @@ pub(super) async fn move_running_mission_project(
         to = %target.project,
         "Moved running mission between projects; next turn uses the new project"
     );
+    if !load_response_mission {
+        return Ok(RunningMoveOutcome::Moved(None));
+    }
     store
         .get_mission(id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {id} not found")))
-        .map(Some)
+        .map(|moved| RunningMoveOutcome::Moved(Some(Box::new(moved))))
 }
 
 /// Update mission run settings for future turns.
@@ -1637,4 +1794,252 @@ pub(super) async fn mission_is_client_placed(
         return Ok(false);
     };
     Ok(client_placement::is_tagged(&mission.project.tags))
+}
+
+#[cfg(test)]
+mod subtree_move_tests {
+    use super::*;
+    use crate::api::mission_store::{MissionProjectPatch, SqliteMissionStore};
+    use crate::api::projects_store::ProjectsStore;
+
+    #[tokio::test]
+    async fn subtree_move_resolves_display_title_and_moves_large_subtree_with_null_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let mut config = Config::new(path.to_path_buf());
+        config.automations_enabled = false;
+        let root_agent: AgentRef = Arc::new(crate::agents::OpenCodeAgent::new(config.clone()));
+        let mcp = Arc::new(McpRegistry::new(path).await);
+        let workspaces = Arc::new(workspace::WorkspaceStore::new(path.to_path_buf()).await);
+        let library = Arc::new(RwLock::new(None));
+        let hub = ControlHub::new(
+            config.clone(),
+            root_agent.clone(),
+            mcp.clone(),
+            workspaces.clone(),
+            library.clone(),
+            None,
+        );
+        let user = AuthUser {
+            id: "subtree-test".into(),
+            username: "subtree-test".into(),
+        };
+        hub.identities
+            .write()
+            .await
+            .insert(user.id.clone(), user.clone());
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(path.join("missions"), &user.id)
+                .await
+                .unwrap(),
+        );
+        let control = spawn_control_session(
+            hub.clone(),
+            config.clone(),
+            root_agent.clone(),
+            mcp.clone(),
+            workspaces.clone(),
+            library.clone(),
+            store.clone(),
+            None,
+            None,
+            user.id.clone(),
+        );
+        hub.sessions
+            .write()
+            .await
+            .insert(user.id.clone(), control.clone());
+        let projects = Arc::new(ProjectsStore::open(path.join("projects.db")).unwrap());
+        projects
+            .upsert_project("assistant", Some("Assistant"), None, None, None)
+            .unwrap();
+        projects
+            .upsert_project("verity-core", Some("Ethereum"), None, None, None)
+            .unwrap();
+        let state = Arc::new(AppState {
+            config,
+            root_agent,
+            mcp,
+            workspaces,
+            library,
+            control: hub,
+            tasks: Default::default(),
+            opencode_connections: Arc::new(
+                crate::opencode_config::OpenCodeStore::new(path.join("connections.json")).await,
+            ),
+            opencode_agents_cache: Default::default(),
+            ai_providers: Arc::new(
+                crate::ai_providers::AIProviderStore::new(path.join("providers.json")).await,
+            ),
+            pending_oauth: Default::default(),
+            pending_github_oauth: Default::default(),
+            pending_github_integration: Default::default(),
+            github_connection: Arc::new(
+                crate::github_connection::GithubConnectionStore::new(path.join("github.json"))
+                    .await,
+            ),
+            secrets: None,
+            console_pool: Arc::new(crate::api::console::SessionPool::new()),
+            settings: Arc::new(crate::settings::SettingsStore::new(path).await),
+            backend_registry: Arc::new(RwLock::new(
+                crate::backend::registry::BackendRegistry::new("opencode"),
+            )),
+            backend_configs: Arc::new(
+                crate::backend_config::BackendConfigStore::new(path.join("backends.json"), vec![])
+                    .await,
+            ),
+            model_catalog: Default::default(),
+            health_tracker: Arc::new(crate::provider_health::ProviderHealthTracker::new()),
+            chain_store: Arc::new(
+                crate::provider_health::ModelChainStore::new(path.join("chains.json")).await,
+            ),
+            http_client: reqwest::Client::new(),
+            proxy_secret: "test-only".into(),
+            proxy_api_keys: Arc::new(
+                crate::api::proxy_keys::ProxyApiKeyStore::new(path.join("keys.json")).await,
+            ),
+            deferred_requests: Arc::new(
+                crate::api::deferred_proxy::DeferredRequestStore::new(path.join("requests.json"))
+                    .await,
+            ),
+            telegram_bridge: Arc::new(crate::api::telegram::TelegramBridge::new()),
+            fido_hub: Arc::new(crate::api::fido::FidoSigningHub::new()),
+            control_metrics: Arc::new(crate::api::control_metrics::ControlMetrics::new()),
+            provider_usage_cache: crate::api::provider_usage_cache::ProviderUsageCache::new(),
+            codex_usage: crate::api::codex_usage::CodexUsageStore::new(),
+            fleet: Arc::new(crate::remote_node::FleetMonitor::new()),
+            validation: Arc::new(
+                crate::api::validation::ValidationStore::open(path.join("validation.db")).unwrap(),
+            ),
+            projects,
+            attention_snapshot: Default::default(),
+        });
+        let _ = state.control.admission_state.set(Arc::downgrade(&state));
+
+        let root = store
+            .create_mission(
+                Some("evm.fast"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                root.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    track: Some(Some("mission-0c532a32".into())),
+                    tags: Some(vec!["pr-readonly".into(), "orb-folder:old".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut child_ids = Vec::new();
+        for idx in 0..64 {
+            let child = store
+                .create_mission_with_parent(
+                    Some(&format!("worker-{idx}")),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    Some("opencode"),
+                    None,
+                    Some(root.id),
+                    None,
+                )
+                .await
+                .unwrap();
+            store
+                .update_mission_status(child.id, MissionStatus::Completed)
+                .await
+                .unwrap();
+            // Include `project = None` (`Default`) children and internal reservation tags.
+            let initial_proj = if idx < 2 {
+                None
+            } else {
+                Some("assistant".to_string())
+            };
+            store
+                .update_mission_project(
+                    child.id,
+                    MissionProjectPatch {
+                        project: Some(initial_proj),
+                        track: Some(Some(format!("worker-track-{idx}"))),
+                        tags: Some(vec![
+                            "pr-readonly".into(),
+                            "orb-folder:nested".into(),
+                            "disk-reservation-v1:1024".into(),
+                        ]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            child_ids.push(child.id);
+        }
+
+        let started = std::time::Instant::now();
+        let Json(updated) = update_mission_project_subtree_locked(
+            &|uid| uid == root.id,
+            State(state.clone()),
+            Extension(user),
+            Path(root.id),
+            Json(UpdateMissionProjectRequest {
+                project: Some(Some("Ethereum".into())),
+                track: None,
+                intent: None,
+                github_pr: None,
+                writer: None,
+                tags: Some(vec!["pr-readonly".into(), "orb-folder:evm".into()]),
+                desired_state: None,
+                next_check_at: None,
+                include_descendants: true,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await
+        .expect("subtree move succeeds");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "64-child subtree move took too long: {elapsed:?}"
+        );
+        assert_eq!(updated.project.project.as_deref(), Some("verity-core"));
+        assert_eq!(
+            updated.project.tags,
+            vec!["pr-readonly".to_string(), "orb-folder:evm".to_string()]
+        );
+
+        for child_id in child_ids {
+            let child = store
+                .get_mission_metadata(child_id)
+                .await
+                .unwrap()
+                .expect("child exists");
+            assert_eq!(child.project.project.as_deref(), Some("verity-core"));
+            assert!(
+                !child
+                    .project
+                    .tags
+                    .iter()
+                    .any(|t| t.starts_with("orb-folder:")),
+                "child folder tags must be stripped on cross-project move: {:?}",
+                child.project.tags
+            );
+            assert!(child.project.tags.contains(&"pr-readonly".to_string()));
+            assert!(child
+                .project
+                .tags
+                .contains(&"disk-reservation-v1:1024".to_string()));
+        }
+    }
 }

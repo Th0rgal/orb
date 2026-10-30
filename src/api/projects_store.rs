@@ -2010,6 +2010,53 @@ impl ProjectsStore {
             .map_err(|e| e.to_string())
     }
 
+    /// Resolve a requested project identifier to its canonical roster `slug`.
+    ///
+    /// Applies `routes.json` alias folding first (`canonicalize_project_slug`).
+    /// When the result does not match an existing roster `slug` directly, falls
+    /// back to a unique case-insensitive match among active projects by `slug`
+    /// and then by display `title` (for example `"ethereum"` / `"Ethereum"` ->
+    /// `"verity-core"` when `title == "Ethereum"`). Ambiguous or unknown names
+    /// return the `routes.json`-canonicalized string unchanged.
+    pub fn resolve_project_slug(&self, raw: &str) -> String {
+        let canonical = crate::api::projects_overview::canonicalize_project_slug(raw);
+        if canonical.is_empty() || canonical != raw.trim() {
+            return canonical;
+        }
+        if matches!(self.get_project(&canonical), Ok(Some(_))) {
+            return canonical;
+        }
+        let Ok(projects) = self.list_projects() else {
+            return canonical;
+        };
+        let active: Vec<&ProjectRecord> = projects
+            .iter()
+            .filter(|p| !matches!(p.status.as_str(), "archived" | "deleted"))
+            .collect();
+        let slug_matches: Vec<&ProjectRecord> = active
+            .iter()
+            .copied()
+            .filter(|p| p.slug.eq_ignore_ascii_case(&canonical))
+            .collect();
+        if slug_matches.len() == 1 {
+            return slug_matches[0].slug.clone();
+        }
+        let title_matches: Vec<&ProjectRecord> = active
+            .iter()
+            .copied()
+            .filter(|p| {
+                p.title
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|t| t.eq_ignore_ascii_case(&canonical))
+            })
+            .collect();
+        if title_matches.len() == 1 {
+            return title_matches[0].slug.clone();
+        }
+        canonical
+    }
+
     /// Remove the authoritative project object and every project-owned row.
     ///
     /// Missions and Hermes conversation messages live in separate stores and
@@ -8356,5 +8403,41 @@ mod tests {
         assert!(store.insert_steer("ghost", "nope", "orb").is_err());
         assert!(store.insert_steer("lido", "   ", "orb").is_err());
         assert!(store.insert_steer("lido", "hi", "telegram").is_err());
+    }
+
+    #[test]
+    fn resolve_project_slug_maps_unique_active_display_title_and_keeps_exact_slugs() {
+        let store = ProjectsStore::open_in_memory().expect("store");
+        store
+            .upsert_project("verity-core", Some("Ethereum"), None, None, None)
+            .expect("ethereum");
+        store
+            .upsert_project("dup-a", Some("Shared Title"), None, None, None)
+            .expect("dup-a");
+        store
+            .upsert_project("dup-b", Some("Shared Title"), None, None, None)
+            .expect("dup-b");
+        store
+            .upsert_project("old-proj", Some("Archived Display"), None, None, None)
+            .expect("archived");
+        store
+            .lock()
+            .expect("lock")
+            .execute(
+                "UPDATE projects SET status = 'archived' WHERE slug = 'old-proj'",
+                [],
+            )
+            .expect("archive");
+
+        assert_eq!(store.resolve_project_slug("verity-core"), "verity-core");
+        assert_eq!(store.resolve_project_slug("VERITY-CORE"), "verity-core");
+        assert_eq!(store.resolve_project_slug("Ethereum"), "verity-core");
+        assert_eq!(store.resolve_project_slug("ethereum"), "verity-core");
+        // Ambiguous titles and archived projects must not silently guess a slug.
+        assert_eq!(store.resolve_project_slug("Shared Title"), "Shared Title");
+        assert_eq!(
+            store.resolve_project_slug("Archived Display"),
+            "Archived Display"
+        );
     }
 }

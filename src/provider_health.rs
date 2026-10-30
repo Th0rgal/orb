@@ -18,7 +18,7 @@ use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Reason an account was placed into cooldown.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CooldownReason {
     /// HTTP 429 rate limit (transient — short exponential cooldown)
@@ -2877,6 +2877,16 @@ impl ModelChainStore {
                 // let the proxy layer fetch a fresh token at request time.
                 let provider_is_google =
                     matches!(provider_type, crate::ai_providers::ProviderType::Google);
+                // Google Code Assist (`cloudcode-pa.googleapis.com`) never serves
+                // Early Access Program (`-eap`) models; those only exist on
+                // `generativelanguage.googleapis.com` (direct API key / CLIProxyAPI).
+                if provider_is_google
+                    && routed_api_key.is_none()
+                    && account.oauth.is_some()
+                    && crate::model_policy::is_google_code_assist_unsupported_model(&entry.model_id)
+                {
+                    continue;
+                }
                 let google_oauth_routable = provider_is_google && account.oauth.is_some();
                 // Kimi tokens live ~300s, so the stored access token is often
                 // expired by the time a request (or a catalog listing) resolves
@@ -3040,10 +3050,17 @@ impl ModelChainStore {
                             && !crate::model_policy::is_google_api_key_allowed_model(
                                 &entry.model_id,
                             );
+                        let disallowed_on_code_assist = sa.has_oauth
+                            && sa.api_key.is_none()
+                            && sa.account_id != stable_provider_uuid("google-cli-proxy")
+                            && crate::model_policy::is_google_code_assist_unsupported_model(
+                                &entry.model_id,
+                            );
                         if duplicate_oauth
                             || duplicate_api_key
                             || duplicate_proxy
                             || disallowed_on_api_key
+                            || disallowed_on_code_assist
                         {
                             continue;
                         }
@@ -3187,6 +3204,13 @@ impl ModelChainStore {
                 {
                     continue;
                 }
+                if provider_type == crate::ai_providers::ProviderType::Google
+                    && account.api_key.is_none()
+                    && account.oauth.is_some()
+                    && crate::model_policy::is_google_code_assist_unsupported_model(&entry.model_id)
+                {
+                    continue;
+                }
                 if matches!(provider_type, crate::ai_providers::ProviderType::Custom) {
                     let matches = if entry.provider_id == "custom" {
                         account
@@ -3210,6 +3234,13 @@ impl ModelChainStore {
                     && (account.api_key.is_some() || account.has_oauth)
                     && (!is_google_api_key_standard_account(account)
                         || crate::model_policy::is_google_api_key_allowed_model(&entry.model_id))
+                    && !(account.provider_type == crate::ai_providers::ProviderType::Google
+                        && account.has_oauth
+                        && account.api_key.is_none()
+                        && account.account_id != stable_provider_uuid("google-cli-proxy")
+                        && crate::model_policy::is_google_code_assist_unsupported_model(
+                            &entry.model_id,
+                        ))
                 {
                     ids.insert(account.account_id);
                 }
@@ -3247,6 +3278,13 @@ impl ModelChainStore {
                 if provider_type == crate::ai_providers::ProviderType::Google
                     && account.api_key.is_some()
                     && !crate::model_policy::is_google_api_key_allowed_model(&entry.model_id)
+                {
+                    continue;
+                }
+                if provider_type == crate::ai_providers::ProviderType::Google
+                    && account.api_key.is_none()
+                    && account.oauth.is_some()
+                    && crate::model_policy::is_google_code_assist_unsupported_model(&entry.model_id)
                 {
                     continue;
                 }
@@ -4213,7 +4251,7 @@ mod tests {
             "argon",
             vec![ChainEntry {
                 provider_id: "google".into(),
-                model_id: "gemini-4-argon-eap".into(),
+                model_id: "gemini-4-argon".into(),
             }],
         )
         .await;
@@ -4255,7 +4293,7 @@ mod tests {
             "carbon",
             vec![ChainEntry {
                 provider_id: "google".to_string(),
-                model_id: "gemini-4-carbon-eap".to_string(),
+                model_id: "gemini-4-carbon".to_string(),
             }],
         )
         .await;
@@ -4277,6 +4315,64 @@ mod tests {
         assert_eq!(resolved[0].account_id, direct_id);
         assert!(resolved[0].api_key.is_some());
         assert!(resolved[1].has_oauth);
+    }
+
+    #[tokio::test]
+    async fn resolve_google_excludes_code_assist_oauth_for_eap_models() {
+        let mut oauth = AIProvider::new(ProviderType::Google, "Google OAuth".to_string());
+        oauth.oauth = Some(OAuthCredentials {
+            access_token: "oauth-access".to_string(),
+            refresh_token: "oauth-refresh".to_string(),
+            expires_at: future_ms(6),
+        });
+        oauth.status = ProviderStatus::Connected;
+        let mut api = AIProvider::new(ProviderType::Google, "Google Gemini".to_string());
+        api.api_key = Some("gemini-api-key".to_string());
+        api.status = ProviderStatus::Connected;
+        let api_id = api.id;
+
+        let store = store_with(vec![oauth, api]).await;
+        let eap = [ChainEntry {
+            provider_id: "google".to_string(),
+            model_id: "gemini-4-carbon-eap".to_string(),
+        }];
+        let chains = store_with_chain("carbon-eap", eap.to_vec()).await;
+        let standard = vec![
+            StandardAccount {
+                account_id: stable_provider_uuid("google"),
+                provider_type: ProviderType::Google,
+                api_key: None,
+                has_oauth: true,
+                base_url: None,
+                oauth_expires_at: Some(future_ms(6)),
+            },
+            StandardAccount {
+                account_id: stable_provider_uuid("google-cli-proxy"),
+                provider_type: ProviderType::Google,
+                api_key: None,
+                has_oauth: true,
+                base_url: None,
+                oauth_expires_at: Some(i64::MAX),
+            },
+        ];
+
+        let resolved = chains
+            .resolve_chain(
+                "carbon-eap",
+                &store,
+                &standard,
+                &ProviderHealthTracker::new(),
+            )
+            .await;
+        let resolved_ids: Vec<Uuid> = resolved.iter().map(|e| e.account_id).collect();
+        assert!(resolved_ids.contains(&api_id));
+        assert!(
+            !resolved_ids.contains(&stable_provider_uuid("google")),
+            "Code Assist OAuth (bbb84a0d) must never be selected for -eap models: {resolved_ids:?}"
+        );
+        let configured = chains.configured_account_ids(&eap, &store, &standard).await;
+        assert!(configured.contains(&api_id));
+        assert!(!configured.contains(&stable_provider_uuid("google")));
 
         let argon_only_oauth = chains
             .resolve_entries(

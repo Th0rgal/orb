@@ -120,3 +120,30 @@ it('assigns distinct tree IDs to cross-project placeholder parents while resolvi
  expect(missionIdFromTreeId(`mp:archive:verity-core:${P}`)).toBe(P);
  expect(missionIdFromTreeId('pf:verity-core:Audits')).toBeNull();
 });
+it('moves co-located fork-of versions and their Default children with the visible conversation leader, without touching individual version moves or cross-project forks',()=>{
+ const V1='52bbf658-8705-4df7-8510-24dc69aed102';
+ const V2='97399f01-c91d-4c44-b9ef-4a645f0e3333';
+ const V3='5fc3a745-bcda-4bba-b0c4-42293e70184c';
+ const V4='0c532a32-2fb5-4fd6-ba6b-b9820d12c097';
+ const D1='d450d33d-1111-4111-8111-111111111111';
+ const OTHER='66666666-6666-4666-8666-666666666666';
+ const forkKnown=[
+  {id:V1,project:'assistant',status:'completed',updated_at:'2026-10-28T00:00:00Z'},
+  {id:D1,project:null,parent_mission_id:V1,status:'interrupted'},
+  {id:V2,project:'assistant',tags:[`fork-of:${V1}`],status:'interrupted',updated_at:'2026-10-29T00:00:00Z'},
+  {id:V3,project:'assistant',tags:[`fork-of:${V2}`],status:'completed',updated_at:'2026-10-29T12:00:00Z'},
+  {id:V4,project:'assistant',tags:[`fork-of:${V2}`],status:'active',updated_at:'2026-10-30T01:00:00Z'},
+  {id:OTHER,project:'elsewhere',tags:[`fork-of:${V1}`],status:'completed',updated_at:'2026-10-29T05:00:00Z'},
+ ];
+ // Moving the leading conversation row moves every co-located version in `assistant`
+ // and heals V1's `project: null` (`Default`) child in the same operation.
+ const leaderPlan=planMissionMoves([V4],'verity-core','evm',forkKnown);
+ const rootIds=leaderPlan.filter(s=>!s.viaRootId).map(s=>s.id);
+ expect(rootIds).toEqual([V4,V1,V2,V3]);
+ expect(rootIds).not.toContain(OTHER);
+ expect(leaderPlan.find(s=>s.id===D1)).toEqual({id:D1,from:null,folder:'',viaRootId:V1});
+
+ // Explicitly moving a single earlier version row moves ONLY that version.
+ const singleVersionPlan=planMissionMoves([V3],'verity-core','',forkKnown);
+ expect(singleVersionPlan).toEqual([{id:V3,from:'assistant',folder:'',includeDescendants:true}]);
+});

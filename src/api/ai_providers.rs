@@ -2158,6 +2158,64 @@ fn read_standard_accounts_with_auth(
     accounts
 }
 
+/// Human-readable label for synthetic `StandardAccount` UUIDs derived via
+/// `stable_provider_uuid(...)` when no matching `AIProviderStore` record exists.
+pub fn synthetic_standard_account_label(account_id: uuid::Uuid) -> Option<String> {
+    use crate::provider_health::stable_provider_uuid;
+    if account_id == stable_provider_uuid("google") {
+        return Some("Gemini CLI (OAuth)".to_string());
+    }
+    if account_id == stable_provider_uuid("google-env-api-key") {
+        return Some("GEMINI_API_KEY (env)".to_string());
+    }
+    if account_id == stable_provider_uuid("google-cli-proxy") {
+        return Some("CLI Proxy (Google OAuth)".to_string());
+    }
+    if account_id == stable_provider_uuid("anthropic") {
+        return Some("Claude CLI (OAuth)".to_string());
+    }
+    if account_id == stable_provider_uuid("anthropic-cli-proxy") {
+        return Some("CLI Proxy (Claude OAuth)".to_string());
+    }
+    if account_id == stable_provider_uuid("openai") {
+        return Some("OpenAI CLI".to_string());
+    }
+    if account_id == stable_provider_uuid("openai-cli-proxy") {
+        return Some("CLI Proxy (Codex OAuth)".to_string());
+    }
+    if account_id == stable_provider_uuid("xai") {
+        return Some("Grok CLI".to_string());
+    }
+    if account_id == stable_provider_uuid("xai-cli-proxy") {
+        return Some("CLI Proxy (xAI OAuth)".to_string());
+    }
+    for pt in [
+        ProviderType::Antigravity,
+        ProviderType::AmazonBedrock,
+        ProviderType::Azure,
+        ProviderType::OpenRouter,
+        ProviderType::Mistral,
+        ProviderType::Groq,
+        ProviderType::DeepInfra,
+        ProviderType::Cerebras,
+        ProviderType::Cohere,
+        ProviderType::TogetherAI,
+        ProviderType::Perplexity,
+        ProviderType::GithubCopilot,
+        ProviderType::Zai,
+        ProviderType::Minimax,
+        ProviderType::Muse,
+        ProviderType::MuseCode,
+        ProviderType::Kimi,
+        ProviderType::Custom,
+    ] {
+        if account_id == stable_provider_uuid(pt.id()) {
+            return Some(format!("{} (CLI credentials)", pt.display_name()));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod google_standard_account_tests {
     use super::*;

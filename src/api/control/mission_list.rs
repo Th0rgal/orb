@@ -516,7 +516,7 @@ pub async fn list_missions(
     // Default to the most recent 50; honor an explicit limit so callers (e.g.
     // the assistant MCP) can request more, capped to keep the response bounded.
     let project = query.project.as_deref().map(|raw| {
-        let canonical = super::super::projects_overview::canonicalize_project_slug(raw);
+        let canonical = state.projects.resolve_project_slug(raw);
         if canonical.is_empty() {
             raw.to_string()
         } else {

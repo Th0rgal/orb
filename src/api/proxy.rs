@@ -25,9 +25,23 @@ use super::proxy_reliability as reliability;
 use crate::ai_providers::ProviderType;
 use crate::provider_health::CooldownReason;
 
+#[derive(Debug, Clone)]
+struct GoogleOAuthBootstrapError {
+    reason: CooldownReason,
+    retry_after: Option<Duration>,
+    cache_negative: bool,
+    message: String,
+}
+
+impl std::fmt::Display for GoogleOAuthBootstrapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Clone)]
 struct GoogleProjectCacheEntry {
-    project_id: String,
+    project_id: Result<String, GoogleOAuthBootstrapError>,
     cached_at: Instant,
 }
 
@@ -39,6 +53,7 @@ const GOOGLE_API_CLIENT: &str = "gl-node/22.17.0";
 const GOOGLE_CLIENT_METADATA: &str =
     "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
 const GOOGLE_PROJECT_CACHE_TTL: Duration = Duration::from_secs(600);
+const GOOGLE_PROJECT_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(300);
 const DEFAULT_CLI_PROXY_API_BASE_URL: &str = "http://127.0.0.1:8317";
 
 const TEXT_EVENT_STREAM: &str = "text/event-stream";
@@ -4072,16 +4087,54 @@ async fn chat_completions_routed(
                 headers,
             )
         } else if use_google_oauth_adapter {
+            if crate::model_policy::is_google_code_assist_unsupported_model(&entry.model_id) {
+                tracing::debug!(
+                    provider = %entry.provider_id,
+                    model = %entry.model_id,
+                    account_id = %entry.account_id,
+                    "Skipping Google Code Assist OAuth route for -eap model"
+                );
+                continue;
+            }
+            let prep_start = Instant::now();
             let access_token = match get_google_access_token().await {
                 Ok(token) => token,
                 Err(e) => {
                     tracing::warn!(
                         provider = %entry.provider_id,
                         account_id = %entry.account_id,
+                        reason = ?e.reason,
                         error = %e,
                         "Google OAuth token unavailable for routing"
                     );
-                    client_error_count += 1;
+                    let cooldown = state
+                        .health_tracker
+                        .record_entry_failure(entry, e.reason, e.retry_after)
+                        .await;
+                    pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                        timestamp: chrono::Utc::now(),
+                        chain_id: chain_id.clone(),
+                        from_provider: entry.provider_id.clone(),
+                        from_model: entry.model_id.clone(),
+                        from_account_id: entry.account_id,
+                        reason: e.reason,
+                        cooldown_secs: Some(cooldown.as_secs_f64()),
+                        to_provider: None,
+                        latency_ms: Some(prep_start.elapsed().as_millis() as u64),
+                        attempt_number: (entry_idx + 1) as u32,
+                        chain_length,
+                    });
+                    match e.reason {
+                        CooldownReason::RateLimit
+                        | CooldownReason::QuotaExhausted
+                        | CooldownReason::Overloaded => rate_limit_count += 1,
+                        CooldownReason::Timeout | CooldownReason::ServerError => {
+                            server_error_count += 1;
+                        }
+                        CooldownReason::AuthError
+                        | CooldownReason::ClientError
+                        | CooldownReason::PaymentRequired => client_error_count += 1,
+                    }
                     continue;
                 }
             };
@@ -4094,10 +4147,38 @@ async fn chat_completions_routed(
                         tracing::warn!(
                             provider = %entry.provider_id,
                             account_id = %entry.account_id,
+                            reason = ?e.reason,
                             error = %e,
                             "Failed to resolve Google Code Assist project for routing"
                         );
-                        client_error_count += 1;
+                        let cooldown = state
+                            .health_tracker
+                            .record_entry_failure(entry, e.reason, e.retry_after)
+                            .await;
+                        pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                            timestamp: chrono::Utc::now(),
+                            chain_id: chain_id.clone(),
+                            from_provider: entry.provider_id.clone(),
+                            from_model: entry.model_id.clone(),
+                            from_account_id: entry.account_id,
+                            reason: e.reason,
+                            cooldown_secs: Some(cooldown.as_secs_f64()),
+                            to_provider: None,
+                            latency_ms: Some(prep_start.elapsed().as_millis() as u64),
+                            attempt_number: (entry_idx + 1) as u32,
+                            chain_length,
+                        });
+                        match e.reason {
+                            CooldownReason::RateLimit
+                            | CooldownReason::QuotaExhausted
+                            | CooldownReason::Overloaded => rate_limit_count += 1,
+                            CooldownReason::Timeout | CooldownReason::ServerError => {
+                                server_error_count += 1;
+                            }
+                            CooldownReason::AuthError
+                            | CooldownReason::ClientError
+                            | CooldownReason::PaymentRequired => client_error_count += 1,
+                        }
                         continue;
                     }
                 };
@@ -5883,7 +5964,7 @@ async fn chat_completions_routed(
                 last.total_ms = outcome.started.elapsed().as_millis() as u64;
             }
             None => rows.push(outcome.record(
-                None,
+                entries.last(),
                 reliability::OutcomeStatus::ServerError,
                 None,
                 None,
@@ -8528,17 +8609,93 @@ fn build_google_api_proxy_headers(api_key: &str, is_stream: bool) -> HeaderMap {
     headers
 }
 
-async fn get_google_access_token() -> Result<String, String> {
-    super::ai_providers::ensure_google_oauth_token_valid().await?;
-    super::ai_providers::read_google_oauth_access_token()
-        .ok_or_else(|| "Google OAuth access token not found".to_string())
+fn classify_google_oauth_token_error(message: String) -> GoogleOAuthBootstrapError {
+    let reason = if message.starts_with("Failed to refresh token:") {
+        CooldownReason::Timeout
+    } else if let Some(rest) = message.strip_prefix("Token refresh failed (") {
+        let code = rest
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|s| s.parse::<u16>().ok());
+        match code {
+            Some(429) => CooldownReason::RateLimit,
+            Some(529) => CooldownReason::Overloaded,
+            Some(500..=599) => CooldownReason::ServerError,
+            Some(400 | 401 | 403) => CooldownReason::AuthError,
+            Some(400..=499) => CooldownReason::ClientError,
+            _ => CooldownReason::ServerError,
+        }
+    } else if message.starts_with("Failed to parse token response:")
+        || message.starts_with("No access token in refresh response")
+    {
+        CooldownReason::ServerError
+    } else {
+        CooldownReason::AuthError
+    };
+    GoogleOAuthBootstrapError {
+        cache_negative: reason == CooldownReason::AuthError,
+        reason,
+        retry_after: None,
+        message,
+    }
+}
+
+fn classify_load_code_assist_http_error(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> GoogleOAuthBootstrapError {
+    let retry_after_hdr = parse_google_retry_after(headers, body)
+        .or_else(|| parse_rate_limit_headers(headers, ProviderType::Google));
+    let (reason, retry_after) = if status == StatusCode::TOO_MANY_REQUESTS {
+        classify_429(ProviderType::Google, retry_after_hdr, body)
+    } else if status.as_u16() == 529 {
+        (CooldownReason::Overloaded, retry_after_hdr)
+    } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        let reason = classify_google_error_reason(body).unwrap_or(CooldownReason::AuthError);
+        let retry_after = if matches!(
+            reason,
+            CooldownReason::RateLimit | CooldownReason::QuotaExhausted | CooldownReason::Overloaded
+        ) {
+            retry_after_hdr
+        } else {
+            None
+        };
+        (reason, retry_after)
+    } else if status.is_server_error() {
+        (CooldownReason::ServerError, None)
+    } else {
+        (CooldownReason::ClientError, None)
+    };
+    GoogleOAuthBootstrapError {
+        cache_negative: reason == CooldownReason::AuthError,
+        reason,
+        retry_after,
+        message: format!(
+            "loadCodeAssist failed ({}): {}",
+            status,
+            String::from_utf8_lossy(body)
+        ),
+    }
+}
+
+async fn get_google_access_token() -> Result<String, GoogleOAuthBootstrapError> {
+    super::ai_providers::ensure_google_oauth_token_valid()
+        .await
+        .map_err(classify_google_oauth_token_error)?;
+    super::ai_providers::read_google_oauth_access_token().ok_or_else(|| GoogleOAuthBootstrapError {
+        reason: CooldownReason::AuthError,
+        retry_after: None,
+        cache_negative: true,
+        message: "Google OAuth access token not found".to_string(),
+    })
 }
 
 async fn get_google_project_id(
     http_client: &reqwest::Client,
     account_id: uuid::Uuid,
     access_token: &str,
-) -> Result<String, String> {
+) -> Result<String, GoogleOAuthBootstrapError> {
     let cache_key = (account_id, access_token.to_string());
     if let Some(cached) = get_google_project_cache()
         .read()
@@ -8546,8 +8703,13 @@ async fn get_google_project_id(
         .get(&cache_key)
         .cloned()
     {
-        if cached.cached_at.elapsed() < GOOGLE_PROJECT_CACHE_TTL {
-            return Ok(cached.project_id);
+        let ttl = if cached.project_id.is_ok() {
+            GOOGLE_PROJECT_CACHE_TTL
+        } else {
+            GOOGLE_PROJECT_NEGATIVE_CACHE_TTL
+        };
+        if cached.cached_at.elapsed() < ttl {
+            return cached.project_id;
         }
     }
 
@@ -8567,45 +8729,71 @@ async fn get_google_project_id(
     .json(&load_body)
     .send()
     .await
-    .map_err(|e| format!("loadCodeAssist request failed: {}", e))?;
+    .map_err(|e| GoogleOAuthBootstrapError {
+        reason: CooldownReason::Timeout,
+        retry_after: None,
+        cache_negative: false,
+        message: format!("loadCodeAssist request failed: {}", e),
+    })?;
 
     let status = resp.status();
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("loadCodeAssist body read failed: {}", e))?;
-    if !status.is_success() {
-        return Err(format!(
-            "loadCodeAssist failed ({}): {}",
-            status,
-            String::from_utf8_lossy(&body)
-        ));
-    }
-    let value: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|e| format!("Invalid loadCodeAssist JSON: {}", e))?;
-    let project = value
-        .get("cloudaicompanionProject")
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            value
-                .get("cloudaicompanionProject")
-                .and_then(|v| v.get("id"))
-                .and_then(|v| v.as_str())
-        })
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| "loadCodeAssist did not return a managed project".to_string())?
-        .to_string();
+    let headers = resp.headers().clone();
+    let body = resp.bytes().await.map_err(|e| GoogleOAuthBootstrapError {
+        reason: CooldownReason::Timeout,
+        retry_after: None,
+        cache_negative: false,
+        message: format!("loadCodeAssist body read failed: {}", e),
+    })?;
+    let resolved = if !status.is_success() {
+        Err(classify_load_code_assist_http_error(
+            status, &headers, &body,
+        ))
+    } else {
+        serde_json::from_slice::<serde_json::Value>(&body)
+            .map_err(|e| GoogleOAuthBootstrapError {
+                reason: CooldownReason::ServerError,
+                retry_after: None,
+                cache_negative: false,
+                message: format!("Invalid loadCodeAssist JSON: {}", e),
+            })
+            .and_then(|value| {
+                value
+                    .get("cloudaicompanionProject")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        value
+                            .get("cloudaicompanionProject")
+                            .and_then(|v| v.get("id"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| GoogleOAuthBootstrapError {
+                        reason: CooldownReason::AuthError,
+                        retry_after: None,
+                        cache_negative: true,
+                        message: "loadCodeAssist did not return a managed project".to_string(),
+                    })
+            })
+    };
 
-    let mut cache = get_google_project_cache().write().await;
-    cache.retain(|(cached_account_id, _), _| *cached_account_id != account_id);
-    cache.insert(
-        cache_key,
-        GoogleProjectCacheEntry {
-            project_id: project.clone(),
-            cached_at: Instant::now(),
-        },
-    );
-    Ok(project)
+    if resolved.as_ref().is_ok_and(|_| true)
+        || resolved
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.cache_negative)
+    {
+        let mut cache = get_google_project_cache().write().await;
+        cache.retain(|(cached_account_id, _), _| *cached_account_id != account_id);
+        cache.insert(
+            cache_key,
+            GoogleProjectCacheEntry {
+                project_id: resolved.clone(),
+                cached_at: Instant::now(),
+            },
+        );
+    }
+    resolved
 }
 
 fn build_google_request_object(
@@ -9944,12 +10132,21 @@ impl OutcomeCtx {
         fallback_depth: u32,
         superseded: bool,
     ) -> crate::api::mission_store::ProxyOutcomeRecord {
+        let chain_target = entry.is_none().then(|| {
+            self.chain_id
+                .split_once('/')
+                .filter(|(prov, model)| !prov.is_empty() && *prov != "builtin" && !model.is_empty())
+        });
+        let (fallback_provider, fallback_model) = match chain_target.flatten() {
+            Some((prov, model)) => (Some(prov.to_string()), Some(model.to_string())),
+            None => (None, None),
+        };
         crate::api::mission_store::ProxyOutcomeRecord {
             timestamp: self.timestamp.clone(),
             chain_id: self.chain_id.clone(),
-            provider: entry.map(|e| e.provider_id.clone()),
+            provider: entry.map(|e| e.provider_id.clone()).or(fallback_provider),
             account_id: entry.map(|e| e.account_id),
-            model: entry.map(|e| e.model_id.clone()),
+            model: entry.map(|e| e.model_id.clone()).or(fallback_model),
             status: status.as_str().to_string(),
             http_status,
             retries: self.retries,
@@ -14654,5 +14851,92 @@ mod latency_tests {
         let client = crate::api::routes::build_upstream_http_client();
         let req = client.get("https://example.invalid/").build().unwrap();
         assert_eq!(req.version(), reqwest::Version::HTTP_11); // negotiated per connection
+    }
+
+    #[test]
+    fn outcome_record_attributes_direct_chain_and_synthetic_standard_labels_resolve() {
+        let direct = OutcomeCtx::new("google/gemini-4-carbon-eap", true).record(
+            None,
+            reliability::OutcomeStatus::ServerError,
+            None,
+            None,
+            0,
+            false,
+        );
+        assert_eq!(direct.provider.as_deref(), Some("google"));
+        assert_eq!(direct.model.as_deref(), Some("gemini-4-carbon-eap"));
+
+        let builtin = OutcomeCtx::new("builtin/smart", true).record(
+            None,
+            reliability::OutcomeStatus::ServerError,
+            None,
+            None,
+            0,
+            false,
+        );
+        assert_eq!(builtin.provider, None);
+        assert_eq!(builtin.model, None);
+
+        assert_eq!(
+            crate::api::ai_providers::synthetic_standard_account_label(
+                crate::provider_health::stable_provider_uuid("google")
+            )
+            .as_deref(),
+            Some("Gemini CLI (OAuth)")
+        );
+        assert_eq!(
+            crate::api::ai_providers::synthetic_standard_account_label(
+                crate::provider_health::stable_provider_uuid("anthropic")
+            )
+            .as_deref(),
+            Some("Claude CLI (OAuth)")
+        );
+    }
+
+    #[test]
+    fn google_oauth_bootstrap_partitions_transient_faults_from_auth_poison() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("7"));
+        let rl = classify_load_code_assist_http_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            br#"{"error":{"message":"Resource has been exhausted"}}"#,
+        );
+        assert_eq!(rl.reason, CooldownReason::RateLimit);
+        assert_eq!(rl.retry_after, Some(Duration::from_secs(7)));
+        assert!(!rl.cache_negative);
+
+        let srv = classify_load_code_assist_http_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &HeaderMap::new(),
+            br#"{"error":{"message":"Backend unavailable"}}"#,
+        );
+        assert_eq!(srv.reason, CooldownReason::ServerError);
+        assert!(!srv.cache_negative);
+
+        let unauth = classify_load_code_assist_http_error(
+            StatusCode::UNAUTHORIZED,
+            &HeaderMap::new(),
+            br#"{"error":{"message":"Invalid Credentials"}}"#,
+        );
+        assert_eq!(unauth.reason, CooldownReason::AuthError);
+        assert!(unauth.cache_negative);
+
+        let tok_timeout =
+            classify_google_oauth_token_error("Failed to refresh token: timed out".into());
+        assert_eq!(tok_timeout.reason, CooldownReason::Timeout);
+        assert!(!tok_timeout.cache_negative);
+
+        let tok_503 = classify_google_oauth_token_error(
+            "Token refresh failed (503 Service Unavailable): temporary outage".into(),
+        );
+        assert_eq!(tok_503.reason, CooldownReason::ServerError);
+        assert!(!tok_503.cache_negative);
+
+        let tok_invalid = classify_google_oauth_token_error(
+            "Token refresh failed (400 Bad Request): invalid_grant".into(),
+        );
+        assert_eq!(tok_invalid.reason, CooldownReason::AuthError);
+        assert!(tok_invalid.cache_negative);
     }
 }

@@ -649,7 +649,7 @@
         },
         {
           "path": "src/api/proxy.rs",
-          "sha256": "0859b6c4e46fd175b1adee93b99d2594e2a8a36656019499c533f602acc1abc9"
+          "sha256": "9056d84b1558bfc8afc97646927edccb5b3b3bcc0192ccc262c3cd92a62e6cc8"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
@@ -712,7 +712,7 @@
         },
         {
           "path": "src/api/proxy.rs",
-          "sha256": "0859b6c4e46fd175b1adee93b99d2594e2a8a36656019499c533f602acc1abc9"
+          "sha256": "9056d84b1558bfc8afc97646927edccb5b3b3bcc0192ccc262c3cd92a62e6cc8"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
@@ -1014,7 +1014,7 @@
         },
         {
           "path": "src/api/mission_store/mod.rs",
-          "sha256": "381b9d63aa4bbd258815c56af043d7000bf13e7609417ed956c557c68890ccf3"
+          "sha256": "c391d9386a9865a7ef2e9e933ad881e879938a5a72bca70bac87138841e88364"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
@@ -1269,7 +1269,7 @@
         },
         {
           "path": "src/provider_health.rs",
-          "sha256": "1a32406b84f635676967e76bdf55fc5b41e9ce91c4e7296e5f85a5c97c9c73eb"
+          "sha256": "7a8549e5a2eea95e0456a616168cdfd35eeeb6f62624c342240a8d4026875691"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",

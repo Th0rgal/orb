@@ -147,6 +147,14 @@ pub fn google_api_key_disallowed_message(model: &str) -> String {
     )
 }
 
+/// Whether `model` is an Early Access Program (`-eap`) model ID served only by
+/// `generativelanguage.googleapis.com` (direct Gemini API key or CLIProxyAPI)
+/// and never by Google Code Assist (`cloudcode-pa.googleapis.com`).
+pub fn is_google_code_assist_unsupported_model(model: &str) -> bool {
+    let (_, id) = split_provider(model.trim());
+    id.trim().to_ascii_lowercase().ends_with("-eap")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
