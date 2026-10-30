@@ -476,19 +476,15 @@ pub(crate) fn is_orchestration_tool_name(tool_name: Option<&str>) -> bool {
     n = n.strip_prefix("mcp_").unwrap_or(n);
     for root in ["sandboxed", "orchestrator", "paloma"] {
         if let Some(mut rest) = n.strip_prefix(root) {
-            loop {
-                if let Some(next) = rest
-                    .strip_prefix("_sh")
-                    .or_else(|| rest.strip_prefix("-sh"))
-                    .or_else(|| rest.strip_prefix("_assistant"))
-                    .or_else(|| rest.strip_prefix("-assistant"))
-                    .or_else(|| rest.strip_prefix("_orchestrator"))
-                    .or_else(|| rest.strip_prefix("-orchestrator"))
-                {
-                    rest = next;
-                } else {
-                    break;
-                }
+            while let Some(next) = rest
+                .strip_prefix("_sh")
+                .or_else(|| rest.strip_prefix("-sh"))
+                .or_else(|| rest.strip_prefix("_assistant"))
+                .or_else(|| rest.strip_prefix("-assistant"))
+                .or_else(|| rest.strip_prefix("_orchestrator"))
+                .or_else(|| rest.strip_prefix("-orchestrator"))
+            {
+                rest = next;
             }
             if let Some(stripped) = rest.strip_prefix('_').or_else(|| rest.strip_prefix('-')) {
                 n = stripped;
