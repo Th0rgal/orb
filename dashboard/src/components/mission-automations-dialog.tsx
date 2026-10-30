@@ -767,8 +767,17 @@ export function MissionAutomationsDialog({
     }
   };
 
-  const loadExecutions = async (automationId: string) => {
+  const handleToggleExecutions = async (automationId: string, retry = false) => {
+    if (expandedAutomationId === automationId && !retry) {
+      executionsRequestId.current += 1;
+      setExpandedAutomationId(null);
+      setExecutions([]);
+      setExecutionsError(null);
+      setExecutionsLoading(false);
+      return;
+    }
     const requestId = ++executionsRequestId.current;
+    setExpandedAutomationId(automationId);
     setExecutions([]);
     setExecutionsError(null);
     setExecutionsLoading(true);
@@ -782,19 +791,6 @@ export function MissionAutomationsDialog({
     } finally {
       if (executionsRequestId.current === requestId) setExecutionsLoading(false);
     }
-  };
-
-  const handleToggleExecutions = (automationId: string) => {
-    if (expandedAutomationId === automationId) {
-      executionsRequestId.current += 1;
-      setExpandedAutomationId(null);
-      setExecutions([]);
-      setExecutionsError(null);
-      setExecutionsLoading(false);
-      return;
-    }
-    setExpandedAutomationId(automationId);
-    void loadExecutions(automationId);
   };
 
   const handleCopyWebhookUrl = (url: string, automationId: string) => {
@@ -1553,7 +1549,7 @@ export function MissionAutomationsDialog({
                             ) : executionsError ? (
                               <div role="alert" className="text-xs text-white/50 py-2">
                                 <p>{executionsError}</p>
-                                <button onClick={() => void loadExecutions(automation.id)} className="mt-2 underline">Retry execution history</button>
+                                <button onClick={() => void handleToggleExecutions(automation.id, true)} className="mt-2 underline">Retry execution history</button>
                               </div>
                             ) : executions.length === 0 ? (
                               <div className="text-xs text-white/30 py-2">
