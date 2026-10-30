@@ -237,7 +237,8 @@ pub(crate) fn search_bundles_body(spec: &SpawnSpec) -> Value {
         "cpu_cores_effective": {"gte": min_cpu},
         "cpu_ram": {"gte": min_ram_mb_for_gb(min_ram_gb)},
         "disk_space": {"gte": min_disk_gb},
-        "reliability2": {"gte": 0.98},
+        "inet_down": {"gte": 300},
+        "reliability2": {"gte": 0.99},
         "order": [["dph_total", "asc"]],
         "type": "on-demand",
         "limit": 10
