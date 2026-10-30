@@ -30,7 +30,7 @@ import { computeDiffStats, narrationKeys, narrationLine, toolArgs, toolName, wor
 import { visibleTranscript, type StreamItem } from "./transcriptModel";
 import { collectFollowUps, isOrchestrationTool, isSubagentTool } from "./orchestrationModel";
 import { FollowUpsContext, OrchestrationCard } from "./OrchestrationCard";
-export { buildTranscript, applyStreamEvent } from "./transcriptModel";
+export { buildTranscript, applyStreamEvent, applyStreamEvents } from "./transcriptModel";
 export type { StreamItem } from "./transcriptModel";
 
 const DisclosureState=createContext<Map<string,boolean>>();
@@ -659,10 +659,35 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
-  const reminders = createMemo(() => reminderMessages(p.items));
+  const reminders = createMemo<Map<string, import("./AutomaticReminder").Reminder>>(
+    () => reminderMessages(p.items),
+    new Map(),
+    { equals: (a, b) => a.size === b.size && [...a].every(([k, v]) => b.get(k)?.origin === v.origin && b.get(k)?.seconds === v.seconds) },
+  );
   const checklist = createMemo(() => latestTaskList(p.items), null, { equals: sameChecklist });
-  const followUps = createMemo(() => collectFollowUps(p.items));
-  const groups = createMemo<Grouped[]>((previous) => groupWork(p.items.filter(item => item.kind !== "user" || !item.queued), previous), []);
+  const followUps = createMemo(
+    () => collectFollowUps(p.items),
+    { actions: new Map(), missions: new Map(), machines: new Map() },
+    {
+      equals: (a, b) =>
+        a.actions.size === b.actions.size &&
+        a.missions.size === b.missions.size &&
+        a.machines.size === b.machines.size &&
+        [...a.actions].every(([k, v]) => JSON.stringify(b.actions.get(k)) === JSON.stringify(v)) &&
+        [...a.missions].every(([k, v]) => JSON.stringify(b.missions.get(k)) === JSON.stringify(v)) &&
+        [...a.machines].every(([k, v]) => JSON.stringify(b.machines.get(k)) === JSON.stringify(v)),
+    },
+  );
+  const nonQueuedItems = createMemo(() => {
+    const list = p.items;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].kind === "user" && (list[i] as Extract<StreamItem, { kind: "user" }>).queued) {
+        return list.filter((item) => item.kind !== "user" || !item.queued);
+      }
+    }
+    return list;
+  });
+  const groups = createMemo<Grouped[]>((previous) => groupWork(nonQueuedItems(), previous), []);
   /** Key of the last user turn, when nothing follows it yet. Compared by key
    * rather than identity: `reconcile` hands the loop store proxies, not the
    * original objects. */

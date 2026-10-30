@@ -59,6 +59,27 @@ export function managedFleetLabel(nodes: readonly ({ id?: string; labels?: reado
 /** "4 vCPU · 8 GB" from heartbeat capacity, when known. */
 export const nodeSize = (n: Named) => [n.cpu_total ? `${n.cpu_total} vCPU` : "", n.mem_total_bytes ? `${Math.round(n.mem_total_bytes / 1024 ** 3)} GB` : ""].filter(Boolean).join(" · ");
 
+export type Machine = {
+  id: string;
+  name: string;
+  host: string;
+  user: string;
+  port: number;
+  locked?: boolean;
+  note: string;
+};
+
+/** Paloma compute fleet that can take missions. From paloma-backends / paloma-ssh-servers. */
+export const MACHINES: Machine[] = [
+  { id: "local", name: "This Mac", host: "localhost", user: "local", port: 22, locked: true, note: "This computer" },
+  { id: "agent-core", name: "agent-core", host: "65.109.98.246", user: "root", port: 22, note: "Control plane · Core" },
+  { id: "ashur", name: "ashur", host: "188.40.69.160", user: "root", port: 22, note: "db0.starknet.id · Lean/Docker" },
+  { id: "babylon", name: "babylon", host: "54.36.175.109", user: "ubuntu", port: 22, note: "db1.starknet.id · Lean" },
+  { id: "nippur", name: "nippur", host: "37.187.92.183", user: "ubuntu", port: 22, note: "db2.starknet.id · Lean/Verity" },
+  { id: "old-agent", name: "old-agent", host: "95.216.112.253", user: "root", port: 22, note: "Compute leaf · sandboxed-node" },
+  { id: "dgx-spark", name: "dgx-spark", host: "10.88.0.2", user: "th0rgal", port: 22, note: "spark-de79 · lean-mesh · GPU" },
+];
+
 export const nodeLabel = (id: string) =>
   names().get(id) ??
   (id === "core" ? "Core"

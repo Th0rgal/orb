@@ -115,6 +115,47 @@ final class OrbStreamTextTests: XCTestCase {
         }
     }
 
+    /// Unclosed 256 KB code fence streamed in 1 KB frames scans & parses O(N) bytes and matches full parse.
+    func testUnclosedFenceStreamsInLinearCostAndMatchesFullParse() {
+        let totalKb = 256
+        let parser = OrbStreamBlocks()
+        var acc = ""
+        acc.reserveCapacity(totalKb * 1024 + 512)
+        var lastBlocks: [OrbNativeMarkdownView.Block] = []
+        for k in 0..<totalKb {
+            var chunk = k == 0 ? "Here is the generated code:\n\n```rust\n" : ""
+            var li = 0
+            while chunk.utf8.count < 1024 {
+                chunk += "pub fn step_\(k)_\(li)(x: u64, y: u64) -> u64 { (x | y) ^ 0x55aa_\(k) }\n"
+                li += 1
+            }
+            let sliceIdx = chunk.utf8.index(chunk.utf8.startIndex, offsetBy: 1024)
+            acc += String(Substring(chunk.utf8[..<sliceIdx]))
+            lastBlocks = parser.blocks(acc)
+        }
+        let openBytes = acc.utf8.count
+        XCTAssertLessThanOrEqual(parser.scannedBytes, openBytes)
+        XCTAssertLessThanOrEqual(parser.parsedBytes, openBytes * 2)
+        XCTAssertEqual(lastBlocks, OrbNativeMarkdownView.parseBlocks(acc))
+
+        acc += "\n```\n\nFinished.\n\n"
+        let closedBlocks = parser.blocks(acc)
+        XCTAssertEqual(closedBlocks, OrbNativeMarkdownView.parseBlocks(acc))
+    }
+
+    /// Streaming height estimates do not evict settled `OrbRichHeightCache` entries.
+    func testStreamingDoesNotEvictRichHeightCache() {
+        let settled = "Settled math reply: $$E = mc^2$$"
+        OrbRichHeightCache.set(142, for: settled, .large)
+        XCTAssertEqual(OrbRichHeightCache.get(settled, .large), 142)
+        for i in 0..<600 {
+            let prefix = "Streaming math $$x_\(i)$$"
+            _ = OrbRichHeightCache.get(prefix, .large, streaming: true)
+            OrbRichHeightCache.set(80 + CGFloat(i % 20), for: prefix, .large, streaming: true)
+        }
+        XCTAssertEqual(OrbRichHeightCache.get(settled, .large), 142)
+    }
+
     /// The parse cache is a text-keyed LRU: same hits and recency order as the Lean model.
     func testTextCacheMatchesLean() throws {
         let spec = try XCTUnwrap(costFixture()["cache"] as? [String: Any])

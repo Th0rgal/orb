@@ -10,7 +10,11 @@ export function chaptersOf(items: StreamItem[]) {
 
 /** Floating table of contents for long conversations (Claude Code desktop's chapters). */
 export function Chapters(p: { items: StreamItem[]; scroller: () => HTMLElement | undefined }) {
-  const chapters = createMemo(() => chaptersOf(p.items));
+  const chapters = createMemo(
+    () => chaptersOf(p.items),
+    [],
+    { equals: (a, b) => a.length === b.length && a.every((c, i) => c.key === b[i].key && c.title === b[i].title) },
+  );
   const [open, setOpen] = createSignal(false);
   let root!: HTMLDivElement;
   const close = (e: PointerEvent) => { if (open() && !root.contains(e.target as Node)) setOpen(false); };

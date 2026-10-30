@@ -1,3 +1,4 @@
+import {initializeKernel} from "../src/orbKernelAbi";
 import {FindBar} from "../src/FindBar";
 import {render} from 'solid-js/web';
 import {createSignal} from 'solid-js';
@@ -5,6 +6,7 @@ import {NativeInteraction} from '../src/NativeInteraction';
 import {followInteraction} from '../src/nativeInteractionStream';
 import {Transcript,buildTranscript,applyStreamEvent} from '../src/Transcript';
 import '../src/styles.css';
+await initializeKernel();
 const [items,setItems]=createSignal<any[]>([]),[view,setView]=createSignal('idle');
 const pending={kind:'tool',key:'q',callId:'q',name:'ui_native_request',done:false,args:{method:'questions',params:{questions:[{id:'q',question:'Performance fixture: keep typing',options:[{label:'Later'}]}]}}};
 const [requests,setRequests]=createSignal([pending]);

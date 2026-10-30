@@ -1,5 +1,7 @@
 import { render } from "solid-js/web";
 import { createSignal } from "solid-js";
+import { initializeKernel } from "../src/orbKernelAbi";
+await initializeKernel();
 const source = new URLSearchParams(location.search).has("baseline") ? "/src/_benchmarkBefore.tsx" : "/src/Transcript.tsx";
 const { Transcript, buildTranscript, applyStreamEvent } = await import(/* @vite-ignore */ source);
 import type { StreamEvent } from "../src/stream";

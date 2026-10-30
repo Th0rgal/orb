@@ -427,7 +427,7 @@ fun OrbRichText(
     /** A reply still arriving: its committed prefix is parsed once (OrbStreamBlocks). */
     streaming: Boolean = false
 ) {
-    val cleaned = remember(markdown) { cleanText(markdown) }
+    val cleaned = remember(markdown, streaming) { cleanRichText(markdown, streaming) }
     if (!needsWebRenderer(cleaned)) {
         OrbNativeMarkdown(
             markdown = cleaned,
@@ -880,7 +880,19 @@ internal fun parseMdBlocks(source: String): List<OrbMdBlock> {
     return blocks
 }
 
+internal fun cleanRichText(raw: String, streaming: Boolean = false): String {
+    if (streaming) {
+        if (!raw.contains("STATE_SIGNATURE:") && !raw.contains(" | ")) {
+            return raw.trimStart()
+        }
+    }
+    return cleanText(raw)
+}
+
 private fun cleanText(raw: String): String {
+    if (!raw.contains("STATE_SIGNATURE:")) {
+        return OrbPipeTables.normalize(raw.trim())
+    }
     val lines = raw.split("\n").filterNot { line ->
         val t = line.trim()
         t.startsWith("[STATE_SIGNATURE:") || t.startsWith("STATE_SIGNATURE:")

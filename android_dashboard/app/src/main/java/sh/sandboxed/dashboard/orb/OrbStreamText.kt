@@ -150,25 +150,125 @@ data class OrbStreamCommit(val tick: Boolean = false, val fence: Marker? = null,
 
 /** [parseMdBlocks] for text that grows by appending: the committed prefix is parsed once. */
 internal class OrbStreamBlocks {
-    private var prefix = ""
+    private var previous = ""
+    private var commitOffset = 0
+    private var scanCursor = 0
+    private var scanState = OrbStreamCommit()
     private var prefixBlocks: List<OrbMdBlock> = emptyList()
+
+    private var openFenceStart = -1
+    private var openFenceBodyStart = 0
+    private var openFenceBodyCursor = 0
+    private var openFenceLang = ""
+    private var openFencePrefixBlocks: List<OrbMdBlock>? = null
+    private val openFenceAcc = StringBuilder()
+    private var openFenceHasLines = false
+
+    /** UTF-8 bytes scanned by the checkpointed commit scanner (`Orb.Stream.CheckpointedScan`). */
+    var scannedBytes = 0
+        private set
 
     /** UTF-8 bytes handed to [parseMdBlocks] so far (Lean `incCost`; checked against stream-cost.json). */
     var parsedBytes = 0
         private set
 
+    private fun resetOpenFence() {
+        openFenceStart = -1
+        openFencePrefixBlocks = null
+        openFenceAcc.setLength(0)
+        openFenceHasLines = false
+    }
+
     fun blocks(source: String): List<OrbMdBlock> {
-        if (!source.startsWith(prefix)) { prefix = ""; prefixBlocks = emptyList() }
-        val rest = source.substring(prefix.length)
-        val advance = OrbStreamCommit.committedLength(rest)
-        if (advance > 0) {
-            val chunk = rest.substring(0, advance)
-            prefixBlocks = prefixBlocks + parseMdBlocks(chunk)
-            prefix += chunk
+        if (!source.startsWith(previous)) {
+            commitOffset = 0
+            scanCursor = 0
+            scanState = OrbStreamCommit()
+            prefixBlocks = emptyList()
+            resetOpenFence()
         }
-        val tail = rest.substring(advance)
-        parsedBytes = OrbKernel.streamTokenCostStep(parsedBytes.toLong(), advance.toLong(), utf8Length(tail).toLong()).toInt()
+        previous = source
+
+        var newCommitOffset = commitOffset
+        while (true) {
+            val nl = source.indexOf('\n', scanCursor)
+            if (nl == -1) break
+            val line = source.substring(scanCursor, nl)
+            val lineStart = scanCursor
+            scanCursor = nl + 1
+            scannedBytes += utf8Length(line) + 1
+
+            val wasTick = scanState.tick
+            val beforeCommit = scanState.commit
+            scanState = scanState.scan(OrbStreamCommit.classify(line))
+            if (scanState.commit != beforeCommit) {
+                newCommitOffset = scanCursor
+                resetOpenFence()
+            } else if (!wasTick && scanState.tick) {
+                openFenceStart = lineStart
+                openFenceBodyStart = scanCursor
+                openFenceBodyCursor = scanCursor
+                openFenceLang = line.trim().drop(3).trim()
+                openFencePrefixBlocks = null
+                openFenceAcc.setLength(0)
+                openFenceHasLines = false
+            } else if (wasTick && !scanState.tick) {
+                resetOpenFence()
+            }
+        }
+
+        val advanceChars = newCommitOffset - commitOffset
+        val advanceUtf8 = if (advanceChars > 0) {
+            val chunk = source.substring(commitOffset, newCommitOffset)
+            prefixBlocks = prefixBlocks + parseMdBlocks(chunk)
+            commitOffset = newCommitOffset
+            utf8Length(chunk)
+        } else {
+            0
+        }
+
+        if (scanState.tick && openFenceStart >= commitOffset && scanCursor - openFenceBodyStart >= OPEN_FENCE_STREAM_THRESHOLD) {
+            val trailing = source.substring(scanCursor)
+            if (!trailing.trim().startsWith("```")) {
+                var deltaBytes = advanceUtf8
+                var pre = openFencePrefixBlocks
+                if (pre == null) {
+                    val preSlice = source.substring(commitOffset, openFenceStart)
+                    deltaBytes += utf8Length(preSlice)
+                    pre = if (preSlice.isNotEmpty()) parseMdBlocks(preSlice) else emptyList()
+                    openFencePrefixBlocks = pre
+                }
+                while (true) {
+                    val nl = source.indexOf('\n', openFenceBodyCursor)
+                    if (nl == -1) break
+                    val rawLine = source.substring(openFenceBodyCursor, nl)
+                    openFenceBodyCursor = nl + 1
+                    deltaBytes += utf8Length(rawLine) + 1
+                    if (openFenceHasLines) openFenceAcc.append('\n')
+                    openFenceAcc.append(rawLine)
+                    openFenceHasLines = true
+                }
+                val openCode = when {
+                    openFenceBodyCursor == source.length && openFenceBodyCursor > openFenceBodyStart ->
+                        openFenceAcc.toString() + "\n"
+                    openFenceBodyCursor < source.length -> {
+                        deltaBytes += utf8Length(trailing)
+                        if (openFenceHasLines) openFenceAcc.toString() + "\n" + trailing else trailing
+                    }
+                    else -> ""
+                }
+                parsedBytes = OrbKernel.streamTokenCostStep(parsedBytes.toLong(), deltaBytes.toLong(), 0L).toInt()
+                return prefixBlocks + pre + OrbMdBlock.CodeBlock(openFenceLang, openCode)
+            }
+        }
+
+        val tail = source.substring(commitOffset)
+        parsedBytes = OrbKernel.streamTokenCostStep(parsedBytes.toLong(), advanceUtf8.toLong(), utf8Length(tail).toLong()).toInt()
         return prefixBlocks + parseMdBlocks(tail)
+    }
+
+    companion object {
+        internal const val OPEN_FENCE_STREAM_THRESHOLD = 4096
     }
 
     private fun utf8Length(s: CharSequence): Int {

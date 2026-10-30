@@ -4,7 +4,7 @@
 running 1 test
 test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
 
     Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
@@ -12,15 +12,15 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; fin
 running 1 test
 test api::privilege_broker::tests::phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.01s
 
-    Finished `test` profile [unoptimized] target(s) in 0.21s
+    Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 1 test
 test api::control::remote_jobs::boot_leftover_tests::phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
 
     Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
@@ -39,7 +39,7 @@ test api::mission_access::tests::scope_hint_points_reads_to_the_tool_and_refuses
 test api::mission_access::tests::state_survives_restart ... ok
 test api::mission_access::tests::ttl_is_clamped_and_self_requests_refused ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3644 filtered out; finished in 0.02s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3645 filtered out; finished in 0.03s
 
     Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
@@ -67,15 +67,15 @@ test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_
 test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
 test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3635 filtered out; finished in 5.72s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3636 filtered out; finished in 5.46s
 
-    Finished `test` profile [unoptimized] target(s) in 0.18s
+    Finished `test` profile [unoptimized] target(s) in 0.22s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 1 test
 test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
 
     Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
@@ -83,7 +83,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; f
 running 1 test
 test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
 
     Finished `test` profile [unoptimized] target(s) in 0.18s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
@@ -91,5 +91,5 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; f
 running 1 test
 test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3655 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
 
