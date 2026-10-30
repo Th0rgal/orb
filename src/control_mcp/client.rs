@@ -35,7 +35,6 @@ pub struct Client {
     role: Role,
     mission_id: Option<uuid::Uuid>,
     project: Option<String>,
-    client_kind: Option<crate::api::approval_flow::ExternalClientKind>,
     client_label: Option<String>,
     host_hint: Option<String>,
     secrets_dir_override: Option<PathBuf>,
@@ -81,7 +80,6 @@ impl Client {
             role,
             mission_id,
             project: None,
-            client_kind: None,
             client_label: None,
             host_hint: None,
             secrets_dir_override: None,
@@ -171,14 +169,7 @@ impl Client {
                 .filter(|_| scoped)
                 .unwrap_or(credential)
         };
-        let path = if scoped {
-            "/api/mcp/renew"
-        } else if self.mission_id.is_some() {
-            "/api/mcp/session"
-        } else {
-            "/api/mcp/external-sessions"
-        };
-        let payload = if scoped {
+        let (path, payload) = if scoped {
             let mut body = serde_json::Map::new();
             if let Some(ref label) = self.client_label {
                 body.insert("client_label".into(), json!(label));
@@ -186,28 +177,23 @@ impl Client {
             if let Some(ref host) = self.host_hint {
                 body.insert("host_hint".into(), json!(host));
             }
-            Value::Object(body)
+            ("/api/mcp/renew", Value::Object(body))
         } else if let Some(mission_id) = self.mission_id {
-            json!({
-                "role": self.role,
-                "mission_id": mission_id,
-                "project": self.project,
-            })
+            (
+                "/api/mcp/session",
+                json!({
+                    "role": self.role,
+                    "mission_id": mission_id,
+                    "project": self.project,
+                }),
+            )
         } else {
-            let mut body = json!({
-                "role": self.role,
-                "project": self.project,
-            });
-            if let Some(kind) = self.client_kind {
-                body["client_kind"] = json!(kind);
-            }
-            if let Some(ref label) = self.client_label {
-                body["client_label"] = json!(label);
-            }
-            if let Some(ref host) = self.host_hint {
-                body["host_hint"] = json!(host);
-            }
-            body
+            return Err(
+                "Missionless MCP clients require a pre-issued `mcp1.*` external session credential \
+                 (mint one in Orb Settings -> Security -> External MCP Sessions and pass \
+                 SANDBOXED_MCP_TOKEN or --token-file)"
+                    .into(),
+            );
         };
         let response = self
             .http
@@ -964,9 +950,6 @@ pub async fn run() -> Result<(), String> {
     client.project = option("--project");
     client.client_label = option("--client-label").or_else(|| env(&["SANDBOXED_MCP_CLIENT_LABEL"]));
     client.host_hint = option("--host-hint").or_else(|| env(&["SANDBOXED_MCP_HOST_HINT"]));
-    if mission_id.is_none() && secret_cmd.is_some() {
-        client.client_kind = Some(crate::api::approval_flow::ExternalClientKind::Cli);
-    }
     let client = Arc::new(client);
     if let Some(cmd) = secret_cmd {
         return run_secret_cli(&client, cmd).await;
@@ -1303,19 +1286,38 @@ mod tests {
 
         let secret_calls = Arc::new(AtomicUsize::new(0));
         let wait_calls = Arc::new(AtomicUsize::new(0));
-        let session_payloads: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let renew_payloads: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
 
         let app = Router::new()
             .route(
-                "/api/mcp/external-sessions",
+                "/api/mcp/capabilities",
+                get({
+                    move || async move {
+                        Json(json!({
+                            "contract_version": "1",
+                            "identity": {
+                                "session_id": sid,
+                                "mission_id": null,
+                                "role": "coordinator"
+                            },
+                            "tools": [],
+                            "limits": {
+                                "session_expires_at": chrono::Utc::now().timestamp() + 3600
+                            }
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/mcp/renew",
                 post({
-                    let session_payloads = session_payloads.clone();
+                    let renew_payloads = renew_payloads.clone();
                     let tok = fake_mcp_token.clone();
                     move |Json(body): Json<Value>| {
-                        let session_payloads = session_payloads.clone();
+                        let renew_payloads = renew_payloads.clone();
                         let tok = tok.clone();
                         async move {
-                            session_payloads.lock().await.push(body);
+                            renew_payloads.lock().await.push(body);
                             Json(json!({
                                 "token": tok,
                                 "session_id": sid,
@@ -1392,9 +1394,23 @@ mod tests {
         }
         let secrets_root = tmp.path().join("session-secrets");
 
-        let mut client =
-            Client::new(url, "owner-jwt-token".into(), None, Role::Coordinator, None).unwrap();
-        client.client_kind = Some(crate::api::approval_flow::ExternalClientKind::Cli);
+        // Missionless owner tokens fail closed immediately with actionable guidance
+        // instead of attempting an unsigned POST to `/api/mcp/external-sessions`.
+        let owner_client = Client::new(
+            url.clone(),
+            "owner-jwt-token".into(),
+            None,
+            Role::Coordinator,
+            None,
+        )
+        .unwrap();
+        let owner_err = owner_client
+            .fetch_secret_file("OPENAI_API_KEY", Some("local mac cli"), 5)
+            .await
+            .unwrap_err();
+        assert!(owner_err.contains("mcp1.*"), "{owner_err}");
+
+        let mut client = Client::new(url, fake_mcp_token, None, Role::Coordinator, None).unwrap();
         client.client_label = Some("Mac Terminal".into());
         client.host_hint = Some("thomas-mbp".into());
         client.secrets_dir_override = Some(secrets_root.clone());
@@ -1413,10 +1429,8 @@ mod tests {
         assert!(export_line.contains("export OPENAI_API_KEY="));
         assert!(!export_line.contains("sk-live-secret-999"));
 
-        let payloads = session_payloads.lock().await;
+        let payloads = renew_payloads.lock().await;
         assert_eq!(payloads.len(), 1);
-        assert!(payloads[0].get("mission_id").is_none());
-        assert_eq!(payloads[0]["client_kind"], "cli");
         assert_eq!(payloads[0]["client_label"], "Mac Terminal");
         assert_eq!(payloads[0]["host_hint"], "thomas-mbp");
 

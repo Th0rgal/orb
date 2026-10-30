@@ -1778,6 +1778,17 @@ pub struct RenewBody {
     pub client_label: Option<String>,
     #[serde(default)]
     pub host_hint: Option<String>,
+    // Accepted and ignored so already-running `sandboxed-mcp` contract v1
+    // clients keep renewing seamlessly across a Core upgrade; identity and
+    // privileges always come exclusively from the signed `Principal`.
+    #[serde(default, rename = "role")]
+    _legacy_role: Option<Role>,
+    #[serde(default, rename = "mission_id")]
+    _legacy_mission_id: Option<Uuid>,
+    #[serde(default, rename = "project")]
+    _legacy_project: Option<String>,
+    #[serde(default, rename = "client_kind")]
+    _legacy_client_kind: Option<crate::api::approval_flow::ExternalClientKind>,
 }
 
 /// Renewal preserves the signed identity and privileges. A retired mission
@@ -2139,6 +2150,23 @@ mod tests {
             exp as i64,
             exp as i64 + 69 * 3600
         ));
+    }
+
+    #[test]
+    fn renew_body_accepts_legacy_client_payload_fields() {
+        let mid = Uuid::new_v4();
+        let parsed: RenewBody = serde_json::from_value(json!({
+            "role": "executor",
+            "mission_id": mid,
+            "project": "lido",
+            "client_kind": "cli",
+            "client_label": "Mac Terminal",
+            "host_hint": "thomas-mbp"
+        }))
+        .expect("legacy contract v1 renewal payload must deserialize");
+        assert_eq!(parsed.client_label.as_deref(), Some("Mac Terminal"));
+        assert_eq!(parsed.host_hint.as_deref(), Some("thomas-mbp"));
+        assert!(serde_json::from_value::<RenewBody>(json!({"unexpected": 1})).is_err());
     }
 }
 

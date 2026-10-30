@@ -22,7 +22,11 @@ class MigrationTests(unittest.TestCase):
         self.binary.write_text("""#!/usr/bin/env python3
 import json, pathlib, sys
 if '--print-catalog' in sys.argv:
-    print(json.dumps([{'name':'get_action'}]))
+    print(json.dumps([
+        {'name': 'get_action'},
+        {'name': 'schedule_wakeup'},
+        {'name': 'schedule_job_wakeup'},
+    ]))
 else:
     token=pathlib.Path(sys.argv[sys.argv.index('--token-file')+1]).read_text()
     assert token == 'mcp1.fixture'
@@ -41,17 +45,13 @@ else:
                 self.end_headers()
                 self.wfile.write(data)
 
-            def do_POST(self):
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                assert self.path == "/api/mcp/external-sessions"
-                assert self.headers["Authorization"] == "Bearer owner"
-                assert body == {"role": "coordinator"}
-                self.reply({"token": "mcp1.fixture"})
-
             def do_GET(self):
                 assert self.path == "/api/mcp/capabilities"
                 assert self.headers["Authorization"] == "Bearer mcp1.fixture"
-                self.reply({"identity": {"role": "coordinator"}, "tools": [{"name": "get_action"}]})
+                self.reply({
+                    "identity": {"role": "coordinator", "mission_id": None},
+                    "tools": [{"name": "get_action"}],
+                })
 
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -63,8 +63,8 @@ else:
         self.addCleanup(stop)
         self.url = f"http://127.0.0.1:{self.server.server_port}"
 
-    def test_cutover_preserves_other_servers_and_removes_owner_credentials(self):
-        self.assertEqual(migrate(self.config, self.binary, self.url, "owner"), 1)
+    def test_cutover_preserves_other_servers_and_filters_mission_only_wakeups(self):
+        self.assertEqual(migrate(self.config, self.binary, self.url, "mcp1.fixture"), 1)
         config = YAML().load(self.config.read_text())
         self.assertEqual(config["model"], "original-model")
         self.assertEqual(config["mcp_servers"]["unrelated"]["command"], "/other/tool")
@@ -77,19 +77,24 @@ else:
         self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.config.with_name("config.yaml.pre-unified-mcp").read_bytes(), self.original)
 
+    def test_owner_token_without_device_minted_session_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "mcp1"):
+            migrate(self.config, self.binary, self.url, "owner")
+        self.assertEqual(self.config.read_bytes(), self.original)
+
     def test_failed_readiness_restores_config_and_existing_credential(self):
         (self.root / "fail-check").touch()
         credential = self.root / "mcp-credential"
         credential.write_text("previous-token")
         with self.assertRaisesRegex(RuntimeError, "readiness"):
-            migrate(self.config, self.binary, self.url, "owner")
+            migrate(self.config, self.binary, self.url, "mcp1.fixture")
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertEqual(credential.read_text(), "previous-token")
 
     def test_failed_first_cutover_removes_new_credential(self):
         (self.root / "fail-check").touch()
         with self.assertRaises(RuntimeError):
-            migrate(self.config, self.binary, self.url, "owner")
+            migrate(self.config, self.binary, self.url, "mcp1.fixture")
         self.assertFalse((self.root / "mcp-credential").exists())
         self.assertEqual(self.config.read_bytes(), self.original)
 
