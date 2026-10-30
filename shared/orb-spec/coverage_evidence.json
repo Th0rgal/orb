@@ -61,7 +61,7 @@
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "3f130ef43a66ac77ce59d787a9106c2b4c62d0b3404f1677bc6c7717e0499657"
+          "sha256": "308ed1a141ca34d647ab91a1631c05c631accc224e91c700052cd9c78252987e"
         },
         {
           "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
@@ -69,7 +69,7 @@
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "d18756dc7f9ba4036f0203d27b1a9bd7d9f5468a747b1948096798b2f75dd430"
+          "sha256": "a5c1bec334dd138706e2cae4e7f21ab164edbdf0e9d4d85a8b40121fdfaec66b"
         }
       ],
       "execution": {
@@ -518,7 +518,7 @@
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "3f130ef43a66ac77ce59d787a9106c2b4c62d0b3404f1677bc6c7717e0499657"
+          "sha256": "308ed1a141ca34d647ab91a1631c05c631accc224e91c700052cd9c78252987e"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
@@ -1444,11 +1444,11 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "7dc623ce68a23bbee176a43a54bf6f631147ed4bca5bf0331ebadac89073e155"
+          "sha256": "2310e0f85d28f705f9e5423f6907e97de172bfe22ee0c67655f91078bd4f76bb"
         },
         {
           "path": "src/managed/tests.rs",
-          "sha256": "a21c842c8c8a0c06c09abdd726d49d170145a94a5e382930cb66350f50821923"
+          "sha256": "efdc25806fa7757d7dbc87d37a4d0b38419dbea1ceddcb9413ede9ed57313e72"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
@@ -1664,11 +1664,11 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "7dc623ce68a23bbee176a43a54bf6f631147ed4bca5bf0331ebadac89073e155"
+          "sha256": "2310e0f85d28f705f9e5423f6907e97de172bfe22ee0c67655f91078bd4f76bb"
         },
         {
           "path": "src/managed/tests.rs",
-          "sha256": "a21c842c8c8a0c06c09abdd726d49d170145a94a5e382930cb66350f50821923"
+          "sha256": "efdc25806fa7757d7dbc87d37a4d0b38419dbea1ceddcb9413ede9ed57313e72"
         },
         {
           "path": "shared/orb-spec/evidence/mission-vm-limits-tests.log",

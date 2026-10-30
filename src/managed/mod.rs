@@ -1117,6 +1117,33 @@ fn register_node(machine: &ManagedMachine, core_port: u16, token: &str) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn register_test_node_with_url(machine: &ManagedMachine, base_url: &str, token: &str) {
+    let config: &'static RemoteNodeConfig = Box::leak(Box::new(RemoteNodeConfig {
+        id: machine.node_id.clone(),
+        base_url: base_url.trim_end_matches('/').to_string(),
+        token_env: token_env_for(&machine.id),
+        labels: Some(vec![
+            "managed".into(),
+            "trust=managed".into(),
+            format!("provider={}", machine.provider),
+            format!("size={}", machine.size),
+            format!("image={}", machine.image),
+        ]),
+    }));
+    if let Ok(mut map) = TOKENS.write() {
+        map.insert(config.token_env.clone(), token.to_string());
+    }
+    if let Ok(mut map) = NODES.write() {
+        map.insert(config.id.clone(), config);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn unregister_test_node(machine: &ManagedMachine) {
+    unregister_node(machine);
+}
+
 fn unregister_node(machine: &ManagedMachine) {
     unregister_alias(machine);
     if let Ok(mut map) = NODES.write() {
@@ -1609,6 +1636,17 @@ impl ManagedManager {
         !self.runtime_settings().disabled_providers.contains(&key)
     }
 
+    /// Whether managed Boat provisioning is configured, runtime-enabled, and
+    /// knows the Core callback URL needed to enroll worker VMs.
+    pub fn is_boat_enabled(&self) -> bool {
+        self.is_enabled()
+            && self.settings.core_url.is_some()
+            && self.is_provider_enabled("boat")
+            && self
+                .provider_for("boat")
+                .is_some_and(|p| self.is_provider_enabled(p.name()))
+    }
+
     pub fn provider_for(&self, name: &str) -> Option<Arc<dyn ManagedProvider>> {
         let key = name.trim().to_ascii_lowercase();
         let map = self.providers.read().ok()?;
@@ -1649,6 +1687,13 @@ impl ManagedManager {
         map.values()
             .find(|p| self.is_provider_enabled(p.name()))
             .cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_default_provider_for_test(&self, name: &str) {
+        if let Ok(mut def) = self.default_provider_name.write() {
+            *def = name.to_string();
+        }
     }
 
     /// Effective global concurrent live VM ceiling for `provider` (`None` = unlimited).
@@ -2312,8 +2357,91 @@ impl ManagedManager {
             })
             .await
             .ok_or_else(|| ManagedError::new("not_found", 404, "Unknown managed machine"))?;
+        self.clear_dispatch_reservation_for_machine(&m.id).await;
         self.ledger("owner_set", &m);
         Ok(m)
+    }
+
+    fn dispatch_reservations_path(&self) -> PathBuf {
+        self.dir.join("managed_dispatch_reservations.json")
+    }
+
+    fn load_dispatch_reservations(&self) -> std::collections::HashMap<String, String> {
+        std::fs::read(self.dispatch_reservations_path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn persist_dispatch_reservations(&self, map: &std::collections::HashMap<String, String>) {
+        let _ = std::fs::create_dir_all(&self.dir);
+        write_atomic(
+            &self.dispatch_reservations_path(),
+            &serde_json::to_vec_pretty(map).unwrap_or_default(),
+            false,
+        );
+    }
+
+    /// Record an unclaimed pre-spawned VM under `(tenant, dispatch_key)` so an
+    /// idempotent retry after timeout/crash before `claim_for_mission` reuses
+    /// the same single-owner VM instead of renting a duplicate.
+    pub async fn record_dispatch_reservation(
+        &self,
+        tenant: &str,
+        dispatch_key: &str,
+        machine_id: &str,
+    ) {
+        let _guard = self.admission.lock().await;
+        let mut map = self.load_dispatch_reservations();
+        map.insert(format!("{tenant}\0{dispatch_key}"), machine_id.to_string());
+        self.persist_dispatch_reservations(&map);
+    }
+
+    pub async fn clear_dispatch_reservation_for_machine(&self, machine_id: &str) {
+        let _guard = self.admission.lock().await;
+        let mut map = self.load_dispatch_reservations();
+        let before = map.len();
+        map.retain(|_, v| v != machine_id);
+        if map.len() != before {
+            self.persist_dispatch_reservations(&map);
+        }
+    }
+
+    /// Return a still-online unclaimed worker VM previously spawned for the
+    /// exact `(tenant, requested_by, dispatch_key)` retry identity, if any.
+    pub async fn take_unclaimed_for_dispatch(
+        &self,
+        tenant: &str,
+        requested_by: Option<&str>,
+        dispatch_key: &str,
+    ) -> Option<ManagedMachine> {
+        let _guard = self.admission.lock().await;
+        let mut map = self.load_dispatch_reservations();
+        let lookup_key = format!("{tenant}\0{dispatch_key}");
+        let machine_id = map.get(&lookup_key)?.clone();
+        let candidate = self
+            .machines
+            .lock()
+            .await
+            .iter()
+            .find(|m| m.id == machine_id)
+            .cloned();
+        let usable = candidate.filter(|m| {
+            m.provisioning_mode.is_worker()
+                && m.state == MachineState::Online
+                && m.owner_mission_id.is_none()
+                && m.owner_user_id.as_deref() == Some(tenant)
+                && m.requested_by_mission_id.as_deref() == requested_by
+                && !m.has_executed_job
+                && m.active_mission_ids.is_empty()
+                && !Self::node_busy(&m.node_id)
+                && Utc::now() + chrono::Duration::minutes(2) < m.expires_at
+        });
+        if usable.is_none() {
+            map.remove(&lookup_key);
+            self.persist_dispatch_reservations(&map);
+        }
+        usable
     }
 
     fn runtime_path(&self) -> PathBuf {

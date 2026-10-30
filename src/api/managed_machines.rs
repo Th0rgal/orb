@@ -172,12 +172,16 @@ pub(crate) async fn spawn(
     spawn_for(&state, &user, req).await
 }
 
-/// Shared by spawn and fork: tenant, budget pool and sibling reuse.
-async fn spawn_for(
+/// Shared by spawn, fork and server-side `auto-managed` mission launches:
+/// tenant, budget pool, retry reservation, sibling reuse and warm snapshots.
+pub(crate) async fn spawn_for_inner(
     state: &Arc<AppState>,
     user: &crate::api::auth::AuthUser,
     mut req: SpawnRequest,
-) -> Response {
+    project_fallback: Option<String>,
+    dispatch_key: Option<&str>,
+    auto_snapshot: bool,
+) -> Result<(crate::managed::ManagedMachine, bool), ManagedError> {
     // The owner's tenant comes from the authenticated caller, never the body.
     req.owner_user_id = Some(user.id.clone());
     let store = crate::api::control::control_for_user(state, user)
@@ -193,7 +197,7 @@ async fn spawn_for(
         // The mission must be the caller's: never charge (or escape to)
         // another tenant's pool.
         let Ok(Some(mission_row)) = store.get_mission(mission).await else {
-            return err(ManagedError {
+            return Err(ManagedError {
                 error: "unknown_mission",
                 message: "Owner mission not found".into(),
                 status: 404,
@@ -201,7 +205,7 @@ async fn spawn_for(
         };
         req.budget_pool_id = crate::api::mission_budget::pool_for(&store, mission, &user.id).await;
         req.cap_lineage = crate::api::mission_budget::lineage(&store, mission).await;
-        req.snapshot_project = mission_row.project.project.clone();
+        req.snapshot_project = mission_row.project.project.clone().or(project_fallback);
         // Walk parent lineage (bounded) to record `root_mission_id`.
         let mut root = mission;
         let mut cur = mission_row.parent_mission_id;
@@ -216,11 +220,22 @@ async fn spawn_for(
                 .and_then(|m| m.parent_mission_id);
         }
         req.root_mission_id = Some(root.to_string());
+    } else if req.snapshot_project.is_none() {
+        req.snapshot_project = project_fallback;
     }
-    let m = match manager() {
-        Ok(m) => m,
-        Err(r) => return r,
-    };
+    let m = state.managed().ok_or_else(|| ManagedError {
+        error: "disabled",
+        message: "Managed machines are not initialised".into(),
+        status: 503,
+    })?;
+    if let Some(key) = dispatch_key.map(str::trim).filter(|k| !k.is_empty()) {
+        if let Some(machine) = m
+            .take_unclaimed_for_dispatch(&user.id, req.requested_by_mission_id.as_deref(), key)
+            .await
+        {
+            return Ok((machine, true));
+        }
+    }
     let target_provider = req
         .provider
         .as_deref()
@@ -229,9 +244,29 @@ async fn spawn_for(
         .map(str::to_ascii_lowercase)
         .or_else(|| m.default_provider().map(|p| p.name().to_string()))
         .unwrap_or_else(|| m.settings.provider.clone());
+    let explicit_snapshot = req
+        .from_snapshot
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let auto_snap = if auto_snapshot
+        && explicit_snapshot.is_none()
+        && req.fork_of.is_none()
+        && req.image.is_none()
+        && req.provisioning_mode.unwrap_or_default().is_worker()
+        && matches!(target_provider.as_str(), "boat" | "fake")
+    {
+        m.newest_ready_worker_snapshot(
+            req.owner_user_id.as_deref(),
+            req.snapshot_project.as_deref(),
+        )
+        .await
+    } else {
+        None
+    };
     if req.provisioning_mode.unwrap_or_default().is_worker()
         && req.reuse_idle == Some(true)
-        && req.from_snapshot.is_none()
+        && explicit_snapshot.is_none()
         && req.fork_of.is_none()
         && m.is_provider_enabled(&target_provider)
     {
@@ -239,17 +274,52 @@ async fn spawn_for(
             charged,
             ManagedManager::plan_for_provider(&m.settings, &target_provider, &req),
         ) {
+            if let Some(snap_img) = auto_snap.as_deref() {
+                if let Some(machine) = reuse_idle_sibling(
+                    &m,
+                    &store,
+                    &req,
+                    parent,
+                    &target_provider,
+                    spec.size,
+                    Some(snap_img),
+                )
+                .await
+                {
+                    return Ok((machine, true));
+                }
+            }
             if let Some(machine) =
-                reuse_idle_sibling(&m, &store, &req, parent, &target_provider, spec.size).await
+                reuse_idle_sibling(&m, &store, &req, parent, &target_provider, spec.size, None)
+                    .await
             {
-                let mut body = serde_json::to_value(&machine).unwrap_or_default();
-                body["reused"] = json!(true);
-                return (StatusCode::OK, Json(body)).into_response();
+                return Ok((machine, true));
             }
         }
     }
-    match m.spawn(req).await {
-        Ok(machine) => (StatusCode::CREATED, Json(machine)).into_response(),
+    if explicit_snapshot.is_none() && auto_snap.is_some() {
+        req.from_snapshot = auto_snap;
+    }
+    let machine = m.spawn(req).await?;
+    if let Some(key) = dispatch_key.map(str::trim).filter(|k| !k.is_empty()) {
+        m.record_dispatch_reservation(&user.id, key, &machine.id)
+            .await;
+    }
+    Ok((machine, false))
+}
+
+async fn spawn_for(
+    state: &Arc<AppState>,
+    user: &crate::api::auth::AuthUser,
+    req: SpawnRequest,
+) -> Response {
+    match spawn_for_inner(state, user, req, None, None, false).await {
+        Ok((machine, true)) => {
+            let mut body = serde_json::to_value(&machine).unwrap_or_default();
+            body["reused"] = json!(true);
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Ok((machine, false)) => (StatusCode::CREATED, Json(machine)).into_response(),
         Err(e) => err(e),
     }
 }
@@ -264,8 +334,11 @@ async fn reuse_idle_sibling(
     parent: uuid::Uuid,
     provider: &str,
     size: &str,
+    image_override: Option<&str>,
 ) -> Option<crate::managed::ManagedMachine> {
-    let image = if m
+    let image = if let Some(img) = image_override {
+        img.to_string()
+    } else if m
         .provider_for(provider)
         .is_some_and(|p| p.uses_cloud_init_bootstrap())
         && req.image.is_none()

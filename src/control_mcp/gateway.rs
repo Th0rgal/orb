@@ -678,28 +678,28 @@ async fn authorize(
         }
         _ => {}
     }
-    // A native child may leave its parent's machine: `remote_node_id` set to
-    // "auto" (fleet scheduler) or to another registered node. It then starts
-    // in that node's default workspace, never in the parent's.
-    let mut elsewhere = launches_child(&tool.definition.name)
-        && args.get("cloud").is_none_or(Value::is_null)
-        && match args.get("remote_node_id").and_then(Value::as_str) {
-            Some(r) if r.eq_ignore_ascii_case("auto") => true,
-            Some(r) if r.to_ascii_lowercase().starts_with("auto-managed") => true,
-            Some(r) => {
-                if state.config.remote_nodes.node(r).is_none() {
-                    return Err(ToolError::denied("Unknown remote node"));
-                }
-                true
-            }
-            None => false,
-        };
-    if let Some(raw) = args.get("workspace_id") {
-        let own_workspace = raw.as_str() == Some(owner.workspace_id.to_string().as_str());
-        // Acceptance pins a native child to the parent's workspace *and* the
-        // parent's node, and dispatch re-runs this check on those stored
-        // arguments. The parent's own node is not "elsewhere".
-        let parent_node = if elsewhere && own_workspace {
+    // A native child defaults to Boat (`auto-managed`, falling back to `auto`
+    // when Boat is disabled or the child harness lacks managed auth) so
+    // subagents never crowd or self-deadlock the parent's host unless the
+    // caller explicitly asks for `remote_node_id = "same"`.
+    if launches_child(&tool.definition.name) && args.get("cloud").is_none_or(Value::is_null) {
+        let omitted_remote = args
+            .get("remote_node_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_none_or(str::is_empty);
+        if omitted_remote && args.get("workspace_id").is_none_or(Value::is_null) {
+            let effective_backend = child_backend_for_gateway(&tool.definition.name, args, &owner);
+            let default_node = crate::api::control::worker_location::default_child_remote_node_id(
+                state,
+                &p.sub,
+                &effective_backend,
+            );
+            args["remote_node_id"] = json!(default_node);
+        }
+    }
+    let parent_remote_node =
+        if launches_child(&tool.definition.name) && args.get("cloud").is_none_or(Value::is_null) {
             crate::api::control::remote_grok::placement(&state.config.working_dir, &store, own)
                 .await
                 .ok()
@@ -708,12 +708,43 @@ async fn authorize(
         } else {
             None
         };
-        let requested_node = args.get("remote_node_id").and_then(Value::as_str);
+    let mut elsewhere = launches_child(&tool.definition.name)
+        && args.get("cloud").is_none_or(Value::is_null)
+        && match args
+            .get("remote_node_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(r) if r.eq_ignore_ascii_case(crate::api::control::worker_location::SAME_NODE) => {
+                false
+            }
+            Some(r) if r.eq_ignore_ascii_case("auto") => true,
+            Some(r) if r.to_ascii_lowercase().starts_with("auto-managed") => true,
+            Some(r) => {
+                let is_parent_node = parent_remote_node.as_deref() == Some(r) && r != "unknown";
+                if state.config.remote_nodes.node(r).is_none() && !is_parent_node {
+                    return Err(ToolError::denied("Unknown remote node"));
+                }
+                true
+            }
+            None => false,
+        };
+    if let Some(raw) = args.get("workspace_id").filter(|v| !v.is_null()) {
+        let own_workspace = raw.as_str() == Some(owner.workspace_id.to_string().as_str());
+        // Acceptance pins a native `"same"` child to the parent's workspace
+        // *and* the parent's node, and dispatch re-runs this check on those
+        // stored arguments. The parent's own node is not "elsewhere".
+        let requested_node = args
+            .get("remote_node_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         if !workspace_in_scope(
             own_workspace,
             elsewhere,
             requested_node,
-            parent_node.as_deref(),
+            parent_remote_node.as_deref(),
         ) {
             return Err(ToolError::denied(
                 "Workspace is outside this session's scope",
@@ -736,27 +767,38 @@ async fn authorize(
                     "Parent placement is changing or does not support native delegation",
                 )
             })?;
-        if crate::api::control::client_placement::is_tagged(&owner.project.tags) {
-            return Err(ToolError::denied(
-                "Orb owns this workspace. Native child placement requires the desktop client; use a cloud child or an explicitly placed coordinator launch",
-            ));
-        }
-        // The latest run can still refer to the source machine immediately
-        // after a committed transfer. Use the same durable placement resolver
-        // as follow-ups rather than inferring placement from that stale lease.
-        let placement =
-            crate::api::control::remote_grok::placement(&state.config.working_dir, &store, own)
+        let parent_is_client =
+            crate::api::control::client_placement::is_tagged(&owner.project.tags);
+        if !elsewhere && parent_is_client {
+            if crate::api::control::worker_location::resolved_client_owner(&store, own)
                 .await
-                .map_err(|_| ToolError::denied("Parent placement unavailable"))?;
-        let node = placement.as_ref().map(|p| p.node_id.as_str());
-        if node == Some("unknown") {
-            return Err(ToolError::denied(
-                "Parent machine is unknown; resolve placement before delegating",
-            ));
-        }
-        if !elsewhere {
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return Err(ToolError::denied(
+                    "Orb owns this workspace. Native same-host child placement requires an open desktop client; omit remote_node_id to run on Boat or open the mission in Orb",
+                ));
+            }
+            args["remote_node_id"] = json!(crate::api::control::worker_location::SAME_NODE);
+        } else if !elsewhere {
+            // The latest run can still refer to the source machine immediately
+            // after a committed transfer. Use the same durable placement resolver
+            // as follow-ups rather than inferring placement from that stale lease.
+            let placement =
+                crate::api::control::remote_grok::placement(&state.config.working_dir, &store, own)
+                    .await
+                    .map_err(|_| ToolError::denied("Parent placement unavailable"))?;
+            let node = placement.as_ref().map(|p| p.node_id.as_str());
+            if node == Some("unknown") {
+                return Err(ToolError::denied(
+                    "Parent machine is unknown; resolve placement before delegating",
+                ));
+            }
             if let Some(node) = node {
                 args["remote_node_id"] = json!(node);
+            } else {
+                args["remote_node_id"] = json!(crate::api::control::worker_location::SAME_NODE);
             }
         }
     }
@@ -817,6 +859,48 @@ fn workspace_in_scope(
 
 fn launches_child(name: &str) -> bool {
     matches!(name, "start_mission" | "consult_model")
+}
+
+fn child_backend_for_gateway(
+    tool_name: &str,
+    args: &Value,
+    owner: &crate::api::mission_store::Mission,
+) -> String {
+    if tool_name == "consult_model" {
+        return "opencode".to_string();
+    }
+    if let Some(b) = args
+        .get("backend")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return b.to_string();
+    }
+    if let Some(a) = args
+        .get("agent")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let mut agent = Some(a.to_string());
+        let mut inferred = None;
+        if crate::api::control::apply_native_backend_agent_selector(&mut agent, &mut inferred)
+            .is_ok()
+        {
+            if let Some(b) = inferred {
+                return b;
+            }
+        }
+    }
+    if let Some(prefixed) = args
+        .get("model_override")
+        .and_then(Value::as_str)
+        .and_then(crate::api::control::native_backend_prefix)
+    {
+        return prefixed.to_string();
+    }
+    owner.backend.clone()
 }
 
 /// Live read grant of the calling subject on `target`, for read-only tools.

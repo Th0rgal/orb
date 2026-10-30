@@ -1073,6 +1073,29 @@ pub(super) fn spawn_untracked_remote_job_cancellation(
     started_at: chrono::DateTime<chrono::Utc>,
     ledger_dir: std::path::PathBuf,
 ) {
+    spawn_untracked_remote_job_cancellation_with_reason(
+        fleet,
+        node,
+        shared_token,
+        mission_id,
+        job_id,
+        started_at,
+        ledger_dir,
+        "Mission left Active; preserve its requested stop",
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_untracked_remote_job_cancellation_with_reason(
+    fleet: Arc<crate::remote_node::FleetMonitor>,
+    node: crate::remote_node::RemoteNodeConfig,
+    shared_token: String,
+    mission_id: Uuid,
+    job_id: Uuid,
+    started_at: chrono::DateTime<chrono::Utc>,
+    ledger_dir: std::path::PathBuf,
+    reason: &'static str,
+) {
     tokio::spawn(observe_untracked_remote_job_cancellation(
         fleet,
         node,
@@ -1081,9 +1104,11 @@ pub(super) fn spawn_untracked_remote_job_cancellation(
         job_id,
         started_at,
         ledger_dir,
+        reason,
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn observe_untracked_remote_job_cancellation(
     fleet: Arc<crate::remote_node::FleetMonitor>,
     node: crate::remote_node::RemoteNodeConfig,
@@ -1092,6 +1117,7 @@ pub(super) async fn observe_untracked_remote_job_cancellation(
     job_id: Uuid,
     started_at: chrono::DateTime<chrono::Utc>,
     ledger_dir: std::path::PathBuf,
+    reason: &'static str,
 ) {
     let client = crate::remote_node::RemoteNodeClient::default();
     let mut terminal: Option<crate::remote_node::NodeJobStatus> = None;
@@ -1099,13 +1125,7 @@ pub(super) async fn observe_untracked_remote_job_cancellation(
     loop {
         if terminal.is_none() {
             if let Err(error) = client
-                .cancel_job_with_reason(
-                    &node,
-                    &shared_token,
-                    job_id,
-                    "core",
-                    "Mission left Active; preserve its requested stop",
-                )
+                .cancel_job_with_reason(&node, &shared_token, job_id, "core", reason)
                 .await
             {
                 tracing::warn!(%mission_id, %job_id, node_id = %node.id, ?error,
@@ -2157,10 +2177,23 @@ pub(super) async fn poll_remote_job(
     let mut last_cancel_request: Option<std::time::Instant> = None;
     loop {
         log_tick.tick().await;
-        let inactive_status = match owner.mission_store.get_mission(mission_id).await {
-            Ok(Some(current)) if current.status != MissionStatus::Active => Some(current.status),
-            _ => None,
-        };
+        let (inactive_status, superseded_stop) =
+            match owner.mission_store.get_mission(mission_id).await {
+                Ok(Some(current))
+                    if crate::api::mission_horizon::superseded_by(&current).is_some()
+                        || current
+                            .project
+                            .tags
+                            .iter()
+                            .any(|tag| tag == crate::api::mission_store::SUPERSEDED_TAG) =>
+                {
+                    (Some(MissionStatus::Acknowledged), true)
+                }
+                Ok(Some(current)) if current.status != MissionStatus::Active => {
+                    (Some(current.status), false)
+                }
+                _ => (None, false),
+            };
         // Keep what a cut turn already said, as soon as the cut is seen.
         // This used to happen only on the terminal receipt, and only while
         // this job still owned the mission's run lease; a Send now interrupt
@@ -2208,14 +2241,13 @@ pub(super) async fn poll_remote_job(
             last_cancel_request.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(3))
         }) {
             last_cancel_request = Some(std::time::Instant::now());
+            let cancel_reason = if superseded_stop {
+                "superseded".to_string()
+            } else {
+                format!("Mission status changed to {status}; preserve its requested stop")
+            };
             if let Err(err) = client
-                .cancel_job_with_reason(
-                    &node,
-                    &shared_token,
-                    job_id,
-                    "core",
-                    &format!("Mission status changed to {status}; preserve its requested stop"),
-                )
+                .cancel_job_with_reason(&node, &shared_token, job_id, "core", &cancel_reason)
                 .await
             {
                 tracing::warn!(
@@ -2594,17 +2626,36 @@ pub(super) async fn poll_remote_job(
                                 owner.send(note);
                                 preserved_terminal_noted = true;
                             }
+                            let lease_terminal_reason = if superseded_stop {
+                                "superseded".to_string()
+                            } else {
+                                format!("remote_job_{}", status.state)
+                            };
                             if let Err(error) = finish_remote_job_lease(
                                 owner.mission_store.as_ref(),
                                 mission_id,
                                 job_id,
-                                &format!("remote_job_{}", status.state),
+                                &lease_terminal_reason,
                             )
                             .await
                             {
                                 tracing::warn!(%mission_id, %job_id, %error,
                                 "remote job run lease could not be finished after preserved interruption");
                             }
+                        }
+                        if superseded_stop
+                            && owner
+                                .mission_store
+                                .get_active_mission_run(mission_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_none()
+                        {
+                            let _ = owner
+                                .mission_store
+                                .update_mission_status(mission_id, MissionStatus::Acknowledged)
+                                .await;
                         }
                     }
                     if let Err(error) = crate::remote_node::job_ledger::finalize_with_artifacts(

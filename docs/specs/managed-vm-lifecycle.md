@@ -59,16 +59,36 @@ via `env_crypto`), environment variables, or Bitwarden Secrets Manager
 Creation paths:
 
 - `spawn_managed_machine` (gateway): owner = calling mission.
-- `start_mission` with `auto-managed`: Core first validates the launch
-  (`POST /api/control/missions` with `validate_only: true`: model, harness
-  auth a fresh `orb-node-base` VM can satisfy (no grok login; Antigravity only
-  when projection is allowed), project caps, sub-budget). A rejection rents
-  nothing. Then the VM is rented with owner = caller (or an idle VM of the
-  same size/image left by an ended sibling, still inside its owner grace, is
-  handed over: `reuse_idle`), and `POST /api/control/missions` carries
-  `claim_managed_machine_id`; once the child exists Core makes the child the
-  owner and the caller the requester. If the create still fails, the rented
-  VM is destroyed (`requested: launch_failed`).
+- Child / subagent default placement (`start_mission`, `consult_model`, and
+  direct `POST /api/control/missions` with `parent_mission_id`, no `cloud`, and
+  no `placement`):
+  - Omitting `remote_node_id` defaults to Boat (`"auto-managed:boat"`), **not**
+    the parent's machine, so waiting parents never starve their own host slots.
+  - When `remote_node_id` was omitted and Boat provisioning is disabled or the
+    child's effective backend fails `managed_backend_auth_precheck` (`grok` has
+    no login on `orb-node-base`; `vibe` lacks `vibe-acp` on `orb-node-base`;
+    `antigravity` requires `antigravity_on_managed` + an allowed owner), Core
+    falls back cleanly to `"auto"` (fleet-wide least-loaded static scheduler),
+    never pinning to the parent's node.
+  - Explicit `remote_node_id = "auto-managed[:provider[:size]]"` keeps
+    fail-closed `400 Bad Request` validation when Boat or managed harness auth
+    is unavailable.
+  - Explicit `remote_node_id = "same"` preserves parent co-location
+    (`fork-workspace:<parent_id>`, `working_directory`, or `worker-client:<owner>`
+    for `placement:client` parents) when the child must inspect uncommitted
+    local files in place.
+- Server-side `auto-managed` resolution (`POST /api/control/missions`): Core
+  validates the launch first (`validate_only` or full admission: model, harness
+  auth precheck, project caps, sub-budget). A rejection rents nothing. Under
+  `worker_location::dispatch_lock`, Core reuses an unclaimed retry reservation
+  keyed by `(tenant, parent_mission_id, idempotency_key)` if an earlier attempt
+  timed out before claim, else reuses an idle sibling VM of the same
+  provider/size/image (`reuse_idle`), else spawns a fresh VM (auto-selecting the
+  newest `ready` Boat worker snapshot for `(tenant, project)` when
+  `managed_from_snapshot` is omitted, unless `"none"`/`"base"` opts out). Once
+  the child mission is created, Core atomically claims the VM for the child
+  (`owner_mission_id = child`, `requested_by_mission_id = parent`); if mission
+  creation fails, the rented VM is destroyed (`requested: launch_failed`).
 - A child that targets or extends a VM rented by an ancestor is a tenant:
   `extend_managed_machine` adopts the VM only when the current owner is a
   descendant of the caller, never an ancestor, so a parent's shared VM is not

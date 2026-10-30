@@ -413,6 +413,7 @@ impl Harness {
             ),
             projects: Arc::new(ProjectsStore::open(path.join("projects.db")).unwrap()),
             attention_snapshot: Default::default(),
+            managed: Default::default(),
         });
         state.control.bind_admission_state(&state);
         crate::control_mcp::gateway::start_worker(state.clone()).unwrap();
@@ -465,6 +466,19 @@ impl Harness {
             .with_state(state.clone());
         let app = axum::Router::new()
             .route("/api/health", axum::routing::get(|| async { "ready" }))
+            .route(
+                "/api/providers/backend-models",
+                axum::routing::get(|| async {
+                    Json(json!({
+                        "backends": {
+                            "opencode": [
+                                {"value": "openai/gpt-6-astra"},
+                                {"value": "anthropic/claude-fable-5-1"}
+                            ]
+                        }
+                    }))
+                }),
+            )
             .nest("/api/control", app.clone())
             .merge(app)
             .merge(mcp_bootstrap);
@@ -3824,6 +3838,7 @@ async fn cancellation_recovery_retains_accepted_and_tentative_jobs_on_404_and_lo
             job_id,
             chrono::Utc::now(),
             h.state.config.working_dir.clone(),
+            "Mission left Active; preserve its requested stop",
         ));
         for value in [0, 1] {
             phase.store(value, Ordering::SeqCst);
@@ -9211,16 +9226,22 @@ async fn unified_mcp_delegation_follows_committed_transfer_and_fences_in_progres
         )
         .await
         .unwrap();
-    let launch = || gateway::Call {
+    let launch_default = || gateway::Call {
         name: "start_mission".into(),
         arguments: json!({
-            "title":"child", "prompt":"test only", "backend":"codex", "idempotency_key":"child-after-move"
+            "title":"child-default", "prompt":"test only", "backend":"codex", "idempotency_key":"child-default-after-move"
+        }),
+    };
+    let launch_same = || gateway::Call {
+        name: "start_mission".into(),
+        arguments: json!({
+            "title":"child", "prompt":"test only", "backend":"codex", "remote_node_id":"same", "idempotency_key":"child-after-move"
         }),
     };
     let refused = gateway::call(
         State(h.state.clone()),
         Extension(principal.clone()),
-        Json(launch()),
+        Json(launch_same()),
     )
     .await
     .0;
@@ -9242,11 +9263,40 @@ async fn unified_mcp_delegation_follows_committed_transfer_and_fences_in_progres
         .save_machine_transfer(transfer, Some(revision))
         .await
         .unwrap();
-    // The most recent run is the transfer receipt, with no remote-node scope.
-    // Acceptance must nevertheless bind the child to the committed destination.
-    let accepted = gateway::call(State(h.state.clone()), Extension(principal), Json(launch()))
-        .await
-        .0;
+    // Omitted `remote_node_id` routes away from the parent's host (`auto` when
+    // Boat is disabled) instead of pinning to `old-agent`.
+    let default_accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(launch_default()),
+    )
+    .await
+    .0;
+    assert_eq!(default_accepted["ok"], true, "{default_accepted}");
+    let default_raw: String = h
+        .state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT arguments FROM mcp_actions_v1 WHERE id=?1",
+            [default_accepted["result"]["action_id"].as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let default_arguments: Value = serde_json::from_str(&default_raw).unwrap();
+    assert_eq!(default_arguments["remote_node_id"], "auto");
+    assert!(default_arguments.get("workspace_id").is_none());
+
+    // Explicit `remote_node_id = "same"` follows the committed transfer destination.
+    let accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal),
+        Json(launch_same()),
+    )
+    .await
+    .0;
     assert_eq!(accepted["ok"], true, "{accepted}");
     let raw: String = h
         .state
@@ -10089,14 +10139,16 @@ async fn core_child_keeps_its_own_directory_and_inherits_the_workspace() {
         )
         .await
         .unwrap();
-    // assistant-mcp always sends a workspace; a different one is not a refusal.
+    // Explicit `"same"` co-location inherits the parent's workspace while giving
+    // the child its own generated directory when the parent has none.
     let mut request: CreateMissionRequest = serde_json::from_value(
-        json!({"parent_mission_id": parent.id, "workspace_id": Uuid::new_v4()}),
+        json!({"parent_mission_id": parent.id, "remote_node_id": "same", "workspace_id": Uuid::new_v4()}),
     )
     .unwrap();
     worker_location::inherit(&harness.state, &harness.control, &mut request)
         .await
         .unwrap();
+    assert_eq!(request.remote_node_id, None);
     assert_eq!(request.workspace_id, Some(host));
     // The parent works in its generated directory: the child gets its own.
     assert_eq!(request.working_directory, None);
@@ -10118,12 +10170,25 @@ async fn core_child_keeps_its_own_directory_and_inherits_the_workspace() {
         )
         .await
         .unwrap();
-    let mut request: CreateMissionRequest =
-        serde_json::from_value(json!({"parent_mission_id": explicit.id})).unwrap();
-    worker_location::inherit(&harness.state, &harness.control, &mut request)
+    let mut same_request: CreateMissionRequest =
+        serde_json::from_value(json!({"parent_mission_id": explicit.id, "remote_node_id": "same"}))
+            .unwrap();
+    worker_location::inherit(&harness.state, &harness.control, &mut same_request)
         .await
         .unwrap();
-    assert_eq!(request.working_directory.as_deref(), Some("/repo"));
+    assert_eq!(same_request.remote_node_id, None);
+    assert_eq!(same_request.working_directory.as_deref(), Some("/repo"));
+
+    // Omitted `remote_node_id` defaults away from the parent's host without
+    // inheriting the parent's workspace or working directory.
+    let mut default_request: CreateMissionRequest =
+        serde_json::from_value(json!({"parent_mission_id": explicit.id})).unwrap();
+    worker_location::inherit(&harness.state, &harness.control, &mut default_request)
+        .await
+        .unwrap();
+    assert_eq!(default_request.remote_node_id.as_deref(), Some("auto"));
+    assert_eq!(default_request.workspace_id, None);
+    assert_eq!(default_request.working_directory, None);
 }
 
 #[tokio::test]
@@ -16848,4 +16913,1160 @@ async fn delete_mission_not_blocked_by_deterministic_mcp_rejection() {
     )
     .await
     .unwrap();
+}
+
+struct AutoEnrollingBoatFixtureProvider {
+    node_url: String,
+    manager: std::sync::OnceLock<std::sync::Weak<crate::managed::ManagedManager>>,
+    spawned_specs: std::sync::Mutex<Vec<crate::managed::SpawnSpec>>,
+    destroyed_ids: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl crate::managed::ManagedProvider for AutoEnrollingBoatFixtureProvider {
+    fn name(&self) -> &'static str {
+        "boat"
+    }
+    fn supports_free_stop(&self) -> bool {
+        true
+    }
+    fn supports_snapshots(&self) -> bool {
+        true
+    }
+    async fn spawn(
+        &self,
+        spec: &crate::managed::SpawnSpec,
+    ) -> Result<crate::managed::ProviderMachine, String> {
+        self.spawned_specs.lock().unwrap().push(spec.clone());
+        Ok(crate::managed::ProviderMachine {
+            provider_id: format!("bx_{}", spec.machine_id),
+            state: "ready".into(),
+            name: spec.name.clone(),
+            deletable_at: None,
+        })
+    }
+    async fn get(&self, provider_id: &str) -> Result<crate::managed::ProviderMachine, String> {
+        Ok(crate::managed::ProviderMachine {
+            provider_id: provider_id.into(),
+            state: "ready".into(),
+            name: String::new(),
+            deletable_at: None,
+        })
+    }
+    async fn list(&self) -> Result<Vec<crate::managed::ProviderMachine>, String> {
+        Ok(Vec::new())
+    }
+    async fn destroy(&self, provider_id: &str) -> Result<(), String> {
+        self.destroyed_ids.lock().unwrap().push(provider_id.into());
+        Ok(())
+    }
+    async fn extend(&self, _: &str, _: u64) -> Result<(), String> {
+        Ok(())
+    }
+    async fn write_file(&self, _: &str, path: &str, content: &str) -> Result<(), String> {
+        if path == "/home/user/.orb/enroll.env" {
+            let mut machine_id = None;
+            let mut enroll_token = None;
+            for line in content.lines() {
+                if let Some(v) = line.strip_prefix("SANDBOXED_NODE_MANAGED_ID=") {
+                    machine_id = Some(v.trim().to_string());
+                } else if let Some(v) = line.strip_prefix("SANDBOXED_NODE_ENROLL_TOKEN=") {
+                    enroll_token = Some(v.trim().to_string());
+                }
+            }
+            if let (Some(id), Some(tok), Some(weak)) = (
+                machine_id,
+                enroll_token,
+                self.manager.get().and_then(|w| w.upgrade()),
+            ) {
+                if let Ok((_, node_tok)) = weak.enroll(&id, &tok).await {
+                    if let Some(m) = weak.get(&id).await {
+                        crate::managed::register_test_node_with_url(&m, &self.node_url, &node_tok);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    async fn exec(&self, _: &str, _: &str, _: u64) -> Result<Value, String> {
+        Ok(json!({"exitCode": 0}))
+    }
+    async fn raw_exec(&self, _: &str, _: &str, _: u64) -> Result<Value, String> {
+        Ok(json!({"exitCode": 0}))
+    }
+    async fn raw_write_file(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn stop(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn fork(
+        &self,
+        _: &str,
+        spec: &crate::managed::SpawnSpec,
+    ) -> Result<crate::managed::ProviderMachine, String> {
+        self.spawn(spec).await
+    }
+    async fn save_snapshot(&self, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn delete_snapshot(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn usage(&self, _: &str) -> Result<crate::managed::ProviderUsage, String> {
+        Ok(crate::managed::ProviderUsage {
+            dollars: 0.0,
+            seconds: 0,
+            running: true,
+        })
+    }
+}
+
+async fn attach_boat_fixture(
+    h: &Harness,
+    node_url: &str,
+) -> (
+    Arc<crate::managed::ManagedManager>,
+    Arc<AutoEnrollingBoatFixtureProvider>,
+) {
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    {
+        let mut registry = h.state.backend_registry.write().await;
+        registry.register(Arc::new(crate::backend::opencode::OpenCodeBackend::new(
+            "http://127.0.0.1:9".into(),
+            None,
+            false,
+        )));
+        registry.register(Arc::new(crate::backend::grok::GrokBackend::new()));
+    }
+    let provider = Arc::new(AutoEnrollingBoatFixtureProvider {
+        node_url: node_url.to_string(),
+        manager: std::sync::OnceLock::new(),
+        spawned_specs: std::sync::Mutex::new(Vec::new()),
+        destroyed_ids: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut settings = crate::managed::ManagedSettings::from_env(true);
+    settings.enabled = true;
+    settings.provider = "boat".into();
+    settings.core_url = Some(h.url.clone());
+    settings.max_concurrent = None;
+    settings.daily_cap_usd = None;
+    let manager = Arc::new(crate::managed::ManagedManager::new(
+        settings,
+        Some(provider.clone()),
+        h._dir.path(),
+        h.state.config.port,
+    ));
+    let _ = provider.manager.set(Arc::downgrade(&manager));
+    *h.state.managed.write().unwrap() = Some(manager.clone());
+    (manager, provider)
+}
+
+async fn wait_for_mcp_action(
+    h: &Harness,
+    principal: &crate::control_mcp::gateway::Principal,
+    action_id: &str,
+) -> Value {
+    use crate::control_mcp::gateway;
+    let mut receipt = Value::Null;
+    for _ in 0..100 {
+        let response = gateway::call(
+            State(h.state.clone()),
+            Extension(principal.clone()),
+            Json(gateway::Call {
+                name: "get_action".into(),
+                arguments: json!({"action_id": action_id}),
+            }),
+        )
+        .await
+        .0;
+        receipt = response["result"].clone();
+        if !matches!(receipt["state"].as_str(), Some("queued" | "dispatching")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    receipt
+}
+
+#[tokio::test]
+async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without_parent_crowding() {
+    use crate::control_mcp::{gateway, Role};
+    let parent_node = spawn_fixture_node("babylon-parent", "BABYLON_PARENT_TOK", "running").await;
+    let boat_guest = spawn_fixture_node("boat-guest", "BOAT_GUEST_TOK", "running").await;
+    let h = Harness::with_nodes(vec![parent_node.node.clone()]).await;
+    let (manager, provider) = attach_boat_fixture(&h, &boat_guest.node.base_url).await;
+
+    // Seed a parent mission executing on static node `babylon-parent` in project `lido`.
+    let parent = active_mission(&h, "parent on babylon").await;
+    h.control
+        .mission_store
+        .update_mission_project(
+            parent.id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let parent_job = Uuid::new_v4();
+    crate::remote_node::job_ledger::record(
+        &h.state.config.working_dir,
+        accepted_mission_handle(parent.id, "babylon-parent", parent_job, chrono::Utc::now()),
+    )
+    .await
+    .unwrap();
+    ensure_remote_job_lease(
+        h.control.mission_store.as_ref(),
+        parent.id,
+        parent_job,
+        "babylon-parent",
+    )
+    .await
+    .unwrap();
+
+    // Seed a warm ready project snapshot for `(h.user.id, "lido")` so omitted
+    // `managed_from_snapshot` automatically picks it up.
+    let snap_dir = h._dir.path().join(".sandboxed-sh");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    std::fs::write(
+        snap_dir.join("managed_snapshots.json"),
+        serde_json::to_vec(&vec![crate::managed::snapshots::ManagedSnapshot {
+            provisioning_mode: crate::managed::ProvisioningMode::Worker,
+            name: "lido-warm".into(),
+            label: "warm".into(),
+            project: Some("lido".into()),
+            owner_mission_id: Some(parent.id.to_string()),
+            owner_user_id: Some(h.user.id.clone()),
+            source_machine_id: "mmseed".into(),
+            source_size: "default".into(),
+            created_at: chrono::Utc::now(),
+            last_used_at: None,
+            status: "ready".into(),
+            size_bytes: None,
+            error: None,
+            monthly_usd: 0.0,
+        }])
+        .unwrap(),
+    )
+    .unwrap();
+    manager.load().await;
+
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            project: Some("lido".into()),
+            role: Role::Executor,
+            mission_id: Some(parent.id),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+
+    // 1. MCP `start_mission` with omitted `remote_node_id`: preview + replay
+    //    succeeds, stamps `auto-managed`, spawns a Boat VM from `lido-warm`,
+    //    claims it for the child, and never touches `babylon-parent` or attaches `fork-workspace`.
+    let start_accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "start_mission".into(),
+            arguments: json!({
+                "title": "subagent worker",
+                "prompt": "run probe",
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "writer": false,
+                "idempotency_key": "subagent-boat-1"
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(start_accepted["ok"], true, "{start_accepted}");
+    let start_receipt = wait_for_mcp_action(
+        &h,
+        &principal,
+        start_accepted["result"]["action_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(start_receipt["state"], "completed", "{start_receipt}");
+    let child_id =
+        Uuid::parse_str(start_receipt["result"]["mission"]["id"].as_str().unwrap()).unwrap();
+    let child = h
+        .control
+        .mission_store
+        .get_mission(child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !child
+            .project
+            .tags
+            .iter()
+            .any(|t| t.starts_with("fork-workspace:")),
+        "Boat child must never inherit fork-workspace: {:?}",
+        child.project.tags
+    );
+    assert_eq!(parent_node.submissions.lock().unwrap().len(), 0);
+    assert_eq!(boat_guest.submissions.lock().unwrap().len(), 1);
+    let spawned_specs = provider.spawned_specs.lock().unwrap().clone();
+    assert_eq!(spawned_specs.len(), 1);
+    assert_eq!(spawned_specs[0].image.as_deref(), Some("lido-warm"));
+
+    let child_vm_id = start_receipt["result"]["managed_machine"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child_vm = manager.get(&child_vm_id).await.unwrap();
+    assert_eq!(
+        child_vm.owner_mission_id.as_deref(),
+        Some(&child_id.to_string() as &str)
+    );
+    assert_eq!(
+        child_vm.requested_by_mission_id.as_deref(),
+        Some(&parent.id.to_string() as &str)
+    );
+
+    // 2. MCP `consult_model` with omitted `remote_node_id` and `files=[...]`:
+    //    succeeds through two-pass authorization, routes to Boat, and returns `placement_note`.
+    let consult_accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "consult_model".into(),
+            arguments: json!({
+                "model": "gpt-6-astra",
+                "question": "Check the architecture",
+                "files": ["docs/specs/managed-vm-lifecycle.md"],
+                "idempotency_key": "consult-boat-1"
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(consult_accepted["ok"], true, "{consult_accepted}");
+    let consult_receipt = wait_for_mcp_action(
+        &h,
+        &principal,
+        consult_accepted["result"]["action_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(consult_receipt["state"], "completed", "{consult_receipt}");
+    assert!(consult_receipt["result"]["placement_note"]
+        .as_str()
+        .unwrap()
+        .contains("remote_node_id=\"same\""));
+    assert_eq!(parent_node.submissions.lock().unwrap().len(), 0);
+    assert_eq!(boat_guest.submissions.lock().unwrap().len(), 2);
+
+    // 3. Explicit `remote_node_id: "same"` co-locates on `babylon-parent` and
+    //    attaches `fork-workspace:<parent_id>`.
+    let same_accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "start_mission".into(),
+            arguments: json!({
+                "title": "same-host helper",
+                "prompt": "inspect uncommitted tree",
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "remote_node_id": "same",
+                "writer": false,
+                "idempotency_key": "subagent-same-1"
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(same_accepted["ok"], true, "{same_accepted}");
+    let same_receipt = wait_for_mcp_action(
+        &h,
+        &principal,
+        same_accepted["result"]["action_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(same_receipt["state"], "completed", "{same_receipt}");
+    let same_child_id =
+        Uuid::parse_str(same_receipt["result"]["mission"]["id"].as_str().unwrap()).unwrap();
+    let same_child = h
+        .control
+        .mission_store
+        .get_mission(same_child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(same_child
+        .project
+        .tags
+        .contains(&format!("fork-workspace:{}", parent.id)));
+    assert_eq!(parent_node.submissions.lock().unwrap().len(), 1);
+
+    // Clean up leaked test node entries.
+    for m in &manager.list(24).await.machines {
+        crate::managed::unregister_test_node(m);
+    }
+}
+
+#[tokio::test]
+async fn child_placement_handles_client_parent_auth_fallback_and_idempotent_retry() {
+    use crate::control_mcp::{gateway, Role};
+    let static_a = spawn_fixture_node("static-a", "STATIC_A_TOK", "running").await;
+    let boat_guest =
+        spawn_fixture_node("boat-client-guest", "BOAT_CLIENT_GUEST_TOK", "running").await;
+    let h = Harness::with_nodes(vec![static_a.node.clone()]).await;
+    let (manager, provider) = attach_boat_fixture(&h, &boat_guest.node.base_url).await;
+
+    // Register `static-a` heartbeat so `"auto"` scheduler can pick it.
+    h.state.fleet.record_heartbeat(
+        "static-a",
+        crate::remote_node::NodeHeartbeat {
+            resource_history: Vec::new(),
+            node_id: "static-a".into(),
+            online: true,
+            capacity_total: 4,
+            capacity_available: 4,
+            active_leases: 0,
+            version: "test".into(),
+            protocol_version: crate::remote_node::protocol::NODE_PROTOCOL_VERSION,
+            labels: Vec::new(),
+            cpu_total: 8,
+            mem_total_bytes: 32 << 30,
+            mem_available_bytes: 28 << 30,
+            disk_total_bytes: 200 << 30,
+            disk_available_bytes: 150 << 30,
+            active_jobs: 0,
+            queued_jobs: 0,
+            side_jobs: 0,
+            cached_toolchains: Vec::new(),
+            lean_runtime_ready: Some(true),
+            source_bundle_capacity: None,
+            min_free_disk_bytes: None,
+            disk_pressure_pinned: false,
+            managed_auth: vec!["grok".into()],
+        },
+    );
+
+    // Create a `placement:client` parent with an active client lease (`orb-mac`).
+    let client_parent = active_mission(&h, "desktop client parent").await;
+    h.control
+        .mission_store
+        .update_mission_project(
+            client_parent.id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                tags: Some(vec!["placement:client".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let _client_run = h
+        .control
+        .mission_store
+        .begin_mission_run(
+            client_parent.id,
+            "orb-client:orb-mac",
+            Some("orb-cwd:/Users/thomas/orb"),
+        )
+        .await
+        .unwrap();
+
+    let session = gateway::session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(gateway::SessionRequest {
+            project: Some("lido".into()),
+            role: Role::Executor,
+            mission_id: Some(client_parent.id),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+
+    // A. `placement:client` parent with omitted `remote_node_id` routes to Boat (`elsewhere = true`).
+    let boat_from_client = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "start_mission".into(),
+            arguments: json!({
+                "title": "client subagent on boat",
+                "prompt": "build check",
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "writer": false,
+                "idempotency_key": "client-to-boat"
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(boat_from_client["ok"], true, "{boat_from_client}");
+    let boat_receipt = wait_for_mcp_action(
+        &h,
+        &principal,
+        boat_from_client["result"]["action_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(boat_receipt["state"], "completed", "{boat_receipt}");
+    let boat_child_id =
+        Uuid::parse_str(boat_receipt["result"]["mission"]["id"].as_str().unwrap()).unwrap();
+    let boat_child = h
+        .control
+        .mission_store
+        .get_mission(boat_child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !crate::api::control::client_placement::is_tagged(&boat_child.project.tags),
+        "Boat child of client parent must not inherit placement:client"
+    );
+    assert_eq!(boat_guest.submissions.lock().unwrap().len(), 1);
+
+    // B. `placement:client` parent with `remote_node_id: "same"` stays on client (`worker-client:orb-mac`).
+    let same_on_client = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "start_mission".into(),
+            arguments: json!({
+                "title": "client same-host helper",
+                "prompt": "read local git diff",
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "remote_node_id": "same",
+                "writer": false,
+                "idempotency_key": "client-same"
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(same_on_client["ok"], true, "{same_on_client}");
+    let same_client_receipt = wait_for_mcp_action(
+        &h,
+        &principal,
+        same_on_client["result"]["action_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(
+        same_client_receipt["state"], "completed",
+        "{same_client_receipt}"
+    );
+    let same_client_id = Uuid::parse_str(
+        same_client_receipt["result"]["mission"]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let same_client_child = h
+        .control
+        .mission_store
+        .get_mission(same_client_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(crate::api::control::client_placement::is_tagged(
+        &same_client_child.project.tags
+    ));
+    assert!(same_client_child
+        .project
+        .tags
+        .contains(&"worker-client:orb-mac".to_string()));
+
+    // C. Edge Case C: omitted `remote_node_id` with `backend="grok"` (or `antigravity`
+    //    without managed auth) falls back to `"auto"` (`static-a`), while explicit
+    //    `"auto-managed"` fails closed with 400.
+    let grok_fallback_res = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "grok child",
+                "parent_mission_id": client_parent.id,
+                "backend": "grok",
+                "prompt": "run grok",
+                "writer": false,
+                "idempotency_key": "grok-fallback-1"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap();
+    let grok_child_id = Uuid::parse_str(grok_fallback_res.1 .0["id"].as_str().unwrap()).unwrap();
+    assert_eq!(static_a.submissions.lock().unwrap().len(), 1);
+    assert_eq!(
+        static_a.submissions.lock().unwrap()[0]["mission_id"].as_str(),
+        Some(grok_child_id.to_string().as_str())
+    );
+
+    let explicit_grok_err = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "explicit grok on boat",
+                "parent_mission_id": client_parent.id,
+                "backend": "grok",
+                "remote_node_id": "auto-managed",
+                "prompt": "must fail closed"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(explicit_grok_err.0, StatusCode::BAD_REQUEST);
+
+    // D. Edge Case D: both pre-claim retry (timeout/crash after VM spawn before
+    //    `claim_for_mission`) and post-commit idempotent retry across
+    //    `POST /api/control/missions` reuse the single Boat VM without leaking.
+    let preclaim_tag = format!(
+        "worker-dispatch:{}",
+        Uuid::new_v5(&client_parent.id, b"preclaim-retry-key")
+    );
+    let (prespawned_vm, was_reused) = crate::api::managed_machines::spawn_for_inner(
+        &h.state,
+        &h.user,
+        crate::managed::SpawnRequest {
+            provider: Some("boat".into()),
+            provisioning_mode: Some(crate::managed::ProvisioningMode::Worker),
+            owner_mission_id: None,
+            owner_user_id: Some(h.user.id.clone()),
+            requested_by_mission_id: Some(client_parent.id.to_string()),
+            reuse_idle: Some(true),
+            wait: Some(true),
+            ..Default::default()
+        },
+        Some("lido".into()),
+        Some(&preclaim_tag),
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(!was_reused);
+    let spawns_after_prespawn = provider.spawned_specs.lock().unwrap().len();
+    let recovered = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value::<CreateMissionRequest>(json!({
+                "title": "preclaim recovered child",
+                "parent_mission_id": client_parent.id,
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "prompt": "recover preclaim vm",
+                "writer": false,
+                "idempotency_key": "preclaim-retry-key"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap()
+    .1
+     .0;
+    assert_eq!(
+        provider.spawned_specs.lock().unwrap().len(),
+        spawns_after_prespawn,
+        "pre-claim retry must reuse the reserved unclaimed Boat VM"
+    );
+    assert_eq!(recovered["managed_machine"]["id"], prespawned_vm.id);
+    assert_eq!(recovered["reused_idle_machine"], true);
+
+    let spawns_before = provider.spawned_specs.lock().unwrap().len();
+    let req_body = || {
+        serde_json::from_value::<CreateMissionRequest>(json!({
+            "title": "idempotent boat child",
+            "parent_mission_id": client_parent.id,
+            "backend": "opencode",
+            "model_override": "openai/gpt-6-astra",
+            "prompt": "run once",
+            "writer": false,
+            "idempotency_key": "retry-boat-key-1"
+        }))
+        .unwrap()
+    };
+    let first = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(req_body())),
+    )
+    .await
+    .unwrap()
+    .1
+     .0;
+    let second = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(req_body())),
+    )
+    .await
+    .unwrap()
+    .1
+     .0;
+    assert_eq!(first["id"], second["id"]);
+    assert_eq!(
+        provider.spawned_specs.lock().unwrap().len(),
+        spawns_before + 1,
+        "idempotent retry must not spawn a duplicate Boat VM"
+    );
+
+    // E. Disabling Boat makes omitted `remote_node_id` fall back to `"auto"`,
+    //    while explicit `"auto-managed"` fails closed with 400.
+    manager
+        .update_provider_config(
+            "boat",
+            crate::managed::ProviderUpdateRequest {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let disabled_fallback = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "boat disabled fallback",
+                "parent_mission_id": client_parent.id,
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "prompt": "run on auto",
+                "writer": false,
+                "idempotency_key": "boat-disabled-fallback"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap()
+    .1
+     .0;
+    assert!(disabled_fallback["id"].is_string());
+    assert_eq!(static_a.submissions.lock().unwrap().len(), 2);
+
+    let explicit_disabled_err = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "explicit boat when disabled",
+                "parent_mission_id": client_parent.id,
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "remote_node_id": "auto-managed",
+                "prompt": "must fail closed"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(explicit_disabled_err.0, StatusCode::BAD_REQUEST);
+
+    for m in &manager.list(24).await.machines {
+        crate::managed::unregister_test_node(m);
+    }
+}
+
+#[tokio::test]
+async fn bugbot_regressions_pin_boat_provider_exclude_vibe_cleanup_rented_vm_and_drop_locks_before_cancel(
+) {
+    let static_vibe = spawn_fixture_node("static-vibe", "STATIC_VIBE_TOK", "running").await;
+    *static_vibe.capabilities.lock().unwrap() =
+        (StatusCode::OK, json!({"version": 2, "harnesses": ["vibe"]}));
+    let boat_guest = spawn_fixture_node("boat-reg-guest", "BOAT_REG_GUEST_TOK", "running").await;
+    let h = Harness::with_nodes(vec![static_vibe.node.clone()]).await;
+    let (manager, boat_provider) = attach_boat_fixture(&h, &boat_guest.node.base_url).await;
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::vibe::VibeBackend::new()));
+    let mut mistral = crate::ai_providers::AIProvider::new(
+        crate::ai_providers::ProviderType::Mistral,
+        "fixture".into(),
+    );
+    mistral.api_key = Some("fixture-only-key".into());
+    let providers_path = h
+        .state
+        .config
+        .working_dir
+        .join(crate::util::AI_PROVIDERS_PATH);
+    std::fs::create_dir_all(providers_path.parent().unwrap()).unwrap();
+    std::fs::write(providers_path, serde_json::to_vec(&vec![mistral]).unwrap()).unwrap();
+
+    h.state.fleet.record_heartbeat(
+        "static-vibe",
+        crate::remote_node::NodeHeartbeat {
+            resource_history: Vec::new(),
+            node_id: "static-vibe".into(),
+            online: true,
+            capacity_total: 4,
+            capacity_available: 4,
+            active_leases: 0,
+            version: "test".into(),
+            protocol_version: crate::remote_node::protocol::NODE_PROTOCOL_VERSION,
+            labels: Vec::new(),
+            cpu_total: 8,
+            mem_total_bytes: 32 << 30,
+            mem_available_bytes: 28 << 30,
+            disk_total_bytes: 200 << 30,
+            disk_available_bytes: 150 << 30,
+            active_jobs: 0,
+            queued_jobs: 0,
+            side_jobs: 0,
+            cached_toolchains: Vec::new(),
+            lean_runtime_ready: Some(true),
+            source_bundle_capacity: None,
+            min_free_disk_bytes: None,
+            disk_pressure_pinned: false,
+            managed_auth: Vec::new(),
+        },
+    );
+
+    // 1. Pin default child placement to `auto-managed:boat` even when another
+    //    provider (`hetzner`) is configured as the managed default.
+    struct FailingHetznerProvider {
+        spawns: std::sync::Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl crate::managed::ManagedProvider for FailingHetznerProvider {
+        fn name(&self) -> &'static str {
+            "hetzner"
+        }
+        async fn spawn(
+            &self,
+            _: &crate::managed::SpawnSpec,
+        ) -> Result<crate::managed::ProviderMachine, String> {
+            *self.spawns.lock().unwrap() += 1;
+            Err("hetzner must not be used for default child placement".into())
+        }
+        async fn get(&self, id: &str) -> Result<crate::managed::ProviderMachine, String> {
+            Ok(crate::managed::ProviderMachine {
+                provider_id: id.into(),
+                state: "ready".into(),
+                name: String::new(),
+                deletable_at: None,
+            })
+        }
+        async fn list(&self) -> Result<Vec<crate::managed::ProviderMachine>, String> {
+            Ok(Vec::new())
+        }
+        async fn destroy(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn extend(&self, _: &str, _: u64) -> Result<(), String> {
+            Ok(())
+        }
+        async fn write_file(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn exec(&self, _: &str, _: &str, _: u64) -> Result<Value, String> {
+            Ok(json!({"exitCode": 0}))
+        }
+        async fn usage(&self, _: &str) -> Result<crate::managed::ProviderUsage, String> {
+            Ok(crate::managed::ProviderUsage {
+                dollars: 0.0,
+                seconds: 0,
+                running: true,
+            })
+        }
+    }
+    let hetzner = Arc::new(FailingHetznerProvider {
+        spawns: std::sync::Mutex::new(0),
+    });
+    manager.register_provider(hetzner.clone());
+    manager.set_default_provider_for_test("hetzner");
+    assert_eq!(
+        manager.default_provider().map(|p| p.name()),
+        Some("hetzner")
+    );
+    assert_eq!(
+        super::worker_location::default_child_remote_node_id(&h.state, &h.user.id, "opencode"),
+        "auto-managed:boat"
+    );
+
+    let parent = active_mission(&h, "parent with hetzner default").await;
+    let boat_pinned = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "child pinned to boat",
+                "parent_mission_id": parent.id,
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "prompt": "run on boat despite hetzner default",
+                "writer": false
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap()
+    .1
+     .0;
+    assert_eq!(*hetzner.spawns.lock().unwrap(), 0);
+    assert_eq!(boat_provider.spawned_specs.lock().unwrap().len(), 1);
+    assert_eq!(boat_pinned["managed_machine"]["provider"], "boat");
+
+    // 2. Exclude `vibe` from managed default placement: omitted `remote_node_id`
+    //    falls back to `"auto"` (`static-vibe`), while explicit `"auto-managed:boat"`
+    //    fails closed with 400 before renting a VM.
+    assert_eq!(
+        super::worker_location::default_child_remote_node_id(&h.state, &h.user.id, "vibe"),
+        "auto"
+    );
+    let vibe_child = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "vibe child fallback",
+                "parent_mission_id": parent.id,
+                "backend": "vibe",
+                "model_override": "mistral/mistral-vibe-cli-latest",
+                "prompt": "run vibe on static node",
+                "writer": false
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap()
+    .1
+     .0;
+    assert!(vibe_child["id"].is_string());
+    assert_eq!(static_vibe.submissions.lock().unwrap().len(), 1);
+    assert_eq!(boat_provider.spawned_specs.lock().unwrap().len(), 1);
+
+    let explicit_vibe_err = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "explicit vibe on boat",
+                "parent_mission_id": parent.id,
+                "backend": "vibe",
+                "model_override": "mistral/mistral-vibe-cli-latest",
+                "remote_node_id": "auto-managed:boat",
+                "prompt": "must fail closed"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(explicit_vibe_err.0, StatusCode::BAD_REQUEST);
+    assert!(explicit_vibe_err.1.contains("vibe-acp"));
+    assert_eq!(boat_provider.spawned_specs.lock().unwrap().len(), 1);
+
+    // 3. Clean up newly rented VMs when post-rental track admission rejects.
+    let held_writer = h.writer(MissionStatus::Active, None).await;
+    assert_eq!(held_writer.project.project.as_deref(), Some("lido"));
+    let destroyed_before = boat_provider.destroyed_ids.lock().unwrap().len();
+    let track_conflict_err = create_mission(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(
+            serde_json::from_value(json!({
+                "title": "conflicting track writer",
+                "parent_mission_id": parent.id,
+                "project": "lido",
+                "track": held_writer.project.track,
+                "writer": true,
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "remote_node_id": "auto-managed:boat:medium",
+                "prompt": "must destroy rented vm on track conflict"
+            }))
+            .unwrap(),
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(track_conflict_err.0, StatusCode::CONFLICT);
+    assert_eq!(
+        boat_provider.destroyed_ids.lock().unwrap().len(),
+        destroyed_before + 1,
+        "post-rental track conflict must destroy the newly rented Boat VM"
+    );
+
+    // 4. Release `DISPATCH_ADMISSION` before awaiting remote job cancellation
+    //    on supersession so a slow remote node never blocks global admission.
+    let (cancel_entered_tx, cancel_entered_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_cancel_tx, release_cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let enter_cell = Arc::new(std::sync::Mutex::new(Some(cancel_entered_tx)));
+    let release_cell = Arc::new(tokio::sync::Mutex::new(Some(release_cancel_rx)));
+    let slow_token_env = format!("SANDBOXED_SLOW_NODE_TOK_{}", Uuid::new_v4().simple());
+    std::env::set_var(&slow_token_env, "slow-tok");
+    let slow_app = axum::Router::new()
+        .route(
+            "/jobs/:id/cancel",
+            axum::routing::post({
+                let enter_cell = enter_cell.clone();
+                let release_cell = release_cell.clone();
+                move |axum::extract::Path(id): axum::extract::Path<Uuid>| {
+                    let enter_cell = enter_cell.clone();
+                    let release_cell = release_cell.clone();
+                    async move {
+                        if let Some(tx) = enter_cell.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        if let Some(rx) = release_cell.lock().await.take() {
+                            let _ = rx.await;
+                        }
+                        Json(crate::remote_node::NodeJobStatus {
+                            cancellation: None,
+                            job_id: id,
+                            mission_id: Uuid::nil(),
+                            state: "cancelled".into(),
+                            exit_code: Some(130),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            started_at: None,
+                            finished_at: Some(chrono::Utc::now().to_rfc3339()),
+                            error: None,
+                            log_tail: None,
+                            artifacts: Vec::new(),
+                        })
+                    }
+                }
+            }),
+        )
+        .route(
+            "/jobs/:id",
+            axum::routing::get(
+                |axum::extract::Path(id): axum::extract::Path<Uuid>| async move {
+                    Json(crate::remote_node::NodeJobStatus {
+                        cancellation: None,
+                        job_id: id,
+                        mission_id: Uuid::nil(),
+                        state: "cancelled".into(),
+                        exit_code: Some(130),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        started_at: None,
+                        finished_at: Some(chrono::Utc::now().to_rfc3339()),
+                        error: None,
+                        log_tail: None,
+                        artifacts: Vec::new(),
+                    })
+                },
+            ),
+        );
+    let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow_addr = slow_listener.local_addr().unwrap();
+    let slow_server = tokio::spawn(async move {
+        let _ = axum::serve(slow_listener, slow_app).await;
+    });
+
+    let slow_node = crate::remote_node::RemoteNodeConfig {
+        id: "slow-supersede-node".into(),
+        base_url: format!("http://{slow_addr}"),
+        token_env: slow_token_env.clone(),
+        labels: None,
+    };
+    let h_slow = Harness::with_nodes(vec![slow_node]).await;
+    h_slow
+        .state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::opencode::OpenCodeBackend::new(
+            "http://127.0.0.1:9".into(),
+            None,
+            false,
+        )));
+    let prior = active_mission(&h_slow, "prior remote reviewer").await;
+    let slow_job = Uuid::new_v4();
+    crate::remote_node::job_ledger::record(
+        &h_slow.state.config.working_dir,
+        accepted_mission_handle(
+            prior.id,
+            "slow-supersede-node",
+            slow_job,
+            chrono::Utc::now(),
+        ),
+    )
+    .await
+    .unwrap();
+    ensure_remote_job_lease(
+        h_slow.control.mission_store.as_ref(),
+        prior.id,
+        slow_job,
+        "slow-supersede-node",
+    )
+    .await
+    .unwrap();
+    // Mark `prior` terminal-ready on horizon (`Completed` or `Failed` is attention-horizon).
+    h_slow
+        .control
+        .mission_store
+        .update_mission_status(prior.id, MissionStatus::Failed)
+        .await
+        .unwrap();
+
+    let state_clone = h_slow.state.clone();
+    let user_clone = h_slow.user.clone();
+    let create_fut = tokio::spawn(async move {
+        create_mission(
+            State(state_clone),
+            Extension(user_clone),
+            Some(Json(
+                serde_json::from_value(json!({
+                    "title": "replacement reviewer",
+                    "backend": "opencode",
+                    "placement": "client",
+                    "supersedes_mission_id": prior.id
+                }))
+                .unwrap(),
+            )),
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), cancel_entered_rx)
+        .await
+        .expect("supersession must enter remote cancel")
+        .expect("cancel_entered_tx dropped before signalling");
+
+    // While `/jobs/:id/cancel` is paused on the slow node, `DISPATCH_ADMISSION`
+    // and the durable admission file lock MUST already be free!
+    let guard = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        super::DISPATCH_ADMISSION.lock(),
+    )
+    .await
+    .expect("DISPATCH_ADMISSION must not be held during remote job cancellation");
+    let file_guard = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        super::dispatch_admission::durable_lock(&h_slow.state.config),
+    )
+    .await
+    .expect("durable admission lock must not be held during remote job cancellation")
+    .unwrap();
+    drop(file_guard);
+    drop(guard);
+
+    let _ = release_cancel_tx.send(());
+    let created = create_fut.await.unwrap().unwrap();
+    assert!(created.1 .0["id"].is_string());
+
+    std::env::remove_var(&slow_token_env);
+    slow_server.abort();
+    for m in &manager.list(24).await.machines {
+        crate::managed::unregister_test_node(m);
+    }
 }

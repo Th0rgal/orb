@@ -2154,6 +2154,7 @@ mod subtree_move_tests {
             ),
             projects,
             attention_snapshot: Default::default(),
+            managed: Default::default(),
         });
         let _ = state.control.admission_state.set(Arc::downgrade(&state));
         (state, store, user)

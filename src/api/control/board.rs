@@ -1735,12 +1735,15 @@ async fn schedule_external_worker(
     let store = store.clone();
     let task = task.clone();
     let preflight = preflight.clone();
+    let same_host =
+        super::client_placement::is_tagged(&boss.project.tags) || task.working_directory.is_some();
     tokio::spawn(async move {
         let request = serde_json::from_value::<super::CreateMissionRequest>(serde_json::json!({
             "title":format!("[{}] {}",task.task_key,task.title),
             "parent_mission_id":task.boss_mission_id,
             "backend":task.backend,"model_override":task.model_override.as_deref().or_else(|| role_default_model(&task)),
             "model_effort":task.model_effort,"working_directory":task.working_directory,
+            "remote_node_id":same_host.then_some(super::worker_location::SAME_NODE),
             "idempotency_key":format!("board:{}:attempt:{}",task.id,task.attempts+1),
             "tags":[format!("board-task:{}",task.id)],
             "prompt":format!("{}{}",retry_prompt(&task,&preflight),worker_contract(&task)),
