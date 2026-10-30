@@ -151,7 +151,7 @@ impl SqliteMissionStore {
         &self,
         mission_id: Uuid,
     ) -> Result<Vec<Automation>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let mission_id_str = mission_id.to_string();
 
         tokio::task::spawn_blocking(move || {
@@ -206,7 +206,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn get_automation(&self, id: Uuid) -> Result<Option<Automation>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id_str = id.to_string();
 
         tokio::task::spawn_blocking(move || {

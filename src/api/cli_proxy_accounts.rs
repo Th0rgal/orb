@@ -276,9 +276,13 @@ pub(crate) async fn bind_login(
         ));
     }
     if let Some(id) = target {
-        store.update(id, p).await.map(|p| p.id)
+        let updated = store.update(id, p).await.map(|p| p.id);
+        super::cli_proxy_routing::invalidate_qualified_model_cache();
+        updated
     } else {
-        Some(store.add(p).await)
+        let added = store.add(p).await;
+        super::cli_proxy_routing::invalidate_qualified_model_cache();
+        Some(added)
     }
 }
 
@@ -300,6 +304,7 @@ pub(crate) async fn set_enabled(
             Some(serde_json::json!({"name":account.file,"disabled":!enabled})),
         )
         .await?;
+    super::cli_proxy_routing::invalidate_qualified_model_cache();
     Ok(())
 }
 pub(crate) async fn delete(provider: &AIProvider) -> Result<(), (axum::http::StatusCode, String)> {
@@ -319,6 +324,7 @@ pub(crate) async fn delete(provider: &AIProvider) -> Result<(), (axum::http::Sta
             None,
         )
         .await?;
+    super::cli_proxy_routing::invalidate_qualified_model_cache();
     Ok(())
 }
 

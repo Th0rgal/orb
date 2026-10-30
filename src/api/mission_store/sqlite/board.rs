@@ -263,7 +263,7 @@ impl SqliteMissionStore {
         &self,
         boss_mission_id: Uuid,
     ) -> Result<Vec<BoardTask>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -286,7 +286,7 @@ impl SqliteMissionStore {
         &self,
         project: &str,
     ) -> Result<Vec<BoardTask>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let project = project.to_string();
         // Qualify every column so the missions join can't shadow board task
         // columns (both tables have id/status/created_at/...).
@@ -316,7 +316,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn list_active_board_missions(&self) -> Result<Vec<Uuid>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -342,7 +342,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn get_board_task(&self, task_id: Uuid) -> Result<Option<BoardTask>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.query_row(
@@ -361,7 +361,7 @@ impl SqliteMissionStore {
         &self,
         worker_mission_id: Uuid,
     ) -> Result<Option<BoardTask>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.query_row(
@@ -502,7 +502,7 @@ impl SqliteMissionStore {
         &self,
         task_id: Uuid,
     ) -> Result<Vec<TaskAttempt>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut statement = conn.prepare(
@@ -571,7 +571,7 @@ impl SqliteMissionStore {
         limit: usize,
         client: Option<bool>,
     ) -> Result<Vec<BoardOutboxItem>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut statement = conn.prepare(

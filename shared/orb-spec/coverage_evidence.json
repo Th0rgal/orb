@@ -649,7 +649,7 @@
         },
         {
           "path": "src/api/proxy.rs",
-          "sha256": "9056d84b1558bfc8afc97646927edccb5b3b3bcc0192ccc262c3cd92a62e6cc8"
+          "sha256": "bf34f236fcc1580d9e1ae00a19efe220bc64a00c8c857cd8ef4985278a72befe"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
@@ -712,7 +712,7 @@
         },
         {
           "path": "src/api/proxy.rs",
-          "sha256": "9056d84b1558bfc8afc97646927edccb5b3b3bcc0192ccc262c3cd92a62e6cc8"
+          "sha256": "bf34f236fcc1580d9e1ae00a19efe220bc64a00c8c857cd8ef4985278a72befe"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",

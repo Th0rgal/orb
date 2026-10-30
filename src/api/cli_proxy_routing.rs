@@ -1,7 +1,40 @@
 //! Account-bound Codex routes shared by ordinary and accelerated inference.
 //! Core owns priority/failover; CLIProxyAPI owns credentials, never account choice.
 use super::cli_proxy_login::ManagementClient;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+const QUALIFIED_MODEL_CACHE_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Hash, PartialEq, Eq)]
+struct QualifiedModelCacheKey {
+    root: PathBuf,
+    management_base: String,
+    account_id: Uuid,
+    bare_model: String,
+}
+
+struct QualifiedModelCacheEntry {
+    qualified: String,
+    cached_at: Instant,
+}
+
+fn qualified_model_cache(
+) -> &'static Mutex<HashMap<QualifiedModelCacheKey, QualifiedModelCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<QualifiedModelCacheKey, QualifiedModelCacheEntry>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn invalidate_qualified_model_cache() {
+    if let Ok(mut cache) = qualified_model_cache().lock() {
+        cache.clear();
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ProxyAccountRoute {
     pub provider_id: Uuid,
@@ -98,8 +131,34 @@ async fn proxy_prefix_with_client(
     model: &str,
     client: &ManagementClient,
 ) -> Result<String, String> {
+    let bare = model.rsplit('/').next().unwrap_or(model).to_string();
+    let cache_key = QualifiedModelCacheKey {
+        root: root.to_path_buf(),
+        management_base: client.base_url().to_string(),
+        account_id: account.provider_id,
+        bare_model: bare.clone(),
+    };
+    if let Ok(cache) = qualified_model_cache().lock() {
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.cached_at.elapsed() < QUALIFIED_MODEL_CACHE_TTL {
+                if let Some((prefix, _)) = entry.qualified.rsplit_once('/') {
+                    return Ok(prefix.to_string());
+                }
+            }
+        }
+    }
+
     static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = GATE.lock().await;
+    if let Ok(cache) = qualified_model_cache().lock() {
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.cached_at.elapsed() < QUALIFIED_MODEL_CACHE_TTL {
+                if let Some((prefix, _)) = entry.qualified.rsplit_once('/') {
+                    return Ok(prefix.to_string());
+                }
+            }
+        }
+    }
     let all = proxy_accounts_with_client(root, client).await?;
     let current = all
         .iter()
@@ -187,6 +246,16 @@ async fn proxy_prefix_with_client(
             return Err("Dedicated account route is shared by another proxy credential".into());
         }
     }
+    if let Ok(mut cache) = qualified_model_cache().lock() {
+        cache.retain(|_, v| v.cached_at.elapsed() < QUALIFIED_MODEL_CACHE_TTL);
+        cache.insert(
+            cache_key,
+            QualifiedModelCacheEntry {
+                qualified,
+                cached_at: Instant::now(),
+            },
+        );
+    }
     Ok(prefix)
 }
 
@@ -224,16 +293,27 @@ async fn qualified_model_with_client(
     model: &str,
     client: &ManagementClient,
 ) -> Result<String, String> {
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    let cache_key = QualifiedModelCacheKey {
+        root: root.to_path_buf(),
+        management_base: client.base_url().to_string(),
+        account_id,
+        bare_model: bare.to_string(),
+    };
+    if let Ok(cache) = qualified_model_cache().lock() {
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.cached_at.elapsed() < QUALIFIED_MODEL_CACHE_TTL {
+                return Ok(entry.qualified.clone());
+            }
+        }
+    }
     let accounts = proxy_accounts_with_client(root, client).await?;
     let account = accounts
         .iter()
         .find(|a| a.provider_id == account_id)
         .ok_or("Selected Codex account has no active proxy credential")?;
     let prefix = proxy_prefix_with_client(root, account, model, client).await?;
-    Ok(format!(
-        "{prefix}/{}",
-        model.rsplit('/').next().unwrap_or(model)
-    ))
+    Ok(format!("{prefix}/{bare}"))
 }
 
 #[cfg(test)]
@@ -252,6 +332,7 @@ mod tests {
     struct Fixture {
         files: Arc<Mutex<Value>>,
         catalogs: Arc<Mutex<HashMap<String, Value>>>,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     async fn fixture() -> (
@@ -289,10 +370,15 @@ mod tests {
                     json!({"models":[{"id":"second/gpt-6-astra"},{"id":"gpt-6-astra"}]}),
                 ),
             ]))),
+            requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         let app = Router::new()
-            .route("/auth-files", get(|State(s): State<Fixture>| async move { Json(s.files.lock().await.clone()) }))
+            .route("/auth-files", get(|State(s): State<Fixture>| async move {
+                s.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Json(s.files.lock().await.clone())
+            }))
             .route("/auth-files/models", get(|State(s): State<Fixture>, Query(q): Query<HashMap<String,String>>| async move {
+                s.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Json(s.catalogs.lock().await.get(&q["name"]).cloned().unwrap_or(json!({"models":[]})))
             }))
             .with_state(fixture.clone());
@@ -364,6 +450,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("shared"), "{error}");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn qualified_model_caches_verified_route_until_invalidated() {
+        let (root, client, state, ids, task) = fixture().await;
+        assert_eq!(
+            qualified_model_with_client(root.path(), ids[0], "openai/gpt-6-astra", &client)
+                .await
+                .unwrap(),
+            "first/gpt-6-astra"
+        );
+        let initial_calls = state.requests.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(initial_calls > 0);
+
+        for _ in 0..5 {
+            assert_eq!(
+                qualified_model_with_client(root.path(), ids[0], "gpt-6-astra", &client)
+                    .await
+                    .unwrap(),
+                "first/gpt-6-astra"
+            );
+        }
+        assert_eq!(
+            state.requests.load(std::sync::atomic::Ordering::Relaxed),
+            initial_calls,
+            "cached qualified_model lookup must not hit management endpoints"
+        );
+
+        invalidate_qualified_model_cache();
+        assert_eq!(
+            qualified_model_with_client(root.path(), ids[0], "gpt-6-astra", &client)
+                .await
+                .unwrap(),
+            "first/gpt-6-astra"
+        );
+        assert!(state.requests.load(std::sync::atomic::Ordering::Relaxed) > initial_calls);
         task.abort();
     }
 }

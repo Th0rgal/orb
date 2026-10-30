@@ -498,6 +498,32 @@ fn proxy_queue_timeout(via_cloudflare: bool) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Maximum time to wait on a saturated Google/Antigravity concurrency sibling
+/// group when downstream non-sibling fallback entries exist in the chain
+/// (`PROXY_GOOGLE_SPILLOVER_WAIT_MS`, default 1500ms). Direct or tail groups
+/// with no remaining fallback still wait up to `proxy_queue_timeout`.
+fn google_spillover_queue_timeout(
+    entries: &[crate::provider_health::ResolvedEntry],
+    entry_idx: usize,
+    full_queue_timeout: std::time::Duration,
+    is_routable: impl Fn(&crate::provider_health::ResolvedEntry) -> bool,
+) -> std::time::Duration {
+    let head = &entries[entry_idx];
+    let mut group_end = entry_idx + 1;
+    while group_end < entries.len() && is_google_concurrency_sibling(head, &entries[group_end]) {
+        group_end += 1;
+    }
+    let has_routable_fallback = entries[group_end..].iter().any(is_routable);
+    if !has_routable_fallback {
+        return full_queue_timeout;
+    }
+    let ms = std::env::var("PROXY_GOOGLE_SPILLOVER_WAIT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1500);
+    std::time::Duration::from_millis(ms).min(full_queue_timeout)
+}
+
 static GOOGLE_ACCOUNT_CONCURRENCY: std::sync::LazyLock<
     std::sync::Mutex<HashMap<uuid::Uuid, Arc<tokio::sync::Semaphore>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
@@ -3698,10 +3724,16 @@ async fn chat_completions_routed(
             ) {
                 continue;
             }
+            let effective_queue_timeout = google_spillover_queue_timeout(
+                &entries,
+                entry_idx,
+                queue_timeout,
+                entry_has_routable_proxy_credentials,
+            );
             match acquire_google_group_permit(
                 &mut entries,
                 entry_idx,
-                queue_timeout,
+                effective_queue_timeout,
                 entry_has_routable_proxy_credentials,
             )
             .await
@@ -11454,6 +11486,19 @@ mod tests {
         )
         .await;
         assert!(timed_out.is_err());
+
+        // With a routable non-sibling fallback in the chain, spillover timeout caps the queue wait
+        // instead of holding callers for the full 30s-180s queue timeout; with no fallback, full
+        // queue timeout is preserved.
+        let full = std::time::Duration::from_secs(180);
+        let with_fallback = make_entries();
+        let spill_budget = google_spillover_queue_timeout(&with_fallback, 0, full, has_cred);
+        assert!(spill_budget <= std::time::Duration::from_secs(5));
+        let without_fallback = with_fallback[..2].to_vec();
+        assert_eq!(
+            google_spillover_queue_timeout(&without_fallback, 0, full, has_cred),
+            full
+        );
     }
 
     #[test]

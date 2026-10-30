@@ -432,7 +432,7 @@ impl SqliteMissionStore {
         limit: usize,
     ) -> Result<Vec<Mission>, String> {
         let prefix = prefix.to_ascii_lowercase();
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             // Half-open range over the PK. Incrementing the last byte gives the
@@ -464,7 +464,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn count_missions_by_status(&self) -> Result<MissionStatusCounts, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn
@@ -493,7 +493,7 @@ impl SqliteMissionStore {
         &self,
         since: &str,
     ) -> Result<MissionStatusCounts, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let since = since.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -679,15 +679,28 @@ impl SqliteMissionStore {
                 .optional()
                 .map_err(|e| e.to_string())?;
 
-            // Load history from events (limited to last 200 messages for performance)
-            // Full history can be retrieved via get_events() if needed
+            // Load history from events (limited to last 200 messages for performance).
+            // Two single-type DESC branches let SQLite seek `idx_events_mission_type_sequence`
+            // directly instead of walking all tool/delta events via `idx_events_mission`.
             if let Some(mut m) = mission {
                 let mut history_stmt = conn
                     .prepare(
                         "SELECT event_type, content, content_file FROM (
-                             SELECT event_type, content, content_file, sequence
-                             FROM mission_events
-                             WHERE mission_id = ?1 AND event_type IN ('user_message', 'assistant_message')
+                             SELECT * FROM (
+                                 SELECT event_type, content, content_file, sequence
+                                 FROM mission_events
+                                 WHERE mission_id = ?1 AND event_type = 'user_message'
+                                 ORDER BY sequence DESC
+                                 LIMIT 200
+                             )
+                             UNION ALL
+                             SELECT * FROM (
+                                 SELECT event_type, content, content_file, sequence
+                                 FROM mission_events
+                                 WHERE mission_id = ?1 AND event_type = 'assistant_message'
+                                 ORDER BY sequence DESC
+                                 LIMIT 200
+                             )
                              ORDER BY sequence DESC
                              LIMIT 200
                          ) ORDER BY sequence ASC",
@@ -1747,7 +1760,7 @@ impl SqliteMissionStore {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -1887,7 +1900,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn get_mission_tree(&self, id: Uuid) -> Result<Option<AgentTreeNode>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
@@ -1978,7 +1991,7 @@ impl SqliteMissionStore {
             return Ok(Vec::new());
         }
 
-        let conn = self.conn.clone();
+        let conn = self.reader();
         let cutoff = Utc::now() - chrono::Duration::hours(stale_hours as i64);
         let cutoff_str = cutoff.to_rfc3339();
 
@@ -2035,7 +2048,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn get_all_active_missions(&self) -> Result<Vec<Mission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             // Recovery decisions require placement tags, origin and project
@@ -2115,7 +2128,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn get_scheduled_pending_missions(&self) -> Result<Vec<Mission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let sql = format!(
@@ -2285,10 +2298,20 @@ impl SqliteMissionStore {
             let conn = conn.blocking_lock();
             let row = conn
                 .query_row(
-                    "SELECT content, content_file FROM mission_events
-                     WHERE mission_id = ?1
-                       AND event_type IN ('assistant_message', 'assistant_message_canonical')
-                     ORDER BY sequence DESC LIMIT 1",
+                    "SELECT content, content_file FROM (
+                         SELECT * FROM (
+                             SELECT content, content_file, sequence FROM mission_events
+                             WHERE mission_id = ?1 AND event_type = 'assistant_message'
+                             ORDER BY sequence DESC LIMIT 1
+                         )
+                         UNION ALL
+                         SELECT * FROM (
+                             SELECT content, content_file, sequence FROM mission_events
+                             WHERE mission_id = ?1 AND event_type = 'assistant_message_canonical'
+                             ORDER BY sequence DESC LIMIT 1
+                         )
+                         ORDER BY sequence DESC LIMIT 1
+                     )",
                     params![id_str],
                     |row| {
                         let content: Option<String> = row.get(0)?;
@@ -2381,7 +2404,7 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn list_assistant_missions(&self) -> Result<Vec<Mission>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn

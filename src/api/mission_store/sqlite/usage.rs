@@ -76,7 +76,8 @@ pub(super) fn usage_model_key(raw_model: &str, stored_normalized_model: &str) ->
 }
 impl SqliteMissionStore {
     pub(super) async fn get_total_cost_cents(&self) -> Result<u64, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
 
         // Prefer normalized cost.amount_cents while remaining backward-compatible
         // with legacy flat cost_cents metadata. Clamp malformed negative values
@@ -108,7 +109,8 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn get_cost_by_source(&self) -> Result<(u64, u64, u64), String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
 
         // Group costs by source provenance. Events may store cost in the
         // normalized shape (cost.amount_cents + cost.source) or in the legacy
@@ -163,7 +165,8 @@ impl SqliteMissionStore {
     }
 
     pub(super) async fn get_total_cost_cents_since(&self, since: &str) -> Result<u64, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
         let query = r#"
             WITH assistant_costs AS (
                 SELECT CAST(
@@ -193,7 +196,8 @@ impl SqliteMissionStore {
         &self,
         since: &str,
     ) -> Result<(u64, u64, u64), String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
         let query = r#"
             WITH source_costs AS (
                 SELECT
@@ -245,7 +249,8 @@ impl SqliteMissionStore {
         &self,
         since: Option<&str>,
     ) -> Result<Vec<ModelUsageStats>, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
 
         // Read individual rows so stale stored `model_normalized` values can be
         // corrected with the current normalizer and estimated costs can be
@@ -377,7 +382,8 @@ impl SqliteMissionStore {
         &self,
         since: Option<&str>,
     ) -> Result<Vec<DailyUsageStats>, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
 
         // Group by the UTC date prefix of the ISO-8601 timestamp.
         // We rely on timestamps being stored in RFC3339 / ISO-8601 form, which
@@ -485,7 +491,8 @@ impl SqliteMissionStore {
         &self,
         since: Option<&str>,
     ) -> Result<Vec<HourlyUsageStats>, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
 
         // Bucket by `YYYY-MM-DDTHH` (the first 13 chars of an RFC3339 stamp).
         // Same cost-source fallback as get_usage_by_day.
@@ -652,7 +659,8 @@ impl SqliteMissionStore {
         &self,
         since: Option<&str>,
     ) -> Result<Vec<ProxyOutcomeRecord>, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
         let mut stmt = conn
             .prepare(
                 "SELECT timestamp, chain_id, provider, account_id, model, status, http_status,
@@ -706,7 +714,8 @@ impl SqliteMissionStore {
         &self,
         since: Option<&str>,
     ) -> Result<Vec<ModelUsageStats>, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
         // Models are normalized and costs finalized at write time, so plain
         // SQL aggregation is enough (unlike mission_events, which re-derives
         // both from stored metadata on read).
@@ -752,7 +761,8 @@ impl SqliteMissionStore {
         &self,
         since: Option<&str>,
     ) -> Result<Vec<DailyUsageStats>, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
         let base_query = r#"
             SELECT
                 substr(timestamp, 1, 10) AS day,
@@ -793,7 +803,8 @@ impl SqliteMissionStore {
         &self,
         since: Option<&str>,
     ) -> Result<Vec<HourlyUsageStats>, String> {
-        let conn = self.conn.lock().await;
+        let reader = self.reader();
+        let conn = reader.lock().await;
         let base_query = r#"
             SELECT
                 substr(timestamp, 1, 13) AS hour,

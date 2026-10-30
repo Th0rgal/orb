@@ -289,7 +289,7 @@ impl SqliteMissionStore {
         &self,
         run_id: Uuid,
     ) -> Result<Vec<MissionToolExecution>, String> {
-        let conn = self.conn.clone();
+        let conn = self.reader();
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let mut stmt = conn

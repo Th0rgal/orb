@@ -49,6 +49,28 @@ pub(crate) struct ManagementClient {
     key: String,
     http: reqwest::Client,
 }
+fn shared_management_http_client() -> Result<&'static reqwest::Client, ApiError> {
+    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = HTTP.get() {
+        return Ok(client);
+    }
+    let built = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not initialize login client.".into(),
+            )
+        })?;
+    let _ = HTTP.set(built);
+    HTTP.get().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Could not initialize login client.".into(),
+    ))
+}
+
 impl ManagementClient {
     #[cfg(test)]
     pub(crate) fn for_test(base: String) -> Self {
@@ -57,6 +79,10 @@ impl ManagementClient {
             key: "fixture-management".into(),
             http: reqwest::Client::new(),
         }
+    }
+
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base
     }
 
     pub(crate) fn configured() -> Result<Self, ApiError> {
@@ -87,16 +113,7 @@ impl ManagementClient {
         Ok(Self {
             base: format!("{base}/v0/management"),
             key,
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(20))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Could not initialize login client.".into(),
-                    )
-                })?,
+            http: shared_management_http_client()?.clone(),
         })
     }
     pub(crate) async fn version(&self) -> Result<String, ApiError> {
