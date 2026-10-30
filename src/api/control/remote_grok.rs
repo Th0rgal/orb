@@ -469,6 +469,8 @@ pub(crate) struct GrokStream {
     pub(crate) last_parity_digest: u32,
     pub(crate) parity_admitted: bool,
     pub(crate) folded_entry_count: u32,
+    pub(crate) last_upstream_seq: u64,
+    pub(crate) gap_buffer: std::collections::BTreeMap<u64, String>,
 }
 
 impl GrokStream {
@@ -715,21 +717,48 @@ impl GrokStream {
             MAX_LINE_BYTES,
             host_emits,
         );
-        if !norm.emit_event {
-            return false;
-        }
-
         let explicit_seq = value
             .get("sequence")
             .and_then(|v| v.as_u64())
             .or_else(|| value.get("seq").and_then(|v| v.as_u64()));
-        let incoming_seq = explicit_seq.unwrap_or_else(|| self.last_reduced_seq.saturating_add(1));
+        if !norm.emit_event {
+            if let Some(seq) = explicit_seq {
+                if seq == self.last_upstream_seq.saturating_add(1) {
+                    self.last_upstream_seq = seq;
+                } else if seq > self.last_upstream_seq.saturating_add(1)
+                    && self.gap_buffer.len() < 256
+                {
+                    self.gap_buffer
+                        .entry(seq)
+                        .or_insert_with(|| trimmed.to_string());
+                }
+            }
+            return false;
+        }
+
+        let (fold_prev_seq, incoming_seq) = if let Some(seq) = explicit_seq {
+            if seq <= self.last_upstream_seq {
+                (self.last_reduced_seq, self.last_reduced_seq)
+            } else if seq == self.last_upstream_seq.saturating_add(1) {
+                (
+                    self.last_reduced_seq,
+                    self.last_reduced_seq.saturating_add(1),
+                )
+            } else {
+                (self.last_upstream_seq, seq)
+            }
+        } else {
+            (
+                self.last_reduced_seq,
+                self.last_reduced_seq.saturating_add(1),
+            )
+        };
         let is_replay_from_log = self.is_replay_stream
             || value.get("replay").and_then(|v| v.as_bool()) == Some(true)
-            || explicit_seq.is_some_and(|s| s <= self.last_reduced_seq);
-        let host_reduce_emits = norm.emit_event && incoming_seq > self.last_reduced_seq;
+            || explicit_seq.is_some_and(|s| s <= self.last_upstream_seq);
+        let host_reduce_emits = norm.emit_event && incoming_seq > fold_prev_seq;
         let red = evaluate_transcript_reduce_gate(
-            self.last_reduced_seq,
+            fold_prev_seq,
             incoming_seq,
             self.reducer_thinking_open,
             norm.action,
@@ -737,13 +766,23 @@ impl GrokStream {
             host_reduce_emits,
         );
         let fold = evaluate_transcript_fold_gate(
-            self.last_reduced_seq,
+            fold_prev_seq,
             incoming_seq,
             self.folded_entry_count,
             self.reducer_thinking_open,
             norm.action,
             is_replay_from_log,
         );
+        if fold.gap_buffered {
+            if let Some(seq) = explicit_seq {
+                if self.gap_buffer.len() < 256 {
+                    self.gap_buffer
+                        .entry(seq)
+                        .or_insert_with(|| trimmed.to_string());
+                }
+            }
+            return false;
+        }
         if !red.emit_entry || !fold.admitted {
             return false;
         }
@@ -753,10 +792,31 @@ impl GrokStream {
         if let Some(key) = event_key {
             self.seen_event_ids.insert(key);
         }
-        self.last_reduced_seq = incoming_seq;
+        if let Some(seq) = explicit_seq {
+            self.last_upstream_seq = seq;
+        }
+        self.last_reduced_seq = fold_prev_seq.saturating_add(1);
         self.reducer_thinking_open = red.thinking_open_next;
         self.folded_entry_count = fold.next_entry_count;
         true
+    }
+
+    fn drain_contiguous_gap_buffer(&mut self, updates: &mut Vec<StreamUpdate>) {
+        while let Some(&next_seq) = self.gap_buffer.keys().next() {
+            if next_seq <= self.last_upstream_seq {
+                self.gap_buffer.remove(&next_seq);
+                continue;
+            }
+            if next_seq != self.last_upstream_seq.saturating_add(1) {
+                break;
+            }
+            let Some(buffered) = self.gap_buffer.remove(&next_seq) else {
+                break;
+            };
+            if self.admit_and_reduce_raw_line(&buffered) {
+                self.feed_line(&buffered, updates);
+            }
+        }
     }
 
     /// Evaluates `orb_client_parity_step` (`ClientProjectionTarget::Core`) over the current
@@ -812,6 +872,7 @@ impl GrokStream {
                     if self.admit_and_reduce_raw_line(trimmed) {
                         self.feed_line(trimmed, &mut updates);
                     }
+                    self.drain_contiguous_gap_buffer(&mut updates);
                 }
                 self.dropping_line = false;
             }
@@ -827,6 +888,18 @@ impl GrokStream {
             let line = std::mem::take(&mut self.partial);
             if self.admit_and_reduce_raw_line(&line) {
                 self.feed_line(&line, &mut updates);
+            }
+            self.drain_contiguous_gap_buffer(&mut updates);
+        }
+        while let Some((&next_seq, _)) = self.gap_buffer.iter().next() {
+            let Some(buffered) = self.gap_buffer.remove(&next_seq) else {
+                break;
+            };
+            if next_seq > self.last_upstream_seq {
+                self.last_upstream_seq = next_seq.saturating_sub(1);
+                if self.admit_and_reduce_raw_line(&buffered) {
+                    self.feed_line(&buffered, &mut updates);
+                }
             }
         }
         self.snapshot_pending(&mut updates);
@@ -5663,6 +5736,24 @@ mod tests {
         assert_eq!(fold_snap.total_divergences, 0);
         assert!(parity_snap.total_events >= 1);
         assert_eq!(parity_snap.total_divergences, 0);
+
+        let mut gs = super::GrokStream::default();
+        let u1 = gs.feed("{\"sequence\":1,\"type\":\"item.completed\",\"item\":{\"id\":\"m1\",\"type\":\"agent_message\",\"text\":\"hello\"}}\n");
+        assert!(!u1.is_empty());
+        assert_eq!((gs.last_upstream_seq, gs.last_reduced_seq), (1, 1));
+        let u_skip = gs.feed("{\"sequence\":2,\"type\":\"reasoning\",\"text\":\"\"}\n");
+        assert!(u_skip.is_empty());
+        assert_eq!((gs.last_upstream_seq, gs.last_reduced_seq), (2, 1));
+        let u3 = gs.feed("{\"sequence\":3,\"type\":\"item.completed\",\"item\":{\"id\":\"m3\",\"type\":\"agent_message\",\"text\":\" world\"}}\n");
+        assert!(!u3.is_empty());
+        assert_eq!((gs.last_upstream_seq, gs.last_reduced_seq), (3, 2));
+        let u5_early = gs.feed("{\"sequence\":5,\"type\":\"item.completed\",\"item\":{\"id\":\"m5\",\"type\":\"agent_message\",\"text\":\"!\"}}\n");
+        assert!(u5_early.is_empty());
+        assert_eq!(gs.gap_buffer.len(), 1);
+        let u4_fills = gs.feed("{\"sequence\":4,\"type\":\"reasoning\",\"text\":\"thinking\"}\n");
+        assert!(!u4_fills.is_empty());
+        assert!(gs.gap_buffer.is_empty());
+        assert_eq!((gs.last_upstream_seq, gs.last_reduced_seq), (5, 4));
     }
 }
 

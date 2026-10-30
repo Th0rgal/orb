@@ -15,13 +15,13 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3672 filtered out; f
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3672 filtered out; finished in 1.52s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3672 filtered out; finished in 1.31s
 
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3672 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3672 filtered out; finished in 0.01s
 
 
 running 1 test
@@ -51,5 +51,5 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3672 filtered out; f
 running 1 test
 test api::control::tests::stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3672 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3672 filtered out; finished in 0.01s
 
