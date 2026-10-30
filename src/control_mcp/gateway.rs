@@ -323,7 +323,6 @@ fn external_executor_allows(name: &str) -> bool {
                 | "cancel_action"
                 | "list_cloud_models"
                 | "list_cloud_accounts"
-                | "get_cloud_execution"
         )
 }
 
@@ -2167,6 +2166,12 @@ mod tests {
         assert_eq!(parsed.client_label.as_deref(), Some("Mac Terminal"));
         assert_eq!(parsed.host_hint.as_deref(), Some("thomas-mbp"));
         assert!(serde_json::from_value::<RenewBody>(json!({"unexpected": 1})).is_err());
+    }
+
+    #[test]
+    fn external_executor_read_tools_align_with_mission_access_grants() {
+        assert!(external_executor_allows("get_cloud_execution"));
+        assert!(crate::api::mission_access::READ_TOOLS.contains(&"get_cloud_execution"));
     }
 }
 

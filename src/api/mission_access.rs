@@ -51,12 +51,13 @@ const AUDIT_LIMIT: usize = 2000;
 const HISTORY_LIMIT: usize = 500;
 
 /// The only tools a grant opens. All read-only: mission record, events
-/// (messages), health, shared file listing.
+/// (messages), health, shared file listing, and cloud execution receipts.
 pub const READ_TOOLS: &[&str] = &[
     "get_mission",
     "get_mission_events",
     "get_mission_health",
     "list_mission_shared_files",
+    "get_cloud_execution",
 ];
 
 pub const TOOL_NAMES: [&str; 2] = ["request_mission_access", "list_mission_access"];
@@ -945,7 +946,7 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
                           (when get_mission / get_mission_events answer \"outside this session's scope\"). He approves on his device \
                           with Touch ID / Face ID. Waits up to 20 s, then returns `pending`; you get a message when he decides, \
                           or call list_mission_access. Once approved (default 24 h), get_mission, get_mission_events, \
-                          get_mission_health and list_mission_shared_files work on that mission. Never grants control: \
+                          get_mission_health, list_mission_shared_files and get_cloud_execution work on that mission. Never grants control: \
                           sending messages, cancel, resume and placement stay denied."
                 .into(),
             input_schema: json!({"type":"object","required":["target_mission_id","reason"],"properties":{
@@ -1428,6 +1429,7 @@ mod tests {
     fn scope_hint_points_reads_to_the_tool_and_refuses_control() {
         let t = Uuid::new_v4();
         assert!(scope_hint("get_mission_events", t).contains("request_mission_access"));
+        assert!(scope_hint("get_cloud_execution", t).contains("request_mission_access"));
         assert!(scope_hint("cancel_mission", t).contains("never allow"));
         assert!(!READ_TOOLS.iter().any(|t| matches!(
             *t,

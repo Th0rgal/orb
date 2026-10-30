@@ -31,7 +31,8 @@ def core(expiring=False):
             self.wfile.write(body)
 
         def do_GET(self):
-            self.respond({"contract_version": "1", "identity": {"role": "executor", "mission_id": MISSION, "project": None},
+            mission_id = None if self.headers.get("Authorization") == "Bearer mcp1.external" else MISSION
+            self.respond({"contract_version": "1", "identity": {"role": "executor", "mission_id": mission_id, "project": None},
                           "tools": [], "limits": {"session_expires_at": int(time.time()) +
                           (60 if expiring and self.headers.get("Authorization") == "Bearer mcp1.initial" else 3600)}})
 
@@ -164,10 +165,20 @@ print(str(credential))
             ext_result = subprocess.run([str(BINARY), "--api-url", url, "--token-file", str(owner),
                                          "--profile", "executor", "--check"],
                                         capture_output=True, text=True, env=env_no_mission, timeout=15)
-            self.assertEqual(ext_result.returncode, 0, ext_result.stderr)
+            self.assertNotEqual(ext_result.returncode, 0)
+            self.assertIn("mcp1.*", ext_result.stderr)
             self.assertEqual(state["sessions"], 1)
-            self.assertEqual(state["external_sessions"], 1)
+            self.assertEqual(state["external_sessions"], 0)
             self.assertEqual(owner.read_text(), "owner-login")
+
+            ext_cred = Path(directory) / "external-credential"
+            ext_cred.write_text("mcp1.external")
+            ext_cred.chmod(0o600)
+            ext_ok = subprocess.run([str(BINARY), "--api-url", url, "--token-file", str(ext_cred),
+                                     "--profile", "executor", "--check"],
+                                    capture_output=True, text=True, env=env_no_mission, timeout=15)
+            self.assertEqual(ext_ok.returncode, 0, ext_ok.stderr)
+            self.assertIsNone(json.loads(ext_ok.stdout)["identity"]["mission_id"])
 
     def test_scoped_renewal_survives_client_restart(self):
         with core(expiring=True) as (url, state), tempfile.TemporaryDirectory() as directory:
