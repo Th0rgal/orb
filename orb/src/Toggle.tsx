@@ -1,16 +1,13 @@
-import { createSignal } from "solid-js";
-
-export function Toggle(p: { on: boolean; onClick?: () => void }) {
-  const [on, setOn] = createSignal(p.on);
+export function Toggle(p: { on: boolean; label?: string; disabled?: boolean; onClick?: () => void }) {
   return (
     <button
-      class={`toggle ${on() ? "on" : ""}`}
+      type="button"
+      class={`toggle ${p.on ? "on" : ""}`}
       role="switch"
-      aria-checked={on()}
-      onClick={() => {
-        setOn(!on());
-        p.onClick?.();
-      }}
+      aria-label={p.label}
+      aria-checked={p.on}
+      disabled={p.disabled}
+      onClick={() => p.onClick?.()}
     />
   );
 }

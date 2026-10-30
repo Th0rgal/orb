@@ -250,8 +250,8 @@
 
 .sd-dialog :is(.sd-tab, .sd-icon-btn, .sd-esc-btn, .sd-open-btn, .sd-ghost-btn, .sd-load-more, .sd-row):focus-visible,
 .sd-select-wrap:has(.sd-select:focus-visible) {
-  outline: 1.5px solid var(--focus-border);
-  outline-offset: 1px;
+  outline: 1px solid var(--focus-border);
+  outline-offset: -1px;
 }
 
 /* Indexing status strip */

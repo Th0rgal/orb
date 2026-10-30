@@ -64,7 +64,8 @@
   --send-bg: #d8d8d7;
   --send-bg-hover: #ffffff;
   --send-fg: #191919;
-  --focus-border: #555555;
+  --focus-border: color-mix(in srgb, var(--fg) 26%, var(--stroke));
+  --selection-bg: color-mix(in srgb, var(--fg) 18%, transparent);
   --md-p: #6a6a6a;
   --md-h: #c9c9c8;
   --md-fence: #8a8a8a;
@@ -122,7 +123,8 @@
   --send-bg: #242423;
   --send-bg-hover: #000000;
   --send-fg: #ffffff;
-  --focus-border: #b9b8b2;
+  --focus-border: color-mix(in srgb, var(--fg) 28%, var(--stroke));
+  --selection-bg: color-mix(in srgb, var(--fg) 12%, transparent);
   --md-p: #63625c;
   --md-h: #333230;
   --md-fence: #7b7a76;
@@ -148,12 +150,13 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 button:disabled, select:disabled, input:disabled, textarea:disabled { cursor: default; }
 a[href], select { cursor: pointer; }
 input, textarea, [contenteditable="true"] { cursor: text; user-select: text; -webkit-user-select: text; -webkit-font-smoothing: antialiased; }
+::selection { background: var(--selection-bg); }
 .row, .icon-btn, .plus, .send, .voice-btn, .voice-x, .voice-ok, .voice-lang, .model, .na-drop-btn, .under-loc, .ctx, button.under-model, .row-action, .section-add, .gear-btn, .pill, .menu-item, .env-btn, .cron-retry {
   transition: background-color var(--t) var(--ease), color var(--t) var(--ease), opacity var(--t) var(--ease), border-color var(--t) var(--ease);
 }
 .row-ico, .row-ico svg { transition: color var(--t) var(--ease); }
 .row:active:not(.active) { background: var(--bg-active); }
-button:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset: 0; border-radius: var(--radius-sm); }
+button:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; border-radius: var(--radius-sm); }
 
 .app {
   display: grid;
@@ -191,14 +194,14 @@ button:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset:
 }
 .sb-top { height: 35px; flex: none; }
 /* Keyboard focus only (mouse clicks stay quiet). */
-:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset: 1px; border-radius: var(--radius-sm); }
+:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; border-radius: var(--radius-sm); }
 /* Text fields show focus with their own border, as in Cursor: no second ring outside it. */
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 0; }
 input:not([type=checkbox], [type=radio], [type=range]):focus, textarea:focus, select:focus { border-color: var(--focus-border); }
 /* The composer is one surface: its outer border brightens on focus, the
    textarea inside must never draw its own ring (Cursor does the same). */
 .composer textarea:focus-visible, .composer textarea:focus { outline: 0; box-shadow: none; }
-button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focus:not(:focus-visible) { outline: 0; }
+button:focus:not(:focus-visible), input:focus:not(:focus-visible), textarea:focus:not(:focus-visible), select:focus:not(:focus-visible) { outline: 0; }
 .sb-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 12px; scroll-padding-block: 8px; scrollbar-width: none; }
 .sb-scroll::-webkit-scrollbar { display: none; }
 .sb-scroll > .row + .row { margin-top: 1px; }
@@ -677,7 +680,7 @@ code {
 /* Absolutely placed above the composer: showing it never changes the dock height. */
 .jump-latest { position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 3; pointer-events: auto; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--overlay-border); background: var(--overlay-field); color: var(--fg-2, var(--fg)); box-shadow: 0 2px 10px rgb(0 0 0 / 10%); cursor: pointer; }
 .jump-latest:hover { color: var(--fg); }
-.jump-latest:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; }
+.jump-latest:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1px; }
 .dock .composer { position: relative; z-index: 1; box-shadow: 0 4px 18px rgb(0 0 0 / 8%); }
 .dock .error-notice { position: relative; z-index: 1; }
 /* Fade the transcript out beneath the controls with a mask rather than a painted
@@ -805,7 +808,7 @@ textarea::placeholder { color: var(--placeholder); }
 .menu-item[aria-pressed]::after, .menu-attachment-mark { content: ""; width: 14px; flex: 0 0 14px; margin-left: auto; color: var(--fg-2); }
 .menu-item[aria-pressed="true"]::after { content: "✓"; }
 .menu-item:focus:not(:focus-visible) { outline: 0; }
-.menu-item:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset: -1px; background: var(--bg-hover); }
+.menu-item:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; background: var(--bg-hover); }
 .menu-item.danger { color: var(--red); }
 .menu-ico { width: 16px; height: 16px; display: grid; place-items: center; color: var(--fg-3); flex: none; }
 .menu-ico svg { width: 14px; height: 14px; display: block; }
@@ -970,6 +973,7 @@ button.under-model { color: inherit; }
 
 .s-btn.primary { background: var(--send-bg); color: var(--send-fg); border-color: transparent; }
 .s-btn.primary:hover { background: var(--send-bg-hover); color: var(--send-fg); }
+.s-btn.primary:focus-visible, .send:focus-visible { outline-offset: 1px; }
 .s-btn.danger { color: var(--red); border-color: transparent; }
 .s-btn:disabled { opacity: .4; }
 
@@ -2106,7 +2110,7 @@ button.fork-trigger:hover { color: var(--fg); }
 .transfer-inventory summary::before { content: ""; flex: none; width: 5px; height: 5px; margin: 0 2px 0 3px; border: solid var(--fg-4); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform var(--t) var(--ease); }
 .transfer-inventory details[open] > summary::before { transform: rotate(45deg); }
 .transfer-inventory summary:hover { background: var(--bg-hover); }
-.transfer-inventory summary:focus-visible { outline: 1.5px solid var(--focus-border); outline-offset: -1px; }
+.transfer-inventory summary:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
 .transfer-path { min-width: 0; font-family: var(--mono); font-size: 11.5px; color: var(--fg); overflow-wrap: anywhere; }
 .transfer-meta { margin-left: auto; flex: none; padding-right: 4px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .transfer-group summary { position: relative; }
@@ -2177,7 +2181,14 @@ button.fork-trigger:hover { color: var(--fg); }
 .settings-body .s-row-title { font-size: 12px; }
 .settings-body .s-row-desc { font-size: 12px; line-height: 17px; color: var(--fg-3); }
 .settings-body .s-row-ctrl { display: flex; align-items: center; gap: 6px; max-width: 48%; }
+.settings-body .s-row-ctrl:not(.ps-cap-ctrl):has(> .s-input:not(.ps-cap-input)) { flex: 0 1 260px; }
 .settings-body .s-row-ctrl .s-input { width: 100%; min-width: 0; }
+.settings-body .s-row-ctrl .s-input:not(.ps-cap-input) { flex: 1; }
+.ut-status { display: inline-flex; align-items: center; gap: 7px; }
+.ut-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--fg-4); }
+.ut-dot.active { background: var(--toggle); }
+.ut-dot.pending { background: var(--warning); }
+.ut-field-err { color: var(--red); }
 .settings-body .s-btn { white-space: nowrap; }
 .settings-body .s-btn.primary { background: var(--send-bg); }
 .settings-body .s-btn:hover { background: var(--bg-active); }
@@ -2445,7 +2456,7 @@ select.orb-select-native:disabled { cursor: default; }
 .context-sync-state { position:relative;font-size:11px;color:var(--fg-2); }
  .context-sync-trigger { display:inline-flex;align-items:center;gap:6px;border:0;background:transparent;color:var(--fg-2);font:inherit;padding:5px 7px;border-radius:var(--radius-sm);cursor:pointer; }
 .context-sync-trigger:hover,.context-sync-trigger[aria-expanded="true"] { background:var(--bg-elev);color:var(--fg); }
-.context-sync-trigger:focus-visible { outline:2px solid var(--fg-2);outline-offset:2px; }
+.context-sync-trigger:focus-visible { outline:1px solid var(--focus-border);outline-offset:-1px; }
 .context-sync-dot { width:5px;height:5px;border-radius:50%;background:currentColor;flex:none; }
 .context-sync-state[data-state="warning"] .context-sync-dot { background:#d98a4a;box-shadow:0 0 0 3px #d98a4a26; }
 .context-sync-state[data-state="failed"] .context-sync-dot { background:#c99b52; }
@@ -2519,13 +2530,13 @@ select.orb-select-native:disabled { cursor: default; }
 .btw-transfer,.btw-reopen { border:0; background:transparent; color:var(--fg-2); font:inherit; font-size:12px; cursor:pointer; padding:6px 0; }
 .btw-transfer:hover,.btw-reopen:hover { color:var(--amber); }
 .btw-panel form { display:flex; flex-shrink:0; gap:8px; margin:12px 16px 16px; padding:8px 9px 8px 16px; min-height:42px; align-items:flex-end; background:var(--bg-elev); border:1px solid var(--stroke); border-radius:21px; cursor:text; }
-.btw-panel form:focus-within { border-color:var(--stroke-strong); }
+.btw-panel form:focus-within { border-color:var(--focus-border); }
 .btw-panel textarea:not(.composer textarea):not(.prompt-editor) { resize:none; max-height:120px; min-width:0; flex:1; background:transparent; color:inherit; font:inherit; font-size:13px; line-height:24px; padding:0; border:0; outline:none; }
 .btw-panel textarea::placeholder { color:var(--fg-3); }
 .btw-panel form button { border:0; border-radius:50%; width:24px; height:24px; flex:none; background:var(--send-bg); color:var(--send-fg); display:grid; place-items:center; cursor:pointer; }
 .btw-panel form button:hover:not(:disabled) { background:var(--send-bg-hover); }
 .btw-panel form button:disabled { opacity:.4; cursor:default; }
-.btw-panel button:focus-visible { outline:1.5px solid var(--focus-border); outline-offset:2px; }
+.btw-panel button:focus-visible { outline:1px solid var(--focus-border); outline-offset:1px; }
 
 /* Compact activity: one quiet line per live task, one folded history. */
 .agent-activity-content { margin: 8px 0 12px; }
@@ -2797,7 +2808,7 @@ select.orb-select-native:disabled { cursor: default; }
 .archive-section-chevron { display: grid; place-items: center; flex: none; width: 18px; height: 18px; }
 .archive-section-toggle[aria-expanded="true"] .history-chevron { transform: rotate(90deg); }
 .archive-section-toggle:hover { color: var(--fg); }
-.archive-section-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.archive-section-toggle:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 1px; border-radius: var(--radius-xs); }
 
 .archive-project-row { width: 100%; }
 #sidebar-archives .row-machine { opacity: 0; transition: opacity 120ms ease; }
@@ -2937,7 +2948,7 @@ select.orb-select-native:disabled { cursor: default; }
 .ps-colors { display: flex; gap: 8px; flex-wrap: wrap; }
 .ps-color { width: 24px; height: 24px; border-radius: 50%; background: var(--swatch); border: 3px solid var(--bg-elev); outline: 1px solid transparent; }
 .ps-color[aria-pressed="true"] { outline-color: var(--fg); }
-.ps-color:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
+.ps-color:focus-visible { outline: 1px solid var(--focus-border); outline-offset: 2px; }
 .sidebar-tree .row-ico { color: var(--fg-3); }
 .sidebar-tree .row-ico > svg, .sidebar-tree .mission-glyph > svg { width: 16px; height: 16px; }
 .sidebar-tree .cron-glyph:not(.running):not(.attention) { color: inherit; }
@@ -3875,19 +3886,19 @@ select.orb-select-native:disabled { cursor: default; }
 .chapters-n { flex: none; width: 18px; color: var(--fg-3); font-variant-numeric: tabular-nums; text-align: right; }
 .chapters-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* One quiet focus treatment for every text field and select (no native blue ring):
-   the border darkens to the theme's focus tone with a soft same-tone halo. */
-:where(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea, select, .s-input, .soul-editor):focus,
-:where(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea, select, .s-input, .soul-editor):focus-visible {
+/* One quiet focus treatment for every text field and select (Cursor-inspired):
+   the 1px border steps up to --focus-border with zero outer ring or halo. */
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea, select, .s-input, .cs-input, .soul-editor):focus,
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea, select, .s-input, .cs-input, .soul-editor):focus-visible {
   outline: none;
   border-color: var(--focus-border);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent);
+  box-shadow: none;
 }
 /* Fields that are deliberately borderless keep their own look. */
 .composer textarea:focus, .composer textarea:focus-visible, .prompt-editor:focus, .prompt-editor:focus-visible, .cs-prompt:focus, .project-search:focus, .picker-search:focus, .picker-search:focus-visible { box-shadow: none; }
 .project-search:focus, .project-search:focus-visible { box-shadow: inset 0 -1px var(--stroke-strong); }
 /* An edited message focuses as one field (like Cursor): the bubble, never a box inside it. */
-.user.editing:focus-within { border-color: var(--focus-border); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent); }
+.user.editing:focus-within { border-color: var(--focus-border); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 5%, transparent); }
 
 /* End-of-turn recap. */
 .turn-recap { margin: 14px 0 6px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--stroke-soft); background: color-mix(in srgb, var(--fg) 2.5%, transparent); font-size: 13px; }
@@ -4117,7 +4128,7 @@ select.orb-select-native:disabled { cursor: default; }
 .settings-tab { height: 30px; padding: 0 10px; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--fg-3); font-size: 13px; white-space: nowrap; cursor: pointer; }
 .settings-tab:hover { color: var(--fg); }
 .settings-tab.active { color: var(--fg); border-bottom-color: var(--fg); }
-.settings-tab:focus-visible { outline: 2px solid var(--focus, var(--purple)); outline-offset: -2px; border-radius: var(--radius-xs); }
+.settings-tab:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; border-radius: var(--radius-xs); }
 .settings-advanced { margin-top: 26px; }
 .settings-advanced > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; margin: 0 8px; font-size: 13px; font-weight: 500; color: var(--fg-2); }
 .settings-advanced > summary::-webkit-details-marker { display: none; }

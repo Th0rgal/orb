@@ -60,7 +60,7 @@
 .st-tr > [data-align="end"] { text-align: right; justify-self: end; max-width: 100%; font-variant-numeric: tabular-nums; color: var(--fg-2); }
 .st-row { cursor: pointer; width: 100%; border: 0; border-bottom: 1px solid var(--stroke-soft); background: transparent; color: inherit; font: inherit; text-align: left; }
 .st-row:hover { background: var(--bg-hover); }
-.st-row:focus-visible { outline: 2px solid var(--focus-border); outline-offset: -2px; }
+.st-row:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
 .st-row[aria-expanded="true"] { background: var(--bg-hover); }
 .st-detail { padding: 8px 12px 12px; border-bottom: 1px solid var(--stroke-soft); background: var(--bg-hover); color: var(--fg-2); font-size: 12px; }
 .st-more { display: flex; width: 100%; justify-content: center; gap: 6px; padding: 8px 12px; border: 0; background: transparent; color: var(--fg-3); font: 12px var(--sans); cursor: pointer; }
