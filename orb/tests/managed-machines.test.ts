@@ -68,10 +68,10 @@ describe("managed machine formatting", () => {
   });
 });
 
-import { nodeLabel, rememberNodeNames, nodeSize, nodeProvider, managedFleetLabel } from "../src/machines/nodes";
+import { nodeLabel, rememberNodeNames, nodeSize, nodeProvider, managedFleetLabel, groupManagedNodesByProvider, managedFleetGroupSummary } from "../src/machines/nodes";
 import { availabilityLine } from "../src/AntigravityProvider";
 import { placeholder } from "../src/ManagedMachines";
-import { machineName, stateLabel, isStarting } from "../src/managedMachineModel";
+import { machineName, stateLabel, isStarting, groupMachinesByProvider, providerGroupSummary } from "../src/managedMachineModel";
 
 describe("managed machine names and v2 states", () => {
   it("labels nodes by server display name, falling back to the id", () => {
@@ -191,7 +191,8 @@ describe("ownership and reaping", () => {
       ["vastai", "Vast.ai", false, true, false, false, false],
       ["scaleway", "Scaleway", false, false, false, false, false],
     ]);
-    expect(providerStatusLine(resp.providers![0]!)).toBe("Configured · Bitwarden ••••1234");
+    expect(resp.providers![0]!.max_concurrent).toBe(100);
+    expect(providerStatusLine(resp.providers![0]!)).toBe("Configured · Bitwarden ••••1234 · up to 100 VMs");
     expect(providerStatusLine(resp.providers![1]!)).toBe("Configured · Settings ••••5678 · fsn1");
     expect(providerStatusLine(resp.providers![2]!)).toBe("Not configured");
     expect(providerStatusLine(resp.providers![3]!)).toBe("Disabled · Not configured");
@@ -202,5 +203,33 @@ describe("ownership and reaping", () => {
     expect(vastRtx?.gpu).toBe("RTX 4090");
     const cax = resp.providers?.find(p => p.provider === "hetzner")?.sizes.find(s => s.size === "cax31");
     expect(cax?.arch).toBe("arm64");
+  });
+  it("groups machines and fleet nodes per provider with compact summaries", () => {
+    const providers = [
+      { provider: "boat", display_name: "boat.dev" },
+      { provider: "hetzner", display_name: "Hetzner Cloud" },
+    ];
+    const items = [
+      machine({ id: "h1", provider: "hetzner", usd_per_hour: 0.12 }),
+      machine({ id: "b1", provider: "boat", usd_per_hour: 0.2 }),
+      machine({ id: "b2", provider: "", usd_per_hour: 0.072 }),
+    ];
+    const groups = groupMachinesByProvider(items, providers);
+    expect(groups.map(g => [g.provider, g.label, g.machines.map(m => m.id), providerGroupSummary(g.machines)])).toEqual([
+      ["boat", "boat.dev", ["b1", "b2"], "2 running · $0.27/h"],
+      ["hetzner", "Hetzner Cloud", ["h1"], "1 running · $0.12/h"],
+    ]);
+    expect(providerGroupSummary([machine({ id: "s1", state: "stopped" }), machine({ id: "s2", state: "stopped" })])).toBe("2 stopped");
+    expect(providerGroupSummary([machine({ id: "f1", state: "failed", usd_per_hour: 0 })])).toBe("1 machine");
+    const fleet = groupManagedNodesByProvider([
+      { id: "spark", status: "online", labels: [] },
+      { id: "managed-h1", status: "online", active_jobs: 1, labels: ["managed", "provider=hetzner"] },
+      { id: "managed-b1", status: "online", active_jobs: 2, labels: ["managed", "boat"] },
+      { id: "managed-b2", status: "offline", active_jobs: 0, labels: ["managed"] },
+    ]);
+    expect(fleet.map(g => [g.provider, g.label, managedFleetGroupSummary(g.nodes)])).toEqual([
+      ["boat", "Managed (boat.dev)", "1/2 online · 2 active"],
+      ["hetzner", "Managed (Hetzner)", "1 online · 1 active"],
+    ]);
   });
 });

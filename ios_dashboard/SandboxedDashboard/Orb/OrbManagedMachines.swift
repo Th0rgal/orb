@@ -73,9 +73,17 @@ struct OrbManagedProviderInfo: Codable, Equatable, Identifiable, Sendable {
     var key_hint: String?
     var region: String?
     var project_id: String?
+    var max_concurrent: Int?
     var supports_snapshots: Bool
     var supports_free_stop: Bool
     var sizes: [OrbManagedSize]
+    var id: String { provider }
+}
+
+struct OrbManagedProviderGroup: Equatable, Identifiable, Sendable {
+    var provider: String
+    var label: String
+    var machines: [OrbManagedMachine]
     var id: String { provider }
 }
 
@@ -171,6 +179,59 @@ enum OrbManaged {
         }
     }
 
+    static let groupPreviewLimit = 5
+
+    static func machineProviderKey(_ provider: String?) -> String {
+        let key = (provider ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return key.isEmpty ? "boat" : key
+    }
+
+    static func providerDisplayLabel(_ provider: String?, providers: [OrbManagedProviderInfo]? = nil) -> String {
+        let key = machineProviderKey(provider)
+        if let found = providers?.first(where: { machineProviderKey($0.provider) == key })?.display_name.trimmingCharacters(in: .whitespacesAndNewlines),
+           !found.isEmpty {
+            return found
+        }
+        return providerLabel(key)
+    }
+
+    static func groupMachinesByProvider(_ machines: [OrbManagedMachine], providers: [OrbManagedProviderInfo]? = nil) -> [OrbManagedProviderGroup] {
+        var buckets: [String: [OrbManagedMachine]] = [:]
+        var seenOrder: [String] = []
+        for m in machines {
+            let key = machineProviderKey(m.provider)
+            if buckets[key] == nil { seenOrder.append(key) }
+            buckets[key, default: []].append(m)
+        }
+        var order: [String] = []
+        func push(_ raw: String?) {
+            let key = machineProviderKey(raw)
+            if !order.contains(key) { order.append(key) }
+        }
+        for p in providers ?? [] { push(p.provider) }
+        for p in ["boat", "hetzner", "vastai", "scaleway"] { push(p) }
+        for key in seenOrder { push(key) }
+        return order.compactMap { key in
+            guard let list = buckets[key], !list.isEmpty else { return nil }
+            return OrbManagedProviderGroup(provider: key, label: providerDisplayLabel(key, providers: providers), machines: list)
+        }
+    }
+
+    static func providerGroupSummary(_ machines: [OrbManagedMachine]) -> String {
+        let running = machines.filter(isLive)
+        let rate = machines
+            .filter { $0.state == "online" || $0.state == "provisioning" || $0.state == "enrolling" }
+            .reduce(0.0) { $0 + $1.usd_per_hour }
+        if !running.isEmpty {
+            return "\(running.count) running" + (rate > 0 ? " · \(usdPerHour(rate))" : "")
+        }
+        let stoppedCount = machines.filter(isStopped).count
+        if stoppedCount > 0 && stoppedCount == machines.count {
+            return "\(stoppedCount) stopped"
+        }
+        return "\(machines.count) \(machines.count == 1 ? "machine" : "machines")"
+    }
+
     static func nodeProvider(_ node: OrbJSON) -> String? {
         let known: Set<String> = ["boat", "hetzner", "vastai", "scaleway"]
         for item in node["labels"].items {
@@ -206,7 +267,8 @@ enum OrbManaged {
             enabled ? "Configured" : "Disabled",
             cred,
             p.region ?? "",
-            (p.project_id?.isEmpty == false) ? "proj \(p.project_id!)" : ""
+            (p.project_id?.isEmpty == false) ? "proj \(p.project_id!)" : "",
+            (p.max_concurrent ?? 0) > 0 ? "up to \(p.max_concurrent!) VMs" : ""
         ].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
@@ -453,9 +515,14 @@ struct OrbManagedMachinesSection: View {
     @State private var destroying: OrbManagedMachine?
     @State private var creating = false
     @State private var titles: [String: String] = [:]
+    @State private var collapsedProviders: Set<String> = []
+    @State private var expandedAllProviders: Set<String> = []
+    @State private var stoppedExpandedOverride: Bool?
+    @State private var showRecent = false
 
     var body: some View {
         let live: [OrbManagedMachine] = response.machines.filter(OrbManaged.isLive)
+        let liveGroups = OrbManaged.groupMachinesByProvider(live, providers: response.providers)
         let stopped: [OrbManagedMachine] = response.machines.filter(OrbManaged.isStopped)
         let recent: [OrbManagedMachine] = OrbManaged.recent(response.machines)
         Section {
@@ -465,37 +532,91 @@ struct OrbManagedMachinesSection: View {
             }
             if !response.enabled { Text("Managed machines are disabled on this backend.").foregroundStyle(.secondary) }
             else if live.isEmpty && stopped.isEmpty { Text("No managed machines running.").foregroundStyle(.secondary) }
-            ForEach(live) { machine in
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    OrbManagedMachineRow(machine: machine, now: context.date, cost: OrbManaged.liveCost(machine, fetchedAt: fetchedAt, now: context.date),
-                                         missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: false, onOpenMission: onOpenMission)
-                }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button("Destroy", role: .destructive) { destroying = machine }.disabled(!canAct(machine))
-                    if OrbManaged.canStop(machine, providers: response.providers), let onStop {
-                        Button("Stop") { onStop(machine) }.tint(.orange).disabled(!canAct(machine))
+            ForEach(liveGroups) { group in
+                let isOpen = Binding<Bool>(
+                    get: { !collapsedProviders.contains(group.provider) },
+                    set: { open in
+                        if open { collapsedProviders.remove(group.provider) }
+                        else { collapsedProviders.insert(group.provider) }
                     }
-                    Button("+1 h") { onExtend(machine) }.tint(.accentColor).disabled(!canAct(machine))
-                }
-                .contextMenu { menu(machine, live: true) }
-                .accessibilityIdentifier("managed.machine.\(machine.id)")
-            }
-            ForEach(stopped) { machine in
-                OrbManagedMachineRow(machine: machine, now: .now, cost: machine.cost_usd,
-                                     missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: false, onOpenMission: onOpenMission)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button("Destroy", role: .destructive) { destroying = machine }.disabled(busy)
-                        if let onResume {
-                            Button("Resume") { onResume(machine) }.tint(.accentColor).disabled(!OrbManaged.canResume(machine, busy: busy))
+                )
+                let showAll = expandedAllProviders.contains(group.provider)
+                let visible = showAll ? group.machines : Array(group.machines.prefix(OrbManaged.groupPreviewLimit))
+                DisclosureGroup(isExpanded: isOpen) {
+                    ForEach(visible) { machine in
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            OrbManagedMachineRow(machine: machine, now: context.date, cost: OrbManaged.liveCost(machine, fetchedAt: fetchedAt, now: context.date),
+                                                 missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: false, onOpenMission: onOpenMission)
                         }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button("Destroy", role: .destructive) { destroying = machine }.disabled(!canAct(machine))
+                            if OrbManaged.canStop(machine, providers: response.providers), let onStop {
+                                Button("Stop") { onStop(machine) }.tint(.orange).disabled(!canAct(machine))
+                            }
+                            Button("+1 h") { onExtend(machine) }.tint(.accentColor).disabled(!canAct(machine))
+                        }
+                        .contextMenu { menu(machine, live: true) }
+                        .accessibilityIdentifier("managed.machine.\(machine.id)")
                     }
-                    .contextMenu { menu(machine, live: false) }
-                    .accessibilityIdentifier("managed.stopped.\(machine.id)")
+                    if group.machines.count > OrbManaged.groupPreviewLimit {
+                        Button(showAll ? "Show fewer" : "Show all \(group.machines.count) machines") {
+                            if showAll { expandedAllProviders.remove(group.provider) }
+                            else { expandedAllProviders.insert(group.provider) }
+                        }
+                        .font(.caption.weight(.medium))
+                        .accessibilityIdentifier("managed.group.more.\(group.provider)")
+                    }
+                } label: {
+                    HStack {
+                        Text(group.label).font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Text(OrbManaged.providerGroupSummary(group.machines))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityIdentifier("managed.group.\(group.provider)")
+                }
             }
-            ForEach(recent) { machine in
-                OrbManagedMachineRow(machine: machine, now: .now, cost: machine.cost_usd,
-                                     missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: true, onOpenMission: onOpenMission)
-                    .contextMenu { menu(machine, live: false) }
+            if !stopped.isEmpty {
+                let stoppedOpen = Binding<Bool>(
+                    get: { stoppedExpandedOverride ?? (stopped.count <= OrbManaged.groupPreviewLimit) },
+                    set: { stoppedExpandedOverride = $0 }
+                )
+                DisclosureGroup(isExpanded: stoppedOpen) {
+                    ForEach(stopped) { machine in
+                        OrbManagedMachineRow(machine: machine, now: .now, cost: machine.cost_usd,
+                                             missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: false, onOpenMission: onOpenMission)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button("Destroy", role: .destructive) { destroying = machine }.disabled(busy)
+                                if let onResume {
+                                    Button("Resume") { onResume(machine) }.tint(.accentColor).disabled(!OrbManaged.canResume(machine, busy: busy))
+                                }
+                            }
+                            .contextMenu { menu(machine, live: false) }
+                            .accessibilityIdentifier("managed.stopped.\(machine.id)")
+                    }
+                } label: {
+                    HStack {
+                        Text("Stopped").font(.subheadline.weight(.medium))
+                        Spacer()
+                        Text(OrbManaged.providerGroupSummary(stopped))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if !recent.isEmpty {
+                DisclosureGroup(isExpanded: $showRecent) {
+                    ForEach(recent) { machine in
+                        OrbManagedMachineRow(machine: machine, now: .now, cost: machine.cost_usd,
+                                             missionTitle: machine.owner_mission_id.flatMap { titles[$0] }, muted: true, onOpenMission: onOpenMission)
+                            .contextMenu { menu(machine, live: false) }
+                    }
+                } label: {
+                    Text("Recent · last 24 h (\(recent.count))")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
         } header: {
             let noUsable = (response.providers?.isEmpty == false) && !(response.providers ?? []).contains(where: OrbManaged.isProviderUsable)
@@ -910,14 +1031,23 @@ struct OrbConfigureMachineProviderSheet: View {
     @State private var apiKey = ""
     @State private var region: String
     @State private var projectID: String
+    @State private var maxConcurrentText: String
     @State private var saving = false
     @State private var error = ""
+    private let initialMaxText: String
 
     init(provider: OrbManagedProviderInfo, onSave: @escaping ([String: OrbJSON]) async throws -> Void) {
         self.provider = provider
         self.onSave = onSave
+        let initMax = provider.max_concurrent.map(String.init) ?? ""
+        self.initialMaxText = initMax
         _region = State(initialValue: provider.region ?? "")
         _projectID = State(initialValue: provider.project_id ?? "")
+        _maxConcurrentText = State(initialValue: initMax)
+    }
+
+    private var maxChanged: Bool {
+        maxConcurrentText.trimmingCharacters(in: .whitespacesAndNewlines) != initialMaxText
     }
 
     private var label: String {
@@ -942,6 +1072,14 @@ struct OrbConfigureMachineProviderSheet: View {
                             ? "Leave blank to keep the current \(OrbManaged.credentialSourceLabel(provider.credential_source).lowercased()) key\(provider.key_hint.map { " (\($0))" } ?? ""). Credentials are encrypted on Core."
                             : "Credentials are encrypted on Core and never returned to clients."
                     )
+                }
+                Section {
+                    TextField("Unlimited", text: $maxConcurrentText)
+                        .keyboardType(.numberPad)
+                } header: {
+                    Text("Max concurrent VMs")
+                } footer: {
+                    Text("Global ceiling on simultaneous live VMs for this provider. Leave blank for unlimited.")
                 }
                 if provider.provider == "hetzner" {
                     Section {
@@ -979,7 +1117,7 @@ struct OrbConfigureMachineProviderSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(saving) }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { Task { await submit(override: nil) } }
-                        .disabled(saving || (!provider.configured && apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                        .disabled(saving || (!provider.configured && apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !maxChanged))
                 }
             }
         }
@@ -1001,6 +1139,17 @@ struct OrbConfigureMachineProviderSheet: View {
             }
             if provider.provider == "scaleway" {
                 patch["project_id"] = .string(projectID.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            if maxChanged {
+                let trimmedMax = maxConcurrentText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmedMax.isEmpty {
+                    patch["max_concurrent"] = .null
+                } else if let n = Int(trimmedMax), (1...1000).contains(n) {
+                    patch["max_concurrent"] = .number(Double(n))
+                } else {
+                    self.error = "Max concurrent VMs must be between 1 and 1000, or blank for unlimited."
+                    return
+                }
             }
         }
         do {

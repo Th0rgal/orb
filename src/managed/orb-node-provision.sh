@@ -15,6 +15,7 @@ ms() { echo $(( ($(date +%s%N) - t0) / 1000000 )); }
 #    creates it as user:user 0775, so every first clone failed).
 install -d -m 1777 /tmp/opencode
 chown -R "$NODE_USER:$NODE_USER" /tmp/opencode
+mkdir -p /etc/tmpfiles.d
 echo "d /tmp/opencode 1777 $NODE_USER $NODE_USER -" > /etc/tmpfiles.d/orb-opencode.conf
 
 # 2. GitHub over https with the token Core delivers to the mission (never
@@ -89,5 +90,5 @@ conn.close()
 PY
 chown "$NODE_USER:$NODE_USER" "$NODE_HOME/work/jobs.db"* 2>/dev/null || true
 
-systemctl daemon-reload
+systemctl daemon-reload 2>/dev/null || true
 echo "orb-provision ok ms=$(ms) rustup=$([ -x "$CACHES/cargo/bin/rustup" ] && echo yes || echo no)"

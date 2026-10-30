@@ -272,7 +272,7 @@ async fn reuse_idle_sibling(
     {
         match provider {
             "hetzner" => "ubuntu-24.04".to_string(),
-            "vastai" => "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel".to_string(),
+            "vastai" => "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04".to_string(),
             "scaleway" if crate::managed::scaleway::is_apple_silicon_type(size) => {
                 "macos-15".to_string()
             }

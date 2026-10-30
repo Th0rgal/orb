@@ -192,7 +192,8 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(providers.map(\.configured), [true, true, false, false])
         XCTAssertEqual(providers.map(OrbManaged.isProviderEnabled), [true, true, true, false])
         XCTAssertEqual(providers.map(OrbManaged.isProviderUsable), [true, true, false, false])
-        XCTAssertEqual(OrbManaged.providerStatusLine(providers[0]), "Configured · Bitwarden ••••1234")
+        XCTAssertEqual(providers[0].max_concurrent, 100)
+        XCTAssertEqual(OrbManaged.providerStatusLine(providers[0]), "Configured · Bitwarden ••••1234 · up to 100 VMs")
         XCTAssertEqual(OrbManaged.providerStatusLine(providers[1]), "Configured · Settings ••••5678 · fsn1")
         XCTAssertEqual(OrbManaged.providerStatusLine(providers[2]), "Not configured")
         XCTAssertEqual(OrbManaged.providerStatusLine(providers[3]), "Disabled · Not configured")
@@ -205,5 +206,24 @@ final class OrbManagedMachinesTests: XCTestCase {
         XCTAssertEqual(r.machines[0].provider, "hetzner")
         XCTAssertEqual(r.machines[0].size, "cpx42")
         XCTAssertFalse(OrbManaged.canStop(r.machines[0], providers: providers))
+    }
+
+    func testGroupsMachinesByProviderAndSummarises() throws {
+        let data = try Data(contentsOf: OrbSpec.url("fixtures/managed-machines-response.json"))
+        let r = try OrbManaged.decode(data)
+        var hetzner = r.machines[0]
+        hetzner.id = "h1"; hetzner.provider = "hetzner"; hetzner.usd_per_hour = 0.12; hetzner.state = "online"
+        var boat1 = hetzner; boat1.id = "b1"; boat1.provider = "boat"; boat1.usd_per_hour = 0.2
+        var boat2 = hetzner; boat2.id = "b2"; boat2.provider = nil; boat2.usd_per_hour = 0.072
+        let groups = OrbManaged.groupMachinesByProvider([hetzner, boat1, boat2], providers: r.providers)
+        XCTAssertEqual(groups.map(\.provider), ["boat", "hetzner"])
+        XCTAssertEqual(groups.map(\.label), ["boat.dev", "Hetzner Cloud"])
+        XCTAssertEqual(groups.map { $0.machines.map(\.id) }, [["b1", "b2"], ["h1"]])
+        XCTAssertEqual(groups.map { OrbManaged.providerGroupSummary($0.machines) }, ["2 running · $0.27/h", "1 running · $0.12/h"])
+        var stopped1 = boat1; stopped1.state = "stopped"
+        var stopped2 = boat2; stopped2.state = "stopped"
+        XCTAssertEqual(OrbManaged.providerGroupSummary([stopped1, stopped2]), "2 stopped")
+        var failed = boat1; failed.state = "failed"; failed.usd_per_hour = 0
+        XCTAssertEqual(OrbManaged.providerGroupSummary([failed]), "1 machine")
     }
 }

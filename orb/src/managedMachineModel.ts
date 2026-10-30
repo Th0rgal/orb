@@ -59,6 +59,7 @@ export interface ManagedProviderInfo {
   key_hint?: string | null;
   region?: string | null;
   project_id?: string | null;
+  max_concurrent?: number | null;
   supports_snapshots: boolean;
   supports_free_stop: boolean;
   sizes: ManagedSize[];
@@ -69,6 +70,7 @@ export interface ManagedProviderPatch {
   api_key?: string;
   region?: string;
   project_id?: string;
+  max_concurrent?: number | null;
 }
 
 export interface ManagedBudget {
@@ -190,7 +192,7 @@ export const isProviderUsable = (p: Pick<ManagedProviderInfo, "configured" | "en
 export const credentialSourceLabel = (source?: string | null): string =>
   source === "settings" ? "Settings" : source === "bitwarden" ? "Bitwarden" : source === "environment" ? "Environment" : source || "";
 
-export function providerStatusLine(p: Pick<ManagedProviderInfo, "configured" | "enabled" | "credential_source" | "key_hint" | "region" | "project_id">): string {
+export function providerStatusLine(p: Pick<ManagedProviderInfo, "configured" | "enabled" | "credential_source" | "key_hint" | "region" | "project_id" | "max_concurrent">): string {
   const enabled = isProviderEnabled(p);
   if (!p.configured) return enabled ? "Not configured" : "Disabled · Not configured";
   const cred = [credentialSourceLabel(p.credential_source), p.key_hint ?? ""].filter(Boolean).join(" ");
@@ -199,6 +201,7 @@ export function providerStatusLine(p: Pick<ManagedProviderInfo, "configured" | "
     cred,
     p.region ?? "",
     p.project_id ? `proj ${p.project_id}` : "",
+    p.max_concurrent != null && p.max_concurrent > 0 ? `up to ${p.max_concurrent} VMs` : "",
   ].filter(Boolean).join(" · ");
 }
 
@@ -271,6 +274,73 @@ export const providerLabel = (provider?: string | null): string => {
   if (key === "scaleway") return "Scaleway";
   return provider || "boat.dev";
 };
+
+export const MANAGED_GROUP_PREVIEW_LIMIT = 5;
+
+export interface ManagedProviderGroup<M = ManagedMachine> {
+  provider: string;
+  label: string;
+  machines: M[];
+}
+
+export const machineProviderKey = (provider?: string | null): string => {
+  const key = (provider ?? "").trim().toLowerCase();
+  return key || "boat";
+};
+
+export function providerDisplayLabel(
+  provider?: string | null,
+  providers?: readonly Pick<ManagedProviderInfo, "provider" | "display_name">[],
+): string {
+  const key = machineProviderKey(provider);
+  const found = providers?.find(p => machineProviderKey(p.provider) === key)?.display_name?.trim();
+  return found || providerLabel(key);
+}
+
+/** Group machines by cloud provider in canonical provider order, omitting empty providers. */
+export function groupMachinesByProvider<M extends Pick<ManagedMachine, "provider">>(
+  machines: readonly M[],
+  providers?: readonly Pick<ManagedProviderInfo, "provider" | "display_name">[],
+): ManagedProviderGroup<M>[] {
+  const buckets = new Map<string, M[]>();
+  for (const m of machines) {
+    const key = machineProviderKey(m.provider);
+    const list = buckets.get(key);
+    if (list) list.push(m);
+    else buckets.set(key, [m]);
+  }
+  const order: string[] = [];
+  const push = (raw?: string | null) => {
+    const key = machineProviderKey(raw);
+    if (!order.includes(key)) order.push(key);
+  };
+  for (const p of providers ?? []) push(p.provider);
+  for (const p of ["boat", "hetzner", "vastai", "scaleway"]) push(p);
+  for (const key of buckets.keys()) push(key);
+  return order
+    .filter(key => (buckets.get(key)?.length ?? 0) > 0)
+    .map(key => ({
+      provider: key,
+      label: providerDisplayLabel(key, providers),
+      machines: buckets.get(key)!,
+    }));
+}
+
+/** Compact header summary for a provider's machines: "16 running · $3.12/h", "2 stopped", "1 machine". */
+export function providerGroupSummary(machines: readonly Pick<ManagedMachine, "state" | "usd_per_hour">[]): string {
+  const running = machines.filter(isLive);
+  const rate = machines
+    .filter(m => m.state === "online" || m.state === "provisioning" || m.state === "enrolling")
+    .reduce((sum, m) => sum + m.usd_per_hour, 0);
+  if (running.length > 0) {
+    return `${running.length} running${rate > 0 ? ` · ${usdPerHour(rate)}` : ""}`;
+  }
+  const stoppedCount = machines.filter(isStopped).length;
+  if (stoppedCount > 0 && stoppedCount === machines.length) {
+    return `${stoppedCount} stopped`;
+  }
+  return `${machines.length} ${machines.length === 1 ? "machine" : "machines"}`;
+}
 
 export function managedSectionTitle(providers?: readonly ManagedProviderInfo[], machines?: readonly Pick<ManagedMachine, "provider">[]): string {
   const multiConfigured = (providers ?? []).some(p => isProviderUsable(p) && p.provider !== "boat");

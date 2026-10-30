@@ -1581,6 +1581,9 @@ async fn idle_machine_of_an_ended_sibling_is_reused_once() {
 #[test]
 fn defaults_shorten_idle_tails() {
     let s = ManagedSettings::from_env(true);
+    assert_eq!(s.max_concurrent, Some(100));
+    assert_eq!(default_provider_max_concurrent("boat"), Some(100));
+    assert_eq!(default_provider_max_concurrent("hetzner"), None);
     assert_eq!(s.waiting_grace_minutes, 15);
     assert_eq!(s.default_ttl_minutes, 60);
     assert_eq!(s.auto_extend_minutes, 30);
@@ -3006,6 +3009,21 @@ fn cloud_bootstrap_script_configures_user_bus_and_harnesses_within_onstart_budge
         "cloud_bootstrap_script failed bash -n: {}",
         String::from_utf8_lossy(&syntax.stderr)
     );
+    let sh_syntax = std::process::Command::new("sh")
+        .arg("-n")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("sh -n");
+    assert!(
+        sh_syntax.status.success(),
+        "cloud_bootstrap_script failed POSIX sh -n: {}",
+        String::from_utf8_lossy(&sh_syntax.stderr)
+    );
+    assert!(
+        !script.contains("pipefail"),
+        "onstart runs under /bin/sh (dash on Ubuntu), which rejects set -o pipefail"
+    );
 }
 
 #[tokio::test]
@@ -3020,6 +3038,7 @@ async fn provider_catalog_and_list_view_match_shared_cross_client_fixture() {
             api_key: Some("hz-secret-5678".into()),
             region: Some("fsn1".into()),
             project_id: None,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -3176,6 +3195,7 @@ async fn provider_enable_disable_and_encrypted_config_lifecycle() {
                 api_key: Some("ui-hetzner-secret-abcd".into()),
                 region: Some("hel1".into()),
                 project_id: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3242,6 +3262,7 @@ async fn provider_enable_disable_and_encrypted_config_lifecycle() {
             api_key: Some("scw-secret-xyz1234".into()),
             region: Some("nl-ams-1".into()),
             project_id: Some("proj-uuid-1".into()),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -3718,4 +3739,271 @@ async fn mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_
         .unwrap_err();
     assert_eq!(c2_err.error, "quota_exceeded");
     assert!(c2_err.message.contains("ancestor pool root"));
+}
+
+#[tokio::test]
+async fn boat_global_limit_defaults_to_100_and_enforces_provider_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = settings();
+    st.daily_cap_usd = None;
+    st.max_concurrent = None; // Even with global pool unlimited, boat.dev defaults to 100.
+    let m = Arc::new(ManagedManager::new(
+        st,
+        Some(NamedFakeProvider::new("boat")),
+        dir.path(),
+        3000,
+    ));
+    assert_eq!(m.provider_max_concurrent("boat"), Some(100));
+
+    // Lower boat.dev's global provider cap via update_provider_config and verify enforcement + persistence.
+    let entry = m
+        .update_provider_config(
+            "boat",
+            ProviderUpdateRequest {
+                max_concurrent: Some(Some(2)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(entry.max_concurrent, Some(2));
+
+    for _ in 0..2 {
+        m.spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    let third = m
+        .spawn(SpawnRequest {
+            provider: Some("boat".into()),
+            size: Some("small".into()),
+            wait: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(third.error, "quota_exceeded");
+    assert_eq!(third.status, 429);
+    assert!(third.message.contains("provider max 2"));
+
+    // Explicit `null` (`Some(None)`) lifts the provider cap and persists across reload.
+    let lifted: ProviderUpdateRequest =
+        serde_json::from_value(serde_json::json!({"max_concurrent": null})).unwrap();
+    let unlim = m.update_provider_config("boat", lifted).unwrap();
+    assert_eq!(unlim.max_concurrent, None);
+
+    let st2 = settings();
+    let m2 = Arc::new(ManagedManager::new(
+        st2,
+        Some(NamedFakeProvider::new("boat")),
+        dir.path(),
+        3000,
+    ));
+    m2.load().await;
+    assert_eq!(m2.provider_max_concurrent("boat"), None);
+}
+
+#[tokio::test]
+async fn vastai_splits_v0_and_v1_routes_and_guards_destroy_and_null_usage() {
+    use axum::{
+        extract::{Path, Query},
+        http::StatusCode,
+        routing::{get, post, put},
+        Json, Router,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let deleted = Arc::new(AtomicBool::new(false));
+    let deleted_get = Arc::clone(&deleted);
+    let deleted_del = Arc::clone(&deleted);
+
+    let route_404 = || async {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"success": false, "msg": "Not found"})),
+        )
+    };
+
+    let app = Router::new()
+        // v1 only serves `GET /api/v1/instances/`; every other route on v1 is 404.
+        .route("/api/v1/bundles/", post(route_404))
+        .route("/api/v1/asks/:offer_id/", put(route_404))
+        .route(
+            "/api/v1/instances/:id/",
+            get(route_404).delete(route_404),
+        )
+        .route(
+            "/api/v1/instances/",
+            get(
+                |Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                    if q.get("next_token").map(String::as_str) == Some("page2") {
+                        Json(serde_json::json!({
+                            "success": true,
+                            "instances": [
+                                {"id": 7002, "actual_status": "running", "cur_state": "running", "label": "orb-managed-mm2"}
+                            ],
+                            "next_token": null
+                        }))
+                    } else {
+                        Json(serde_json::json!({
+                            "success": true,
+                            "instances": [
+                                // Immediately after creation: actual_status is null while cur_state is "running".
+                                {"id": 7001, "actual_status": null, "cur_state": "running", "label": "orb-managed-mm1"}
+                            ],
+                            "next_token": "page2"
+                        }))
+                    }
+                },
+            ),
+        )
+        // v0 deprecates `GET /api/v0/instances/` with 410, but serves bundles/asks/instance-by-id.
+        .route(
+            "/api/v0/instances/",
+            get(|| async {
+                (
+                    StatusCode::GONE,
+                    Json(serde_json::json!({"error": "deprecated_endpoint"})),
+                )
+            }),
+        )
+        .route(
+            "/api/v0/bundles/",
+            post(|| async {
+                Json(serde_json::json!({
+                    "offers": [
+                        {"id": 501, "dph_total": 0.42, "cpu_cores_effective": 32.0, "cpu_ram": 128000.0}
+                    ]
+                }))
+            }),
+        )
+        .route(
+            "/api/v0/asks/:offer_id/",
+            put(|Path(offer_id): Path<String>| async move {
+                assert_eq!(offer_id, "501");
+                Json(serde_json::json!({"success": true, "new_contract": 7001}))
+            }),
+        )
+        .route(
+            "/api/v0/instances/:id/",
+            get(move |Path(id): Path<String>| {
+                let deleted_get = Arc::clone(&deleted_get);
+                async move {
+                    if id == "route404" {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({"success": false, "msg": "Not found"})),
+                        );
+                    }
+                    if deleted_get.load(Ordering::SeqCst) {
+                        (StatusCode::OK, Json(serde_json::json!({"instances": null})))
+                    } else {
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "instances": {
+                                    "id": 7001,
+                                    "cur_state": "running",
+                                    "label": "orb-managed-mm1"
+                                }
+                            })),
+                        )
+                    }
+                }
+            })
+            .delete(move |Path(id): Path<String>| {
+                let deleted_del = Arc::clone(&deleted_del);
+                async move {
+                    if id == "route404" {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({"success": false, "msg": "Not found"})),
+                        );
+                    }
+                    if deleted_del.swap(true, Ordering::SeqCst) {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({"success": false, "error": "no_such_instance"})),
+                        );
+                    }
+                    (StatusCode::OK, Json(serde_json::json!({"success": true})))
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    // Even when initialized with `/api/v1` (legacy env override), VastAiProvider routes v0/v1 properly.
+    let p = vastai::VastAiProvider::new(format!("http://{addr}/api/v1"), "vast-key");
+    let spec = SpawnSpec {
+        machine_id: "mm1".into(),
+        size: "rtx4090".into(),
+        cpu: 16,
+        ram_gb: 64,
+        ttl_seconds: 1800,
+        image: None,
+        name: "orb-managed-mm1".into(),
+        idempotency_key: "orb-managed-mm1".into(),
+        bootstrap_script: Some("#!/usr/bin/env bash\n".into()),
+        gpu: None,
+        arch: None,
+        max_hourly_usd: None,
+        preferred_offer_id: None,
+        exclude_offer_ids: Vec::new(),
+        allow_24h_commitment: false,
+        provisioning_mode: ProvisioningMode::Worker,
+    };
+
+    let quote = p.quote_spawn(&spec).await.unwrap().unwrap();
+    assert_eq!(quote.offer_id.as_deref(), Some("501"));
+
+    let created = p.spawn(&spec).await.unwrap();
+    assert_eq!(created.provider_id, "7001");
+
+    // Missing/null `actual_status` with `cur_state: "running"` stays `"loading"` (not ready).
+    let got = p.get("7001").await.unwrap();
+    assert_eq!(got.state, "loading");
+    assert!(!p.is_ready_state(&got.state));
+
+    // `list()` uses `/api/v1/instances/` and follows `next_token` pagination.
+    let listed = p.list().await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].provider_id, "7001");
+    assert_eq!(listed[0].state, "loading");
+    assert_eq!(listed[1].provider_id, "7002");
+    assert_eq!(listed[1].state, "running");
+
+    // Generic route 404 (`"msg":"Not found"`) MUST fail rather than silently pretending to destroy.
+    let route_err = p.destroy("route404").await.unwrap_err();
+    assert!(route_err.contains("HTTP 404"));
+
+    // First delete succeeds; second delete (`404 no_such_instance`) is idempotent; post-delete usage errors cleanly.
+    p.destroy("7001").await.unwrap();
+    p.destroy("7001").await.unwrap();
+    assert!(p.usage("7001").await.is_err());
+
+    let gpu_script = cloud_bootstrap_script(
+        "https://agent-core.sandboxed.example.com",
+        "0123456789abcdef0123456789abcdef",
+        "managed-0123456789abcdef0123456789abcdef",
+        &"b".repeat(64),
+        16,
+        managed_job_memory_bytes(64),
+        "vastai",
+        "rtx4090",
+        "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel",
+    );
+    assert!(gpu_script.contains(",lean,gpu\n"));
+    assert!(gpu_script.contains("/usr/local/cuda/bin"));
+    assert!(gpu_script.len() < 4096);
+
+    srv.abort();
 }
