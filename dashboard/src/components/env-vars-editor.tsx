@@ -51,13 +51,10 @@ export const toEnvRows = (env: Record<string, string>, encryptedKeys?: string[])
   });
 
 export const envRowsToMap = (rows: EnvRow[]): Record<string, string> => {
-  const env: Record<string, string> = {};
-  rows.forEach((row) => {
+  return Object.fromEntries(rows.flatMap((row) => {
     const key = row.key.trim();
-    if (!key) return;
-    env[key] = row.value;
-  });
-  return env;
+    return key ? [[key, row.value]] : [];
+  }));
 };
 
 export const getEncryptedKeys = (rows: EnvRow[]): string[] =>
@@ -102,7 +99,7 @@ export function EnvVarsEditor({ rows, onChange, className, description, showEncr
         if (r.id !== id) return r;
         // When key changes and becomes sensitive, auto-enable encryption
         const newEncrypted = newSecret ? true : r.encrypted;
-        return { ...r, key: newKey, secret: newSecret, visible: newSecret ? r.visible : true, encrypted: newEncrypted, decryptionFailed: false };
+        return { ...r, key: newKey, secret: newSecret, visible: (newSecret || newEncrypted) ? r.visible && (r.secret || r.encrypted) : true, encrypted: newEncrypted, decryptionFailed: false };
       })
     );
   };
