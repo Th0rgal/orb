@@ -224,6 +224,9 @@ fn spec_floors(spec: &SpawnSpec) -> (u32, u32, f64) {
 pub(crate) fn search_bundles_body(spec: &SpawnSpec) -> Value {
     let gpu_name = gpu_model_for_size(&spec.size, spec.gpu.as_deref());
     let (min_cpu, min_ram_gb, max_dph) = spec_floors(spec);
+    let min_disk_gb = vastai_size_spec(&spec.size)
+        .map_or(120, |s| s.disk_gb)
+        .max(40);
     json!({
         "verified": {"eq": true},
         "external": {"eq": false},
@@ -233,6 +236,7 @@ pub(crate) fn search_bundles_body(spec: &SpawnSpec) -> Value {
         "dph_total": {"lte": max_dph},
         "cpu_cores_effective": {"gte": min_cpu},
         "cpu_ram": {"gte": min_ram_mb_for_gb(min_ram_gb)},
+        "disk_space": {"gte": min_disk_gb},
         "reliability2": {"gte": 0.98},
         "order": [["dph_total", "asc"]],
         "type": "on-demand",

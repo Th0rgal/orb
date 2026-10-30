@@ -3347,18 +3347,10 @@ impl ManagedManager {
         };
         self.ledger("spawn_requested", &machine);
 
-        let admitted_ceiling = if quoted_offer_id.is_some() {
-            Some(
-                req.max_hourly_usd
-                    .map_or(effective_usd_per_hour, |m| m.min(effective_usd_per_hour)),
-            )
-        } else {
-            req.max_hourly_usd
-        };
         let extras = SpawnExtras {
             gpu: req.gpu.clone(),
             arch: req.arch.clone(),
-            max_hourly_usd: admitted_ceiling,
+            max_hourly_usd: req.max_hourly_usd,
             preferred_offer_id: quoted_offer_id,
             min_cpu: Some(min_cpu),
             min_ram_gb: Some(min_ram_gb),
@@ -3476,7 +3468,7 @@ impl ManagedManager {
             None => {
                 let mut current_offer = extras.preferred_offer_id.clone();
                 let mut excluded = Vec::new();
-                let admitted_rate = m.usd_per_hour;
+                let mut admitted_rate = m.usd_per_hour;
                 loop {
                     let spec = build_spec(&m, current_offer.clone(), excluded.clone());
                     match provider.spawn(&spec).await {
@@ -3498,11 +3490,7 @@ impl ManagedManager {
                                 bootstrap_script: None,
                                 preferred_offer_id: None,
                                 exclude_offer_ids: excluded.clone(),
-                                max_hourly_usd: Some(
-                                    extras
-                                        .max_hourly_usd
-                                        .map_or(admitted_rate, |cap| cap.min(admitted_rate)),
-                                ),
+                                max_hourly_usd: extras.max_hourly_usd,
                                 ..spec
                             };
                             let Some(next_quote) = provider
@@ -3522,7 +3510,29 @@ impl ManagedManager {
                                 return Err(first_err);
                             };
                             if next_quote.usd_per_hour > admitted_rate + 1e-9 {
-                                return Err(first_err);
+                                let extra_hourly = next_quote.usd_per_hour - admitted_rate;
+                                let extra_cost = ttl_minutes as f64 / 60.0 * extra_hourly;
+                                let _guard = self.admission.lock().await;
+                                let budget = self.budget().await;
+                                if self.settings.daily_cap_usd.is_some_and(|cap| {
+                                    budget.spent_today_usd + budget.committed_usd + extra_cost > cap
+                                }) {
+                                    return Err(first_err);
+                                }
+                                if let Some(pool) = m.budget_pool_id.as_deref() {
+                                    if self
+                                        .check_pool(
+                                            pool,
+                                            budget::reservation_for(ttl_minutes, extra_hourly),
+                                            "fallback offer",
+                                        )
+                                        .await
+                                        .is_err()
+                                    {
+                                        return Err(first_err);
+                                    }
+                                }
+                                admitted_rate = next_quote.usd_per_hour;
                             }
                             m = self
                                 .update(id, |row| {
