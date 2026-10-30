@@ -24,9 +24,9 @@ docker compose up -d
 
 | Variable | Description |
 | --- | --- |
-| `DEV_MODE` | Set to `false` in production to enforce password/JWT authentication |
-| `DASHBOARD_PASSWORD` | Password for Orb and web login |
-| `JWT_SECRET` | Long random secret used to sign JWT tokens |
+| `DEV_MODE` | Defaults to `false` (authentication enforced). Local-only `DEV_MODE=true` requires a loopback `HOST` |
+| `DASHBOARD_PASSWORD` | Strong password for Orb and web login (placeholder values are rejected) |
+| `JWT_SECRET` | Long random secret used to sign JWT tokens (`openssl rand -hex 32`) |
 | `SANDBOXED_SH_USERS` | Optional JSON array for multi-user authentication |
 | `LIBRARY_REMOTE` | Git URL for your shared Library repository |
 | `MAX_PARALLEL_MISSIONS` | Maximum concurrent server missions |

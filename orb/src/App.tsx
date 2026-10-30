@@ -813,8 +813,12 @@ export default function App() {
     };
     window.addEventListener("orb:open-page", onOpenPage);
     const onMoved = (e: Event) => {
-      const { id, project, tags } = (e as CustomEvent<{ id: string; project: string | null; tags: string[] }>).detail;
-      setMissions(prev => prev.map(m => m.id === id ? mergeMission(m, { id, project, tags }, "partial") : m));
+      const { id, project, tags } = (e as CustomEvent<{ id: string; project: string | null; tags?: string[] }>).detail;
+      setMissions(prev => prev.map(m => {
+        if (m.id !== id) return m;
+        const nextTags = tags ?? (m.tags ?? []).filter(t => !t.startsWith("orb-folder:"));
+        return mergeMission(m, { id, project, tags: nextTags }, "partial");
+      }));
     };
     window.addEventListener("orb:mission-moved", onMoved);
     onCleanup(() => window.removeEventListener("orb:mission-moved", onMoved));

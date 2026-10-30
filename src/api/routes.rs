@@ -177,6 +177,7 @@ fn backend_enabled_by_default(id: &str, host_detected: bool) -> bool {
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
+    config.validate_runtime_security()?;
     let mut config = config;
     // Start monitoring background collector early so clients get history immediately
     monitoring::init_monitoring();
@@ -1632,8 +1633,15 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let bound_addr = listener.local_addr()?;
+    if !config.auth.auth_required(config.dev_mode) && !bound_addr.ip().is_loopback() {
+        anyhow::bail!(
+            "Refusing to serve with authentication disabled on non-loopback socket {}",
+            bound_addr
+        );
+    }
 
-    tracing::info!("Server listening on {}", addr);
+    tracing::info!("Server listening on {}", bound_addr);
 
     // systemd integration: READY=1 now that the listener is bound, then the
     // runtime-liveness watchdog loop (no-op without NOTIFY_SOCKET /

@@ -86,12 +86,7 @@ const DEFAULT_GLOBAL_INACTIVITY_SECS: u64 = 300;
 const DEFAULT_TOOL_IDLE_SECS: u64 = 1800;
 /// Inactivity threshold while OpenCode server heartbeats are still arriving.
 const HEARTBEAT_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(420);
-/// A builtin-proxy chunk within this window counts as "the LLM call is alive".
-const PROXY_STREAM_RECENT: std::time::Duration = std::time::Duration::from_secs(30);
-/// Absolute cap on the proxy-stream grace: even with live upstream chunks,
-/// kill after this much harness silence (protects against a wedged CLI that
-/// stopped consuming its own LLM stream).
-const PROXY_STREAM_INACTIVITY_CAP: std::time::Duration = std::time::Duration::from_secs(1800);
+use crate::api::proxy_liveness::PROXY_STREAM_RECENT;
 
 /// Convert legacy controller-facing OpenCode model aliases into the canonical
 /// `provider/model` ids required by the OpenCode CLI.
@@ -1359,9 +1354,7 @@ pub async fn run_opencode_turn(
                         // streaming the whole time. Don't kill while the
                         // mission's own LLM call is demonstrably alive.
                         let proxy_streaming =
-                            crate::api::proxy_liveness::time_since_activity(mission_id)
-                                .map(|d| d <= PROXY_STREAM_RECENT)
-                                .unwrap_or(false);
+                            crate::api::proxy_liveness::is_active(mission_id, PROXY_STREAM_RECENT);
                         if !recent_activity && !long_tool && !proxy_streaming {
                             tracing::info!(
                                 mission_id = %mission_id,
@@ -1423,10 +1416,11 @@ pub async fn run_opencode_turn(
                     // kill up to a hard cap in case OpenCode itself wedged
                     // while the proxy keeps receiving.
                     let proxy_streaming =
-                        crate::api::proxy_liveness::time_since_activity(mission_id)
-                            .map(|d| d <= PROXY_STREAM_RECENT)
-                            .unwrap_or(false);
-                    if proxy_streaming && inactivity_elapsed < PROXY_STREAM_INACTIVITY_CAP {
+                        crate::api::proxy_liveness::is_active(mission_id, PROXY_STREAM_RECENT);
+                    if crate::api::proxy_liveness::defers_idle_interrupt_pure(
+                        proxy_streaming,
+                        inactivity_elapsed,
+                    ) {
                         tracing::debug!(
                             mission_id = %mission_id,
                             inactivity_secs = inactivity_elapsed.as_secs(),

@@ -181,47 +181,35 @@ pub(super) async fn consecutive_failure_count_for_automation(
 
 pub(super) async fn check_github_all_issues_closed_and_prs_merged(repo: &str) -> bool {
     let client = reqwest::Client::new();
+    check_github_repo_stop_policy(&client, &format!("https://api.github.com/repos/{repo}")).await
+}
 
-    let issues_url = format!("https://api.github.com/repos/{}/issues?state=open", repo);
-    let pulls_url = format!("https://api.github.com/repos/{}/pulls?state=open", repo);
-
+async fn check_github_repo_stop_policy(client: &reqwest::Client, repo_url: &str) -> bool {
     let check_repo = async {
-        let issues_resp = client
-            .get(&issues_url)
-            .header("User-Agent", "sandboxed-sh")
-            .header("Accept", "application/vnd.github.v3+json")
-            .send()
-            .await;
-
-        let pulls_resp = client
-            .get(&pulls_url)
-            .header("User-Agent", "sandboxed-sh")
-            .header("Accept", "application/vnd.github.v3+json")
-            .send()
-            .await;
-
-        let has_open_issues = match issues_resp {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
-                Ok(value) => value.as_array().map(|arr| !arr.is_empty()).unwrap_or(false),
-                Err(_) => false,
-            },
-            Err(_) => false,
-        };
-
-        let has_open_prs = match pulls_resp {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
-                Ok(value) => value.as_array().map(|arr| !arr.is_empty()).unwrap_or(false),
-                Err(_) => false,
-            },
-            Err(_) => false,
-        };
-
-        !has_open_issues && !has_open_prs
+        for resource in ["issues", "pulls"] {
+            let response = client
+                .get(format!("{repo_url}/{resource}?state=open"))
+                .header("User-Agent", "sandboxed-sh")
+                .header("Accept", "application/vnd.github.v3+json")
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                return Ok::<bool, reqwest::Error>(false);
+            }
+            let items = response.json::<Vec<serde_json::Value>>().await?;
+            if !items.is_empty() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     };
 
-    tokio::time::timeout(std::time::Duration::from_secs(10), check_repo)
-        .await
-        .unwrap_or(false)
+    // Unknown repository state must never be treated as completed work.
+    // Stop only when both requests succeed and contain valid, empty lists.
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), check_repo).await,
+        Ok(Ok(true))
+    )
 }
 
 /// Outcome of [`maybe_begin_grok_goal`]: either a rewritten first-turn
@@ -701,4 +689,95 @@ pub(super) fn parse_goal_objective(message: &str) -> Option<String> {
 /// agreement without teaching each one about `/goal\n`.
 pub(super) fn canonical_goal_message(message: &str) -> Option<String> {
     parse_goal_objective(message).map(|objective| format!("/goal {objective}"))
+}
+
+#[cfg(test)]
+mod github_stop_policy_tests {
+    use super::check_github_repo_stop_policy;
+    use axum::{http::StatusCode, routing::get, Router};
+
+    async fn check_responses(
+        issues: (StatusCode, &'static str),
+        pulls: (StatusCode, &'static str),
+    ) -> bool {
+        let app = Router::new()
+            .route(
+                "/repos/owner/repo/issues",
+                get(move || async move { issues }),
+            )
+            .route("/repos/owner/repo/pulls", get(move || async move { pulls }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result =
+            check_github_repo_stop_policy(&client, &format!("http://{address}/repos/owner/repo"))
+                .await;
+        server.abort();
+        result
+    }
+
+    #[tokio::test]
+    async fn stops_only_when_both_lists_are_empty() {
+        let empty = (StatusCode::OK, "[]");
+        let open = (StatusCode::OK, r#"[{"number":1}]"#);
+        assert!(check_responses(empty, empty).await);
+        assert!(!check_responses(open, empty).await);
+        assert!(!check_responses(empty, open).await);
+    }
+
+    #[tokio::test]
+    async fn keeps_running_on_http_or_invalid_response_errors() {
+        let empty = (StatusCode::OK, "[]");
+        for error in [
+            (StatusCode::FOUND, "[]"),
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"message":"API rate limit exceeded"}"#,
+            ),
+            (StatusCode::NOT_FOUND, r#"{"message":"Not Found"}"#),
+            (StatusCode::INTERNAL_SERVER_ERROR, "[]"),
+            (StatusCode::OK, r#"{"message":"unexpected object"}"#),
+            (StatusCode::OK, "null"),
+            (StatusCode::OK, "not json"),
+            (StatusCode::NO_CONTENT, ""),
+        ] {
+            assert!(
+                !check_responses(error, empty).await,
+                "issues response: {error:?}"
+            );
+            assert!(
+                !check_responses(empty, error).await,
+                "pulls response: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn keeps_running_on_connection_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        assert!(
+            !check_github_repo_stop_policy(&client, &format!("http://{address}/repos/owner/repo"))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn keeps_running_on_request_timeout() {
+        // Leave the listening socket open without responding to HTTP requests.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+        assert!(
+            !check_github_repo_stop_policy(&client, &format!("http://{address}/repos/owner/repo"))
+                .await
+        );
+    }
 }

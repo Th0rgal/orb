@@ -1031,6 +1031,17 @@ pub(crate) async fn stuck_mission_watchdog_loop(
                 );
                 continue;
             }
+            if crate::api::proxy_liveness::defers_idle_interrupt(
+                info.mission_id,
+                std::time::Duration::from_secs(info.seconds_since_activity),
+            ) {
+                tracing::debug!(
+                    mission_id = %info.mission_id,
+                    seconds_since_activity = info.seconds_since_activity,
+                    "Stuck-mission watchdog: builtin proxy stream active within 30m cap — deferring"
+                );
+                continue;
+            }
             // A mission parked on a frontend tool (e.g. AskUserQuestion) is
             // intentionally silent: its harness is killed while it awaits a
             // human answer, so it emits no activity. Do not count that as a

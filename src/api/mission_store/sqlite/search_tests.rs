@@ -446,6 +446,26 @@ async fn enforces_user_isolation_deletion_edits_cloud_turns_tool_filter_and_host
     assert_eq!(ca.hits.len(), 1);
     assert_eq!(ca.hits[0].locator, "cloud:turn-alpha:answer");
 
+    // Title-locator preview on a cloud execution returns canonical cloud turns
+    // instead of folding mission_events (which suppresses mirrored cloud replies).
+    let cloud_title_ctx = alice
+        .get_passage_context(
+            cloud_exec.mission_id,
+            &PassageContextQuery {
+                locator: "title".into(),
+                before: Some(3),
+                after: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .expect("cloud mission context");
+    assert!(cloud_title_ctx.target_found);
+    assert_eq!(cloud_title_ctx.messages.len(), 2);
+    assert_eq!(cloud_title_ctx.messages[0].content, "CloudPromptUnique_441");
+    assert_eq!(cloud_title_ctx.messages[1].content, "CloudAnswerUnique_442");
+
     // Hostile FTS5 syntax never causes an error.
     for hostile in [
         "\"unclosed quote AND OR NOT (",

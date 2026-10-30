@@ -22,6 +22,15 @@ use uuid::Uuid;
 /// Header carrying the mission id on builtin proxy requests.
 pub const MISSION_ID_HEADER: &str = "x-sandboxed-mission-id";
 
+/// A builtin-proxy request in flight or active within this window counts as
+/// live model traffic for harness and control-plane stall watchdogs.
+pub const PROXY_STREAM_RECENT: Duration = Duration::from_secs(30);
+
+/// Hard ceiling on proxy-stream grace: even with live upstream chunks, allow
+/// inactivity watchdogs to fire once harness output has been silent for this
+/// long (protects against a wedged CLI or runaway internal subagent loop).
+pub const PROXY_STREAM_INACTIVITY_CAP: Duration = Duration::from_secs(1800);
+
 /// Entries older than this are pruned opportunistically on writes; a turn that
 /// has been silent for an hour is long past any watchdog decision.
 const PRUNE_AFTER: Duration = Duration::from_secs(3600);
@@ -99,6 +108,19 @@ pub fn is_active(mission_id: Uuid, recent: Duration) -> bool {
     in_flight(mission_id) > 0 || time_since_activity(mission_id).is_some_and(|d| d < recent)
 }
 
+/// Pure decision: whether live builtin-proxy activity defers a harness-idle
+/// interrupt at `harness_idle`, bounded by [`PROXY_STREAM_INACTIVITY_CAP`].
+pub fn defers_idle_interrupt_pure(proxy_active: bool, harness_idle: Duration) -> bool {
+    proxy_active && harness_idle < PROXY_STREAM_INACTIVITY_CAP
+}
+
+/// Whether `mission_id` has live builtin-proxy traffic right now (in flight or
+/// active within [`PROXY_STREAM_RECENT`]) and `harness_idle` is still below
+/// [`PROXY_STREAM_INACTIVITY_CAP`].
+pub fn defers_idle_interrupt(mission_id: Uuid, harness_idle: Duration) -> bool {
+    defers_idle_interrupt_pure(is_active(mission_id, PROXY_STREAM_RECENT), harness_idle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +145,18 @@ mod tests {
         assert_eq!(in_flight(id), 0);
         assert!(!is_active(id, Duration::ZERO));
         assert!(is_active(id, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn defers_idle_interrupt_respects_30m_cap() {
+        let idle_id = Uuid::new_v4();
+        assert!(!defers_idle_interrupt(idle_id, Duration::from_secs(914)));
+
+        let live_id = Uuid::new_v4();
+        let _guard = begin_request(live_id);
+        assert!(defers_idle_interrupt(live_id, Duration::from_secs(900)));
+        assert!(defers_idle_interrupt(live_id, Duration::from_secs(1799)));
+        assert!(!defers_idle_interrupt(live_id, PROXY_STREAM_INACTIVITY_CAP));
+        assert!(!defers_idle_interrupt(live_id, Duration::from_secs(2400)));
     }
 }

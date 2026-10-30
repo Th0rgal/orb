@@ -63,7 +63,26 @@ function formatShortDate(iso: string | undefined | null): string {
   if (diffMs >= 0 && diffMs < 86_400_000) return `${Math.floor(diffMs / 3_600_000)}h ago`;
   const d = new Date(ts);
   const sameYear = d.getFullYear() === new Date(now).getFullYear();
-  return d.toLocaleDateString(undefined, sameYear ? { month: "short", day: "numeric" } : { year: "numeric", month: "short", day: "numeric" });
+  return d.toLocaleDateString(
+    undefined,
+    sameYear
+      ? { month: "short", day: "numeric" }
+      : { year: "numeric", month: "short", day: "numeric" },
+  );
+}
+
+function roleLabel(role: string): string {
+  if (role === "user") return "User";
+  if (role === "assistant") return "Assistant";
+  if (role === "title") return "Title";
+  if (role === "tool") return "Tool";
+  return role;
+}
+
+function clampPreviewContent(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= 2400) return trimmed;
+  return `${trimmed.slice(0, 2400).trimEnd()}…`;
 }
 
 function HighlightedText(p: { text: string; highlights?: SearchHighlightRange[] }) {
@@ -94,6 +113,7 @@ export default function SearchDialog(p: SearchDialogProps) {
   let root!: HTMLDivElement;
   let inputRef: HTMLInputElement | undefined;
   let resultsPaneRef: HTMLDivElement | undefined;
+  let previewScrollRef: HTMLDivElement | undefined;
   let composing = false;
   let restoreFocusOnClose = true;
 
@@ -103,7 +123,6 @@ export default function SearchDialog(p: SearchDialogProps) {
 
   const [projectFilter, setProjectFilter] = createSignal<string>("");
   const [roleFilter, setRoleFilter] = createSignal<ConversationSearchRole>("all");
-  const [includeTools, setIncludeTools] = createSignal(false);
   const [datePreset, setDatePreset] = createSignal<DatePreset>("any");
   const [sortOrder, setSortOrder] = createSignal<ConversationSearchSort>("relevance");
   const [mobilePane, setMobilePane] = createSignal<"results" | "preview">("results");
@@ -247,7 +266,7 @@ export default function SearchDialog(p: SearchDialogProps) {
     const apiBase = getApiUrl();
     const proj = projectFilter() || null;
     const role = roleFilter();
-    const tools = role === "tool" || includeTools();
+    const tools = role === "tool";
     const since = sinceIsoForPreset(datePreset());
     const sort = sortOrder();
     const appendCursor = opts?.cursor ?? null;
@@ -372,7 +391,6 @@ export default function SearchDialog(p: SearchDialogProps) {
         trimmedQuery(),
         projectFilter(),
         roleFilter(),
-        includeTools(),
         datePreset(),
         sortOrder(),
       ] as const,
@@ -391,9 +409,23 @@ export default function SearchDialog(p: SearchDialogProps) {
     ),
   );
 
-  // Fetch passage preview context ONLY for the currently selected hit.
+  // Fetch passage preview context for the currently selected hit (including title matches,
+  // which resolve the conversation's latest turns on the backend).
   let previewSeq = 0;
   let activePreviewAbort: AbortController | undefined;
+
+  const scrollTargetIntoPreview = () => {
+    queueMicrotask(() => {
+      const container = previewScrollRef;
+      if (!container) return;
+      const target = container.querySelector<HTMLElement>(".sd-turn.is-target");
+      if (target) {
+        target.scrollIntoView({ block: "nearest" });
+      } else {
+        container.scrollTop = 0;
+      }
+    });
+  };
 
   createEffect(() => {
     const connVer = connectionVersion();
@@ -411,22 +443,17 @@ export default function SearchDialog(p: SearchDialogProps) {
       return;
     }
 
-    if (hit.locator === "title") {
-      setPreviewData(null);
-      setPreviewLoading(false);
-      setPreviewError(null);
-      return;
-    }
-
     const cacheKey = `${connVer}|${apiBase}|${hit.mission_id}|${hit.locator}|${q}`;
     const cached = previewCache.get(cacheKey);
     if (cached) {
       setPreviewData(cached);
       setPreviewLoading(false);
       setPreviewError(null);
+      scrollTargetIntoPreview();
       return;
     }
 
+    setPreviewData(null);
     const seq = ++previewSeq;
     const ctrl = new AbortController();
     activePreviewAbort = ctrl;
@@ -440,8 +467,8 @@ export default function SearchDialog(p: SearchDialogProps) {
         sequence: hit.sequence,
         event_id: hit.event_id,
         query: q,
-        before: 2,
-        after: 2,
+        before: hit.locator === "title" ? 3 : 2,
+        after: hit.locator === "title" ? 0 : 2,
         include_events: false,
       },
       ctrl.signal,
@@ -462,6 +489,7 @@ export default function SearchDialog(p: SearchDialogProps) {
         previewCache.set(cacheKey, ctx);
         setPreviewData(ctx);
         setPreviewError(null);
+        scrollTargetIntoPreview();
       })
       .catch(err => {
         if (
@@ -507,6 +535,8 @@ export default function SearchDialog(p: SearchDialogProps) {
 
   const handleDialogKeyDown = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.isComposing || composing) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.tagName === "SELECT") return;
     const count = activeItemsCount();
     if (e.key === "ArrowDown") {
       if (count > 0) {
@@ -527,9 +557,7 @@ export default function SearchDialog(p: SearchDialogProps) {
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
-      const target = e.target as HTMLElement | null;
-      // Let explicit buttons/selects handle their own Enter press naturally.
-      if (target && (target.tagName === "BUTTON" || target.tagName === "SELECT") && !target.hasAttribute("data-cs-index")) {
+      if (target && target.tagName === "BUTTON" && !target.hasAttribute("data-cs-index")) {
         return;
       }
       if (count > 0) {
@@ -565,39 +593,52 @@ export default function SearchDialog(p: SearchDialogProps) {
   });
 
   const hasActiveFilters = () =>
-    projectFilter() !== "" || roleFilter() !== "all" || includeTools() || datePreset() !== "any";
+    projectFilter() !== "" || roleFilter() !== "all" || datePreset() !== "any";
 
   const clearFilters = () => {
     setProjectFilter("");
     setRoleFilter("all");
-    setIncludeTools(false);
     setDatePreset("any");
   };
 
   const activeDescendantId = () =>
     activeItemsCount() > 0 ? `${listboxId}-opt-${selectedIndex()}` : undefined;
 
-  const recentSnippet = (m: Mission): string => {
+  const recentTurns = (m: Mission): Array<{ role: string; text: string }> => {
     const cached = peekReadyTranscript(m.id);
     if (cached?.items.length) {
-      for (let i = cached.items.length - 1; i >= 0; i--) {
-        const it = cached.items[i];
-        if ((it.kind === "text" || it.kind === "user") && it.text.trim()) {
-          return it.text.replace(/\s+/g, " ").trim().slice(0, 180);
-        }
-      }
+      const turns = cached.items
+        .filter((it): it is Extract<typeof it, { kind: "text" | "user" }> =>
+          (it.kind === "text" || it.kind === "user") && Boolean(it.text.trim()),
+        )
+        .slice(-4)
+        .map(it => ({
+          role: it.kind === "user" ? "user" : "assistant",
+          text: clampPreviewContent(it.text),
+        }));
+      if (turns.length) return turns;
     }
-    const lastHist = m.history?.at(-1)?.content?.trim();
-    if (lastHist) return lastHist.replace(/\s+/g, " ").slice(0, 180);
-    return isArchived(m.status) ? "Archived conversation" : "Open conversation";
+    const hist = (m.history ?? [])
+      .filter(h => Boolean(h.content?.trim()))
+      .slice(-4)
+      .map(h => ({ role: h.role || "assistant", text: clampPreviewContent(h.content) }));
+    return hist;
+  };
+
+  const recentSnippet = (m: Mission): string => {
+    const turns = recentTurns(m);
+    if (turns.length) {
+      return turns[turns.length - 1].text.replace(/\s+/g, " ").slice(0, 180);
+    }
+    return isArchived(m.status) ? "Archived conversation" : "Active conversation";
   };
 
   return (
     <OverlayContext.Provider value={layer}>
       <Portal>
         <div
-          class="cs-backdrop"
-          classList={{ "cs-backdrop-dim": overlayFirstModal(layer) }}
+          class="sd-backdrop"
+          classList={{ "sd-backdrop-dim": overlayFirstModal(layer) }}
           style={{ "z-index": overlayZIndex(layer) }}
         >
           <div
@@ -608,13 +649,13 @@ export default function SearchDialog(p: SearchDialogProps) {
             aria-busy={loading() || undefined}
             inert={overlayHasModalAbove(layer)}
             tabIndex={-1}
-            class="cs-dialog"
+            class="sd-dialog"
             data-testid="conversation-search-dialog"
             onKeyDown={handleDialogKeyDown}
           >
-            <header class="cs-header">
-              <div class="cs-input-row">
-                <span class="cs-search-ico" aria-hidden="true">
+            <header class="sd-header">
+              <div class="sd-searchbar">
+                <span class="sd-search-ico" aria-hidden="true">
                   <Ic.SearchIcon size={16} />
                 </span>
                 <label id={titleId} class="sr-only">
@@ -631,8 +672,8 @@ export default function SearchDialog(p: SearchDialogProps) {
                   aria-activedescendant={activeDescendantId()}
                   aria-autocomplete="list"
                   aria-label="Search conversations and messages"
-                  class="cs-input"
-                  placeholder="Search conversations, code, identifiers, and messages…"
+                  class="sd-input"
+                  placeholder="Search conversations and messages…"
                   value={p.query}
                   autocomplete="off"
                   spellcheck={false}
@@ -647,42 +688,29 @@ export default function SearchDialog(p: SearchDialogProps) {
                 <Show when={p.query.length > 0}>
                   <button
                     type="button"
-                    class="cs-clear-btn"
+                    class="sd-icon-btn"
                     aria-label="Clear search query"
+                    title="Clear search"
                     onClick={() => {
                       p.onQueryChange("");
                       inputRef?.focus({ preventScroll: true });
                     }}
                   >
-                    Clear
+                    <Ic.CloseIcon size={13} />
                   </button>
                 </Show>
                 <button
                   type="button"
-                  class="cs-close-btn"
+                  class="sd-esc-btn"
                   aria-label="Close search"
                   onClick={() => p.onClose()}
                 >
-                  <Ic.CloseIcon size={15} />
+                  Esc
                 </button>
               </div>
 
-              <div class="cs-filters" role="toolbar" aria-label="Search filters">
-                <select
-                  class="cs-select"
-                  aria-label="Filter by project"
-                  value={projectFilter()}
-                  onChange={e => setProjectFilter(e.currentTarget.value)}
-                >
-                  <option value="">All projects</option>
-                  <For each={p.projects}>
-                    {proj => <option value={proj.slug}>{proj.title || proj.slug}</option>}
-                  </For>
-                </select>
-
-                <span class="cs-filter-sep" aria-hidden="true" />
-
-                <div class="cs-chip-group" role="group" aria-label="Message role">
+              <div class="sd-toolbar" role="toolbar" aria-label="Search filters">
+                <div class="sd-tabs" role="group" aria-label="Message role">
                   {(
                     [
                       ["all", "All"],
@@ -694,7 +722,7 @@ export default function SearchDialog(p: SearchDialogProps) {
                   ).map(([id, label]) => (
                     <button
                       type="button"
-                      class="cs-chip"
+                      class="sd-tab"
                       classList={{ "is-active": roleFilter() === id }}
                       aria-pressed={roleFilter() === id}
                       onClick={() => setRoleFilter(id)}
@@ -702,79 +730,95 @@ export default function SearchDialog(p: SearchDialogProps) {
                       {label}
                     </button>
                   ))}
-                  <Show when={roleFilter() === "all"}>
-                    <button
-                      type="button"
-                      class="cs-chip"
-                      classList={{ "is-active": includeTools() }}
-                      aria-pressed={includeTools()}
-                      title="Include tool file and command targets in All results"
-                      onClick={() => setIncludeTools(v => !v)}
+                </div>
+
+                <div class="sd-meta-filters">
+                  <Show when={p.projects.length > 0}>
+                    <div class="sd-select-wrap" classList={{ "is-filtered": projectFilter() !== "" }}>
+                      <span class="sd-select-label" aria-hidden="true">
+                        {projectTitle(projectFilter()) || "All projects"}
+                      </span>
+                      <span class="sd-select-caret" aria-hidden="true">
+                        <Ic.ChevronDown size={10} />
+                      </span>
+                      <select
+                        class="sd-select"
+                        aria-label="Filter by project"
+                        value={projectFilter()}
+                        onChange={e => setProjectFilter(e.currentTarget.value)}
+                      >
+                        <option value="">All projects</option>
+                        <For each={p.projects}>
+                          {proj => <option value={proj.slug}>{proj.title || proj.slug}</option>}
+                        </For>
+                      </select>
+                    </div>
+                  </Show>
+
+                  <div class="sd-select-wrap" classList={{ "is-filtered": datePreset() !== "any" }}>
+                    <span class="sd-select-label" aria-hidden="true">
+                      {datePreset() === "7d"
+                        ? "Past 7d"
+                        : datePreset() === "30d"
+                          ? "Past 30d"
+                          : datePreset() === "90d"
+                            ? "Past 90d"
+                            : "Any time"}
+                    </span>
+                    <span class="sd-select-caret" aria-hidden="true">
+                      <Ic.ChevronDown size={10} />
+                    </span>
+                    <select
+                      class="sd-select"
+                      aria-label="Date range"
+                      value={datePreset()}
+                      onChange={e => setDatePreset(e.currentTarget.value as DatePreset)}
                     >
-                      + Tools
-                    </button>
+                      <option value="any">Any time</option>
+                      <option value="7d">Past 7 days</option>
+                      <option value="30d">Past 30 days</option>
+                      <option value="90d">Past 90 days</option>
+                    </select>
+                  </div>
+
+                  <Show when={trimmedQuery().length > 0}>
+                    <div
+                      class="sd-select-wrap"
+                      classList={{ "is-filtered": sortOrder() !== "relevance" }}
+                    >
+                      <span class="sd-select-label" aria-hidden="true">
+                        {sortOrder() === "recent" ? "Recent" : "Relevance"}
+                      </span>
+                      <span class="sd-select-caret" aria-hidden="true">
+                        <Ic.ChevronDown size={10} />
+                      </span>
+                      <select
+                        class="sd-select"
+                        aria-label="Sort order"
+                        value={sortOrder()}
+                        onChange={e =>
+                          setSortOrder(e.currentTarget.value as ConversationSearchSort)
+                        }
+                      >
+                        <option value="relevance">Relevance</option>
+                        <option value="recent">Most recent</option>
+                      </select>
+                    </div>
                   </Show>
                 </div>
-
-                <span class="cs-filter-sep" aria-hidden="true" />
-
-                <div class="cs-chip-group" role="group" aria-label="Date range">
-                  {(
-                    [
-                      ["any", "Any time"],
-                      ["7d", "7d"],
-                      ["30d", "30d"],
-                      ["90d", "90d"],
-                    ] as const
-                  ).map(([id, label]) => (
-                    <button
-                      type="button"
-                      class="cs-chip"
-                      classList={{ "is-active": datePreset() === id }}
-                      aria-pressed={datePreset() === id}
-                      onClick={() => setDatePreset(id)}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-
-                <Show when={trimmedQuery().length > 0}>
-                  <div class="cs-sort-push" role="group" aria-label="Sort order">
-                    <button
-                      type="button"
-                      class="cs-chip"
-                      classList={{ "is-active": sortOrder() === "relevance" }}
-                      aria-pressed={sortOrder() === "relevance"}
-                      onClick={() => setSortOrder("relevance")}
-                    >
-                      Relevance
-                    </button>
-                    <button
-                      type="button"
-                      class="cs-chip"
-                      classList={{ "is-active": sortOrder() === "recent" }}
-                      aria-pressed={sortOrder() === "recent"}
-                      onClick={() => setSortOrder("recent")}
-                    >
-                      Recent
-                    </button>
-                  </div>
-                </Show>
               </div>
             </header>
 
             <Show when={coverage()?.state === "indexing"}>
-              <div class="cs-indexing-banner" role="status" data-testid="search-indexing-banner">
-                <span>
-                  <i class="cs-indexing-dot" aria-hidden="true" />
-                  Indexing conversation history ({coverage()!.indexed_missions} of{" "}
-                  {coverage()!.total_missions} conversations)…
+              <div class="sd-banner" role="status" data-testid="search-indexing-banner">
+                <span class="sd-banner-text">
+                  <i class="sd-indexing-dot" aria-hidden="true" />
+                  Indexing history ({coverage()!.indexed_missions} of {coverage()!.total_missions})
                 </span>
                 <Show when={trimmedQuery().length > 0}>
                   <button
                     type="button"
-                    class="cs-chip"
+                    class="sd-inline-link"
                     onClick={() => void runSearch({ immediate: true })}
                   >
                     Refresh
@@ -783,7 +827,7 @@ export default function SearchDialog(p: SearchDialogProps) {
               </div>
             </Show>
 
-            <div class="cs-body" data-mobile-pane={mobilePane()}>
+            <div class="cs-body sd-body" data-mobile-pane={mobilePane()}>
               <div
                 ref={el => {
                   resultsPaneRef = el;
@@ -791,33 +835,37 @@ export default function SearchDialog(p: SearchDialogProps) {
                 id={listboxId}
                 role="listbox"
                 aria-label={trimmedQuery() ? "Matching passages" : "Recent conversations"}
-                class="cs-results-pane"
+                class="sd-results-pane"
               >
                 <Switch>
                   <Match when={!isConnected()}>
-                    <div class="cs-state-box" role="status" data-testid="search-disconnected">
-                      <div class="cs-state-title">Disconnected from backend</div>
-                      <div class="cs-state-desc">
-                        Connect to an Orb backend in Settings to search across your conversation history.
+                    <div class="sd-empty-state" role="status" data-testid="search-disconnected">
+                      <div class="sd-empty-title">Disconnected</div>
+                      <div class="sd-empty-desc">
+                        Connect to an Orb server in Settings to search across conversations.
                       </div>
                     </div>
                   </Match>
 
                   <Match when={!trimmedQuery()}>
-                    <div class="cs-section-label">
-                      <span>Recent conversations</span>
-                      <span>{filteredRecents().length}</span>
+                    <div class="sd-section-head">
+                      <span>Recent</span>
                     </div>
                     <Show
                       when={filteredRecents().length > 0}
                       fallback={
-                        <div class="cs-state-box" data-testid="search-recents-empty">
-                          <div class="cs-state-title">No recent conversations</div>
-                          <div class="cs-state-desc">
+                        <div class="sd-empty-state" data-testid="search-recents-empty">
+                          <div class="sd-empty-title">No recent conversations</div>
+                          <div class="sd-empty-desc">
                             {hasActiveFilters()
-                              ? "No loaded conversations match the selected filters."
-                              : "Start a conversation or type a query to search full history."}
+                              ? "No loaded conversations match these filters."
+                              : "Type above to search your conversation archive."}
                           </div>
+                          <Show when={hasActiveFilters()}>
+                            <button type="button" class="sd-ghost-btn" onClick={clearFilters}>
+                              Reset filters
+                            </button>
+                          </Show>
                         </div>
                       }
                     >
@@ -827,6 +875,7 @@ export default function SearchDialog(p: SearchDialogProps) {
                             displayTitle(renamedTitle("mission", m.id, m.title)) ||
                             "Untitled conversation";
                           const proj = () => projectTitle(m.project);
+                          const dateStr = () => formatShortDate(m.updated_at || m.created_at);
                           return (
                             <button
                               type="button"
@@ -834,7 +883,7 @@ export default function SearchDialog(p: SearchDialogProps) {
                               role="option"
                               aria-selected={selectedIndex() === idx()}
                               data-cs-index={idx()}
-                              class="cs-row"
+                              class="sd-row"
                               classList={{ "is-selected": selectedIndex() === idx() }}
                               onClick={() => {
                                 setSelectedIndex(idx());
@@ -842,19 +891,19 @@ export default function SearchDialog(p: SearchDialogProps) {
                               }}
                               onDblClick={() => commitOpenRecent(m.id)}
                             >
-                              <div class="cs-row-top">
-                                <span class="cs-row-title">{title()}</span>
-                                <span class="cs-row-meta">
+                              <div class="sd-row-top">
+                                <span class="sd-row-title">{title()}</span>
+                                <span class="sd-row-meta">
                                   <Show when={proj()}>
-                                    <span class="cs-badge">{proj()}</span>
+                                    <span class="sd-meta-proj">{proj()}</span>
                                   </Show>
-                                  <Show when={isArchived(m.status)}>
-                                    <span class="cs-badge cs-badge-archived">Archived</span>
+                                  <Show when={proj() && dateStr()}>
+                                    <span class="sd-dot" aria-hidden="true">·</span>
                                   </Show>
-                                  <span>{formatShortDate(m.updated_at || m.created_at)}</span>
+                                  <span>{dateStr()}</span>
                                 </span>
                               </div>
-                              <div class="cs-row-excerpt">{recentSnippet(m)}</div>
+                              <div class="cs-row-excerpt sd-row-excerpt">{recentSnippet(m)}</div>
                             </button>
                           );
                         }}
@@ -863,31 +912,31 @@ export default function SearchDialog(p: SearchDialogProps) {
                   </Match>
 
                   <Match when={error()}>
-                    <div class="cs-state-box" role="alert" data-testid="search-error">
-                      <div class="cs-state-title">Search couldn’t complete</div>
-                      <div class="cs-state-desc">{error()}</div>
+                    <div class="sd-empty-state" role="alert" data-testid="search-error">
+                      <div class="sd-empty-title">Search unavailable</div>
+                      <div class="sd-empty-desc">{error()}</div>
                       <button
                         type="button"
-                        class="cs-action-btn"
+                        class="sd-ghost-btn"
                         onClick={() => void runSearch({ immediate: true })}
                       >
-                        Retry
+                        Try again
                       </button>
                     </div>
                   </Match>
 
                   <Match when={loading() && !hasLoadedForQuery()}>
                     <div
-                      class="cs-skeleton-list"
+                      class="sd-skeleton-list"
                       role="status"
                       aria-label="Searching conversations"
                       data-testid="search-loading"
                     >
-                      <For each={[0, 1, 2, 3, 4, 5]}>
+                      <For each={[0, 1, 2, 3, 4]}>
                         {() => (
-                          <div class="cs-skeleton-row" aria-hidden="true">
-                            <div class="cs-sk-bar" style={{ width: "62%" }} />
-                            <div class="cs-sk-bar" style={{ width: "88%" }} />
+                          <div class="sd-skeleton-row" aria-hidden="true">
+                            <div class="sd-sk-bar" style={{ width: "56%" }} />
+                            <div class="sd-sk-bar" style={{ width: "84%" }} />
                           </div>
                         )}
                       </For>
@@ -898,30 +947,29 @@ export default function SearchDialog(p: SearchDialogProps) {
                     <Show
                       when={coverage()?.state === "indexing"}
                       fallback={
-                        <div class="cs-state-box" role="status" data-testid="search-empty">
-                          <div class="cs-state-title">No matching passages</div>
-                          <div class="cs-state-desc">
-                            No conversations or messages matched your search
-                            {hasActiveFilters() ? " with the active filters." : "."}
+                        <div class="sd-empty-state" role="status" data-testid="search-empty">
+                          <div class="sd-empty-title">No matches</div>
+                          <div class="sd-empty-desc">
+                            Nothing matched “{trimmedQuery()}”
+                            {hasActiveFilters() ? " with the current filters." : "."}
                           </div>
                           <Show when={hasActiveFilters()}>
-                            <button type="button" class="cs-action-btn" onClick={clearFilters}>
+                            <button type="button" class="sd-ghost-btn" onClick={clearFilters}>
                               Clear filters
                             </button>
                           </Show>
                         </div>
                       }
                     >
-                      <div class="cs-state-box" role="status" data-testid="search-still-indexing">
-                        <div class="cs-state-title">Still indexing earlier conversations</div>
-                        <div class="cs-state-desc">
+                      <div class="sd-empty-state" role="status" data-testid="search-still-indexing">
+                        <div class="sd-empty-title">Indexing earlier conversations</div>
+                        <div class="sd-empty-desc">
                           {coverage()!.indexed_missions} of {coverage()!.total_missions}{" "}
-                          conversations indexed so far. Matching passages from older threads will
-                          appear as indexing completes.
+                          conversations indexed so far.
                         </div>
                         <button
                           type="button"
-                          class="cs-action-btn"
+                          class="sd-ghost-btn"
                           onClick={() => void runSearch({ immediate: true })}
                         >
                           Check again
@@ -934,74 +982,108 @@ export default function SearchDialog(p: SearchDialogProps) {
                     <For each={groupedResults().groups}>
                       {group => {
                         const proj = () => projectTitle(group.project);
+                        const multi = () => group.rows.length > 1;
                         return (
-                          <div class="cs-group" data-mission-group={group.missionId}>
-                            <Show when={group.rows.length > 1}>
-                              <div class="cs-group-head">
-                                <span class="cs-group-title">{group.title}</span>
-                                <span class="cs-group-meta">
-                                  <Show when={proj()}>{proj()} · </Show>
-                                  {Math.max(group.rows.length, group.totalMatches)} matches
+                          <div class="sd-group" data-mission-group={group.missionId}>
+                            <Show when={multi()}>
+                              <div class="sd-group-head">
+                                <span class="sd-group-title">{group.title}</span>
+                                <span class="sd-group-meta">
+                                  <Show when={proj()}>
+                                    <span class="sd-meta-proj">{proj()}</span>
+                                    <span class="sd-dot" aria-hidden="true">·</span>
+                                  </Show>
+                                  <span>{Math.max(group.rows.length, group.totalMatches)}</span>
                                 </span>
                               </div>
                             </Show>
-                            <For each={group.rows}>
-                              {entry => (
-                                <button
-                                  type="button"
-                                  id={`${listboxId}-opt-${entry.index}`}
-                                  role="option"
-                                  aria-selected={selectedIndex() === entry.index}
-                                  data-cs-index={entry.index}
-                                  class="cs-row"
-                                  classList={{
-                                    "cs-row-grouped": group.rows.length > 1,
-                                    "is-selected": selectedIndex() === entry.index,
-                                  }}
-                                  onClick={() => {
-                                    setSelectedIndex(entry.index);
-                                    if (isNarrowViewport()) setMobilePane("preview");
-                                  }}
-                                  onDblClick={() => commitOpenHit(entry.hit)}
-                                >
-                                  <Show when={group.rows.length === 1}>
-                                    <div class="cs-row-top">
-                                      <span class="cs-row-title">
+                            <div classList={{ "sd-group-passages": multi() }}>
+                              <For each={group.rows}>
+                                {entry => {
+                                  const isSingleTitleHit = () =>
+                                    !multi() && entry.hit.locator === "title";
+                                  const isGroupedTitleHit = () =>
+                                    multi() && entry.hit.locator === "title";
+                                  const dateStr = () =>
+                                    formatShortDate(entry.hit.timestamp || entry.hit.updated_at);
+                                  return (
+                                    <button
+                                      type="button"
+                                      id={`${listboxId}-opt-${entry.index}`}
+                                      role="option"
+                                      aria-selected={selectedIndex() === entry.index}
+                                      data-cs-index={entry.index}
+                                      class="sd-row"
+                                      classList={{
+                                        "sd-row-grouped": multi(),
+                                        "is-selected": selectedIndex() === entry.index,
+                                      }}
+                                      onClick={() => {
+                                        setSelectedIndex(entry.index);
+                                        if (isNarrowViewport()) setMobilePane("preview");
+                                      }}
+                                      onDblClick={() => commitOpenHit(entry.hit)}
+                                    >
+                                      <Show when={!multi()}>
+                                        <div class="sd-row-top">
+                                          <span class="sd-row-title">
+                                            <Show
+                                              when={
+                                                entry.hit.locator === "title" &&
+                                                entry.hit.highlights.length > 0
+                                              }
+                                              fallback={group.title}
+                                            >
+                                              <HighlightedText
+                                                text={entry.hit.excerpt || group.title}
+                                                highlights={entry.hit.highlights}
+                                              />
+                                            </Show>
+                                          </span>
+                                          <span class="sd-row-meta">
+                                            <Show when={proj()}>
+                                              <span class="sd-meta-proj">{proj()}</span>
+                                            </Show>
+                                            <Show when={proj() && dateStr()}>
+                                              <span class="sd-dot" aria-hidden="true">·</span>
+                                            </Show>
+                                            <span>{dateStr()}</span>
+                                          </span>
+                                        </div>
+                                      </Show>
+                                      <div
+                                        class="cs-row-excerpt sd-row-excerpt"
+                                        classList={{ "sd-row-excerpt-single": isGroupedTitleHit() }}
+                                      >
                                         <Show
-                                          when={entry.hit.locator === "title" && entry.hit.highlights.length > 0}
-                                          fallback={group.title}
+                                          when={!isSingleTitleHit()}
+                                          fallback={
+                                            <span class="sd-title-match-note">
+                                              Title match
+                                              <Show when={isArchived(group.status)}>
+                                                {" · Archived"}
+                                              </Show>
+                                            </span>
+                                          }
                                         >
+                                          <span class="sd-role-tag">
+                                            {roleLabel(entry.hit.role)}
+                                          </span>
                                           <HighlightedText
-                                            text={entry.hit.excerpt || group.title}
+                                            text={
+                                              isGroupedTitleHit()
+                                                ? entry.hit.excerpt || group.title
+                                                : entry.hit.excerpt
+                                            }
                                             highlights={entry.hit.highlights}
                                           />
                                         </Show>
-                                      </span>
-                                      <span class="cs-row-meta">
-                                        <Show when={proj()}>
-                                          <span class="cs-badge">{proj()}</span>
-                                        </Show>
-                                        <Show when={isArchived(group.status)}>
-                                          <span class="cs-badge cs-badge-archived">Archived</span>
-                                        </Show>
-                                        <span>
-                                          {formatShortDate(
-                                            entry.hit.timestamp || entry.hit.updated_at,
-                                          )}
-                                        </span>
-                                      </span>
-                                    </div>
-                                  </Show>
-                                  <div class="cs-row-excerpt">
-                                    <span class="cs-role-tag">{entry.hit.role}</span>
-                                    <HighlightedText
-                                      text={entry.hit.excerpt}
-                                      highlights={entry.hit.highlights}
-                                    />
-                                  </div>
-                                </button>
-                              )}
-                            </For>
+                                      </div>
+                                    </button>
+                                  );
+                                }}
+                              </For>
+                            </div>
                           </div>
                         );
                       }}
@@ -1009,18 +1091,18 @@ export default function SearchDialog(p: SearchDialogProps) {
                     <Show when={nextCursor()}>
                       <button
                         type="button"
-                        class="cs-load-more"
+                        class="sd-load-more"
                         disabled={loadingMore()}
                         onClick={() => void runSearch({ cursor: nextCursor(), immediate: true })}
                       >
-                        {loadingMore() ? "Loading more…" : "Show more matches"}
+                        {loadingMore() ? "Loading…" : "Show more"}
                       </button>
                     </Show>
                   </Match>
                 </Switch>
               </div>
 
-              <div class="cs-preview-pane" data-testid="search-preview-pane">
+              <div class="sd-preview-pane" data-testid="search-preview-pane">
                 <Switch>
                   <Match when={Boolean(trimmedQuery()) ? selectedHit() : undefined}>
                     {hit => {
@@ -1031,119 +1113,188 @@ export default function SearchDialog(p: SearchDialogProps) {
                       const proj = () => projectTitle(hit().project);
                       return (
                         <>
-                          <div class="cs-preview-head">
-                            <div class="cs-preview-title-wrap">
-                              <div class="cs-preview-title">{title()}</div>
-                              <div class="cs-preview-sub">
+                          <div class="sd-preview-head">
+                            <div class="sd-preview-heading">
+                              <div class="sd-preview-title">
+                                <Show
+                                  when={
+                                    hit().locator === "title" && hit().highlights.length > 0
+                                  }
+                                  fallback={title()}
+                                >
+                                  <HighlightedText
+                                    text={hit().excerpt || title()}
+                                    highlights={hit().highlights}
+                                  />
+                                </Show>
+                              </div>
+                              <div class="sd-preview-sub">
                                 <Show when={proj()}>
                                   <span>{proj()}</span>
-                                  <span>·</span>
+                                  <span class="sd-dot" aria-hidden="true">·</span>
                                 </Show>
                                 <span>{formatShortDate(hit().timestamp || hit().updated_at)}</span>
                                 <Show when={isArchived(hit().status)}>
-                                  <span>·</span>
+                                  <span class="sd-dot" aria-hidden="true">·</span>
                                   <span>Archived</span>
                                 </Show>
                               </div>
                             </div>
-                            <div class="cs-preview-actions">
+                            <div class="sd-preview-actions">
                               <button
                                 type="button"
-                                class="cs-action-btn cs-mobile-back"
+                                class="sd-open-btn sd-mobile-back"
                                 onClick={() => setMobilePane("results")}
                               >
-                                <Ic.ArrowLeft size={13} /> Results
+                                <Ic.ArrowLeft size={12} /> Results
                               </button>
                               <button
                                 type="button"
-                                class="cs-action-btn cs-action-primary"
+                                class="sd-open-btn"
                                 data-testid="search-open-hit"
                                 onClick={() => commitOpenHit(hit())}
                               >
-                                Open passage
+                                <span>Open</span>
+                                <kbd class="sd-open-kbd" aria-hidden="true">↵</kbd>
                               </button>
                             </div>
                           </div>
-                          <div class="cs-preview-scroll">
+
+                          <div
+                            ref={el => {
+                              previewScrollRef = el;
+                            }}
+                            class="sd-preview-scroll"
+                          >
                             <Switch>
-                              <Match when={hit().locator === "title"}>
-                                <div class="cs-context-msg is-target">
-                                  <div class="cs-context-role">
-                                    <span>Conversation title</span>
-                                    <span>{formatShortDate(hit().updated_at)}</span>
-                                  </div>
-                                  <div class="cs-context-body">
-                                    <HighlightedText
-                                      text={hit().excerpt || title()}
-                                      highlights={hit().highlights}
-                                    />
-                                  </div>
-                                </div>
-                              </Match>
-
                               <Match when={previewLoading() && !previewData()}>
-                                <div
-                                  class="cs-skeleton-list"
-                                  role="status"
-                                  aria-label="Loading message context"
+                                <Show
+                                  when={hit().locator !== "title"}
+                                  fallback={
+                                    <div class="sd-preview-quiet">Loading conversation…</div>
+                                  }
                                 >
-                                  <For each={[0, 1, 2]}>
-                                    {() => (
-                                      <div class="cs-skeleton-row" aria-hidden="true">
-                                        <div class="cs-sk-bar" style={{ width: "30%" }} />
-                                        <div class="cs-sk-bar" style={{ width: "92%" }} />
-                                        <div class="cs-sk-bar" style={{ width: "74%" }} />
-                                      </div>
-                                    )}
-                                  </For>
-                                </div>
-                              </Match>
-
-                              <Match when={previewError()}>
-                                <div class="cs-context-msg is-target">
-                                  <div class="cs-context-role">
-                                    <span>{hit().role}</span>
-                                    <span>{formatShortDate(hit().timestamp)}</span>
-                                  </div>
-                                  <div class="cs-context-body">
-                                    <HighlightedText
-                                      text={hit().excerpt}
-                                      highlights={hit().highlights}
-                                    />
-                                  </div>
-                                </div>
-                              </Match>
-
-                              <Match when={previewData()}>
-                                {ctx => (
-                                  <>
-                                    <Show when={!ctx().target_found}>
-                                      <div class="cs-indexing-banner" role="status">
-                                        This passage was updated or removed since indexing — showing
-                                        the latest surrounding context.
-                                      </div>
-                                    </Show>
-                                    <For each={ctx().messages}>
-                                      {msg => (
-                                        <div
-                                          class="cs-context-msg"
-                                          classList={{ "is-target": msg.is_target }}
-                                        >
-                                          <div class="cs-context-role">
-                                            <span>{msg.role}</span>
-                                            <span>{formatShortDate(msg.timestamp)}</span>
-                                          </div>
-                                          <div class="cs-context-body">
-                                            <HighlightedText
-                                              text={msg.content}
-                                              highlights={msg.highlights}
-                                            />
-                                          </div>
+                                  <div
+                                    class="sd-skeleton-list"
+                                    role="status"
+                                    aria-label="Loading message context"
+                                  >
+                                    <For each={[0, 1]}>
+                                      {() => (
+                                        <div class="sd-skeleton-row" aria-hidden="true">
+                                          <div class="sd-sk-bar" style={{ width: "24%" }} />
+                                          <div class="sd-sk-bar" style={{ width: "90%" }} />
+                                          <div class="sd-sk-bar" style={{ width: "68%" }} />
                                         </div>
                                       )}
                                     </For>
-                                  </>
-                                )}
+                                  </div>
+                                </Show>
+                              </Match>
+
+                              <Match when={previewError()}>
+                                <Show
+                                  when={hit().locator !== "title"}
+                                  fallback={
+                                    <div class="sd-preview-quiet">
+                                      Press Enter to open this conversation.
+                                    </div>
+                                  }
+                                >
+                                  <div class="sd-turn is-target">
+                                    <div class="sd-turn-meta">
+                                      <span class="sd-turn-role">{roleLabel(hit().role)}</span>
+                                      <span class="sd-turn-time">
+                                        {formatShortDate(hit().timestamp)}
+                                      </span>
+                                    </div>
+                                    <div class="sd-turn-body">
+                                      <HighlightedText
+                                        text={clampPreviewContent(hit().excerpt)}
+                                        highlights={hit().highlights}
+                                      />
+                                    </div>
+                                  </div>
+                                </Show>
+                              </Match>
+
+                              <Match when={previewData()}>
+                                {ctx => {
+                                  const fallbackTurns = () => {
+                                    const local = p.recentMissions.find(
+                                      m => m.id === hit().mission_id,
+                                    );
+                                    return local ? recentTurns(local) : [];
+                                  };
+                                  return (
+                                    <>
+                                      <Show when={!ctx().target_found && hit().locator !== "title"}>
+                                        <div class="sd-stale-note" role="status">
+                                          Passage updated since indexing — showing latest context.
+                                        </div>
+                                      </Show>
+                                      <Show
+                                        when={ctx().messages.length > 0}
+                                        fallback={
+                                          <Show
+                                            when={fallbackTurns().length > 0}
+                                            fallback={
+                                              <div class="sd-preview-quiet">
+                                                {hit().locator === "title"
+                                                  ? "Press Enter to open this conversation."
+                                                  : "No messages recorded in this conversation yet."}
+                                              </div>
+                                            }
+                                          >
+                                            <div class="sd-turn-stream">
+                                              <For each={fallbackTurns()}>
+                                                {turn => (
+                                                  <div class="sd-turn">
+                                                    <div class="sd-turn-meta">
+                                                      <span class="sd-turn-role">
+                                                        {roleLabel(turn.role)}
+                                                      </span>
+                                                    </div>
+                                                    <div class="sd-turn-body">{turn.text}</div>
+                                                  </div>
+                                                )}
+                                              </For>
+                                            </div>
+                                          </Show>
+                                        }
+                                      >
+                                        <div class="sd-turn-stream">
+                                          <For each={ctx().messages}>
+                                            {msg => (
+                                              <div
+                                                class="sd-turn"
+                                                classList={{
+                                                  "is-target":
+                                                    msg.is_target && hit().locator !== "title",
+                                                }}
+                                              >
+                                                <div class="sd-turn-meta">
+                                                  <span class="sd-turn-role">
+                                                    {roleLabel(msg.role)}
+                                                  </span>
+                                                  <span class="sd-turn-time">
+                                                    {formatShortDate(msg.timestamp)}
+                                                  </span>
+                                                </div>
+                                                <div class="sd-turn-body">
+                                                  <HighlightedText
+                                                    text={clampPreviewContent(msg.content)}
+                                                    highlights={msg.highlights}
+                                                  />
+                                                </div>
+                                              </div>
+                                            )}
+                                          </For>
+                                        </div>
+                                      </Show>
+                                    </>
+                                  );
+                                }}
                               </Match>
                             </Switch>
                           </div>
@@ -1158,50 +1309,66 @@ export default function SearchDialog(p: SearchDialogProps) {
                         displayTitle(renamedTitle("mission", recent().id, recent().title)) ||
                         "Untitled conversation";
                       const proj = () => projectTitle(recent().project);
+                      const turns = createMemo(() => recentTurns(recent()));
                       return (
                         <>
-                          <div class="cs-preview-head">
-                            <div class="cs-preview-title-wrap">
-                              <div class="cs-preview-title">{title()}</div>
-                              <div class="cs-preview-sub">
+                          <div class="sd-preview-head">
+                            <div class="sd-preview-heading">
+                              <div class="sd-preview-title">{title()}</div>
+                              <div class="sd-preview-sub">
                                 <Show when={proj()}>
                                   <span>{proj()}</span>
-                                  <span>·</span>
+                                  <span class="sd-dot" aria-hidden="true">·</span>
                                 </Show>
                                 <span>
                                   {formatShortDate(recent().updated_at || recent().created_at)}
                                 </span>
                                 <Show when={isArchived(recent().status)}>
-                                  <span>·</span>
+                                  <span class="sd-dot" aria-hidden="true">·</span>
                                   <span>Archived</span>
                                 </Show>
                               </div>
                             </div>
-                            <div class="cs-preview-actions">
+                            <div class="sd-preview-actions">
                               <button
                                 type="button"
-                                class="cs-action-btn cs-mobile-back"
+                                class="sd-open-btn sd-mobile-back"
                                 onClick={() => setMobilePane("results")}
                               >
-                                <Ic.ArrowLeft size={13} /> Back
+                                <Ic.ArrowLeft size={12} /> Results
                               </button>
                               <button
                                 type="button"
-                                class="cs-action-btn cs-action-primary"
+                                class="sd-open-btn"
                                 onClick={() => commitOpenRecent(recent().id)}
                               >
-                                Open conversation
+                                <span>Open</span>
+                                <kbd class="sd-open-kbd" aria-hidden="true">↵</kbd>
                               </button>
                             </div>
                           </div>
-                          <div class="cs-preview-scroll">
-                            <div class="cs-context-msg is-target">
-                              <div class="cs-context-role">
-                                <span>Latest summary</span>
-                                <span>{recent().backend || "agent"}</span>
+                          <div class="sd-preview-scroll">
+                            <Show
+                              when={turns().length > 0}
+                              fallback={
+                                <div class="sd-preview-quiet">
+                                  Press Enter to open this conversation.
+                                </div>
+                              }
+                            >
+                              <div class="sd-turn-stream">
+                                <For each={turns()}>
+                                  {turn => (
+                                    <div class="sd-turn">
+                                      <div class="sd-turn-meta">
+                                        <span class="sd-turn-role">{roleLabel(turn.role)}</span>
+                                      </div>
+                                      <div class="sd-turn-body">{turn.text}</div>
+                                    </div>
+                                  )}
+                                </For>
                               </div>
-                              <div class="cs-context-body">{recentSnippet(recent())}</div>
-                            </div>
+                            </Show>
                           </div>
                         </>
                       );
@@ -1209,10 +1376,9 @@ export default function SearchDialog(p: SearchDialogProps) {
                   </Match>
 
                   <Match when={true}>
-                    <div class="cs-state-box">
-                      <div class="cs-state-desc">
-                        Select a result on the left to preview its message context without leaving
-                        your current conversation.
+                    <div class="sd-empty-state">
+                      <div class="sd-empty-desc">
+                        Select a conversation on the left to preview its messages.
                       </div>
                     </div>
                   </Match>
@@ -1220,27 +1386,25 @@ export default function SearchDialog(p: SearchDialogProps) {
               </div>
             </div>
 
-            <footer class="cs-footer">
-              <div class="cs-kbd-hints">
+            <footer class="sd-footer">
+              <div class="sd-kbd-hints">
                 <span>
-                  <kbd class="cs-kbd">↑</kbd>
-                  <kbd class="cs-kbd">↓</kbd> Select
+                  <kbd class="sd-kbd">↑↓</kbd> Navigate
                 </span>
                 <span>
-                  <kbd class="cs-kbd">↵</kbd> Open
-                </span>
-                <span>
-                  <kbd class="cs-kbd">Esc</kbd> Close
+                  <kbd class="sd-kbd">↵</kbd> Open
                 </span>
               </div>
-              <span>
+              <span class="sd-footer-count">
                 {trimmedQuery()
                   ? loading()
                     ? "Searching…"
-                    : `${groupedResults().flat.length}${nextCursor() ? "+" : ""} passage${
-                        groupedResults().flat.length === 1 ? "" : "s"
+                    : `${groupedResults().flat.length}${nextCursor() ? "+" : ""} ${
+                        groupedResults().flat.length === 1 ? "match" : "matches"
                       }`
-                  : "Active & archived conversations"}
+                  : filteredRecents().length > 0
+                    ? `${filteredRecents().length} recent`
+                    : ""}
               </span>
             </footer>
           </div>
