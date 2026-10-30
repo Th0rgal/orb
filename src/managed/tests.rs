@@ -3296,3 +3296,70 @@ fn retryable_exec_error_matches_transient_sandbox_proxy_faults() {
     assert!(!super::is_retryable_exec_error("exit code 1"));
     assert!(!super::is_retryable_exec_error("HTTP 403 forbidden"));
 }
+
+#[test]
+fn resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences() {
+    use crate::orb_spec::ResourceLedgerOp;
+
+    let r0 = super::evaluate_resource_ledger_gate(
+        ResourceLedgerOp::Reserve,
+        0,
+        1,
+        2,
+        400,
+        300,
+        1_000,
+        10,
+        100,
+    );
+    assert!(r0.admitted);
+    assert_eq!(r0.next_reserved_slots, 1);
+    assert_eq!(r0.next_active_slots, 1);
+
+    let over_cap = super::evaluate_resource_ledger_gate(
+        ResourceLedgerOp::Reserve,
+        1,
+        1,
+        2,
+        400,
+        100,
+        1_000,
+        10,
+        100,
+    );
+    assert!(!over_cap.admitted);
+    assert_eq!(over_cap.next_reserved_slots, 1);
+
+    let act = super::evaluate_resource_ledger_gate(
+        ResourceLedgerOp::ActivateReserved,
+        1,
+        1,
+        2,
+        700,
+        0,
+        1_000,
+        20,
+        100,
+    );
+    assert!(act.admitted);
+    assert_eq!(act.next_reserved_slots, 0);
+    assert_eq!(act.next_active_slots, 2);
+
+    let reap = super::evaluate_resource_ledger_gate(
+        ResourceLedgerOp::ReapExpired,
+        1,
+        0,
+        2,
+        700,
+        0,
+        1_000,
+        100,
+        100,
+    );
+    assert!(reap.admitted);
+    assert_eq!(reap.next_reserved_slots, 0);
+
+    let snap = super::resource_ledger_shadow_counter().snapshot("orb_resource_ledger_step");
+    assert!(snap.total_events >= 4);
+    assert_eq!(snap.total_divergences, 0);
+}

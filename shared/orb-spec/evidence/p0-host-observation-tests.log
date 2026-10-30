@@ -1,6 +1,5 @@
-   Compiling sandboxed_sh v1.3.0 (/tmp/orb-work/orb)
-    Finished `test` profile [unoptimized] target(s) in 1m 57s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-634227b8721980c6)
+    Finished `test` profile [unoptimized] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b1c7fe9c77e7500b)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -18,5 +17,5 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3630 filtered out; finished in 1.07s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3642 filtered out; finished in 0.46s
 

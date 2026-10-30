@@ -625,11 +625,23 @@ def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaL
   - the principal is `hermes`, `orb_ui` or `script` and claims exactly its own kind.
 -/
 @[inline] def attributionInScope (principalKind claimedKind sameMission isDescendant : UInt8) : Bool :=
-  claimedKind == 0 ||
-  (principalKind == 5 && (claimedKind == 1 || claimedKind == 2 || claimedKind == 5)) ||
-  ((principalKind == 1 || principalKind == 2) &&
-    ((claimedKind == 1 && sameMission == 1) || (claimedKind == 2 && isDescendant == 1))) ||
-  ((principalKind == 3 || principalKind == 4 || principalKind == 6) && claimedKind == principalKind)
+  if claimedKind == 0 then true
+  else if principalKind == 5 then
+    if claimedKind == 1 then true
+    else if claimedKind == 2 then true
+    else claimedKind == 5
+  else if principalKind == 1 then
+    if claimedKind == 1 then sameMission == 1
+    else if claimedKind == 2 then isDescendant == 1
+    else false
+  else if principalKind == 2 then
+    if claimedKind == 1 then sameMission == 1
+    else if claimedKind == 2 then isDescendant == 1
+    else false
+  else if principalKind == 3 then claimedKind == 3
+  else if principalKind == 4 then claimedKind == 4
+  else if principalKind == 6 then claimedKind == 6
+  else false
 
 /-- Principal kind clamped to the closed enum (`> 6` is `unknown`). -/
 @[inline] def attributionPrincipal (principalKind : UInt8) : UInt8 :=
@@ -637,9 +649,10 @@ def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaL
 
 /-- Final caller kind: the claim when in scope (and non-empty), the principal's own kind otherwise. -/
 @[inline] def attributionKind (principalKind claimedKind sameMission isDescendant : UInt8) : UInt8 :=
-  if attributionInScope (attributionPrincipal principalKind) claimedKind sameMission isDescendant then
-    (if claimedKind == 0 then attributionPrincipal principalKind else claimedKind)
-  else attributionPrincipal principalKind
+  let p := attributionPrincipal principalKind
+  if attributionInScope p claimedKind sameMission isDescendant then
+    (if claimedKind == 0 then p else claimedKind)
+  else p
 
 /--
   Unboxed C-ABI Usage Attribution Stepper (`orb_attribution_step`):
@@ -649,9 +662,10 @@ def transcriptPatchStep (stateLen stateSeq : UInt32) (eventKind : UInt8) (deltaL
 -/
 @[inline, export orb_attribution_step]
 def attributionStep (principalKind claimedKind sameMission isDescendant : UInt8) : UInt32 :=
-  (attributionKind principalKind claimedKind sameMission isDescendant).toUInt32 |||
-    (if attributionInScope (attributionPrincipal principalKind) claimedKind sameMission isDescendant
-     then 256 else 0)
+  let p := attributionPrincipal principalKind
+  if attributionInScope p claimedKind sameMission isDescendant then
+    (if claimedKind == 0 then p else claimedKind).toUInt32 ||| 256
+  else p.toUInt32
 
 /--
   Native recurring schedule step (`orb_schedule_step`, `docs/specs/agent-schedules.md`).
@@ -1992,5 +2006,333 @@ def computeSecretGate
     512
   else
     257
+-- Wave 12 (P4–P6): Compositional `OrbWire` Patch/Machine ABI & 7 Stateful
+--                  Domain Steppers (Closing `G-ORB-1..7`)
+-- ═══════════════════════════════════════════════════════════════════════════
 
+/--
+  Unboxed C-ABI `OrbWire` Field-Presence Patch Stepper (`orb_wire_apply_patch_step`):
+  Applies a revision-fenced tri-state field patch (`presence : 0 = Omitted, 1 = Present, 2 = Cleared`)
+  to `(currentRev, currentHasVal, currentVal)`:
+  - Rejects unknown presence tags (`presence > 2`, `lo32 = 0`, state preserved).
+  - Rejects stale or duplicate revisions (`!(incomingRev > currentRev)`, `lo32` action `2`, state preserved).
+  - `presence == 0 (Omitted)`: advances revision, preserves `(currentHasVal, currentVal)` (`lo32` action `3 | 256`).
+  - `presence == 1 (Present)`: advances revision, sets `hasVal = 1`, `val = incomingVal` (`lo32 = 769`, `hi32 = incomingVal`).
+  - `presence == 2 (Cleared)`: advances revision, clears `hasVal = 0`, `val = 0` (`lo32 = 260`, `hi32 = 0`).
+-/
+@[inline, export orb_wire_apply_patch_step]
+def wireApplyPatchStep
+    (currentRev incomingRev : UInt64)
+    (currentHasVal : UInt8) (currentVal : UInt32)
+    (presence : UInt8) (incomingVal : UInt32) : UInt64 :=
+  let keepBit : UInt32 := if currentHasVal == 1 then 512 else 0
+  let keepVal : UInt32 := if currentHasVal == 1 then currentVal else 0
+  let validPresence : Bool := presence <= 2
+  let freshRev : Bool := incomingRev > currentRev
+  let lo32 : UInt32 :=
+    if !validPresence then 0
+    else if !freshRev then 2 ||| keepBit
+    else if presence == 0 then 259 ||| keepBit
+    else if presence == 1 then 769
+    else 260
+  let hi32 : UInt32 :=
+    if !(validPresence && freshRev) then keepVal
+    else if presence == 0 then keepVal
+    else if presence == 1 then incomingVal
+    else 0
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Unboxed C-ABI Compositional `OrbWire` Machine Stepper (`orb_wire_machine_step`):
+  Executes a validated, versioned, output-capacity-fenced `OrbWire` state-machine step:
+  - If `outCap < requiredOutBytes`: returns `lo32 = 5`, `hi32 = stateRev32` (zero partial mutation).
+  - If `!(schemaId >= 1 && schemaId <= 2)`: returns `lo32 = 2`, `hi32 = stateRev32`.
+  - If `!(eventSeq > stateRev)`: returns `lo32 = 3`, `hi32 = stateRev32` (`ReplayIdempotence`).
+  - If `effectAdmitted != 1`: returns `lo32 = 4`, `hi32 = stateRev32` (`EffectSafety` rejection).
+  - Otherwise admits transition (`lo32 = 257 | emitBit`, `hi32 = eventSeq.toUInt32`).
+-/
+@[inline, export orb_wire_machine_step]
+def wireMachineStep
+    (schemaId : UInt32)
+    (stateRev eventSeq : UInt64)
+    (effectKind effectAdmitted : UInt8)
+    (outCap requiredOutBytes : UInt32) : UInt64 :=
+  let curRev32 : UInt32 := stateRev.toUInt32
+  let capOk : Bool := requiredOutBytes <= outCap
+  let schemaOk : Bool := schemaId >= 1 && schemaId <= 2
+  let seqFresh : Bool := eventSeq > stateRev
+  let authOk : Bool := effectAdmitted == 1 && effectKind <= 5
+  let emitBit : UInt32 := if effectKind != 0 then 512 else 0
+  let lo32 : UInt32 :=
+    if !capOk then 5
+    else if !schemaOk then 2
+    else if !seqFresh then 3
+    else if !authOk then 4
+    else 257 ||| emitBit
+  let hi32 : UInt32 :=
+    if capOk && schemaOk && seqFresh && authOk then eventSeq.toUInt32 else curRev32
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Family 1 (`G-ORB-5`): Epoch-Aware Mission Hierarchy & Snapshot/Patch Merge Stepper (`orb_hierarchy_merge_step`):
+  Distinguishes full-snapshot replacement (`isPartialPatch == 0`) from partial-patch preservation
+  (`isPartialPatch == 1`, where `parentPresence == 0` preserves `curParentOrd` while `parentPresence == 2`
+  clears it), and enforces the sticky supersession fence (`curSuperseded == 1 || incSupersede == 1`)
+  versus explicit epoch-fenced unarchive (`incUnarchive == 1 && incomingEpoch > archiveEpoch && !superseded`).
+-/
+@[inline, export orb_hierarchy_merge_step]
+def hierarchyMergeStep
+    (currentEpoch incomingEpoch archiveEpoch : UInt64)
+    (curArchived curSuperseded isPartialPatch parentPresence : UInt8)
+    (curParentOrd incParentOrd : UInt32)
+    (incArchive incUnarchive incSupersede : UInt8) : UInt64 :=
+  let nextSup : Bool := curSuperseded == 1 || incSupersede == 1
+  let curArchBool : Bool := curArchived == 1
+  let incArchBool : Bool := incArchive == 1
+  let incUnarchBool : Bool := incUnarchive == 1
+  let incSupBool : Bool := incSupersede == 1
+  let validPresence : Bool := parentPresence <= 2
+  let epochFresh : Bool :=
+    if isPartialPatch == 1 then incomingEpoch > currentEpoch else incomingEpoch >= currentEpoch
+  let unarchEpochOk : Bool := incomingEpoch > archiveEpoch
+  let unarchiveAllowed : Bool :=
+    if nextSup then false
+    else if incUnarchBool then (if incArchBool then false else unarchEpochOk)
+    else false
+  let nextArch : Bool :=
+    if nextSup then true
+    else if validPresence then
+      if epochFresh then
+        if incArchBool then true
+        else if unarchiveAllowed then false
+        else curArchBool
+      else curArchBool
+    else curArchBool
+  let supBlocks : Bool := if curSuperseded == 1 then !incSupBool else false
+  let archBlocks : Bool :=
+    if curArchBool then
+      if nextSup then false
+      else if incArchBool then false
+      else !unarchiveAllowed
+    else false
+  let admit : Bool :=
+    if validPresence then
+      if epochFresh then
+        if supBlocks then false else !archBlocks
+      else false
+    else false
+  let nextParent : UInt32 :=
+    if !admit then curParentOrd
+    else if isPartialPatch == 1 then
+      if parentPresence == 0 then curParentOrd
+      else if parentPresence == 1 then incParentOrd
+      else 0
+    else
+      if parentPresence == 1 then incParentOrd else 0
+  let archBit : UInt32 := if nextArch then 512 else 0
+  let supBit : UInt32 := if nextSup then 1024 else 0
+  let unarchBit : UInt32 := if admit && unarchiveAllowed && curArchived == 1 then 2048 else 0
+  let lo32 : UInt32 :=
+    (if admit then 257 else 2) ||| archBit ||| supBit ||| unarchBit
+  lo32.toUInt64 ||| (nextParent.toUInt64 <<< 32)
+
+/--
+  Family 2 (`G-ORB-3`): Contiguous Sequence & Replay-Equivalent Transcript Fold Stepper (`orb_transcript_fold_step`):
+  Enforces strict contiguous sequence progression (`incomingSeq == lastAppliedSeq + 1` with no `UInt64` wrap)
+  so out-of-order gaps (`incomingSeq > lastAppliedSeq + 1`) are buffered (`action = 3`, `gapBit = 2048`)
+  and duplicates (`incomingSeq <= lastAppliedSeq`) are ignored (`action = 2`), while `isReplayFromLog`
+  is bit-for-bit invariant across live and replay folds.
+-/
+@[inline, export orb_transcript_fold_step]
+def transcriptFoldStep
+    (lastAppliedSeq incomingSeq : UInt64)
+    (entryCount : UInt32)
+    (thinkingOpen normalizedAction isReplayFromLog : UInt8) : UInt64 :=
+  let _ := isReplayFromLog
+  let keepThink : UInt32 := if thinkingOpen == 1 then 512 else 0
+  let isDuplicate : Bool := incomingSeq <= lastAppliedSeq
+  let isContiguous : Bool := !isDuplicate && (incomingSeq - lastAppliedSeq == 1)
+  let isOpenThink : Bool := normalizedAction == 4
+  let isAppendEntry : Bool :=
+    normalizedAction == 5 || normalizedAction == 6 || normalizedAction == 7 ||
+    normalizedAction == 9 || normalizedAction == 10
+  let isMetaUpdate : Bool :=
+    normalizedAction == 2 || normalizedAction == 3 || normalizedAction == 8
+  let lo32 : UInt32 :=
+    if isDuplicate then 2 ||| keepThink
+    else if !isContiguous then 2051 ||| keepThink
+    else if isOpenThink then 769
+    else if isAppendEntry then (if thinkingOpen == 1 then 1281 else 257)
+    else if isMetaUpdate then 260 ||| keepThink
+    else 5 ||| keepThink
+  let hi32 : UInt32 :=
+    if isContiguous && isAppendEntry then satAdd32 entryCount 1 else entryCount
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Family 3 (`G-ORB-2`): Crash-Consistent Durable Outbox & Volatile Lease Reconciler (`orb_outbox_crash_reconcile_step`):
+  Separates persistent WAL state (`durableQueued`, `durableAcked`) from volatile in-flight lease state
+  (`volatileInFlight`, `volatileLeaseOwner`, `leaseBootEpoch` vs `nodeBootEpoch`):
+  - If `durableAcked > durableQueued`, rejects corrupt WAL (`lo32 = 0`, `hi32 = 0`).
+  - If `leaseBootEpoch != nodeBootEpoch`, crash-resets volatile lease/in-flight state and re-queues
+    `durableQueued - durableAcked` unacknowledged messages (`reconciledBit = 512`, `0` lost messages).
+  - Admits single-writer dispatch (`admitBit = 256`, `writerCount <= 1`) iff `unacked > 0`, `reqOwner != 0`,
+    and either volatile lease was crash-reset or `volatileLeaseOwner == 0 || volatileLeaseOwner == reqOwner`.
+-/
+@[inline, export orb_outbox_crash_reconcile_step]
+def outboxCrashReconcileStep
+    (durableQueued durableAcked volatileInFlight : UInt32)
+    (leaseBootEpoch nodeBootEpoch : UInt64)
+    (volatileLeaseOwner reqOwner : UInt32) : UInt64 :=
+  let validWal : Bool := durableAcked <= durableQueued
+  let unacked : UInt32 := if validWal then durableQueued - durableAcked else 0
+  let crashReset : Bool := leaseBootEpoch != nodeBootEpoch
+  let effOwner : UInt32 := if crashReset then 0 else volatileLeaseOwner
+  let effInFlight : UInt32 := if crashReset then 0 else volatileInFlight
+  let canAcquire : Bool :=
+    validWal && unacked > 0 && reqOwner != 0 &&
+    (effOwner == 0 || effOwner == reqOwner) && effInFlight < unacked
+  let nextOwner : UInt32 := if canAcquire then reqOwner else effOwner
+  let writerBit : UInt32 := if nextOwner != 0 then 1024 else 0
+  let crashBit : UInt32 := if crashReset then 512 else 0
+  let lo32 : UInt32 :=
+    if !validWal then 0
+    else if canAcquire then 257 ||| crashBit ||| writerBit
+    else (if unacked == 0 then 2 else 3) ||| crashBit ||| writerBit
+  lo32.toUInt64 ||| (unacked.toUInt64 <<< 32)
+
+/--
+  Family 4: Multi-Attempt Provider Lifecycle, Cooldown & 3-Clock Stepper (`orb_provider_attempt_step`):
+  Unifies retry budget (`attemptsUsed < retryBudget`), Antigravity account pinning (`pinnedAccountId == 0 || candidateAccountId == pinnedAccountId`),
+  402/quota cooldown (`failureKind != 2` and `upstreamNowEpoch >= cooldownUntilEpoch`), 3-clock deadline
+  isolation (`upstreamNowEpoch < upstreamDeadline && authValid == 1`), and sticky `firstByteCommitted` lock.
+-/
+@[inline, export orb_provider_attempt_step]
+def providerAttemptStep
+    (pinnedAccountId candidateAccountId : UInt32)
+    (attemptsUsed retryBudget : UInt32)
+    (firstByteCommitted failureKind : UInt8)
+    (upstreamNowEpoch cooldownUntilEpoch upstreamDeadline : UInt64)
+    (authValid : UInt8) : UInt64 :=
+  let nextFirstByte : Bool := firstByteCommitted == 1 || failureKind == 3
+  let lockBit : UInt32 := if nextFirstByte then 512 else 0
+  let pinOk : Bool :=
+    candidateAccountId != 0 && (pinnedAccountId == 0 || candidateAccountId == pinnedAccountId)
+  let cooldownOk : Bool := failureKind != 2 && upstreamNowEpoch >= cooldownUntilEpoch
+  let clockOk : Bool := upstreamNowEpoch < upstreamDeadline && authValid == 1
+  let isRetry : Bool := failureKind == 1 || failureKind == 2
+  let budgetOk : Bool := if isRetry then attemptsUsed < retryBudget else attemptsUsed <= retryBudget
+  let canDispatch : Bool :=
+    !(firstByteCommitted == 1 && isRetry) && pinOk && cooldownOk && clockOk && budgetOk
+  let nextAttempts : UInt32 :=
+    if canDispatch && isRetry then satAdd32 attemptsUsed 1 else attemptsUsed
+  let lo32 : UInt32 :=
+    if firstByteCommitted == 1 && isRetry then 3 ||| lockBit
+    else if !pinOk then 4 ||| lockBit
+    else if !cooldownOk then 5 ||| lockBit
+    else if !clockOk then 6 ||| lockBit
+    else if !budgetOk then 7 ||| lockBit
+    else 257 ||| lockBit
+  lo32.toUInt64 ||| (nextAttempts.toUInt64 <<< 32)
+
+/--
+  Family 5 (`G-ORB-7`): `observe -> gate -> execute` TOCTOU Authorization Stepper (`orb_auth_toctou_execute_step`):
+  Binds an execution attempt to the exact authorization evidence observed at gate time:
+  admits (`257`) iff `principalKind >= 1 && principalKind <= 3`, `observedTargetId != 0 && observedTargetId == execTargetId`,
+  `observedLeaseEpoch != 0 && observedLeaseEpoch == liveLeaseEpoch`, `observedDigest != 0 && observedDigest == execDigest`,
+  `nowTick < expiryTick`, and `bunkerState == 0` (normal). Any target swap, lease revocation/rotation,
+  payload mutation, expiry, or bunker trip between `gate` and `execute` fails closed (`>= 512`, `admittedBit = 0`).
+-/
+@[inline, export orb_auth_toctou_execute_step]
+def authToctouExecuteStep
+    (principalKind bunkerState : UInt8)
+    (observedTargetId execTargetId : UInt32)
+    (observedLeaseEpoch liveLeaseEpoch : UInt64)
+    (nowTick expiryTick : UInt64)
+    (observedDigest execDigest : UInt64) : UInt32 :=
+  if bunkerState != 0 then 513
+  else if !(principalKind >= 1 && principalKind <= 3) then 514
+  else if !(nowTick < expiryTick) then 515
+  else if !(observedLeaseEpoch != 0 && observedLeaseEpoch == liveLeaseEpoch) then 516
+  else if !(observedTargetId != 0 && observedTargetId == execTargetId) then 517
+  else if !(observedDigest != 0 && observedDigest == execDigest) then 518
+  else 257
+
+/--
+  Family 6: Conserved Resource Reservation, Spend & TTL Reaper Stepper (`orb_resource_ledger_step`):
+  Maintains `reservedSlots + activeSlots <= maxSlots` and `spentCents <= budgetCents` with TTL/boot-epoch
+  reaping (`opKind : 0 = Reserve, 1 = ActivateReserved, 2 = ReleaseActive, 3 = ReapExpired`):
+  - Never double-spends (`spentCents + costDeltaCents` checked without wrap via `costDeltaCents <= budgetCents - spentCents`).
+  - Never overflows `maxSlots` (`activeSlots <= maxSlots && reservedSlots <= maxSlots - activeSlots`).
+-/
+@[inline, export orb_resource_ledger_step]
+def resourceLedgerStep
+    (opKind : UInt8)
+    (reservedSlots activeSlots maxSlots : UInt32)
+    (spentCents costDeltaCents budgetCents : UInt64)
+    (nowTick ttlExpiryTick : UInt64) : UInt64 :=
+  let activeFits : Bool := activeSlots <= maxSlots
+  let remSlots : UInt32 := if activeFits then maxSlots - activeSlots else 0
+  let reservedFits : Bool := reservedSlots <= remSlots
+  let budgetValid : Bool := spentCents <= budgetCents
+  let stateValid : Bool :=
+    if activeFits then (if reservedFits then budgetValid else false) else false
+  let remBudget : UInt64 := if budgetValid then budgetCents - spentCents else 0
+  let spendFits : Bool := if stateValid then costDeltaCents <= remBudget else false
+  let hasFreeSlot : Bool := reservedSlots < remSlots
+  let hasReserved : Bool := reservedSlots > 0
+  let hasActive : Bool := activeSlots > 0
+  let ttlLive : Bool := nowTick < ttlExpiryTick
+  let ttlExpired : Bool := nowTick >= ttlExpiryTick
+  let canReserve : Bool :=
+    if opKind == 0 then (if spendFits then (if hasFreeSlot then ttlLive else false) else false) else false
+  let canActivate : Bool :=
+    if opKind == 1 then (if stateValid then (if hasReserved then ttlLive else false) else false) else false
+  let canRelease : Bool :=
+    if opKind == 2 then (if stateValid then hasActive else false) else false
+  let canReap : Bool :=
+    if opKind == 3 then (if stateValid then (if hasReserved then ttlExpired else false) else false) else false
+  let nextReserved : UInt32 :=
+    if canReserve then reservedSlots + 1
+    else if canActivate || canReap then reservedSlots - 1
+    else reservedSlots
+  let nextActive : UInt32 :=
+    if canActivate then activeSlots + 1
+    else if canRelease then activeSlots - 1
+    else activeSlots
+  let admit : Bool := canReserve || canActivate || canRelease || canReap
+  let lo32 : UInt32 :=
+    if !stateValid then 0
+    else if admit then (257 : UInt32) ||| ((opKind.toUInt32 &&& (0xFF : UInt32)) <<< 1)
+    else 2
+  let hi32 : UInt32 := (nextReserved &&& (0xFFFF : UInt32)) ||| ((nextActive &&& (0xFFFF : UInt32)) <<< 16)
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
+
+/--
+  Family 7 (`G-ORB-6`): Bounded-Tail Checkpointed Stream Commit Stepper (`orb_stream_bounded_commit_step`):
+  Bounds the open Markdown fence tail by `maxOpenTailBytes` (`maxOpenTailBytes > 0`):
+  computes monotone `nextCommit = max prevCommit (min rawCommit totalBytes)` and advances
+  `nextCheckpoint = max (max prevCheckpoint nextCommit) (totalBytes - maxOpenTailBytes)` so the
+  re-parsed open tail `totalBytes - nextCheckpoint` NEVER exceeds `maxOpenTailBytes` even on giant
+  unclosed code fences.
+-/
+@[inline, export orb_stream_bounded_commit_step]
+def streamBoundedCommitStep
+    (prevLen prevCommit prevCheckpoint : UInt32)
+    (newLen rawCommit maxOpenTailBytes : UInt32) : UInt64 :=
+  let validCap : Bool := maxOpenTailBytes > 0
+  let validMono : Bool :=
+    prevCommit <= prevCheckpoint && prevCheckpoint <= prevLen && prevLen <= newLen
+  let clampedRaw : UInt32 := if rawCommit <= newLen then rawCommit else newLen
+  let nextCommit : UInt32 := if prevCommit <= clampedRaw then clampedRaw else prevCommit
+  let baseCheckpoint : UInt32 := if prevCheckpoint <= nextCommit then nextCommit else prevCheckpoint
+  let capFloor : UInt32 := if maxOpenTailBytes <= newLen then newLen - maxOpenTailBytes else 0
+  let nextCheckpoint : UInt32 := if baseCheckpoint <= capFloor then capFloor else baseCheckpoint
+  let checkpointForcedBit : UInt32 := if nextCheckpoint > nextCommit then 512 else 0
+  let lo32 : UInt32 :=
+    if !(validCap && validMono) then 0
+    else 257 ||| checkpointForcedBit
+  let hi32 : UInt32 :=
+    if !(validCap && validMono) then prevCheckpoint else nextCheckpoint
+  lo32.toUInt64 ||| (hi32.toUInt64 <<< 32)
 end Orb.Kernel

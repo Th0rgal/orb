@@ -60,6 +60,120 @@ use crate::remote_node::RemoteNodeConfig;
 /// Prefix of every managed node id and of the boat sandbox names we create.
 pub const NODE_PREFIX: &str = "managed-";
 pub const SANDBOX_NAME_PREFIX: &str = "orb-managed-";
+
+static RESOURCE_LEDGER_SHADOW_COUNTER: OnceLock<crate::orb_spec::ShadowCounter> = OnceLock::new();
+
+pub fn resource_ledger_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    RESOURCE_LEDGER_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_resource_ledger_gate(
+    op_kind: crate::orb_spec::ResourceLedgerOp,
+    reserved_slots: u32,
+    active_slots: u32,
+    max_slots: u32,
+    spent_cents: u64,
+    cost_delta_cents: u64,
+    budget_cents: u64,
+    now_tick: u64,
+    ttl_expiry_tick: u64,
+) -> crate::orb_spec::ResourceLedgerStepVerdict {
+    let input = crate::orb_spec::ResourceLedgerStepInput {
+        op_kind,
+        reserved_slots,
+        active_slots,
+        max_slots,
+        spent_cents,
+        cost_delta_cents,
+        budget_cents,
+        now_tick,
+        ttl_expiry_tick,
+    };
+    let verdict = crate::orb_spec::resource_ledger_step(input);
+    let active_fits = active_slots <= max_slots;
+    let rem_slots = if active_fits {
+        max_slots - active_slots
+    } else {
+        0
+    };
+    let reserved_fits = reserved_slots <= rem_slots;
+    let budget_valid = spent_cents <= budget_cents;
+    let state_valid = active_fits && reserved_fits && budget_valid;
+    let rem_budget = if budget_valid {
+        budget_cents - spent_cents
+    } else {
+        0
+    };
+    let spend_fits = state_valid && cost_delta_cents <= rem_budget;
+    let can_reserve = matches!(op_kind, crate::orb_spec::ResourceLedgerOp::Reserve)
+        && spend_fits
+        && reserved_slots < rem_slots
+        && now_tick < ttl_expiry_tick;
+    let can_activate = matches!(op_kind, crate::orb_spec::ResourceLedgerOp::ActivateReserved)
+        && state_valid
+        && reserved_slots > 0
+        && now_tick < ttl_expiry_tick;
+    let can_release = matches!(op_kind, crate::orb_spec::ResourceLedgerOp::ReleaseActive)
+        && state_valid
+        && active_slots > 0;
+    let can_reap = matches!(op_kind, crate::orb_spec::ResourceLedgerOp::ReapExpired)
+        && state_valid
+        && reserved_slots > 0
+        && now_tick >= ttl_expiry_tick;
+    let host_admitted = can_reserve || can_activate || can_release || can_reap;
+    let host_next_reserved = if can_reserve {
+        reserved_slots + 1
+    } else if can_activate || can_reap {
+        reserved_slots - 1
+    } else {
+        reserved_slots
+    } as u16;
+    let host_next_active = if can_activate {
+        active_slots + 1
+    } else if can_release {
+        active_slots - 1
+    } else {
+        active_slots
+    } as u16;
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        (bool, u16, u16),
+        (bool, u16, u16),
+        crate::orb_spec::ResourceLedgerStepInput,
+        u8,
+        u8,
+    > {
+        subsystem: "orb_resource_ledger_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = crate::orb_spec::resource_ledger_step(*ev);
+            (
+                (v.admitted, v.next_reserved_slots, v.next_active_slots),
+                vec![u8::from(v.state_valid)],
+            )
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: now_tick,
+        fresh_nonce: ttl_expiry_tick,
+        idempotency_key: cost_delta_cents,
+        boot_id_matches: true,
+        schema_id: 2,
+    };
+    resource_ledger_shadow_counter().with_ring(|ring| {
+        let _ = sim.observe_step(
+            &(false, reserved_slots as u16, active_slots as u16),
+            &(host_admitted, host_next_reserved, host_next_active),
+            &input,
+            &[u8::from(state_valid)],
+            ctx,
+            ring,
+        );
+    });
+    verdict
+}
 const TOKEN_ENV_PREFIX: &str = "SANDBOXED_MANAGED_TOKEN_";
 const ENROLL_ENV_PATH: &str = "/home/user/.orb/enroll.env";
 const PROVISION_PATH: &str = "/home/user/.orb/provision.sh";
@@ -2960,6 +3074,30 @@ impl ManagedManager {
                     "Managed machine spawn rejected by kernel admission policy",
                 ));
             }
+            let spent_before_cents =
+                ((budget.spent_today_usd + budget.committed_usd) * 100.0).ceil() as u64;
+            let cost_delta_cents = spent_plus_new_cents.saturating_sub(spent_before_cents);
+            let ledger_cap_cents = daily_cap_cents.max(spent_plus_new_cents);
+            let now_tick = Utc::now().timestamp().max(0) as u64;
+            let ttl_expiry_tick = now_tick.saturating_add(ttl_minutes.saturating_mul(60));
+            let ledger_verdict = evaluate_resource_ledger_gate(
+                crate::orb_spec::ResourceLedgerOp::Reserve,
+                0,
+                active_count_u32,
+                max_conc_u32,
+                spent_before_cents,
+                cost_delta_cents,
+                ledger_cap_cents,
+                now_tick,
+                ttl_expiry_tick,
+            );
+            if !ledger_verdict.admitted {
+                return Err(ManagedError::new(
+                    "budget_exceeded",
+                    402,
+                    "Managed machine reservation rejected by orb_resource_ledger_step",
+                ));
+            }
             let reserve = if committed_minutes > ttl_minutes {
                 new_cost
             } else {
@@ -3866,10 +4004,25 @@ impl ManagedManager {
                     if m.state != MachineState::Online {
                         // Not yet serving: only the TTL applies.
                         if now >= m.expires_at {
-                            let _ = self
-                                .destroy_inner(&m.id, Some("ttl_expired".into()), false)
-                                .await;
-                            continue;
+                            let now_tick = now.timestamp().max(0) as u64;
+                            let exp_tick = m.expires_at.timestamp().max(0) as u64;
+                            let reap_ledger = evaluate_resource_ledger_gate(
+                                crate::orb_spec::ResourceLedgerOp::ReapExpired,
+                                1,
+                                0,
+                                1,
+                                0,
+                                0,
+                                1,
+                                now_tick,
+                                exp_tick,
+                            );
+                            if reap_ledger.admitted {
+                                let _ = self
+                                    .destroy_inner(&m.id, Some("ttl_expired".into()), false)
+                                    .await;
+                                continue;
+                            }
                         }
                     } else {
                         let busy = Self::node_busy(&m.node_id);
@@ -3916,6 +4069,18 @@ impl ManagedManager {
                                         idle_expired: !ttl && !decision.is_owner_rule(),
                                     });
                                 if admitted && (ttl || !dry_run) {
+                                    let release_ledger = evaluate_resource_ledger_gate(
+                                        crate::orb_spec::ResourceLedgerOp::ReleaseActive,
+                                        0,
+                                        1,
+                                        1,
+                                        0,
+                                        0,
+                                        1,
+                                        now.timestamp().max(0) as u64,
+                                        m.expires_at.timestamp().max(0) as u64,
+                                    );
+                                    debug_assert!(release_ledger.admitted);
                                     let supports_free_stop = self
                                         .provider_for(&m.provider)
                                         .is_some_and(|p| p.supports_free_stop());

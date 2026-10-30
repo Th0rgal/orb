@@ -2426,7 +2426,20 @@ async fn native_protocol_proxy(
             !native_first_byte_locked && (entry_idx as u32) < native_chain_length,
         );
         native_first_byte_locked = pool_verdict.first_byte_locked_next;
+        let attempt_verdict = crate::provider_health::evaluate_provider_attempt_gate(
+            0,
+            cand_ord,
+            entry_idx as u32,
+            native_chain_length.max(1),
+            native_first_byte_locked,
+            u8::from(entry_idx > 0),
+            now_epoch,
+            0,
+            now_epoch.saturating_add(300),
+            true,
+        );
         if !pool_verdict.emit_dispatch_effect
+            || !attempt_verdict.admitted
             || native_account_ordinals.uuid_of(pool_verdict.dispatched_account_id)
                 != Some(entry.account_id)
         {
@@ -3749,7 +3762,20 @@ async fn chat_completions_routed(
             !waterfall_first_byte_locked && (entry_idx as u32) < chain_length.max(1),
         );
         waterfall_first_byte_locked = pool_verdict.first_byte_locked_next;
+        let attempt_verdict = crate::provider_health::evaluate_provider_attempt_gate(
+            0,
+            cand_ord,
+            entry_idx as u32,
+            chain_length.max(1),
+            waterfall_first_byte_locked,
+            u8::from(entry_idx > 0),
+            now_epoch,
+            0,
+            now_epoch.saturating_add(300),
+            true,
+        );
         if !pool_verdict.emit_dispatch_effect
+            || !attempt_verdict.admitted
             || waterfall_account_ordinals.uuid_of(pool_verdict.dispatched_account_id)
                 != Some(entry.account_id)
         {

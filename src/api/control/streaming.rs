@@ -109,6 +109,85 @@ pub(super) fn merge_text_stream_fragment(buffer: &mut String, fragment: &str) {
     buffer.push_str(&fragment[overlap..]);
 }
 
+pub const STREAM_MAX_OPEN_TAIL_BYTES: u32 = 4096;
+
+static STREAM_BOUNDED_COMMIT_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+pub fn stream_bounded_commit_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    STREAM_BOUNDED_COMMIT_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+pub fn evaluate_stream_bounded_commit_gate(
+    prev_len: u32,
+    prev_commit: u32,
+    prev_checkpoint: u32,
+    new_len: u32,
+    raw_commit: u32,
+    max_open_tail_bytes: u32,
+) -> crate::orb_spec::StreamBoundedCommitVerdict {
+    let input = crate::orb_spec::StreamBoundedCommitInput {
+        prev_len,
+        prev_commit,
+        prev_checkpoint,
+        new_len,
+        raw_commit,
+        max_open_tail_bytes,
+    };
+    let verdict = crate::orb_spec::stream_bounded_commit_step(input);
+    let valid = max_open_tail_bytes > 0
+        && prev_commit <= prev_checkpoint
+        && prev_checkpoint <= prev_len
+        && prev_len <= new_len;
+    let clamped_raw = raw_commit.min(new_len);
+    let next_commit = prev_commit.max(clamped_raw);
+    let base_checkpoint = prev_checkpoint.max(next_commit);
+    let cap_floor = new_len.saturating_sub(max_open_tail_bytes);
+    let host_next_checkpoint = if valid {
+        base_checkpoint.max(cap_floor)
+    } else {
+        prev_checkpoint
+    };
+    let host_forced = valid && host_next_checkpoint > next_commit;
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        (bool, u32),
+        (bool, u32),
+        crate::orb_spec::StreamBoundedCommitInput,
+        u8,
+        u8,
+    > {
+        subsystem: "orb_stream_bounded_commit_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = crate::orb_spec::stream_bounded_commit_step(*ev);
+            (
+                (v.admitted, v.next_checkpoint),
+                vec![u8::from(v.checkpoint_forced)],
+            )
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: u64::from(new_len),
+        fresh_nonce: u64::from(prev_len),
+        idempotency_key: u64::from(raw_commit),
+        boot_id_matches: true,
+        schema_id: 2,
+    };
+    stream_bounded_commit_shadow_counter().with_ring(|ring| {
+        let _ = sim.observe_step(
+            &(false, prev_checkpoint),
+            &(valid, host_next_checkpoint),
+            &input,
+            &[u8::from(host_forced)],
+            ctx,
+            ring,
+        );
+    });
+    verdict
+}
+
 pub(super) fn text_op_events_for_stream(
     ev: AgentEvent,
     text_buffers: &mut HashMap<Uuid, String>,
@@ -119,9 +198,36 @@ pub(super) fn text_op_events_for_stream(
             mission_id: Some(mission_id),
         } => {
             let previous = text_buffers.entry(mission_id).or_default();
+            let prev_bytes = previous.len().min(u32::MAX as usize) as u32;
+            let prev_raw_commit = previous
+                .rfind("\n\n")
+                .map(|idx| (idx + 2).min(u32::MAX as usize) as u32)
+                .unwrap_or(0);
+            let prev_checkpoint =
+                prev_raw_commit.max(prev_bytes.saturating_sub(STREAM_MAX_OPEN_TAIL_BYTES));
             let previous_len = previous.chars().count();
             let mut next = previous.clone();
             merge_text_stream_fragment(&mut next, &content);
+            let new_bytes = next.len().min(u32::MAX as usize) as u32;
+            let raw_commit = next
+                .rfind("\n\n")
+                .map(|idx| (idx + 2).min(u32::MAX as usize) as u32)
+                .unwrap_or(prev_raw_commit);
+            let commit_verdict = evaluate_stream_bounded_commit_gate(
+                prev_bytes,
+                prev_raw_commit,
+                prev_checkpoint,
+                new_bytes.max(prev_bytes),
+                raw_commit,
+                STREAM_MAX_OPEN_TAIL_BYTES,
+            );
+            debug_assert!(
+                commit_verdict.admitted
+                    && new_bytes
+                        .max(prev_bytes)
+                        .saturating_sub(commit_verdict.next_checkpoint)
+                        <= STREAM_MAX_OPEN_TAIL_BYTES
+            );
             let ops = if previous.is_empty() {
                 vec![TextOp::Insert {
                     pos: 0,

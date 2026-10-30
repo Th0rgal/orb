@@ -1,9 +1,9 @@
 {
   "schema_version": "orb-coverage-registry-v1",
   "acceptance": "INCOMPLETE",
-  "total_exports": 118,
+  "total_exports": 128,
   "counts_by_status": {
-    "partial": 12,
+    "partial": 22,
     "unconnected": 106
   },
   "entries": [
@@ -184,54 +184,6 @@
       ]
     },
     {
-      "export": "orb_vm_lifecycle_step",
-      "requirement": "Inventory ABI declaration orb_vm_lifecycle_step; behavioral acceptance pending",
-      "model": "Orb.Kernel.vmLifecycleStep",
-      "theorems": [],
-      "authoritative_callers": [],
-      "adapter_tests": [],
-      "status": "unconnected",
-      "assumptions": [
-        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
-        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
-      ],
-      "blockers": [
-        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
-      ]
-    },
-    {
-      "export": "orb_vm_claim_step",
-      "requirement": "Inventory ABI declaration orb_vm_claim_step; behavioral acceptance pending",
-      "model": "Orb.Kernel.vmClaimStep",
-      "theorems": [],
-      "authoritative_callers": [],
-      "adapter_tests": [],
-      "status": "unconnected",
-      "assumptions": [
-        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
-        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
-      ],
-      "blockers": [
-        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
-      ]
-    },
-    {
-      "export": "orb_compute_secret_gate",
-      "requirement": "Inventory ABI declaration orb_compute_secret_gate; behavioral acceptance pending",
-      "model": "Orb.Kernel.computeSecretGate",
-      "theorems": [],
-      "authoritative_callers": [],
-      "adapter_tests": [],
-      "status": "unconnected",
-      "assumptions": [
-        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
-        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
-      ],
-      "blockers": [
-        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
-      ]
-    },
-    {
       "export": "orb_verify_log_window",
       "requirement": "Inventory ABI declaration orb_verify_log_window; behavioral acceptance pending",
       "model": "Orb.Kernel.verifyLogWindow",
@@ -307,23 +259,23 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "3065391e2c76a1212f466803b79b3d9bf000e9710de307fc645c58dce07f5ccd"
+            "sha256": "0859b6c4e46fd175b1adee93b99d2594e2a8a36656019499c533f602acc1abc9"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "db8282476bf973fe6cce913ba3b696c0cbaeedb7090a67ee4c84b88ab95da55d"
+            "sha256": "4d6770dbc44cd2f7f146f7bb6442dd2ee138e442829c89faada5e99d0a8c6acd"
           }
         ],
         "execution": {
@@ -382,23 +334,23 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "src/api/proxy.rs",
-            "sha256": "3065391e2c76a1212f466803b79b3d9bf000e9710de307fc645c58dce07f5ccd"
+            "sha256": "0859b6c4e46fd175b1adee93b99d2594e2a8a36656019499c533f602acc1abc9"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "db8282476bf973fe6cce913ba3b696c0cbaeedb7090a67ee4c84b88ab95da55d"
+            "sha256": "4d6770dbc44cd2f7f146f7bb6442dd2ee138e442829c89faada5e99d0a8c6acd"
           }
         ],
         "execution": {
@@ -569,15 +521,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "src/api/mission_access.rs",
@@ -585,7 +537,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "db8282476bf973fe6cce913ba3b696c0cbaeedb7090a67ee4c84b88ab95da55d"
+            "sha256": "4d6770dbc44cd2f7f146f7bb6442dd2ee138e442829c89faada5e99d0a8c6acd"
           }
         ],
         "execution": {
@@ -771,15 +723,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "src/remote_node/job_ledger.rs",
@@ -787,7 +739,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "db8282476bf973fe6cce913ba3b696c0cbaeedb7090a67ee4c84b88ab95da55d"
+            "sha256": "4d6770dbc44cd2f7f146f7bb6442dd2ee138e442829c89faada5e99d0a8c6acd"
           }
         ],
         "execution": {
@@ -1421,23 +1373,23 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
-            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
+            "sha256": "45270814a91e20e0e6f5c6e48dd91bacddc11fe61cd1ed65c100c641150ad3de"
           }
         ],
         "execution": {
@@ -1501,23 +1453,23 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
-            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
+            "sha256": "45270814a91e20e0e6f5c6e48dd91bacddc11fe61cd1ed65c100c641150ad3de"
           }
         ],
         "execution": {
@@ -1576,23 +1528,23 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
-            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
+            "sha256": "45270814a91e20e0e6f5c6e48dd91bacddc11fe61cd1ed65c100c641150ad3de"
           }
         ],
         "execution": {
@@ -1651,23 +1603,23 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
-            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
           },
           {
             "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-            "sha256": "3c6a46f6b98ed628352702130cde849b2698143f7c99f9988190cc4372c7ed4a"
+            "sha256": "45270814a91e20e0e6f5c6e48dd91bacddc11fe61cd1ed65c100c641150ad3de"
           }
         ],
         "execution": {
@@ -1785,11 +1737,11 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "src/api/control/fork.rs",
@@ -1801,7 +1753,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-            "sha256": "3b3e09500c4516cf7d6c761eb947e5964d7c50b417fcd588129e2faf6ffcc5d0"
+            "sha256": "e7467dcc43972af449a89fb58410d4cfb2aa44bd647fbe8fde2fd82d23e0853e"
           },
           {
             "path": "src/api/control/dispatch_admission_tests.rs",
@@ -1877,15 +1829,15 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-            "sha256": "8eb6531bfd7f1a83ac18e6c20115b4a9f5e95ac87bd2bcdf805d616d6609d4ec"
+            "sha256": "c5b222b2b4bcff605fd41d0081ac84010a7f916afa1f6ed28cd42c75ca34f4dd"
           },
           {
             "path": "src/api/control/fork.rs",
@@ -1954,27 +1906,27 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
-            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
           },
           {
             "path": "src/api/privilege_broker.rs",
-            "sha256": "2139a0218c8b6be59bad654038c4eb1513b1e0e01a435848e35e0b89c6de6be0"
+            "sha256": "2b38fc4ac6f8699a74709d05b15e1e5314f25c96b708d544aa38c28df810cfb6"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "db8282476bf973fe6cce913ba3b696c0cbaeedb7090a67ee4c84b88ab95da55d"
+            "sha256": "4d6770dbc44cd2f7f146f7bb6442dd2ee138e442829c89faada5e99d0a8c6acd"
           }
         ],
         "execution": {
@@ -2038,19 +1990,19 @@
         "sources": [
           {
             "path": "lean/Orb/Kernel.lean",
-            "sha256": "ae5d5c10c96ccc78ab97c7bdc1f13f5fbdf3a4e443b8460231ac7863e4c4d877"
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
           },
           {
             "path": "lean/Orb/Spec.lean",
-            "sha256": "66332e486dd6192b918e779cb337525a4479fec1c2d87a6de8eee87692e9ab9f"
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
           },
           {
             "path": "crates/orb-spec/src/lib.rs",
-            "sha256": "0f5e96a9b19b8489bf0423c2fc41a40e46635656ef081b0e40b971a783402f8a"
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
           },
           {
             "path": "crates/orb-spec/src/shadow.rs",
-            "sha256": "3ec8af8e650a40b8a6461a2a4430b4b9c90baac52950c0bbc5569cf5e7b647bd"
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
           },
           {
             "path": "src/api/control/remote_jobs.rs",
@@ -2058,7 +2010,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "db8282476bf973fe6cce913ba3b696c0cbaeedb7090a67ee4c84b88ab95da55d"
+            "sha256": "4d6770dbc44cd2f7f146f7bb6442dd2ee138e442829c89faada5e99d0a8c6acd"
           }
         ],
         "execution": {
@@ -2175,36 +2127,918 @@
       ]
     },
     {
-      "export": "orb_node_gc_step",
-      "requirement": "Inventory ABI declaration orb_node_gc_step; behavioral acceptance pending",
-      "model": "Orb.Kernel.nodeGcStep",
+      "export": "orb_wire_apply_patch_step",
+      "requirement": "Inventory ABI declaration orb_wire_apply_patch_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.wireApplyPatchStep",
       "theorems": [],
       "authoritative_callers": [],
       "adapter_tests": [],
-      "status": "unconnected",
+      "status": "partial",
       "assumptions": [
         "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
         "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
       ],
       "blockers": [
-        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
-      ]
+        "Patch-frame application is exercised in orb-spec shadow/codec tests; authoritative production IPC cutover remains open.",
+        "Slot index bounds and staging copies in Rust surround the scalar Lean patch gate."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local OrbWire patch tests verify revision-fenced tri-state field presence (Omitted preserves, Present updates, Cleared resets) and stale-revision rejection.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "wire_apply_patch_presence_merge_laws"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "apply_patch_frame"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/orb_spec.rs",
+            "symbol": "apply_host_wire_patch"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/orb_spec.rs",
+            "symbol": "host_orb_wire_machine_patch_and_fd_bounds_gates_verified"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "src/orb_spec.rs",
+            "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Patch-frame application is exercised in orb-spec shadow/codec tests; authoritative production IPC cutover remains open.",
+          "Slot index bounds and staging copies in Rust surround the scalar Lean patch gate."
+        ]
+      }
     },
     {
-      "export": "orb_node_disk_admission_step",
-      "requirement": "Inventory ABI declaration orb_node_disk_admission_step; behavioral acceptance pending",
-      "model": "Orb.Kernel.nodeDiskAdmissionStep",
+      "export": "orb_wire_machine_step",
+      "requirement": "Inventory ABI declaration orb_wire_machine_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.wireMachineStep",
       "theorems": [],
       "authoritative_callers": [],
       "adapter_tests": [],
-      "status": "unconnected",
+      "status": "partial",
       "assumptions": [
         "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
         "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
       ],
       "blockers": [
-        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
-      ]
+        "OrbWireMachine frames are exercised in orb-spec unit tests rather than live multi-node RPC endpoints.",
+        "Payload serialization of domain state and effects runs in host Rust around the scalar admission gate."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local OrbWireMachine tests verify output-buffer capacity fencing with zero partial mutation, schema range validation, monotone sequence progression, and replay rejection.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "wire_machine_step_cap_exceeded_preserves_rev"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "wire_machine_step"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/orb_spec.rs",
+            "symbol": "step_host_wire_machine"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/orb_spec.rs",
+            "symbol": "host_orb_wire_machine_patch_and_fd_bounds_gates_verified"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "src/orb_spec.rs",
+            "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "OrbWireMachine frames are exercised in orb-spec unit tests rather than live multi-node RPC endpoints.",
+          "Payload serialization of domain state and effects runs in host Rust around the scalar admission gate."
+        ]
+      }
+    },
+    {
+      "export": "orb_hierarchy_merge_step",
+      "requirement": "Inventory ABI declaration orb_hierarchy_merge_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.hierarchyMergeStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Authoritative sidebar/tree store cutover across iOS, Android, and desktop clients remains pending.",
+        "UUID-to-ordinal mapping and JSON patch deserialization occur in host code prior to the scalar step."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local hierarchy-merge shadow tests verify partial-patch parent preservation, full-snapshot replacement, and sticky supersession blocking unarchive.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "hierarchy_merge_partial_presence_and_sticky_supersede"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "symbol": "kill_family1_hierarchy_mutants"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "observe_hierarchy_merge_shadow"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/mission_store/mod.rs",
+            "symbol": "evaluate_hierarchy_merge_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/mission_store/mod.rs",
+            "symbol": "phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "lean/Orb/MutantSuite.lean",
+            "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          },
+          {
+            "path": "src/api/mission_store/mod.rs",
+            "sha256": "381b9d63aa4bbd258815c56af043d7000bf13e7609417ed956c557c68890ccf3"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Authoritative sidebar/tree store cutover across iOS, Android, and desktop clients remains pending.",
+          "UUID-to-ordinal mapping and JSON patch deserialization occur in host code prior to the scalar step."
+        ]
+      }
+    },
+    {
+      "export": "orb_transcript_fold_step",
+      "requirement": "Inventory ABI declaration orb_transcript_fold_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.transcriptFoldStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Out-of-order buffer draining and DOM/list materialization remain in client host code.",
+        "Native mobile and browser E2E transcript replay cutover is not established by this local Rust receipt."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local transcript-fold shadow tests verify contiguous sequence progression, gap buffering without entry inflation, and bitwise live-vs-replay fold equivalence.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "transcript_replay_fold_eq_live_fold"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "symbol": "kill_family2_transcript_mutants"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "observe_transcript_fold_shadow"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/control/remote_grok.rs",
+            "symbol": "evaluate_transcript_fold_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/remote_grok.rs",
+            "symbol": "phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "lean/Orb/MutantSuite.lean",
+            "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          },
+          {
+            "path": "src/api/control/remote_grok.rs",
+            "sha256": "e495e60af572c8677f071712a6f8f2c2a2b9394beb351b6612cd6e2906812509"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Out-of-order buffer draining and DOM/list materialization remain in client host code.",
+          "Native mobile and browser E2E transcript replay cutover is not established by this local Rust receipt."
+        ]
+      }
+    },
+    {
+      "export": "orb_outbox_crash_reconcile_step",
+      "requirement": "Inventory ABI declaration orb_outbox_crash_reconcile_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.outboxCrashReconcileStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Filesystem fsync durability and SQLite/IndexedDB WAL recovery remain outside the scalar reconciler.",
+        "Production local-queue and remote-outbox cutover to orb_outbox_crash_reconcile_step is not yet complete."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local outbox crash-reconcile tests verify volatile lease reset on boot-epoch mismatch, conservation of unacknowledged WAL entries, and single-writer lease acquisition.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "outbox_crash_conservation_and_single_writer"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "symbol": "kill_family3_outbox_mutants"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "outbox_crash_reconcile_step"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/control/control_queue.rs",
+            "symbol": "evaluate_outbox_crash_reconcile_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/control_queue.rs",
+            "symbol": "outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "lean/Orb/MutantSuite.lean",
+            "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          },
+          {
+            "path": "src/api/control/control_queue.rs",
+            "sha256": "e6ef230ae19443a7cad298d6877481e569025377f00ee21779f3a32f5930dbb5"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Filesystem fsync durability and SQLite/IndexedDB WAL recovery remain outside the scalar reconciler.",
+          "Production local-queue and remote-outbox cutover to orb_outbox_crash_reconcile_step is not yet complete."
+        ]
+      }
+    },
+    {
+      "export": "orb_provider_attempt_step",
+      "requirement": "Inventory ABI declaration orb_provider_attempt_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.providerAttemptStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "HTTP status classification and Tokio stream polling remain in src/api/proxy.rs.",
+        "Authoritative cutover of multi-provider failover loops to orb_provider_attempt_step remains open."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local provider-attempt tests verify sticky first-byte stream lock against mid-stream retry, account pinning, quota cooldown gating, and upstream deadline enforcement.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "provider_attempt_first_byte_lock_pin_and_cooldown"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "symbol": "kill_family4_provider_mutants"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "provider_attempt_step"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/provider_health.rs",
+            "symbol": "evaluate_provider_attempt_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/provider_health.rs",
+            "symbol": "provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "lean/Orb/MutantSuite.lean",
+            "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          },
+          {
+            "path": "src/provider_health.rs",
+            "sha256": "1a32406b84f635676967e76bdf55fc5b41e9ce91c4e7296e5f85a5c97c9c73eb"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "HTTP status classification and Tokio stream polling remain in src/api/proxy.rs.",
+          "Authoritative cutover of multi-provider failover loops to orb_provider_attempt_step remains open."
+        ]
+      }
+    },
+    {
+      "export": "orb_auth_toctou_execute_step",
+      "requirement": "Inventory ABI declaration orb_auth_toctou_execute_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.authToctouExecuteStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Approval-queue and secret-broker wiring is intentionally deferred to avoid colliding with concurrent approval-queue work.",
+        "Cryptographic digest computation and kernel syscall atomicity remain outside the scalar TOCTOU check."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local TOCTOU authorization shadow tests verify fail-closed execution when bunker state, principal kind, expiry, lease epoch, target id, or payload digest drifts between gate and execute.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "auth_toctou_all_evidence_mutations_fail_closed"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "symbol": "kill_family5_auth_toctou_mutants"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "observe_auth_toctou_shadow"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/privilege_broker.rs",
+            "symbol": "evaluate_auth_toctou_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/privilege_broker.rs",
+            "symbol": "auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "lean/Orb/MutantSuite.lean",
+            "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          },
+          {
+            "path": "src/api/privilege_broker.rs",
+            "sha256": "2b38fc4ac6f8699a74709d05b15e1e5314f25c96b708d544aa38c28df810cfb6"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Approval-queue and secret-broker wiring is intentionally deferred to avoid colliding with concurrent approval-queue work.",
+          "Cryptographic digest computation and kernel syscall atomicity remain outside the scalar TOCTOU check."
+        ]
+      }
+    },
+    {
+      "export": "orb_resource_ledger_step",
+      "requirement": "Inventory ABI declaration orb_resource_ledger_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.resourceLedgerStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Managed-VM provider billing reconciliation and SQLite ledger transactions remain in host Rust.",
+        "Authoritative cutover of VM spawn/extend/reap paths to orb_resource_ledger_step remains open."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local resource-ledger tests verify slot conservation (reserved + active <= maxSlots), wrap-free budget subtraction on u64::MAX cost deltas, and expired-TTL reservation reaping.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "resource_ledger_conservation_and_ttl_reap"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "resource_ledger_overspend_rejected_without_wrap"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "symbol": "kill_family6_resource_ledger_mutants"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "resource_ledger_step"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/managed/mod.rs",
+            "symbol": "evaluate_resource_ledger_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/managed/tests.rs",
+            "symbol": "resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "lean/Orb/MutantSuite.lean",
+            "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          },
+          {
+            "path": "src/managed/mod.rs",
+            "sha256": "106f688964b33c28b9e6377c7f519c86e66c5c1c10eea259482463d750523f7e"
+          },
+          {
+            "path": "src/managed/tests.rs",
+            "sha256": "75fe9f27772b5630991c99ad782cda558c0b5b2c25e21dab17ae936c4b7166f9"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "Managed-VM provider billing reconciliation and SQLite ledger transactions remain in host Rust.",
+          "Authoritative cutover of VM spawn/extend/reap paths to orb_resource_ledger_step remains open."
+        ]
+      }
+    },
+    {
+      "export": "orb_stream_bounded_commit_step",
+      "requirement": "Inventory ABI declaration orb_stream_bounded_commit_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.streamBoundedCommitStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "DOM/Markdown incremental rendering in desktop/iOS/Android clients is not yet cut over to orb_stream_bounded_commit_step.",
+        "UTF-8 codepoint boundary alignment around forced checkpoints is handled by host string slicing."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local bounded-stream commit tests verify forced checkpoint advancement so the unparsed open fence tail never exceeds maxOpenTailBytes.",
+        "links": [
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Spec.lean",
+            "symbol": "stream_bounded_commit_multichunk_conservation"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/Stream.lean",
+            "symbol": "boundedCost_linear"
+          },
+          {
+            "kind": "theorem",
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "symbol": "kill_family7_stream_commit_mutants"
+          },
+          {
+            "kind": "host_observer",
+            "path": "crates/orb-spec/src/lib.rs",
+            "symbol": "stream_bounded_commit_step"
+          },
+          {
+            "kind": "host_test",
+            "path": "crates/orb-spec/src/shadow.rs",
+            "symbol": "wave12_orbwire_machine_and_seven_stateful_families_verified"
+          },
+          {
+            "kind": "host_observer",
+            "path": "src/api/control/streaming.rs",
+            "symbol": "evaluate_stream_bounded_commit_gate"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/control/tests.rs",
+            "symbol": "stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences"
+          }
+        ],
+        "sources": [
+          {
+            "path": "lean/Orb/Kernel.lean",
+            "sha256": "cfa85cd5697a8a01cb65da7e2f69c2452c4f4b0a1e8408fd39017106946d76b7"
+          },
+          {
+            "path": "lean/Orb/Spec.lean",
+            "sha256": "5027c8c7cff664be42681e2a6e02cb173b2c9ea563bf7eb89753def513ee45e2"
+          },
+          {
+            "path": "lean/Orb/Stream.lean",
+            "sha256": "368a33903177af3b4288ee3d608169771f16664fa9ca2f65d536886cc11988b7"
+          },
+          {
+            "path": "lean/Orb/MutantSuite.lean",
+            "sha256": "d5356569323b0b860f1acf0c851c7451d7e0340e33d368712b5c5a0aef856682"
+          },
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "crates/orb-spec/src/shadow.rs",
+            "sha256": "e3ac47ac8f5f8795ccfbab6896d303c675783b0819b647022a9a923c17e1c0be"
+          },
+          {
+            "path": "lean/Orb/StatefulMutantSuite.lean",
+            "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          },
+          {
+            "path": "src/api/control/streaming.rs",
+            "sha256": "8ad8cf99ebdd5361fd327551c531025331d01cca36022103eb20e4695ee65640"
+          },
+          {
+            "path": "src/api/control/tests.rs",
+            "sha256": "bc9d0607fe4ad268d538af2453cdf3fee6f71c44a07f75517bf2e9e72c0a1f4a"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "DOM/Markdown incremental rendering in desktop/iOS/Android clients is not yet cut over to orb_stream_bounded_commit_step.",
+          "UTF-8 codepoint boundary alignment around forced checkpoints is handled by host string slicing."
+        ]
+      }
     },
     {
       "export": "leansys_verify_slice_bounds",
@@ -2706,6 +3540,148 @@
       "export": "leansys_verify_isa_selection",
       "requirement": "Inventory ABI declaration leansys_verify_isa_selection; behavioral acceptance pending",
       "model": "LeanSys.Spec.verifyIsaSelection",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "leansys_verify_fd_bounds",
+      "requirement": "Inventory ABI declaration leansys_verify_fd_bounds; behavioral acceptance pending",
+      "model": "LeanSys.Spec.verifyFdBounds",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "partial",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "POSIX syscall return-value extraction and close-on-exec flag management remain in host Rust/libc.",
+        "LeanSys.Spec theorem metadata is tracked in the upstream lean-sys repository rather than lean/Orb/Spec.lean."
+      ],
+      "evidence": {
+        "status": "partial",
+        "claim": "Local host fd-bounds tests verify non-truncating u64-to-u32 descriptor validation and positive 31-bit descriptor bounds via leansys_verify_fd_bounds.",
+        "links": [
+          {
+            "kind": "host_observer",
+            "path": "src/orb_spec.rs",
+            "symbol": "verify_host_fd_bounds"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/orb_spec.rs",
+            "symbol": "host_orb_wire_machine_patch_and_fd_bounds_gates_verified"
+          }
+        ],
+        "sources": [
+          {
+            "path": "crates/orb-spec/src/lib.rs",
+            "sha256": "803157b60e7b88688fe6432edbe396928e38820eb3cf31445ff8909afe61ebcf"
+          },
+          {
+            "path": "src/orb_spec.rs",
+            "sha256": "51015c9b651861f3ce58f72164c5a29cfadf78e755d911813fd72c4a4fb30c1b"
+          },
+          {
+            "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+            "sha256": "f6c31281c67fd2fdf2e2db59ef1d395d65b1b81bc34060f0df112ff33b03425e"
+          }
+        ],
+        "execution": {
+          "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
+          "command": "CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 -p orb-spec --lib wave12_orbwire_machine_and_seven_stateful_families_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib host_orb_wire_machine_patch_and_fd_bounds_gates_verified -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences -- --test-threads=1 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -j 1 --lib stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences -- --test-threads=1",
+          "exit_code": 0,
+          "result": "TESTED_LOCAL"
+        },
+        "assumptions": [
+          "The receipt records local x86_64 Linux execution against the listed source hashes.",
+          "Source declaration checks do not prove semantic linkage or a transitive axiom audit.",
+          "No native mobile or WASM target execution is established by this receipt."
+        ],
+        "blockers": [
+          "POSIX syscall return-value extraction and close-on-exec flag management remain in host Rust/libc.",
+          "LeanSys.Spec theorem metadata is tracked in the upstream lean-sys repository rather than lean/Orb/Spec.lean."
+        ]
+      }
+    },
+    {
+      "export": "orb_vm_lifecycle_step",
+      "requirement": "Inventory ABI declaration orb_vm_lifecycle_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.vmLifecycleStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_vm_claim_step",
+      "requirement": "Inventory ABI declaration orb_vm_claim_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.vmClaimStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_compute_secret_gate",
+      "requirement": "Inventory ABI declaration orb_compute_secret_gate; behavioral acceptance pending",
+      "model": "Orb.Kernel.computeSecretGate",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_node_gc_step",
+      "requirement": "Inventory ABI declaration orb_node_gc_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.nodeGcStep",
+      "theorems": [],
+      "authoritative_callers": [],
+      "adapter_tests": [],
+      "status": "unconnected",
+      "assumptions": [
+        "Scalar inputs are supplied by the host; freshness and enforcement are not established here.",
+        "Symbolic cpuFuel annotations do not establish runtime complexity or branch-free execution."
+      ],
+      "blockers": [
+        "Proof-to-export, authoritative caller and executed adapter-test links require explicit review."
+      ]
+    },
+    {
+      "export": "orb_node_disk_admission_step",
+      "requirement": "Inventory ABI declaration orb_node_disk_admission_step; behavioral acceptance pending",
+      "model": "Orb.Kernel.nodeDiskAdmissionStep",
       "theorems": [],
       "authoritative_callers": [],
       "adapter_tests": [],

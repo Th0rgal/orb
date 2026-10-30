@@ -405,4 +405,138 @@ def committedLen (s : String) : Nat :=
   let k := commitOf (lines.map classify)
   ((lines.take k).map (fun l => l.utf8ByteSize + 1)).sum
 
+/-! ## 6. Bounded-Tail Checkpointed Stream Scanner (Closing `G-ORB-6`)
+
+When an unclosed Markdown code fence grows beyond `maxOpenTailBytes` (`0 < maxOpenTailBytes`),
+`commitOf` holds `commit` fixed while `len - commit` grows linearly, causing quadratic re-parse
+work unless a bounded-tail checkpoint advances the re-parse cursor. `BoundedStreamState` tracks
+both the true Markdown `commit` offset and a monotone `checkpoint` cursor (`commit ≤ checkpoint ≤ len`)
+such that whenever `len - checkpoint > maxOpenTailBytes`, `checkpoint` advances to
+`len - maxOpenTailBytes`. Re-parsing from `checkpoint` yields `boundedCost`, which satisfies the
+unconditional $O(N)$ bound `boundedCost_linear` WITHOUT any external `ht` tail-size assumption,
+and produces identical final `(len, commit, checkpoint)` state across arbitrary chunk splits
+(`boundedStream_chunk_split_invariant`). -/
+
+structure BoundedStreamState where
+  len        : Nat
+  commit     : Nat
+  checkpoint : Nat
+  deriving Repr, DecidableEq
+
+def BoundedStreamState.init : BoundedStreamState :=
+  { len := 0, commit := 0, checkpoint := 0 }
+
+def BoundedStreamState.WellFormed (cap : Nat) (s : BoundedStreamState) : Prop :=
+  s.commit ≤ s.checkpoint ∧ s.checkpoint ≤ s.len ∧ s.len - s.checkpoint ≤ cap
+
+/-- Advance `BoundedStreamState` on a monotone update `u` under open-tail cap `cap`:
+    updates `commit' = max s.commit (min u.commit nextLen)` and advances `checkpoint'` to at least
+    `nextLen - cap` whenever the unclosed fence tail exceeds `cap`. -/
+def stepBoundedStream (cap : Nat) (s : BoundedStreamState) (u : Upd) : BoundedStreamState :=
+  let nextLen := max s.len u.len
+  let nextCommit := max s.commit (min u.commit nextLen)
+  let baseCheckpoint := max s.checkpoint nextCommit
+  let nextCheckpoint := max baseCheckpoint (nextLen - cap)
+  { len := nextLen, commit := nextCommit, checkpoint := nextCheckpoint }
+
+def foldBoundedStream (cap : Nat) (s : BoundedStreamState) (us : List Upd) : BoundedStreamState :=
+  us.foldl (stepBoundedStream cap) s
+
+/-- Incremental bytes parsed per update using the bounded-tail checkpoint cursor:
+    newly checkpointed bytes `(s'.checkpoint - s.checkpoint)` plus the bounded open tail
+    `(s'.len - s'.checkpoint)`. -/
+def boundedCost (cap : Nat) : BoundedStreamState → List Upd → Nat
+  | _, [] => 0
+  | s, u :: us =>
+    let s' := stepBoundedStream cap s u
+    (s'.checkpoint - s.checkpoint) + (s'.len - s'.checkpoint) + boundedCost cap s' us
+
+def boundedTails (cap : Nat) : BoundedStreamState → List Upd → Nat
+  | _, [] => 0
+  | s, u :: us =>
+    let s' := stepBoundedStream cap s u
+    (s'.len - s'.checkpoint) + boundedTails cap s' us
+
+theorem stepBoundedStream_wellFormed (cap : Nat) (s : BoundedStreamState) (u : Upd)
+    (hs : s.WellFormed cap) :
+    s.len ≤ (stepBoundedStream cap s u).len ∧
+    s.commit ≤ (stepBoundedStream cap s u).commit ∧
+    s.checkpoint ≤ (stepBoundedStream cap s u).checkpoint ∧
+    (stepBoundedStream cap s u).WellFormed cap := by
+  rcases hs with ⟨hc1, hc2, hc3⟩
+  dsimp [stepBoundedStream, BoundedStreamState.WellFormed]
+  omega
+
+theorem foldBoundedStream_checkpoint_le_len (cap : Nat) (s : BoundedStreamState) (us : List Upd)
+    (hs : s.WellFormed cap) :
+    s.checkpoint ≤ (foldBoundedStream cap s us).checkpoint ∧
+    (foldBoundedStream cap s us).WellFormed cap := by
+  induction us generalizing s with
+  | nil => exact ⟨Nat.le_refl _, hs⟩
+  | cons u us ih =>
+    have hstep := stepBoundedStream_wellFormed cap s u hs
+    have hrest := ih (stepBoundedStream cap s u) hstep.2.2.2
+    simp only [foldBoundedStream, List.foldl_cons] at hrest ⊢
+    exact ⟨Nat.le_trans hstep.2.2.1 hrest.1, hrest.2⟩
+
+theorem boundedCost_eq (cap : Nat) (s : BoundedStreamState) (us : List Upd)
+    (hs : s.WellFormed cap) :
+    boundedCost cap s us + s.checkpoint =
+      (foldBoundedStream cap s us).checkpoint + boundedTails cap s us := by
+  induction us generalizing s with
+  | nil => simp [boundedCost, foldBoundedStream, boundedTails]
+  | cons u us ih =>
+    have hstep := stepBoundedStream_wellFormed cap s u hs
+    have hih := ih (stepBoundedStream cap s u) hstep.2.2.2
+    simp only [boundedCost, foldBoundedStream, List.foldl_cons, boundedTails] at hih ⊢
+    omega
+
+theorem boundedTails_le (cap : Nat) (s : BoundedStreamState) (us : List Upd)
+    (hs : s.WellFormed cap) :
+    boundedTails cap s us ≤ us.length * cap := by
+  induction us generalizing s with
+  | nil => simp [boundedTails]
+  | cons u us ih =>
+    have hstep := stepBoundedStream_wellFormed cap s u hs
+    have hih := ih (stepBoundedStream cap s u) hstep.2.2.2
+    have htail : (stepBoundedStream cap s u).len - (stepBoundedStream cap s u).checkpoint ≤ cap :=
+      hstep.2.2.2.2.2
+    simp only [boundedTails, List.length_cons, Nat.succ_mul]
+    omega
+
+/-- Unconditional $O(N)$ linear re-parse bound (`G-ORB-6` remediation):
+    Without ANY external `ht` tail-size hypothesis on `us` (even when `u.commit = 0` throughout
+    a giant unclosed code fence), `boundedCost` over `us` is bounded by `last + us.length * cap`. -/
+theorem boundedCost_linear (cap : Nat) (us : List Upd) (last : Nat)
+    (hl : (foldBoundedStream cap BoundedStreamState.init us).len ≤ last) :
+    boundedCost cap BoundedStreamState.init us ≤ last + us.length * cap := by
+  have hinit : BoundedStreamState.init.WellFormed cap := by
+    simp [BoundedStreamState.init, BoundedStreamState.WellFormed]
+  have heq := boundedCost_eq cap BoundedStreamState.init us hinit
+  have hwf := (foldBoundedStream_checkpoint_le_len cap BoundedStreamState.init us hinit).2
+  have htails := boundedTails_le cap BoundedStreamState.init us hinit
+  have hcp : (foldBoundedStream cap BoundedStreamState.init us).checkpoint ≤ last :=
+    Nat.le_trans hwf.2.1 hl
+  have h0 : BoundedStreamState.init.checkpoint = 0 := rfl
+  rw [h0, Nat.add_zero] at heq
+  omega
+
+/-- Chunk-split associativity (`foldBoundedStream` over `xs ++ ys` equals sequential chunk folds):
+    splitting a streamed update trace across arbitrary chunk boundaries yields the exact same
+    `(len, commit, checkpoint)` state. -/
+theorem boundedStream_chunk_split_invariant (cap : Nat) (s : BoundedStreamState) (xs ys : List Upd) :
+    foldBoundedStream cap s (xs ++ ys) = foldBoundedStream cap (foldBoundedStream cap s xs) ys := by
+  simp [foldBoundedStream, List.foldl_append]
+
+/-- Chunk-delta equivalence: feeding two cumulative monotone updates `[u1, u2]` (`u1.len ≤ u2.len`,
+    `u1.commit ≤ u2.commit ≤ u2.len`) from `BoundedStreamState.init` produces the exact same
+    bounded checkpoint state as delivering `u2` in a single coalesced frame `[u2]`. -/
+theorem boundedStream_coalesced_eq_split (cap : Nat) (u1 u2 : Upd)
+    (hlen : u1.len ≤ u2.len) (hcom : u1.commit ≤ u2.commit) (hwf2 : u2.commit ≤ u2.len) :
+    foldBoundedStream cap BoundedStreamState.init [u1, u2] =
+      foldBoundedStream cap BoundedStreamState.init [u2] := by
+  simp only [foldBoundedStream, List.foldl_cons, List.foldl_nil,
+    BoundedStreamState.init, stepBoundedStream]
+  congr 1 <;> omega
+
 end Orb.Stream

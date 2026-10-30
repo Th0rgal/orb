@@ -1,15 +1,9 @@
-   Compiling sandboxed_sh v1.3.0 (/var/lib/orb-node/work/c2fa6bca-5c56-448f-8bc4-403ba4c7d503/orb)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 13m 21s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-d97a46decee60fa8)
 
 running 1 test
 test api::control::dispatch_admission_tests::remote_submission_rejects_closed_snapshots_and_records_host_observations ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 7.32s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3658 filtered out; finished in 0.15s
 
-   Compiling sandboxed_sh v1.3.0 (/var/lib/orb-node/work/c2fa6bca-5c56-448f-8bc4-403ba4c7d503/orb)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 24s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-d97a46decee60fa8)
 
 running 14 tests
 test api::control::fork::tests::an_edited_message_replaces_the_rest_of_the_conversation ... ok
@@ -27,15 +21,12 @@ test api::control::fork::tests::remote_fork_uses_existing_sibling_and_refuses_mi
 test api::control::fork::tests::shadow_state_observation_detects_independent_host_poststate_and_effect_divergences ... ok
 test api::control::fork::tests::unobserved_remote_home_is_not_an_exact_match ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3652 filtered out; finished in 2.50s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 3645 filtered out; finished in 0.06s
 
-   Compiling orb-spec v1.3.0 (/var/lib/orb-node/work/c2fa6bca-5c56-448f-8bc4-403ba4c7d503/orb/crates/orb-spec)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.70s
-     Running tests/artifact_symbols.rs (target/debug/deps/artifact_symbols-ef4fed310f934088)
 
 running 2 tests
 test missing_extra_duplicate_nontext_and_imported_symbols_fail ... ok
 test real_object_and_archive_mutations_are_rejected ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.10s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
 

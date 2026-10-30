@@ -207,6 +207,105 @@ static PROXY_SHADOW_RING: std::sync::LazyLock<
     std::sync::Mutex::new(crate::orb_spec::shadow::ShadowDivergenceRing::<256>::new())
 });
 
+static PROVIDER_ATTEMPT_SHADOW_COUNTER: std::sync::OnceLock<crate::orb_spec::ShadowCounter> =
+    std::sync::OnceLock::new();
+
+pub fn provider_attempt_shadow_counter() -> &'static crate::orb_spec::ShadowCounter {
+    PROVIDER_ATTEMPT_SHADOW_COUNTER.get_or_init(crate::orb_spec::ShadowCounter::new)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_provider_attempt_gate(
+    pinned_account_id: u32,
+    candidate_account_id: u32,
+    attempts_used: u32,
+    retry_budget: u32,
+    first_byte_committed: bool,
+    failure_kind: u8,
+    upstream_now_epoch: u64,
+    cooldown_until_epoch: u64,
+    upstream_deadline: u64,
+    auth_valid: bool,
+) -> crate::orb_spec::ProviderAttemptStepVerdict {
+    let input = crate::orb_spec::ProviderAttemptStepInput {
+        pinned_account_id,
+        candidate_account_id,
+        attempts_used,
+        retry_budget,
+        first_byte_committed,
+        failure_kind,
+        upstream_now_epoch,
+        cooldown_until_epoch,
+        upstream_deadline,
+        auth_valid,
+    };
+    let verdict = crate::orb_spec::provider_attempt_step(input);
+    let pin_ok = candidate_account_id != 0
+        && (pinned_account_id == 0 || candidate_account_id == pinned_account_id);
+    let cooldown_ok = failure_kind != 2 && upstream_now_epoch >= cooldown_until_epoch;
+    let clock_ok = upstream_now_epoch < upstream_deadline && auth_valid;
+    let is_retry = failure_kind == 1 || failure_kind == 2;
+    let budget_ok = if is_retry {
+        attempts_used < retry_budget
+    } else {
+        attempts_used <= retry_budget
+    };
+    let host_admitted =
+        !(first_byte_committed && is_retry) && pin_ok && cooldown_ok && clock_ok && budget_ok;
+    let host_next_attempts = if host_admitted && is_retry {
+        attempts_used.saturating_add(1)
+    } else {
+        attempts_used
+    };
+    let host_action_code = if first_byte_committed && is_retry {
+        3u8
+    } else if !pin_ok {
+        4u8
+    } else if !cooldown_ok {
+        5u8
+    } else if !clock_ok {
+        6u8
+    } else if !budget_ok {
+        7u8
+    } else {
+        1u8
+    };
+    let sim = crate::orb_spec::shadow::RefinementSimulation::<
+        (bool, u32),
+        (bool, u32),
+        crate::orb_spec::ProviderAttemptStepInput,
+        u8,
+        u8,
+    > {
+        subsystem: "orb_provider_attempt_step",
+        abs_state: |s| *s,
+        norm_effects: |effs| effs.to_vec(),
+        lean_step: |_s, ev, _ctx| {
+            let v = crate::orb_spec::provider_attempt_step(*ev);
+            ((v.admitted, v.next_attempts_used), vec![v.action_code])
+        },
+        classify_known_legacy_bug: |_, _, _, _| None,
+    };
+    let ctx = crate::orb_spec::shadow::EventContext {
+        now_ms: upstream_now_epoch.saturating_mul(1000),
+        fresh_nonce: u64::from(attempts_used),
+        idempotency_key: u64::from(candidate_account_id),
+        boot_id_matches: true,
+        schema_id: 2,
+    };
+    provider_attempt_shadow_counter().with_ring(|ring| {
+        let _ = sim.observe_step(
+            &(first_byte_committed, attempts_used),
+            &(host_admitted, host_next_attempts),
+            &input,
+            &[host_action_code],
+            ctx,
+            ring,
+        );
+    });
+    verdict
+}
+
 /// Snapshot the live proxy shadow-mode counters (`total_steps`, `total_divergences`) for
 /// `/api/model-routing/shadow` and structured telemetry.
 pub fn proxy_shadow_snapshot() -> ProxyShadowSnapshot {
@@ -2624,6 +2723,18 @@ impl ModelChainStore {
                     },
                     host_admits_pool,
                 );
+                let attempt_verdict = evaluate_provider_attempt_gate(
+                    bound_custom_account_id.unwrap_or(0),
+                    cand_u32,
+                    0,
+                    (store_accounts.len() as u32).max(1),
+                    false,
+                    if is_rejected { 2 } else { 0 },
+                    now_epoch,
+                    if is_rejected { now_epoch + 60 } else { 0 },
+                    now_epoch.saturating_add(300),
+                    account.has_credentials(),
+                );
                 if !is_healthy {
                     tracing::debug!(
                         account_id = %account.id,
@@ -2633,6 +2744,7 @@ impl ModelChainStore {
                     continue;
                 }
                 if !pool_verdict.emit_dispatch_effect
+                    || !attempt_verdict.admitted
                     || account_ordinals.uuid_of(pool_verdict.dispatched_account_id)
                         != Some(account.id)
                 {
@@ -5452,5 +5564,30 @@ mod tests {
             resolved[1].account_id,
             stable_provider_uuid("google-cli-proxy")
         );
+    }
+
+    #[test]
+    fn provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences() {
+        let ok = evaluate_provider_attempt_gate(2, 2, 0, 3, false, 0, 1000, 0, 1300, true);
+        assert!(ok.admitted);
+        assert_eq!(ok.action_code, 1);
+
+        let wrong_pin = evaluate_provider_attempt_gate(2, 3, 0, 3, false, 0, 1000, 0, 1300, true);
+        assert!(!wrong_pin.admitted);
+        assert_eq!(wrong_pin.action_code, 4);
+
+        let quota_cool =
+            evaluate_provider_attempt_gate(0, 2, 1, 3, false, 2, 1000, 1600, 1300, true);
+        assert!(!quota_cool.admitted);
+        assert_eq!(quota_cool.action_code, 5);
+
+        let locked_retry = evaluate_provider_attempt_gate(0, 2, 1, 3, true, 1, 1000, 0, 1300, true);
+        assert!(!locked_retry.admitted);
+        assert!(locked_retry.first_byte_locked_next);
+        assert_eq!(locked_retry.action_code, 3);
+
+        let snap = provider_attempt_shadow_counter().snapshot("orb_provider_attempt_step");
+        assert!(snap.total_events >= 4);
+        assert_eq!(snap.total_divergences, 0);
     }
 }

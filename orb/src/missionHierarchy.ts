@@ -16,6 +16,7 @@
  *  - `reparentMission` is the only way to change or clear a remembered link.
  */
 import { createSignal } from "solid-js";
+import { orbHierarchyMergeStep } from "./orbKernel";
 import { shallowEqual } from "./poll";
 
 export type HierarchyFields = {
@@ -38,6 +39,21 @@ type Seen = { title?: string | null; project?: string | null; status?: string };
 
 const links = new Map<string, Link>();
 const seen = new Map<string, Seen>();
+const parentOrds = new Map<string, number>();
+const ordParents = new Map<number, string>();
+let hierarchyEpoch = 0n;
+const internParentOrd = (id: string | undefined): number => {
+  if (!id) return 0;
+  let ord = parentOrds.get(id);
+  if (!ord) {
+    ord = parentOrds.size + 1;
+    parentOrds.set(id, ord);
+    ordParents.set(ord, id);
+  }
+  return ord;
+};
+const isSupersededTag = (tag: string) =>
+  tag === "superseded" || tag.startsWith("superseded_by:") || tag.startsWith("superseded-by:");
 const nonEmpty = (v: string | null | undefined): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
 
 /** Remember the links (and display facts) a payload carries. Never forgets. */
@@ -88,9 +104,37 @@ export function stickHierarchy<M extends HierarchyFields>(m: M): M { observeMiss
 export function mergeMission<M extends HierarchyFields>(prev: M | undefined, next: Partial<M> & { id: string }, mode: "full" | "partial" = "full"): M {
   if (prev) observeMission(prev);
   observeMission(next as HierarchyFields);
+  const prevLink = links.get(next.id);
+  const curParentOrd = internParentOrd(prevLink?.parent ?? nonEmpty(prev?.parent_mission_id));
+  const incParent = nonEmpty(next.parent_mission_id);
+  const incParentOrd = internParentOrd(incParent);
+  const curSuperseded = !!(prevLink?.tags.some(isSupersededTag) || prev?.tags?.some(isSupersededTag));
+  const incSupersede = curSuperseded || !!(next.tags?.some(isSupersededTag));
+  const curArchived = curSuperseded || prev?.status === "completed" || prev?.status === "acknowledged";
+  const incArchive = incSupersede || next.status === "completed" || next.status === "acknowledged";
+  const incUnarchive = !incArchive && curArchived;
+  const currentEpoch = hierarchyEpoch;
+  hierarchyEpoch += 1n;
+  const step = orbHierarchyMergeStep({
+    currentEpoch,
+    incomingEpoch: hierarchyEpoch,
+    archiveEpoch: 0n,
+    curArchived,
+    curSuperseded,
+    isPartialPatch: mode === "partial",
+    parentPresence: incParent ? 1 : 0,
+    curParentOrd,
+    incParentOrd,
+    incArchive,
+    incUnarchive,
+    incSupersede,
+  });
   let merged: M;
-  if (mode === "full" || !prev) merged = next as M;
-  else {
+  if (!step.admitted && prev) {
+    merged = { ...prev };
+  } else if (mode === "full" || !prev) {
+    merged = next as M;
+  } else {
     merged = { ...prev };
     for (const [key, value] of Object.entries(next)) if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
   }
@@ -100,7 +144,28 @@ export function mergeMission<M extends HierarchyFields>(prev: M | undefined, nex
 /** Explicit re-parent (or `null` to detach): the only way a remembered link changes. */
 export function reparentMission(id: string, fields: { parent_mission_id?: string | null; callback_parent_mission_id?: string | null }): void {
   const link = links.get(id) ?? { tags: [] };
-  if ("parent_mission_id" in fields) link.parent = nonEmpty(fields.parent_mission_id);
+  if ("parent_mission_id" in fields) {
+    const incParent = nonEmpty(fields.parent_mission_id);
+    const currentEpoch = hierarchyEpoch;
+    hierarchyEpoch += 1n;
+    const step = orbHierarchyMergeStep({
+      currentEpoch,
+      incomingEpoch: hierarchyEpoch,
+      archiveEpoch: 0n,
+      curArchived: false,
+      curSuperseded: false,
+      isPartialPatch: true,
+      parentPresence: incParent ? 1 : 2,
+      curParentOrd: internParentOrd(link.parent),
+      incParentOrd: internParentOrd(incParent),
+      incArchive: false,
+      incUnarchive: false,
+      incSupersede: false,
+    });
+    if (step.admitted) {
+      link.parent = step.nextParentOrd ? ordParents.get(step.nextParentOrd) : undefined;
+    }
+  }
   if ("callback_parent_mission_id" in fields) link.callback = nonEmpty(fields.callback_parent_mission_id);
   links.set(id, link);
 }
@@ -168,7 +233,8 @@ export function markParentSeen(id: string): void {
 
 /** Tests and connection switches start from nothing. */
 export function resetMissionHierarchy(): void {
-  links.clear(); seen.clear(); parentState.clear(); parentRows.clear(); retries.clear();
+  links.clear(); seen.clear(); parentOrds.clear(); ordParents.clear(); hierarchyEpoch = 0n;
+  parentState.clear(); parentRows.clear(); retries.clear();
   bumpResolver(v => v + 1);
 }
 
