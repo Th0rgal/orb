@@ -143,12 +143,15 @@ When reconstructible per-mission build/toolchain trees (`.elan`, `.lake`,
 `target`, `toolchains`, `.rustup`, `node_modules`) inside finished missions pin a
 worker's disk, inspect and reclaim only those reconstructible caches via
 `scripts/reclaim_worker_build_caches.py` (dry-run by default; requires complete
-Core + `jobs.db` indexes and `lsof +D` open-descriptor verification before
-`--apply`, and never deletes mission source or `.git` repositories). To roll out
-`sandboxed-node` binary updates across busy workers without retiring in-flight
-turns, stage `.new` binaries and run `scripts/rolling_upgrade_nodes.py` to
-cordon, drain `jobs.db` to zero active jobs, swap, restart, and uncordon in
-capacity-bounded waves.
+Core + `jobs.db` indexes, `lsof +D` open-descriptor verification, and single-device
+/ nested-mount rejection via `dir_fd` before `--apply`, and never deletes mission
+source or `.git` repositories). To roll out `sandboxed-node` binary updates across
+busy workers without retiring in-flight turns, stage `.new` binaries and run
+`scripts/rolling_upgrade_nodes.py` to cordon in capacity-bounded waves, fence
+worker job/lease admission via an exclusive `BEGIN IMMEDIATE` lock on `jobs.db`
+before the final zero-work check, verify post-start health (rolling back to `.prev`
+and quarantining `.new.failed` on activation failure), and uncordon each verified
+node.
 
 [Worker scratch reclamation](specs/node-storage-lifecycle.md) covers new owned
 TMPDIR/TMP/TEMP directories after confirmed supervision (72-hour baseline grace when

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+import os
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -184,6 +186,66 @@ class ReclaimWorkerBuildCachesTest(unittest.TestCase):
             self.assertFalse(ok2)
             self.assertTrue(any(r.get("action") == "aborted_incomplete_index" for r in records2))
             self.assertTrue((fx["node"] / fx["done"] / ".elan").exists())
+
+    def test_nested_mounts_inside_mission_and_scratch_caches_are_protected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fx = self._setup_fixture(root)
+
+            # Nested bind mount inside a completed mission's .lake directory
+            mounted_in_lake = fx["node"] / fx["done"] / "repo" / ".lake" / "shared_mount"
+            mounted_in_lake.mkdir(parents=True)
+            (mounted_in_lake / "precious.txt").write_text("do not erase")
+
+            # Scratch step glob containing both a clean .elan and a target/ with nested mount
+            scratch_step = root / "scratch" / "step-01"
+            (scratch_step / ".elan").mkdir(parents=True)
+            (scratch_step / ".elan" / "toolchain").write_bytes(b"t" * 256)
+            mounted_in_scratch = scratch_step / "target" / "bind_src"
+            mounted_in_scratch.mkdir(parents=True)
+            (mounted_in_scratch / "lib.rs").write_text("pub fn keep() {}")
+
+            mount_set = {
+                os.path.normpath(os.path.abspath(str(mounted_in_lake))),
+                os.path.normpath(os.path.abspath(str(mounted_in_scratch))),
+            }
+
+            records, ok = reclaim.reclaim_worker_caches(
+                node_work_dir=fx["node"],
+                missions_dir=fx["missions"],
+                apply=True,
+                terminal_only=True,
+                extra_step_globs=[str(root / "scratch" / "step-*")],
+                open_file_probe=lambda _: ("clear", ""),
+                mountpoints=mount_set,
+            )
+            self.assertTrue(ok)
+
+            # Both nested-mount cache trees were skipped intact (including sibling build.olean)
+            self.assertTrue((mounted_in_lake / "precious.txt").exists())
+            self.assertTrue((fx["node"] / fx["done"] / "repo" / ".lake" / "build.olean").exists())
+            self.assertTrue((mounted_in_scratch / "lib.rs").exists())
+
+            # Sibling clean caches (.elan) in both mission and scratch were reclaimed
+            self.assertFalse((fx["node"] / fx["done"] / ".elan").exists())
+            self.assertFalse((scratch_step / ".elan").exists())
+
+            skipped_mounts = [
+                r for r in records
+                if r.get("action") == "skip" and r.get("reason") == "nested_mount_protected"
+            ]
+            self.assertEqual(len(skipped_mounts), 2)
+
+            # Direct rmtree_same_device also refuses a late/TOCTOU mount via os.path.ismount
+            expected_dev = (fx["node"] / fx["done"]).lstat().st_dev
+            with mock.patch("os.path.ismount", side_effect=lambda p: Path(p) == mounted_in_lake):
+                with self.assertRaises(RuntimeError):
+                    reclaim.rmtree_same_device(
+                        fx["node"] / fx["done"] / "repo" / ".lake",
+                        expected_dev,
+                        mountpoints=frozenset(),
+                    )
+            self.assertTrue((mounted_in_lake / "precious.txt").exists())
 
 
 if __name__ == "__main__":
