@@ -2739,15 +2739,28 @@ select.orb-select-native:disabled { cursor: default; }
 .resource-disk { color:#849ca4; }
 .resource-gpu { color:#b69a76; }
 
-.find-bar { position: fixed; z-index: 1000; top: 54px; right: 24px; display:flex; align-items:center; gap:6px; padding:8px; max-width:calc(100vw - 32px); background:var(--bg-elev); border:1px solid var(--stroke); border-radius:10px; box-shadow:0 6px 20px #0002; color:var(--fg-2); }
-.find-bar input { width:180px; min-width:60px; flex:1; background:transparent; color:var(--fg); border:0; outline:0; font:inherit; }
-.find-bar:focus-within { border-color:var(--focus-border); }
-.find-bar button { display:flex; align-items:center; justify-content:center; border:0; background:transparent; color:var(--fg-2); border-radius:5px; min-width:26px; height:26px; cursor:pointer; }
-.find-bar button:hover,.find-bar button[aria-pressed=true] { background:var(--stroke); color:var(--fg); }
-.find-bar button:disabled { opacity:.3; cursor:default; }
-.find-count { font-size:11px; white-space:nowrap; min-width:55px; text-align:center; }
-::highlight(orb-find) { background:#b9914040; color:inherit; }
-::highlight(orb-find-current) { background:#dbb66b; color:#191919; }
+.find-bar { position: fixed; z-index: 1000; top: 54px; right: 24px; display: flex; align-items: center; gap: 4px; width: min(392px, calc(100vw - 24px)); padding: 3px 4px; background: var(--bg-elev); border: 1px solid var(--stroke); border-radius: var(--radius-md); box-shadow: 0 8px 24px rgb(0 0 0 / 26%), 0 1px 2px rgb(0 0 0 / 12%); color: var(--fg-2); }
+:root[data-theme="light"] .find-bar { box-shadow: 0 6px 20px rgb(30 30 28 / 12%), 0 1px 2px rgb(30 30 28 / 6%); }
+.find-field { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; height: 26px; padding: 0 3px 0 8px; background: var(--bg-inset); border: 1px solid var(--stroke-soft); border-radius: 5px; transition: border-color var(--t) var(--ease); }
+:root[data-theme="light"] .find-field { background: var(--bg-field); border-color: var(--stroke); }
+.find-field:focus-within { border-color: var(--focus-border); }
+.find-icon { flex: none; color: var(--fg-3); pointer-events: none; }
+.find-bar input { flex: 1; width: 0; min-width: 48px; height: 100%; padding: 0; background: transparent; color: var(--fg); border: 0; outline: none; box-shadow: none; font: 12.5px/1 var(--sans); }
+.find-bar input::placeholder { color: var(--placeholder); }
+.find-toggle { display: flex; align-items: center; justify-content: center; flex: none; width: 20px; height: 20px; border-radius: 4px; color: var(--fg-3); transition: background-color var(--t) var(--ease), color var(--t) var(--ease); }
+.find-toggle:hover { background: var(--hover-1); color: var(--fg-2); }
+.find-toggle[aria-pressed="true"] { background: color-mix(in srgb, var(--blue) 20%, transparent); color: var(--blue); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 42%, transparent); }
+.find-count { flex: none; min-width: 64px; padding: 0 5px; font-size: 11.5px; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--fg-3); user-select: none; }
+.find-count.is-empty, .find-count.is-error { color: var(--red); }
+.find-actions { display: flex; align-items: center; gap: 1px; flex: none; }
+.find-actions button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 5px; color: var(--fg-2); transition: background-color var(--t) var(--ease), color var(--t) var(--ease), opacity var(--t) var(--ease); }
+.find-actions button:hover:not(:disabled) { background: var(--hover-1); color: var(--fg); }
+.find-actions button:disabled { opacity: 0.32; cursor: default; }
+.find-actions button:focus-visible, .find-toggle:focus-visible { outline: 1px solid var(--focus-border); outline-offset: -1px; }
+::highlight(orb-find) { background: rgb(217 178 58 / 26%); color: inherit; }
+::highlight(orb-find-current) { background: #e0b44c; color: #161615; }
+:root[data-theme="light"]::highlight(orb-find) { background: rgb(234 179 8 / 30%); color: inherit; }
+:root[data-theme="light"]::highlight(orb-find-current) { background: #f2ab27; color: #191918; }
 
 .agent-software { margin-top:20px; }
 .software-body { padding:0 14px 8px; }
@@ -2779,12 +2792,6 @@ select.orb-select-native:disabled { cursor: default; }
 .software-unavailable > summary { padding:9px 0;cursor:pointer; }
 .software-unavailable .software-machine-heading { padding:4px 0 4px 16px; }
 @media(max-width:600px){.software-entry summary,.software-runtime summary{grid-template-columns:8px minmax(70px,1fr) 60px;gap:4px 8px}.software-owner{grid-column:2}.software-status{grid-column:2 / -1;text-align:left;margin-left:0}.software-name{min-width:0}}
-.find-bar { gap:4px; padding:4px 6px; width:380px; box-sizing:border-box; border-radius:8px; box-shadow:0 4px 12px #0002; }
-.find-bar input { width:0; font-size:12px; }
-.find-bar button { min-width:24px; height:26px; font-size:12px; }
-.find-bar .find-whole { text-decoration:underline; text-underline-offset:3px; }
-.find-count:empty { display:none; }
-.find-count { min-width:42px; font-variant-numeric:tabular-nums; }
 .btw-sidebar.maximized .btw-sidebar-content { padding-top:0; }
 /* A sent message keeps its geometry; only the small activity indicator moves. */
 .user.pending { background-image:none; animation:none; opacity:1; }
@@ -3884,7 +3891,7 @@ select.orb-select-native:disabled { cursor: default; }
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent);
 }
 /* Fields that are deliberately borderless keep their own look. */
-.composer textarea:focus, .composer textarea:focus-visible, .prompt-editor:focus, .prompt-editor:focus-visible, .cs-prompt:focus, .project-search:focus, .picker-search:focus, .picker-search:focus-visible { box-shadow: none; }
+.composer textarea:focus, .composer textarea:focus-visible, .prompt-editor:focus, .prompt-editor:focus-visible, .cs-prompt:focus, .project-search:focus, .picker-search:focus, .picker-search:focus-visible, .find-bar input:focus, .find-bar input:focus-visible { box-shadow: none; }
 .project-search:focus, .project-search:focus-visible { box-shadow: inset 0 -1px var(--stroke-strong); }
 /* An edited message focuses as one field (like Cursor): the bubble, never a box inside it. */
 .user.editing:focus-within { border-color: var(--focus-border); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent); }

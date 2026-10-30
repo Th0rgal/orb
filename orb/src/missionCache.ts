@@ -4,7 +4,7 @@ import { applyStreamEvent, applyStreamEvents, buildTranscript, type StreamItem }
 import { getMissionEventPage, getMissionEventPreview, storedToStream, type StoredEvent, type StreamEvent } from "./stream";
 import { cacheDelete, cachePeek, cachePut } from "./pageCache";
 
-export type TranscriptSnap = { activity?: string; items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; detailsPending?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
+export type TranscriptSnap = { activity?: string; items: StreamItem[]; stream: StreamEvent[]; fromLog?: boolean; detailsPending?: boolean; spineComplete?: boolean; queueError?: string; cursor?: number; before?: number; hasOlder?: boolean };
 
 const key = (id: string) => `c:${connectionVersion()}:m:${id}:tx`;
 const heightKey = (id: string) => `c:${connectionVersion()}:m:${id}:h`;
@@ -133,7 +133,7 @@ async function fetchTranscript(id: string): Promise<TranscriptSnap> {
   check();
   const queueEvents: StreamEvent[] = queued.map(row => ({ type: "user_message", eventId: row.id, data: { id: row.id, content: row.content, queued: row.inflight !== true } }));
   // History first puts accepted user turns at their actual transcript positions.
-  return { items: buildTranscript([...stream, ...queueEvents]), stream, fromLog: true, queueError, cursor, before, hasOlder };
+  return { items: buildTranscript([...stream, ...queueEvents]), stream, fromLog: true, spineComplete: previous?.spineComplete, queueError, cursor, before, hasOlder };
 }
 
 type JobKind='initial'|'refresh'|'older';
@@ -204,9 +204,9 @@ export function loadOlderTranscript(id:string):Promise<TranscriptSnap>{
  * into, until older raw pages arrive. Keep each turn's last assistant row (its
  * answer, or the newest narration of the running turn); the rest comes back,
  * with its tools, when the reader pages up. */
-export function spineAnswers(spine: StreamEvent[]): StreamEvent[] {
+export function spineAnswers(spine: StreamEvent[], tailAnswered = false): StreamEvent[] {
   const keep: StreamEvent[] = [];
-  let answered = false; // a later assistant row of the same turn is kept
+  let answered = tailAnswered; // a later assistant row of the same turn is kept
   for (let i = spine.length - 1; i >= 0; i--) {
     const event = spine[i];
     if (event.type === "user_message") answered = false;
@@ -217,6 +217,65 @@ export function spineAnswers(spine: StreamEvent[]): StreamEvent[] {
     keep.push(event);
   }
   return keep.reverse();
+}
+
+/** Hydrate the full user/final-assistant conversational spine (`view=transcript`)
+ * for Cmd+F search without paging through thousands of intermediate tool events,
+ * while preserving `before`/`hasOlder` for on-demand raw-event scrollback. */
+export function prepareTranscriptSearch(id: string, signal?: AbortSignal): Promise<TranscriptSnap> {
+  const ready = peekReadyTranscript(id);
+  if (ready && (!ready.hasOlder || ready.before === undefined || ready.spineComplete)) {
+    return Promise.resolve(ready);
+  }
+  return transcriptJob(id, "older", async () => {
+    const current = peekReadyTranscript(id) ?? (await fetchTranscript(id));
+    if (!current.hasOlder || current.before === undefined || current.spineComplete) {
+      return { ...current, spineComplete: true };
+    }
+    let spineBefore: number | undefined = current.before;
+    const olderRaw: StreamEvent[] = [];
+    for (;;) {
+      if (signal?.aborted || spineBefore === undefined) break;
+      const page = await getMissionEventPage(id, { before: spineBefore, view: "transcript" });
+      if (page.hasMore && (page.nextCursor === undefined || page.nextCursor >= spineBefore)) {
+        throw Error("Older transcript spine cursor did not advance.");
+      }
+      const batch = page.events.map(storedToStream).filter((e): e is StreamEvent => e !== null);
+      olderRaw.unshift(...batch);
+      if (!page.hasMore || page.nextCursor === undefined) {
+        spineBefore = undefined;
+        break;
+      }
+      spineBefore = page.nextCursor;
+    }
+    if (signal?.aborted) return current;
+    const firstConv = current.stream.find(
+      (e) => e.type === "user_message" || (e.type === "assistant_message" && e.data.success !== false),
+    );
+    const spine = spineAnswers(olderRaw, firstConv?.type === "assistant_message");
+    const stream = mergeStreamBySequence(spine, current.stream);
+    let items = buildTranscript(stream);
+    for (const item of current.items) {
+      if (item.kind === "user" && item.messageId) {
+        items = applyStreamEvent(items, {
+          type: "user_message",
+          data: {
+            id: item.messageId,
+            content: item.text,
+            queued: item.queued,
+            receipt: item.receipt,
+            attached: item.attached,
+          },
+        });
+      }
+    }
+    return {
+      ...current,
+      stream,
+      items,
+      spineComplete: true,
+    };
+  });
 }
 
 /** Refresh only a bounded recent set; never download tool histories offscreen. */

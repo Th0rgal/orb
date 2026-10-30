@@ -290,3 +290,33 @@ export const SkillsIcon = (p: P) => (
   </I>
 );
 
+export const CaseSensitiveIcon = (p: P) => (
+  <I {...p} sw={1.25}>
+    <path d="M1.9 11.8 4.8 4.2l2.9 7.6M2.8 9.6h4" />
+    <path d="M10.1 7.6c.5-.5 1.1-.7 1.9-.7 1.1 0 1.8.6 1.8 1.6v3.3" />
+    <path d="M13.8 9.4h-1.5c-1.2 0-2.1.5-2.1 1.3 0 .7.6 1.2 1.4 1.2.9 0 1.7-.4 2.2-1" />
+  </I>
+);
+
+export const WholeWordIcon = (p: P) => (
+  <I {...p} sw={1.25}>
+    <path d="M3.4 6.6c.4-.4 1-.6 1.6-.6 1 0 1.6.5 1.6 1.4v3" />
+    <path d="M6.6 8.2H5.3c-1.1 0-1.8.4-1.8 1.1 0 .6.5 1.1 1.2 1.1.8 0 1.4-.3 1.9-.9" />
+    <path d="M9.1 3.9v6.5" />
+    <path d="M9.1 7.1a1.8 1.7 0 1 1 0 2.4" />
+    <path d="M1.8 12v1.7h12.4V12" />
+  </I>
+);
+
+export const FindPrevIcon = (p: P) => (
+  <I {...p} sw={1.25}>
+    <path d="M8 12.6V3.4M4.4 7 8 3.4 11.6 7" />
+  </I>
+);
+
+export const FindNextIcon = (p: P) => (
+  <I {...p} sw={1.25}>
+    <path d="M8 3.4v9.2M4.4 9 8 12.6 11.6 9" />
+  </I>
+);
+

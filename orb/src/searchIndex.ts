@@ -1,15 +1,57 @@
 export type TextSegment = {node: Text; start: number; end: number};
 export type TextIndex = {text: string; nodes: TextSegment[]};
-const excluded='button,textarea,input,script,style,.file-provenance,.find-bar,[aria-hidden="true"],[hidden]';
-export function indexText(scope:HTMLElement):TextIndex {
+export type IndexTextOptions = {messagesOnly?: boolean};
+const excluded = [
+  'button:not(.file-reference)',
+  'textarea',
+  'input',
+  'script',
+  'style',
+  '.file-provenance',
+  '.find-bar',
+  '.code-copy-feedback',
+  '.mermaid-head',
+  '.md-file-unavailable > small',
+  '.st-work',
+  '.st-think',
+  '.st-think-fold',
+  '.st-tool',
+  '.st-orch',
+  '.mission-tasks',
+  '.background-wake',
+  '.automatic-reminder',
+  '.fork-context',
+  '.legacy-log',
+  '.agent-activity',
+  '.btw-narration',
+  '.btw-queue',
+  '.btw-progress',
+  '.turn-recap',
+  '.error-notice',
+  '.response-actions',
+  '.user-origin',
+  '.user-plan',
+  '.user-context',
+  '.message-images',
+  '[aria-hidden="true"]',
+  '[hidden]',
+].join(',');
+const blockSelector = 'p,li,pre,h1,h2,h3,h4,tr,td,th,.user,[data-find-message]';
+export function indexText(scope:HTMLElement,options?:IndexTextOptions):TextIndex {
   const nodes:TextSegment[]=[];let text='',block:Element|null=null;
+  const requireMessage=options?.messagesOnly===true;
   const walker=document.createTreeWalker(scope,NodeFilter.SHOW_TEXT,{acceptNode(node){
     const parent=node.parentElement;
-    return !parent || parent.closest(excluded) || (parent.checkVisibility && !parent.checkVisibility({contentVisibilityAuto:false})) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    if(!parent||parent.closest(excluded)||(parent.checkVisibility&&!parent.checkVisibility({contentVisibilityAuto:false})))return NodeFilter.FILTER_REJECT;
+    if(requireMessage){
+      const msg=parent.closest('[data-find-message]');
+      if(!msg||!scope.contains(msg))return NodeFilter.FILTER_REJECT;
+    }
+    return NodeFilter.FILTER_ACCEPT;
   }});
   let node:Node|null;
   while((node=walker.nextNode())) {
-    const next=node.parentElement?.closest('p,li,pre,h1,h2,h3,h4,tr,.user,.agent-turn')??scope;
+    const next=node.parentElement?.closest(blockSelector)??scope;
     if(block&&next!==block)text+='\n';block=next;
     const start=text.length;text+=node.textContent;nodes.push({node:node as Text,start,end:text.length});
   }

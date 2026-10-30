@@ -5,8 +5,11 @@ import { isScrollPinned, markScrollIntent, scrollKeeper } from "./mission/scroll
 export type SearchHit={key:string;occurrence:number};
 export interface TranscriptSearch {
  search(query:string,sensitive:boolean,whole:boolean):SearchHit[];
- reveal(hit:SearchHit):Promise<HTMLElement|undefined>;
+ reveal(hit:SearchHit,options?:{scroll?:boolean}):Promise<HTMLElement|undefined>;
  prepare(signal:AbortSignal):Promise<void>;
+ needsPrepare?():boolean;
+ turnRange?(key:string):{top:number;height:number}|undefined;
+ mountedTurn?(key:string):HTMLElement|undefined;
 }
 const searches=new WeakMap<HTMLElement,TranscriptSearch>();
 export function transcriptSearch(scope:HTMLElement):TranscriptSearch|undefined{
@@ -24,7 +27,7 @@ function sizeCache(key?:string){
  while(sizeCaches.size>40)sizeCaches.delete(sizeCaches.keys().next().value!);
  return cache;
 }
-export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=>string;estimate?:(item:T)=>number;prepare?:(signal:AbortSignal)=>Promise<void>;sizeKey?:string;children:(item:T)=>JSX.Element}){
+export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=>string;estimate?:(item:T)=>number;prepare?:(signal:AbortSignal)=>Promise<void>;needsPrepare?:()=>boolean;sizeKey?:string;children:(item:T)=>JSX.Element}){
  let root!:HTMLDivElement,scroller:HTMLElement|undefined,frame=0;
  const sizes=sizeCache(p.sizeKey),nodes=new Map<string,HTMLElement>();
  // First estimate per row, kept fixed so an unmeasured gap never changes height.
@@ -146,13 +149,36 @@ export function VirtualTurns<T extends {key:string}>(p:{items:T[];text:(item:T)=
   searches.set(root,{
    search:(query,sensitive,whole)=>p.items.flatMap(item=>matchOffsets(p.text(item),query,sensitive,whole).map((_,occurrence)=>({key:item.key,occurrence}))),
    prepare:signal=>p.prepare?.(signal)??Promise.resolve(),
-   async reveal(hit){
+   needsPrepare:()=>p.needsPrepare?.()??Boolean(p.prepare),
+   mountedTurn:key=>{const n=nodes.get(key);return n?.isConnected?n:undefined;},
+   turnRange:key=>{
+    const row=layout().find(r=>r.item.key===key);if(!row)return undefined;
+    const offset=scroller?root.getBoundingClientRect().top-scroller.getBoundingClientRect().top+scroller.scrollTop:0;
+    return {top:offset+row.top,height:row.height};
+   },
+   async reveal(hit,options){
     const row=layout().find(row=>row.item.key===hit.key);if(!row)return;
+    if(options?.scroll===false){
+     const existing=nodes.get(hit.key);
+     if(existing?.isConnected)return existing;
+    }
     revealed.set(hit.key,(revealed.get(hit.key)??0)+1);
     setPinned(prev=>prev.has(hit.key)?prev:new Set([...prev,hit.key]));
     try{
      await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
-     let node=nodes.get(hit.key);markScrollIntent(scroller);node?.scrollIntoView({block:'center'});update();
+     let node=nodes.get(hit.key);
+     if(options?.scroll===false){
+      if(scroller){
+       const offset=root.getBoundingClientRect().top-scroller.getBoundingClientRect().top+scroller.scrollTop;
+       const latest=layout().find(r=>r.item.key===hit.key)??row;
+       markScrollIntent(scroller);
+       scroller.scrollTop=Math.max(0,offset+latest.top-72);
+       update();
+      }
+      await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
+      return nodes.get(hit.key);
+     }
+     markScrollIntent(scroller);node?.scrollIntoView({block:'center'});update();
      await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
      node=nodes.get(hit.key);markScrollIntent(scroller);node?.scrollIntoView({block:'center'});update();
      return node;
