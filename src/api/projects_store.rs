@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bumped by every table rebuild. Additive `ensure_column` migrations do not
@@ -2064,7 +2064,9 @@ impl ProjectsStore {
     /// must remove those explicitly before committing this project deletion.
     pub fn delete_project(&self, slug: &str) -> Result<bool, String> {
         let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         transaction
             .execute(
                 "DELETE FROM project_bindings WHERE slug = ?1",
@@ -2133,7 +2135,9 @@ impl ProjectsStore {
             return Err("new slug is identical to the current one".to_string());
         }
         let mut connection = self.lock()?;
-        let transaction = connection.transaction().map_err(|e| e.to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         // `project_grant` references projects(slug) with no ON UPDATE action,
         // so parent and child must both move before constraints are checked.
         transaction
@@ -2619,7 +2623,7 @@ impl ProjectsStore {
             .map_err(|e| TrackWriteError::Store(e.to_string()))?;
         let mut connection = self.lock().map_err(TrackWriteError::Store)?;
         let tx = connection
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| TrackWriteError::Store(e.to_string()))?;
         let existing =
             Self::resolve_track_id_on(&tx, slug, track).map_err(TrackWriteError::Store)?;
@@ -2698,7 +2702,9 @@ impl ProjectsStore {
     pub fn upsert_planned_tracks(&self, slug: &str, items: &[PlannedTrack]) -> Result<(), String> {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
-        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         for item in items {
             let key = normalize_track_key(&item.track);
             if key.is_empty() {
@@ -2780,7 +2786,7 @@ impl ProjectsStore {
     pub fn insert_receipt(&self, receipt: &NewReceipt) -> Result<Receipt, ReceiptWriteError> {
         let mut connection = self.lock().map_err(ReceiptWriteError::Store)?;
         let tx = connection
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| ReceiptWriteError::Store(e.to_string()))?;
         let result = Self::insert_receipt_on(&tx, receipt)?;
         tx.commit()
@@ -2937,7 +2943,7 @@ impl ProjectsStore {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock().map_err(AcceptError::Store)?;
         let tx = connection
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AcceptError::Store(e.to_string()))?;
         let Some(track) = Self::track_on(&tx, slug, key).map_err(AcceptError::Store)? else {
             return Err(AcceptError::NotFound);
@@ -3087,7 +3093,7 @@ impl ProjectsStore {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock().map_err(AcceptError::Store)?;
         let tx = connection
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AcceptError::Store(e.to_string()))?;
         let Some(track) = Self::track_on(&tx, slug, key).map_err(AcceptError::Store)? else {
             return Err(AcceptError::NotFound);
@@ -3193,10 +3199,144 @@ impl ProjectsStore {
         pr_number: Option<i64>,
     ) -> Result<AbsorbOutcome, String> {
         let mut connection = self.lock()?;
-        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         let outcome = Self::absorb_track_on(&tx, slug, key, title_hint, pr_number)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(outcome)
+    }
+
+    /// Absorb multiple mission tracks into `slug` and journal their exact undo
+    /// delta onto `subtree_project_edits(root_id)` in the same `IMMEDIATE`
+    /// SQLite write transaction. Large subtree moves pay one WAL commit instead
+    /// of one per descendant, never race concurrent WAL writers on a `DEFERRED`
+    /// read-to-write upgrade (`SQLITE_BUSY_SNAPSHOT`), and never leave
+    /// uncompensated absorbed tracks/aliases/PR-refs if a later step or crash
+    /// rolls the subtree back.
+    pub fn absorb_tracks_batch_for_subtree(
+        &self,
+        root_id: &str,
+        slug: &str,
+        items: &[AbsorbTrackBatchItem<'_>],
+    ) -> Result<(HashMap<Uuid, AbsorbOutcome>, AbsorbedTracksUndo), String> {
+        if items.is_empty() {
+            return Ok((HashMap::new(), AbsorbedTracksUndo::default()));
+        }
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let mut outcomes = HashMap::with_capacity(items.len());
+        let mut undo = AbsorbedTracksUndo::default();
+        for item in items {
+            let outcome = Self::absorb_track_on_tracked(
+                &tx,
+                slug,
+                item.key,
+                item.title_hint,
+                item.pr_number,
+                Some(&mut undo),
+            )?;
+            outcomes.insert(item.mission_id, outcome);
+        }
+        if !undo.is_empty() {
+            let raw_receipt: Option<String> = tx
+                .query_row(
+                    "SELECT receipt FROM subtree_project_edits WHERE root_id = ?1",
+                    params![root_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if let Some(raw) = raw_receipt {
+                let mut parsed: serde_json::Value =
+                    serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+                if let Some(first) = parsed.as_array_mut().and_then(|arr| arr.first_mut()) {
+                    let mut combined: AbsorbedTracksUndo = first
+                        .get("absorbed_tracks_undo")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default();
+                    combined.extend_from(&undo);
+                    first["absorbed_tracks_undo"] =
+                        serde_json::to_value(&combined).map_err(|e| e.to_string())?;
+                    tx.execute(
+                        "UPDATE subtree_project_edits SET receipt = ?2 WHERE root_id = ?1",
+                        params![root_id, parsed.to_string()],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok((outcomes, undo))
+    }
+
+    pub fn rollback_absorbed_tracks(&self, undo: &AbsorbedTracksUndo) -> Result<(), String> {
+        if undo.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        for alias in &undo.created_aliases {
+            tx.execute(
+                "DELETE FROM project_track_aliases \
+                 WHERE slug = ?1 AND alias_key = ?2 AND track_id = ?3 AND reason = 'pr_match'",
+                params![alias.slug, alias.alias_key, alias.track_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        for created in &undo.created_tracks {
+            // Only compensate tracks that remain at their exact created revision,
+            // origin, alias count, and ref count with zero leases, receipts,
+            // evidence, or dispatches — preserving any independent operator/plan
+            // edit made while the subtree move was in flight or awaiting recovery.
+            let unmodified_and_unreferenced: bool = tx
+                .query_row(
+                    "SELECT EXISTS( \
+                        SELECT 1 FROM project_tracks t \
+                        WHERE t.id = ?1 \
+                          AND t.origin = 'absorbed' \
+                          AND t.revision = ?2 \
+                          AND (SELECT COUNT(*) FROM project_track_aliases a WHERE a.track_id = t.id) = ?3 \
+                          AND (SELECT COUNT(*) FROM project_track_refs r WHERE r.track_id = t.id) = ?4 \
+                          AND NOT EXISTS (SELECT 1 FROM track_leases l WHERE l.track_id = t.id AND l.state IN ('reserved','active')) \
+                          AND NOT EXISTS (SELECT 1 FROM receipts rc WHERE rc.track_id = t.id) \
+                          AND NOT EXISTS (SELECT 1 FROM project_track_evidence ev WHERE ev.slug = t.slug AND ev.track = t.track) \
+                          AND NOT EXISTS (SELECT 1 FROM project_track_dispatches d WHERE d.slug = t.slug AND d.track = t.track) \
+                    )",
+                    params![
+                        created.id,
+                        created.revision,
+                        created.alias_count,
+                        created.ref_count
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if !unmodified_and_unreferenced {
+                continue;
+            }
+            tx.execute(
+                "DELETE FROM project_track_aliases WHERE track_id = ?1",
+                params![created.id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM project_track_refs WHERE track_id = ?1",
+                params![created.id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM project_tracks WHERE id = ?1 AND origin = 'absorbed' AND revision = ?2",
+                params![created.id, created.revision],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
     }
 
     fn absorb_track_on(
@@ -3205,6 +3345,17 @@ impl ProjectsStore {
         key: &str,
         title_hint: Option<&str>,
         pr_number: Option<i64>,
+    ) -> Result<AbsorbOutcome, String> {
+        Self::absorb_track_on_tracked(tx, slug, key, title_hint, pr_number, None)
+    }
+
+    fn absorb_track_on_tracked(
+        tx: &Connection,
+        slug: &str,
+        key: &str,
+        title_hint: Option<&str>,
+        pr_number: Option<i64>,
+        undo: Option<&mut AbsorbedTracksUndo>,
     ) -> Result<AbsorbOutcome, String> {
         let normalized = normalize_track_key(key);
         if normalized.is_empty() {
@@ -3247,12 +3398,22 @@ impl ProjectsStore {
             drop(statement);
             if matches.len() == 1 {
                 let (id, canonical) = matches.into_iter().next().unwrap();
-                tx.execute(
-                    "INSERT OR IGNORE INTO project_track_aliases \
-                       (slug, alias_key, track_id, reason, created_at) VALUES (?1, ?2, ?3, 'pr_match', ?4)",
-                    params![slug, key.trim(), id, now],
-                )
-                .map_err(|e| e.to_string())?;
+                let inserted = tx
+                    .execute(
+                        "INSERT OR IGNORE INTO project_track_aliases \
+                           (slug, alias_key, track_id, reason, created_at) VALUES (?1, ?2, ?3, 'pr_match', ?4)",
+                        params![slug, key.trim(), id, now],
+                    )
+                    .map_err(|e| e.to_string())?;
+                if inserted > 0 {
+                    if let Some(u) = undo {
+                        u.created_aliases.push(AbsorbedCreatedAlias {
+                            slug: slug.to_string(),
+                            alias_key: key.trim().to_string(),
+                            track_id: id.clone(),
+                        });
+                    }
+                }
                 return Ok(AbsorbOutcome {
                     key: canonical,
                     track_id: id,
@@ -3276,21 +3437,35 @@ impl ProjectsStore {
             params![id, slug, normalized, title, now],
         )
         .map_err(|e| e.to_string())?;
+        let mut alias_count: i64 = 0;
         if normalized != key.trim() {
-            tx.execute(
-                "INSERT OR IGNORE INTO project_track_aliases \
-                   (slug, alias_key, track_id, reason, created_at) VALUES (?1, ?2, ?3, 'renamed', ?4)",
-                params![slug, key.trim(), id, now],
-            )
-            .map_err(|e| e.to_string())?;
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO project_track_aliases \
+                       (slug, alias_key, track_id, reason, created_at) VALUES (?1, ?2, ?3, 'renamed', ?4)",
+                    params![slug, key.trim(), id, now],
+                )
+                .map_err(|e| e.to_string())?;
+            alias_count += inserted as i64;
         }
+        let mut ref_count: i64 = 0;
         if let Some(number) = pr_number {
-            tx.execute(
-                "INSERT OR IGNORE INTO project_track_refs \
-                   (track_id, kind, repository, number, url, created_at) VALUES (?1, 'pr', '', ?2, NULL, ?3)",
-                params![id, number, now],
-            )
-            .map_err(|e| e.to_string())?;
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO project_track_refs \
+                       (track_id, kind, repository, number, url, created_at) VALUES (?1, 'pr', '', ?2, NULL, ?3)",
+                    params![id, number, now],
+                )
+                .map_err(|e| e.to_string())?;
+            ref_count += inserted as i64;
+        }
+        if let Some(u) = undo {
+            u.created_tracks.push(AbsorbedCreatedTrack {
+                id: id.clone(),
+                revision: 0,
+                alias_count,
+                ref_count,
+            });
         }
         Ok(AbsorbOutcome {
             key: normalized,
@@ -4146,7 +4321,9 @@ impl ProjectsStore {
         }
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
-        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         let existing = Self::resolve_track_id_on(&tx, slug, key)?;
         let created = existing.is_none();
         let id = match existing {
@@ -4383,7 +4560,9 @@ impl ProjectsStore {
             return Err("too many steer acknowledgements".into());
         }
         let mut connection = self.lock()?;
-        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         let at = Utc::now().to_rfc3339();
         let mut changed = 0;
         for id in ids {
@@ -4402,7 +4581,9 @@ impl ProjectsStore {
     pub fn upsert_proposals(&self, slug: &str, proposals: &[NewProposal]) -> Result<(), String> {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.lock()?;
-        let tx = connection.transaction().map_err(|e| e.to_string())?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         for proposal in proposals {
             let criteria =
                 serde_json::to_string(&proposal.acceptance_criteria).map_err(|e| e.to_string())?;
@@ -5489,6 +5670,50 @@ pub struct AbsorbOutcome {
     pub created: bool,
     /// `key` | `alias` | `pr_ref` | `created`
     pub matched_by: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AbsorbTrackBatchItem<'a> {
+    pub mission_id: Uuid,
+    pub key: &'a str,
+    pub title_hint: Option<&'a str>,
+    pub pr_number: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AbsorbedCreatedTrack {
+    pub id: String,
+    pub revision: i64,
+    pub alias_count: i64,
+    pub ref_count: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AbsorbedCreatedAlias {
+    pub slug: String,
+    pub alias_key: String,
+    pub track_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AbsorbedTracksUndo {
+    #[serde(default)]
+    pub created_tracks: Vec<AbsorbedCreatedTrack>,
+    #[serde(default)]
+    pub created_aliases: Vec<AbsorbedCreatedAlias>,
+}
+
+impl AbsorbedTracksUndo {
+    pub fn is_empty(&self) -> bool {
+        self.created_tracks.is_empty() && self.created_aliases.is_empty()
+    }
+
+    pub fn extend_from(&mut self, other: &Self) {
+        self.created_tracks
+            .extend(other.created_tracks.iter().cloned());
+        self.created_aliases
+            .extend(other.created_aliases.iter().cloned());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -301,7 +301,55 @@ struct ResolvedEditTags {
     tags: Option<Vec<String>>,
     effective_tags: Vec<String>,
     could_change_writer_status: bool,
-    becomes_writer: bool,
+    becomes_writer: Option<bool>,
+}
+
+async fn resolve_mission_becomes_writer(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    req_writer: Option<bool>,
+    effective_tags: &[String],
+    effective_intent: Option<&str>,
+) -> Result<bool, (StatusCode, String)> {
+    // When explicit `writer`, `"pr-readonly"`, `"pr-writer"`, or `intent`
+    // already determines `requested_pr_writer`, skip loading prompt/goal rows.
+    let has_decisive_writer_tag = effective_tags
+        .iter()
+        .any(|tag| tag == "pr-readonly" || tag == "pr-writer");
+    if req_writer.is_some() || has_decisive_writer_tag {
+        return Ok(requested_pr_writer(
+            req_writer,
+            Some(effective_tags),
+            effective_intent,
+            None,
+        ));
+    }
+    if requested_pr_writer(req_writer, Some(effective_tags), effective_intent, None) {
+        return Ok(true);
+    }
+    let deferred_goal = mission_store
+        .get_deferred_goal(mission_id)
+        .await
+        .map_err(internal_error)?;
+    let initial_prompt = mission_store
+        .get_initial_user_message(mission_id)
+        .await
+        .map_err(internal_error)?;
+    let initial_prompt_requests_writer = requested_pr_writer(
+        req_writer,
+        Some(effective_tags),
+        effective_intent,
+        initial_prompt.as_deref(),
+    );
+    let deferred_goal_requests_writer = deferred_goal.as_deref().is_some_and(|goal| {
+        requested_pr_writer(
+            req_writer,
+            Some(effective_tags),
+            effective_intent,
+            Some(goal),
+        )
+    });
+    Ok(initial_prompt_requests_writer || deferred_goal_requests_writer)
 }
 
 async fn resolve_project_edit_tags(
@@ -354,45 +402,21 @@ async fn resolve_project_edit_tags(
         &effective_tags,
         &current.project.tags,
     );
-    // When explicit `writer`, `"pr-readonly"`, `"pr-writer"`, or `intent`
-    // already determines `requested_pr_writer`, skip loading prompt/goal rows.
-    let has_decisive_writer_tag = effective_tags
-        .iter()
-        .any(|tag| tag == "pr-readonly" || tag == "pr-writer");
-    let becomes_writer = if req.writer.is_some() || has_decisive_writer_tag {
-        requested_pr_writer(req.writer, Some(&effective_tags), effective_intent, None)
-    } else if requested_pr_writer(req.writer, Some(&effective_tags), effective_intent, None) {
-        true
-    } else {
-        let deferred_goal = mission_store
-            .get_deferred_goal(current.id)
-            .await
-            .map_err(internal_error)?;
-        let initial_prompt = mission_store
-            .get_initial_user_message(current.id)
-            .await
-            .map_err(internal_error)?;
-        let initial_prompt_requests_writer = requested_pr_writer(
+    // Defer prompt/deferred-goal event scans unless writer status is actually
+    // changing or a live lease needs a mode decision later in the edit.
+    let becomes_writer = if could_change_writer_status {
+        let writer = resolve_mission_becomes_writer(
+            mission_store,
+            current.id,
             req.writer,
-            Some(&effective_tags),
+            &effective_tags,
             effective_intent,
-            initial_prompt.as_deref(),
-        );
-        let deferred_goal_requests_writer = deferred_goal.as_deref().is_some_and(|goal| {
-            requested_pr_writer(
-                req.writer,
-                Some(&effective_tags),
-                effective_intent,
-                Some(goal),
-            )
-        });
-        initial_prompt_requests_writer || deferred_goal_requests_writer
-    };
-    // Writer capability governs tracks even when PR metadata is absent.
-    // Explicit promotion must replace a read-only tag before lease_mode sees it,
-    // while pure project/folder moves keep capability tags untouched.
-    if could_change_writer_status {
-        if becomes_writer {
+        )
+        .await?;
+        // Writer capability governs tracks even when PR metadata is absent.
+        // Explicit promotion must replace a read-only tag before lease_mode sees it,
+        // while pure project/folder moves keep capability tags untouched.
+        if writer {
             effective_tags.retain(|tag| tag != "pr-readonly" && tag != "pr-writer");
             effective_tags.push("pr-writer".to_string());
             tags = Some(effective_tags.clone());
@@ -401,7 +425,10 @@ async fn resolve_project_edit_tags(
             effective_tags.push("pr-readonly".to_string());
             tags = Some(effective_tags.clone());
         }
-    }
+        Some(writer)
+    } else {
+        None
+    };
     Ok(ResolvedEditTags {
         tags,
         effective_tags,
@@ -452,6 +479,9 @@ fn live_track_leases_by_attempt(
 struct SubtreeMoveContext {
     ownership: Option<execution_ownership::Snapshot>,
     remote_job_missions: Option<HashSet<Uuid>>,
+    live_leases: HashMap<String, PriorTrackLease>,
+    unresolved_admissions: HashSet<String>,
+    absorbed_tracks: HashMap<Uuid, super::super::projects_store::AbsorbOutcome>,
 }
 
 impl SubtreeMoveContext {
@@ -499,6 +529,10 @@ struct MovedMissionSnapshot {
     /// Tags removed by this subtree transfer (re-added on rollback).
     #[serde(default)]
     undo_tag_add: Vec<String>,
+    /// Destination tracks/aliases/PR-refs created by `absorb_tracks_batch_for_subtree`
+    /// (recorded on `moved[0]` and rolled back if a descendant fails or on crash recovery).
+    #[serde(default)]
+    absorbed_tracks_undo: super::super::projects_store::AbsorbedTracksUndo,
 }
 
 impl MovedMissionSnapshot {
@@ -516,6 +550,7 @@ impl MovedMissionSnapshot {
             prior_track_lease: live_track_leases.get(&attempt).cloned(),
             undo_tag_remove,
             undo_tag_add,
+            absorbed_tracks_undo: Default::default(),
         }
     }
 }
@@ -526,36 +561,57 @@ async fn rollback_moved_missions(
     moved: &[MovedMissionSnapshot],
 ) -> Result<(), String> {
     let mut first_error: Option<String> = None;
-    for snap in moved.iter().rev() {
-        if let Err(recover_err) =
-            dispatch_admission::recover_dispatch_single(state, store, snap.id).await
-        {
+    let unresolved_admissions: Option<HashSet<String>> = match state.projects.dispatch_admissions()
+    {
+        Ok(entries) => Some(entries.into_iter().map(|(id, _)| id).collect()),
+        Err(err) => {
             tracing::error!(
-                mission_id = %snap.id,
-                %recover_err,
-                "Subtree project transfer individual journal recovery failed before rollback"
+                %err,
+                "Subtree project transfer unresolved admission snapshot failed during rollback"
             );
-            first_error.get_or_insert(recover_err);
-            continue;
+            first_error.get_or_insert(err);
+            None
         }
+    };
+    let mut current_leases: Option<HashMap<String, PriorTrackLease>> =
+        match live_track_leases_by_attempt(state) {
+            Ok(leases) => Some(leases),
+            Err((_, err)) => {
+                tracing::error!(
+                    %err,
+                    "Subtree project transfer lease snapshot failed during rollback"
+                );
+                first_error.get_or_insert(err);
+                None
+            }
+        };
+    for snap in moved.iter().rev() {
         let attempt = snap.id.to_string();
+        let needs_recover = unresolved_admissions
+            .as_ref()
+            .is_none_or(|set| set.contains(&attempt));
+        if needs_recover {
+            if let Err(recover_err) =
+                dispatch_admission::recover_dispatch_single(state, store, snap.id).await
+            {
+                tracing::error!(
+                    mission_id = %snap.id,
+                    %recover_err,
+                    "Subtree project transfer individual journal recovery failed before rollback"
+                );
+                first_error.get_or_insert(recover_err);
+                continue;
+            }
+            if let Ok(refreshed) = live_track_leases_by_attempt(state) {
+                current_leases = Some(refreshed);
+            }
+        }
         if let Some(prior) = &snap.prior_track_lease {
-            let still_matches = match state.projects.live_leases(None) {
-                Ok(leases) => leases
-                    .into_iter()
-                    .rfind(|l| l.attempt_id == attempt && l.mutation_domain == "track")
-                    .is_some_and(|l| {
-                        l.slug == prior.slug && l.track == prior.track && l.mode == prior.mode
-                    }),
-                Err(err) => {
-                    tracing::error!(
-                        mission_id = %snap.id,
-                        %err,
-                        "Subtree project transfer lease inspection failed during rollback"
-                    );
-                    first_error.get_or_insert(err);
-                    false
-                }
+            let still_matches = match &current_leases {
+                Some(leases) => leases.get(&attempt).is_some_and(|l| {
+                    l.slug == prior.slug && l.track == prior.track && l.mode == prior.mode
+                }),
+                None => false,
             };
             if !still_matches {
                 let pr = super::super::track_leases::pr_number(snap.before.github_pr.as_deref());
@@ -576,13 +632,18 @@ async fn rollback_moved_missions(
                     first_error.get_or_insert_with(|| rollback_err.to_string());
                 }
             }
-        } else if let Err(rollback_err) = state.projects.release_leases_for_attempt(&attempt) {
-            tracing::error!(
-                mission_id = %snap.id,
-                %rollback_err,
-                "Subtree project transfer lease release rollback failed"
-            );
-            first_error.get_or_insert(rollback_err);
+        } else if current_leases
+            .as_ref()
+            .is_none_or(|leases| leases.contains_key(&attempt))
+        {
+            if let Err(rollback_err) = state.projects.release_leases_for_attempt(&attempt) {
+                tracing::error!(
+                    mission_id = %snap.id,
+                    %rollback_err,
+                    "Subtree project transfer lease release rollback failed"
+                );
+                first_error.get_or_insert(rollback_err);
+            }
         }
 
         match store.get_mission_metadata(snap.id).await {
@@ -627,6 +688,21 @@ async fn rollback_moved_missions(
                     mission_id = %snap.id,
                     %rollback_err,
                     "Subtree project transfer rollback mission read failed"
+                );
+                first_error.get_or_insert(rollback_err);
+            }
+        }
+    }
+    for snap in moved.iter().rev() {
+        if !snap.absorbed_tracks_undo.is_empty() {
+            if let Err(rollback_err) = state
+                .projects
+                .rollback_absorbed_tracks(&snap.absorbed_tracks_undo)
+            {
+                tracing::error!(
+                    mission_id = %snap.id,
+                    %rollback_err,
+                    "Subtree project transfer absorbed tracks rollback failed"
                 );
                 first_error.get_or_insert(rollback_err);
             }
@@ -745,26 +821,30 @@ where
     // Reconcile any interrupted individual `mission_dispatch_admissions`
     // receipts on the root and every descendant BEFORE capturing rollback
     // snapshots so a stale provisional lease is never captured as prior state.
-    for mid in std::iter::once(id).chain(descendant_ids.iter().copied()) {
-        let had_receipt = state
-            .projects
-            .dispatch_admission(&mid.to_string())
-            .map_err(internal_error)?
-            .is_some();
-        if had_receipt {
-            dispatch_admission::recover_dispatch_single(&state, &control.mission_store, mid)
-                .await
-                .map_err(map_dispatch_recovery_error)?;
-            if mid != id {
-                if let Some(reloaded) = control
-                    .mission_store
-                    .get_mission_metadata(mid)
+    let initial_unresolved: HashSet<String> = state
+        .projects
+        .dispatch_admissions()
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|(attempt, _)| attempt)
+        .collect();
+    if !initial_unresolved.is_empty() {
+        for mid in std::iter::once(id).chain(descendant_ids.iter().copied()) {
+            if initial_unresolved.contains(&mid.to_string()) {
+                dispatch_admission::recover_dispatch_single(&state, &control.mission_store, mid)
                     .await
-                    .map_err(internal_error)?
-                {
-                    descendant_missions.insert(mid, reloaded);
-                } else {
-                    descendant_missions.remove(&mid);
+                    .map_err(map_dispatch_recovery_error)?;
+                if mid != id {
+                    if let Some(reloaded) = control
+                        .mission_store
+                        .get_mission_metadata(mid)
+                        .await
+                        .map_err(internal_error)?
+                    {
+                        descendant_missions.insert(mid, reloaded);
+                    } else {
+                        descendant_missions.remove(&mid);
+                    }
                 }
             }
         }
@@ -832,7 +912,18 @@ where
         .save_subtree_project_edit(&root_key, &receipt_json)
         .map_err(internal_error)?;
 
-    let mut subtree_ctx = SubtreeMoveContext::default();
+    let unresolved_after_reconcile: HashSet<String> = state
+        .projects
+        .dispatch_admissions()
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|(attempt, _)| attempt)
+        .collect();
+    let mut subtree_ctx = SubtreeMoveContext {
+        live_leases: live_leases.clone(),
+        unresolved_admissions: unresolved_after_reconcile,
+        ..Default::default()
+    };
     let updated = match update_mission_project_inner(
         is_actor_busy(id),
         state.clone(),
@@ -862,12 +953,22 @@ where
 
     if updated.project.project.is_some() || explicit_project_patch {
         let target_project = updated.project.project.clone();
+        let mut moved = vec![planned_snapshots[0].clone()];
         let mut planned_by_id: HashMap<Uuid, MovedMissionSnapshot> = planned_snapshots
             .iter()
             .skip(1)
             .map(|s| (s.id, s.clone()))
             .collect();
-        let mut moved = vec![planned_snapshots[0].clone()];
+
+        // Partition moving descendants into two ordered waves:
+        //  1. Active, busy, or lease-holding descendants run individually FIRST so any
+        //     409 lease/busy conflict rejects and rolls back before batch-absorbing
+        //     tracks for passive descendants.
+        //  2. Passive descendants batch-absorb their destination tracks in a single
+        //     `IMMEDIATE` transaction (journaling `absorbed_tracks_undo` onto both
+        //     `subtree_project_edits` and `moved[0]`) and then commit metadata.
+        let mut wave1_active_or_leased: Vec<(Uuid, Mission)> = Vec::new();
+        let mut wave2_passive: Vec<(Uuid, Mission)> = Vec::new();
         for child_id in descendant_ids {
             let child = match descendant_missions.remove(&child_id) {
                 Some(child) => child,
@@ -888,62 +989,104 @@ where
             if child.project.project == target_project {
                 continue;
             }
-            let child_snap = match planned_by_id.remove(&child_id) {
-                Some(snap) => snap,
-                None => {
-                    let removed_folders: Vec<String> = child
-                        .project
-                        .tags
-                        .iter()
-                        .filter(|t| t.starts_with("orb-folder:"))
-                        .cloned()
-                        .collect();
-                    MovedMissionSnapshot::from_leases(
-                        &live_leases,
-                        &child,
-                        Vec::new(),
-                        removed_folders,
-                    )
+            let holds_track = match subtree_ctx.holds_track(&state.control, child_id).await {
+                Ok(v) => v,
+                Err(err) => {
+                    if rollback_moved_missions(&state, &control.mission_store, &moved)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = state.projects.clear_subtree_project_edit(&root_key);
+                    }
+                    return Err(internal_error(err));
                 }
             };
-            // Include the attempted child in `moved` before running its update:
-            // if its metadata write commits and only the trailing read fails,
-            // compensation must roll back (or retain the receipt for) this
-            // child too rather than stranding it in the destination project.
-            moved.push(child_snap);
-            // Omit internal `disk-reservation-v1:` tags from the synthetic
-            // request body so admission validation does not reject legacy
-            // rows; `update_mission_project_inner` re-attaches them from
-            // `current.project.tags` automatically.
-            let child_tags: Vec<String> = child
-                .project
-                .tags
-                .iter()
-                .filter(|t| {
-                    !t.starts_with("orb-folder:") && !t.starts_with(DISK_RESERVATION_TAG_PREFIX)
-                })
-                .cloned()
-                .collect();
-            if let Err(err) = update_mission_project_inner(
-                is_actor_busy(child_id),
-                state.clone(),
-                user.clone(),
+            let cid_str = child_id.to_string();
+            if holds_track
+                || is_actor_busy(child_id)
+                || live_leases.contains_key(&cid_str)
+                || subtree_ctx.unresolved_admissions.contains(&cid_str)
+            {
+                wave1_active_or_leased.push((child_id, child));
+            } else {
+                wave2_passive.push((child_id, child));
+            }
+        }
+
+        for (child_id, child) in wave1_active_or_leased {
+            if let Err(err) = move_subtree_descendant(
+                is_actor_busy,
+                &state,
+                &user,
+                &target_project,
+                &live_leases,
+                &mut planned_by_id,
+                &mut moved,
+                &mut subtree_ctx,
                 child_id,
-                UpdateMissionProjectRequest {
-                    project: Some(target_project.clone()),
-                    track: None,
-                    intent: None,
-                    github_pr: None,
-                    writer: None,
-                    tags: Some(child_tags),
-                    desired_state: None,
-                    next_check_at: None,
-                    include_descendants: false,
-                    descendant_ids: Vec::new(),
-                },
-                Some(child),
-                Some(&mut subtree_ctx),
-                false,
+                child,
+            )
+            .await
+            {
+                if rollback_moved_missions(&state, &control.mission_store, &moved)
+                    .await
+                    .is_ok()
+                {
+                    let _ = state.projects.clear_subtree_project_edit(&root_key);
+                }
+                return Err(err);
+            }
+        }
+
+        if let Some(slug) = target_project.as_deref() {
+            let batch_inputs: Vec<super::super::projects_store::AbsorbTrackBatchItem<'_>> =
+                wave2_passive
+                    .iter()
+                    .filter_map(|(cid, child)| {
+                        let key = child.project.track.as_deref()?;
+                        let pr = super::super::track_leases::pr_number(
+                            child.project.github_pr.as_deref(),
+                        );
+                        Some(super::super::projects_store::AbsorbTrackBatchItem {
+                            mission_id: *cid,
+                            key,
+                            title_hint: child.title.as_deref(),
+                            pr_number: pr,
+                        })
+                    })
+                    .collect();
+            match state
+                .projects
+                .absorb_tracks_batch_for_subtree(&root_key, slug, &batch_inputs)
+            {
+                Ok((outcomes, undo)) => {
+                    subtree_ctx.absorbed_tracks = outcomes;
+                    moved[0].absorbed_tracks_undo.extend_from(&undo);
+                }
+                Err(err) => {
+                    if rollback_moved_missions(&state, &control.mission_store, &moved)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = state.projects.clear_subtree_project_edit(&root_key);
+                    }
+                    return Err(internal_error(err));
+                }
+            }
+        }
+
+        for (child_id, child) in wave2_passive {
+            if let Err(err) = move_subtree_descendant(
+                is_actor_busy,
+                &state,
+                &user,
+                &target_project,
+                &live_leases,
+                &mut planned_by_id,
+                &mut moved,
+                &mut subtree_ctx,
+                child_id,
+                child,
             )
             .await
             {
@@ -963,6 +1106,76 @@ where
         .clear_subtree_project_edit(&root_key)
         .map_err(internal_error)?;
     Ok(Json(updated))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn move_subtree_descendant<F>(
+    is_actor_busy: &F,
+    state: &Arc<AppState>,
+    user: &AuthUser,
+    target_project: &Option<String>,
+    live_leases: &HashMap<String, PriorTrackLease>,
+    planned_by_id: &mut HashMap<Uuid, MovedMissionSnapshot>,
+    moved: &mut Vec<MovedMissionSnapshot>,
+    subtree_ctx: &mut SubtreeMoveContext,
+    child_id: Uuid,
+    child: Mission,
+) -> Result<(), (StatusCode, String)>
+where
+    F: Fn(Uuid) -> bool,
+{
+    let child_snap = match planned_by_id.remove(&child_id) {
+        Some(snap) => snap,
+        None => {
+            let removed_folders: Vec<String> = child
+                .project
+                .tags
+                .iter()
+                .filter(|t| t.starts_with("orb-folder:"))
+                .cloned()
+                .collect();
+            MovedMissionSnapshot::from_leases(live_leases, &child, Vec::new(), removed_folders)
+        }
+    };
+    // Include the attempted child in `moved` before running its update:
+    // if its metadata write commits and only the trailing read fails,
+    // compensation must roll back (or retain the receipt for) this
+    // child too rather than stranding it in the destination project.
+    moved.push(child_snap);
+    // Omit internal `disk-reservation-v1:` tags from the synthetic
+    // request body so admission validation does not reject legacy
+    // rows; `update_mission_project_inner` re-attaches them from
+    // `current.project.tags` automatically.
+    let child_tags: Vec<String> = child
+        .project
+        .tags
+        .iter()
+        .filter(|t| !t.starts_with("orb-folder:") && !t.starts_with(DISK_RESERVATION_TAG_PREFIX))
+        .cloned()
+        .collect();
+    update_mission_project_inner(
+        is_actor_busy(child_id),
+        state.clone(),
+        user.clone(),
+        child_id,
+        UpdateMissionProjectRequest {
+            project: Some(target_project.clone()),
+            track: None,
+            intent: None,
+            github_pr: None,
+            writer: None,
+            tags: Some(child_tags),
+            desired_state: None,
+            next_check_at: None,
+            include_descendants: false,
+            descendant_ids: Vec::new(),
+        },
+        Some(child),
+        Some(subtree_ctx),
+        false,
+    )
+    .await
+    .map(|_| ())
 }
 
 pub(super) async fn update_mission_project_locked(
@@ -1030,7 +1243,7 @@ async fn update_mission_project_inner(
     )
     .await?;
 
-    let writer_guard = if becomes_writer && could_change_writer_status {
+    let writer_guard = if becomes_writer == Some(true) && could_change_writer_status {
         Some(
             acquire_durable_pr_writer_lock(&state.control)
                 .await
@@ -1064,6 +1277,7 @@ async fn update_mission_project_inner(
     let effective_track = effective_string(&track, &current.project.track);
     let project_changed = effective_project != current.project.project;
     let mut cached_busy_reason: Option<Option<&'static str>> = None;
+    let mut cached_becomes_writer = becomes_writer;
     // A pure project move (generated per-mission tracks and Orb folder tags
     // follow the mission) keeps the holder, mode, PR and real track. Leases
     // are only revalidated at turn start, so a running mission can move as
@@ -1078,15 +1292,19 @@ async fn update_mission_project_inner(
         let track_follows = effective_track == current.project.track
             || (effective_track.as_deref() == Some(generated.as_str())
                 && current.project.track.as_deref().is_none_or(generated_shape));
+        let no_unresolved_admission = match subtree_ctx.as_deref() {
+            Some(ctx) => !ctx.unresolved_admissions.contains(&id.to_string()),
+            None => state
+                .projects
+                .dispatch_admission(&id.to_string())
+                .map_err(internal_error)?
+                .is_none(),
+        };
         let move_only = track_follows
             && effective_github_pr == current.project.github_pr
             && effective_intent == current.project.intent
             && folder_only_tag_diff(&effective_tags, &current.project.tags)
-            && state
-                .projects
-                .dispatch_admission(&id.to_string())
-                .map_err(internal_error)?
-                .is_none();
+            && no_unresolved_admission;
         let busy = if move_only {
             let remote_jobs = match subtree_ctx.as_deref_mut() {
                 Some(ctx) => Some(
@@ -1111,6 +1329,21 @@ async fn update_mission_project_inner(
             None
         };
         if busy.is_some() {
+            let is_writer = match cached_becomes_writer {
+                Some(v) => v,
+                None => {
+                    let v = resolve_mission_becomes_writer(
+                        &control.mission_store,
+                        current.id,
+                        req.writer,
+                        &effective_tags,
+                        effective_intent.as_deref(),
+                    )
+                    .await?;
+                    cached_becomes_writer = Some(v);
+                    v
+                }
+            };
             if let RunningMoveOutcome::Moved(moved) = move_running_mission_project(
                 &state,
                 &control.mission_store,
@@ -1118,7 +1351,7 @@ async fn update_mission_project_inner(
                 MoveTarget {
                     project: effective_project.clone().unwrap_or_default(),
                     track: effective_track.clone(),
-                    mode: if becomes_writer {
+                    mode: if is_writer {
                         "writer"
                     } else {
                         super::super::track_leases::lease_mode(
@@ -1183,11 +1416,17 @@ async fn update_mission_project_inner(
         effective_track.as_deref(),
     ) {
         let pr = super::super::track_leases::pr_number(effective_github_pr.as_deref());
-        let outcome = state
-            .projects
-            .absorb_track(slug, key, current.title.as_deref(), pr)
-            .map_err(internal_error)?;
-        let holds_lease = match subtree_ctx {
+        let outcome = match subtree_ctx
+            .as_deref_mut()
+            .and_then(|ctx| ctx.absorbed_tracks.remove(&id))
+        {
+            Some(preabsorbed) => preabsorbed,
+            None => state
+                .projects
+                .absorb_track(slug, key, current.title.as_deref(), pr)
+                .map_err(internal_error)?,
+        };
+        let holds_lease = match subtree_ctx.as_deref_mut() {
             Some(ctx) => ctx
                 .holds_track(&state.control, id)
                 .await
@@ -1201,7 +1440,20 @@ async fn update_mission_project_inner(
             }
         };
         if holds_lease {
-            let mode = if becomes_writer {
+            let is_writer = match cached_becomes_writer {
+                Some(v) => v,
+                None => {
+                    resolve_mission_becomes_writer(
+                        &control.mission_store,
+                        current.id,
+                        req.writer,
+                        &effective_tags,
+                        effective_intent.as_deref(),
+                    )
+                    .await?
+                }
+            };
+            let mode = if is_writer {
                 "writer"
             } else {
                 super::super::track_leases::lease_mode(
@@ -1260,7 +1512,17 @@ async fn update_mission_project_inner(
     if let Some(delta) = &patch.tag_patch {
         delta.apply(&mut after.tags);
     }
-    if track_changed {
+    // In a subtree move, `subtree_project_edits` already journals the whole
+    // subtree rollback; only nodes that hold or acquire a track lease mutate
+    // `projects.db` `track_leases` and need per-node two-DB lease fencing.
+    let needs_lease_journal = match subtree_ctx.as_deref() {
+        Some(ctx) => {
+            track_changed
+                && (lease_request.is_some() || ctx.live_leases.contains_key(&id.to_string()))
+        }
+        None => track_changed,
+    };
+    if needs_lease_journal {
         // Recovery compares only fields owned by this edit. The metadata write
         // is atomic; after a crash it either committed or still names `before`.
         // Unrelated tag additions must not prevent that decision.
@@ -1283,7 +1545,7 @@ async fn update_mission_project_inner(
         .update_mission_project(id, patch)
         .await;
     if let Err(error) = persisted {
-        if track_changed {
+        if needs_lease_journal {
             // Keep the receipt when compensation itself fails, so sweep or
             // restart retries the exact provisional claim instead of renewing it.
             dispatch_admission::finish_project_edit(&state, &control.mission_store, id, false)
@@ -1294,7 +1556,7 @@ async fn update_mission_project_inner(
     }
     #[cfg(test)]
     dispatch_admission_tests::crash_checkpoint("project_edit_after_metadata");
-    if track_changed {
+    if needs_lease_journal {
         if let Err(error) =
             dispatch_admission::finish_project_edit(&state, &control.mission_store, id, true).await
         {
@@ -1800,11 +2062,11 @@ pub(super) async fn mission_is_client_placed(
 mod subtree_move_tests {
     use super::*;
     use crate::api::mission_store::{MissionProjectPatch, SqliteMissionStore};
-    use crate::api::projects_store::ProjectsStore;
+    use crate::api::projects_store::{AbsorbTrackBatchItem, ProjectsStore};
 
-    #[tokio::test]
-    async fn subtree_move_resolves_display_title_and_moves_large_subtree_with_null_children() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn build_subtree_test_env(
+        dir: &tempfile::TempDir,
+    ) -> (Arc<AppState>, Arc<dyn MissionStore>, AuthUser) {
         let path = dir.path();
         let mut config = Config::new(path.to_path_buf());
         config.automations_enabled = false;
@@ -1845,10 +2107,7 @@ mod subtree_move_tests {
             None,
             user.id.clone(),
         );
-        hub.sessions
-            .write()
-            .await
-            .insert(user.id.clone(), control.clone());
+        hub.sessions.write().await.insert(user.id.clone(), control);
         let projects = Arc::new(ProjectsStore::open(path.join("projects.db")).unwrap());
         projects
             .upsert_project("assistant", Some("Assistant"), None, None, None)
@@ -1915,6 +2174,14 @@ mod subtree_move_tests {
             attention_snapshot: Default::default(),
         });
         let _ = state.control.admission_state.set(Arc::downgrade(&state));
+        (state, store, user)
+    }
+
+    #[tokio::test]
+    async fn subtree_move_resolves_display_title_and_moves_large_subtree_with_null_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let (state, store, user) = build_subtree_test_env(&dir).await;
 
         let root = store
             .create_mission(
@@ -1942,7 +2209,7 @@ mod subtree_move_tests {
             .unwrap();
 
         let mut child_ids = Vec::new();
-        for idx in 0..64 {
+        for idx in 0..210 {
             let child = store
                 .create_mission_with_parent(
                     Some(&format!("worker-{idx}")),
@@ -1959,26 +2226,30 @@ mod subtree_move_tests {
                 .await
                 .unwrap();
             store
-                .update_mission_status(child.id, MissionStatus::Completed)
+                .update_mission_status(child.id, MissionStatus::Acknowledged)
                 .await
                 .unwrap();
-            // Include `project = None` (`Default`) children and internal reservation tags.
+            // Include `project = None` (`Default`) children, internal reservation
+            // tags, and untagged children so lazy writer resolution is exercised.
             let initial_proj = if idx < 2 {
                 None
             } else {
                 Some("assistant".to_string())
             };
+            let mut initial_tags = vec![
+                "orb-folder:nested".to_string(),
+                "disk-reservation-v1:1024".to_string(),
+            ];
+            if idx % 2 == 0 {
+                initial_tags.insert(0, "pr-readonly".to_string());
+            }
             store
                 .update_mission_project(
                     child.id,
                     MissionProjectPatch {
                         project: Some(initial_proj),
                         track: Some(Some(format!("worker-track-{idx}"))),
-                        tags: Some(vec![
-                            "pr-readonly".into(),
-                            "orb-folder:nested".into(),
-                            "disk-reservation-v1:1024".into(),
-                        ]),
+                        tags: Some(initial_tags),
                         ..Default::default()
                     },
                 )
@@ -1987,8 +2258,37 @@ mod subtree_move_tests {
             child_ids.push(child.id);
         }
 
+        // Replay `remote_node::job_ledger`'s cross-connection WAL writes on
+        // `projects.db` throughout the subtree move so any `DEFERRED`
+        // read-to-write upgrade (`SQLITE_BUSY_SNAPSHOT` / "database is locked")
+        // is immediately caught.
+        let stop_writer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_writer_bg = stop_writer.clone();
+        let projects_db_path = path.join("projects.db");
+        let writer_handle = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(&projects_db_path).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            let _ = conn.pragma_update(None, "journal_mode", "WAL");
+            conn.execute_batch(crate::api::projects_store::REMOTE_JOBS_SCHEMA)
+                .unwrap();
+            let mut seq: i64 = 0;
+            while !stop_writer_bg.load(std::sync::atomic::Ordering::Relaxed) {
+                seq += 1;
+                let now = chrono::Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "INSERT INTO remote_jobs \
+                     (job_id, mission_id, node_id, kind, state, submission_sequence, started_at, heartbeat_at, updated_at) \
+                     VALUES ('bg-job-1', 'bg-mission-1', 'sepolia', 'mission', 'running', ?1, ?2, ?2, ?2) \
+                     ON CONFLICT(job_id) DO UPDATE SET submission_sequence = excluded.submission_sequence, heartbeat_at = excluded.heartbeat_at, updated_at = excluded.updated_at",
+                    rusqlite::params![seq, now],
+                );
+                std::thread::yield_now();
+            }
+        });
+
         let started = std::time::Instant::now();
-        let Json(updated) = update_mission_project_subtree_locked(
+        let move_res = update_mission_project_subtree_locked(
             &|uid| uid == root.id,
             State(state.clone()),
             Extension(user),
@@ -2006,12 +2306,15 @@ mod subtree_move_tests {
                 descendant_ids: Vec::new(),
             }),
         )
-        .await
-        .expect("subtree move succeeds");
+        .await;
+        stop_writer.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = writer_handle.join();
+        let Json(updated) =
+            move_res.expect("210-child subtree move under concurrent WAL writes succeeds");
         let elapsed = started.elapsed();
         assert!(
             elapsed < std::time::Duration::from_secs(5),
-            "64-child subtree move took too long: {elapsed:?}"
+            "210-child subtree move took too long: {elapsed:?}"
         );
         assert_eq!(updated.project.project.as_deref(), Some("verity-core"));
         assert_eq!(
@@ -2019,7 +2322,7 @@ mod subtree_move_tests {
             vec!["pr-readonly".to_string(), "orb-folder:evm".to_string()]
         );
 
-        for child_id in child_ids {
+        for (idx, child_id) in child_ids.into_iter().enumerate() {
             let child = store
                 .get_mission_metadata(child_id)
                 .await
@@ -2035,11 +2338,360 @@ mod subtree_move_tests {
                 "child folder tags must be stripped on cross-project move: {:?}",
                 child.project.tags
             );
-            assert!(child.project.tags.contains(&"pr-readonly".to_string()));
+            if idx % 2 == 0 {
+                assert!(child.project.tags.contains(&"pr-readonly".to_string()));
+            }
             assert!(child
                 .project
                 .tags
                 .contains(&"disk-reservation-v1:1024".to_string()));
         }
+    }
+
+    #[tokio::test]
+    async fn subtree_move_rejects_early_lease_conflict_without_creating_batch_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store, user) = build_subtree_test_env(&dir).await;
+
+        let blocker = store
+            .create_mission(
+                Some("blocker"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .projects
+            .absorb_track("verity-core", "shared-track", None, None)
+            .unwrap();
+        state
+            .projects
+            .acquire_track_lease(&crate::api::track_leases::lease_request(
+                "verity-core",
+                "shared-track",
+                &blocker.id.to_string(),
+                "writer",
+                Some("blocker-lease-1"),
+            ))
+            .unwrap();
+
+        let root = store
+            .create_mission(Some("root"), None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        store
+            .update_mission_status(root.id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                root.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    track: Some(Some("root-track".into())),
+                    tags: Some(vec!["pr-readonly".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Child 0 is Paused and holds a writer lease on `shared-track` in `assistant`,
+        // so moving it to `verity-core` conflicts 409 with `blocker`'s writer lease.
+        let leased_child = store
+            .create_mission_with_parent(
+                Some("leased-child"),
+                None,
+                None,
+                None,
+                None,
+                false,
+                Some("opencode"),
+                None,
+                Some(root.id),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_status(leased_child.id, MissionStatus::Paused)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                leased_child.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    track: Some(Some("shared-track".into())),
+                    tags: Some(vec!["pr-writer".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .projects
+            .absorb_track("assistant", "shared-track", None, None)
+            .unwrap();
+        state
+            .projects
+            .acquire_track_lease(&crate::api::track_leases::lease_request(
+                "assistant",
+                "shared-track",
+                &leased_child.id.to_string(),
+                "writer",
+                Some("leased-child-1"),
+            ))
+            .unwrap();
+
+        for idx in 1..8 {
+            let passive = store
+                .create_mission_with_parent(
+                    Some(&format!("passive-{idx}")),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    Some("opencode"),
+                    None,
+                    Some(root.id),
+                    None,
+                )
+                .await
+                .unwrap();
+            store
+                .update_mission_status(passive.id, MissionStatus::Acknowledged)
+                .await
+                .unwrap();
+            store
+                .update_mission_project(
+                    passive.id,
+                    MissionProjectPatch {
+                        project: Some(Some("assistant".into())),
+                        track: Some(Some(format!("unvisited-track-{idx}"))),
+                        tags: Some(vec!["pr-readonly".into()]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let err = update_mission_project_subtree_locked(
+            &|_| false,
+            State(state.clone()),
+            Extension(user),
+            Path(root.id),
+            Json(UpdateMissionProjectRequest {
+                project: Some(Some("Ethereum".into())),
+                track: None,
+                intent: None,
+                github_pr: None,
+                writer: None,
+                tags: None,
+                desired_state: None,
+                next_check_at: None,
+                include_descendants: true,
+                descendant_ids: Vec::new(),
+            }),
+        )
+        .await
+        .expect_err("writer lease conflict on leased child must reject subtree move");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+
+        let root_after = store.get_mission_metadata(root.id).await.unwrap().unwrap();
+        assert_eq!(root_after.project.project.as_deref(), Some("assistant"));
+        let leased_after = store
+            .get_mission_metadata(leased_child.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(leased_after.project.project.as_deref(), Some("assistant"));
+        assert!(state.projects.subtree_project_edits().unwrap().is_empty());
+
+        for idx in 1..8 {
+            assert_eq!(
+                state
+                    .projects
+                    .resolve_track_key("verity-core", &format!("unvisited-track-{idx}"))
+                    .unwrap(),
+                None,
+                "passive track unvisited-track-{idx} must not be created when Wave 1 conflicts"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn absorb_tracks_batch_undo_rolls_back_created_tracks_and_aliases_on_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, store, _user) = build_subtree_test_env(&dir).await;
+
+        let root = store
+            .create_mission(Some("root"), None, None, None, None, Some("opencode"), None)
+            .await
+            .unwrap();
+        store
+            .update_mission_status(root.id, MissionStatus::Acknowledged)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                root.id,
+                MissionProjectPatch {
+                    project: Some(Some("assistant".into())),
+                    track: Some(Some("root-track".into())),
+                    tags: Some(vec!["pr-readonly".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let root_meta = store.get_mission_metadata(root.id).await.unwrap().unwrap();
+        let root_key = root.id.to_string();
+        let initial_snap =
+            MovedMissionSnapshot::from_leases(&HashMap::new(), &root_meta, Vec::new(), Vec::new());
+        state
+            .projects
+            .save_subtree_project_edit(
+                &root_key,
+                &serde_json::to_value(vec![initial_snap]).unwrap(),
+            )
+            .unwrap();
+
+        // Declare an existing track with a PR ref so `pr_match` alias creation is also tested.
+        state
+            .projects
+            .set_track("verity-core", "declared-pr-track", None, None)
+            .unwrap();
+        state
+            .projects
+            .absorb_track("verity-core", "declared-pr-track", None, Some(4242))
+            .unwrap();
+        // Ensure PR ref 4242 exists on an absorbed track to exercise `pr_match` alias undo:
+        state
+            .projects
+            .absorb_track("verity-core", "existing-pr-holder", None, Some(7777))
+            .unwrap();
+
+        let m1 = Uuid::new_v4();
+        let m2 = Uuid::new_v4();
+        let m3 = Uuid::new_v4();
+        let (outcomes, undo) = state
+            .projects
+            .absorb_tracks_batch_for_subtree(
+                &root_key,
+                "verity-core",
+                &[
+                    AbsorbTrackBatchItem {
+                        mission_id: m1,
+                        key: "Batch_Created_1",
+                        title_hint: Some("Batch 1"),
+                        pr_number: Some(8888),
+                    },
+                    AbsorbTrackBatchItem {
+                        mission_id: m2,
+                        key: "alias-via-pr-7777",
+                        title_hint: None,
+                        pr_number: Some(7777),
+                    },
+                    AbsorbTrackBatchItem {
+                        mission_id: m3,
+                        key: "batch-edited-later",
+                        title_hint: Some("Initial Title"),
+                        pr_number: None,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(undo.created_tracks.len(), 2);
+        assert_eq!(undo.created_aliases.len(), 1);
+        assert_eq!(undo.created_aliases[0].slug, "verity-core");
+        assert_eq!(undo.created_aliases[0].alias_key, "alias-via-pr-7777");
+        assert_eq!(
+            state
+                .projects
+                .resolve_track_key("verity-core", "Batch_Created_1")
+                .unwrap()
+                .as_deref(),
+            Some("batch-created-1")
+        );
+        assert_eq!(
+            state
+                .projects
+                .resolve_track_key("verity-core", "alias-via-pr-7777")
+                .unwrap()
+                .as_deref(),
+            Some("existing-pr-holder")
+        );
+
+        // Operator/plan edit on `batch-edited-later` bumps revision: rollback must preserve it!
+        state
+            .projects
+            .patch_track(
+                "verity-core",
+                "batch-edited-later",
+                Some("Updated desired state"),
+                None,
+                Some("Operator Edited Title"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Simulate crash recovery replaying the persisted `subtree_project_edits` receipt.
+        let persisted = state.projects.subtree_project_edits().unwrap();
+        assert_eq!(persisted.len(), 1);
+        recover_subtree_project_edit_entry(&state, &store, &root_key, persisted[0].1.clone())
+            .await
+            .unwrap();
+
+        assert!(state.projects.subtree_project_edits().unwrap().is_empty());
+        assert_eq!(
+            state
+                .projects
+                .resolve_track_key("verity-core", "Batch_Created_1")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            state
+                .projects
+                .resolve_track_key("verity-core", "batch-created-1")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            state
+                .projects
+                .resolve_track_key("verity-core", "alias-via-pr-7777")
+                .unwrap(),
+            None
+        );
+        // Independently modified batch-created track AND pre-existing tracks remain untouched.
+        let preserved = state
+            .projects
+            .track("verity-core", "batch-edited-later")
+            .unwrap()
+            .expect("modified absorbed track must be preserved across rollback");
+        assert_eq!(preserved.title.as_deref(), Some("Operator Edited Title"));
+        assert_eq!(
+            preserved.desired_state.as_deref(),
+            Some("Updated desired state")
+        );
+        assert_eq!(
+            state
+                .projects
+                .resolve_track_key("verity-core", "existing-pr-holder")
+                .unwrap()
+                .as_deref(),
+            Some("existing-pr-holder")
+        );
     }
 }

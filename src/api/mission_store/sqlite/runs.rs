@@ -14,7 +14,7 @@ impl SqliteMissionStore {
         let scope_unit = scope_unit.map(str::to_string);
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
-            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
             machine_transfer::guard_start(&tx, mission_id)?;
             machine_transfer::guard_placement(&tx,mission_id,&owner_actor_id,scope_unit.as_deref())?;
             let cwd=scope_unit.as_deref().and_then(|s|s.strip_prefix("orb-cwd:"));
@@ -337,7 +337,7 @@ impl SqliteMissionStore {
         let run = run.map(|r| (r.run_id.to_string(), r.generation));
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let (current_backend, current_session): (String, Option<String>) = tx.query_row("SELECT COALESCE(backend, 'opencode'), session_id FROM missions WHERE id = ?1", [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
             let latest: Option<(String, u64)> = tx.query_row("SELECT run_id, generation FROM mission_runs WHERE mission_id = ?1 ORDER BY generation DESC LIMIT 1", [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
             if backend.is_empty() || current_backend != backend || current_session != session_id || latest != run { return Ok(false); }
@@ -365,7 +365,7 @@ impl SqliteMissionStore {
         let run = run.map(|r| (r.run_id.to_string(), r.generation));
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let (current_backend, session): (String, Option<String>) = tx.query_row("SELECT COALESCE(backend, 'opencode'), session_id FROM missions WHERE id = ?1", [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
             let latest: Option<(String, u64)> = tx.query_row("SELECT run_id, generation FROM mission_runs WHERE mission_id = ?1 ORDER BY generation DESC LIMIT 1", [id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
             if backend.is_empty() || current_backend != backend || session.is_some() || latest != run { return Ok(false); }
@@ -394,7 +394,7 @@ impl SqliteMissionStore {
         let backend = backend.to_string();
         tokio::task::spawn_blocking(move || {
             let mut connection = conn.blocking_lock();
-            let tx = connection.transaction().map_err(|e| e.to_string())?;
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let current_backend: String = tx.query_row(
                 "SELECT COALESCE(backend, 'opencode') FROM missions WHERE id = ?1",
                 params![id.to_string()], |row| row.get(0),
@@ -435,7 +435,7 @@ impl SqliteMissionStore {
         let run = (run.run_id.to_string(), run.generation);
         tokio::task::spawn_blocking(move || {
             let mut c = conn.blocking_lock();
-            let tx = c.transaction().map_err(|e| e.to_string())?;
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let latest: Option<(String,u64)> = tx.query_row(
                 "SELECT run_id,generation FROM mission_runs WHERE mission_id=?1 ORDER BY generation DESC LIMIT 1",
                 [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?)),

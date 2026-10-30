@@ -52,7 +52,7 @@ impl SqliteMissionStore {
         let automation = automation.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let current: Option<(bool, Option<String>)> = tx.query_row(
                 "SELECT active, last_triggered_at FROM automations WHERE id = ?",
                 [automation.id.to_string()], |r| Ok((r.get(0)?, r.get(1)?))
@@ -127,7 +127,7 @@ impl SqliteMissionStore {
     pub(super) async fn cancel_mission_continuations(&self, mission: Uuid) -> Result<(), String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = conn.blocking_lock(); let tx = conn.transaction()?;
+            let mut conn = conn.blocking_lock(); let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute("UPDATE automations SET active = 0 WHERE mission_id = ? AND json_extract(variables, '$.__wakeup_source') IS NOT NULL", [mission.to_string()])?;
             tx.execute("UPDATE board_outbox SET state = 'acknowledged', acknowledged_at = ? WHERE id IN (SELECT id FROM automation_executions WHERE mission_id = ? AND trigger_source = 'durable_schedule') AND state = 'pending'", params![now_string(),mission.to_string()])?;
             tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND (status IN ('pending','running') OR COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true')", params![now_string(),mission.to_string()])?;
@@ -142,7 +142,7 @@ impl SqliteMissionStore {
     ) -> Result<(), String> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let mut conn = conn.blocking_lock(); let tx = conn.transaction()?;
+            let mut conn = conn.blocking_lock(); let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute("INSERT INTO mission_wakeup_fences (mission_id, stopped_generation) VALUES (?1, ?2) ON CONFLICT(mission_id) DO UPDATE SET stopped_generation = MAX(stopped_generation, excluded.stopped_generation)", params![mission.to_string(), generation as i64])?;
             tx.execute("UPDATE automations SET active = 0 WHERE mission_id = ? AND json_extract(variables, '$.__wakeup_source') IS NOT NULL AND CAST(COALESCE(json_extract(variables, '$.__wakeup_run_generation'), '0') AS INTEGER) <= ?", params![mission.to_string(),generation as i64])?;
             tx.execute("UPDATE board_outbox SET state = 'acknowledged', acknowledged_at = ? WHERE id IN (SELECT id FROM automation_executions WHERE mission_id = ? AND trigger_source = 'durable_schedule' AND CAST(COALESCE(json_extract(variables_used, '$.__wakeup_run_generation'), '0') AS INTEGER) <= ?) AND state = 'pending'", params![now_string(),mission.to_string(),generation as i64])?;
@@ -155,7 +155,7 @@ impl SqliteMissionStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             tx.execute("UPDATE automations SET active = 0 WHERE id = ?", [id.to_string()]).map_err(|e| e.to_string())?;
             tx.execute("UPDATE automation_executions SET status = 'cancelled', completed_at = ? WHERE automation_id = ? AND trigger_source = 'durable_schedule' AND (status = 'pending' OR (status IN ('success','failed') AND COALESCE(json_extract(variables_used, '$.__delivery_accepted'), '') != 'true'))", params![now_string(), id.to_string()]).map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())
