@@ -1546,7 +1546,7 @@
         },
         {
           "path": "src/api/control/tests.rs",
-          "sha256": "bc9d0607fe4ad268d538af2453cdf3fee6f71c44a07f75517bf2e9e72c0a1f4a"
+          "sha256": "2e2a520949562a9dff3e0ec398e77fca8b9a03b8ef505bcd094c74acbc584bd0"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",

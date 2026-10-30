@@ -36,7 +36,6 @@ use uuid::Uuid;
 
 use crate::ai_providers::{AIProvider, ProviderType};
 use crate::config::Config;
-use crate::library::env_crypto::strip_encrypted_tags;
 use crate::library::LibraryStore;
 use crate::mcp::{McpRegistry, McpScope, McpServerConfig, McpTransport};
 use crate::nspawn::{self, NspawnDistro};
@@ -2717,10 +2716,10 @@ async fn write_managed_library_skills(
         } else {
             ensure_skill_name_in_frontmatter(&skill.content, &skill.name)
         };
-        files.insert("SKILL.md".to_owned(), strip_encrypted_tags(&content));
+        files.insert("SKILL.md".to_owned(), content);
         for (path, content) in &skill.files {
             crate::project_context::valid_path(path).map_err(anyhow::Error::msg)?;
-            files.insert(path.clone(), strip_encrypted_tags(content));
+            files.insert(path.clone(), content.clone());
         }
         desired.insert(skill.name.clone(), files);
     }
@@ -3135,136 +3134,6 @@ async fn collect_skill_contents(
     }
 
     skills_to_write
-}
-
-/// Collect all command contents from the library.
-/// Used for both Claude Code (as commands) and OpenCode (as skills).
-async fn collect_command_contents(
-    context_name: &str,
-    library: &LibraryStore,
-) -> Vec<CommandContent> {
-    let mut commands_to_write: Vec<CommandContent> = Vec::new();
-
-    match library.list_commands().await {
-        Ok(command_summaries) => {
-            for summary in command_summaries {
-                match library.get_command(&summary.name).await {
-                    Ok(command) => {
-                        commands_to_write.push(CommandContent {
-                            name: command.name,
-                            description: command.description,
-                            content: command.content,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            command = %summary.name,
-                            context = %context_name,
-                            error = %e,
-                            "Failed to load command from library, skipping"
-                        );
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                context = %context_name,
-                error = %e,
-                "Failed to list commands from library"
-            );
-        }
-    }
-
-    commands_to_write
-}
-
-/// Agent content to be written to the workspace.
-pub struct AgentContent {
-    /// Agent name (filename without .md)
-    pub name: String,
-    /// Full markdown content (frontmatter + body)
-    pub content: String,
-}
-
-/// Write agent files to the workspace's `.opencode/agent/` directory.
-/// This makes library agents available to OpenCode when running in this workspace.
-pub async fn write_agents_to_workspace(
-    workspace_dir: &Path,
-    agents: &[AgentContent],
-) -> anyhow::Result<()> {
-    if agents.is_empty() {
-        return Ok(());
-    }
-
-    let agents_dir = workspace_dir.join(".opencode").join("agent");
-    tokio::fs::create_dir_all(&agents_dir).await?;
-
-    for agent in agents {
-        let agent_path = agents_dir.join(format!("{}.md", agent.name));
-        tokio::fs::write(&agent_path, &agent.content).await?;
-
-        tracing::debug!(
-            agent = %agent.name,
-            workspace = %workspace_dir.display(),
-            "Wrote agent to workspace"
-        );
-    }
-
-    tracing::info!(
-        count = agents.len(),
-        workspace = %workspace_dir.display(),
-        "Wrote agents to workspace"
-    );
-
-    Ok(())
-}
-
-/// Sync library agents to a specific directory's `.opencode/agent/` folder.
-pub async fn sync_agents_to_dir(
-    target_dir: &Path,
-    agent_names: &[String],
-    context_name: &str,
-    library: &LibraryStore,
-) -> anyhow::Result<()> {
-    if agent_names.is_empty() {
-        tracing::debug!(
-            context = %context_name,
-            "No agents to sync"
-        );
-        return Ok(());
-    }
-
-    let mut agents_to_write = Vec::new();
-    for agent_name in agent_names {
-        match library.get_library_agent(agent_name).await {
-            Ok(agent) => {
-                agents_to_write.push(AgentContent {
-                    name: agent.name,
-                    content: agent.content,
-                });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    agent = %agent_name,
-                    context = %context_name,
-                    error = %e,
-                    "Failed to load library agent, skipping"
-                );
-            }
-        }
-    }
-
-    write_agents_to_workspace(target_dir, &agents_to_write).await?;
-
-    tracing::info!(
-        context = %context_name,
-        agents = ?agent_names,
-        target = %target_dir.display(),
-        "Synced agents to directory"
-    );
-
-    Ok(())
 }
 
 /// A recorded placement belongs to an existing attempt. Losing its mission
@@ -3867,7 +3736,7 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
     mission_id: Uuid,
     backend_id: &str,
     custom_providers: Option<&[AIProvider]>,
-    config_profile: Option<&str>,
+    _config_profile: Option<&str>,
     boss_user_id: Option<&crate::api::auth::AuthUser>,
     app_working_dir: Option<&Path>,
     allow_git_mutations: bool,
@@ -3937,26 +3806,9 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
     };
     let skill_allowlist = resolved_allowlist.as_deref();
     let mut skill_contents: Option<Vec<SkillContent>> = None;
-    let mut command_contents: Option<Vec<CommandContent>> = None;
 
     if let Some(lib) = library {
         let context = format!("mission-{}", mission_id);
-
-        // Collect commands from library (for all backends)
-        let commands = collect_command_contents(&context, lib).await;
-        if !commands.is_empty() {
-            tracing::info!(
-                mission_id = %mission_id,
-                backend_id = %backend_id,
-                workspace = %workspace.name,
-                command_count = commands.len(),
-                command_names = ?commands.iter().map(|c| &c.name).collect::<Vec<_>>(),
-                "Collected {} commands for {} backend",
-                commands.len(),
-                backend_id
-            );
-            command_contents = Some(commands);
-        }
 
         // Collect skills (for backends that use skill contents directly)
         if matches!(
@@ -4004,72 +3856,9 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
             mission_id = %mission_id,
             backend_id = %backend_id,
             workspace = %workspace.name,
-            "Library not available, cannot sync skills/commands to mission workspace"
+            "Library not available, cannot sync skills to mission workspace"
         );
     }
-
-    // Load Claude Code config profile settings (hooks, custom defaults).
-    // Profile is base; generated settings (MCPs, permissions) win on top.
-    let claudecode_profile_overlay: Option<serde_json::Value> = if backend_id == "claudecode" {
-        if let Some(lib) = library {
-            let profile = config_profile.unwrap_or("default");
-            tracing::info!(
-                mission = %mission_id,
-                workspace = %workspace.name,
-                profile = %profile,
-                "Loading Claude Code settings from profile"
-            );
-            match lib.get_claudecode_raw_settings_for_profile(profile).await {
-                Ok(s) if !s.as_object().map(|o| o.is_empty()).unwrap_or(true) => Some(s),
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::warn!(
-                        mission = %mission_id,
-                        workspace = %workspace.name,
-                        profile = %profile,
-                        error = %e,
-                        "Failed to load Claude Code settings from profile, skipping"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Load Codex config profile (TOML with [otel], model defaults, etc.).
-    // Profile TOML becomes the base; MCP sections are regenerated on top.
-    let codex_profile_base: Option<String> = if backend_id == "codex" {
-        if let Some(lib) = library {
-            let profile = config_profile.unwrap_or("default");
-            tracing::info!(
-                mission = %mission_id,
-                workspace = %workspace.name,
-                profile = %profile,
-                "Loading Codex config from profile"
-            );
-            match lib.get_codex_raw_config_for_profile(profile).await {
-                Ok(s) if !s.trim().is_empty() => Some(s),
-                Ok(_) => Some(String::new()),
-                Err(e) => {
-                    tracing::warn!(
-                        mission = %mission_id,
-                        profile = %profile,
-                        error = %e,
-                        "Failed to load Codex config from profile, skipping"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
 
     let unified_mcp = if matches!(
         backend_id,
@@ -4192,11 +3981,11 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
         &workspace.env_vars,
         skill_allowlist,
         skill_contents.as_deref(),
-        command_contents.as_deref(),
+        None,
         workspace.shared_network,
         effective_custom_providers,
-        claudecode_profile_overlay.as_ref(),
-        codex_profile_base.as_deref(),
+        None,
+        None,
     )
     .await?;
 
@@ -4217,53 +4006,10 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
         );
     }
 
-    // Sync native opencode agents from profile into the workspace path read by
-    // vanilla `opencode`.
-    if backend_id == "opencode" {
-        if let Some(lib) = library {
-            let profile = config_profile.unwrap_or("default");
-            let profile_path = lib.config_profile_path(profile);
-            let agents_src = profile_path.join(".opencode").join("agents");
-            if agents_src.is_dir() {
-                let agents_dest = dir.join(".opencode").join("agent");
-                if let Err(e) = tokio::fs::create_dir_all(&agents_dest).await {
-                    tracing::warn!(
-                        mission = %mission_id,
-                        error = %e,
-                        "Failed to create .opencode/agent directory"
-                    );
-                } else {
-                    let mut count = 0u32;
-                    if let Ok(mut entries) = tokio::fs::read_dir(&agents_src).await {
-                        while let Ok(Some(entry)) = entries.next_entry().await {
-                            let path = entry.path();
-                            if path.extension().map(|e| e == "md").unwrap_or(false) {
-                                let dest = agents_dest.join(entry.file_name());
-                                if let Ok(content) = tokio::fs::read(&path).await {
-                                    let _ = tokio::fs::write(&dest, &content).await;
-                                    count += 1;
-                                }
-                            }
-                        }
-                    }
-                    if count > 0 {
-                        tracing::info!(
-                            mission = %mission_id,
-                            count = count,
-                            profile = %profile,
-                            "Synced agents from config profile to workspace"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Sync skills and tools from workspace to mission directory
+    // Sync skills from workspace to mission directory
     if let Some(lib) = library {
         let context = format!("mission-{}", mission_id);
 
-        // Sync skills
         let skill_names = match resolve_workspace_skill_names(workspace, lib).await {
             Ok(names) => names,
             Err(e) => {
@@ -4283,30 +4029,6 @@ pub(crate) async fn prepare_mission_workspace_with_skills_backend_at(
                     workspace = %workspace.name,
                     error = %e,
                     "Failed to sync skills to mission directory"
-                );
-            }
-        }
-
-        // Sync library agents (used by mission agent selection)
-        let agent_names = match lib.list_library_agents().await {
-            Ok(agents) => agents.into_iter().map(|agent| agent.name).collect(),
-            Err(e) => {
-                tracing::warn!(
-                    mission = %mission_id,
-                    workspace = %workspace.name,
-                    error = %e,
-                    "Failed to list library agents"
-                );
-                Vec::new()
-            }
-        };
-        if !agent_names.is_empty() {
-            if let Err(e) = sync_agents_to_dir(&dir, &agent_names, &context, lib).await {
-                tracing::warn!(
-                    mission = %mission_id,
-                    workspace = %workspace.name,
-                    error = %e,
-                    "Failed to sync agents to mission directory"
                 );
             }
         }
@@ -4785,7 +4507,6 @@ pub async fn build_container_workspace(
     distro: Option<NspawnDistro>,
     force_rebuild: bool,
     working_dir: &Path,
-    library: Option<&LibraryStore>,
     harness_policy: &crate::settings::HarnessVersionPolicy,
 ) -> anyhow::Result<()> {
     if workspace.workspace_type != WorkspaceType::Container {
@@ -4892,15 +4613,14 @@ pub async fn build_container_workspace(
                 return Err(e);
             }
 
-            let has_init_scripts = !workspace.init_scripts.is_empty();
             let has_custom_script = workspace
                 .init_script
                 .as_ref()
                 .is_some_and(|s| !s.trim().is_empty());
-            if has_init_scripts || has_custom_script {
+            if has_custom_script {
                 append_to_init_log(&workspace.path, "[sandboxed] Running init script...\n");
             }
-            if let Err(e) = run_workspace_init_script(workspace, library).await {
+            if let Err(e) = run_workspace_init_script(workspace).await {
                 append_to_init_log(
                     &workspace.path,
                     &format!("[sandboxed] Init script failed: {}\n", e),
@@ -5403,84 +5123,19 @@ pub async fn probe_workspace_harness_versions(
     }))
 }
 
-async fn run_workspace_init_script(
-    workspace: &Workspace,
-    library: Option<&LibraryStore>,
-) -> anyhow::Result<()> {
-    let has_fragments = !workspace.init_scripts.is_empty();
-    let custom_script = workspace
+async fn run_workspace_init_script(workspace: &Workspace) -> anyhow::Result<()> {
+    let script = workspace
         .init_script
         .as_ref()
         .map(|s| s.trim())
         .unwrap_or("");
-
-    // If there are fragments and we have a library, assemble them
-    let script = if has_fragments {
-        if let Some(library) = library {
-            // Assemble fragments + custom script
-            let custom = if custom_script.is_empty() {
-                None
-            } else {
-                Some(custom_script)
-            };
-
-            // Collect setup commands from workspace skills
-            let skill_setup_commands = if !workspace.skills.is_empty() {
-                let commands = library
-                    .collect_skill_setup_commands(&workspace.skills)
-                    .await;
-                if commands.is_empty() {
-                    None
-                } else {
-                    tracing::info!(
-                        workspace = %workspace.name,
-                        skills_with_setup = commands.len(),
-                        "Collected setup commands from {} skills",
-                        commands.len()
-                    );
-                    Some(commands)
-                }
-            } else {
-                None
-            };
-
-            match library
-                .assemble_init_script(
-                    &workspace.init_scripts,
-                    custom,
-                    skill_setup_commands.as_deref(),
-                )
-                .await
-            {
-                Ok(assembled) => assembled,
-                Err(e) => {
-                    tracing::warn!(
-                        workspace = %workspace.name,
-                        error = %e,
-                        "Failed to assemble init script fragments, falling back to custom script only"
-                    );
-                    custom_script.to_string()
-                }
-            }
-        } else {
-            // No library available, just use custom script
-            tracing::warn!(
-                workspace = %workspace.name,
-                "Init script fragments specified but library not available"
-            );
-            custom_script.to_string()
-        }
-    } else {
-        // No fragments, just use custom script
-        custom_script.to_string()
-    };
 
     if script.is_empty() {
         return Ok(());
     }
 
     let script_path = workspace.path.join("sandboxed-init.sh");
-    tokio::fs::write(&script_path, &script).await?;
+    tokio::fs::write(&script_path, script).await?;
 
     #[cfg(unix)]
     {
@@ -5563,70 +5218,6 @@ fn resolve_opencode_config_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(home_dir())
         .join(".config")
         .join("opencode")
-}
-
-/// Sync sandboxed/config.json from Library to the working directory.
-/// This makes Library-backed agent visibility settings available.
-pub async fn sync_sandboxed_config(
-    library: &crate::library::LibraryStore,
-    working_dir: &std::path::Path,
-) -> anyhow::Result<()> {
-    let config = library.get_sandboxed_config().await?;
-
-    let dest_dir = working_dir.join(".sandboxed-sh");
-    let dest_path = dest_dir.join("config.json");
-
-    // Ensure directory exists
-    tokio::fs::create_dir_all(&dest_dir).await?;
-
-    let content = serde_json::to_string_pretty(&config)?;
-    tokio::fs::write(&dest_path, content).await?;
-
-    tracing::info!(
-        path = %dest_path.display(),
-        "Synced sandboxed config from Library"
-    );
-
-    Ok(())
-}
-
-/// Write sandboxed/config.json to the working directory.
-/// Useful when the Library is not configured but the UI still needs local defaults.
-pub async fn write_sandboxed_config(
-    working_dir: &std::path::Path,
-    config: &crate::library::SandboxedConfig,
-) -> anyhow::Result<()> {
-    let dest_dir = working_dir.join(".sandboxed-sh");
-    let dest_path = dest_dir.join("config.json");
-
-    tokio::fs::create_dir_all(&dest_dir).await?;
-
-    let content = serde_json::to_string_pretty(&config)?;
-    tokio::fs::write(&dest_path, content).await?;
-
-    tracing::info!(
-        path = %dest_path.display(),
-        "Wrote sandboxed config to working directory"
-    );
-
-    Ok(())
-}
-
-/// Read the Sandboxed config from the working directory.
-/// Returns default config if the file doesn't exist.
-pub async fn read_sandboxed_config(
-    working_dir: &std::path::Path,
-) -> crate::library::SandboxedConfig {
-    let path = working_dir.join(".sandboxed-sh/config.json");
-
-    if !path.exists() {
-        return crate::library::SandboxedConfig::default();
-    }
-
-    match tokio::fs::read_to_string(&path).await {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => crate::library::SandboxedConfig::default(),
-    }
 }
 
 #[cfg(test)]

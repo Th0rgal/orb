@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::library::env_crypto;
+use crate::env_crypto;
 use crate::secrets::{
     InitializeKeysResult, InitializeRequest, RegistryInfo, SecretInfo, SecretsStatus, SecretsStore,
     SetSecretRequest, UnlockRequest,
@@ -146,56 +146,19 @@ async fn get_private_key(State(state): State<Arc<AppState>>) -> Json<PrivateKeyR
 }
 
 /// PUT /api/secrets/encryption/key
-/// Set or update the private key, re-encrypting existing skill content.
+/// Set or update the private key.
 async fn set_private_key(
-    State(state): State<Arc<AppState>>,
     Json(req): Json<SetPrivateKeyRequest>,
 ) -> Result<Json<SetPrivateKeyResponse>, (StatusCode, String)> {
     let new_key_hex = req.key_hex.trim();
 
-    // Validate the new key format
-    let new_key = env_crypto::parse_key_hex(new_key_hex).map_err(|e| {
+    env_crypto::parse_key_hex(new_key_hex).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("Invalid key format: {}", e),
         )
     })?;
 
-    // Get the old key (if any) for re-encryption
-    let old_key = env_crypto::load_private_key_from_env()
-        .ok()
-        .flatten()
-        .or_else(|| {
-            // Try reading from file
-            let key_file = state
-                .config
-                .working_dir
-                .join(".sandboxed-sh")
-                .join("private_key");
-            if key_file.exists() {
-                std::fs::read_to_string(&key_file)
-                    .ok()
-                    .and_then(|s| env_crypto::parse_key_hex(s.trim()).ok())
-            } else {
-                None
-            }
-        });
-
-    // Re-encrypt library content if we have both old and new keys
-    let (reencrypted_count, failed_count) = if let Some(old_key) = old_key {
-        if old_key != new_key {
-            // Re-encrypt all skills in the library
-            reencrypt_library_skills(&state, &old_key, &new_key).await
-        } else {
-            // Same key, no re-encryption needed
-            (0, 0)
-        }
-    } else {
-        // No old key, nothing to re-encrypt
-        (0, 0)
-    };
-
-    // Save the new key
     env_crypto::set_private_key_hex(new_key_hex)
         .await
         .map_err(|e| {
@@ -205,113 +168,12 @@ async fn set_private_key(
             )
         })?;
 
-    let message = if reencrypted_count > 0 || failed_count > 0 {
-        format!(
-            "Key updated. Re-encrypted {} items, {} failed.",
-            reencrypted_count, failed_count
-        )
-    } else {
-        "Key updated successfully.".to_string()
-    };
-
     Ok(Json(SetPrivateKeyResponse {
         success: true,
-        message,
-        reencrypted_count,
-        failed_count,
+        message: "Key updated successfully.".to_string(),
+        reencrypted_count: 0,
+        failed_count: 0,
     }))
-}
-
-/// Re-encrypt all skill content in the library with a new key.
-async fn reencrypt_library_skills(
-    state: &Arc<AppState>,
-    old_key: &[u8; 32],
-    new_key: &[u8; 32],
-) -> (usize, usize) {
-    let library_guard = state.library.read().await;
-    let Some(library) = library_guard.as_ref() else {
-        return (0, 0);
-    };
-
-    let mut reencrypted = 0;
-    let mut failed = 0;
-
-    // Get all skills
-    let skills = match library.list_skills().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("Failed to list skills for re-encryption: {}", e);
-            return (0, 0);
-        }
-    };
-
-    for skill_summary in skills {
-        // Read the skill content
-        let skill = match library.get_skill(&skill_summary.name).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to read skill {} for re-encryption: {}",
-                    skill_summary.name,
-                    e
-                );
-                failed += 1;
-                continue;
-            }
-        };
-
-        // Check if content has encrypted tags
-        if !env_crypto::has_encrypted_tags(&skill.content) {
-            continue;
-        }
-
-        // Try to decrypt with old key and re-encrypt with new key
-        let decrypted = match env_crypto::decrypt_content_tags(old_key, &skill.content) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to decrypt skill {} with old key: {}",
-                    skill_summary.name,
-                    e
-                );
-                failed += 1;
-                continue;
-            }
-        };
-
-        // Re-encrypt with new key
-        let reencrypted_content = match env_crypto::encrypt_content_tags(new_key, &decrypted) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to re-encrypt skill {} with new key: {}",
-                    skill_summary.name,
-                    e
-                );
-                failed += 1;
-                continue;
-            }
-        };
-
-        // Save the re-encrypted content
-        if let Err(e) = library
-            .save_skill(&skill_summary.name, &reencrypted_content)
-            .await
-        {
-            tracing::warn!(
-                "Failed to save re-encrypted skill {}: {}",
-                skill_summary.name,
-                e
-            );
-            failed += 1;
-            continue;
-        }
-
-        reencrypted += 1;
-        tracing::info!("Re-encrypted skill: {}", skill_summary.name);
-    }
-
-    (reencrypted, failed)
 }
 
 /// GET /api/secrets/status

@@ -115,8 +115,6 @@ fn policy(name: &str) -> Option<(Role, bool)> {
         | "get_project_tasks"
         | "list_workspaces"
         | "get_workspace"
-        | "list_workspace_templates"
-        | "get_workspace_template"
         | "board_status" => (Coordinator, false),
         "acknowledge_mission"
         | "adopt_mission"
@@ -143,9 +141,6 @@ fn policy(name: &str) -> Option<(Role, bool)> {
         | "create_workspace"
         | "update_workspace"
         | "delete_workspace"
-        | "save_workspace_template"
-        | "delete_workspace_template"
-        | "rebuild_workspace_from_template"
         | "deploy_sandboxed_sh" => (Operator, true),
         // Superseded worker aliases and blocking asks/waits are not published.
         // Host-side worktree operations must not run on Core for a remote node.

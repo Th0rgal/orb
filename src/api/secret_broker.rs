@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use super::bitwarden::{self, BitwardenSecretDetail, BitwardenSecretSummary};
 use super::routes::AppState;
-use crate::library::env_crypto;
+use crate::env_crypto;
 
 /// Default lifetime of an approved grant.
 pub const DEFAULT_GRANT_TTL_HOURS: i64 = 24;

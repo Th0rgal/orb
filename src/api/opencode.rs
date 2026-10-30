@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::opencode_config::OpenCodeConnection;
-use crate::util::{internal_error, read_json_config, resolve_config_path, write_json_config};
+use crate::util::{read_json_config, resolve_config_path, write_json_config};
 
 /// Create OpenCode connection routes.
 pub fn routes() -> Router<Arc<super::routes::AppState>> {
@@ -187,81 +187,17 @@ pub struct TestConnectionResponse {
 // Public Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Vanilla opencode ships with these primary agents.  They are surfaced in the
-/// dashboard's agent dropdown even when the Library defines no `.opencode/agents/`
-/// files, so that picking "build" or "plan" Just Works.
+/// Vanilla opencode ships with these primary agents.
 const VANILLA_OPENCODE_AGENTS: &[&str] = &["build", "plan"];
 
-/// Fetch agents from Library configuration (no central server needed).
-///
-/// The returned list merges:
-///   1. vanilla opencode's built-in primary agents ("build", "plan"),
-///   2. native `.opencode/agents/*.md` files in the Library profile.
-pub async fn fetch_opencode_agents(state: &super::routes::AppState) -> Result<Value, String> {
-    fetch_opencode_agents_for_profile(state, None).await
-}
-
-/// Read native opencode agent names from `<profile>/.opencode/agents/*.md`.
-/// Returns the filename stem of each `.md` file (e.g. "ana" from "ana.md").
-async fn read_native_agent_names(lib: &crate::library::LibraryStore, profile: &str) -> Vec<String> {
-    let agents_dir = lib
-        .config_profile_path(profile)
-        .join(".opencode")
-        .join("agents");
-    let mut names: Vec<String> = Vec::new();
-    if let Ok(mut entries) = tokio::fs::read_dir(&agents_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().map(|e| e == "md").unwrap_or(false) {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    names.push(stem.to_string());
-                }
-            }
-        }
-    }
-    names
-}
-
-/// Fetch agents for a specific config profile.  See [`fetch_opencode_agents`].
-pub async fn fetch_opencode_agents_for_profile(
-    state: &super::routes::AppState,
-    profile: Option<&str>,
-) -> Result<Value, String> {
-    let library_guard = state.library.read().await;
-    let Some(lib) = library_guard.as_ref() else {
-        tracing::debug!("Library not configured, no agents available");
-        return Ok(Value::Array(
-            VANILLA_OPENCODE_AGENTS
-                .iter()
-                .map(|s| Value::String(s.to_string()))
-                .collect(),
-        ));
-    };
-
-    let profile_name = profile.unwrap_or("default");
-
-    // 1. Start with vanilla opencode's built-in primary agents.
-    let mut agents: Vec<String> = VANILLA_OPENCODE_AGENTS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    // 2. Merge native `.opencode/agents/*.md` files from the Library profile.
-    for name in read_native_agent_names(lib, profile_name).await {
-        if !agents.iter().any(|a| a.eq_ignore_ascii_case(&name)) {
-            agents.push(name);
-        }
-    }
-
-    tracing::debug!(
-        profile = %profile_name,
-        count = agents.len(),
-        "Resolved opencode agents"
-    );
-
-    Ok(Value::Array(
-        agents.into_iter().map(Value::String).collect(),
-    ))
+/// Return OpenCode's built-in primary agents.
+pub fn fetch_opencode_agents() -> Value {
+    Value::Array(
+        VANILLA_OPENCODE_AGENTS
+            .iter()
+            .map(|s| Value::String((*s).to_string()))
+            .collect(),
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,11 +222,10 @@ async fn require_connection(
 // Handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// GET /api/opencode/agents - Return OpenCode agent list from Library.
+/// GET /api/opencode/agents - Return OpenCode built-in agent list.
 pub async fn list_agents(
     State(state): State<Arc<super::routes::AppState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    // Check cache first
     let now = Instant::now();
     if let Some(payload) = {
         let cache = state.opencode_agents_cache.read().await;
@@ -307,12 +242,8 @@ pub async fn list_agents(
         return Ok(Json(payload));
     }
 
-    // Fetch from Library (no HTTP call needed)
-    let payload = fetch_opencode_agents(&state)
-        .await
-        .map_err(internal_error)?;
+    let payload = fetch_opencode_agents();
 
-    // Update cache
     {
         let mut cache = state.opencode_agents_cache.write().await;
         cache.payload = Some(payload.clone());

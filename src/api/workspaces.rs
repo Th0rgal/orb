@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::library::WorkspaceTemplate;
 use crate::nspawn::NspawnDistro;
 use crate::util::sanitize_skill_list;
 use crate::workspace::{self, TailscaleMode, Workspace, WorkspaceStatus, WorkspaceType};
@@ -31,12 +30,11 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id", get(get_workspace))
         .route("/:id", put(update_workspace))
         .route("/:id", delete(delete_workspace))
-        .route("/:id/apply-template", post(apply_workspace_template))
         .route("/:id/build", post(build_workspace))
         .route("/:id/sync", post(sync_workspace))
         .route("/:id/exec", post(exec_workspace_command))
         .route("/:id/exec-rooted", post(exec_rooted_workspace_command))
-        // Debug endpoints for template development
+        // Debug endpoints for container development
         .route("/:id/debug", get(get_workspace_debug))
         .route("/:id/rerun-init", post(rerun_init_script))
         .route("/:id/init-log", get(get_init_log))
@@ -134,12 +132,6 @@ pub struct UpdateWorkspaceRequest {
     pub config: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ApplyWorkspaceTemplateRequest {
-    /// Template to apply. Defaults to the workspace's current template.
-    pub template: Option<String>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct WorkspaceResponse {
     pub id: Uuid,
@@ -196,14 +188,6 @@ impl From<Workspace> for WorkspaceResponse {
             harness_versions: w.harness_versions,
         }
     }
-}
-
-/// Clone the optional library reference out of the shared `RwLock`.
-async fn clone_library(
-    library: &super::library::SharedLibrary,
-) -> Option<Arc<crate::library::LibraryStore>> {
-    let guard = library.read().await;
-    guard.as_ref().map(Arc::clone)
 }
 
 /// Apply build-related fields from a completed build back to the latest stored
@@ -373,27 +357,18 @@ async fn create_workspace(
     // Validate workspace name for path traversal
     validate_workspace_name(&req.name)?;
 
-    let mut workspace_type = req.workspace_type;
-    let mut template_data: Option<WorkspaceTemplate> = None;
-
-    if let Some(template_name) = req.template.as_ref() {
-        // Templates always require an isolated (container) workspace
-        workspace_type = WorkspaceType::Container;
-
-        let library = clone_library(&state.library).await.ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Library not initialized".to_string(),
-            )
-        })?;
-
-        template_data = Some(
-            library
-                .get_workspace_template(template_name)
-                .await
-                .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?,
-        );
+    if req
+        .template
+        .as_deref()
+        .is_some_and(|t| !t.trim().is_empty())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Workspace templates have been retired; configure distro, skills, env_vars, and init_script directly.".to_string(),
+        ));
     }
+
+    let workspace_type = req.workspace_type;
 
     // Host workspaces require a custom path - the root working directory is reserved
     // for the default host workspace (which is created automatically).
@@ -426,90 +401,26 @@ async fn create_workspace(
         },
     };
 
-    let mut env_vars = template_data
-        .as_ref()
-        .map(|t| t.env_vars.clone())
-        .unwrap_or_default();
-    if let Some(custom_env) = req.env_vars.clone() {
-        env_vars.extend(custom_env);
-    }
-    env_vars = sanitize_env_vars(env_vars);
-
-    let mut skills = template_data
-        .as_ref()
-        .map(|t| t.skills.clone())
-        .unwrap_or_default();
-    if !req.skills.is_empty() {
-        skills.extend(req.skills.clone());
-    }
-    skills = sanitize_skill_list(skills);
-
-    // Init script fragments from template
-    let init_scripts = template_data
-        .as_ref()
-        .map(|t| t.init_scripts.clone())
-        .unwrap_or_default();
-
-    let mut init_script = template_data.as_ref().map(|t| t.init_script.clone());
-    if let Some(custom_script) = req.init_script.clone() {
-        init_script = Some(custom_script);
-    }
-    init_script = normalize_init_script(init_script);
-
-    let mut distro = template_data.as_ref().and_then(|t| t.distro.clone());
-    if let Some(custom_distro) = req.distro.as_ref() {
-        distro = Some(custom_distro.to_string());
-    }
-    let distro = match distro {
-        Some(value) => Some(normalize_distro_value(&value)?),
+    let env_vars = sanitize_env_vars(req.env_vars.unwrap_or_default());
+    let skills = sanitize_skill_list(req.skills);
+    let init_scripts = Vec::new();
+    let init_script = normalize_init_script(req.init_script);
+    let distro = match req.distro.as_ref() {
+        Some(value) => Some(normalize_distro_value(value)?),
         None => None,
     };
+    let shared_network = req.shared_network;
+    let tailscale_mode = req.tailscale_mode;
+    let mcps = req.mcps;
+    let mcps_replace_defaults = req.mcps_replace_defaults;
+    let config_profile = req
+        .config_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
-    // shared_network: request overrides template, default to true (None means true)
-    let shared_network = req
-        .shared_network
-        .or_else(|| template_data.as_ref().and_then(|t| t.shared_network));
-
-    // tailscale_mode: request overrides template
-    let tailscale_mode = req
-        .tailscale_mode
-        .or_else(|| template_data.as_ref().and_then(|t| t.tailscale_mode));
-
-    // MCPs: request overrides template
-    let mcps = if !req.mcps.is_empty() {
-        req.mcps.clone()
-    } else {
-        template_data
-            .as_ref()
-            .map(|t| t.mcps.clone())
-            .unwrap_or_default()
-    };
-
-    // mcps_replace_defaults: if the request explicitly sets false, use that;
-    // otherwise inherit from template (default: true = original behavior).
-    let mcps_replace_defaults = if !req.mcps_replace_defaults {
-        false
-    } else {
-        template_data
-            .as_ref()
-            .map(|t| t.mcps_replace_defaults)
-            .unwrap_or(true)
-    };
-
-    // Config profile from template (request overrides)
-    let mut config_profile = template_data
-        .as_ref()
-        .and_then(|t| t.config_profile.clone());
-    if let Some(custom_profile) = req.config_profile.as_ref() {
-        let trimmed = custom_profile.trim();
-        if trimmed.is_empty() {
-            config_profile = None;
-        } else {
-            config_profile = Some(trimmed.to_string());
-        }
-    }
-
-    let mut workspace = match workspace_type {
+    let workspace = match workspace_type {
         WorkspaceType::Host => Workspace {
             id: Uuid::new_v4(),
             name: req.name,
@@ -518,19 +429,19 @@ async fn create_workspace(
             status: WorkspaceStatus::Ready,
             error_message: None,
             config: serde_json::json!({}),
-            template: req.template.clone(),
+            template: None,
             distro,
             env_vars,
-            init_scripts: init_scripts.clone(),
+            init_scripts,
             init_script,
             created_at: chrono::Utc::now(),
             skills,
             plugins: req.plugins,
             shared_network,
             tailscale_mode,
-            mcps: mcps.clone(),
+            mcps,
             mcps_replace_defaults,
-            config_profile: config_profile.clone(),
+            config_profile,
             resolved_git_credentials: None,
             read_only_command_guard_dir: None,
             mission_project_skills: Vec::new(),
@@ -540,7 +451,6 @@ async fn create_workspace(
             let mut ws = Workspace::new_container(req.name, path);
             ws.skills = skills;
             ws.plugins = req.plugins;
-            ws.template = req.template.clone();
             ws.distro = distro;
             ws.env_vars = env_vars;
             ws.init_scripts = init_scripts;
@@ -570,7 +480,7 @@ async fn create_workspace(
 
     let id = state.workspaces.add(workspace.clone()).await;
 
-    // Sync skills and tools to workspace if any are specified
+    // Sync skills to workspace if any are specified
     let library_guard = state.library.read().await;
     if let Some(library) = library_guard.as_ref() {
         if !workspace.skills.is_empty() {
@@ -590,59 +500,7 @@ async fn create_workspace(
     }
     drop(library_guard);
 
-    // Auto-start build for template-based container workspaces
-    // This improves UX by not requiring a separate build API call
-    if workspace.workspace_type == WorkspaceType::Container && req.template.is_some() {
-        let distro = workspace
-            .distro
-            .as_ref()
-            .map(|d| parse_distro(d))
-            .transpose()
-            .ok()
-            .flatten();
-
-        // Set status to Building
-        workspace.status = WorkspaceStatus::Building;
-        state.workspaces.update(workspace.clone()).await;
-
-        // Spawn build task
-        let workspaces_store = Arc::clone(&state.workspaces);
-        let working_dir = state.config.working_dir.clone();
-        let mut workspace_for_build = workspace.clone();
-        // Get library for init script assembly
-        let library = clone_library(&state.library).await;
-        let harness_policy = state.settings.get_harness_versions().await;
-
-        tokio::spawn(async move {
-            let result = crate::workspace::build_container_workspace(
-                &mut workspace_for_build,
-                distro,
-                false, // don't force rebuild
-                &working_dir,
-                library.as_deref(),
-                &harness_policy,
-            )
-            .await;
-
-            if let Err(e) = result {
-                tracing::error!(
-                    workspace = %workspace_for_build.name,
-                    error = %e,
-                    "Failed to auto-build container workspace"
-                );
-            }
-
-            merge_build_result(&workspaces_store, workspace_for_build).await;
-        });
-
-        tracing::info!(
-            "Created and auto-building workspace: {} ({})",
-            workspace.name,
-            id
-        );
-    } else {
-        tracing::info!("Created workspace: {} ({})", workspace.name, id);
-    }
+    tracing::info!("Created workspace: {} ({})", workspace.name, id);
 
     let response: WorkspaceResponse = workspace.into();
 
@@ -790,111 +648,7 @@ async fn update_workspace(
     Ok(Json(workspace.into()))
 }
 
-/// POST /api/workspaces/:id/apply-template - Reapply the latest template fields.
-async fn apply_workspace_template(
-    State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
-    Json(req): Json<ApplyWorkspaceTemplateRequest>,
-) -> Result<Json<WorkspaceResponse>, (StatusCode, String)> {
-    let mut workspace = require_workspace(&state.workspaces, id).await?;
-
-    if workspace.workspace_type != WorkspaceType::Container {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Only container workspaces can apply templates".to_string(),
-        ));
-    }
-    if workspace.status == WorkspaceStatus::Building {
-        return Err((
-            StatusCode::CONFLICT,
-            "Workspace build already in progress".to_string(),
-        ));
-    }
-
-    let template_name = req
-        .template
-        .as_deref()
-        .or(workspace.template.as_deref())
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "No template supplied and workspace has no template".to_string(),
-            )
-        })?
-        .to_string();
-
-    let library = clone_library(&state.library).await.ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Library not initialized".to_string(),
-        )
-    })?;
-    let template = library
-        .get_workspace_template(&template_name)
-        .await
-        .map_err(|error| (StatusCode::NOT_FOUND, error.to_string()))?;
-
-    apply_template_fields(&mut workspace, &template_name, template)?;
-    state.workspaces.update(workspace.clone()).await;
-
-    if let Err(error) = workspace::sync_workspace_skills(&workspace, &library).await {
-        tracing::warn!(
-            workspace = %workspace.name,
-            error = %error,
-            "Failed to sync skills after applying workspace template"
-        );
-    }
-
-    tracing::info!(
-        workspace = %workspace.name,
-        template = %template_name,
-        "Applied workspace template"
-    );
-
-    Ok(Json(workspace.into()))
-}
-
-fn apply_template_fields(
-    workspace: &mut Workspace,
-    template_name: &str,
-    template: WorkspaceTemplate,
-) -> Result<(), (StatusCode, String)> {
-    if template
-        .env_vars
-        .values()
-        .any(|value| value.starts_with("[DECRYPTION_FAILED]"))
-    {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "Template '{template_name}' contains env vars that could not be decrypted; workspace configuration was left unchanged"
-            ),
-        ));
-    }
-
-    workspace.template = Some(template_name.to_string());
-    workspace.distro = template
-        .distro
-        .as_deref()
-        .map(normalize_distro_value)
-        .transpose()?;
-    workspace.skills = sanitize_skill_list(template.skills);
-    workspace.env_vars = sanitize_env_vars(template.env_vars);
-    workspace.init_scripts = template.init_scripts;
-    workspace.init_script = normalize_init_script(Some(template.init_script));
-    workspace.shared_network = template.shared_network;
-    workspace.tailscale_mode = template.tailscale_mode;
-    workspace.mcps = template.mcps;
-    workspace.mcps_replace_defaults = template.mcps_replace_defaults;
-    workspace.config_profile = template
-        .config_profile
-        .and_then(|profile| (!profile.trim().is_empty()).then(|| profile.trim().to_string()));
-    Ok(())
-}
-
-/// POST /api/workspaces/:id/sync - Manually sync skills and tools to workspace.
+/// POST /api/workspaces/:id/sync - Manually sync skills to workspace.
 async fn sync_workspace(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<Uuid>,
@@ -1201,15 +955,6 @@ async fn build_workspace(
         ));
     }
 
-    // Get library for init script assembly - require it when workspace has fragments
-    let library = clone_library(&state.library).await;
-    if library.is_none() && !workspace.init_scripts.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Library not initialized yet, init script fragments cannot be assembled".to_string(),
-        ));
-    }
-
     // Set status to Building immediately to prevent concurrent builds
     workspace.status = WorkspaceStatus::Building;
     state.workspaces.update(workspace.clone()).await;
@@ -1226,7 +971,6 @@ async fn build_workspace(
             distro,
             force_rebuild,
             &working_dir,
-            library.as_deref(),
             &harness_policy,
         )
         .await;
@@ -2542,86 +2286,6 @@ mod tests {
     #[test]
     fn test_validate_workspace_name_rejects_empty() {
         assert!(validate_workspace_name("").is_err());
-    }
-
-    #[test]
-    fn apply_template_fields_replaces_template_controlled_configuration() {
-        let mut workspace =
-            Workspace::new_container("demo".to_string(), PathBuf::from("/tmp/demo"));
-        workspace.distro = Some("ubuntu:22.04".to_string());
-        workspace.skills = vec!["old-skill".to_string()];
-        workspace.env_vars = HashMap::from([("OLD".to_string(), "value".to_string())]);
-        workspace.tailscale_mode = Some(TailscaleMode::ExitNode);
-        workspace.config_profile = Some("old".to_string());
-
-        let template = WorkspaceTemplate {
-            name: "lean".to_string(),
-            description: Some("Lean workspace".to_string()),
-            path: "workspace-template/lean.json".to_string(),
-            distro: Some("ubuntu-noble".to_string()),
-            skills: vec!["lean".to_string()],
-            env_vars: HashMap::from([("LEAN_VERSION".to_string(), "4.24.0".to_string())]),
-            encrypted_keys: Vec::new(),
-            init_scripts: vec!["base".to_string(), "lean".to_string()],
-            init_script: "echo ready".to_string(),
-            shared_network: Some(false),
-            tailscale_mode: None,
-            mcps: vec!["lean-lsp".to_string()],
-            mcps_replace_defaults: false,
-            config_profile: None,
-        };
-
-        apply_template_fields(&mut workspace, "lean", template).unwrap();
-
-        assert_eq!(workspace.template.as_deref(), Some("lean"));
-        assert_eq!(workspace.distro.as_deref(), Some("ubuntu-noble"));
-        assert_eq!(workspace.skills, vec!["lean"]);
-        assert_eq!(workspace.env_vars.get("LEAN_VERSION").unwrap(), "4.24.0");
-        assert!(!workspace.env_vars.contains_key("OLD"));
-        assert_eq!(workspace.init_scripts, vec!["base", "lean"]);
-        assert_eq!(workspace.init_script.as_deref(), Some("echo ready"));
-        assert_eq!(workspace.shared_network, Some(false));
-        assert_eq!(workspace.tailscale_mode, None);
-        assert_eq!(workspace.mcps, vec!["lean-lsp"]);
-        assert!(!workspace.mcps_replace_defaults);
-        assert_eq!(workspace.config_profile, None);
-    }
-
-    #[test]
-    fn apply_template_fields_rejects_failed_decryption_without_mutating_workspace() {
-        let mut workspace =
-            Workspace::new_container("demo".to_string(), PathBuf::from("/tmp/demo"));
-        workspace.template = Some("working".to_string());
-        workspace.env_vars = HashMap::from([("TOKEN".to_string(), "valid".to_string())]);
-
-        let template = WorkspaceTemplate {
-            name: "broken".to_string(),
-            description: None,
-            path: "workspace-template/broken.json".to_string(),
-            distro: Some("ubuntu-noble".to_string()),
-            skills: Vec::new(),
-            env_vars: HashMap::from([(
-                "TOKEN".to_string(),
-                "[DECRYPTION_FAILED]<encrypted>ciphertext</encrypted>".to_string(),
-            )]),
-            encrypted_keys: vec!["TOKEN".to_string()],
-            init_scripts: Vec::new(),
-            init_script: "echo should-not-run".to_string(),
-            shared_network: None,
-            tailscale_mode: None,
-            mcps: Vec::new(),
-            mcps_replace_defaults: true,
-            config_profile: None,
-        };
-
-        let error = apply_template_fields(&mut workspace, "broken", template).unwrap_err();
-        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(workspace.template.as_deref(), Some("working"));
-        assert_eq!(
-            workspace.env_vars.get("TOKEN").map(String::as_str),
-            Some("valid")
-        );
-        assert!(workspace.init_script.is_none());
     }
 
     #[test]

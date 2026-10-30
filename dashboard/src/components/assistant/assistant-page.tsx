@@ -27,7 +27,7 @@ import {
   type TelegramTriggerMode,
   type CreateAssistantGatewayInput,
 } from '@/lib/api';
-import { listBackends, listWorkspaces, listBackendModelOptions, listProviders, listConfigProfiles, type Backend, type BackendModelOption, type Provider, type Workspace, type ConfigProfileSummary } from '@/lib/api';
+import { listBackends, listWorkspaces, listBackendModelOptions, listProviders, type Backend, type BackendModelOption, type Provider, type Workspace } from '@/lib/api';
 import { listMissionAutomations, listHermesAssistantSkills, type Automation, type CommandSource, type TriggerType, type HermesSkill, type HermesSkillsResponse } from '@/lib/api';
 import {
   MessageCircle,
@@ -209,9 +209,6 @@ export default function AssistantPage() {
     getSystemComponents,
     { revalidateOnFocus: false, dedupingInterval: 30000 }
   );
-  const { data: configProfiles = [] } = useSWR('config-profiles', listConfigProfiles, {
-    revalidateOnFocus: false,
-  });
   const { data: modelChains = [] } = useSWR<ModelChain[]>('model-chains', listModelChains, {
     revalidateOnFocus: false,
     dedupingInterval: 60000,
@@ -329,7 +326,6 @@ export default function AssistantPage() {
   const [createModelOverride, setCreateModelOverride] = useState('');
   const [createModelEffort, setCreateModelEffort] = useState('');
   const [createWorkspaceId, setCreateWorkspaceId] = useState('');
-  const [createConfigProfile, setCreateConfigProfile] = useState('');
   const [creating, setCreating] = useState(false);
 
   // Model selector options helper
@@ -368,7 +364,6 @@ export default function AssistantPage() {
   const [editModelOverride, setEditModelOverride] = useState('');
   const [editModelEffort, setEditModelEffort] = useState('');
   const [editWorkspaceId, setEditWorkspaceId] = useState('');
-  const [editConfigProfile, setEditConfigProfile] = useState('');
   const [saving, setSaving] = useState(false);
 
   const editNative = useAntigravityModels(editBackend, editWorkspaceId, !!editingBot, editModelOverride);
@@ -532,7 +527,6 @@ export default function AssistantPage() {
       if (createModelOverride.trim()) input.default_model_override = createModelOverride.trim();
       if (createModelEffort) input.default_model_effort = createModelEffort;
       if (createWorkspaceId) input.default_workspace_id = createWorkspaceId;
-      if (createConfigProfile.trim()) input.default_config_profile = createConfigProfile.trim();
 
       const bot = await createAssistantGateway(input);
       await mutateBots();
@@ -625,7 +619,6 @@ export default function AssistantPage() {
         default_model_override: editModelOverride || undefined,
         default_model_effort: editModelEffort || undefined,
         default_workspace_id: editWorkspaceId || (editNative.native ? '00000000-0000-0000-0000-000000000000' : undefined),
-        default_config_profile: editConfigProfile || undefined,
       });
       await mutateBots();
       setEditingBot(null);
@@ -647,7 +640,6 @@ export default function AssistantPage() {
     setCreateModelOverride('');
     setCreateModelEffort('');
     setCreateWorkspaceId('');
-    setCreateConfigProfile('');
   };
 
   // Index missions by ID once per render so per-chat lookups stay O(1).
@@ -1106,7 +1098,6 @@ export default function AssistantPage() {
                         setEditModelOverride(bot.default_model_override || '');
                         setEditModelEffort(bot.default_model_effort || '');
                         setEditWorkspaceId(bot.default_workspace_id || '');
-                        setEditConfigProfile(bot.default_config_profile || '');
                       }}
                       className="p-2 rounded-lg text-white/40 hover:text-white hover:bg-white/[0.06] transition-colors"
                       aria-label={`Edit ${gatewayLabel(bot)}`}
@@ -1772,22 +1763,6 @@ export default function AssistantPage() {
                   </select>
                 </div>
               )}
-              <div>
-                <label className="block text-sm text-white/60 mb-1">Config Profile (optional)</label>
-                <select
-                  value={createConfigProfile}
-                  onChange={(e) => setCreateConfigProfile(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50"
-                >
-                  <option value="">None (use workspace default)</option>
-                  {configProfiles.map((p: ConfigProfileSummary) => (
-                    <option key={p.name} value={p.name}>
-                      {p.name}{p.is_default ? ' (default)' : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
               {/* Divider */}
               <div className="border-t border-white/[0.06] pt-4">
                 <p className="text-xs text-white/40 mb-3">Gateway behavior</p>
@@ -1969,22 +1944,6 @@ export default function AssistantPage() {
                   </select>
                 </div>
               )}
-              <div>
-                <label className="block text-sm text-white/60 mb-1">Config Profile</label>
-                <select
-                  value={editConfigProfile}
-                  onChange={(e) => setEditConfigProfile(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50"
-                >
-                  <option value="">None (use workspace default)</option>
-                  {configProfiles.map((p: ConfigProfileSummary) => (
-                    <option key={p.name} value={p.name}>
-                      {p.name}{p.is_default ? ' (default)' : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
               {/* Gateway behavior */}
               <div className="border-t border-white/[0.06] pt-4">
                 <p className="text-xs text-white/40 mb-3">Gateway behavior</p>

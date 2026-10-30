@@ -948,10 +948,6 @@ struct CreateWorkspaceParams {
     #[serde(default)]
     skills: Option<Vec<String>>,
     #[serde(default)]
-    plugins: Option<Vec<String>>,
-    #[serde(default)]
-    template: Option<String>,
-    #[serde(default)]
     distro: Option<String>,
     #[serde(default)]
     env_vars: Option<HashMap<String, String>>,
@@ -965,8 +961,6 @@ struct CreateWorkspaceParams {
     mcps: Option<Vec<String>>,
     #[serde(default)]
     mcps_replace_defaults: Option<bool>,
-    #[serde(default)]
-    config_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -977,17 +971,11 @@ struct UpdateWorkspaceParams {
     #[serde(default)]
     skills: Option<Vec<String>>,
     #[serde(default)]
-    plugins: Option<Vec<String>>,
-    #[serde(default)]
-    template: Option<String>,
-    #[serde(default)]
     distro: Option<String>,
     #[serde(default)]
     env_vars: Option<HashMap<String, String>>,
     #[serde(default)]
     init_script: Option<String>,
-    #[serde(default)]
-    init_scripts: Option<Vec<String>>,
     #[serde(default)]
     shared_network: Option<bool>,
     #[serde(default)]
@@ -996,60 +984,8 @@ struct UpdateWorkspaceParams {
     mcps: Option<Vec<String>>,
     #[serde(default)]
     mcps_replace_defaults: Option<bool>,
-    #[serde(default)]
-    config_profile: Option<String>,
     #[serde(default)]
     config: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkspaceTemplateNameParams {
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SaveWorkspaceTemplateParams {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    distro: Option<String>,
-    #[serde(default)]
-    skills: Option<Vec<String>>,
-    #[serde(default)]
-    env_vars: Option<HashMap<String, String>>,
-    #[serde(default)]
-    encrypted_keys: Option<Vec<String>>,
-    #[serde(default)]
-    init_scripts: Option<Vec<String>>,
-    #[serde(default)]
-    init_script: Option<String>,
-    #[serde(default)]
-    shared_network: Option<bool>,
-    #[serde(default)]
-    tailscale_mode: Option<String>,
-    #[serde(default)]
-    mcps: Option<Vec<String>>,
-    #[serde(default)]
-    mcps_replace_defaults: Option<bool>,
-    #[serde(default)]
-    config_profile: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DeleteWorkspaceTemplateParams {
-    name: String,
-    #[serde(default)]
-    confirm: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct RebuildWorkspaceFromTemplateParams {
-    workspace_id: String,
-    #[serde(default)]
-    template: Option<String>,
-    #[serde(default)]
-    confirm: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1290,8 +1226,6 @@ fn create_workspace_body(params: CreateWorkspaceParams) -> Result<Value, String>
     insert_optional(&mut body, "workspace_type", params.workspace_type)?;
     insert_optional(&mut body, "path", params.path)?;
     insert_optional(&mut body, "skills", params.skills)?;
-    insert_optional(&mut body, "plugins", params.plugins)?;
-    insert_optional(&mut body, "template", params.template)?;
     insert_optional(&mut body, "distro", params.distro)?;
     insert_optional(&mut body, "env_vars", params.env_vars)?;
     insert_optional(&mut body, "init_script", params.init_script)?;
@@ -1303,7 +1237,6 @@ fn create_workspace_body(params: CreateWorkspaceParams) -> Result<Value, String>
         "mcps_replace_defaults",
         params.mcps_replace_defaults,
     )?;
-    insert_optional(&mut body, "config_profile", params.config_profile)?;
     Ok(Value::Object(body))
 }
 
@@ -1312,12 +1245,9 @@ fn update_workspace_body(params: UpdateWorkspaceParams) -> Result<(Uuid, Value),
     let mut body = serde_json::Map::new();
     insert_optional(&mut body, "name", params.name)?;
     insert_optional(&mut body, "skills", params.skills)?;
-    insert_optional(&mut body, "plugins", params.plugins)?;
-    insert_optional(&mut body, "template", params.template)?;
     insert_optional(&mut body, "distro", params.distro)?;
     insert_optional(&mut body, "env_vars", params.env_vars)?;
     insert_optional(&mut body, "init_script", params.init_script)?;
-    insert_optional(&mut body, "init_scripts", params.init_scripts)?;
     insert_optional(&mut body, "shared_network", params.shared_network)?;
     insert_optional(&mut body, "tailscale_mode", params.tailscale_mode)?;
     insert_optional(&mut body, "mcps", params.mcps)?;
@@ -1326,35 +1256,11 @@ fn update_workspace_body(params: UpdateWorkspaceParams) -> Result<(Uuid, Value),
         "mcps_replace_defaults",
         params.mcps_replace_defaults,
     )?;
-    insert_optional(&mut body, "config_profile", params.config_profile)?;
     insert_optional(&mut body, "config", params.config)?;
     if body.is_empty() {
         return Err("No workspace fields supplied to update".to_string());
     }
     Ok((id, Value::Object(body)))
-}
-
-fn apply_template_patch(
-    template: &mut serde_json::Map<String, Value>,
-    params: SaveWorkspaceTemplateParams,
-) -> Result<(), String> {
-    insert_optional(template, "description", params.description)?;
-    insert_optional(template, "distro", params.distro)?;
-    insert_optional(template, "skills", params.skills)?;
-    insert_optional(template, "env_vars", params.env_vars)?;
-    insert_optional(template, "encrypted_keys", params.encrypted_keys)?;
-    insert_optional(template, "init_scripts", params.init_scripts)?;
-    insert_optional(template, "init_script", params.init_script)?;
-    insert_optional(template, "shared_network", params.shared_network)?;
-    insert_optional(template, "tailscale_mode", params.tailscale_mode)?;
-    insert_optional(template, "mcps", params.mcps)?;
-    insert_optional(
-        template,
-        "mcps_replace_defaults",
-        params.mcps_replace_defaults,
-    )?;
-    insert_optional(template, "config_profile", params.config_profile)?;
-    Ok(())
 }
 
 fn default_artifact_dir() -> PathBuf {
@@ -2314,31 +2220,28 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "create_workspace".to_string(),
-                description: "Create a sandboxed.sh workspace. A template always creates an isolated container and starts its build automatically; a host workspace requires a path inside the server working directory.".to_string(),
+                description: "Create a sandboxed.sh workspace. A host workspace requires a path inside the server working directory; a container workspace creates an isolated container.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["name"],
                     "properties": {
                         "name": {"type": "string"},
-                        "workspace_type": {"type": "string", "enum": ["host", "container"], "description": "Defaults to host unless template is set."},
+                        "workspace_type": {"type": "string", "enum": ["host", "container"], "description": "Defaults to host."},
                         "path": {"type": "string", "description": "Required for host workspaces; omit for the standard container path."},
                         "skills": {"type": "array", "items": {"type": "string"}},
-                        "plugins": {"type": "array", "items": {"type": "string"}},
-                        "template": {"type": "string", "description": "Workspace template name. Forces container type and starts a build."},
                         "distro": {"type": "string"},
                         "env_vars": {"type": "object", "additionalProperties": {"type": "string"}},
                         "init_script": {"type": "string"},
                         "shared_network": {"type": "boolean"},
                         "tailscale_mode": {"type": "string", "enum": ["exit_node", "tailnet_only"]},
                         "mcps": {"type": "array", "items": {"type": "string"}},
-                        "mcps_replace_defaults": {"type": "boolean"},
-                        "config_profile": {"type": "string"}
+                        "mcps_replace_defaults": {"type": "boolean"}
                     }
                 }),
             },
             ToolDefinition {
                 name: "update_workspace".to_string(),
-                description: "Update only the supplied fields of an existing workspace. Setting template changes the association but does not reapply template contents; use rebuild_workspace_from_template for that.".to_string(),
+                description: "Update only the supplied fields of an existing workspace.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["workspace_id"],
@@ -2346,17 +2249,13 @@ impl AssistantMcp {
                         "workspace_id": {"type": "string"},
                         "name": {"type": "string"},
                         "skills": {"type": "array", "items": {"type": "string"}},
-                        "plugins": {"type": "array", "items": {"type": "string"}},
-                        "template": {"type": "string", "description": "Empty string clears the association."},
                         "distro": {"type": "string", "description": "Empty string clears the override."},
                         "env_vars": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Replaces the workspace env map."},
                         "init_script": {"type": "string"},
-                        "init_scripts": {"type": "array", "items": {"type": "string"}},
                         "shared_network": {"type": "boolean"},
                         "tailscale_mode": {"type": "string", "enum": ["exit_node", "tailnet_only"]},
                         "mcps": {"type": "array", "items": {"type": "string"}},
                         "mcps_replace_defaults": {"type": "boolean"},
-                        "config_profile": {"type": "string", "description": "Empty string clears the profile."},
                         "config": {"type": "object", "description": "Shallow-merged into freeform workspace config."}
                     }
                 }),
@@ -2370,68 +2269,6 @@ impl AssistantMcp {
                     "properties": {
                         "workspace_id": {"type": "string"},
                         "confirm": {"type": "boolean", "description": "Must be true to perform deletion."}
-                    }
-                }),
-            },
-            ToolDefinition {
-                name: "list_workspace_templates".to_string(),
-                description: "List reusable sandboxed.sh workspace templates from the Library.".to_string(),
-                input_schema: json!({"type": "object", "properties": {}}),
-            },
-            ToolDefinition {
-                name: "get_workspace_template".to_string(),
-                description: "Get a reusable workspace template. Sensitive values are redacted from the tool result.".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["name"],
-                    "properties": {"name": {"type": "string"}}
-                }),
-            },
-            ToolDefinition {
-                name: "save_workspace_template".to_string(),
-                description: "Create or update a reusable workspace template. Existing templates are patch-updated: omitted fields are preserved, while supplied arrays/maps replace that field.".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["name"],
-                    "properties": {
-                        "name": {"type": "string"},
-                        "description": {"type": "string"},
-                        "distro": {"type": "string"},
-                        "skills": {"type": "array", "items": {"type": "string"}},
-                        "env_vars": {"type": "object", "additionalProperties": {"type": "string"}},
-                        "encrypted_keys": {"type": "array", "items": {"type": "string"}, "description": "Env var keys to encrypt at rest."},
-                        "init_scripts": {"type": "array", "items": {"type": "string"}},
-                        "init_script": {"type": "string"},
-                        "shared_network": {"type": "boolean"},
-                        "tailscale_mode": {"type": "string", "enum": ["exit_node", "tailnet_only"]},
-                        "mcps": {"type": "array", "items": {"type": "string"}},
-                        "mcps_replace_defaults": {"type": "boolean"},
-                        "config_profile": {"type": "string"}
-                    }
-                }),
-            },
-            ToolDefinition {
-                name: "delete_workspace_template".to_string(),
-                description: "Delete a reusable workspace template. Requires confirm=true and does not delete workspaces already created from it.".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["name", "confirm"],
-                    "properties": {
-                        "name": {"type": "string"},
-                        "confirm": {"type": "boolean", "description": "Must be true to perform deletion."}
-                    }
-                }),
-            },
-            ToolDefinition {
-                name: "rebuild_workspace_from_template".to_string(),
-                description: "Reapply the latest template definition to an existing container workspace, replacing template-controlled fields, then force-rebuild its container. Requires confirm=true because container state may be replaced.".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["workspace_id", "confirm"],
-                    "properties": {
-                        "workspace_id": {"type": "string"},
-                        "template": {"type": "string", "description": "Optional template name; defaults to the workspace's current template."},
-                        "confirm": {"type": "boolean", "description": "Must be true to force rebuild."}
                     }
                 }),
             },
@@ -3969,122 +3806,6 @@ impl AssistantMcp {
         Ok(json!({"deleted": true, "workspace_id": id.to_string()}))
     }
 
-    async fn list_workspace_templates(&self) -> Result<Value, String> {
-        let response = self.api_get("/api/library/workspace-template").await?;
-        let templates = Self::response_value(response, "List workspace templates").await?;
-        Ok(json!({"templates": templates}))
-    }
-
-    async fn get_workspace_template(
-        &self,
-        params: WorkspaceTemplateNameParams,
-    ) -> Result<Value, String> {
-        let name = require_resource_name(&params.name, "Workspace template")?;
-        let encoded = urlencoding::encode(&name);
-        let response = self
-            .api_get(&format!("/api/library/workspace-template/{encoded}"))
-            .await?;
-        let template = Self::response_value(response, "Get workspace template").await?;
-        Ok(json!({"template": template}))
-    }
-
-    async fn save_workspace_template(
-        &self,
-        params: SaveWorkspaceTemplateParams,
-    ) -> Result<Value, String> {
-        let name = require_resource_name(&params.name, "Workspace template")?;
-        let encoded = urlencoding::encode(&name);
-        let path = format!("/api/library/workspace-template/{encoded}");
-        let response = self.api_get(&path).await?;
-        let has_env_override = params.env_vars.is_some();
-        let mut template = if response.status().is_success() {
-            let current = Self::response_value(response, "Get workspace template").await?;
-            if !has_env_override
-                && current
-                    .get("env_vars")
-                    .and_then(Value::as_object)
-                    .is_some_and(|env| {
-                        env.values().any(|value| {
-                            value
-                                .as_str()
-                                .is_some_and(|raw| raw.starts_with("[DECRYPTION_FAILED]"))
-                        })
-                    })
-            {
-                return Err(
-                    "Template contains env vars that could not be decrypted; supply a complete env_vars replacement before saving"
-                        .to_string(),
-                );
-            }
-            current.as_object().cloned().ok_or_else(|| {
-                "Existing workspace template response was not an object".to_string()
-            })?
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-            serde_json::Map::new()
-        } else {
-            return match Self::response_value(response, "Get workspace template").await {
-                Err(error) => Err(error),
-                Ok(_) => Err("Unexpected successful template response".to_string()),
-            };
-        };
-        template.remove("name");
-        template.remove("path");
-        apply_template_patch(&mut template, params)?;
-
-        let response = self.api_put(&path, Value::Object(template)).await?;
-        Self::response_value(response, "Save workspace template").await?;
-        let response = self.api_get(&path).await?;
-        let saved = Self::response_value(response, "Read saved workspace template").await?;
-        Ok(json!({"saved": true, "template": saved}))
-    }
-
-    async fn delete_workspace_template(
-        &self,
-        params: DeleteWorkspaceTemplateParams,
-    ) -> Result<Value, String> {
-        if !params.confirm {
-            return Err("Template deletion requires confirm=true".to_string());
-        }
-        let name = require_resource_name(&params.name, "Workspace template")?;
-        let encoded = urlencoding::encode(&name);
-        let response = self
-            .api_delete(&format!("/api/library/workspace-template/{encoded}"))
-            .await?;
-        Self::response_value(response, "Delete workspace template").await?;
-        Ok(json!({"deleted": true, "name": name}))
-    }
-
-    async fn rebuild_workspace_from_template(
-        &self,
-        params: RebuildWorkspaceFromTemplateParams,
-    ) -> Result<Value, String> {
-        if !params.confirm {
-            return Err("Forced workspace rebuild requires confirm=true".to_string());
-        }
-        let id = parse_uuid(&params.workspace_id)?;
-        let apply_response = self
-            .api_post(
-                &format!("/api/workspaces/{id}/apply-template"),
-                json!({"template": params.template}),
-            )
-            .await?;
-        let applied = Self::response_value(apply_response, "Apply workspace template").await?;
-
-        let build_response = self
-            .api_post(
-                &format!("/api/workspaces/{id}/build"),
-                json!({"rebuild": true}),
-            )
-            .await?;
-        let build = Self::response_value(build_response, "Rebuild workspace").await?;
-        Ok(json!({
-            "workspace_id": id.to_string(),
-            "template_applied": applied.get("template").cloned().unwrap_or(Value::Null),
-            "status": build.get("status").cloned().unwrap_or(Value::Null),
-            "rebuild_started": true,
-        }))
-    }
-
     async fn update_mission_settings(&self, params: UpdateSettingsParams) -> Result<Value, String> {
         let id = self.resolve_mission_id(&params.mission_id).await?;
         self.assert_mission_scope(id).await?;
@@ -4835,23 +4556,6 @@ impl AssistantMcp {
             "delete_workspace" => {
                 let params: DeleteWorkspaceParams = parse_params(arguments)?;
                 self.delete_workspace(params).await
-            }
-            "list_workspace_templates" => self.list_workspace_templates().await,
-            "get_workspace_template" => {
-                let params: WorkspaceTemplateNameParams = parse_params(arguments)?;
-                self.get_workspace_template(params).await
-            }
-            "save_workspace_template" => {
-                let params: SaveWorkspaceTemplateParams = parse_params(arguments)?;
-                self.save_workspace_template(params).await
-            }
-            "delete_workspace_template" => {
-                let params: DeleteWorkspaceTemplateParams = parse_params(arguments)?;
-                self.delete_workspace_template(params).await
-            }
-            "rebuild_workspace_from_template" => {
-                let params: RebuildWorkspaceFromTemplateParams = parse_params(arguments)?;
-                self.rebuild_workspace_from_template(params).await
             }
             "workspace_bash" => {
                 let params: WorkspaceBashParams = parse_params(arguments)?;
@@ -7255,11 +6959,6 @@ mod tests {
             "create_workspace",
             "update_workspace",
             "delete_workspace",
-            "list_workspace_templates",
-            "get_workspace_template",
-            "save_workspace_template",
-            "delete_workspace_template",
-            "rebuild_workspace_from_template",
             "start_workspace_job",
             "get_workspace_job",
             "cancel_workspace_job",
@@ -7267,21 +6966,15 @@ mod tests {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
 
-        for destructive in [
-            "delete_workspace",
-            "delete_workspace_template",
-            "rebuild_workspace_from_template",
-        ] {
-            let schema = &tools
-                .iter()
-                .find(|tool| tool.name == destructive)
-                .unwrap()
-                .input_schema;
-            assert!(schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("confirm")));
-        }
+        let delete_schema = &tools
+            .iter()
+            .find(|tool| tool.name == "delete_workspace")
+            .unwrap()
+            .input_schema;
+        assert!(delete_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("confirm")));
     }
 
     #[test]
@@ -7926,40 +7619,14 @@ mod tests {
             "workspace_id": id,
             "skills": [],
             "shared_network": false,
-            "config_profile": ""
+            "distro": ""
         }))
         .unwrap();
         let (parsed_id, body) = update_workspace_body(params).unwrap();
         assert_eq!(parsed_id, id);
         assert_eq!(body["skills"], json!([]));
         assert_eq!(body["shared_network"], false);
-        assert_eq!(body["config_profile"], "");
-    }
-
-    #[test]
-    fn template_patch_preserves_omitted_fields_and_replaces_supplied_fields() {
-        let mut current = json!({
-            "description": "existing",
-            "skills": ["old"],
-            "env_vars": {"TOKEN": "secret"},
-            "mcps_replace_defaults": true
-        })
-        .as_object()
-        .unwrap()
-        .clone();
-        let params: SaveWorkspaceTemplateParams = serde_json::from_value(json!({
-            "name": "lean",
-            "skills": ["lean", "github"],
-            "mcps_replace_defaults": false
-        }))
-        .unwrap();
-
-        apply_template_patch(&mut current, params).unwrap();
-
-        assert_eq!(current["description"], "existing");
-        assert_eq!(current["env_vars"]["TOKEN"], "secret");
-        assert_eq!(current["skills"], json!(["lean", "github"]));
-        assert_eq!(current["mcps_replace_defaults"], false);
+        assert_eq!(body["distro"], "");
     }
 }
 

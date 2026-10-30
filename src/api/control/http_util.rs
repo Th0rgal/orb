@@ -165,66 +165,25 @@ pub(super) async fn require_automation(
         ))
 }
 
-/// Validate that a command exists in the library.
+/// Library commands have been retired in favor of inline and local_file commands.
 pub(super) async fn validate_library_command(
-    state: &AppState,
+    _state: &AppState,
     name: &str,
 ) -> Result<(), (StatusCode, String)> {
-    if let Some(lib) = state.library.read().await.as_ref() {
-        match lib.get_command(name).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("not found") || msg.contains("does not exist") {
-                    Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("Command '{}' not found in library", name),
-                    ))
-                } else {
-                    Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to validate command: {}", e),
-                    ))
-                }
-            }
-        }
-    } else {
-        Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Library not initialized".to_string(),
-        ))
-    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        format!(
+            "Library command '{}' cannot be used: Library commands have been retired; use inline or local_file commands instead",
+            name
+        ),
+    ))
 }
 
 pub(crate) async fn resolve_claudecode_default_model(
-    library: &SharedLibrary,
-    config_profile: Option<&str>,
+    _library: &SharedLibrary,
+    _config_profile: Option<&str>,
 ) -> Option<String> {
-    // Keep this fallback aligned with Anthropic's model catalog:
-    // https://platform.claude.com/docs/en/about-claude/models/overview
-    let lib = {
-        let guard = library.read().await;
-        guard.clone()
-    };
-
-    let Some(lib) = lib else {
-        return Some(crate::library::CLAUDE_CODE_DEFAULT_MODEL.to_string());
-    };
-
-    let profile = config_profile.unwrap_or("default");
-    match lib.get_claudecode_config_for_profile(profile).await {
-        Ok(config) => Some(crate::library::normalize_claude_code_default_model(
-            config.default_model,
-        )),
-        Err(err) => {
-            tracing::warn!(
-                "Failed to load Claude Code config from library (profile: {}): {}",
-                profile,
-                err
-            );
-            Some(crate::library::CLAUDE_CODE_DEFAULT_MODEL.to_string())
-        }
-    }
+    Some(crate::model_policy::CLAUDE_CODE_DEFAULT_MODEL.to_string())
 }
 
 /// Return the default model for Codex CLI when no override is specified.

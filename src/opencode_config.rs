@@ -4,13 +4,12 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::library::Plugin;
 use crate::mcp::{McpRegistry, McpScope, McpTransport};
 use crate::util::{home_dir, resolve_config_path};
 
@@ -353,83 +352,6 @@ pub async fn ensure_global_config(mcp: &McpRegistry) -> anyhow::Result<()> {
     let payload = serde_json::to_string_pretty(&root)?;
     tokio::fs::write(&config_path, payload).await?;
     tracing::info!(path = %config_path.display(), "Ensured OpenCode global config");
-
-    Ok(())
-}
-
-fn split_package_spec(spec: &str) -> (String, Option<String>) {
-    if let Some(at_pos) = spec.rfind('@') {
-        if at_pos > 0 {
-            let base = spec[..at_pos].to_string();
-            let version = spec[at_pos + 1..].trim().to_string();
-            if !version.is_empty() {
-                return (base, Some(version));
-            }
-        }
-    }
-    (spec.to_string(), None)
-}
-
-fn package_base(spec: &str) -> String {
-    split_package_spec(spec).0
-}
-
-pub async fn sync_global_plugins(plugins: &HashMap<String, Plugin>) -> anyhow::Result<()> {
-    let config_path = resolve_opencode_config_path();
-    if let Some(parent) = config_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    let mut root: Value = if config_path.exists() {
-        let contents = tokio::fs::read_to_string(&config_path)
-            .await
-            .unwrap_or_default();
-        serde_json::from_str(&contents).unwrap_or_else(|_| json!({}))
-    } else {
-        json!({})
-    };
-
-    if !root.is_object() {
-        root = json!({});
-    }
-
-    let root_obj = root.as_object_mut().expect("config object");
-    let existing_plugins: Vec<String> = root_obj
-        .get("plugin")
-        .or_else(|| root_obj.get("plugins"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|value| value.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let mut merged = existing_plugins;
-    let mut seen = HashSet::new();
-    merged.retain(|entry| seen.insert(entry.clone()));
-
-    for plugin in plugins.values().filter(|plugin| plugin.enabled) {
-        let spec = plugin.package.trim();
-        if spec.is_empty() {
-            continue;
-        }
-        let (base, version) = split_package_spec(spec);
-        if version.is_some() {
-            merged.retain(|entry| package_base(entry) != base);
-            if !merged.iter().any(|entry| entry == spec) {
-                merged.push(spec.to_string());
-            }
-        } else if !merged.iter().any(|entry| package_base(entry) == base) {
-            merged.push(spec.to_string());
-        }
-    }
-
-    root_obj.insert("plugin".to_string(), json!(merged));
-
-    let payload = serde_json::to_string_pretty(&root)?;
-    tokio::fs::write(&config_path, payload).await?;
-    tracing::info!(path = %config_path.display(), "Synced OpenCode global plugins");
 
     Ok(())
 }

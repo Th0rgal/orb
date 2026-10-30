@@ -201,7 +201,7 @@ export interface SkillLint {
 }
 
 const IPV4 = /(?<![\d.])(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?![\d.])/;
-const IPV4_ALLOWED = new Set(["paloma-infra"]);
+const IPV4_ALLOWED = new Set(["ops"]);
 const BENIGN_IPS = new Set(["127.0.0.1", "0.0.0.0"]);
 
 export function lintSkill(folder: string, content: string): SkillLint[] {
@@ -216,7 +216,7 @@ export function lintSkill(folder: string, content: string): SkillLint[] {
   if (lines > 500) out.push({ id: "length", message: `SKILL.md is ${lines} lines (> 500): move detail into reference files.` });
   if (!IPV4_ALLOWED.has(folder)) {
     const found = [...content.matchAll(new RegExp(IPV4.source, "g"))].map((m) => m[0]).filter((ip) => !BENIGN_IPS.has(ip));
-    if (found.length) out.push({ id: "ipv4", message: `Raw IPv4 address ${found[0]}${found.length > 1 ? ` (+${found.length - 1})` : ""}: reference paloma-infra or a hostname instead.` });
+    if (found.length) out.push({ id: "ipv4", message: `Raw IPv4 address ${found[0]}${found.length > 1 ? ` (+${found.length - 1})` : ""}: reference ops or a hostname instead.` });
   }
   if (!meta.hasSandboxedMeta) out.push({ id: "metadata", message: "No metadata.sandboxed block: audience defaults to mission + local, scope on-demand." });
   return out;

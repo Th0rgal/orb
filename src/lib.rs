@@ -50,6 +50,7 @@ pub mod container_tmp;
 pub mod cost;
 #[path = "../shared/cyber_access.rs"]
 pub mod cyber_access;
+pub mod env_crypto;
 #[path = "../shared/file_notifications.rs"]
 pub mod file_notifications;
 pub mod github_connection;
@@ -71,7 +72,6 @@ pub mod provider_health;
 pub mod remote_node;
 pub mod secrets;
 pub mod settings;
-pub mod skills_registry;
 pub mod task;
 pub mod tools;
 pub mod uploads;

@@ -1,30 +1,19 @@
 import { useState } from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  getBuiltinCommands,
-  getVisibleAgents,
-  listLibraryCommands,
-} from "@/lib/api";
+import { listBackendAgents } from "@/lib/api";
 import { EnhancedInput } from "./enhanced-input";
 
 vi.mock("@/lib/api", () => ({
-  listLibraryCommands: vi.fn().mockResolvedValue([]),
-  getBuiltinCommands: vi
-    .fn()
-    .mockResolvedValue({ opencode: [], claudecode: [] }),
-  getVisibleAgents: vi.fn().mockResolvedValue([]),
+  listBackendAgents: vi.fn().mockResolvedValue([]),
 }));
 
 beforeEach(() => {
-  vi.mocked(listLibraryCommands).mockResolvedValue([]);
-  vi.mocked(getVisibleAgents).mockResolvedValue([]);
-  vi.mocked(getBuiltinCommands).mockResolvedValue({
-    opencode: [],
-    claudecode: [],
-  });
+  vi.mocked(listBackendAgents).mockResolvedValue([]);
 });
+
+afterEach(cleanup);
 
 describe("EnhancedInput file paste handling", () => {
   it("passes textarea selection to onFilePaste", async () => {
@@ -153,12 +142,7 @@ describe("EnhancedInput composer behavior", () => {
 });
 
 describe("EnhancedInput command autocomplete backend filtering", () => {
-  it("does not show OpenCode or Claude builtins for codex backend", async () => {
-    vi.mocked(getBuiltinCommands).mockResolvedValue({
-      opencode: [{ name: "init", description: null, path: "builtin" }],
-      claudecode: [{ name: "plan", description: null, path: "builtin-claude" }],
-    });
-
+  it("does not show Claude builtins for codex backend", async () => {
     function ControlledInput() {
       const [value, setValue] = useState("");
       return (
@@ -177,18 +161,14 @@ describe("EnhancedInput command autocomplete backend filtering", () => {
 
     fireEvent.change(textarea as HTMLTextAreaElement, { target: { value: "/" } });
 
+    expect(await screen.findByText("goal")).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByText("plan")).not.toBeInTheDocument();
-      expect(screen.queryByText("init")).not.toBeInTheDocument();
+      expect(screen.queryByText("compact")).not.toBeInTheDocument();
     });
   });
 
   it("shows only Claude builtins for claudecode backend", async () => {
-    vi.mocked(getBuiltinCommands).mockResolvedValue({
-      opencode: [{ name: "init", description: null, path: "builtin" }],
-      claudecode: [{ name: "plan", description: null, path: "builtin-claude" }],
-    });
-
     function ControlledInput() {
       const [value, setValue] = useState("");
       return (
@@ -208,6 +188,6 @@ describe("EnhancedInput command autocomplete backend filtering", () => {
     fireEvent.change(textarea as HTMLTextAreaElement, { target: { value: "/" } });
 
     expect(await screen.findByText("plan")).toBeInTheDocument();
-    expect(screen.queryByText("init")).not.toBeInTheDocument();
+    expect(screen.queryByText("goal")).not.toBeInTheDocument();
   });
 });

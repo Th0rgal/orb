@@ -12,43 +12,24 @@ import {
 import { useToast } from '@/components/toast';
 import {
   getLibraryStatus,
-  getLibraryMcps,
   listLibrarySkills,
-  listLibraryCommands,
   syncLibrary,
   forceSyncLibrary,
   forcePushLibrary,
   commitLibrary,
   pushLibrary,
-  saveLibraryMcps,
   saveLibrarySkill,
   deleteLibrarySkill,
-  saveLibraryCommand,
-  deleteLibraryCommand,
-  listLibraryAgents,
-  getLibraryAgent as apiGetLibraryAgent,
-  saveLibraryAgent as apiSaveLibraryAgent,
-  deleteLibraryAgent,
   LibraryUnavailableError,
   DivergedHistoryError,
   type LibraryStatus,
-  type McpServerDef,
   type SkillSummary,
-  type CommandSummary,
-  type LibraryAgentSummary,
-  type LibraryAgent,
 } from '@/lib/api';
-
-// Re-export types for consumers
-export type { LibraryAgentSummary };
 
 interface LibraryContextValue {
   // State
   status: LibraryStatus | null;
-  mcps: Record<string, McpServerDef>;
   skills: SkillSummary[];
-  commands: CommandSummary[];
-  libraryAgents: LibraryAgentSummary[];
   loading: boolean;
   libraryUnavailable: boolean;
   libraryUnavailableMessage: string | null;
@@ -67,22 +48,9 @@ interface LibraryContextValue {
   commit: (message: string) => Promise<void>;
   push: () => Promise<void>;
 
-  // MCP operations
-  saveMcps: (mcps: Record<string, McpServerDef>) => Promise<void>;
-
   // Skill operations
   saveSkill: (name: string, content: string) => Promise<void>;
   removeSkill: (name: string) => Promise<void>;
-
-  // Command operations
-  saveCommand: (name: string, content: string) => Promise<void>;
-  removeCommand: (name: string) => Promise<void>;
-
-  // Library Agent operations
-  getLibraryAgent: (name: string) => Promise<LibraryAgent>;
-  saveLibraryAgent: (name: string, content: string) => Promise<void>;
-  removeLibraryAgent: (name: string) => Promise<void>;
-  refreshLibraryAgents: () => Promise<void>;
 
   // Operation states
   syncing: boolean;
@@ -107,10 +75,7 @@ interface LibraryProviderProps {
 export function LibraryProvider({ children }: LibraryProviderProps) {
   const { showError } = useToast();
   const [status, setStatus] = useState<LibraryStatus | null>(null);
-  const [mcps, setMcps] = useState<Record<string, McpServerDef>>({});
   const [skills, setSkills] = useState<SkillSummary[]>([]);
-  const [commands, setCommands] = useState<CommandSummary[]>([]);
-  const [libraryAgents, setLibraryAgents] = useState<LibraryAgentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [libraryUnavailable, setLibraryUnavailable] = useState(false);
   const [libraryUnavailableMessage, setLibraryUnavailableMessage] = useState<string | null>(null);
@@ -128,10 +93,7 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
 
     const results = await Promise.allSettled([
       getLibraryStatus(),
-      getLibraryMcps(),
       listLibrarySkills(),
-      listLibraryCommands(),
-      listLibraryAgents().catch(() => []),
     ]);
 
     const errors: string[] = [];
@@ -140,17 +102,14 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
         setLibraryUnavailable(true);
         setLibraryUnavailableMessage(reason.message);
         setStatus(null);
-        setMcps({});
         setSkills([]);
-        setCommands([]);
-        setLibraryAgents([]);
         return true;
       }
       errors.push(`${label}: ${reason instanceof Error ? reason.message : 'Failed to load'}`);
       return false;
     };
 
-    const [statusRes, mcpsRes, skillsRes, commandsRes, agentsRes] = results;
+    const [statusRes, skillsRes] = results;
 
     if (statusRes.status === 'fulfilled') {
       setStatus(statusRes.value);
@@ -159,30 +118,9 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       return;
     }
 
-    if (mcpsRes.status === 'fulfilled') {
-      setMcps(mcpsRes.value);
-    } else if (handleRejection('MCPs', mcpsRes.reason)) {
-      setLoading(false);
-      return;
-    }
-
     if (skillsRes.status === 'fulfilled') {
       setSkills(skillsRes.value);
     } else if (handleRejection('Skills', skillsRes.reason)) {
-      setLoading(false);
-      return;
-    }
-
-    if (commandsRes.status === 'fulfilled') {
-      setCommands(commandsRes.value);
-    } else if (handleRejection('Commands', commandsRes.reason)) {
-      setLoading(false);
-      return;
-    }
-
-    if (agentsRes.status === 'fulfilled') {
-      setLibraryAgents(agentsRes.value);
-    } else if (handleRejection('Agents', agentsRes.reason)) {
       setLoading(false);
       return;
     }
@@ -218,10 +156,8 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       await refresh();
     } catch (err) {
       if (err instanceof DivergedHistoryError) {
-        // Set diverged history state so UI can show force sync options
         setDivergedHistory(true);
         setDivergedHistoryMessage(err.message);
-        // Don't show generic error toast - UI will show specific options
         throw err;
       }
       showError(err instanceof Error ? err.message : 'Failed to sync');
@@ -287,15 +223,8 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
     }
   }, [refreshStatus, showError]);
 
-  const saveMcps = useCallback(async (newMcps: Record<string, McpServerDef>) => {
-    await saveLibraryMcps(newMcps);
-    setMcps(newMcps);
-    await refreshStatus();
-  }, [refreshStatus]);
-
   const saveSkill = useCallback(async (name: string, content: string) => {
     await saveLibrarySkill(name, content);
-    // Refresh skills list
     const skillsData = await listLibrarySkills();
     setSkills(skillsData);
     await refreshStatus();
@@ -307,64 +236,10 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
     await refreshStatus();
   }, [refreshStatus]);
 
-  const saveCommand = useCallback(async (name: string, content: string) => {
-    await saveLibraryCommand(name, content);
-    // Refresh commands list
-    const commandsData = await listLibraryCommands();
-    setCommands(commandsData);
-    await refreshStatus();
-  }, [refreshStatus]);
-
-  const removeCommand = useCallback(async (name: string) => {
-    await deleteLibraryCommand(name);
-    setCommands((prev) => prev.filter((c) => c.name !== name));
-    await refreshStatus();
-  }, [refreshStatus]);
-
-  // Library Agent operations
-  const getLibraryAgent = useCallback(async (name: string): Promise<LibraryAgent> => {
-    return apiGetLibraryAgent(name);
-  }, []);
-
-  const saveLibraryAgentFn = useCallback(async (name: string, content: string) => {
-    // Build a partial LibraryAgent object from content - server handles parsing
-    const agent: LibraryAgent = {
-      name,
-      content,
-      description: null,
-      path: `agent/${name}.md`,
-      model: null,
-      tools: {},
-      permissions: {},
-    };
-    await apiSaveLibraryAgent(name, agent);
-    const agentsData = await listLibraryAgents();
-    setLibraryAgents(agentsData);
-    await refreshStatus();
-  }, [refreshStatus]);
-
-  const removeLibraryAgent = useCallback(async (name: string) => {
-    await deleteLibraryAgent(name);
-    setLibraryAgents((prev) => prev.filter((a) => a.name !== name));
-    await refreshStatus();
-  }, [refreshStatus]);
-
-  const refreshLibraryAgents = useCallback(async () => {
-    try {
-      const agentsData = await listLibraryAgents();
-      setLibraryAgents(agentsData);
-    } catch {
-      // Silently fail
-    }
-  }, []);
-
   const value = useMemo<LibraryContextValue>(
     () => ({
       status,
-      mcps,
       skills,
-      commands,
-      libraryAgents,
       loading,
       libraryUnavailable,
       libraryUnavailableMessage,
@@ -377,25 +252,15 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       forcePush,
       commit,
       push,
-      saveMcps,
       saveSkill,
       removeSkill,
-      saveCommand,
-      removeCommand,
-      getLibraryAgent,
-      saveLibraryAgent: saveLibraryAgentFn,
-      removeLibraryAgent,
-      refreshLibraryAgents,
       syncing,
       committing,
       pushing,
     }),
     [
       status,
-      mcps,
       skills,
-      commands,
-      libraryAgents,
       loading,
       libraryUnavailable,
       libraryUnavailableMessage,
@@ -408,15 +273,8 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       forcePush,
       commit,
       push,
-      saveMcps,
       saveSkill,
       removeSkill,
-      saveCommand,
-      removeCommand,
-      getLibraryAgent,
-      saveLibraryAgentFn,
-      removeLibraryAgent,
-      refreshLibraryAgents,
       syncing,
       committing,
       pushing,

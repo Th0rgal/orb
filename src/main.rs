@@ -2,7 +2,7 @@
 //!
 //! Starts the HTTP server that exposes the agent API.
 
-use sandboxed_sh::{api, config::Config, library::env_crypto};
+use sandboxed_sh::{api, config::Config, env_crypto};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

@@ -469,13 +469,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         tokio::spawn(async move {
             match crate::library::LibraryStore::new(library_path, &library_remote).await {
                 Ok(store) => {
-                    if let Ok(plugins) = store.get_plugins().await {
-                        if let Err(e) = crate::opencode_config::sync_global_plugins(&plugins).await
-                        {
-                            tracing::warn!("Failed to sync OpenCode plugins: {}", e);
-                        }
-                    }
-                    tracing::info!("Configuration library initialized from {}", library_remote);
+                    tracing::info!("Skills library initialized from {}", library_remote);
                     *library_clone.write().await = Some(Arc::new(store));
 
                     let workspaces = workspaces_clone.list().await;

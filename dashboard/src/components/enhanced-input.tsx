@@ -1,10 +1,10 @@
 'use client';
 
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, forwardRef, useImperativeHandle, memo } from 'react';
-import { listLibraryCommands, getBuiltinCommands as fetchBuiltinCommands, getVisibleAgents, type CommandSummary, type CommandParam } from '@/lib/api';
+import { listBackendAgents, type CommandSummary, type CommandParam } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
-// Fallback builtin commands (used if API fails)
+// Builtin harness slash commands
 const FALLBACK_OPENCODE_COMMANDS: CommandSummary[] = [
   {
     name: 'goal',
@@ -74,29 +74,6 @@ interface AutocompleteItem {
   params?: CommandParam[];
 }
 
-const parseAgentNames = (payload: unknown): string[] => {
-  const normalizeEntry = (entry: unknown): string | null => {
-    if (typeof entry === 'string') return entry;
-    if (entry && typeof entry === 'object') {
-      const name = (entry as { name?: unknown }).name;
-      if (typeof name === 'string') return name;
-      const id = (entry as { id?: unknown }).id;
-      if (typeof id === 'string') return id;
-    }
-    return null;
-  };
-
-  const raw = Array.isArray(payload)
-    ? payload
-    : (payload as { agents?: unknown })?.agents;
-  if (!Array.isArray(raw)) return [];
-
-  const names = raw
-    .map(normalizeEntry)
-    .filter((name): name is string => Boolean(name));
-  return Array.from(new Set(names));
-};
-
 const getAgentDescription = (name: string): string => {
   const descriptions: Record<string, string> = {
     'oracle': 'Architecture, code review, strategy (GPT)',
@@ -146,7 +123,21 @@ export const EnhancedInput = memo(forwardRef<EnhancedInputHandle, EnhancedInputP
     externalOnChange(newValue);
   }, [externalOnChange]);
 
-  const [commands, setCommands] = useState<CommandSummary[]>([]);
+  const commands = useMemo<CommandSummary[]>(() => {
+    const builtinByBackend: Record<string, CommandSummary[]> = {
+      claudecode: FALLBACK_CLAUDECODE_COMMANDS,
+      opencode: FALLBACK_OPENCODE_COMMANDS,
+      codex: FALLBACK_CODEX_COMMANDS,
+    };
+    if (backend) {
+      return builtinByBackend[backend] ?? [];
+    }
+    return [
+      ...FALLBACK_OPENCODE_COMMANDS,
+      ...FALLBACK_CLAUDECODE_COMMANDS,
+      ...FALLBACK_CODEX_COMMANDS,
+    ];
+  }, [backend]);
   const [agents, setAgents] = useState<string[]>([]);
   const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [autocompleteItems, setAutocompleteItems] = useState<AutocompleteItem[]>([]);
@@ -206,84 +197,25 @@ export const EnhancedInput = memo(forwardRef<EnhancedInputHandle, EnhancedInputP
     if (wrapper) wrapper.style.height = prevWrapperHeight;
   }, []);
 
-  // Load commands and agents on mount or when backend changes
+  // Load OpenCode @agent names on mount
   useEffect(() => {
     let isMounted = true;
-
-    async function loadData() {
-      // Fetch builtin commands from backend API
-      let builtinCommands: CommandSummary[] = [];
-      try {
-        const builtinResponse = await fetchBuiltinCommands();
-        const builtinByBackend: Record<string, CommandSummary[]> = {
-          claudecode: builtinResponse.claudecode,
-          opencode: builtinResponse.opencode,
-          // Codex got native slash commands in 0.128.0 (currently just /goal).
-          // The backend returns an empty array for older binaries; the field
-          // is optional in the response type.
-          codex: builtinResponse.codex ?? [],
-        };
-        if (backend) {
-          builtinCommands = builtinByBackend[backend] ?? [];
-        } else {
-          // No backend selected yet, show every known builtin set.
-          builtinCommands = [
-            ...builtinResponse.opencode,
-            ...builtinResponse.claudecode,
-            ...(builtinResponse.codex ?? []),
-          ];
-        }
-      } catch {
-        // Use fallback commands if API fails
-        const fallbackByBackend: Record<string, CommandSummary[]> = {
-          claudecode: FALLBACK_CLAUDECODE_COMMANDS,
-          opencode: FALLBACK_OPENCODE_COMMANDS,
-          codex: FALLBACK_CODEX_COMMANDS,
-        };
-        if (backend) {
-          builtinCommands = fallbackByBackend[backend] ?? [];
-        } else {
-          builtinCommands = [
-            ...FALLBACK_OPENCODE_COMMANDS,
-            ...FALLBACK_CLAUDECODE_COMMANDS,
-            ...FALLBACK_CODEX_COMMANDS,
-          ];
-        }
-      }
-
-      // Fetch library commands
-      try {
-        const libraryCommands = await listLibraryCommands();
+    listBackendAgents('opencode')
+      .then((agentsData) => {
         if (isMounted) {
-          setCommands([...builtinCommands, ...libraryCommands]);
+          setAgents(Array.from(new Set(agentsData.map((a) => a.name).filter(Boolean))));
         }
-      } catch {
-        if (isMounted) {
-          setCommands(builtinCommands);
-        }
-      }
-
-      // Fetch agents
-      try {
-        const agentsData = await getVisibleAgents();
-        const agentNames = parseAgentNames(agentsData);
-        if (isMounted) {
-          setAgents(agentNames);
-        }
-      } catch {
-        // Use empty array on failure - backend validates agents anyway
-        // This prevents suggesting non-existent agents from stale fallbacks
+      })
+      .catch(() => {
         if (isMounted) {
           setAgents([]);
         }
-      }
-    }
-    loadData();
+      });
 
     return () => {
       isMounted = false;
     };
-  }, [backend]);
+  }, []);
 
   // Check if an agent name is valid
   const isValidAgent = useCallback((name: string) => {
@@ -345,7 +277,14 @@ export const EnhancedInput = memo(forwardRef<EnhancedInputHandle, EnhancedInputP
         type: 'command',
         name: cmd.name,
         description: cmd.description,
-        source: cmd.path === 'builtin' ? 'opencode' : cmd.path === 'builtin-claude' ? 'claude-code' : 'library',
+        source:
+          cmd.path === 'builtin-opencode'
+            ? 'opencode'
+            : cmd.path === 'builtin-claude'
+              ? 'claude-code'
+              : cmd.path === 'builtin-codex'
+                ? 'codex'
+                : undefined,
         params: cmd.params,
       })));
       setTriggerPosition(0);
@@ -829,7 +768,7 @@ export const EnhancedInput = memo(forwardRef<EnhancedInputHandle, EnhancedInputP
         >
           {autocompleteItems.map((item, index) => (
             <button
-              key={`${item.type}-${item.name}`}
+              key={`${item.type}-${item.name}-${item.source ?? ''}`}
               type="button"
               onClick={() => selectItem(item)}
               className={cn(

@@ -663,7 +663,7 @@ pub(super) fn resolve_agent_finished_target_mission(
 pub(super) async fn agent_finished_automation_messages(
     mission_store: &Arc<dyn MissionStore>,
     mission_id: Uuid,
-    library: &SharedLibrary,
+    _library: &SharedLibrary,
     workspaces: &workspace::SharedWorkspaceStore,
 ) -> Vec<RoutedAutomationMessage> {
     use super::super::automation_variables::{substitute_variables, SubstitutionContext};
@@ -764,25 +764,12 @@ pub(super) async fn agent_finished_automation_messages(
         // Fetch the command content based on the command source
         let command_content = match &automation.command_source {
             CommandSource::Library { name } => {
-                if let Some(lib) = library.read().await.as_ref() {
-                    match lib.get_command(name).await {
-                        Ok(command) => automation_library_command_body(&command.content),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to fetch command '{}' for automation {}: {}",
-                                name,
-                                automation.id,
-                                e
-                            );
-                            continue;
-                        }
-                    }
-                } else {
-                    tracing::debug!(
-                        "Library not initialized, skipping agent_finished automation trigger"
-                    );
-                    continue;
-                }
+                tracing::warn!(
+                    "Skipping retired library command '{}' for automation {}",
+                    name,
+                    automation.id
+                );
+                continue;
             }
             CommandSource::LocalFile { path } => {
                 let file_path = if let Some(ws) = workspace.as_ref() {

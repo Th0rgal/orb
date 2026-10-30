@@ -184,7 +184,7 @@ missions.
 
 1. User creates a mission with a workspace + agent (backend).
 2. Core prepares a **per-mission workspace directory** and syncs Library
-   content (skills/tools/rules).
+   skills.
 3. Core writes **per-workspace config files** (`opencode.json`,
    `.opencode/opencode.json`, `.claude/settings.local.json`, `CLAUDE.md`).
 4. The mission runner launches the chosen harness **inside the workspace** using
@@ -272,8 +272,7 @@ backend in configuration. The default is to avoid host-proxy tooling.
 
 Per-workspace config is generated from three sources:
 
-1. **Library** (git-backed) for agents, skills, tools, rules, and MCP
-   definitions.
+1. **Library** (git-backed) for skills.
 2. **Backend Settings** (UI) for CLI paths or backend-specific overrides.
 3. **Workspace Settings** for env vars and per-workspace overrides.
 

@@ -1535,27 +1535,6 @@ pub async fn update_mission_settings(
             .or_else(|| workspace_config_profile.clone()),
     };
 
-    let effective_agent = match &agent {
-        Some(Some(agent)) => Some(agent.clone()),
-        Some(None) => None,
-        None => current.agent.clone(),
-    };
-    if let Some(ref agent_name) = effective_agent {
-        let skip_validation = matches!(
-            effective_backend.as_str(),
-            "claudecode" | "codex" | "grok" | "antigravity" | "vibe"
-        );
-        if !skip_validation {
-            super::super::library::validate_agent_exists(
-                &state,
-                agent_name,
-                effective_config_profile.as_deref(),
-            )
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-        }
-    }
-
     if let Some(Some(raw_effort)) = model_effort.as_ref() {
         let normalized = normalize_model_effort_for_backend(Some(&effective_backend), raw_effort)
             .ok_or_else(|| {

@@ -19,8 +19,11 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use uuid::Uuid;
 
-use super::library::SharedLibrary;
 use super::routes::AppState;
+
+const AUTO_CLOSE_GRACE_PERIOD_SECS: u64 = 7200; // 2 hours
+const CLEANUP_INTERVAL_SECS: u64 = 900; // 15 minutes
+const WARNING_BEFORE_CLOSE_SECS: u64 = 300; // 5 minutes
 
 /// Status of a desktop session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -372,10 +375,7 @@ async fn remove_session_from_storage(
 async fn collect_desktop_sessions(state: &Arc<AppState>) -> Vec<DesktopSessionDetail> {
     let mut sessions_by_display: HashMap<String, DesktopSessionDetail> = HashMap::new();
 
-    // Get desktop config for grace period
-    let grace_period_secs = get_desktop_config(&state.library)
-        .await
-        .auto_close_grace_period_secs;
+    let grace_period_secs = AUTO_CLOSE_GRACE_PERIOD_SECS;
 
     // Get all missions from the store
     let mission_store = state.control.get_mission_store().await;
@@ -530,19 +530,6 @@ fn calculate_auto_close_secs(
     }
 }
 
-/// Get desktop config from library.
-async fn get_desktop_config(library: &SharedLibrary) -> crate::library::types::DesktopConfig {
-    let guard = library.read().await;
-    if let Some(lib) = guard.as_ref() {
-        match lib.get_sandboxed_config().await {
-            Ok(config) => config.desktop,
-            Err(_) => crate::library::types::DesktopConfig::default(),
-        }
-    } else {
-        crate::library::types::DesktopConfig::default()
-    }
-}
-
 async fn is_desktop_session_running(
     display: &str,
     display_server: &str,
@@ -675,11 +662,9 @@ pub async fn start_cleanup_task(state: Arc<AppState>) {
     tracing::info!("Starting desktop session cleanup background task");
 
     loop {
-        // Get config for intervals
-        let config = get_desktop_config(&state.library).await;
-        let interval_secs = config.cleanup_interval_secs;
-        let grace_period_secs = config.auto_close_grace_period_secs;
-        let warning_secs = config.warning_before_close_secs;
+        let interval_secs = CLEANUP_INTERVAL_SECS;
+        let grace_period_secs = AUTO_CLOSE_GRACE_PERIOD_SECS;
+        let warning_secs = WARNING_BEFORE_CLOSE_SECS;
 
         // Skip if auto-close is disabled
         if grace_period_secs == 0 {

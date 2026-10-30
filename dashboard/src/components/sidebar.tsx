@@ -15,7 +15,6 @@ import {
   Archive,
   ChatCircleText,
   CheckCircle,
-  CirclesFour,
   CircleNotch,
   Cpu,
   GearSix,
@@ -33,7 +32,6 @@ import {
   Sparkle,
   TerminalWindow,
   Toolbox,
-  TreeStructure,
   XCircle,
   type Icon,
 } from '@phosphor-icons/react';
@@ -52,17 +50,7 @@ const navigation: NavItem[] = [
   { name: 'Console', href: '/console', icon: TerminalWindow },
   { name: 'Assistant', href: '/assistant', icon: Robot },
   { name: 'Routing', href: '/model-routing', icon: GitBranch },
-  {
-    name: 'Library',
-    href: '/config',
-    icon: TreeStructure,
-    children: [
-      { name: 'Commands', href: '/config/commands', icon: TerminalWindow },
-      { name: 'Skills', href: '/config/skills', icon: Lightning },
-      { name: 'Workspaces', href: '/config/workspace-templates', icon: CirclesFour },
-      { name: 'Profiles', href: '/config/settings', icon: GearSix },
-    ],
-  },
+  { name: 'Skills', href: '/config/skills', icon: Lightning },
   {
     name: 'Inspect',
     href: '/inspect',
@@ -140,9 +128,6 @@ export const Sidebar = memo(function Sidebar({
   // Auto-expand sections if we're on their subpages
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      if (pathname.startsWith('/config')) {
-        setExpandedItems((prev) => new Set([...prev, 'Library']));
-      }
       if (pathname.startsWith('/inspect')) {
         setExpandedItems((prev) => new Set([...prev, 'Inspect']));
       }

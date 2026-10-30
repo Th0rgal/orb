@@ -29,7 +29,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::library::env_crypto;
+use crate::env_crypto;
 use crate::settings::OrbTelemetrySettings;
 
 use super::control::AgentEvent;

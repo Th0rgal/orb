@@ -50,12 +50,12 @@ describe("lint", () => {
     expect(ids).toEqual(["description", "name", "metadata"]);
     expect(lintSkill("s", ok()).length).toBe(0);
   });
-  it("flags long files and raw IPv4 except in paloma-infra", () => {
+  it("flags long files and raw IPv4 except in ops", () => {
     expect(lintSkill("s", ok("x\n".repeat(520))).map((l) => l.id)).toEqual(["length"]);
     expect(lintSkill("s", ok("ssh root@65.109.98.246\n")).map((l) => l.id)).toEqual(["ipv4"]);
     expect(lintSkill("s", ok("version 1.2.3.4.5 and 127.0.0.1\n"))).toEqual([]);
-    const infra = ok("ssh root@65.109.98.246\n").replace("name: s", "name: paloma-infra");
-    expect(lintSkill("paloma-infra", infra)).toEqual([]);
+    const infra = ok("ssh root@65.109.98.246\n").replace("name: s", "name: ops");
+    expect(lintSkill("ops", infra)).toEqual([]);
   });
 });
 
