@@ -86,6 +86,29 @@ const DEFAULT_GLOBAL_INACTIVITY_SECS: u64 = 300;
 const DEFAULT_TOOL_IDLE_SECS: u64 = 1800;
 /// Inactivity threshold while OpenCode server heartbeats are still arriving.
 const HEARTBEAT_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(420);
+/// Default timeout (ms) for OpenCode's built-in `bash` tool when the model
+/// omits an explicit `timeout` parameter. Stock OpenCode defaults to 120_000 ms
+/// (2 minutes), which SIGTERMs Lean/proof and Rust builds mid-flight (mission
+/// f35e99fc: 43 commands killed at 120s, wasting 93m). Override with
+/// `SANDBOXED_SH_OPENCODE_BASH_TIMEOUT_MS`.
+pub(crate) const DEFAULT_OPENCODE_BASH_TIMEOUT_MS: u64 = 600_000;
+pub(crate) const OPENCODE_BASH_DEFAULT_TIMEOUT_ENV: &str =
+    "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS";
+
+pub(crate) fn opencode_bash_default_timeout_ms_from(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_OPENCODE_BASH_TIMEOUT_MS)
+}
+
+pub(crate) fn opencode_bash_default_timeout_ms() -> u64 {
+    opencode_bash_default_timeout_ms_from(
+        std::env::var("SANDBOXED_SH_OPENCODE_BASH_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
+    )
+}
 use crate::api::proxy_liveness::PROXY_STREAM_RECENT;
 
 /// Convert legacy controller-facing OpenCode model aliases into the canonical
@@ -798,6 +821,13 @@ pub async fn run_opencode_turn(
     // Set non-interactive mode
     env.insert("OPENCODE_NON_INTERACTIVE".to_string(), "true".to_string());
     env.insert("OPENCODE_RUN".to_string(), "true".to_string());
+    if !workspace
+        .env_vars
+        .contains_key(OPENCODE_BASH_DEFAULT_TIMEOUT_ENV)
+    {
+        env.entry(OPENCODE_BASH_DEFAULT_TIMEOUT_ENV.to_string())
+            .or_insert_with(|| opencode_bash_default_timeout_ms().to_string());
+    }
     env.entry("SANDBOXED_SH_WORKSPACE_TYPE".to_string())
         .or_insert_with(|| workspace.workspace_type.as_str().to_string());
 
@@ -2386,7 +2416,8 @@ mod path_tests {
     use super::{
         canonicalize_configured_opencode_model, canonicalize_opencode_cli_model,
         linux_pid_has_children, linux_pid_is_alive, normalize_opencode_model_id,
-        opencode_inactivity_should_kill, opencode_model_argument, opencode_path,
+        opencode_bash_default_timeout_ms_from, opencode_inactivity_should_kill,
+        opencode_model_argument, opencode_path,
     };
     use std::time::Duration;
 
@@ -2823,5 +2854,17 @@ mod path_tests {
         assert!(linux_pid_is_alive(pid));
         assert!(!linux_pid_is_alive(u32::MAX - 1));
         let _ = linux_pid_has_children(pid);
+    }
+
+    #[test]
+    fn opencode_bash_default_timeout_defaults_to_ten_minutes_and_parses_overrides() {
+        assert_eq!(opencode_bash_default_timeout_ms_from(None), 600_000);
+        assert_eq!(opencode_bash_default_timeout_ms_from(Some("")), 600_000);
+        assert_eq!(opencode_bash_default_timeout_ms_from(Some("0")), 600_000);
+        assert_eq!(opencode_bash_default_timeout_ms_from(Some("bad")), 600_000);
+        assert_eq!(
+            opencode_bash_default_timeout_ms_from(Some(" 900000 ")),
+            900_000
+        );
     }
 }

@@ -607,9 +607,9 @@ pub(super) async fn submit_leased_remote_job(
         crate::antigravity::validate_prompt(prompt)?;
     }
     let (mut execution, proxy_key_id) = if plan.uses_core_proxy() {
-        let api_base_url = super::super::mission_runner::public_api_base_url_from_env()
+        let api_base_url = super::super::mission_runner::public_proxy_base_url_from_env()
             .ok_or_else(|| {
-                "SANDBOXED_PUBLIC_URL is not configured; a remote harness launch needs a core URL the node can reach".to_string()
+                "SANDBOXED_PROXY_PUBLIC_URL / SANDBOXED_PUBLIC_URL is not configured; a remote harness launch needs a core proxy URL the node can reach".to_string()
             })?;
         let key = state
             .proxy_api_keys

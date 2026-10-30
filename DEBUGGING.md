@@ -787,6 +787,13 @@ retuned live from the dashboard **Resources** panel (or
 `POST /api/workspaces/:id/resources` with `cpu_weight`/`cpu_quota`). Setting any
 CPU property is also what makes systemd delegate the `cpu` controller into
 `missions.slice` — without it, a per-scope `CPUQuota` is silently unenforced.
+
+Note that `sandboxed-node` runs unprivileged (`systemd-run --user --scope`), so
+its jobs land under `user-<runner_uid>.slice` instead of `missions.slice`. Pin
+aggregate CPU/memory drop-ins on `/etc/systemd/system/user-<runner_uid>.slice.d/`
+(and optional per-job `SANDBOXED_NODE_JOB_CPU_WEIGHT` /
+`SANDBOXED_NODE_JOB_CPU_QUOTA` in `/etc/sandboxed-node.env` when `user@<uid>.service`
+delegates `cpu`) so node workloads yield to `system.slice` as well.
 See the "Resource isolation" section in `AGENTS.md` for the architecture.
 
 ## Pausing / Resuming the DGX Spark (node cordon)

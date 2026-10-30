@@ -1538,6 +1538,58 @@ fn memory_budget_reserves_host_and_side_question_capacity() {
     assert!(default_job_memory_limit(total, 4) < limit);
 }
 
+#[cfg(any(test, target_os = "linux"))]
+fn parse_job_cpu_weight(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "idle" {
+        return Some("idle".to_string());
+    }
+    trimmed
+        .parse::<u16>()
+        .ok()
+        .filter(|weight| (1..=10_000).contains(weight))
+        .map(|weight| weight.to_string())
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn parse_job_cpu_quota(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "infinity" {
+        return Some("infinity".to_string());
+    }
+    let pct = trimmed.strip_suffix('%')?;
+    pct.parse::<f64>()
+        .ok()
+        .filter(|pct| pct.is_finite() && *pct > 0.0)
+        .map(|_| trimmed.to_string())
+}
+
+#[cfg(test)]
+#[test]
+fn job_cpu_scope_properties_validate_weight_and_quota() {
+    assert_eq!(parse_job_cpu_weight(None), None);
+    assert_eq!(parse_job_cpu_weight(Some("  ")), None);
+    assert_eq!(parse_job_cpu_weight(Some("0")), None);
+    assert_eq!(parse_job_cpu_weight(Some("10001")), None);
+    assert_eq!(parse_job_cpu_weight(Some(" 40 ")).as_deref(), Some("40"));
+    assert_eq!(parse_job_cpu_weight(Some("idle")).as_deref(), Some("idle"));
+
+    assert_eq!(parse_job_cpu_quota(None), None);
+    assert_eq!(parse_job_cpu_quota(Some("0%")), None);
+    assert_eq!(parse_job_cpu_quota(Some("400")), None);
+    assert_eq!(parse_job_cpu_quota(Some(" 400% ")).as_deref(), Some("400%"));
+    assert_eq!(
+        parse_job_cpu_quota(Some("infinity")).as_deref(),
+        Some("infinity")
+    );
+}
+
 #[cfg(target_os = "linux")]
 fn systemd_scope_command(
     cmd: tokio::process::Command,
@@ -1574,6 +1626,20 @@ fn systemd_scope_command(
         .arg(format!("--property=MemoryMax={}", memory_limit))
         .arg(format!("--property=MemoryHigh={}", memory_limit / 10 * 9))
         .arg("--property=MemorySwapMax=0");
+    if let Some(weight) = parse_job_cpu_weight(
+        std::env::var("SANDBOXED_NODE_JOB_CPU_WEIGHT")
+            .ok()
+            .as_deref(),
+    ) {
+        scoped.arg(format!("--property=CPUWeight={weight}"));
+    }
+    if let Some(quota) = parse_job_cpu_quota(
+        std::env::var("SANDBOXED_NODE_JOB_CPU_QUOTA")
+            .ok()
+            .as_deref(),
+    ) {
+        scoped.arg(format!("--property=CPUQuota={quota}"));
+    }
     if oom_policy_supported {
         scoped.arg("--property=OOMPolicy=continue");
     }

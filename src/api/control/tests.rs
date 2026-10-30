@@ -6871,6 +6871,10 @@ fn remote_execution_routes_selected_model_through_core_proxy_env() {
     assert!(!exec.command.contains("sk-proxy-abc"));
     let env = exec.env.unwrap();
     assert_eq!(env[REMOTE_PROXY_KEY_ENV], "sk-proxy-abc");
+    assert_eq!(
+        env[crate::api::runners::opencode::OPENCODE_BASH_DEFAULT_TIMEOUT_ENV],
+        crate::api::runners::opencode::opencode_bash_default_timeout_ms().to_string()
+    );
     let config: serde_json::Value = serde_json::from_str(&env[REMOTE_OPENCODE_CONFIG_ENV]).unwrap();
     assert_eq!(
         config["provider"]["builtin"]["options"]["baseURL"],

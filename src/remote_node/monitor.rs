@@ -922,8 +922,9 @@ pub struct RemoteLaunchCapabilities {
     pub requires_proxy_harnesses: Vec<String>,
     /// An explicit `remote_command` is still accepted verbatim.
     pub raw_command: bool,
-    /// `SANDBOXED_PUBLIC_URL` is set, so node harnesses can reach the proxy.
-    /// When false a typed launch fails at dispatch (502), not at planning.
+    /// `SANDBOXED_PROXY_PUBLIC_URL` or `SANDBOXED_PUBLIC_URL` is set, so node
+    /// harnesses can reach Core's `/v1/*` proxy. When false a typed launch fails
+    /// at dispatch (502), not at planning.
     pub proxy_url_configured: bool,
     /// Prefixes of the plain-text 400 bodies returned before a mission exists.
     pub error_prefixes: Vec<String>,
