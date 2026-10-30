@@ -20,14 +20,14 @@ All in-scope production, control-plane, compute, and operator endpoints communic
 | `3` | `ashur` | `10.88.0.11` | `UntrustedCompute` (`1`) | Worker Pool (`sandboxed-node`) | Ubuntu 24.04.4 LTS | 3-Key Policy |
 | `4` | `babylon` | `10.88.0.12` | `UntrustedCompute` (`1`) | Worker Pool (`sandboxed-node`) | Ubuntu 24.04.4 LTS | 3-Key Policy |
 | `5` | `nippur` | `10.88.0.13` | `UntrustedCompute` (`1`) | Worker Pool (`sandboxed-node`) | Ubuntu 24.04.4 LTS | 3-Key Policy |
-| `6` | `old-agent` | `10.88.0.14` | `UntrustedCompute` (`1`) | Worker Pool (`sandboxed-node`) | Ubuntu 24.04.4 LTS | 3-Key Policy |
+| `6` | `uruk` | `10.88.0.14` | `UntrustedCompute` (`1`) | Worker Pool (`sandboxed-node`) | Ubuntu 24.04.4 LTS | 3-Key Policy |
 | `7` | `thomas-md` | `10.88.0.21` | `PublicGateway` (`2`) | Public Web Gateway (`thomas.md`) | Ubuntu 24.04.4 LTS | 3-Key Policy |
 | `8` | `polymath` | `10.88.0.22` | `PublicGateway` (`2`) | Polymath Web / API | Ubuntu 24.04.4 LTS | 3-Key Policy |
 | `9` | `maven-repo` | `10.88.0.31` | `ArtifactBuild` (`3`) | Artifact Repository | Ubuntu 24.04.4 LTS | 3-Key Policy |
 | `14` | `watchtower` | `10.88.0.50` | `CanaryBunker` (`5`) | Out-of-Band Canary & Audit Bunker | Debian 12 (Bookworm) | 3-Key Policy |
 | `16` | `rpc-starknet-id` | `10.88.0.16` | `UntrustedCompute` (`1`) | Compute / RPC Node | Debian 12 (Bookworm) | 3-Key Policy |
 | `17` | `utu-lfglabs` | `10.88.0.17` | `UntrustedCompute` (`1`) | Compute / UTU Node | Debian 13 (Trixie) | 3-Key Policy |
-| `18` | `agent-starknet-id` | `10.88.0.18` | `UntrustedCompute` (`1`) | Compute / Agent Node | Ubuntu 24.04.4 LTS | 3-Key Policy |
+| `18` | `nimrud` | `10.88.0.18` | `UntrustedCompute` (`1`) | Worker Pool (`sandboxed-node`) | Ubuntu 26.04 LTS | 3-Key Policy |
 | `100` | `macbook-air` | `10.88.0.100` | `OperatorAdmin` (`6`) | Operator Admin Workstation (macOS Orb Client) | macOS (Darwin arm64) | 3-Key + Touch ID JIT |
 
 ### 1.2 Out-of-Scope Scheduled Decommission Hosts (Fenced Legacy Perimeter)
@@ -88,5 +88,5 @@ Formally specified and proved in `Orb.Kernel.soc2AuditShipperStep`:
 2. **Automated OS Security Patching (CC7.1)**:
    - Every in-scope Linux node runs a supported LTS distribution (`Ubuntu 24.04 LTS` or `Debian 12/13`) with `unattended-upgrades` enabled (`osEol == 0 && unattendedUpgrades == 1`).
 3. **Capacity & Workspace Garbage Collection (A1.2)**:
-   - Compute worker nodes (`ashur`, `babylon`, `nippur`, `old-agent`) run `sandboxed-node-gc.timer` daily to prune inactive mission `target/` and `.lake/build/` artifacts and maintain disk utilization below 80%.
+   - Compute worker nodes (`ashur`, `babylon`, `nippur`, `uruk`, `nimrud`) run `sandboxed-node-gc.timer` daily to prune inactive mission `target/` and `.lake/build/` artifacts and maintain disk utilization below 80%.
    - Backblaze B2 encrypted backups (`rclone` + age/restic) protect stateful services (`agent-core` SQLite + `/etc/paloma`, `dgx-spark` Hindsight memory, `thomas-md`, `polymath`, `maven-repo`) with monthly restore verification drills.

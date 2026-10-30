@@ -86,12 +86,12 @@ When a user asks which “servers/backends” sandboxed.sh uses, answer by layer
 1. **Control-plane host** — runs sandboxed.sh production and orchestrates mission state.
 2. **Workspace** — container/host execution environment selected by `workspace_id`; examples include project workspaces and the dedicated `dgx-spark` workspace.
 3. **LLM backend** — the `backend` field (`codex`, `claudecode`, `opencode`, `grok`, `antigravity`); this selects the agent/model transport, not a physical machine.
-4. **Remote node/build worker** — extra compute reached through sandboxed-node or `/api/remote-build`; current documented general runners are `babylon`, `nippur`, and `ashur`, while the Lean build fleet also includes `dgx-spark`.
+4. **Remote node/build worker** — extra compute reached through sandboxed-node or `/api/remote-build`; current documented general runners are `babylon`, `nippur`, `ashur`, `uruk`, and `nimrud`, while the Lean build fleet also includes `dgx-spark`.
 5. **Adjacent runner** — e.g. a GitHub Actions self-hosted runner. This is not automatically a sandboxed.sh remote node even if it runs on the same machine.
 
 For inventory questions, report all SSH-reachable machines separately from the subset registered as sandboxed.sh compute. Date any “currently deployed” claim unless live state was checked via `GET /api/remote-nodes` and `GET /api/health/fleet`.
 
-**Production DGX routing incident rule.** If `disk-sentinel` reports only `dgx-spark` unreachable, check `systemctl is-enabled tailscaled`, `systemctl is-active tailscaled`, and `tailscale ping -c 2 100.77.4.93` on `agent-core` before changing keys or topology. The expected recovery is `systemctl enable --now tailscaled`, followed by strict-host-key SSH and a silent sentinel run. Do not recreate an `old-agent` tunnel: `old-agent` is compute-only.
+**Production DGX routing incident rule.** If `disk-sentinel` reports only `dgx-spark` unreachable, inspect `lean-mesh` (`systemctl is-active lean-mesh`, `wg show wg-leanmesh0 latest-handshakes`, `ip route get 10.88.0.2`) on `agent-core` before changing keys or topology, followed by strict-host-key SSH and a silent sentinel run. Do not recreate a `uruk` (`old-agent`) tunnel: `uruk` is compute-only.
 
 ## Picking the agent
 

@@ -2159,12 +2159,12 @@ pub fn resolve_fleet_ssh_target(target_host: &str) -> Result<Option<&'static str
         "ashur" => Ok(Some("root@10.88.0.11")),
         "babylon" => Ok(Some("ubuntu@10.88.0.12")),
         "nippur" => Ok(Some("ubuntu@10.88.0.13")),
-        "old-agent" => Ok(Some("root@10.88.0.14")),
+        "uruk" | "old-agent" => Ok(Some("root@10.88.0.14")),
         "watchtower" => Ok(Some("ubuntu@10.88.0.15")),
         "macbook-air" | "mac" | "thomas-air" => Ok(Some("thomas@10.88.0.100")),
         "rpc-starknet-id" | "rpc.starknet.id" => Ok(Some("root@135.181.75.104")),
         "utu-lfglabs" | "utu.lfglabs.dev" => Ok(Some("root@88.99.67.234")),
-        "agent-starknet-id" | "agent.starknet.id" => Ok(Some("ubuntu@10.88.0.18")),
+        "nimrud" | "agent-starknet-id" | "agent.starknet.id" => Ok(Some("ubuntu@10.88.0.18")),
         "signer-starknet-id" | "signer.starknet.id" => Ok(Some("ubuntu@141.94.26.62")),
         "api-starknet-id" | "api.starknet.id" => Ok(Some("ubuntu@5.39.72.91")),
         "sepolia-starknet-id" | "sepolia.api.starknet.id" => Ok(Some("ubuntu@5.39.73.3")),
@@ -2602,14 +2602,14 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
         },
         ToolDefinition {
             name: "execute_privileged_command".into(),
-            description: "Execute a command on a fleet host (e.g. `\"dgx-spark\"`, `\"thomas-md\"`, `\"ashur\"`, `\"babylon\"`, `\"nippur\"`, `\"old-agent\"`, `\"agent-core\"`, or `\"self\"`) using an active Touch ID / Face ID privilege grant (`request_privileged_access`). Enables missions on leaf workers to run audited commands on `dgx-spark` or other fleet nodes without storing SSH private keys on the worker. Every invocation is formally checked by `orb_privd_command_step` (`OpsRead` / `ServiceDeploy` / `RootExec`) and logged in Core's JSON command audit log.".into(),
+            description: "Execute a command on a fleet host (e.g. `\"dgx-spark\"`, `\"thomas-md\"`, `\"ashur\"`, `\"babylon\"`, `\"nippur\"`, `\"uruk\"`, `\"nimrud\"`, `\"agent-core\"`, or `\"self\"`) using an active Touch ID / Face ID privilege grant (`request_privileged_access`). Enables missions on leaf workers to run audited commands on `dgx-spark` or other fleet nodes without storing SSH private keys on the worker. Every invocation is formally checked by `orb_privd_command_step` (`OpsRead` / `ServiceDeploy` / `RootExec`) and logged in Core's JSON command audit log.".into(),
             input_schema: json!({
                 "type": "object",
                 "required": ["target_host", "argv"],
                 "properties": {
                     "target_host": {
                         "type": "string",
-                        "description": "Target fleet machine matching the approved grant (e.g. \"dgx-spark\", \"thomas-md\", \"agent-core\", \"ashur\", \"babylon\", \"nippur\", \"old-agent\", \"self\"). \"self\" is this mission's own remote node; it never runs inside Core."
+                        "description": "Target fleet machine matching the approved grant (e.g. \"dgx-spark\", \"thomas-md\", \"agent-core\", \"ashur\", \"babylon\", \"nippur\", \"uruk\", \"nimrud\", \"self\"). \"self\" is this mission's own remote node; it never runs inside Core."
                     },
                     "argv": {
                         "type": "array",
@@ -2729,7 +2729,7 @@ async fn get_bunker_status_for_node(
 /// node-Ed25519-authenticated canary tripwire endpoints called by worker
 /// canary units (`orb-canary-mongo@.service`, `paloma-canary-audit-watch`), and
 /// public read-only bunker convergence status polled by `orb-bunker-enforcer`
-/// across all fleet nodes (`ashur`, `babylon`, `nippur`, `old-agent`, `dgx-spark`, etc.).
+/// across all fleet nodes (`ashur`, `babylon`, `nippur`, `uruk`, `nimrud`, `dgx-spark`, etc.).
 pub fn public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/privilege-access/verify-and-log", post(verify_and_log))
@@ -3473,6 +3473,14 @@ mod tests {
             "agent-core"
         );
         assert_eq!(resolve_fleet_ssh_target("agent-core").unwrap(), None);
+        assert_eq!(
+            resolve_fleet_ssh_target("uruk").unwrap(),
+            Some("root@10.88.0.14")
+        );
+        assert_eq!(
+            resolve_fleet_ssh_target("nimrud").unwrap(),
+            Some("ubuntu@10.88.0.18")
+        );
     }
 
     #[tokio::test]

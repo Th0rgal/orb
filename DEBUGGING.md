@@ -8,18 +8,19 @@ out of this public repository).
 | Server | SSH | Domain |
 | --- | --- | --- |
 | **Thomas / agent-core** | `ssh agent-core` | https://agent-backend.thomas.md |
-| **Thomas / old-agent compute** | `ssh old-agent` | Sandboxed node only |
+| **Thomas / uruk compute** | `ssh uruk` | Sandboxed node only |
+| **Thomas / nimrud compute** | `ssh nimrud` | Sandboxed node only |
 | **Ben** | `ssh ben-backend` | (private) |
 
 ## Backend Services (Thomas / agent-core)
 
-`agent-core` is the only Thomas
+`agent-core` (`orb-core`) is the only Thomas
 control plane. It runs the two Core instances plus the Hermes assistant
 stack. Hermes's server inventory calls it **`agent-core`**; the historical
 `sepolia.rpc.starknet.id` name is only a compatibility DNS alias.
 
-`old-agent` is intentionally still powered on, but only as a
-leaf compute host. Its Sandboxed node ID is **`old-agent`** and exposes port
+`uruk` (formerly `old-agent`) is intentionally still powered on, but only as a
+leaf compute host. Its Sandboxed node ID is **`uruk`** and exposes port
 3088 only to `agent-core`. Its former Core, Hermes, fleet-daemon, and
 nginx control-plane services remain stopped and disabled. Do not use it as a
 scheduler, relay, or rollback control plane.
@@ -27,15 +28,15 @@ scheduler, relay, or rollback control plane.
 Network routing is direct:
 
 - `agent-core` reaches DGX Spark over Lean-Mesh (`10.88.0.2`, node port 3088). There is
-  no production SSH tunnel through `old-agent`.
-- Ashur, Babylon, Nippur, and `old-agent` expose their Sandboxed node API only
+  no production SSH tunnel through `uruk`.
+- Ashur, Babylon, Nippur, `uruk`, and `nimrud` expose their Sandboxed node API only
   to `agent-core`.
-- The Paloma SSH key on `agent-core` is authorized for operational reads on
-  Ashur, Babylon, Nippur, DGX, and `old-agent`; `disk-sentinel` exercises these
+- The per-host SSH keys on `agent-core` are authorized for operational reads on
+  Ashur, Babylon, Nippur, DGX, `uruk`, and `nimrud`; `disk-sentinel` exercises these
   direct paths.
 - DNS already points the production endpoints at `agent-core`. The current
   Cloudflare automation token still returns `Invalid API Token`; rotate it
-  before the next DNS mutation. Do not reintroduce an `old-agent` relay as a
+  before the next DNS mutation. Do not reintroduce an `uruk` relay as a
   workaround.
 
 ### Disk sentinel
@@ -48,14 +49,14 @@ The production cron runs:
 
 Keep its mirrored operator copy in
 `/srv/sandboxed-storage/staging/agent-core/hermes/scripts/` identical. It checks
-`agent-core` locally, then Ashur, Babylon, Nippur, DGX Spark, and `old-agent`
+`agent-core` locally, then Ashur, Babylon, Nippur, DGX Spark, `uruk`, and `nimrud`
 over direct SSH. It must not contain the retired CI runner or route DGX through
-`old-agent`.
+`uruk`.
 
 Remote SSH is deliberately non-interactive and fail-closed:
 
-- Ashur, Babylon, Nippur, and `old-agent` use
-  `/var/lib/hermes-assistant/.ssh/paloma`.
+- Ashur, Babylon, Nippur, `uruk`, and `nimrud` use
+  per-host keys on `agent-core` (or `/var/lib/hermes-assistant/.ssh/paloma` where retained).
 - DGX uses `/root/.ssh/agent-core-dgx-tunnel` directly; despite the historical
   filename, this is now a direct SSH identity over Lean-Mesh.
 - Every host key must already be pinned in `/root/.ssh/known_hosts`; do not
@@ -88,7 +89,7 @@ ip route get 10.88.0.2
 Check the signed mesh manifest, peer handshake, and DGX heartbeat before
 attempting recovery. Then require strict-host-key SSH to DGX and a silent
 `disk-sentinel.sh` run. Do not enable `tailscaled` or restore the retired
-`old-agent` tunnel to work around a mesh incident.
+`uruk` (`old-agent`) tunnel to work around a mesh incident.
 
 | Service | Port | Domain | Binary |
 |---------|------|--------|--------|
