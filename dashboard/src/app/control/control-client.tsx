@@ -48,6 +48,7 @@ import {
   controlAskStore,
   type StreamDiagnosticsState,
 } from "./control-stores";
+import { createQueueSync } from "./queue-sync";
 import { createMissionStream, streamLog } from "./transport/connection";
 import {
   formatDuration,
@@ -3182,7 +3183,6 @@ export default function ControlClient() {
   );
   const [queueLen, setQueueLen] = useControlQueueStore();
   const lastQueueLenRef = useRef<number | null>(null);
-  const syncingQueueRef = useRef(false);
   // Bumped whenever the user locally mutates the queue (remove / clear all).
   // getQueue() snapshots capture the generation *before* the fetch and compare
   // it when applying — a snapshot taken while a deletion was in flight may
@@ -8591,37 +8591,23 @@ export default function ControlClient() {
     }
   };
 
-  const syncQueueForMission = useCallback(
-    async (missionId: string) => {
-      if (!missionId || syncingQueueRef.current) return;
-      syncingQueueRef.current = true;
-      try {
-        const queueGenAtFetch = queueMutationGenRef.current;
-        const queuedMessages = await getQueue();
-        // A local remove/clear landed while this snapshot was in flight —
-        // it may still contain the deleted message. Discard it; the
-        // mutation handler triggers its own (fresh) sync.
-        if (queueGenAtFetch !== queueMutationGenRef.current) return;
-        const queuedForMission = queuedMessages.filter(
-          (qm) => qm.mission_id === missionId,
-        );
-        const queuedIds = new Set(queuedForMission.map((qm) => qm.id));
-
-        setItems((prev) =>
-          prev.map((item) => {
-            if (item.kind !== "user") return item;
-            if (item.id.startsWith("temp-")) return item;
-            const shouldBeQueued = queuedIds.has(item.id);
-            if (item.queued === shouldBeQueued) return item;
-            return { ...item, queued: shouldBeQueued };
-          }),
-        );
-      } catch (err) {
-        console.warn("[control] failed to sync queue", err);
-      } finally {
-        syncingQueueRef.current = false;
-      }
-    },
+  const syncQueueForMission = useMemo(
+    () => createQueueSync({
+      fetchQueue: getQueue,
+      getMissionId: () => viewingMissionIdRef.current,
+      getMutationGeneration: () => queueMutationGenRef.current,
+      apply: (queuedMessages, missionId) => {
+        const queuedIds = new Set(queuedMessages
+          .filter((qm) => qm.mission_id === missionId)
+          .map((qm) => qm.id));
+        setItems((prev) => prev.map((item) => {
+          if (item.kind !== "user" || item.id.startsWith("temp-")) return item;
+          const shouldBeQueued = queuedIds.has(item.id);
+          return item.queued === shouldBeQueued ? item : { ...item, queued: shouldBeQueued };
+        }));
+      },
+      onError: (err) => console.warn("[control] failed to sync queue", err),
+    }),
     [setItems],
   );
 
