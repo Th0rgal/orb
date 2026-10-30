@@ -9,9 +9,11 @@ import {
   secretChangeVerb,
   type BitwardenProject,
   type SecretAccessRequest,
+  type SecretAuditEntry,
   type SecretBrokerSnapshot,
   type SecretGrant,
 } from "./bitwardenApi";
+import { actorLabel, subjectKey } from "./missionAccessApi";
 import * as Ic from "./icons";
 import { readString, writeString } from "./storage";
 import { Select } from "./Select";
@@ -86,13 +88,23 @@ export function SecretAccessPanel(p: {
       : g.scope.kind === "project"
         ? `Project ${projectName(g.scope.project_id)}`
         : `Secret ${g.scope.key}`;
-  const who = (x: { mission_title?: string | null; mission_id: string; paloma_project?: string | null }) =>
-    `${x.mission_title || `Mission ${x.mission_id.slice(0, 8)}`}${x.paloma_project ? ` · ${x.paloma_project}` : ""}`;
+  const who = (x: {
+    mission_title?: string | null;
+    mission_id?: string | null;
+    requester_label?: string | null;
+    requester?: SecretAccessRequest["requester"];
+    paloma_project?: string | null;
+  }) => `${actorLabel(x)}${x.paloma_project ? ` · ${x.paloma_project}` : ""}`;
+  const groupKey = (g: SecretGrant) => subjectKey(g.requester, g.mission_id, g.requester_label);
+  const auditWho = (a: SecretAuditEntry) => actorLabel(a);
 
-  // Grants of one mission are listed together so its title appears once.
+  // Grants of one requester are listed together so its label appears once.
   const grantGroups = createMemo(() => {
     const groups = new Map<string, SecretGrant[]>();
-    for (const g of snap().grants) groups.set(g.mission_id, [...(groups.get(g.mission_id) ?? []), g]);
+    for (const g of snap().grants) {
+      const k = groupKey(g);
+      groups.set(k, [...(groups.get(k) ?? []), g]);
+    }
     return [...groups.values()];
   });
   const nextExpiry = createMemo(() =>
@@ -251,7 +263,7 @@ export function SecretAccessPanel(p: {
                           type="button"
                           class="bw-link-btn"
                           disabled={!!busy()}
-                          onClick={() => void revoke(group[0].mission_id, group)}
+                          onClick={() => void revoke(groupKey(group[0]), group)}
                         >
                           Revoke all
                         </button>
@@ -304,7 +316,7 @@ export function SecretAccessPanel(p: {
                   <span class={`bw-log-status ${a.via}`}>{a.via}</span>
                   <code class="bw-mono">{a.key}</code>
                   <span class="s-row-desc">
-                    Mission {a.mission_id.slice(0, 8)}
+                    {auditWho(a)}
                     {a.paloma_project ? ` · ${a.paloma_project}` : ""} · {since(a.at)}
                   </span>
                 </div>

@@ -74,7 +74,12 @@ pub struct AccessRequest {
     pub owner: String,
     #[serde(default)]
     pub owner_username: String,
-    pub requester_mission_id: Uuid,
+    #[serde(default)]
+    pub requester_mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_label: Option<String>,
     #[serde(default)]
     pub requester_title: Option<String>,
     pub target_mission_id: Uuid,
@@ -96,6 +101,14 @@ pub struct AccessRequest {
 }
 
 impl AccessRequest {
+    pub fn subject(&self) -> approval_flow::RequesterSubject {
+        self.requester.clone().unwrap_or_else(|| {
+            approval_flow::RequesterSubject::mission(
+                self.requester_mission_id.unwrap_or_else(Uuid::nil),
+            )
+        })
+    }
+
     fn live_grant(&self, now: DateTime<Utc>) -> bool {
         self.state == ApprovalState::Approved && self.expires_at.is_some_and(|t| t > now)
     }
@@ -106,7 +119,12 @@ pub struct AuditEntry {
     pub at: DateTime<Utc>,
     pub owner: String,
     pub request_id: Uuid,
-    pub requester_mission_id: Uuid,
+    #[serde(default)]
+    pub requester_mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_label: Option<String>,
     pub target_mission_id: Uuid,
     /// `requested`, `approved`, `denied`, `expired`, `revoked`, or `read`.
     pub action: String,
@@ -130,6 +148,8 @@ impl Persisted {
             owner: r.owner.clone(),
             request_id: r.id,
             requester_mission_id: r.requester_mission_id,
+            requester: r.requester.clone(),
+            requester_label: r.requester_label.clone(),
             target_mission_id: r.target_mission_id,
             action: action.into(),
             detail,
@@ -210,12 +230,12 @@ pub fn store(state: &AppState) -> Arc<MissionAccess> {
         .clone()
 }
 
-/// What a new request needs to know about the two missions.
+/// What a new request needs to know about the requester and target mission.
 #[derive(Debug, Clone)]
 pub struct NewRequest {
     pub owner: String,
     pub owner_username: String,
-    pub requester: Uuid,
+    pub requester: approval_flow::RequesterSubject,
     pub requester_title: Option<String>,
     pub target: Uuid,
     pub target_title: Option<String>,
@@ -257,7 +277,7 @@ impl MissionAccess {
     /// Open a request, or return the pending request / live grant that
     /// already covers it.
     pub async fn request(&self, new: NewRequest) -> Result<AccessRequest, String> {
-        if new.requester == new.target {
+        if new.requester.mission_id() == Some(new.target) {
             return Err("A mission can already read itself".into());
         }
         let now = Utc::now();
@@ -265,7 +285,7 @@ impl MissionAccess {
         let pruned = data.prune(now);
         if let Some(existing) = data.requests.iter().rev().find(|r| {
             r.owner == new.owner
-                && r.requester_mission_id == new.requester
+                && r.subject().same_actor(&new.requester)
                 && r.target_mission_id == new.target
                 && (r.state.is_pending() || r.live_grant(now))
         }) {
@@ -278,19 +298,23 @@ impl MissionAccess {
         let open = data
             .requests
             .iter()
-            .filter(|r| r.owner == new.owner && r.requester_mission_id == new.requester)
+            .filter(|r| r.owner == new.owner && r.subject().same_actor(&new.requester))
             .filter(|r| r.state.is_pending())
             .count();
         if open >= MAX_PENDING_PER_MISSION {
             return Err(format!(
-                "This mission already has {open} pending access requests; wait for Thomas to answer them"
+                "This session already has {open} pending access requests; wait for Thomas to answer them"
             ));
         }
+        let requester_mission_id = new.requester.mission_id();
+        let requester_label = new.requester.external_display_label();
         let r = AccessRequest {
             id: Uuid::new_v4(),
             owner: new.owner,
             owner_username: new.owner_username,
-            requester_mission_id: new.requester,
+            requester_mission_id,
+            requester: Some(new.requester),
+            requester_label,
             requester_title: new.requester_title,
             target_mission_id: new.target,
             target_title: new.target_title,
@@ -333,8 +357,30 @@ impl MissionAccess {
         id: Uuid,
         event: ApprovalEvent,
         ttl_hours: Option<i64>,
+        state: Option<&Arc<AppState>>,
     ) -> Result<AccessRequest, String> {
         let now = Utc::now();
+        let hard_expires_at = if matches!(event, ApprovalEvent::Approve) {
+            let session_id = {
+                let data = self.data.lock().await;
+                data.requests
+                    .iter()
+                    .find(|r| r.id == id && r.owner == owner)
+                    .and_then(|r| r.subject().session_id())
+            };
+            match session_id {
+                Some(sid) => {
+                    let st = state.ok_or_else(|| {
+                        "External session approval requires live AppState verification".to_string()
+                    })?;
+                    crate::control_mcp::gateway::external_session_approval_bounds(st, sid, now)
+                        .await?
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         let mut data = self.data.lock().await;
         data.prune(now);
         let idx = data
@@ -342,11 +388,17 @@ impl MissionAccess {
             .iter()
             .position(|r| r.id == id && r.owner == owner)
             .ok_or("Request not found")?;
+        if matches!(event, ApprovalEvent::Approve)
+            && data.requests[idx].subject().is_external()
+            && state.is_none()
+        {
+            return Err("External session approval requires live AppState verification".into());
+        }
         let before = data.requests[idx].clone();
         let r = &mut data.requests[idx];
         let next = r.state.apply(event)?;
         let detail = match event {
-            ApprovalEvent::Approve => Some(grant(r, now, ttl_hours)),
+            ApprovalEvent::Approve => Some(grant(r, now, ttl_hours, hard_expires_at)),
             ApprovalEvent::Deny => {
                 r.decided_at = Some(now);
                 None
@@ -384,7 +436,18 @@ impl MissionAccess {
         id: Uuid,
         ttl_hours: Option<i64>,
     ) -> Result<AccessRequest, String> {
-        self.transition(owner, id, ApprovalEvent::Approve, ttl_hours)
+        self.transition(owner, id, ApprovalEvent::Approve, ttl_hours, None)
+            .await
+    }
+
+    pub async fn approve_with_state(
+        &self,
+        state: &Arc<AppState>,
+        owner: &str,
+        id: Uuid,
+        ttl_hours: Option<i64>,
+    ) -> Result<AccessRequest, String> {
+        self.transition(owner, id, ApprovalEvent::Approve, ttl_hours, Some(state))
             .await
     }
 
@@ -410,10 +473,57 @@ impl MissionAccess {
         refs: &[BatchRef],
         confirm_critical: bool,
     ) -> Result<Vec<AccessRequest>, String> {
+        self.approve_batch_inner(None, owner, refs, confirm_critical)
+            .await
+    }
+
+    pub async fn approve_batch_with_state(
+        &self,
+        state: &Arc<AppState>,
+        owner: &str,
+        refs: &[BatchRef],
+        confirm_critical: bool,
+    ) -> Result<Vec<AccessRequest>, String> {
+        self.approve_batch_inner(Some(state), owner, refs, confirm_critical)
+            .await
+    }
+
+    async fn approve_batch_inner(
+        &self,
+        state: Option<&Arc<AppState>>,
+        owner: &str,
+        refs: &[BatchRef],
+        confirm_critical: bool,
+    ) -> Result<Vec<AccessRequest>, String> {
         if refs.is_empty() {
             return Ok(Vec::new());
         }
         let now = Utc::now();
+        let session_ids: Vec<(Uuid, Option<Uuid>)> = {
+            let data = self.data.lock().await;
+            refs.iter()
+                .map(|want| {
+                    let sid = data
+                        .requests
+                        .iter()
+                        .find(|r| r.id == want.id && r.owner == owner && r.state.is_pending())
+                        .and_then(|r| r.subject().session_id());
+                    (want.id, sid)
+                })
+                .collect()
+        };
+        let mut session_bounds = std::collections::HashMap::new();
+        for (req_id, sid) in session_ids {
+            if let Some(sid) = sid {
+                let st = state.ok_or_else(|| {
+                    "External session approval requires live AppState verification".to_string()
+                })?;
+                let hard =
+                    crate::control_mcp::gateway::external_session_approval_bounds(st, sid, now)
+                        .await?;
+                session_bounds.insert(req_id, hard);
+            }
+        }
         let mut data = self.data.lock().await;
         data.prune(now);
         let mut idxs = Vec::with_capacity(refs.len());
@@ -424,6 +534,15 @@ impl MissionAccess {
                 .position(|r| r.id == want.id && r.owner == owner && r.state.is_pending());
             let current = idx.map(|i| ApprovalItem::mission_access(&data.requests[i]));
             approval_queue::admit(current.as_ref(), want, confirm_critical)?;
+            if let Some(i) = idx {
+                if data.requests[i].subject().is_external()
+                    && !session_bounds.contains_key(&want.id)
+                {
+                    return Err(
+                        "External session approval requires live AppState verification".into(),
+                    );
+                }
+            }
             idxs.extend(idx);
         }
         let before: Vec<AccessRequest> = idxs.iter().map(|&i| data.requests[i].clone()).collect();
@@ -433,7 +552,8 @@ impl MissionAccess {
         for &idx in &idxs {
             let r = &mut data.requests[idx];
             r.state = r.state.apply(ApprovalEvent::Approve)?;
-            let detail = grant(r, now, None);
+            let hard_expires_at = session_bounds.get(&r.id).copied().flatten();
+            let detail = grant(r, now, None, hard_expires_at);
             let snapshot = r.clone();
             data.log(&snapshot, "approved", Some(detail), now);
             out.push(snapshot);
@@ -451,23 +571,29 @@ impl MissionAccess {
     }
 
     pub async fn deny(&self, owner: &str, id: Uuid) -> Result<AccessRequest, String> {
-        self.transition(owner, id, ApprovalEvent::Deny, None).await
+        self.transition(owner, id, ApprovalEvent::Deny, None, None)
+            .await
     }
 
     pub async fn revoke(&self, owner: &str, id: Uuid) -> Result<AccessRequest, String> {
-        self.transition(owner, id, ApprovalEvent::Revoke, None)
+        self.transition(owner, id, ApprovalEvent::Revoke, None, None)
             .await
     }
 
     /// The live read grant of `requester` on `target`, if any.
-    pub async fn read_grant(&self, owner: &str, requester: Uuid, target: Uuid) -> Option<Uuid> {
+    pub async fn read_grant(
+        &self,
+        owner: &str,
+        requester: &approval_flow::RequesterSubject,
+        target: Uuid,
+    ) -> Option<Uuid> {
         let now = Utc::now();
         let data = self.data.lock().await;
         data.requests
             .iter()
             .find(|r| {
                 r.owner == owner
-                    && r.requester_mission_id == requester
+                    && r.subject().same_actor(requester)
                     && r.target_mission_id == target
                     && r.scope == AccessScope::Read
                     && r.live_grant(now)
@@ -480,7 +606,7 @@ impl MissionAccess {
     pub async fn grant_for_tool(
         &self,
         owner: &str,
-        requester: Uuid,
+        requester: &approval_flow::RequesterSubject,
         target: Uuid,
         tool: &str,
     ) -> Option<Uuid> {
@@ -558,8 +684,12 @@ impl MissionAccess {
         json!({ "requests": requests, "audit": audit })
     }
 
-    /// Requests made by one mission (for `list_mission_access`).
-    pub async fn by_requester(&self, owner: &str, requester: Uuid) -> Vec<AccessRequest> {
+    /// Requests made by one actor (for `list_mission_access`).
+    pub async fn by_requester(
+        &self,
+        owner: &str,
+        requester: &approval_flow::RequesterSubject,
+    ) -> Vec<AccessRequest> {
         let mut data = self.data.lock().await;
         if data.prune(Utc::now()) {
             self.save(&data).await;
@@ -567,10 +697,69 @@ impl MissionAccess {
         data.requests
             .iter()
             .rev()
-            .filter(|r| r.owner == owner && r.requester_mission_id == requester)
+            .filter(|r| r.owner == owner && r.subject().same_actor(requester))
             .take(50)
             .cloned()
             .collect()
+    }
+
+    /// Revoke active read grants and expire pending requests for an external MCP session.
+    pub async fn revoke_session_grants(&self, owner: &str, session_id: Uuid) -> usize {
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        let mut touched = Vec::new();
+        for r in data.requests.iter_mut() {
+            if r.owner != owner || r.subject().session_id() != Some(session_id) {
+                continue;
+            }
+            if r.state == ApprovalState::Approved && r.live_grant(now) {
+                r.state = ApprovalState::Revoked;
+                r.revoked_at = Some(now);
+                touched.push((r.clone(), "revoked"));
+            } else if r.state.is_pending() {
+                r.state = ApprovalState::Expired;
+                r.decided_at = Some(now);
+                touched.push((r.clone(), "expired"));
+            }
+        }
+        if touched.is_empty() {
+            return 0;
+        }
+        for (r, action) in &touched {
+            data.log(r, action, Some("external_session_revoked".into()), now);
+        }
+        self.save(&data).await;
+        drop(data);
+        self.changed.notify_waiters();
+        touched.len()
+    }
+
+    /// Wait view used by `GET /api/mcp/requests/mission_access/:id/wait`.
+    pub async fn wait_for_requester(
+        &self,
+        owner: &str,
+        requester: &approval_flow::RequesterSubject,
+        id: Uuid,
+        wait: Duration,
+    ) -> Result<Value, (StatusCode, String)> {
+        let initial = self
+            .get(owner, id)
+            .await
+            .filter(|r| r.subject().same_actor(requester))
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    "Access request not found".to_string(),
+                )
+            })?;
+        let final_req = if initial.state.is_pending() && !wait.is_zero() {
+            self.wait_decided(owner, id, wait).await.unwrap_or(initial)
+        } else {
+            initial
+        };
+        let mut out = agent_view(&final_req);
+        out["message"] = json!(decision_note(&final_req));
+        Ok(out)
     }
 }
 
@@ -642,13 +831,27 @@ pub async fn handle_tool(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    let own = p
-        .mission_id
-        .ok_or("Mission access is only available to mission-scoped sessions")?;
+    let subject = p.requester_subject();
+    if subject.is_external() {
+        let bunker = super::privilege_broker::store(state).bunker_state().await;
+        if bunker >= super::privilege_broker::BunkerState::HardLockdown {
+            return Err(
+                "Bunker HardLockdown is active; external MCP sessions are suspended".into(),
+            );
+        }
+        if bunker >= super::privilege_broker::BunkerState::SoftQuarantine
+            && name == "request_mission_access"
+        {
+            return Err(
+                "Fleet is in Bunker SoftQuarantine; external mission-access requests are suspended"
+                    .into(),
+            );
+        }
+    }
     let access = store(state);
     match name {
         "list_mission_access" => {
-            let list = access.by_requester(&p.sub, own).await;
+            let list = access.by_requester(&p.sub, &subject).await;
             Ok(json!({ "requests": list.iter().map(agent_view).collect::<Vec<_>>() }))
         }
         "request_mission_access" => {
@@ -685,27 +888,32 @@ pub async fn handle_tool(
             // so the tool cannot probe which missions exist. Such a request can
             // never be approved (the approver must own the target) and times out.
             let target_mission = missions.get_mission(target).await.ok().flatten();
-            let requester = missions
-                .get_mission(own)
-                .await
-                .ok()
-                .flatten()
-                .ok_or("Mission no longer exists")?;
-            if target == own
-                || target_mission
-                    .as_ref()
-                    .is_some_and(|m| m.parent_mission_id == Some(own))
-            {
-                return Ok(
-                    json!({"status":"already_in_scope","message":"This mission is already in your scope; read it directly."}),
-                );
-            }
+            let requester_title = if let Some(own) = p.mission_id {
+                let requester = missions
+                    .get_mission(own)
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or("Mission no longer exists")?;
+                if target == own
+                    || target_mission
+                        .as_ref()
+                        .is_some_and(|m| m.parent_mission_id == Some(own))
+                {
+                    return Ok(
+                        json!({"status":"already_in_scope","message":"This mission is already in your scope; read it directly."}),
+                    );
+                }
+                requester.title
+            } else {
+                None
+            };
             let r = access
                 .request(NewRequest {
                     owner: p.sub.clone(),
                     owner_username: p.username.clone(),
-                    requester: own,
-                    requester_title: requester.title,
+                    requester: subject,
+                    requester_title,
                     target,
                     target_title: target_mission.and_then(|m| m.title),
                     reason,
@@ -759,16 +967,30 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
 /// Wake the requesting mission with the decision (best effort).
 /// Turn a pending request into a grant: lifetime and decision time. The
 /// caller applies the state change. Returns the audit detail.
-fn grant(r: &mut AccessRequest, now: DateTime<Utc>, ttl_hours: Option<i64>) -> String {
+fn grant(
+    r: &mut AccessRequest,
+    now: DateTime<Utc>,
+    ttl_hours: Option<i64>,
+    hard_expires_at: Option<DateTime<Utc>>,
+) -> String {
     let ttl = clamp_ttl(ttl_hours.or(Some(r.ttl_hours)));
     r.ttl_hours = ttl;
-    r.expires_at = Some(now + chrono::Duration::hours(ttl));
+    let mut exp = now + chrono::Duration::hours(ttl);
+    if let Some(hard) = hard_expires_at {
+        if hard < exp {
+            exp = hard;
+        }
+    }
+    r.expires_at = Some(exp);
     r.decided_at = Some(now);
     format!("{ttl}h")
 }
 
 pub(crate) async fn notify_requester(state: &Arc<AppState>, r: &AccessRequest) {
     use crate::api::control::{ControlCommand, MissionStatus};
+    let Some(requester_mission_id) = r.requester_mission_id else {
+        return;
+    };
     let user = AuthUser {
         id: r.owner.clone(),
         username: r.owner_username.clone(),
@@ -776,7 +998,7 @@ pub(crate) async fn notify_requester(state: &Arc<AppState>, r: &AccessRequest) {
     let control = state.control.get_or_spawn(&user).await;
     let Ok(Some(m)) = control
         .mission_store
-        .get_mission(r.requester_mission_id)
+        .get_mission(requester_mission_id)
         .await
     else {
         return;
@@ -805,7 +1027,7 @@ pub(crate) async fn notify_requester(state: &Arc<AppState>, r: &AccessRequest) {
             id: Uuid::new_v4(),
             content,
             agent: None,
-            target_mission_id: Some(r.requester_mission_id),
+            target_mission_id: Some(requester_mission_id),
             strict: false,
             source: Some("mission-access".to_string()),
             respond: tx,
@@ -882,7 +1104,7 @@ async fn approve(
         ));
     }
     let r = access
-        .approve(&user.id, id, body.ttl_hours)
+        .approve_with_state(&state, &user.id, id, body.ttl_hours)
         .await
         .map_err(|e| (StatusCode::CONFLICT, e))?;
     notify_requester(&state, &r).await;
@@ -926,10 +1148,7 @@ pub async fn describe_for_approval(
 ) -> Result<String, String> {
     let id = Uuid::parse_str(id).map_err(|_| "Unknown request")?;
     let r = store(state).get(owner, id).await.ok_or("Unknown request")?;
-    let who = r
-        .requester_title
-        .clone()
-        .unwrap_or_else(|| format!("mission {}", &r.requester_mission_id.to_string()[..8]));
+    let who = r.subject().prompt_who(r.requester_title.as_deref());
     let target = r
         .target_title
         .clone()
@@ -937,13 +1156,13 @@ pub async fn describe_for_approval(
     Ok(match action {
         "approve" => format!(
             "Let {} READ (not control) {} for {} h",
-            super::approvals::quoted(&who),
+            who,
             super::approvals::quoted(&target),
             clamp_ttl(ttl.or(Some(r.ttl_hours)))
         ),
         _ => format!(
             "Decline: {} wants to read {}",
-            super::approvals::quoted(&who),
+            who,
             super::approvals::quoted(&target)
         ),
     })
@@ -958,11 +1177,15 @@ mod tests {
         MissionAccess::open(dir.join("mission_access.json"))
     }
 
+    fn subj(id: Uuid) -> approval_flow::RequesterSubject {
+        approval_flow::RequesterSubject::mission(id)
+    }
+
     fn new(owner: &str, requester: Uuid, target: Uuid) -> NewRequest {
         NewRequest {
             owner: owner.into(),
             owner_username: owner.into(),
-            requester,
+            requester: subj(requester),
             requester_title: Some("requester".into()),
             target,
             target_title: Some("target".into()),
@@ -977,16 +1200,16 @@ mod tests {
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         let r = s.request(new("thomas", a, b)).await.unwrap();
         assert_eq!(r.state, ApprovalState::Pending);
-        assert_eq!(s.read_grant("thomas", a, b).await, None);
+        assert_eq!(s.read_grant("thomas", &subj(a), b).await, None);
         // Asking again returns the same pending request.
         assert_eq!(s.request(new("thomas", a, b)).await.unwrap().id, r.id);
         let ok = s.approve("thomas", r.id, None).await.unwrap();
         assert_eq!(ok.state, ApprovalState::Approved);
         let left = ok.expires_at.unwrap() - Utc::now();
         assert!(left > chrono::Duration::hours(23) && left <= chrono::Duration::hours(24));
-        assert_eq!(s.read_grant("thomas", a, b).await, Some(r.id));
+        assert_eq!(s.read_grant("thomas", &subj(a), b).await, Some(r.id));
         // A grant is directional.
-        assert_eq!(s.read_grant("thomas", b, a).await, None);
+        assert_eq!(s.read_grant("thomas", &subj(b), a).await, None);
         // Decided once only.
         assert!(s.approve("thomas", r.id, None).await.is_err());
         assert!(s.deny("thomas", r.id).await.is_err());
@@ -1000,7 +1223,7 @@ mod tests {
         s.approve("thomas", r.id, None).await.unwrap();
         for tool in READ_TOOLS {
             assert_eq!(
-                s.grant_for_tool("thomas", a, b, tool).await,
+                s.grant_for_tool("thomas", &subj(a), b, tool).await,
                 Some(r.id),
                 "{tool}"
             );
@@ -1016,7 +1239,7 @@ mod tests {
             "ask_mission",
         ] {
             assert_eq!(
-                s.grant_for_tool("thomas", a, b, tool).await,
+                s.grant_for_tool("thomas", &subj(a), b, tool).await,
                 None,
                 "{tool} allowed"
             );
@@ -1029,14 +1252,14 @@ mod tests {
         let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let r = s.request(new("thomas", a, b)).await.unwrap();
         s.deny("thomas", r.id).await.unwrap();
-        assert_eq!(s.read_grant("thomas", a, b).await, None);
+        assert_eq!(s.read_grant("thomas", &subj(a), b).await, None);
         // Revoking a pending request is refused (deny it instead).
         let r2 = s.request(new("thomas", a, c)).await.unwrap();
         assert!(s.revoke("thomas", r2.id).await.is_err());
         s.approve("thomas", r2.id, Some(1)).await.unwrap();
-        assert!(s.read_grant("thomas", a, c).await.is_some());
+        assert!(s.read_grant("thomas", &subj(a), c).await.is_some());
         s.revoke("thomas", r2.id).await.unwrap();
-        assert_eq!(s.read_grant("thomas", a, c).await, None);
+        assert_eq!(s.read_grant("thomas", &subj(a), c).await, None);
         assert!(
             s.approve("thomas", r2.id, None).await.is_err(),
             "revoked never comes back"
@@ -1072,7 +1295,7 @@ mod tests {
             }
         }
         assert_eq!(
-            s.read_grant("thomas", a, b).await,
+            s.read_grant("thomas", &subj(a), b).await,
             None,
             "expired grant still reads"
         );
@@ -1098,7 +1321,7 @@ mod tests {
         assert!(s.deny("mallory", r.id).await.is_err());
         s.approve("thomas", r.id, None).await.unwrap();
         assert!(s.revoke("mallory", r.id).await.is_err());
-        assert_eq!(s.read_grant("mallory", a, b).await, None);
+        assert_eq!(s.read_grant("mallory", &subj(a), b).await, None);
         assert_eq!(
             s.snapshot("mallory").await["requests"]
                 .as_array()
@@ -1140,7 +1363,7 @@ mod tests {
             r.id
         };
         let s = MissionAccess::open(path);
-        assert_eq!(s.read_grant("thomas", a, b).await, Some(id));
+        assert_eq!(s.read_grant("thomas", &subj(a), b).await, Some(id));
     }
 
     #[tokio::test]
@@ -1186,7 +1409,7 @@ mod tests {
         std::fs::create_dir_all(path.with_extension("json.tmp")).unwrap();
         assert!(s.revoke("thomas", r.id).await.is_err());
         assert_eq!(
-            s.read_grant("thomas", a, b).await,
+            s.read_grant("thomas", &subj(a), b).await,
             Some(r.id),
             "memory must match disk"
         );
@@ -1194,7 +1417,9 @@ mod tests {
         s.revoke("thomas", r.id).await.unwrap();
         // After a restart the revoke holds.
         assert_eq!(
-            MissionAccess::open(path).read_grant("thomas", a, b).await,
+            MissionAccess::open(path)
+                .read_grant("thomas", &subj(a), b)
+                .await,
             None
         );
     }

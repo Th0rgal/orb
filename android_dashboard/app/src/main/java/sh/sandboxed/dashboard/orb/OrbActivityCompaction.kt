@@ -149,14 +149,19 @@ object OrbActivityCompaction {
     }
 
     /**
-     * Deduplicates active mission-access grants by `(requester_mission_id, target_mission_id, scope)`,
+     * Deduplicates active mission-access grants by `(subjectKey, target_mission_id, scope)`,
      * keeping the grant with the latest `expires_at` while preserving first-seen order.
      */
     fun dedupeMissionGrants(grants: List<Map<String, Any?>>): List<Map<String, Any?>> {
         val indexByKey = HashMap<String, Int>()
         val out = ArrayList<Map<String, Any?>>(grants.size)
         for (grant in grants) {
-            val req = str(grant["requester_mission_id"])
+            val reqSubject = OrbApprovalQueue.subjectOf(grant)
+            val req = when (reqSubject?.get("kind")) {
+                "external_session" -> "session:${str(reqSubject["session_id"])}"
+                "mission" -> str(reqSubject["mission_id"])
+                else -> str(grant["requester_mission_id"])
+            }
             val tgt = str(grant["target_mission_id"])
             val scope = str(grant["scope"])
             val key = if (req.isEmpty() && tgt.isEmpty()) "id:${str(grant["id"])}" else "$req|$tgt|$scope"

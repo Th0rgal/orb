@@ -1,6 +1,7 @@
 import { nativeInvoke } from "./native";
 import { api } from "./api";
 import { signedApi } from "./deviceApproval";
+import type { RequesterSubject } from "./missionAccessApi";
 
 export interface BitwardenStatus {
   configured: boolean;
@@ -143,7 +144,9 @@ export type SecretGrantScope =
 
 export interface SecretGrant {
   id: string;
-  mission_id: string;
+  mission_id?: string | null;
+  requester?: RequesterSubject | null;
+  requester_label?: string | null;
   mission_title?: string | null;
   paloma_project?: string | null;
   scope: SecretGrantScope;
@@ -155,7 +158,9 @@ export interface SecretAccessRequest {
   id: string;
   kind: "read" | "write" | "delete" | "move";
   status: "pending" | "approved" | "denied" | "rejected" | "expired" | "revoked";
-  mission_id: string;
+  mission_id?: string | null;
+  requester?: RequesterSubject | null;
+  requester_label?: string | null;
   mission_title?: string | null;
   paloma_project?: string | null;
   key?: string | null;
@@ -177,7 +182,9 @@ export function secretChangeVerb(r: Pick<SecretAccessRequest, "kind">): "Store" 
 
 export interface SecretAuditEntry {
   at: string;
-  mission_id: string;
+  mission_id?: string | null;
+  requester?: RequesterSubject | null;
+  requester_label?: string | null;
   paloma_project?: string | null;
   key: string;
   project_id?: string | null;

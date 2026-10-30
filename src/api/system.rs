@@ -1964,17 +1964,9 @@ async fn adopt_hermes_assistant(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let mcp_credential_file = format!("/var/lib/{runtime_name}/mcp-credential");
-    let mcp_session = crate::control_mcp::gateway::session(
-        State(state.clone()),
-        Extension(user.clone()),
-        Json(crate::control_mcp::gateway::SessionRequest {
-            project: None,
-            role: crate::control_mcp::Role::Coordinator,
-            mission_id: None,
-        }),
-    )
-    .await?
-    .0;
+    let mcp_session =
+        crate::control_mcp::gateway::issue_host_coordinator_session(&state, &user, runtime_name)
+            .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
     let user_id = user.id.clone();
     let default_workspace_id = channel
         .default_workspace_id

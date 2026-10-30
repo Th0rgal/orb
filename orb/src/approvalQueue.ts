@@ -1,7 +1,8 @@
 import { api, ApiError } from "./api";
 import { approveSecretRequest, getSecretBroker, type SecretAccessRequest } from "./bitwardenApi";
 import { signedApi } from "./deviceApproval";
-import { approveMissionAccess, getMissionAccess, missionLabel, type MissionAccessRequest } from "./missionAccessApi";
+import { actorLabel, approvalDigest, approveMissionAccess, canonicalSubjectId, getMissionAccess, missionLabel, type MissionAccessRequest, type RequesterSubject } from "./missionAccessApi";
+export { approvalDigest, canonicalSubjectId, type RequesterSubject };
 import { approvePrivilegeAccess, getPrivilegeAccess, lifetimeLabel, requestTitle, scopeUnlocks, type PrivilegeRequest, type PrivilegeScope } from "./privilegeAccessApi";
 
 /**
@@ -19,8 +20,10 @@ export type ApprovalRisk = "routine" | "elevated" | "critical";
 export interface ApprovalItem {
   kind: ApprovalKind;
   id: string;
-  requester_mission_id: string;
+  requester_mission_id?: string | null;
   requester_title?: string | null;
+  requester_subject?: RequesterSubject | null;
+  requester_label?: string | null;
   tier: string;
   target: string;
   risk: ApprovalRisk;
@@ -50,11 +53,15 @@ export function legacyItem(kind: ApprovalKind, r: PrivilegeRequest | SecretAcces
   const request = r as unknown as Record<string, unknown>;
   const tier = kind === "privilege" ? str(request.scope) : kind === "secret" ? str(request.kind) : "read_mission";
   const target = kind === "privilege" ? str(request.target_host) : kind === "mission_access" ? str(request.target_mission_id) : str(request.key) || str(request.project_id) || "*";
+  const missionId = str(request.requester_mission_id) || str(request.mission_id);
+  const subject = ((request.requester_subject ?? request.requester) ?? null) as RequesterSubject | null;
   return {
     kind,
     id: r.id,
-    requester_mission_id: str(request.requester_mission_id) || str(request.mission_id),
+    requester_mission_id: missionId || null,
     requester_title: (request.requester_title ?? request.mission_title ?? null) as string | null,
+    requester_subject: subject,
+    requester_label: (request.requester_label ?? null) as string | null,
     tier,
     target,
     risk: riskOf(kind, tier, request),
@@ -125,8 +132,19 @@ export function itemDetail(i: Pick<ApprovalItem, "kind" | "tier" | "request">, p
   return "";
 }
 
-export const itemRequester = (i: Pick<ApprovalItem, "requester_title" | "requester_mission_id">) =>
-  missionLabel(i.requester_title, i.requester_mission_id);
+export const itemRequester = (
+  i: Pick<ApprovalItem, "requester_title" | "requester_mission_id" | "requester_label" | "requester_subject"> & {
+    request?: Record<string, unknown>;
+  },
+) =>
+  actorLabel({
+    requester_label: i.requester_label ?? (str(i.request?.requester_label) || null),
+    requester_subject:
+      i.requester_subject ??
+      (((i.request?.requester_subject ?? i.request?.requester) ?? null) as RequesterSubject | null),
+    requester_title: i.requester_title,
+    requester_mission_id: i.requester_mission_id,
+  });
 
 const uniqSorted = (xs: string[]) => [...new Set(xs)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 

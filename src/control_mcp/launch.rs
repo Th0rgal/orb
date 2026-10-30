@@ -4,6 +4,18 @@ use super::{client::Client, Role};
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::Path};
 
+pub(super) const CONTROL_PLANE_ENV_VARS: &[&str] = &[
+    "JWT_SECRET",
+    "API_SERVER_KEY",
+    "HERMES_SANDBOXED_API_TOKEN",
+    "SANDBOXED_API_TOKEN",
+    "OPEN_AGENT_API_TOKEN",
+    "API_TOKEN",
+    "SANDBOXED_MCP_TOKEN",
+    "SANDBOXED_MCP_TOKEN_FILE",
+    "SANDBOXED_MCP_WRAPPER",
+];
+
 /// Runtime entry points must not silently launch a native mission without its
 /// scoped MCP identity. Offline workspace/config generation may omit an owner.
 pub fn require_runtime_owner(
@@ -274,20 +286,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     process
         .args(harness_arguments(program, &command[1..], &flags)?)
         .envs(env);
-    // These control-plane credentials are never part of a harness environment.
-    for name in [
-        "JWT_SECRET",
-        "API_SERVER_KEY",
-        "HERMES_SANDBOXED_API_TOKEN",
-        "SANDBOXED_API_TOKEN",
-        "OPEN_AGENT_API_TOKEN",
-        "API_TOKEN",
-        "SANDBOXED_MCP_TOKEN",
-        "SANDBOXED_MCP_TOKEN_FILE",
-    ] {
+    for name in CONTROL_PLANE_ENV_VARS {
         process.env_remove(name);
     }
-    process.env_remove("SANDBOXED_MCP_WRAPPER");
     if grok_acp {
         process.stdin(std::process::Stdio::piped());
     }

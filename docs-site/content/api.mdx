@@ -99,7 +99,8 @@ curl -X POST "https://orb.thomas.md/api/auth/login" \
 
 `sandboxed-mcp` is the unified stdio MCP binary used by **Hermes** (coordinator profile), **mission harnesses** (executor profile), and **operators** (operator profile). It talks to Core over `/api/mcp`:
 
-- `POST /api/mcp/session`: Exchanges an owner/launcher credential for a 1-hour scoped `mcp1.` token.
+- `POST /api/mcp/session`: Exchanges an owner/launcher credential for a 1-hour mission-scoped `mcp1.` token (`mission_id` required).
+- `POST /api/mcp/external-sessions`: Device-signed endpoint that mints a bounded external `mcp1.` session (`role` in `{executor, coordinator}`, capped `hard_expires_at`, Bunker-aware).
 - `POST /api/mcp/renew`: Renews an active session token with identical privileges.
 - `GET /api/mcp/capabilities`: Lists tools permitted for the session's profile (`executor`, `coordinator`, or `operator`).
 - `POST /api/mcp/call`: Executes a tool call. All mutations require an `idempotency_key` and return a durable action receipt (`get_action`, `cancel_action`, `reconcile_action`).

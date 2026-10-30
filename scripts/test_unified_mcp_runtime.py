@@ -17,7 +17,7 @@ MISSION = "00000000-0000-0000-0000-000000000001"
 
 @contextlib.contextmanager
 def core(expiring=False):
-    state = {"renewals": 0, "sessions": 0}
+    state = {"renewals": 0, "sessions": 0, "external_sessions": 0}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -43,6 +43,15 @@ def core(expiring=False):
                     self.send_error(403)
                     return
                 state["sessions"] += 1
+                self.respond({"token": "mcp1.initial", "expires_at": int(time.time()) + 3600})
+                return
+            if self.path == "/api/mcp/external-sessions":
+                payload = json.loads(body)
+                if (self.headers.get("Authorization") != "Bearer owner-login" or
+                        payload.get("role") != "executor"):
+                    self.send_error(403)
+                    return
+                state["external_sessions"] += 1
                 self.respond({"token": "mcp1.initial", "expires_at": int(time.time()) + 3600})
                 return
             if self.path != "/api/mcp/renew":
@@ -147,8 +156,18 @@ print(str(credential))
                                     capture_output=True, text=True, env=env, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(state["sessions"], 1)
+            self.assertEqual(state["external_sessions"], 0)
             self.assertEqual(owner.read_text(), "owner-login")
             self.assertFalse(Path(result.stdout.strip()).exists())
+
+            env_no_mission = {k: v for k, v in env.items() if k not in ("SANDBOXED_SH_MISSION_ID", "MISSION_ID")}
+            ext_result = subprocess.run([str(BINARY), "--api-url", url, "--token-file", str(owner),
+                                         "--profile", "executor", "--check"],
+                                        capture_output=True, text=True, env=env_no_mission, timeout=15)
+            self.assertEqual(ext_result.returncode, 0, ext_result.stderr)
+            self.assertEqual(state["sessions"], 1)
+            self.assertEqual(state["external_sessions"], 1)
+            self.assertEqual(owner.read_text(), "owner-login")
 
     def test_scoped_renewal_survives_client_restart(self):
         with core(expiring=True) as (url, state), tempfile.TemporaryDirectory() as directory:

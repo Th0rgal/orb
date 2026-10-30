@@ -128,13 +128,16 @@ enum OrbActivityCompaction {
         return out
     }
 
-    /// Deduplicates active mission-access grants by `(requester_mission_id, target_mission_id, scope)`,
+    /// Deduplicates active mission-access grants by `(subjectKey, target_mission_id, scope)`,
     /// keeping the grant with the latest `expires_at` while preserving first-seen order.
     static func dedupeMissionGrants(_ grants: [OrbJSON]) -> [OrbJSON] {
         var indexByKey: [String: Int] = [:]
         var out: [OrbJSON] = []
         for grant in grants {
-            let req = grant["requester_mission_id"].text
+            let reqSubject = OrbMissionAccessMonitor.subjectOf(grant)
+            let req = reqSubject["kind"].text == "external_session"
+                ? "session:\(reqSubject["session_id"].text)"
+                : (reqSubject["kind"].text == "mission" ? reqSubject["mission_id"].text : grant["requester_mission_id"].text)
             let tgt = grant["target_mission_id"].text
             let scope = grant["scope"].text
             let key = (req.isEmpty && tgt.isEmpty) ? "id:\(grant["id"].text)" : "\(req)|\(tgt)|\(scope)"

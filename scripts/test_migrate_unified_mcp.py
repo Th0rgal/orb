@@ -43,7 +43,7 @@ else:
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                assert self.path == "/api/mcp/session"
+                assert self.path == "/api/mcp/external-sessions"
                 assert self.headers["Authorization"] == "Bearer owner"
                 assert body == {"role": "coordinator"}
                 self.reply({"token": "mcp1.fixture"})

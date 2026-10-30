@@ -78,8 +78,11 @@ def migrate(config_path: Path, binary: Path, base: str, owner: str):
             raise ValueError("Remove the duplicate legacy MCP server in the reviewed configuration first")
     credential = config_path.parent / "mcp-credential"
     old_credential = credential.read_bytes() if credential.exists() else None
-    grant = request(base, "/api/mcp/session", owner, {"role": "coordinator"})
-    token = grant.get("token", "")
+    if owner.startswith("mcp1."):
+        token = owner
+    else:
+        grant = request(base, "/api/mcp/external-sessions", owner, {"role": "coordinator"})
+        token = grant.get("token", "")
     if not token.startswith("mcp1."):
         raise RuntimeError("Core did not issue a scoped MCP credential")
     caps = request(base, "/api/mcp/capabilities", token)

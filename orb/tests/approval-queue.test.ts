@@ -4,7 +4,7 @@ vi.mock('../src/deviceApproval',()=>({signedApi:vi.fn(),ApprovalCancelled:class 
 import {signedApi} from '../src/deviceApproval';
 import {api,ApiError} from '../src/api';
 import fixture from '../../shared/orb-spec/fixtures/approvals.json';
-import {MAX_BATCH,approveItems,getApprovalQueue,legacyItem,riskOf,normalBatch,allBatch,denyItem,itemDetail,itemRequester,itemTitle,queueSummary,signingReason,type ApprovalItem} from '../src/approvalQueue';
+import {MAX_BATCH,approvalDigest,approveItems,canonicalSubjectId,getApprovalQueue,legacyItem,riskOf,normalBatch,allBatch,denyItem,itemDetail,itemRequester,itemTitle,queueSummary,signingReason,type ApprovalItem,type RequesterSubject} from '../src/approvalQueue';
 const item=(c:any,n=0):ApprovalItem=>({id:`i${n}`,reason:'',created_at:'',digest:`d${n}`,...c.item});
 afterEach(()=>{vi.mocked(signedApi).mockReset();vi.mocked(api).mockReset();});
 describe('approval queue',()=>{
@@ -89,5 +89,17 @@ describe('approval queue',()=>{
   vi.mocked(signedApi).mockResolvedValue({});
   for(const k of [0,2,7]) await denyItem(item(fixture.labels[k],k));
   expect(vi.mocked(signedApi).mock.calls.map(c=>c[1])).toEqual(['/api/privilege-access/i0/deny','/api/bitwarden/requests/i2/reject','/api/mission-access/i7/deny']);
+ });
+ it('computes v1 mission and v2 external-session digests matching Core and mobile',async()=>{
+  for(const v of fixture.digests){
+   const subject=v.subject as RequesterSubject;
+   expect(await canonicalSubjectId(subject)).toBe(v.canonical_subject);
+   expect(await approvalDigest(v.kind,v.id,subject,v.fields)).toBe(v.digest);
+  }
+ });
+ it('preserves external-session requester labels in legacy fallback items without crashing on null mission_id',()=>{
+  const ext=legacyItem('secret',{id:'s9',status:'pending',kind:'read',mission_id:null,requester:{kind:'external_session',session_id:'c4d5e6f7-0000-4000-8000-000000000099',client_kind:'local_mcp',client_label:'claude-code',host_hint:'macbook-air'},key:'OPENAI_API_KEY',all_projects:false,reason:'need key',created_at:'2026-10-29T10:00:00Z'} as any);
+  expect(itemRequester(ext)).toBe('External · macbook-air (claude-code)');
+  expect(signingReason([ext])).toBe('Read OPENAI_API_KEY for External · macbook-air (claude-code)');
  });
 });
