@@ -178,6 +178,7 @@ test('right-click in archives selects and deletes everything, older than 1 day, 
  const shortcut=process.platform==='darwin'?'Meta':'Control';
  const secondProject=archiveTree.getByRole('button',{name:'Second project',exact:true});
  if(await secondProject.getAttribute('aria-expanded')==='false')await secondProject.click();
+ await freshOne.click({modifiers:[shortcut]});
  await archiveTree.getByRole('button',{name:'Three days two',exact:true}).click({modifiers:[shortcut]});
  await freshOne.click({button:'right'});
  await expect(page.getByRole('menuitem',{name:'Delete 2 agents…',exact:true})).toBeVisible();

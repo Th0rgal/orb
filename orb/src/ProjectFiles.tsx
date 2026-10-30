@@ -219,7 +219,8 @@ export function LiveProjectsSection(p: {
   const [fileError, setFileError] = createSignal<string | null>(null);
   const [makingFile, setMakingFile] = createSignal(false);
   /** The context menu targets the selected group without opening its conversation. */
-  const [missionMenu, setMissionMenu] = createSignal<{ x: number; y: number; mission: Mission; slug: string; folder: string } | null>(null);
+  const [missionMenu, setMissionMenu] = createSignal<{ x: number; y: number; mission: Mission; treeId: string; slug: string; folder: string } | null>(null);
+  const [fileMenu, setFileMenu] = createSignal<{ slug: string; path: string; x: number; y: number } | null>(null);
   const [settingsMission, setSettingsMission] = createSignal<Mission | null>(null);
   /** Title of any loaded mission (children and pool owners in Mission settings). */
   const loadedTitle = (id: string) => {
@@ -257,8 +258,17 @@ export function LiveProjectsSection(p: {
   const archiving = new Map<string, string>();
   const { archivesOpen, setArchivesOpen, archiveExpanded, setArchiveExpanded, archivedMissions, setArchivedMissions, archivesLoading, archivesError, archivesMore, archivesLoaded, archivesRequest, loadArchives, removeArchived, reset: resetArchives } =
     createArchivePager({ revision: () => missionRevision, archiving, deleted: deletedInSession, currentConnection: version => currentConnection(version) });
-  const { setSelectedTreeIds, setSelectedAgents, selectionActive, setSelectionActive, selectedTreeSet, selectedRowIds, selectionAnchor, setSelectionAnchor, clickSelectableRow, selectedFor, selectedTreeFor } =
-    createTreeSelection({ visibleNodes: () => [...tree(), ...(archivesOpen() ? archiveNodes() : [])] });
+  const contextTreeId = () => {
+    const mm = missionMenu();
+    if (mm) return mm.treeId;
+    const fm = fileMenu();
+    if (fm) return `pf:${fm.slug}:${fm.path}`;
+    const cm = controllerMenu();
+    if (cm) return cm.controller ? `c:${cm.slug}` : cm.id ? `pc:${cm.slug}:${cm.id}` : null;
+    return null;
+  };
+  const { setSelectedTreeIds, setSelectedAgents, selectionActive, setSelectionActive, selectedTreeSet, selectedRowIds, isRowActive, selectionAnchor, setSelectionAnchor, syncToCommitted, clickSelectableRow, contextSelectRow, selectedFor, selectedTreeFor } =
+    createTreeSelection({ visibleNodes: () => [...tree(), ...(archivesOpen() ? archiveNodes() : [])], selected: () => p.selected(), contextTreeId });
   const { cutId, setCutId, pendingMoves, setPendingMoves, beginMove, moveDirect, pasteMission, isMoving, hasCutClipboard, hasUnsyncedCutClipboard } = createMissionMoves({
     allKnownMissions: () => allKnownMissions(),
     leaveProjects: (id, keep) => leaveProjects(id, keep),
@@ -566,7 +576,6 @@ export function LiveProjectsSection(p: {
   const [cronFolder, setCronFolder] = createSignal("");
   const [newCron, setNewCron] = createSignal<string | null>(null);
   const [actionFocus, setActionFocus] = createSignal(true);
-  const [fileMenu, setFileMenu] = createSignal<{ slug: string; path: string; x: number; y: number } | null>(null);
   const [fileAction, setFileAction] = createSignal<{ slug: string; path: string; kind: "rename" | "move" | "delete"; directory?: boolean } | null>(null);
   const [fileActionValue, setFileActionValue] = createSignal("");
   const [fileActionError, setFileActionError] = createSignal<string | null>(null);
@@ -1765,14 +1774,13 @@ export function LiveProjectsSection(p: {
     setFileMenu(null);
     setMultiSelectMenu(null);
     setForkTarget(null);
-    setSelectionActive(true);
-    if (!selectedTreeSet().has(treeId)) { setSelectedTreeIds([treeId]); setSelectionAnchor(treeId); }
-    const group = selectedTreeFor(treeId);
+    const group = contextSelectRow(treeId);
+    if (!group.length) return;
     if (group.length > 1 && group.some(id => !missionIdFromTreeId(id))) {
       setMultiSelectMenu({ x: e.clientX, y: e.clientY, treeIds: group });
       return;
     }
-    setMissionMenu({ x: e.clientX, y: e.clientY, mission, slug, folder });
+    setMissionMenu({ x: e.clientX, y: e.clientY, mission, treeId, slug, folder });
   };
   let intentTimer: ReturnType<typeof setTimeout> | undefined;
   const cancelIntent = () => clearTimeout(intentTimer);
@@ -1875,7 +1883,7 @@ export function LiveProjectsSection(p: {
       } else if (isUnsyncedClipboard(prevClip)) {
         retireClipboardReference(prevClip);
       }
-      setFileClipboard(""); setSelectedTreeIds([]); setSelectionActive(false); setPendingMoves([]); setCutId(null); setCutCron(null); setSelectionAnchor(null);
+      setFileClipboard(""); syncToCommitted(); setPendingMoves([]); setCutId(null); setCutCron(null);
       return;
     }
     if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
@@ -2112,13 +2120,7 @@ export function LiveProjectsSection(p: {
   nativeComposerDrop(()=>dropTree,importFiles,dropAt);
   // Navigation (fork, search, history) owns the current selection. An old
   // range selection must not keep highlighting a different conversation.
-  createEffect(on(p.selected, selected => {
-    setSelectionActive(false); setSelectedTreeIds([]); setSelectionAnchor(null);
-    if (!selected) return;
-    if (selected.startsWith("m:") || selected.startsWith("pc:") || selected.startsWith("pf:")) {
-      setSelectionAnchor(selected); setSelectedTreeIds([selected]);
-    }
-  }));
+  createEffect(on(p.selected, selected => syncToCommitted(selected)));
   const currentMission = createMemo(() => {
     const selected = p.selected();
     if (!selected?.startsWith("m:")) return undefined;
@@ -2231,19 +2233,18 @@ export function LiveProjectsSection(p: {
     if (d.kind === "cron") {
       const ticking = () => d.controller && (controllers[d.slug]?.runs ?? []).some(r => r.status === "running" || r.status === "claimed");
       const isCronCut = () => !d.controller && (cutCron()?.id === d.job?.id || readCronReference(fileClipboard())?.id === d.job?.id || isItemCut(row.id));
-      const isCronActive = () => !d.controller && selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id;
-      return <><button class={`row agent cron ${d.job?.archived ? "done" : ""} ${isCronCut() ? "mission-cut" : ""} ${isCronActive() ? "active" : ""}`} aria-expanded={d.launched ? row.expanded : undefined} {...rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron", d.job?.folder || undefined]))} onClick={e => { if (!d.controller && d.job?.id) clickSelectableRow(e, row.id, () => p.open(row.id)); else p.open(row.id); }}
+      return <><button class={`row agent cron ${d.job?.archived ? "done" : ""} ${isCronCut() ? "mission-cut" : ""} ${isRowActive(row.id) ? "active" : ""}`} aria-expanded={d.launched ? row.expanded : undefined} {...rowTip.bind(rowDetail(d.label, [d.controller ? "Controller" : "Cron", d.job?.folder || undefined]))} onClick={e => { if (!d.controller && d.job?.id) clickSelectableRow(e, row.id, () => p.open(row.id)); else p.open(row.id); }}
         onKeyDown={e => { if (d.launched && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }} onContextMenu={e => {
         e.preventDefault(); e.stopPropagation();
         setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setFileMenu(null); setMultiSelectMenu(null);
         if (!d.controller && d.job?.id) {
-          setSelectionActive(true);
-          if (!selectedTreeSet().has(row.id)) { setSelectedTreeIds([row.id]); setSelectionAnchor(row.id); }
-          const group = selectedTreeFor(row.id);
+          const group = contextSelectRow(row.id);
           if (group.length > 1) {
             setMultiSelectMenu({ x: e.clientX, y: e.clientY, treeIds: group });
             return;
           }
+        } else {
+          syncToCommitted();
         }
         setControllerMenu({x:e.clientX,y:e.clientY,slug:d.slug,id:d.controller ? undefined : d.job?.id,name:d.label,folder:d.job?.folder ?? "",controller:!!d.controller,archived:!!d.job?.archived});
       }}>
@@ -2258,12 +2259,10 @@ export function LiveProjectsSection(p: {
     const tip = rowTip.bind(rowDetail(d.label, [d.mission && isArchived(d.mission) ? [projects().find(project => project.slug === d.slug)?.title || d.slug, missionFolder(d.mission)].filter(Boolean).join(" / ") : undefined, d.mission ? missionMachine(d.mission) : undefined, d.mission?.backend, d.mission?.model_override, d.mission?.id, d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined]));
     return <><button disabled={deleting()} aria-busy={deleting() ? true : undefined} aria-current={p.selected() === row.id ? "page" : undefined} aria-expanded={d.launched || d.versions ? row.expanded : undefined}
       onKeyDown={e => { if (deleting()) return; if ((d.launched || d.versions) && ((e.key === "ArrowRight" && !row.expanded) || (e.key === "ArrowLeft" && row.expanded))) { e.preventDefault(); e.stopPropagation(); setExpanded(row.id, !row.expanded); } }}
-      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${d.mission ? (!deleting() && (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id)) ? "active" : "" : (selectionActive() ? selectedTreeSet().has(row.id) : p.selected() === row.id) ? "active" : ""}`} {...tip}
+      aria-description={d.mission ? (deleting() ? "Deleting…" : missionStatusPresentation(d.mission.status, pendingMissionInteraction(d.mission.id)).label) : undefined} class={`row ${d.kind === "mission" ? "agent" : "file"} ${d.mission && pendingPlaceMoves().has(missionMoveKey(d.mission.id)) ? "mission-arriving" : ""} ${deleting() ? "mission-deleting" : ""} ${d.kind === "file" && ((cutFile()?.slug === d.slug && cutFile()?.path === d.path) || isItemCut(row.id)) ? "mission-cut" : ""} ${d.mission && !LIVE.has(d.mission.status) ? "done" : ""} ${isMissionCut() ? "mission-cut" : ""} ${!deleting() && isRowActive(row.id) ? "active" : ""}`} {...tip}
       onPointerEnter={e => { if (deleting()) return; tip.onPointerEnter(e); if (d.mission) void loadTranscript(d.mission.id).catch(swallow("projectFiles.hoverTranscript")); else cachePrefetch(row.id, () => readProjectFile(d.slug, d.path!).then(text => cachePut(row.id, text))); }} onContextMenu={e => { if (d.mission) { if (deleting()) { e.preventDefault(); e.stopPropagation(); return; } const dest = resolveTreeDestination(row.id); onMissionContext(e, d.mission, row.id, dest?.slug ?? (isArchived(d.mission) ? "" : d.slug), dest?.path ?? ""); } else {
         e.preventDefault(); e.stopPropagation(); setActionMenu(null); setMissionMenu(null); setArchiveMenu(null); setControllerMenu(null); setMultiSelectMenu(null);
-        setSelectionActive(true);
-        if (!selectedTreeSet().has(row.id)) { setSelectedTreeIds([row.id]); setSelectionAnchor(row.id); }
-        const group = selectedTreeFor(row.id);
+        const group = contextSelectRow(row.id);
         if (group.length > 1) {
           setMultiSelectMenu({ x: e.clientX, y: e.clientY, treeIds: group });
           return;
