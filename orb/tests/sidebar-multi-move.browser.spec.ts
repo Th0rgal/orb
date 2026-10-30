@@ -234,3 +234,65 @@ test('pointer drag-and-drop and right-click Move here on a destination mission r
   await page.getByRole('menuitem',{name:'Move here',exact:true}).click();
   await expect.poll(()=>missions().find(m=>m.id===F)?.project).toBe('verity');
 });
+
+test('when system clipboard write is refused, paste prefers the active local cut over a stale system clipboard reference', async ({page}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('orb.apiUrl',location.origin);
+    localStorage.setItem('orb.jwt','test');
+    Object.defineProperty(navigator,'clipboard',{
+      configurable:true,
+      value:{writeText:async()=>{throw new DOMException('Refused','NotAllowedError');}},
+    });
+  });
+  let filesByProject:Record<string,string[]>={verity:['a.md','b.md'],other:[]};
+  const transfers:Array<{from:string;to:string;path:string;destination:string}>=[];
+  await page.route('**/api/**',async route=>{
+    const req=route.request(),url=new URL(req.url()),path=url.pathname;
+    if(req.method()==='POST' && path.includes('/file/transfer')) {
+      const parts=path.split('/'),from=parts[3],to=parts[6]??from,body=req.postDataJSON();
+      transfers.push({from,to,path:body.path,destination:body.destination});
+      filesByProject[from]=(filesByProject[from]??[]).filter(f=>f!==body.path);
+      filesByProject[to]=[...(filesByProject[to]??[]),body.destination];
+      return route.fulfill({json:{ok:true}});
+    }
+    const slug=path.split('/')[3];
+    const json=path==='/api/projects'?{projects:[{slug:'verity',title:'Verity'},{slug:'other',title:'Other'}]}
+      :path==='/api/control/missions'?[]
+      :path.endsWith('/files')?{entries:((url.searchParams.get('path')??'')===''?(filesByProject[slug]??[]).map(name=>({name,kind:'file'})):[])}
+      :path.endsWith('/crons')?{jobs:[]}:path.endsWith('/controller')?{job:null,runs:[]}:[];
+    await route.fulfill({json});
+  });
+  await page.goto('/');
+  await page.getByRole('button',{name:'Verity',exact:true}).click();
+  await page.getByRole('button',{name:'Other',exact:true}).click();
+  const tree=page.getByRole('tree',{name:'Projects',exact:true});
+
+  // Cut a.md via native ClipboardEvent('cut') so the system clipboard receives a valid reference to a.md.
+  const fileABtn=tree.locator('[data-tree-id="pf:verity:a.md"] button.row');
+  const staleSystemPayload=await fileABtn.evaluate(el=>{
+    const dt=new DataTransfer();
+    el.dispatchEvent(new ClipboardEvent('cut',{bubbles:true,cancelable:true,clipboardData:dt}));
+    return dt.getData('text/plain');
+  });
+  expect(staleSystemPayload).toContain('orb:file:');
+
+  // Now cut b.md from the context menu; navigator.clipboard.writeText rejects, leaving staleSystemPayload in the OS clipboard.
+  await tree.locator('[data-tree-id="pf:verity:b.md"] button.row').click({button:'right'});
+  await page.getByRole('menuitem',{name:'Cut',exact:true}).click();
+
+  // Paste onto Other using a native ClipboardEvent carrying the stale a.md payload: b.md must move, not a.md.
+  const otherBtn=tree.getByRole('button',{name:'Other',exact:true});
+  const dispatchPaste=async()=>otherBtn.evaluate((el,text)=>{
+    const dt=new DataTransfer();
+    dt.setData('text/plain',text);
+    el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt}));
+  },staleSystemPayload);
+
+  await dispatchPaste();
+  await expect.poll(()=>transfers).toEqual([{from:'verity',to:'other',path:'b.md',destination:'b.md'}]);
+
+  // A second paste with the still-stale OS clipboard payload must not resurrect the superseded a.md cut.
+  await dispatchPaste();
+  await page.waitForTimeout(150);
+  expect(transfers).toEqual([{from:'verity',to:'other',path:'b.md',destination:'b.md'}]);
+});

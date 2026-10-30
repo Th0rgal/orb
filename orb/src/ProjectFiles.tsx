@@ -8,7 +8,7 @@ import {nativeComposerDrop} from "./composerDrop";
 import {importProjectFiles} from "./projectFileImport";
 import {backgroundUploads,cancelBackgroundUpload,formatFileSize,pauseBackgroundUpload,resumeBackgroundUpload,type UploadSource} from "./uploads";
 import {subscribeProjectContext} from "./projectContext";
-import { assertFolderHasNoWork, moveFolderWork, copyFileReference, readFileReference, copyCronReference, readCronReference, copyItemsReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
+import { assertFolderHasNoWork, moveFolderWork, makeFileReference, readFileReference, makeCronReference, readCronReference, makeItemsReference, readItemsReference, type ClipboardItem, fileDestination, fileParent, fileName as fileBaseName, transferProjectFile } from "./fileActions";
 import { FolderActivityIcon, folderActivity } from "./FolderActivity";
 import { createSidebarRequests } from "./sidebarRequests";
 import { folderLabel, setFolderLabel } from "./folderLabels";
@@ -70,7 +70,14 @@ import {
 import { CronGlyph, untilLabel } from "./Controller";
 import { ConfirmDialog, Dialog, DialogButton, NameDialog } from "./Dialog";
 import { PopupMenu, type MenuEntry } from "./Menu";
-import { copyText } from "./clipboard";
+import {
+  copyText,
+  isClipboardReferenceRetired,
+  isUnsyncedClipboard,
+  retireActiveClipboardReference,
+  retireClipboardReference,
+  writeClipboardReference,
+} from "./clipboard";
 import { CronForm } from "./ControllerSettings";
 import { getProjectCronFromJob } from "./cronSchema";
 import { loadTranscript, prefetchTranscript } from "./missionCache";
@@ -252,7 +259,7 @@ export function LiveProjectsSection(p: {
     createArchivePager({ revision: () => missionRevision, archiving, deleted: deletedInSession, currentConnection: version => currentConnection(version) });
   const { setSelectedTreeIds, setSelectedAgents, selectionActive, setSelectionActive, selectedTreeSet, selectedRowIds, selectionAnchor, setSelectionAnchor, clickSelectableRow, selectedFor, selectedTreeFor } =
     createTreeSelection({ visibleNodes: () => [...tree(), ...(archivesOpen() ? archiveNodes() : [])] });
-  const { cutId, setCutId, pendingMoves, setPendingMoves, beginMove, moveDirect, pasteMission, isMoving, hasCutClipboard } = createMissionMoves({
+  const { cutId, setCutId, pendingMoves, setPendingMoves, beginMove, moveDirect, pasteMission, isMoving, hasCutClipboard, hasUnsyncedCutClipboard } = createMissionMoves({
     allKnownMissions: () => allKnownMissions(),
     leaveProjects: (id, keep) => leaveProjects(id, keep),
     revealDestination: (slug, path) => { setExpanded(slug, true); if (path) setExpanded(`${slug}:${path}`, true); },
@@ -521,6 +528,7 @@ export function LiveProjectsSection(p: {
     if (!ids.length) return;
     if (ids.length === 1) { setPendingMoves([]); beginMove(id, clipboardData); }
     else {
+      retireActiveClipboardReference();
       if (clipboardData) clipboardData.setData("text/plain", makeCutMission(ids[0]));
       setPendingMoves(ids); setCutId(ids[0]); setActionError(null);
     }
@@ -605,16 +613,14 @@ export function LiveProjectsSection(p: {
     finally { setFileBusy(false); }
   };
   const copyFile = async (slug: string, path: string, copy: boolean, directory = false, clipboardData?: DataTransfer | null) => {
-    const version = connectionVersion(); setFileMenu(null); setActionMenu(null); setMultiSelectMenu(null);
-    try {
-      const text = await copyFileReference(slug, path, copy, directory, clipboardData);
-      if (version !== connectionVersion()) return;
-      setFileClipboard(text); setCutId(null); setPendingMoves([]); setCutCron(null); setActionError(null);
-    } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+    setFileMenu(null); setActionMenu(null); setMultiSelectMenu(null);
+    const text = makeFileReference(slug, path, copy, directory);
+    setCutId(null); setPendingMoves([]); setCutCron(null); setFileClipboard(text); setActionError(null);
+    await writeClipboardReference(text, clipboardData);
   };
   const pasteFile = async (slug: string, path: string, text: string) => {
     const item = readFileReference(text), version = connectionVersion();
-    if (!item || fileBusy() || text === consumedFileClipboard) return;
+    if (!item || fileBusy() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     try {
       const other = item.slug !== slug;
@@ -629,7 +635,7 @@ export function LiveProjectsSection(p: {
       if (item.copy) await transfer();
       else await moveOptimistically(moveKey, { kind: "file", fromProject: item.slug, toProject: slug, path: destination, fromPath: item.path, directory: item.directory }, transfer, fileBaseName(item.path));
       if (version !== connectionVersion()) return;
-      if (!item.copy) { consumedFileClipboard = text; setFileClipboard(""); }
+      if (!item.copy) { consumedFileClipboard = text; retireClipboardReference(text); setFileClipboard(""); }
       await Promise.all([loadDir(item.slug, fileParent(item.path), true), loadDir(slug, path, true)]);
       if (!item.copy) settleMove(moveKey);
       setExpanded(path ? `${slug}:${path}` : slug, true);
@@ -1127,25 +1133,27 @@ export function LiveProjectsSection(p: {
     bumpProjects();
   };
   const startCutCron = async (slug: string, id: string, name: string, folder = "", clipboardData?: DataTransfer | null) => {
-    const version = connectionVersion();
     setControllerMenu(null); setActionMenu(null); setMultiSelectMenu(null);
-    try {
-      const text = await copyCronReference(slug, id, name, folder, clipboardData);
-      if (version !== connectionVersion()) return;
-      setFileClipboard(text); setCutId(null); setPendingMoves([]); setCutCron({ slug, id, name }); setActionError(null);
-    } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+    const text = makeCronReference(slug, id, name, folder);
+    setCutId(null); setPendingMoves([]); setCutCron({ slug, id, name }); setFileClipboard(text); setActionError(null);
+    await writeClipboardReference(text, clipboardData);
   };
   const pasteCron = async (toSlug: string, folder: string, fromText?: string) => {
-    const ref = fromText ? readCronReference(fromText) : null;
+    const ref = fromText && !isClipboardReferenceRetired(fromText) ? readCronReference(fromText) : null;
     const item = ref ?? cutCron();
-    if (!item || movingCron() || (fromText && fromText === consumedFileClipboard)) return;
+    if (!item || movingCron() || (fromText && (fromText === consumedFileClipboard || isClipboardReferenceRetired(fromText)))) return;
     setActionMenu(null);
     setMovingCron(true);
     setActionError(null);
     try {
       await performMoveCron(item.slug, item.id, toSlug, folder);
-      if (fromText) consumedFileClipboard = fromText;
-      if (readCronReference(fileClipboard())?.id === item.id) setFileClipboard("");
+      if (fromText) { consumedFileClipboard = fromText; retireClipboardReference(fromText); }
+      const currentClip = fileClipboard();
+      if (readCronReference(currentClip)?.id === item.id) {
+        consumedFileClipboard = currentClip;
+        retireClipboardReference(currentClip);
+        setFileClipboard("");
+      }
       setCutCron(null);
     } catch (e) {
       setActionError(`Couldn’t move cron: ${e instanceof Error ? e.message : String(e)}`);
@@ -1218,6 +1226,7 @@ export function LiveProjectsSection(p: {
       setFileClipboard(""); setCutCron(null);
       if (ids.length === 1) { setPendingMoves([]); beginMove(ids[0], clipboardData); }
       else {
+        retireActiveClipboardReference();
         if (clipboardData) clipboardData.setData("text/plain", makeCutMission(ids[0]));
         setPendingMoves(ids); setCutId(ids[0]); setActionError(null);
       }
@@ -1228,17 +1237,14 @@ export function LiveProjectsSection(p: {
       if (single.kind === "file") { await copyFile(single.slug, single.path, copy, !!single.directory, clipboardData); return; }
       if (single.kind === "cron" && !copy) { await startCutCron(single.slug, single.id, single.name, single.folder, clipboardData); return; }
     }
-    const version = connectionVersion();
     setMultiSelectMenu(null); setActionMenu(null); setFileMenu(null); setControllerMenu(null); setMissionMenu(null);
-    try {
-      const text = await copyItemsReference(items, copy, clipboardData);
-      if (version !== connectionVersion()) return;
-      setFileClipboard(text); setCutId(null); setPendingMoves([]); setCutCron(null); setActionError(null);
-    } catch (e) { if (version === connectionVersion()) setActionError(String(e)); }
+    const text = makeItemsReference(items, copy);
+    setCutId(null); setPendingMoves([]); setCutCron(null); setFileClipboard(text); setActionError(null);
+    await writeClipboardReference(text, clipboardData);
   };
   const pasteItems = async (targetSlug: string, targetPath: string, text: string) => {
     const bundle = readItemsReference(text), version = connectionVersion();
-    if (!bundle || fileBusy() || movingCron() || isMoving() || text === consumedFileClipboard) return;
+    if (!bundle || fileBusy() || movingCron() || isMoving() || text === consumedFileClipboard || isClipboardReferenceRetired(text)) return;
     setFileBusy(true); setActionMenu(null); setActionError(null);
     // Show every moved item at its destination at once; each is settled or
     // reverted as its own request finishes (see moves.ts).
@@ -1335,6 +1341,7 @@ export function LiveProjectsSection(p: {
       setExpanded(targetPath ? `${targetSlug}:${targetPath}` : targetSlug, true);
       if (!bundle.copy && !failures.length) {
         consumedFileClipboard = text;
+        retireClipboardReference(text);
         setFileClipboard("");
       }
       if (failures.length) setActionError(failures.join("; "));
@@ -1796,25 +1803,54 @@ export function LiveProjectsSection(p: {
     return false;
   };
   const applyPastePayload = (destSlug: string, destPath: string, text?: string): boolean => {
-    if (pendingMoves().length > 1) { pasteMission(destSlug, destPath); return true; }
-    if (text) {
+    if (pendingMoves().length > 1) {
+      if (text) retireClipboardReference(text);
+      pasteMission(destSlug, destPath);
+      return true;
+    }
+    const localClip = fileClipboard();
+    const hasActiveLocalFileClip = !!localClip && localClip !== consumedFileClipboard && !isClipboardReferenceRetired(localClip);
+    if (hasActiveLocalFileClip && isUnsyncedClipboard(localClip)) {
+      if (text && text !== localClip) retireClipboardReference(text);
+      if (readItemsReference(localClip)) { void pasteItems(destSlug, destPath, localClip); return true; }
+      if (readFileReference(localClip)) { void pasteFile(destSlug, destPath, localClip); return true; }
+      if (readCronReference(localClip)) { void pasteCron(destSlug, destPath, localClip); return true; }
+    }
+    if (hasUnsyncedCutClipboard()) {
+      if (text) retireClipboardReference(text);
+      pasteMission(destSlug, destPath);
+      return true;
+    }
+    if (text && !isClipboardReferenceRetired(text)) {
       if (readItemsReference(text)) { void pasteItems(destSlug, destPath, text); return true; }
       if (readFileReference(text)) { void pasteFile(destSlug, destPath, text); return true; }
       if (readCronReference(text)) { void pasteCron(destSlug, destPath, text); return true; }
       if (readCutMission(text, getApiUrl())) { pasteMission(destSlug, destPath, text); return true; }
     }
-    const localClip = fileClipboard();
-    if (localClip && localClip !== consumedFileClipboard) {
+    if (hasActiveLocalFileClip) {
       if (readItemsReference(localClip)) { void pasteItems(destSlug, destPath, localClip); return true; }
       if (readFileReference(localClip)) { void pasteFile(destSlug, destPath, localClip); return true; }
       if (readCronReference(localClip)) { void pasteCron(destSlug, destPath, localClip); return true; }
     }
     if (cutCron()) { void pasteCron(destSlug, destPath); return true; }
-    if (hasCutClipboard() || cutId()) { pasteMission(destSlug, destPath, text); return true; }
+    if (hasCutClipboard() || cutId()) {
+      pasteMission(destSlug, destPath, text && !isClipboardReferenceRetired(text) ? text : undefined);
+      return true;
+    }
     return false;
   };
   const moveKey = (event: KeyboardEvent) => {
-    if (event.key === "Escape") { if (cutFile() || cutItems().length || readCronReference(fileClipboard())) consumedFileClipboard = fileClipboard(); setFileClipboard(""); setSelectedTreeIds([]); setSelectionActive(false); setPendingMoves([]); setCutId(null); setCutCron(null); setSelectionAnchor(null); return; }
+    if (event.key === "Escape") {
+      const prevClip = fileClipboard();
+      if (cutFile() || cutItems().length || readCronReference(prevClip)) {
+        consumedFileClipboard = prevClip;
+        retireClipboardReference(prevClip);
+      } else if (isUnsyncedClipboard(prevClip)) {
+        retireClipboardReference(prevClip);
+      }
+      setFileClipboard(""); setSelectedTreeIds([]); setSelectionActive(false); setPendingMoves([]); setCutId(null); setCutCron(null); setSelectionAnchor(null);
+      return;
+    }
     if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
     const target = event.target as HTMLElement;
     if (target.closest('input, textarea, [contenteditable="true"]')) return;
@@ -1832,7 +1868,8 @@ export function LiveProjectsSection(p: {
       const version = connectionVersion();
       void navigator.clipboard.readText().then(text => {
         if (version !== connectionVersion()) return;
-        if (!applyPastePayload(destSlug, destPath, text)) pasteMission(destSlug, destPath, text);
+        const usable = isClipboardReferenceRetired(text) ? undefined : text;
+        if (!applyPastePayload(destSlug, destPath, usable)) pasteMission(destSlug, destPath, usable);
       }, () => {
         // Clipboard read refused (no permission or gesture): fall back to in-app cuts.
         if (version !== connectionVersion()) return;

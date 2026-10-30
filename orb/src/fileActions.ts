@@ -1,5 +1,5 @@
 import { api, ApiError, getApiUrl, getJwt, connectionVersion, listProjectCrons, updateProjectCron, type Mission } from "./api";
-import { copyText } from "./clipboard";
+import { writeClipboardReference } from "./clipboard";
 import { localContextFile } from "./projectContext";
 import { moveMission } from "./missionMove";
 
@@ -53,11 +53,11 @@ export async function transferProjectFile(slug: string, path: string, destinatio
     throw error;
   }
 }
+export function makeFileReference(slug: string, path: string, copy: boolean, directory = false): string {
+  return prefix + JSON.stringify({ slug, path, copy, ...(directory ? { directory } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
+}
 export async function copyFileReference(slug: string, path: string, copy: boolean, directory = false, clipboardData?: DataTransfer | null): Promise<string> {
-  const text = prefix + JSON.stringify({ slug, path, copy, ...(directory ? { directory } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
-  if (clipboardData) { clipboardData.setData("text/plain", text); return text; }
-  await copyText(text).catch(() => {});
-  return text;
+  return writeClipboardReference(makeFileReference(slug, path, copy, directory), clipboardData);
 }
 export function readFileReference(text: string): FileClipboard | null {
   if (!text.startsWith(prefix)) return null;
@@ -66,11 +66,11 @@ export function readFileReference(text: string): FileClipboard | null {
     return value.backend === getApiUrl() && value.account === clipboardAccount() && typeof value.slug === "string" && typeof value.path === "string" && typeof value.copy === "boolean" && ["undefined", "boolean"].includes(typeof value.directory) && typeof value.nonce === "string" ? value : null;
   } catch { return null; }
 }
+export function makeCronReference(slug: string, id: string, name: string, folder?: string): string {
+  return cronPrefix + JSON.stringify({ slug, id, name, ...(folder ? { folder } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
+}
 export async function copyCronReference(slug: string, id: string, name: string, folder?: string, clipboardData?: DataTransfer | null): Promise<string> {
-  const text = cronPrefix + JSON.stringify({ slug, id, name, ...(folder ? { folder } : {}), backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
-  if (clipboardData) { clipboardData.setData("text/plain", text); return text; }
-  await copyText(text).catch(() => {});
-  return text;
+  return writeClipboardReference(makeCronReference(slug, id, name, folder), clipboardData);
 }
 export function readCronReference(text: string): CronClipboard | null {
   if (!text.startsWith(cronPrefix)) return null;
@@ -83,10 +83,7 @@ export function makeItemsReference(items: ClipboardItem[], copy: boolean): strin
   return itemsPrefix + JSON.stringify({ items, copy, backend: getApiUrl(), account: clipboardAccount(), nonce: crypto.randomUUID() });
 }
 export async function copyItemsReference(items: ClipboardItem[], copy: boolean, clipboardData?: DataTransfer | null): Promise<string> {
-  const text = makeItemsReference(items, copy);
-  if (clipboardData) { clipboardData.setData("text/plain", text); return text; }
-  await copyText(text).catch(() => {});
-  return text;
+  return writeClipboardReference(makeItemsReference(items, copy), clipboardData);
 }
 export function readItemsReference(text: string): ItemsClipboard | null {
   if (!text.startsWith(itemsPrefix)) return null;

@@ -1,6 +1,12 @@
 import { createSignal } from "solid-js";
 import { bumpProjects, connectionVersion, getApiUrl, type Mission } from "../api";
-import { copyText } from "../clipboard";
+import {
+  isClipboardReferenceRetired,
+  isUnsyncedClipboard,
+  restoreClipboardReference,
+  retireClipboardReference,
+  writeClipboardReference,
+} from "../clipboard";
 import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "../missionMove";
 
 /**
@@ -20,24 +26,35 @@ export function createMissionMoves(deps: {
   loadMissions: (slug: string) => Promise<void>;
   setActionError: (error: string | null) => void;
 }) {
-  const [cutId, setCutId] = createSignal<string | null>(null);
+  const [cutId, setCutIdRaw] = createSignal<string | null>(null);
   const [pendingMoves, setPendingMoves] = createSignal<string[]>([]);
   let moving = false;
   let consumedCut = "";
   let cutClipboard = "";
+  const setCutId = (id: string | null) => {
+    if (id === null && cutClipboard) {
+      consumedCut = cutClipboard;
+      retireClipboardReference(cutClipboard);
+      cutClipboard = "";
+    } else if (id !== null && cutClipboard && readCutMission(cutClipboard, getApiUrl()) !== id) {
+      retireClipboardReference(cutClipboard);
+      cutClipboard = "";
+    }
+    setCutIdRaw(id);
+  };
   const beginMove = (id: string, clipboardData?: DataTransfer | null) => {
     if (moving) return;
     const text = makeCutMission(id);
-    cutClipboard = text; consumedCut = ""; setCutId(id); deps.setActionError(null);
-    if (clipboardData) { clipboardData.setData("text/plain", text); return; }
-    void copyText(text).catch(() => {});
+    cutClipboard = text; consumedCut = ""; setCutIdRaw(id); deps.setActionError(null);
+    void writeClipboardReference(text, clipboardData);
   };
   const moveDirect = (ids: string[], slug: string, path: string) => {
     if (moving || !ids.length) return;
     moving = true;
     const version = connectionVersion();
     if (ids.some(id => id === cutId() || pendingMoves().includes(id))) {
-      setPendingMoves([]); setCutId(null); cutClipboard = "";
+      retireClipboardReference(cutClipboard);
+      setPendingMoves([]); setCutIdRaw(null); cutClipboard = "";
     }
     deps.setActionError(null);
     deps.revealDestination(slug, path);
@@ -51,10 +68,10 @@ export function createMissionMoves(deps: {
       const ids = [...pendingMoves()], version = connectionVersion();
       // No long grayed "cut" state: the rows are at their destination now
       // (moves.ts overlay) and only failures come back.
-      setPendingMoves([]); setCutId(null); deps.setActionError(null);
+      setPendingMoves([]); setCutIdRaw(null); deps.setActionError(null);
       deps.revealDestination(slug, path);
       void run(ids, slug, path, version, failed => {
-        setPendingMoves(failed); setCutId(failed[0] ?? null);
+        setPendingMoves(failed); setCutIdRaw(failed[0] ?? null);
       }).finally(() => { moving = false; });
       return;
     }
@@ -62,14 +79,30 @@ export function createMissionMoves(deps: {
     const version = connectionVersion();
     void (async () => {
       // A second clipboard read in the same gesture is refused by WebKit (NotAllowedError).
-      let clipboard = clipboardText || cutClipboard;
-      let missionId = clipboard === consumedCut ? null : readCutMission(clipboard, getApiUrl());
-      if (!missionId && cutClipboard && clipboard !== cutClipboard) { clipboard = cutClipboard; missionId = readCutMission(clipboard, getApiUrl()); }
+      const incoming = clipboardText && !isClipboardReferenceRetired(clipboardText) ? clipboardText : "";
+      const preferLocalCut = !!cutClipboard && cutClipboard !== consumedCut && isUnsyncedClipboard(cutClipboard);
+      if (preferLocalCut && incoming && incoming !== cutClipboard) retireClipboardReference(incoming);
+      let clipboard = preferLocalCut ? cutClipboard : (incoming || cutClipboard);
+      let missionId = !clipboard || clipboard === consumedCut || isClipboardReferenceRetired(clipboard)
+        ? null
+        : readCutMission(clipboard, getApiUrl());
+      if (!missionId && cutClipboard && cutClipboard !== consumedCut && !isClipboardReferenceRetired(cutClipboard) && clipboard !== cutClipboard) {
+        clipboard = cutClipboard;
+        missionId = readCutMission(clipboard, getApiUrl());
+      }
       if (!missionId || version !== connectionVersion()) return;
-      consumedCut = clipboard; cutClipboard = "";
-      setCutId(null); deps.setActionError(null);
+      const wasUnsynced = isUnsyncedClipboard(clipboard);
+      consumedCut = clipboard; cutClipboard = ""; retireClipboardReference(clipboard);
+      setCutIdRaw(null); deps.setActionError(null);
       deps.revealDestination(slug, path);
-      await run([missionId], slug, path, version, failed => { if (failed.length) { cutClipboard = clipboard; consumedCut = ""; setCutId(missionId); } });
+      await run([missionId], slug, path, version, failed => {
+        if (failed.length) {
+          cutClipboard = clipboard;
+          consumedCut = "";
+          restoreClipboardReference(clipboard, wasUnsynced);
+          setCutIdRaw(missionId);
+        }
+      });
     })().catch(e => deps.setActionError(`Couldn’t move conversation: ${String(e)}`)).finally(() => { moving = false; });
   };
   /** Move `ids` (and the missions they launched) in parallel; `done` gets the failed selection ids. */
@@ -96,6 +129,8 @@ export function createMissionMoves(deps: {
   }
   return {
     cutId, setCutId, pendingMoves, setPendingMoves, beginMove, moveDirect, pasteMission,
-    isMoving: () => moving, hasCutClipboard: () => !!cutClipboard,
+    isMoving: () => moving,
+    hasCutClipboard: () => !!cutClipboard && cutClipboard !== consumedCut && !isClipboardReferenceRetired(cutClipboard),
+    hasUnsyncedCutClipboard: () => !!cutClipboard && cutClipboard !== consumedCut && isUnsyncedClipboard(cutClipboard),
   };
 }
