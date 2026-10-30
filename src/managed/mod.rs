@@ -2710,7 +2710,7 @@ impl ManagedManager {
         }
         Ok(match provider_name {
             "hetzner" => "ubuntu-24.04".into(),
-            "vastai" => "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel".into(),
+            "vastai" => "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04".into(),
             "scaleway" if scaleway::is_apple_silicon_type(size) => "macos-15".into(),
             "scaleway" => "ubuntu_noble".into(),
             _ => "ubuntu-24.04".into(),
@@ -5594,16 +5594,17 @@ pub(crate) fn cloud_bootstrap_script(
         ""
     };
     format!(
-        r#"#!/usr/bin/env bash
-set -euo pipefail
+        r#"#!/bin/sh
+set -eu
 H=/var/lib/orb-node; B=/usr/local/bin; S=/usr/local/sbin; O=/home/user/.orb
 P=$B:/usr/local/cuda/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/conda/bin
 E="OPENCODE_TMPDIR=/tmp/opencode GIT_TERMINAL_PROMPT=0 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_AUTOUPDATE=1 CODEX_DISABLE_UPDATE_CHECK=1 NO_UPDATE_NOTIFIER=1"
 q() {{ "$@" >/dev/null 2>&1; }}
 if q command -v apt-get; then
-  n=0; for c in curl git python3 jq xz zstd runuser; do q command -v "$c" || n=1; done
-  [ -d /run/systemd/system ] && [ ! -e /usr/lib/systemd/user/dbus.socket ] && [ ! -e /lib/systemd/user/dbus.socket ] && n=1 || :
-  [ "$n" = 1 ] && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq curl ca-certificates git sudo python3 dbus-user-session jq xz-utils zstd util-linux
+  n=0; d=; for c in curl git jq xz zstd runuser; do q command -v "$c" || n=1; done
+  q python3 -c "import sqlite3,urllib.request" || n=1
+  if [ -d /run/systemd/system ]; then d=dbus-user-session; [ -e /usr/lib/systemd/user/dbus.socket ] || [ -e /lib/systemd/user/dbus.socket ] || n=1; fi
+  if [ "$n" = 1 ]; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -yqq curl ca-certificates git sudo python3 $d jq xz-utils zstd util-linux; fi
 fi
 q id -u user || useradd -m -s /bin/bash user || :
 q id -u orbnode || useradd -r -m -d "$H" -s /bin/bash orbnode || :

@@ -237,6 +237,7 @@ pub(crate) fn search_bundles_body(spec: &SpawnSpec) -> Value {
         "cpu_cores_effective": {"gte": min_cpu},
         "cpu_ram": {"gte": min_ram_mb_for_gb(min_ram_gb)},
         "disk_space": {"gte": min_disk_gb},
+        "cuda_max_good": {"gte": 12.6},
         "inet_down": {"gte": 300},
         "reliability2": {"gte": 0.99},
         "order": [["dph_total", "asc"]],
@@ -302,7 +303,7 @@ pub(crate) fn select_verified_offer(
 pub(crate) fn create_instance_body(spec: &SpawnSpec, disk_gb: u32) -> Value {
     let image = match spec.image.as_deref() {
         Some(img) if !img.is_empty() && img != "orb-node-base" && img != "provider-default" => img,
-        _ => "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel",
+        _ => "nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04",
     };
     let mut body = json!({
         "client_id": "me",

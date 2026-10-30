@@ -3009,6 +3009,21 @@ fn cloud_bootstrap_script_configures_user_bus_and_harnesses_within_onstart_budge
         "cloud_bootstrap_script failed bash -n: {}",
         String::from_utf8_lossy(&syntax.stderr)
     );
+    let sh_syntax = std::process::Command::new("sh")
+        .arg("-n")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("sh -n");
+    assert!(
+        sh_syntax.status.success(),
+        "cloud_bootstrap_script failed POSIX sh -n: {}",
+        String::from_utf8_lossy(&sh_syntax.stderr)
+    );
+    assert!(
+        !script.contains("pipefail"),
+        "onstart runs under /bin/sh (dash on Ubuntu), which rejects set -o pipefail"
+    );
 }
 
 #[tokio::test]
