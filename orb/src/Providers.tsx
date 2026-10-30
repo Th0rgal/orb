@@ -211,10 +211,16 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
   const [removing, setRemoving] = createSignal<AIProvider | null>(null);
   const [removeBusy, setRemoveBusy] = createSignal(false);
   const [removeError, setRemoveError] = createSignal<string | null>(null);
+  const [openIds, setOpenIds] = createSignal<Set<string>>(new Set());
+  const setRowOpen = (id: string, nextOpen: boolean) => setOpenIds(prev => {
+    const next = new Set(prev);
+    if (nextOpen) next.add(id); else next.delete(id);
+    return next;
+  });
   const remove = async () => {
     const account = removing(); if (!account || removeBusy()) return;
     setRemoveBusy(true);
-    try { await api(`/api/ai/providers/${encodeURIComponent(account.id)}`, {method: "DELETE"}); setRemoving(null); p.onRefresh(); }
+    try { await api(`/api/ai/providers/${encodeURIComponent(account.id)}`, {method: "DELETE"}); setRowOpen(account.id, false); setRemoving(null); p.onRefresh(); }
     catch (error) { setRemoveError(String(error)); }
     finally { setRemoveBusy(false); }
   };
@@ -324,7 +330,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <Show when={loginOptions()?.reason}><p class="s-row-desc">{loginOptions()?.reason}</p></Show>
         <div class="s-card">
           <For each={oauth()}>
-            {(a) => <LiveRow a={a} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(oauth, a)} usage={usage()[a.id]} sharedOrgs={sharedOrgs()} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={oauth().length === 0}>
             <div class="s-row"><div class="s-row-desc">No subscription accounts connected.</div></div>
@@ -337,7 +343,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
           <h3>Model connections</h3>
           <p class="s-row-desc p-section-description">Model access through connected credentials, separate from subscription accounts.</p>
           <div class="s-card">
-            <For each={modelConnections()}>{a => <LiveRow a={a} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}</For>
+            <For each={modelConnections()}>{a => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} usage={usage()[a.id]} health={p.health?.[a.id]} onReconnect={() => setReauth(a)} onToggle={enabled => toggle(a, enabled)} />}</For>
           </div>
         </section>
       </Show>
@@ -348,7 +354,7 @@ function LiveProviders(p: { list: AIProvider[]; health?: Record<string, AccountH
         <div class="section-row"><h3>API keys</h3><button class="s-btn sm quiet" onClick={() => setKeyEditor("new")}><Ic.PlusIcon size={12}/> Add API key</button></div>
         <div class="s-card">
           <For each={keys()}>
-            {(a) => <LiveRow a={a} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
+            {(a) => <LiveRow a={a} open={openIds().has(a.id)} onOpenChange={v => setRowOpen(a.id, v)} rank={rankIn(keys, a)} usage={usage()[a.id]} health={p.health?.[a.id]} onUsage={value => setUsage(previous => ({ ...previous, [a.id]: value }))} onReconnect={() => setReauth(a)} onEditKey={() => setKeyEditor(a)} onRemove={() => { setRemoveError(null); setRemoving(a); }} onToggle={enabled => toggle(a, enabled)} />}
           </For>
           <Show when={keys().length === 0}>
             <div class="s-row"><div class="s-row-desc">No API keys configured.</div></div>
@@ -974,7 +980,7 @@ function RankControls(p: { rank: AccountRank; name: string; title: string }) {
 
 const RANK_DRAG_TYPE = "application/x-orb-account-rank";
 
-function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
+function LiveRow(p: { a: AIProvider; open?: boolean; onOpenChange?: (open: boolean) => void; rank?: AccountRank; usage?: ProviderUsage; sharedOrgs?: Set<string>; health?: AccountHealthSnapshot; onUsage?: (usage: ProviderUsage) => void; onReconnect: () => void; onEditKey?: () => void; onRemove?: () => void; onToggle: (enabled: boolean) => void }) {
   const a = p.a;
   const status = () => effectiveProviderStatus(a, p.usage, p.health);
   const quota = () => p.usage ? quotaStatus(usageWindows(p.usage)) : null;
@@ -989,7 +995,9 @@ function LiveRow(p: { a: AIProvider; rank?: AccountRank; usage?: ProviderUsage; 
   const canReconnect = () => reconnectable(a);
   const mistralSubscription = () => a.provider_type === "mistral" && a.uses_oauth;
   const expandable = () => !!p.rank || status() === "out_of_credit" || status() === "auth_failed" || status() === "needs_verification" || a.provider_type === "antigravity" || !!p.onEditKey || canReconnect() || hasProviderUsageDetails(p.usage) || !!a.status.reason || !!a.status.message;
-  const [open, setOpen] = createSignal(false);
+  const [localOpen, setLocalOpen] = createSignal(false);
+  const open = () => p.open ?? localOpen();
+  const setOpen = (nextOpen: boolean) => p.onOpenChange ? p.onOpenChange(nextOpen) : setLocalOpen(nextOpen);
   const [menu, setMenu] = createSignal(false);
   let menuBtn!: HTMLButtonElement;
   const [dropping, setDropping] = createSignal(false);
