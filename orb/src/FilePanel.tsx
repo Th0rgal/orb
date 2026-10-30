@@ -1,5 +1,14 @@
 import { swallow } from "./log";
 import { hasOverlay } from "./overlayLayer";
+import {
+  btwShortcutLabel,
+  expandShortcutLabel,
+  filesShortcutLabel,
+  fileTreeShortcutLabel,
+  hasPrimaryModifier,
+  isBtwShortcut,
+  isFocusModeShortcut,
+} from "./keyboardShortcuts";
 import { nativeInvoke } from "./clientRuns";
 import * as TreeIcon from "./sidebarIcons";
 import {
@@ -71,7 +80,7 @@ const SidePanelContext = createContext<{
   target: () => HTMLDivElement | undefined;
   available: () => boolean;
   visible: () => boolean;
-  show: () => void;
+  show: (opts?: { focus?: boolean }) => void;
   hide: () => void;
   register: (open: (() => void) | undefined) => void;
 }>();
@@ -89,7 +98,7 @@ export function FilePanelButton() {
     <><Show when={ctx?.available()}>
       <button
         class="files-toggle"
-        title="Toggle files (⌘J)"
+        title={`Toggle files (${filesShortcutLabel()})`}
         aria-keyshortcuts="Meta+J"
         aria-label="Files"
         aria-expanded={ctx?.open()}
@@ -97,11 +106,13 @@ export function FilePanelButton() {
       >
         <Ic.FileIcon size={16} />
       </button>
-    </Show><Show when={side?.available()}><button class="files-toggle" title="Toggle side question (⌘⇧J)" aria-keyshortcuts="Meta+Shift+J" aria-label="Side question" aria-expanded={side?.visible()} onClick={() => side?.visible() ? side.hide() : side?.show()}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18 0Z"/><path d="M7 9h8M7 13h5"/></svg></button></Show></>
+    </Show><Show when={side?.available()}><button class="files-toggle" title={`Toggle side question (${btwShortcutLabel()})`} aria-keyshortcuts="Meta+K Meta+Shift+J" aria-label="Side question" aria-expanded={side?.visible()} onClick={() => side?.visible() ? side.hide() : side?.show({ focus: true })}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 11a8 8 0 0 1-8 8H5l-3 3V11a9 9 0 0 1 18 0Z"/><path d="M7 9h8M7 13h5"/></svg></button></Show></>
   );
 }
 export function FilePanelProvider(p: {
   scope: FileScope;
+  sidebar?: () => boolean;
+  onSetSidebar?: (next: boolean) => void;
   children: JSX.Element;
 }) {
   const scopeKey = createMemo(() => {
@@ -148,8 +159,15 @@ export function FilePanelProvider(p: {
   const [history, setHistory] = createSignal<FileRef[]>([]),
     [historyIndex, setHistoryIndex] = createSignal(-1);
   let panel: HTMLElement | undefined,
+    sideAside: HTMLElement | undefined,
     viewer: HTMLDivElement | undefined,
     searchInput: HTMLInputElement | undefined;
+  let zenRestore: { sidebar: boolean; panel: "files" | "side" | "none" } | null = null;
+  const focusSideComposer = () => {
+    requestAnimationFrame(() => {
+      sideTarget()?.querySelector<HTMLTextAreaElement>("textarea")?.focus({ preventScroll: true });
+    });
+  };
   let cache = new Map<string, Promise<FileRef[]>>(),
     queue = new Map<string, ((r: FileRef[]) => void)[]>(),
     batchTimer: ReturnType<typeof setTimeout> | undefined,
@@ -493,73 +511,155 @@ export function FilePanelProvider(p: {
   });
   // Remember the most recently interacted pane, including clicks on read-only
   // source text and toolbar buttons that Safari does not focus on click.
-  let filePaneFocused=false;
-  const trackPane=(event:Event)=>{filePaneFocused=!!panel?.contains(event.target as Node);};
+  let rightPaneFocused = false;
+  const trackPane = (event: Event) => {
+    const target = event.target as Node | null;
+    rightPaneFocused = !!(target && (panel?.contains(target) || sideAside?.contains(target)));
+  };
   onMount(()=>{window.addEventListener("pointerdown",trackPane,true);window.addEventListener("focusin",trackPane,true);});
   onCleanup(()=>{window.removeEventListener("pointerdown",trackPane,true);window.removeEventListener("focusin",trackPane,true);});
   function keys(e: KeyboardEvent) {
-    if (!available() || e.defaultPrevented || e.isComposing || hasOverlay()) return;
-    if (opened() && filePaneFocused && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase()==="b" && !e.isComposing) {
-      e.preventDefault();e.stopImmediatePropagation();
-      if(!e.repeat)setTree(v=>!v);
-      return;
+    if (e.defaultPrevented || e.isComposing || hasOverlay()) return;
+    if (isFocusModeShortcut(e)) {
+      const active = document.activeElement;
+      const inRightPane =
+        (opened() && !!(panel?.contains(active) || rightPaneFocused)) ||
+        (sideVisible() && !!(sideAside?.contains(active) || rightPaneFocused));
+      if (inRightPane && available()) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (!e.repeat) {
+          setSplit(false);
+          setMaximized(v => !v);
+        }
+        return;
+      }
+      if (p.onSetSidebar) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (!e.repeat) {
+          if (maximized()) {
+            setMaximized(false);
+            return;
+          }
+          const sbOpen = p.sidebar?.() ?? false;
+          const filesOpen = opened() && available();
+          const sideOpen = sideVisible() && available();
+          if (sbOpen || filesOpen || sideOpen) {
+            zenRestore = {
+              sidebar: sbOpen,
+              panel: filesOpen ? "files" : sideOpen ? "side" : "none",
+            };
+            p.onSetSidebar(false);
+            setFilesOpened(false);
+            setSideVisible(false);
+            setSplit(false);
+          } else if (zenRestore) {
+            const restore = zenRestore;
+            zenRestore = null;
+            p.onSetSidebar(restore.sidebar);
+            if (restore.panel === "files" && available()) setOpened(true);
+            else if (restore.panel === "side" && openSide()) {
+              setFilesOpened(false);
+              setSideVisible(true);
+              openSide()?.();
+            }
+          } else {
+            p.onSetSidebar(true);
+          }
+        }
+        return;
+      }
+      if ((opened() || sideVisible()) && available()) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (!e.repeat) {
+          setSplit(false);
+          setMaximized(v => !v);
+        }
+        return;
+      }
     }
-    if ((opened() || sideVisible()) && e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.key.toLowerCase() === "f" && !e.isComposing) {
+    if (!available()) return;
+    if (opened() && hasPrimaryModifier(e) && !e.altKey && e.shiftKey && (e.code === "KeyB" || e.key.toLowerCase() === "b")) {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (!e.repeat) { setSplit(false); setMaximized(v => !v); }
+      if (!e.repeat) setTree(v => !v);
       return;
     }
-    if ((opened() || sideVisible()) && e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.key.toLowerCase() === "e" && !e.isComposing) {
+    if ((opened() || sideVisible()) && hasPrimaryModifier(e) && !e.altKey && e.shiftKey && (e.code === "KeyE" || e.key.toLowerCase() === "e")) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (!e.repeat) { setMaximized(false); setSplit(v => !v); }
       return;
     }
-    if (openSide() && e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey && e.key.toLowerCase() === "j" && !e.isComposing) {
+    if (openSide() && isBtwShortcut(e)) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (!e.repeat) {
-        if (sideVisible()) setSideVisible(false);
-        else {
+        zenRestore = null;
+        if (sideVisible()) {
+          const sideComposer = sideTarget()?.querySelector<HTMLTextAreaElement>("textarea");
+          if (e.shiftKey || (sideComposer && document.activeElement === sideComposer)) {
+            setSideVisible(false);
+          } else {
+            focusSideComposer();
+          }
+        } else {
           setFilesOpened(false);
           setSideVisible(true);
           openSide()?.();
+          rightPaneFocused = true;
+          focusSideComposer();
         }
       }
       return;
     }
-    if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "j" && !e.isComposing) {
+    if (hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && (e.code === "KeyJ" || e.key.toLowerCase() === "j")) {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (!e.repeat) setOpened(v => !v);
+      if (!e.repeat) {
+        zenRestore = null;
+        setOpened(v => {
+          const next = !v;
+          rightPaneFocused = next;
+          return next;
+        });
+      }
       return;
     }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+    if (hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && (e.code === "KeyP" || e.key.toLowerCase() === "p")) {
       e.preventDefault();
       e.stopImmediatePropagation();
+      zenRestore = null;
       setOpened(true);
+      rightPaneFocused = true;
       setSearch("");
       requestAnimationFrame(() => searchInput?.focus());
+      return;
     }
-    if (e.metaKey && e.key === "/" && panel?.contains(document.activeElement)) {
+    if (hasPrimaryModifier(e) && !e.altKey && !e.shiftKey && e.key === "/" && panel?.contains(document.activeElement)) {
       e.preventDefault();
       e.stopImmediatePropagation();
       setSourceMode((v) => !v);
+      return;
     }
     if (e.key === "Escape" && document.querySelector(".find-bar")) return;
-    if (e.key === "Escape" && (maximized() || split() || panel?.contains(document.activeElement))) {
+    if (e.key === "Escape" && opened() && (maximized() || split() || panel?.contains(document.activeElement))) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (search() !== null) setSearch(null);
       else if (maximized()) setMaximized(false);
       else if (split()) setSplit(false);
-      else setOpened(false);
+      else { setOpened(false); rightPaneFocused = false; }
     }
   }
   const closeSideOnEscape = (event: KeyboardEvent) => {
-    if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing && !hasOverlay() && sideVisible()) {
-      event.preventDefault();setSideVisible(false);
+    if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing && !hasOverlay() && !document.querySelector(".find-bar") && sideVisible()) {
+      event.preventDefault();
+      if (maximized()) setMaximized(false);
+      else if (split()) setSplit(false);
+      else { setSideVisible(false); rightPaneFocused = false; }
     }
   };
   onMount(() => window.addEventListener("keydown", closeSideOnEscape));
@@ -824,13 +924,18 @@ export function FilePanelProvider(p: {
       target: sideTarget,
       available: () => !!openSide(),
       visible: sideVisible,
-      show: () => {
+      show: (opts?: { focus?: boolean }) => {
         if (!openSide()) return;
+        zenRestore = null;
         setFilesOpened(false);
         setSideVisible(true);
         openSide()?.();
+        if (opts?.focus) {
+          rightPaneFocused = true;
+          focusSideComposer();
+        }
       },
-      hide: () => setSideVisible(false),
+      hide: () => { setSideVisible(false); rightPaneFocused = false; },
       register: fn => {
         setOpenSide(() => fn);
         // A side question that unmounts and immediately mounts again (a
@@ -840,12 +945,23 @@ export function FilePanelProvider(p: {
       },
     }}>
     <PanelContext.Provider
-      value={{ toggle: () => setOpened((v) => !v), open: opened, available }}
+      value={{
+        toggle: () => {
+          zenRestore = null;
+          setOpened(v => {
+            const next = !v;
+            rightPaneFocused = next;
+            return next;
+          });
+        },
+        open: opened,
+        available,
+      }}
     >
       <FileReferenceContext.Provider value={resolver}>
         <span ref={layoutMarker} hidden />
         {p.children}
-        <aside class="btw-sidebar" classList={{ "file-panel": sideVisible(), maximized: sideVisible() && maximized() }} style={{ display: sideVisible() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
+        <aside ref={el => { sideAside = el; }} class="btw-sidebar" classList={{ "file-panel": sideVisible(), maximized: sideVisible() && maximized() }} style={{ display: sideVisible() ? undefined : "none" }} aria-label="Side question panel"><div class="file-panel-resize" role="separator" aria-label="Resize side question panel" aria-orientation="vertical" onPointerDown={e=>resize(e)} /><div ref={setSideTarget} class="btw-sidebar-content" /></aside>
         <Show when={opened() && available()}>
           <aside
             ref={(el) => {
@@ -875,7 +991,7 @@ export function FilePanelProvider(p: {
             />
             <div class="file-tabs file-header" data-tauri-drag-region>
               
-              <button aria-label={maximized()?"Restore conversation":"Expand file editor"} title={maximized()?"Restore conversation (⌘⇧F)":"Expand file editor (⌘⇧F)"} aria-keyshortcuts="Meta+Shift+F" aria-pressed={maximized()} onClick={()=>{setSplit(false);setMaximized(v=>!v);}}>
+              <button aria-label={maximized()?"Restore conversation":"Expand file editor"} title={maximized()?`Restore conversation (${expandShortcutLabel()})`:`Expand file editor (${expandShortcutLabel()})`} aria-keyshortcuts="Meta+\\" aria-pressed={maximized()} onClick={()=>{setSplit(false);setMaximized(v=>!v);}}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d={maximized()?"M4 9h5V4m6 0v5h5M4 15h5v5m6 0v-5h5":"M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5"}/></svg>
               </button>
               <button aria-label={split()?"Exit side-by-side view":"Side by side, full height"} title={split()?"Exit side-by-side view (⌘⇧E or Esc)":"Side by side, full height (⌘⇧E)"} aria-keyshortcuts="Meta+Shift+E" aria-pressed={split()} onClick={()=>{setMaximized(false);setSplit(v=>!v);}}>
@@ -883,8 +999,8 @@ export function FilePanelProvider(p: {
               </button>
               <button
                 aria-label="Toggle file explorer"
-                title="Toggle file explorer (⌘B)"
-                aria-keyshortcuts="Meta+B"
+                title={`Toggle file explorer (${fileTreeShortcutLabel()})`}
+                aria-keyshortcuts="Meta+Shift+B"
                 aria-expanded={tree()}
                 onClick={() => setTree((v) => !v)}
               >

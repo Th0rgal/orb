@@ -21,8 +21,10 @@ Do not wire the new dialog to those scans and present it as exhaustive search.
 
 ## Interaction contract
 
-The titlebar button, Command-K on macOS, and Control-K elsewhere open one search
-surface. The shortcut works from the composer without sending or changing its
+The titlebar button, Command-Shift-F on macOS, Control-Shift-F elsewhere (plus
+Command-F / Control-F when focus is inside `#orb-sidebar`), open one search
+surface. Command-K / Control-K is reserved for opening and focusing the `/btw`
+side-question panel. The shortcut works from the composer without sending or changing its
 draft. Respect IME composition and higher-priority modal interactions. When search
 is already open, the shortcut focuses its input rather than opening another copy.
 

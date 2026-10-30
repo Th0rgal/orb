@@ -9,11 +9,11 @@ import {
   type Mission,
 } from "../src/api";
 import { startDiagnostics } from "../src/diagnostics";
-import { isSearchShortcut } from "../src/keyboardShortcuts";
+import { isBtwShortcut, isFocusModeShortcut, isSearchShortcut } from "../src/keyboardShortcuts";
 import { resolveTargetKeys, splitUtf16Highlights } from "../src/searchTarget";
 import type { StreamItem } from "../src/transcriptModel";
 
-describe("conversation search keyboard shortcuts", () => {
+describe("conversation search and side panel keyboard shortcuts", () => {
   const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
 
   afterEach(() => {
@@ -22,34 +22,63 @@ describe("conversation search keyboard shortcuts", () => {
     }
   });
 
-  it("matches Command-K on macOS and Control-K on non-macOS while respecting IME and modifiers", () => {
+  it("matches Command-Shift-F for global search, Command-K / Command-Shift-J for /btw, and Command-\\ for focus mode", () => {
     Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
     expect(
-      isSearchShortcut(new KeyboardEvent("keydown", { key: "k", code: "KeyK", metaKey: true })),
+      isSearchShortcut(
+        new KeyboardEvent("keydown", { key: "F", code: "KeyF", metaKey: true, shiftKey: true }),
+      ),
     ).toBe(true);
     expect(
-      isSearchShortcut(new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true })),
+      isSearchShortcut(new KeyboardEvent("keydown", { key: "f", code: "KeyF", metaKey: true })),
     ).toBe(false);
     expect(
       isSearchShortcut(
-        new KeyboardEvent("keydown", { key: "k", code: "KeyK", metaKey: true, shiftKey: true }),
+        new KeyboardEvent("keydown", { key: "F", code: "KeyF", ctrlKey: true, shiftKey: true }),
       ),
     ).toBe(false);
     const imeEvent = new KeyboardEvent("keydown", {
-      key: "k",
-      code: "KeyK",
+      key: "F",
+      code: "KeyF",
       metaKey: true,
+      shiftKey: true,
       isComposing: true,
     });
     expect(isSearchShortcut(imeEvent)).toBe(false);
 
-    Object.defineProperty(navigator, "platform", { value: "Linux x86_64", configurable: true });
     expect(
-      isSearchShortcut(new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true })),
+      isBtwShortcut(new KeyboardEvent("keydown", { key: "k", code: "KeyK", metaKey: true })),
     ).toBe(true);
     expect(
-      isSearchShortcut(new KeyboardEvent("keydown", { key: "k", code: "KeyK", metaKey: true })),
+      isBtwShortcut(
+        new KeyboardEvent("keydown", { key: "J", code: "KeyJ", metaKey: true, shiftKey: true }),
+      ),
+    ).toBe(true);
+    expect(
+      isFocusModeShortcut(
+        new KeyboardEvent("keydown", { key: "\\", code: "Backslash", metaKey: true }),
+      ),
+    ).toBe(true);
+
+    Object.defineProperty(navigator, "platform", { value: "Linux x86_64", configurable: true });
+    expect(
+      isSearchShortcut(
+        new KeyboardEvent("keydown", { key: "F", code: "KeyF", ctrlKey: true, shiftKey: true }),
+      ),
+    ).toBe(true);
+    expect(
+      isSearchShortcut(
+        new KeyboardEvent("keydown", { key: "F", code: "KeyF", metaKey: true, shiftKey: true }),
+      ),
     ).toBe(false);
+    expect(
+      isBtwShortcut(new KeyboardEvent("keydown", { key: "k", code: "KeyK", ctrlKey: true })),
+    ).toBe(true);
+    expect(
+      isFocusModeShortcut(
+        new KeyboardEvent("keydown", { key: "\\", code: "Backslash", ctrlKey: true }),
+      ),
+    ).toBe(true);
   });
 });
 

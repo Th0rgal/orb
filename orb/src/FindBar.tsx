@@ -444,7 +444,13 @@ export function FindBar() {
     hadQuery = Boolean(seed ?? prevQuery);
 
     positionBar();
-    setLabel(nextScope.matches('.file-preview') ? 'file' : 'conversation');
+    setLabel(
+      nextScope.matches('.file-preview')
+        ? 'file'
+        : nextScope.matches('.btw-thread')
+          ? 'side question'
+          : 'conversation',
+    );
     setFailure('');
     setOpen(true);
 
@@ -494,11 +500,13 @@ export function FindBar() {
     const key = e.key.toLowerCase();
 
     if (mod && !e.shiftKey && !e.altKey && key === 'f') {
+      if (document.getElementById('orb-sidebar')?.contains(document.activeElement)) return;
       const origin = lastTarget?.isConnected
         ? lastTarget
         : (document.activeElement as HTMLElement | null);
       const nextScope =
         origin?.closest<HTMLElement>('.file-preview,.btw-thread,.scroll,[data-find-conversation]') ??
+        origin?.closest('.btw-panel,.btw-sidebar')?.querySelector<HTMLElement>('.btw-thread') ??
         origin?.closest('.file-panel')?.querySelector<HTMLElement>('.file-preview') ??
         document.querySelector<HTMLElement>('.scroll,[data-find-conversation]') ??
         undefined;

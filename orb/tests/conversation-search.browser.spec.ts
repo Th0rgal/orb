@@ -379,7 +379,7 @@ test("global conversation search: <100ms open, draft safety, out-of-order reject
     await composer.fill("Keep my unsent draft intact");
 
     const isMac = await page.evaluate(() => /mac|iphone|ipad|ipod/i.test(navigator.platform));
-    const chord = isMac ? "Meta+k" : "Control+k";
+    const chord = isMac ? "Meta+Shift+f" : "Control+Shift+f";
 
     // Measure shortcut open + input focus latency (< 100 ms target).
     const openMs = await page.evaluate(
@@ -387,8 +387,9 @@ test("global conversation search: <100ms open, draft safety, out-of-order reject
         const t0 = performance.now();
         window.dispatchEvent(
           new KeyboardEvent("keydown", {
-            key: "k",
-            code: "KeyK",
+            key: "F",
+            code: "KeyF",
+            shiftKey: true,
             metaKey: isMacPlatform,
             ctrlKey: !isMacPlatform,
             bubbles: true,
@@ -474,6 +475,27 @@ test("global conversation search: <100ms open, draft safety, out-of-order reject
     await page.keyboard.press("Enter");
     await expect(page.getByText("Passage updated since search")).toBeVisible();
     await expect(page.getByText("Updated passage text after replacement.")).toBeVisible();
+
+    // Command-F inside the focused sidebar opens global search, and Command-\ toggles full-width Zen mode.
+    const findChord = isMac ? "Meta+f" : "Control+f";
+    const zenChord = isMac ? "Meta+\\" : "Control+\\";
+    const btwChord = isMac ? "Meta+k" : "Control+k";
+    await page.locator("#orb-sidebar button.row").first().focus();
+    await page.keyboard.press(findChord);
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    // Command-K opens /btw on the open conversation; Command-\ from main hides both sidebar and /btw, then restores both.
+    await page.keyboard.press(btwChord);
+    await expect(page.locator(".btw-sidebar")).toBeVisible();
+    await page.locator(".main textarea").first().focus();
+    await page.keyboard.press(zenChord);
+    await expect(page.locator(".app")).toHaveClass(/sb-hidden/);
+    await expect(page.locator(".btw-sidebar")).not.toBeVisible();
+    await page.keyboard.press(zenChord);
+    await expect(page.locator(".app")).not.toHaveClass(/sb-hidden/);
+    await expect(page.locator(".btw-sidebar")).toBeVisible();
   } finally {
     await core.close();
   }

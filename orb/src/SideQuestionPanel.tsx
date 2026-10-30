@@ -260,7 +260,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   .finally(()=>{if(abort===controller)asking=false;if(current===key()&&abort===controller){setBusy(false);setRunStatus('');queueMicrotask(sendNext);}});
   return true;
  };
- const reveal=()=>{setOpen(true);side?.show();};
+ const reveal=()=>{setOpen(true);side?.show({focus:true});};
  p.ref({ask,open:reveal});
  const escape=(event:KeyboardEvent)=>{
   if(event.key==='Escape'&&!event.defaultPrevented&&open()&&!side){

@@ -25,7 +25,7 @@
 - **[Shared Project Context & Offline Local Starts](ORB_PROJECT_CONTEXT.md)** — Bi-directionally synced `@context` directories and offline local mission creation (`~/.orb/local-origins/`).
 - **[Project Skills](PROJECT_SKILLS.md)** — Synchronized per-project `skills/<name>/SKILL.md` discovery across Codex, Claude Code, Antigravity, OpenCode, and Grok.
 - **[Native Plan Mode (`/plan`)](ORB_PLAN_MODE.md)** — Interactive planning with native question/approval cards and checklist progress tracking.
-- **[Side Agents (`/btw`)](ORB_BTW.md)** — Independent side-panel agent sessions (`⌘⇧J`) with incremental transcript excerpts and `@conversation` archives.
+- **[Side Agents (`/btw`)](ORB_BTW.md)** — Independent side-panel agent sessions (`⌘K` / `⌘⇧J`) with incremental transcript excerpts and `@conversation` archives.
 - **[Cross-Machine Mission Transfer](ORB_MISSION_TRANSFER.md)** — Move idle missions (`Change machine…`) across your computer, Core, and fleet nodes with SHA-256 verified checkpoints and Git bundles.
 - **[Scheduled Continuations](SCHEDULED_CONTINUATIONS.md)** — Durable mission wake-ups (`schedule_wakeup` / `schedule_job_wakeup`).
 - **[File Attachments & Uploads](ORB_FILE_UPLOADS.md)** — Native multi-file picker and 20 MiB destination-routed uploads (`POST /api/uploads`).
