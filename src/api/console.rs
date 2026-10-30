@@ -125,40 +125,16 @@ impl Default for SessionPool {
     }
 }
 
-fn extract_jwt_from_protocols(headers: &HeaderMap) -> Option<String> {
-    let raw = headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())?;
-    // Client sends: ["sandboxed", "jwt.<token>"]
-    for part in raw.split(',').map(|s| s.trim()) {
-        if let Some(rest) = part.strip_prefix("jwt.") {
-            if !rest.is_empty() {
-                return Some(rest.to_string());
-            }
-        }
-    }
-    None
-}
-
 pub async fn console_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Enforce auth in non-dev mode by taking JWT from Sec-WebSocket-Protocol.
-    let session_key = if state.config.auth.auth_required(state.config.dev_mode) {
-        let token = match extract_jwt_from_protocols(&headers) {
-            Some(t) => t,
-            None => return (StatusCode::UNAUTHORIZED, "Missing websocket JWT").into_response(),
-        };
-        if !auth::verify_token_for_config(&token, &state.config) {
-            return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
-        }
-        // Use token hash as session key for authenticated users
-        format!("auth:{:x}", md5::compute(&token))
-    } else {
-        // In dev mode, use a simple key
-        "dev:default".to_string()
+    // Enforce JWT subprotocol auth outside dev mode, and loopback-only guards in dev mode.
+    let session_key = match auth::authenticate_websocket_protocols(&headers, &state.config) {
+        Ok(Some(token)) => format!("auth:{:x}", md5::compute(&token)),
+        Ok(None) => "dev:default".to_string(),
+        Err((status, message)) => return (status, message).into_response(),
     };
 
     tracing::info!(session_key = %session_key, "Console websocket upgrade requested");
@@ -505,18 +481,11 @@ pub async fn workspace_shell_ws(
     AxumPath(workspace_id): AxumPath<Uuid>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Enforce auth in non-dev mode
-    let session_key = if state.config.auth.auth_required(state.config.dev_mode) {
-        let token = match extract_jwt_from_protocols(&headers) {
-            Some(t) => t,
-            None => return (StatusCode::UNAUTHORIZED, "Missing websocket JWT").into_response(),
-        };
-        if !auth::verify_token_for_config(&token, &state.config) {
-            return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
-        }
-        format!("workspace:{}:{:x}", workspace_id, md5::compute(&token))
-    } else {
-        format!("workspace:{}:dev", workspace_id)
+    // Enforce JWT subprotocol auth outside dev mode, and loopback-only guards in dev mode.
+    let session_key = match auth::authenticate_websocket_protocols(&headers, &state.config) {
+        Ok(Some(token)) => format!("workspace:{}:{:x}", workspace_id, md5::compute(&token)),
+        Ok(None) => format!("workspace:{}:dev", workspace_id),
+        Err((status, message)) => return (status, message).into_response(),
     };
 
     tracing::info!(

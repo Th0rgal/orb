@@ -543,8 +543,8 @@ OPENCODE_PERMISSIVE=true
 # (recommended if you enabled strong workspace skill isolation in section 3.2.1).
 # OPENCODE_CONFIG_DIR=/var/lib/opencode/.config/opencode
 
-# Server bind
-HOST=0.0.0.0
+# Server bind (keep 127.0.0.1 behind Nginx/Caddy)
+HOST=127.0.0.1
 PORT=3000
 
 # Default filesystem root for Core (agent still has full system access)
@@ -553,10 +553,10 @@ LIBRARY_PATH=/root/.sandboxed-sh/library
 # Library remote (optional, can also be set via dashboard Settings page)
 LIBRARY_REMOTE=git@github.com:<your-org>/<your-library-repo>.git
 
-# Auth (set DEV_MODE=false on real deployments)
+# Auth (DEV_MODE=false enforces authentication; replace password and secret)
 DEV_MODE=false
-DASHBOARD_PASSWORD=change-me
-JWT_SECRET=change-me-to-a-long-random-string
+DASHBOARD_PASSWORD=<set-a-strong-password>
+JWT_SECRET=<output-of-openssl-rand-hex-32>
 JWT_TTL_DAYS=30
 
 # Dashboard Console (local shell)
