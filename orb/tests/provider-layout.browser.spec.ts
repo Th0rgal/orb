@@ -39,7 +39,7 @@ test('compact quota rows, separate account actions and API key add/edit',async({
  const key=page.locator('.p-acc-wrap').filter({hasText:'Work key'});await key.getByRole('button',{name:/Actions for/}).click();await page.getByRole('menuitem',{name:'Edit API key'}).click();
  await expect(dialog.locator('input[type=password]')).toHaveValue('');await dialog.locator('input[type=password]').fill('replacement-test-key');await dialog.getByRole('button',{name:'Save',exact:true}).click();await expect(dialog).toHaveCount(0);
  expect(writes[1]).toEqual({method:'PUT',body:{name:'Work key',api_key:'replacement-test-key'}});
- await account.locator('.p-acc-btn').click();
+ await expect(account.locator('.p-acc-btn')).toHaveAttribute('aria-expanded','true');
  await expect(account.locator('.provider-usage-chip-label')).toContainText(['Weekly']);
  const cloud=page.getByRole('region',{name:'Cloud agents'});
  await cloud.getByRole('button',{name:/Cursor Cloud/}).click();
