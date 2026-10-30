@@ -387,6 +387,16 @@ describe("telemetry redaction and SearchDialog state discipline", () => {
     expect(document.body.querySelectorAll("script").length).toBe(0);
     expect(document.body.querySelectorAll("img[onerror]").length).toBe(0);
 
+    // Native <select> filters preserve browser ArrowDown/ArrowUp handling without moving result selection.
+    const dateSelect = screen.getByLabelText("Date range");
+    const downOnSelect = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    dateSelect.dispatchEvent(downOnSelect);
+    expect(downOnSelect.defaultPrevented).toBe(false);
+
     // Explicit Open passage button navigates.
     await fireEvent.click(screen.getByTestId("search-open-hit"));
     expect(onOpenHit).toHaveBeenCalledTimes(1);
