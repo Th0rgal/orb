@@ -14,6 +14,42 @@ pub(super) fn skip_idle_registered_liveness_interrupt(
     watchdog_skips_control_owned_mission(origin, origin_session_id, tags)
 }
 
+pub(super) const REGISTERED_LIVENESS_IDLE_SECS: u64 = 15 * 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RegisteredLivenessIdleDecision {
+    HealthyOrProtected,
+    DeferForProxyStream,
+    CheckOwnershipAndInterrupt,
+}
+
+/// Evaluate whether an active durable run has gone silent past the 15-minute
+/// registered-liveness gate without user wait, remote job, live registered
+/// tools, or bounded builtin-proxy grace (`< 30m`, matching OpenCode's
+/// `PROXY_STREAM_INACTIVITY_CAP` so active reasoning streams or internal
+/// subagent LLM calls are not killed at 15m while wedged CLIs still cap at 30m).
+pub(super) fn evaluate_registered_liveness_idle(
+    idle_secs: u64,
+    state: MissionExecutionState,
+    live_registered_tools: usize,
+    mission_id: Uuid,
+) -> RegisteredLivenessIdleDecision {
+    if idle_secs < REGISTERED_LIVENESS_IDLE_SECS
+        || state == MissionExecutionState::WaitingUser
+        || state == MissionExecutionState::WaitingRemoteJob
+        || live_registered_tools > 0
+    {
+        return RegisteredLivenessIdleDecision::HealthyOrProtected;
+    }
+    if crate::api::proxy_liveness::defers_idle_interrupt(
+        mission_id,
+        std::time::Duration::from_secs(idle_secs),
+    ) {
+        return RegisteredLivenessIdleDecision::DeferForProxyStream;
+    }
+    RegisteredLivenessIdleDecision::CheckOwnershipAndInterrupt
+}
+
 pub(super) fn parse_durable_job_result(result: &serde_json::Value) -> Option<serde_json::Value> {
     fn visit(value: &serde_json::Value, depth: u8) -> Option<serde_json::Value> {
         if depth > 4 {

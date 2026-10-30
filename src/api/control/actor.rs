@@ -1140,55 +1140,68 @@ pub(super) async fn control_actor_loop(
                                     "Failed to persist mission run heartbeat: {error}"
                                 ),
                             }
-                            if idle_secs >= 15 * 60
-                                && state != MissionExecutionState::WaitingUser
-                                && state != MissionExecutionState::WaitingRemoteJob
-                                && live_registered_tools == 0
-                            {
-                                let owned = match mission_store.get_mission(run.mission_id).await {
-                                    Ok(Some(mission)) => skip_idle_registered_liveness_interrupt(
-                                        mission.origin.as_deref(),
-                                        mission.origin_session_id.as_deref(),
-                                        &mission.project.tags,
-                                    ),
-                                    _ => skip_idle_registered_liveness_interrupt(
-                                        None,
-                                        None,
-                                        &[],
-                                    ),
-                                };
-                                if owned {
+                            match evaluate_registered_liveness_idle(
+                                idle_secs,
+                                state,
+                                live_registered_tools,
+                                run.mission_id,
+                            ) {
+                                RegisteredLivenessIdleDecision::HealthyOrProtected => {}
+                                RegisteredLivenessIdleDecision::DeferForProxyStream => {
+                                    tracing::debug!(
+                                        mission_id = %run.mission_id,
+                                        run_id = %run.run_id,
+                                        idle_secs,
+                                        "Registered-liveness interrupt: builtin proxy stream active within 30m cap — deferring"
+                                    );
+                                    continue;
+                                }
+                                RegisteredLivenessIdleDecision::CheckOwnershipAndInterrupt => {
+                                    let owned = match mission_store.get_mission(run.mission_id).await {
+                                        Ok(Some(mission)) => skip_idle_registered_liveness_interrupt(
+                                            mission.origin.as_deref(),
+                                            mission.origin_session_id.as_deref(),
+                                            &mission.project.tags,
+                                        ),
+                                        _ => skip_idle_registered_liveness_interrupt(
+                                            None,
+                                            None,
+                                            &[],
+                                        ),
+                                    };
+                                    if owned {
+                                        tracing::warn!(
+                                            mission_id = %run.mission_id,
+                                            run_id = %run.run_id,
+                                            idle_secs,
+                                            "Registered-liveness interrupt: control-owned mission idle — NOT interrupting"
+                                        );
+                                        continue;
+                                    }
                                     tracing::warn!(
                                         mission_id = %run.mission_id,
                                         run_id = %run.run_id,
                                         idle_secs,
-                                        "Registered-liveness interrupt: control-owned mission idle — NOT interrupting"
+                                        "Interrupting mission after 15 minutes without registered liveness evidence"
                                     );
-                                    continue;
-                                }
-                                tracing::warn!(
-                                    mission_id = %run.mission_id,
-                                    run_id = %run.run_id,
-                                    idle_secs,
-                                    "Interrupting mission after 15 minutes without registered liveness evidence"
-                                );
-                                let _ = mission_store
-                                    .heartbeat_mission_run(
-                                        run.run_id,
-                                        run.generation,
-                                        MissionExecutionState::Stopping,
-                                        None,
-                                    )
-                                    .await;
-                                if running_mission_id == Some(run.mission_id) {
-                                    if let Some(token) = &running_cancel {
-                                        token.cancel();
-                                        runner_force_clear_deadline = Some(
-                                            tokio::time::Instant::now() + RUNNER_FORCE_CLEAR_GRACE,
-                                        );
+                                    let _ = mission_store
+                                        .heartbeat_mission_run(
+                                            run.run_id,
+                                            run.generation,
+                                            MissionExecutionState::Stopping,
+                                            None,
+                                        )
+                                        .await;
+                                    if running_mission_id == Some(run.mission_id) {
+                                        if let Some(token) = &running_cancel {
+                                            token.cancel();
+                                            runner_force_clear_deadline = Some(
+                                                tokio::time::Instant::now() + RUNNER_FORCE_CLEAR_GRACE,
+                                            );
+                                        }
+                                    } else if let Some(runner) = parallel_runners.get_mut(&run.mission_id) {
+                                        runner.cancel();
                                     }
-                                } else if let Some(runner) = parallel_runners.get_mut(&run.mission_id) {
-                                    runner.cancel();
                                 }
                             }
                         }
@@ -3465,12 +3478,17 @@ pub(super) async fn control_actor_loop(
                                         None
                                     };
                                     if let Some(idle) = idle {
-                                        if idle < min_idle {
+                                        if idle < min_idle
+                                            || crate::api::proxy_liveness::defers_idle_interrupt(
+                                                mission_id,
+                                                idle,
+                                            )
+                                        {
                                             tracing::info!(
                                                 mission_id = %mission_id,
                                                 idle_secs = idle.as_secs(),
                                                 threshold_secs = min_idle.as_secs(),
-                                                "Skipping watchdog/cleanup cancel: mission resumed activity before cancel was processed"
+                                                "Skipping watchdog/cleanup cancel: mission resumed activity or has live proxy stream within cap"
                                             );
                                             let _ = respond.send(Ok(
                                                 CancelMissionOutcome::SkippedRecentlyActive,

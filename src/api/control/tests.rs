@@ -24,6 +24,56 @@ fn registered_liveness_interrupt_skips_hermes_tagged_writer() {
     ));
 }
 
+#[test]
+fn registered_liveness_idle_defers_for_live_proxy_stream_up_to_30m_cap() {
+    use super::{
+        evaluate_registered_liveness_idle, MissionExecutionState, RegisteredLivenessIdleDecision,
+    };
+    use uuid::Uuid;
+
+    let silent = Uuid::new_v4();
+    assert_eq!(
+        evaluate_registered_liveness_idle(899, MissionExecutionState::Running, 0, silent),
+        RegisteredLivenessIdleDecision::HealthyOrProtected
+    );
+    assert_eq!(
+        evaluate_registered_liveness_idle(900, MissionExecutionState::Running, 0, silent),
+        RegisteredLivenessIdleDecision::CheckOwnershipAndInterrupt
+    );
+    assert_eq!(
+        evaluate_registered_liveness_idle(914, MissionExecutionState::WaitingUser, 0, silent),
+        RegisteredLivenessIdleDecision::HealthyOrProtected
+    );
+    assert_eq!(
+        evaluate_registered_liveness_idle(914, MissionExecutionState::WaitingRemoteJob, 0, silent),
+        RegisteredLivenessIdleDecision::HealthyOrProtected
+    );
+    assert_eq!(
+        evaluate_registered_liveness_idle(914, MissionExecutionState::Running, 1, silent),
+        RegisteredLivenessIdleDecision::HealthyOrProtected
+    );
+
+    // Production incident (`65407660`, idle_secs = 914): OpenCode's internal
+    // subagent was actively calling `/v1/chat/completions` while outer harness
+    // stdout stayed quiet past 15 minutes. Live proxy activity defers up to 30m.
+    let active = Uuid::new_v4();
+    let _in_flight = crate::api::proxy_liveness::begin_request(active);
+    assert_eq!(
+        evaluate_registered_liveness_idle(914, MissionExecutionState::Running, 0, active),
+        RegisteredLivenessIdleDecision::DeferForProxyStream
+    );
+    assert_eq!(
+        evaluate_registered_liveness_idle(1799, MissionExecutionState::Running, 0, active),
+        RegisteredLivenessIdleDecision::DeferForProxyStream
+    );
+    // Bounded ClockDiscipline: at >= 30m (1800s), proxy grace expires so a
+    // wedged CLI or infinite internal subagent loop still terminates.
+    assert_eq!(
+        evaluate_registered_liveness_idle(1800, MissionExecutionState::Running, 0, active),
+        RegisteredLivenessIdleDecision::CheckOwnershipAndInterrupt
+    );
+}
+
 mod fabricated_origin {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
