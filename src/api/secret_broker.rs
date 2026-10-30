@@ -47,7 +47,12 @@ pub enum GrantScope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grant {
     pub id: Uuid,
-    pub mission_id: Uuid,
+    #[serde(default)]
+    pub mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_label: Option<String>,
     #[serde(default)]
     pub mission_title: Option<String>,
     #[serde(default)]
@@ -55,6 +60,14 @@ pub struct Grant {
     pub scope: GrantScope,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+impl Grant {
+    pub fn subject(&self) -> approval_flow::RequesterSubject {
+        self.requester.clone().unwrap_or_else(|| {
+            approval_flow::RequesterSubject::mission(self.mission_id.unwrap_or_else(Uuid::nil))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +90,14 @@ pub struct SecretRequest {
     pub id: Uuid,
     pub kind: RequestKind,
     pub status: RequestStatus,
-    pub mission_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_label: Option<String>,
     #[serde(default)]
     pub mission_title: Option<String>,
     #[serde(default)]
@@ -111,12 +131,19 @@ pub struct SecretRequest {
 }
 
 impl SecretRequest {
+    pub fn subject(&self) -> approval_flow::RequesterSubject {
+        self.requester.clone().unwrap_or_else(|| {
+            approval_flow::RequesterSubject::mission(self.mission_id.unwrap_or_else(Uuid::nil))
+        })
+    }
+
     /// Client view: the encrypted value of a write never leaves Core.
     pub fn public(&self) -> Value {
         let mut v = serde_json::to_value(self).unwrap_or_default();
         if let Some(o) = v.as_object_mut() {
             o.remove("encrypted_value");
             o.remove("value_sha256");
+            o.remove("owner");
         }
         v
     }
@@ -125,7 +152,12 @@ impl SecretRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub at: DateTime<Utc>,
-    pub mission_id: Uuid,
+    #[serde(default)]
+    pub mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_label: Option<String>,
     #[serde(default)]
     pub paloma_project: Option<String>,
     pub key: String,
@@ -216,7 +248,7 @@ pub fn default_projects(
 fn grant_access(
     defaults: Vec<String>,
     grants: &[Grant],
-    mission: Uuid,
+    subject: &approval_flow::RequesterSubject,
     now: DateTime<Utc>,
 ) -> Access {
     let mut access = Access {
@@ -226,7 +258,7 @@ fn grant_access(
     };
     for g in grants
         .iter()
-        .filter(|g| g.mission_id == mission && g.expires_at > now)
+        .filter(|g| g.subject().same_actor(subject) && g.expires_at > now)
     {
         match &g.scope {
             GrantScope::All => access.all = true,
@@ -237,10 +269,11 @@ fn grant_access(
     access
 }
 
-/// Identity of the calling mission, from the signed MCP session.
+/// Identity of the calling mission or external session, from the signed MCP session.
 #[derive(Debug, Clone)]
 pub struct Caller {
-    pub mission_id: Uuid,
+    pub owner: String,
+    pub subject: approval_flow::RequesterSubject,
     pub mission_title: Option<String>,
     pub paloma_project: Option<String>,
     /// True when the calling mission executes on an untrusted `managed-*` VM.
@@ -333,10 +366,20 @@ impl SecretBroker {
     }
 
     pub async fn access_for(&self, state: &AppState, caller: &Caller) -> Access {
+        if caller.subject.is_external()
+            && super::privilege_broker::store(state).bunker_state().await
+                >= super::privilege_broker::BunkerState::SoftQuarantine
+        {
+            return Access {
+                all: false,
+                projects: Vec::new(),
+                keys: Vec::new(),
+            };
+        }
         let bw = state.settings.get_bitwarden().await;
         let defaults = default_projects(&bw, caller.paloma_project.as_deref());
         let data = self.data.lock().await;
-        grant_access(defaults, &data.grants, caller.mission_id, Utc::now())
+        grant_access(defaults, &data.grants, &caller.subject, Utc::now())
     }
 
     pub async fn list_all(
@@ -374,14 +417,20 @@ impl SecretBroker {
     }
 
     /// Reuse an identical pending request instead of piling up duplicates.
+    #[cfg(test)]
+    pub(crate) async fn seed_pending_for_test(&self, request: SecretRequest) -> SecretRequest {
+        self.open_request(request).await
+    }
+
     async fn open_request(&self, mut request: SecretRequest) -> SecretRequest {
+        let req_subject = request.subject();
         let mut data = self.data.lock().await;
         Self::prune(&mut data, Utc::now());
         if request.kind == RequestKind::Write {
             if let Some(existing) = data.requests.iter_mut().find(|r| {
                 r.status == RequestStatus::Pending
                     && r.kind == RequestKind::Write
-                    && r.mission_id == request.mission_id
+                    && r.subject().same_actor(&req_subject)
                     && r.key == request.key
                     && r.project_id == request.project_id
             }) {
@@ -393,14 +442,14 @@ impl SecretBroker {
                 existing.status = RequestStatus::Expired;
                 existing.resolved_at = Some(Utc::now());
                 existing.encrypted_value = None;
-                existing.error = Some("Superseded by a newer value from the mission".into());
+                existing.error = Some("Superseded by a newer value from the session".into());
             }
         }
         if matches!(request.kind, RequestKind::Delete | RequestKind::Move) {
             if let Some(existing) = data.requests.iter().find(|r| {
                 r.status == RequestStatus::Pending
                     && r.kind == request.kind
-                    && r.mission_id == request.mission_id
+                    && r.subject().same_actor(&req_subject)
                     && r.key == request.key
                     && r.project_id == request.project_id
                     && r.target_project_id == request.target_project_id
@@ -412,7 +461,7 @@ impl SecretBroker {
             if let Some(existing) = data.requests.iter().find(|r| {
                 r.status == RequestStatus::Pending
                     && r.kind == RequestKind::Read
-                    && r.mission_id == request.mission_id
+                    && r.subject().same_actor(&req_subject)
                     && r.key == request.key
                     && r.project_id == request.project_id
                     && r.all_projects == request.all_projects
@@ -428,10 +477,10 @@ impl SecretBroker {
         request
     }
 
-    /// An approved write of this name by this mission in the last hour.
+    /// An approved write of this name by this actor in the last hour.
     async fn recent_approved_write(
         &self,
-        mission: Uuid,
+        subject: &approval_flow::RequesterSubject,
         key: &str,
         project_id: &str,
         value_sha256: &str,
@@ -446,7 +495,7 @@ impl SecretBroker {
             .find(|r| {
                 r.kind == RequestKind::Write
                     && r.status == RequestStatus::Approved
-                    && r.mission_id == mission
+                    && r.subject().same_actor(subject)
                     && r.key.as_deref() == Some(key)
                     && r.project_id.as_deref() == Some(project_id)
                     && r.value_sha256.as_deref() == Some(value_sha256)
@@ -455,8 +504,13 @@ impl SecretBroker {
             .map(|r| r.id)
     }
 
-    /// An approved delete or move of this name by this mission in the last hour.
-    async fn recent_approved(&self, kind: RequestKind, mission: Uuid, key: &str) -> Option<Uuid> {
+    /// An approved delete or move of this name by this actor in the last hour.
+    async fn recent_approved(
+        &self,
+        kind: RequestKind,
+        subject: &approval_flow::RequesterSubject,
+        key: &str,
+    ) -> Option<Uuid> {
         let since = Utc::now() - chrono::Duration::hours(1);
         self.data
             .lock()
@@ -467,7 +521,7 @@ impl SecretBroker {
             .find(|r| {
                 r.kind == kind
                     && r.status == RequestStatus::Approved
-                    && r.mission_id == mission
+                    && r.subject().same_actor(subject)
                     && r.key.as_deref() == Some(key)
                     && r.resolved_at.is_some_and(|t| t > since)
             })
@@ -594,15 +648,25 @@ impl SecretBroker {
         }
         let _resolving = self.resolving.lock().await;
         let current = self.pending_items().await;
+        let now = Utc::now();
         for want in refs {
             let c = current.iter().find(|c| c.id == want.id);
             approval_queue::admit(c, want, confirm_critical)?;
+            if let Some(session_id) = c.and_then(|item| item.requester_subject.session_id()) {
+                crate::control_mcp::gateway::external_session_approval_bounds(
+                    state, session_id, now,
+                )
+                .await?;
+            }
         }
         let mut out = Vec::with_capacity(refs.len());
         for want in refs {
             match self.approve_resolving(state, want.id, None, None).await {
                 Ok(r) => out.push(r),
-                Err(_) => out.extend(self.request(want.id).await),
+                Err(e) => match self.request(want.id).await {
+                    Some(r) if !r.status.is_pending() => out.push(r),
+                    _ => return Err(e),
+                },
             }
         }
         Ok(out)
@@ -619,6 +683,15 @@ impl SecretBroker {
         let request = self.request(id).await.ok_or("Request not found")?;
         request.status.apply(ApprovalEvent::Approve)?;
         let now = Utc::now();
+        let external_hard_expires_at = match request.subject().session_id() {
+            Some(session_id) => Some(
+                crate::control_mcp::gateway::external_session_approval_bounds(
+                    state, session_id, now,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let mut error = None;
         match request.kind {
             RequestKind::Read => {
@@ -644,17 +717,28 @@ impl SecretBroker {
                     },
                     other => return Err(format!("Unsupported scope `{other}` for this request")),
                 };
-                let ttl = ttl_hours
-                    .unwrap_or(DEFAULT_GRANT_TTL_HOURS)
-                    .clamp(1, 24 * 30);
+                let default_ttl = if request.subject().is_external() {
+                    1
+                } else {
+                    DEFAULT_GRANT_TTL_HOURS
+                };
+                let ttl = ttl_hours.unwrap_or(default_ttl).clamp(1, 24 * 30);
+                let mut expires_at = now + chrono::Duration::hours(ttl);
+                if let Some(Some(hard)) = external_hard_expires_at {
+                    if hard < expires_at {
+                        expires_at = hard;
+                    }
+                }
                 let grant = Grant {
                     id: Uuid::new_v4(),
                     mission_id: request.mission_id,
+                    requester: request.requester.clone(),
+                    requester_label: request.requester_label.clone(),
                     mission_title: request.mission_title.clone(),
                     paloma_project: request.paloma_project.clone(),
                     scope,
                     created_at: now,
-                    expires_at: now + chrono::Duration::hours(ttl),
+                    expires_at,
                 };
                 self.data.lock().await.grants.push(grant);
             }
@@ -743,6 +827,8 @@ impl SecretBroker {
             data.audit.push(AuditEntry {
                 at: now,
                 mission_id: out.mission_id,
+                requester: out.requester.clone(),
+                requester_label: out.requester_label.clone(),
                 paloma_project: out.paloma_project.clone(),
                 key: out.key.clone().unwrap_or_default(),
                 project_id: out.project_id.clone(),
@@ -765,6 +851,68 @@ impl SecretBroker {
             .into_iter()
             .find(|s| s.key == key)
             .and_then(|s| s.project_id)
+    }
+
+    /// Revoke active secret grants and expire pending requests bound to an external MCP session.
+    pub async fn revoke_session_grants(&self, session_id: Uuid) -> usize {
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        let before_grants = data.grants.len();
+        data.grants
+            .retain(|g| g.subject().session_id() != Some(session_id));
+        let mut touched = before_grants - data.grants.len();
+        for r in data.requests.iter_mut() {
+            if r.status.is_pending() && r.subject().session_id() == Some(session_id) {
+                r.status = RequestStatus::Expired;
+                r.resolved_at = Some(now);
+                r.encrypted_value = None;
+                r.error = Some("External MCP session revoked".into());
+                touched += 1;
+            }
+        }
+        if touched > 0 {
+            self.save(&data).await;
+            drop(data);
+            self.changed.notify_waiters();
+        }
+        touched
+    }
+
+    /// Wait view used by `GET /api/mcp/requests/secret/:id/wait`.
+    pub async fn wait_for_requester(
+        &self,
+        owner: &str,
+        requester: &approval_flow::RequesterSubject,
+        id: Uuid,
+        wait: Duration,
+    ) -> Result<Value, (axum::http::StatusCode, String)> {
+        let initial = self
+            .request(id)
+            .await
+            .filter(|r| {
+                r.subject().same_actor(requester) && r.owner.as_deref().is_none_or(|o| o == owner)
+            })
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    "Secret request not found".to_string(),
+                )
+            })?;
+        let final_req = if initial.status.is_pending() && !wait.is_zero() {
+            self.wait_resolved(id, wait).await.unwrap_or(initial)
+        } else {
+            initial
+        };
+        Ok(json!({
+            "request_id": final_req.id,
+            "kind": final_req.kind,
+            "status": final_req.status,
+            "name": final_req.key,
+            "project_id": final_req.project_id,
+            "all_projects": final_req.all_projects,
+            "resolved_at": final_req.resolved_at,
+            "error": final_req.error,
+        }))
     }
 }
 
@@ -831,40 +979,44 @@ async fn caller_for(
     state: &Arc<AppState>,
     p: &crate::control_mcp::gateway::Principal,
 ) -> Result<Caller, String> {
-    let mission_id = p
-        .mission_id
-        .ok_or("Secrets are only available to mission-scoped sessions")?;
-    let control = state
-        .control
-        .get_or_spawn(&crate::api::auth::AuthUser {
-            id: p.sub.clone(),
-            username: p.username.clone(),
-        })
-        .await;
-    let mission = control
-        .mission_store
-        .get_mission(mission_id)
+    let subject = p.requester_subject();
+    let (mission, on_managed_node) = if let Some(mission_id) = p.mission_id {
+        let control = state
+            .control
+            .get_or_spawn(&crate::api::auth::AuthUser {
+                id: p.sub.clone(),
+                username: p.username.clone(),
+            })
+            .await;
+        let mission = control
+            .mission_store
+            .get_mission(mission_id)
+            .await
+            .ok()
+            .flatten();
+        let on_managed_node = crate::api::control::remote_grok::placement(
+            &state.config.working_dir,
+            &control.mission_store,
+            mission_id,
+        )
         .await
         .ok()
-        .flatten();
-    let on_managed_node = crate::api::control::remote_grok::placement(
-        &state.config.working_dir,
-        &control.mission_store,
-        mission_id,
-    )
-    .await
-    .ok()
-    .flatten()
-    .is_some_and(|pl| crate::managed::is_managed_node(&pl.node_id));
+        .flatten()
+        .is_some_and(|pl| crate::managed::is_managed_node(&pl.node_id));
+        (mission, on_managed_node)
+    } else {
+        (None, false)
+    };
     // The signed session's project decides default access; the mission record
-    // is only a fallback for sessions issued without one.
+    // is only a fallback for mission sessions issued without one.
     let paloma_project = p
         .project
         .clone()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| mission.as_ref().and_then(|m| m.project.project.clone()));
     Ok(Caller {
-        mission_id,
+        owner: p.sub.clone(),
+        subject,
         mission_title: mission.and_then(|m| m.title),
         paloma_project,
         on_managed_node,
@@ -889,6 +1041,20 @@ pub async fn handle_tool(
 ) -> Result<Value, String> {
     let caller = caller_for(state, p).await?;
     let broker = broker(state);
+    if caller.subject.is_external() {
+        let bunker = super::privilege_broker::store(state).bunker_state().await;
+        if bunker >= super::privilege_broker::BunkerState::HardLockdown {
+            return Err(
+                "Bunker HardLockdown is active; external MCP sessions are suspended".into(),
+            );
+        }
+        if bunker >= super::privilege_broker::BunkerState::SoftQuarantine && name != "secret_list" {
+            return Err(
+                "Fleet is in Bunker SoftQuarantine; external secret requests and mutations are suspended"
+                    .into(),
+            );
+        }
+    }
     let str_arg = |k: &str| {
         args.get(k)
             .and_then(Value::as_str)
@@ -978,7 +1144,10 @@ pub async fn handle_tool(
                         id: Uuid::new_v4(),
                         kind: RequestKind::Read,
                         status: RequestStatus::Pending,
-                        mission_id: caller.mission_id,
+                        owner: Some(caller.owner.clone()),
+                        mission_id: caller.subject.mission_id(),
+                        requester: Some(caller.subject.clone()),
+                        requester_label: caller.subject.external_display_label(),
                         mission_title: caller.mission_title.clone(),
                         paloma_project: caller.paloma_project.clone(),
                         key: Some(key.clone()),
@@ -1021,7 +1190,9 @@ pub async fn handle_tool(
             broker
                 .audit(AuditEntry {
                     at: Utc::now(),
-                    mission_id: caller.mission_id,
+                    mission_id: caller.subject.mission_id(),
+                    requester: Some(caller.subject.clone()),
+                    requester_label: caller.subject.external_display_label(),
                     paloma_project: caller.paloma_project.clone(),
                     key: key.clone(),
                     project_id: project_id.clone(),
@@ -1073,7 +1244,10 @@ pub async fn handle_tool(
                     id: Uuid::new_v4(),
                     kind: RequestKind::Read,
                     status: RequestStatus::Pending,
-                    mission_id: caller.mission_id,
+                    owner: Some(caller.owner.clone()),
+                    mission_id: caller.subject.mission_id(),
+                    requester: Some(caller.subject.clone()),
+                    requester_label: caller.subject.external_display_label(),
                     mission_title: caller.mission_title.clone(),
                     paloma_project: caller.paloma_project.clone(),
                     key: None,
@@ -1142,7 +1316,7 @@ pub async fn handle_tool(
             // A retry after the operator approved the earlier call: done already.
             let value_sha256 = value_digest(state, value).await?;
             if let Some(done) = broker
-                .recent_approved_write(caller.mission_id, &key, &project_id, &value_sha256)
+                .recent_approved_write(&caller.subject, &key, &project_id, &value_sha256)
                 .await
             {
                 return Ok(json!({"status":"stored","request_id": done}));
@@ -1152,7 +1326,10 @@ pub async fn handle_tool(
                     id: Uuid::new_v4(),
                     kind: RequestKind::Write,
                     status: RequestStatus::Pending,
-                    mission_id: caller.mission_id,
+                    owner: Some(caller.owner.clone()),
+                    mission_id: caller.subject.mission_id(),
+                    requester: Some(caller.subject.clone()),
+                    requester_label: caller.subject.external_display_label(),
                     mission_title: caller.mission_title.clone(),
                     paloma_project: caller.paloma_project.clone(),
                     key: Some(key),
@@ -1218,7 +1395,7 @@ pub async fn handle_tool(
                 }))
             };
             let Some(summary) = matches.first().copied() else {
-                if let Some(id) = broker.recent_approved(kind, caller.mission_id, &key).await {
+                if let Some(id) = broker.recent_approved(kind, &caller.subject, &key).await {
                     return done(Some(id));
                 }
                 return Err(format!(
@@ -1236,17 +1413,17 @@ pub async fn handle_tool(
                 ));
             }
             if kind == RequestKind::Move && summary.project_id == wanted {
-                return done(broker.recent_approved(kind, caller.mission_id, &key).await);
+                return done(broker.recent_approved(kind, &caller.subject, &key).await);
             }
             if kind == RequestKind::Move {
                 // A move must not turn into a read: refuse moving a secret this
-                // mission cannot read into a project it can.
+                // session cannot read into a project it can.
                 let access = broker.access_for(state, &caller).await;
                 if !access.allows(&key, summary.project_id.as_deref())
                     && access.allows(&key, wanted.as_deref())
                 {
                     return Err(format!(
-                        "This mission could read `{key}` after the move; use secret_get to ask for it, \
+                        "This session could read `{key}` after the move; use secret_get to ask for it, \
                          or ask Thomas to move it himself."
                     ));
                 }
@@ -1260,7 +1437,10 @@ pub async fn handle_tool(
                     id: Uuid::new_v4(),
                     kind,
                     status: RequestStatus::Pending,
-                    mission_id: caller.mission_id,
+                    owner: Some(caller.owner.clone()),
+                    mission_id: caller.subject.mission_id(),
+                    requester: Some(caller.subject.clone()),
+                    requester_label: caller.subject.external_display_label(),
                     mission_title: caller.mission_title.clone(),
                     paloma_project: caller.paloma_project.clone(),
                     key: Some(key.clone()),
@@ -1414,7 +1594,9 @@ mod tests {
         let mission = Uuid::new_v4();
         let grant = |m, scope, hours| Grant {
             id: Uuid::new_v4(),
-            mission_id: m,
+            mission_id: Some(m),
+            requester: Some(approval_flow::RequesterSubject::mission(m)),
+            requester_label: None,
             mission_title: None,
             paloma_project: None,
             scope,
@@ -1432,7 +1614,12 @@ mod tests {
             ),
             grant(Uuid::new_v4(), GrantScope::All, 1),
         ];
-        let access = grant_access(vec!["p-mc".into()], &grants, mission, now);
+        let access = grant_access(
+            vec!["p-mc".into()],
+            &grants,
+            &approval_flow::RequesterSubject::mission(mission),
+            now,
+        );
         assert!(access.allows("UXON", Some("p-core")));
         assert!(access.allows("ANY", Some("p-mc")));
         assert!(
@@ -1451,7 +1638,10 @@ mod tests {
             id: Uuid::new_v4(),
             kind: RequestKind::Write,
             status: RequestStatus::Pending,
-            mission_id: Uuid::new_v4(),
+            owner: Some("thomas".into()),
+            mission_id: Some(Uuid::new_v4()),
+            requester: None,
+            requester_label: None,
             mission_title: None,
             paloma_project: None,
             key: Some("K".into()),
@@ -1467,6 +1657,7 @@ mod tests {
             error: None,
         };
         assert!(r.public().get("encrypted_value").is_none());
+        assert!(r.public().get("owner").is_none());
     }
 
     #[test]
@@ -1475,7 +1666,10 @@ mod tests {
             id: Uuid::new_v4(),
             kind: RequestKind::Move,
             status: RequestStatus::Pending,
-            mission_id: Uuid::new_v4(),
+            owner: None,
+            mission_id: Some(Uuid::new_v4()),
+            requester: None,
+            requester_label: None,
             mission_title: None,
             paloma_project: None,
             key: Some("K".into()),

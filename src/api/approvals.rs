@@ -393,10 +393,22 @@ async fn describe(
                     .unwrap_or_else(|| quoted(pid)),
                 None => "every project".into(),
             };
-            let who = format!(
-                "mission {}",
-                quoted(r["mission_title"].as_str().unwrap_or("untitled"))
-            );
+            let who = match serde_json::from_value::<super::approval_flow::RequesterSubject>(
+                r["requester"].clone(),
+            ) {
+                Ok(subject) => subject.prompt_who(r["mission_title"].as_str()),
+                Err(_) => match r["mission_id"]
+                    .as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                {
+                    Some(mid) => super::approval_flow::RequesterSubject::mission(mid)
+                        .prompt_who(r["mission_title"].as_str()),
+                    None => format!(
+                        "mission {}",
+                        quoted(r["mission_title"].as_str().unwrap_or("untitled"))
+                    ),
+                },
+            };
             let target = match r["target_project_id"].as_str() {
                 Some(pid) => super::bitwarden::list_projects_raw(state)
                     .await
@@ -425,10 +437,17 @@ async fn describe(
                     if matches!(r["kind"].as_str(), Some("write" | "delete" | "move")) {
                         format!("Allow {who} to {what}")
                     } else {
-                        let hours = req
-                            .ttl_hours
-                            .unwrap_or(super::secret_broker::DEFAULT_GRANT_TTL_HOURS)
-                            .clamp(1, 24 * 30);
+                        let default_hours = if matches!(
+                            serde_json::from_value::<super::approval_flow::RequesterSubject>(
+                                r["requester"].clone()
+                            ),
+                            Ok(super::approval_flow::RequesterSubject::ExternalSession { .. })
+                        ) {
+                            1
+                        } else {
+                            super::secret_broker::DEFAULT_GRANT_TTL_HOURS
+                        };
+                        let hours = req.ttl_hours.unwrap_or(default_hours).clamp(1, 24 * 30);
                         // Mirror SecretBroker::approve: an empty scope means the
                         // secret if one was asked, else every project, else the project.
                         let effective = match req.scope.as_deref().unwrap_or("") {
@@ -658,6 +677,10 @@ async fn describe(
         (&Method::POST, ["", "api", "settings", "restore"]) => {
             "Restore backend settings from a backup".into()
         }
+        (&Method::POST, ["", "api", "mcp", "external-sessions"]) => {
+            let req: crate::control_mcp::gateway::CreateExternalSessionRequest = typed(body)?;
+            req.describe_for_approval()
+        }
         _ => return Err("This request does not need a device approval".into()),
     })
 }
@@ -687,6 +710,7 @@ pub fn is_protected(method: &Method, path: &str) -> bool {
         (&Method::POST, ["", "api", "settings", "restore"]) => true,
         // Backups contain the backend's private key and stored credentials.
         (&Method::GET, ["", "api", "settings", "backup"]) => true,
+        (&Method::POST, ["", "api", "mcp", "external-sessions"]) => true,
         _ => false,
     }
 }
@@ -710,6 +734,7 @@ pub fn always_signed(method: &Method, path: &str) -> bool {
             )
             | (&Method::POST, ["", "api", "privilege-access", _, "approve"])
             | (&Method::POST, ["", "api", "approvals", "approve-all"])
+            | (&Method::POST, ["", "api", "mcp", "external-sessions"])
     )
 }
 
@@ -750,7 +775,8 @@ pub async fn require_device_approval(
     let guarded_prefix = path.starts_with("/api/bitwarden")
         || path.starts_with("/api/approvals")
         || path.starts_with("/api/mission-access")
-        || path.starts_with("/api/privilege-access");
+        || path.starts_with("/api/privilege-access")
+        || path.starts_with("/api/mcp/external-sessions");
     if guarded_prefix
         && (path.contains("//")
             || path.contains('%')
@@ -1203,10 +1229,16 @@ mod tests {
         for path in [
             "/api/approvals/approve-all",
             "/api/privilege-access/approve-all",
+            "/api/mcp/external-sessions",
         ] {
             assert!(is_protected(&Method::POST, path), "{path}");
             assert!(always_signed(&Method::POST, path), "{path}");
         }
+        assert!(!is_protected(&Method::GET, "/api/mcp/external-sessions"));
+        assert!(!is_protected(
+            &Method::DELETE,
+            "/api/mcp/external-sessions/00000000-0000-4000-8000-000000000001"
+        ));
     }
 
     #[test]

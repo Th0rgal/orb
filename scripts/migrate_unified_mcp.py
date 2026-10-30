@@ -58,9 +58,17 @@ def atomic_private(path: Path, data: bytes):
             temporary.unlink(missing_ok=True)
 
 
-def migrate(config_path: Path, binary: Path, base: str, owner: str):
+MISSION_ONLY_TOOLS = {"schedule_wakeup", "schedule_job_wakeup"}
+
+
+def migrate(config_path: Path, binary: Path, base: str, scoped_token: str):
     if not binary.is_absolute() or not binary.is_file():
         raise ValueError("An installed absolute sandboxed-mcp binary is required")
+    if not scoped_token.startswith("mcp1."):
+        raise ValueError(
+            "Missionless coordinator cutover requires a pre-issued mcp1.* credential "
+            "(mint via Orb Settings -> Security -> External MCP Sessions or adopt_hermes_assistant)"
+        )
     # The exact installed build supplies its catalogue; no copied allowlist.
     catalog = subprocess.run([str(binary), "--profile", "coordinator", "--print-catalog"],
         capture_output=True, text=True, timeout=30, check=True)
@@ -78,19 +86,23 @@ def migrate(config_path: Path, binary: Path, base: str, owner: str):
             raise ValueError("Remove the duplicate legacy MCP server in the reviewed configuration first")
     credential = config_path.parent / "mcp-credential"
     old_credential = credential.read_bytes() if credential.exists() else None
-    grant = request(base, "/api/mcp/session", owner, {"role": "coordinator"})
-    token = grant.get("token", "")
-    if not token.startswith("mcp1."):
-        raise RuntimeError("Core did not issue a scoped MCP credential")
+    token = scoped_token
     caps = request(base, "/api/mcp/capabilities", token)
-    if caps.get("identity", {}).get("role") != "coordinator" or {
-            tool["name"] for tool in caps.get("tools", [])} != set(names):
+    identity = caps.get("identity", {})
+    cap_names = {tool["name"] for tool in caps.get("tools", [])}
+    valid_catalog = (
+        cap_names in (set(names), set(names) - MISSION_ONLY_TOOLS)
+        if identity.get("mission_id")
+        else cap_names == (set(names) - MISSION_ONLY_TOOLS)
+    )
+    if identity.get("role") != "coordinator" or not valid_catalog:
         raise RuntimeError("Core and installed MCP catalogue do not match")
+    included = [name for name in names if name in cap_names]
     # Replace only this owned server, preserving other Hermes integrations.
     servers["sandboxed_assistant"] = {
         "command": str(binary), "args": ["--profile", "coordinator"], "timeout": 60,
         "env": {"SANDBOXED_MCP_API_URL": base, "SANDBOXED_MCP_TOKEN_FILE": str(credential)},
-        "tools": {"include": names, "prompts": False, "resources": False},
+        "tools": {"include": included, "prompts": False, "resources": False},
     }
     output = io.StringIO()
     yaml.dump(config, output)
@@ -113,7 +125,7 @@ def migrate(config_path: Path, binary: Path, base: str, owner: str):
         else:
             atomic_private(credential, old_credential)
         raise
-    return len(names)
+    return len(included)
 
 
 def main():
@@ -121,13 +133,13 @@ def main():
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--api-url", required=True)
-    parser.add_argument("--owner-token-file", required=True, type=Path)
+    parser.add_argument("--mcp-token-file", "--owner-token-file", dest="mcp_token_file", required=True, type=Path)
     args = parser.parse_args()
-    if args.owner_token_file.stat().st_mode & 0o077:
-        raise SystemExit("Owner credential file must be private")
+    if args.mcp_token_file.stat().st_mode & 0o077:
+        raise SystemExit("Scoped MCP credential file must be private")
     try:
         count = migrate(args.config.resolve(), args.binary, args.api_url,
-                        args.owner_token_file.read_text().strip())
+                        args.mcp_token_file.read_text().strip())
     except Exception:
         raise SystemExit("MCP migration failed; configuration was not switched. Inspect readiness and retry.") from None
     print(f"Scoped coordinator MCP configured and verified ({count} tools). Restart Hermes to activate.")

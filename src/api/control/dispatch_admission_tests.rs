@@ -8881,7 +8881,7 @@ async fn unified_mcp_action_dispatches_through_core_once_and_returns_durable_res
         Extension(h.user.clone()),
         Json(gateway::SessionRequest {
             role: Role::Coordinator,
-            mission_id: None,
+            mission_id: Some(mission.id),
             project: None,
         }),
     )
@@ -9342,7 +9342,7 @@ async fn unified_mcp_git_executes_on_the_node_and_retry_does_not_repeat_it() {
         Json(gateway::SessionRequest {
             project: None,
             role: Role::Coordinator,
-            mission_id: None,
+            mission_id: Some(mission.id),
         }),
     )
     .await
@@ -9725,19 +9725,26 @@ async fn unified_mcp_core_board_worktrees_use_the_boss_workspace() {
 async fn unified_mcp_operator_auth_discovery_does_not_require_a_mission() {
     use crate::control_mcp::{gateway, Role};
     let h = Harness::new().await;
-    let session = gateway::session(
-        State(h.state.clone()),
-        Extension(h.user.clone()),
-        Json(gateway::SessionRequest {
-            role: Role::Operator,
-            mission_id: None,
-            project: None,
-        }),
-    )
-    .await
-    .unwrap()
-    .0;
-    let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    // `/api/mcp/session` rejects missionless session issuance across every role.
+    assert_eq!(
+        gateway::session(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Json(gateway::SessionRequest {
+                role: Role::Operator,
+                mission_id: None,
+                project: None,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let session =
+        gateway::issue_host_coordinator_session(&h.state, &h.user, "hermes-fixture").unwrap();
+    let mut principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
+    principal.role = Role::Operator;
     let result = gateway::call(
         State(h.state.clone()),
         Extension(principal),
@@ -14760,6 +14767,9 @@ async fn workspace_purge_history_delete_ignores_unrelated_uncertain_actions() {
             action_run_generation: None,
             session_id: Uuid::new_v4(),
             exp: usize::MAX,
+            client_kind: None,
+            client_label: None,
+            host_hint: None,
         };
         conn.execute(
             "INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state) VALUES('uncertain',?1,'test','retry','fingerprint',?2,'resume_mission',?3,'reconciliation_required')",
@@ -14883,6 +14893,9 @@ async fn workspace_purge_history_delete_retains_inherited_successor_parent() {
             action_run_generation: None,
             session_id: Uuid::new_v4(),
             exp: usize::MAX,
+            client_kind: None,
+            client_label: None,
+            host_hint: None,
         };
         conn.execute("INSERT INTO mcp_actions_v1(id,owner,scope,retry_key,fingerprint,principal,tool,arguments,state) VALUES('replacement',?1,'test','retry','fingerprint',?2,'start_mission',?3,'queued')",
             rusqlite::params![h.user.id, serde_json::to_string(&principal).unwrap(), json!({"supersedes_mission_id":worker.id}).to_string()]).unwrap();
@@ -15749,4 +15762,647 @@ async fn recovery_stale_timer_cannot_restart_or_fail_a_manual_resume() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn external_mcp_session_lifecycle_allowlist_revocation_cascade_bunker_and_wait() {
+    use crate::control_mcp::{
+        gateway::{
+            call, capabilities, create_external_session, list_external_sessions, renew,
+            revoke_external_session, verify, wait_request, Call, CreateExternalSessionRequest,
+            WaitQuery,
+        },
+        Role,
+    };
+
+    let h = Harness::new().await;
+    let target_mission = h.writer(MissionStatus::Active, None).await;
+
+    // Operator role cannot be minted as an external session.
+    assert_eq!(
+        create_external_session(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Json(CreateExternalSessionRequest {
+                role: Role::Operator,
+                project: None,
+                client_kind: Some(crate::api::approval_flow::ExternalClientKind::LocalMcp),
+                client_label: Some("mac-shell".into()),
+                host_hint: Some("thomas-air".into()),
+                ttl_days: Some(1),
+                hard_ttl_hours: None,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Mint an external Executor session with a 2-hour hard cap.
+    let Json(issued) = create_external_session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(CreateExternalSessionRequest {
+            role: Role::Executor,
+            project: Some("lido".into()),
+            client_kind: Some(crate::api::approval_flow::ExternalClientKind::Cli),
+            client_label: Some("deploy-cli".into()),
+            host_hint: Some("thomas-air".into()),
+            ttl_days: None,
+            hard_ttl_hours: Some(2),
+        }),
+    )
+    .await
+    .unwrap();
+    let token = issued["token"].as_str().unwrap().to_string();
+    let session_id = Uuid::parse_str(issued["session_id"].as_str().unwrap()).unwrap();
+    let hard_exp = issued["hard_expires_at"].as_i64().unwrap();
+    assert_eq!(issued["subject"]["kind"], "external_session");
+    assert_eq!(issued["subject"]["client_kind"], "cli");
+    assert_eq!(issued["subject"]["client_label"], "deploy-cli");
+    assert_eq!(issued["subject"]["host_hint"], "thomas-air");
+
+    let principal = verify(&h.state, &token).unwrap();
+    assert_eq!(principal.mission_id, None);
+    assert_eq!(principal.session_id, session_id);
+
+    // Capabilities expose broker/read tools for mission-less Executor, never start_mission/wakeups.
+    let Json(caps) = capabilities(State(h.state.clone()), Extension(principal.clone())).await;
+    let tool_names: Vec<&str> = caps["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(tool_names.contains(&"secret_get"));
+    assert!(tool_names.contains(&"request_mission_access"));
+    assert!(tool_names.contains(&"request_privileged_access"));
+    assert!(tool_names.contains(&"get_mission"));
+    assert!(!tool_names.contains(&"start_mission"));
+    assert!(!tool_names.contains(&"schedule_wakeup"));
+
+    // Mission-bound tools are denied even if invoked directly.
+    let Json(denied_start) = call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(Call {
+            name: "start_mission".into(),
+            arguments: json!({"title":"nope","prompt":"nope","idempotency_key":"k1"}),
+        }),
+    )
+    .await;
+    assert_eq!(denied_start["ok"], false);
+    assert_eq!(denied_start["error"]["code"], "forbidden");
+
+    // Unapproved mission read is denied for external Executor; request_mission_access + approve unlocks it.
+    let Json(denied_read) = call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(Call {
+            name: "get_mission".into(),
+            arguments: json!({"mission_id": target_mission.id}),
+        }),
+    )
+    .await;
+    assert_eq!(denied_read["ok"], false);
+
+    let access_store = crate::api::mission_access::store(&h.state);
+    let access_req = access_store
+        .request(crate::api::mission_access::NewRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: principal.requester_subject(),
+            requester_title: None,
+            target: target_mission.id,
+            target_title: target_mission.title.clone(),
+            reason: "audit mission logs from local Mac".into(),
+            ttl_hours: Some(1),
+        })
+        .await
+        .unwrap();
+
+    // /wait endpoint sees pending when timeout_secs=0, then sees approved once approved.
+    let Json(wait_pending) = wait_request(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Path(("mission_access".into(), access_req.id)),
+        axum::extract::Query(WaitQuery {
+            timeout_secs: Some(0),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wait_pending["status"], "pending");
+
+    // Another session cannot poll this request via /wait (returns 404).
+    let mut other_principal = principal.clone();
+    other_principal.session_id = Uuid::new_v4();
+    assert_eq!(
+        wait_request(
+            State(h.state.clone()),
+            Extension(other_principal),
+            Path(("mission_access".into(), access_req.id)),
+            axum::extract::Query(WaitQuery {
+                timeout_secs: Some(0),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    access_store
+        .approve_with_state(&h.state, &h.user.id, access_req.id, Some(1))
+        .await
+        .unwrap();
+    let Json(wait_approved) = wait_request(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Path(("mission_access".into(), access_req.id)),
+        axum::extract::Query(WaitQuery {
+            timeout_secs: Some(1),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wait_approved["status"], "approved");
+
+    // Also open a privilege grant and secret grant to verify revocation cascade.
+    let priv_store = crate::api::privilege_broker::store(&h.state);
+    let priv_req = priv_store
+        .request(crate::api::privilege_broker::NewPrivilegeRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: principal.requester_subject(),
+            requester_title: None,
+            target_host: "dgx-spark".into(),
+            scope: crate::api::privilege_broker::PrivilegeScope::OpsRead,
+            allowed_unit: None,
+            reason: "tail journal".into(),
+            session_scoped: true,
+            ttl_minutes: Some(30),
+        })
+        .await
+        .unwrap();
+    priv_store
+        .approve_with_state(&h.state, &h.user.id, priv_req.id, Some(30), Some(true))
+        .await
+        .unwrap();
+
+    // Renewal updates client_label/host_hint and clamps to hard_expires_at.
+    let Json(renewed) = renew(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        axum::body::Bytes::from(r#"{"client_label":"deploy-cli-v2","host_hint":"mac-studio"}"#),
+    )
+    .await
+    .unwrap();
+    assert_eq!(renewed["hard_expires_at"].as_i64(), Some(hard_exp));
+    let renewed_principal = verify(&h.state, renewed["token"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        renewed_principal.client_label.as_deref(),
+        Some("deploy-cli-v2")
+    );
+    assert_eq!(renewed_principal.host_hint.as_deref(), Some("mac-studio"));
+
+    // Bunker SoftQuarantine suspends new external requests; HardLockdown blocks external tool calls & renewal.
+    priv_store
+        .step_bunker(false, true, 0, false, Some("burst".into()))
+        .await
+        .unwrap();
+    let Json(quarantine_req) = call(
+        State(h.state.clone()),
+        Extension(renewed_principal.clone()),
+        Json(Call {
+            name: "request_mission_access".into(),
+            arguments: json!({"target_mission_id": target_mission.id, "reason": "blocked in quarantine"}),
+        }),
+    )
+    .await;
+    assert_eq!(quarantine_req["ok"], false);
+
+    priv_store
+        .step_bunker(true, false, 0, false, Some("canary".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        renew(
+            State(h.state.clone()),
+            Extension(renewed_principal.clone()),
+            axum::body::Bytes::new(),
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let Json(lockdown_call) = call(
+        State(h.state.clone()),
+        Extension(renewed_principal.clone()),
+        Json(Call {
+            name: "get_capabilities".into(),
+            arguments: json!({}),
+        }),
+    )
+    .await;
+    assert_eq!(lockdown_call["ok"], false);
+
+    // Biometric unbunker restores normal state.
+    priv_store
+        .step_bunker(false, false, 0, true, Some("clear".into()))
+        .await
+        .unwrap();
+
+    // List external sessions shows our active session; revoke cascades across brokers.
+    let Json(listed) = list_external_sessions(State(h.state.clone()), Extension(h.user.clone()))
+        .await
+        .unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["sessions"][0]["active"], true);
+
+    // Re-open privilege grant after bunker cleared (mission_access grant from earlier is still live), then revoke external session.
+    assert!(
+        access_req.id
+            == access_store
+                .request(crate::api::mission_access::NewRequest {
+                    owner: h.user.id.clone(),
+                    owner_username: h.user.username.clone(),
+                    requester: renewed_principal.requester_subject(),
+                    requester_title: None,
+                    target: target_mission.id,
+                    target_title: target_mission.title.clone(),
+                    reason: "post-unbunker check".into(),
+                    ttl_hours: Some(1),
+                })
+                .await
+                .unwrap()
+                .id
+    );
+    let priv_req2 = priv_store
+        .request(crate::api::privilege_broker::NewPrivilegeRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: renewed_principal.requester_subject(),
+            requester_title: None,
+            target_host: "dgx-spark".into(),
+            scope: crate::api::privilege_broker::PrivilegeScope::OpsRead,
+            allowed_unit: None,
+            reason: "post-unbunker tail".into(),
+            session_scoped: true,
+            ttl_minutes: Some(30),
+        })
+        .await
+        .unwrap();
+    priv_store
+        .approve_with_state(&h.state, &h.user.id, priv_req2.id, Some(30), Some(true))
+        .await
+        .unwrap();
+
+    let Json(revoked) = revoke_external_session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(session_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(revoked["revoked"], true);
+    assert_eq!(revoked["reaped_privilege_grants"], 1);
+    assert_eq!(revoked["revoked_mission_access_grants"], 1);
+    assert!(verify(&h.state, renewed["token"].as_str().unwrap()).is_err());
+
+    // Hard-expiry clamping: expired hard_expires_at refuses renewal.
+    let Json(short_issued) = create_external_session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(CreateExternalSessionRequest {
+            role: Role::Coordinator,
+            project: None,
+            client_kind: Some(crate::api::approval_flow::ExternalClientKind::LocalMcp),
+            client_label: Some("short".into()),
+            host_hint: None,
+            ttl_days: None,
+            hard_ttl_hours: Some(1),
+        }),
+    )
+    .await
+    .unwrap();
+    let short_principal = verify(&h.state, short_issued["token"].as_str().unwrap()).unwrap();
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        conn.execute(
+            "UPDATE mcp_sessions_v1 SET hard_expires_at=?1 WHERE id=?2",
+            rusqlite::params![
+                chrono::Utc::now().timestamp() - 10,
+                short_principal.session_id.to_string()
+            ],
+        )
+        .unwrap();
+    }
+    assert!(verify(&h.state, short_issued["token"].as_str().unwrap()).is_err());
+    assert_eq!(
+        renew(
+            State(h.state.clone()),
+            Extension(short_principal),
+            axum::body::Bytes::new(),
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn external_mcp_session_gates_missionless_issuance_and_approval_liveness() {
+    use crate::api::approval_queue::{
+        approve_all, ApprovalItem, ApprovalKind, BatchBody, BatchRef,
+    };
+    use crate::api::secret_broker::{RequestKind, RequestStatus, SecretRequest};
+    use crate::control_mcp::{
+        gateway::{
+            create_external_session, issue_host_coordinator_session, list_external_sessions, renew,
+            revoke_external_session, session, verify, CreateExternalSessionRequest, SessionRequest,
+        },
+        Role,
+    };
+
+    let h = Harness::new().await;
+    let target_mission = active_mission(&h, "Approval Gate Target").await;
+
+    // 1. `/api/mcp/session` rejects missionless requests for every role.
+    for role in [Role::Executor, Role::Coordinator, Role::Operator] {
+        assert_eq!(
+            session(
+                State(h.state.clone()),
+                Extension(h.user.clone()),
+                Json(SessionRequest {
+                    project: None,
+                    role,
+                    mission_id: None,
+                }),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    // Host coordinator bootstrap (`adopt_hermes_assistant`) keeps renewable standing token
+    // without appearing in the external-session list.
+    let host_coord = issue_host_coordinator_session(&h.state, &h.user, "hermes-agent").unwrap();
+    let host_principal = verify(&h.state, host_coord["token"].as_str().unwrap()).unwrap();
+    assert_eq!(host_principal.role, Role::Coordinator);
+    assert!(host_principal.mission_id.is_none());
+    assert!(host_principal.requester_subject().is_external());
+    let Json(listed_initial) =
+        list_external_sessions(State(h.state.clone()), Extension(h.user.clone()))
+            .await
+            .unwrap();
+    assert!(listed_initial["sessions"].as_array().unwrap().is_empty());
+    let Json(host_renewed) = renew(
+        State(h.state.clone()),
+        Extension(host_principal),
+        axum::body::Bytes::new(),
+    )
+    .await
+    .unwrap();
+    assert!(host_renewed.get("hard_expires_at").is_none());
+
+    // 2. Mint a bounded external session (1h hard cap) and verify SoftQuarantine + liveness gates
+    // across Read/Write/Delete/Move secrets, MissionAccess, Privilege, and batch `approve_all`.
+    let Json(ext_issued) = create_external_session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Json(CreateExternalSessionRequest {
+            role: Role::Coordinator,
+            project: None,
+            client_kind: Some(crate::api::approval_flow::ExternalClientKind::Cli),
+            client_label: Some("mac-cli".into()),
+            host_hint: Some("thomas-mbp".into()),
+            ttl_days: None,
+            hard_ttl_hours: Some(1),
+        }),
+    )
+    .await
+    .unwrap();
+    let ext_principal = verify(&h.state, ext_issued["token"].as_str().unwrap()).unwrap();
+    let ext_subject = ext_principal.requester_subject();
+    let ext_hard_ts = ext_issued["hard_expires_at"].as_i64().unwrap();
+
+    let secret_broker = crate::api::secret_broker::broker(&h.state);
+    let make_secret_req = |kind: RequestKind, key: &str| SecretRequest {
+        id: Uuid::new_v4(),
+        kind,
+        status: RequestStatus::Pending,
+        owner: Some(h.user.id.clone()),
+        mission_id: None,
+        requester: Some(ext_subject.clone()),
+        requester_label: ext_subject.external_display_label(),
+        mission_title: None,
+        paloma_project: None,
+        key: Some(key.into()),
+        project_id: Some("proj-1".into()),
+        all_projects: false,
+        reason: "regression test".into(),
+        note: None,
+        value_sha256: (kind == RequestKind::Write).then(|| "deadbeef".into()),
+        encrypted_value: None,
+        target_project_id: (kind == RequestKind::Move).then(|| "proj-2".into()),
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+        error: None,
+    };
+
+    let read_req = secret_broker
+        .seed_pending_for_test(make_secret_req(RequestKind::Read, "OPENAI_API_KEY"))
+        .await;
+    let write_req = secret_broker
+        .seed_pending_for_test(make_secret_req(RequestKind::Write, "NEW_KEY"))
+        .await;
+    let delete_req = secret_broker
+        .seed_pending_for_test(make_secret_req(RequestKind::Delete, "OLD_KEY"))
+        .await;
+    let move_req = secret_broker
+        .seed_pending_for_test(make_secret_req(RequestKind::Move, "MOVED_KEY"))
+        .await;
+
+    let access_store = crate::api::mission_access::store(&h.state);
+    let access_req = access_store
+        .request(crate::api::mission_access::NewRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: ext_subject.clone(),
+            requester_title: None,
+            target: target_mission.id,
+            target_title: target_mission.title.clone(),
+            reason: "inspect target".into(),
+            ttl_hours: Some(24),
+        })
+        .await
+        .unwrap();
+
+    let priv_store = crate::api::privilege_broker::store(&h.state);
+    let priv_req = priv_store
+        .request(crate::api::privilege_broker::NewPrivilegeRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: ext_subject.clone(),
+            requester_title: None,
+            target_host: "dgx-spark".into(),
+            scope: crate::api::privilege_broker::PrivilegeScope::OpsRead,
+            allowed_unit: None,
+            reason: "tail logs".into(),
+            session_scoped: true,
+            ttl_minutes: Some(240),
+        })
+        .await
+        .unwrap();
+
+    // Enter Bunker SoftQuarantine: every pending external approval (single and batch) must be rejected.
+    priv_store
+        .step_bunker(false, true, 0, false, Some("quarantine-gate-test".into()))
+        .await
+        .unwrap();
+
+    for id in [read_req.id, write_req.id, delete_req.id, move_req.id] {
+        let err = secret_broker
+            .approve(&h.state, id, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("SoftQuarantine"), "{id}: {err}");
+    }
+    assert!(access_store
+        .approve_with_state(&h.state, &h.user.id, access_req.id, Some(24))
+        .await
+        .unwrap_err()
+        .contains("SoftQuarantine"));
+    assert!(priv_store
+        .approve_with_state(&h.state, &h.user.id, priv_req.id, Some(240), Some(true))
+        .await
+        .is_err());
+
+    let read_item = ApprovalItem::secret(&read_req);
+    assert_eq!(
+        approve_all(
+            State(h.state.clone()),
+            Extension(h.user.clone()),
+            Json(BatchBody {
+                items: vec![BatchRef {
+                    kind: ApprovalKind::Secret,
+                    id: read_req.id,
+                    digest: read_item.digest.clone(),
+                }],
+                confirm_critical: true,
+            }),
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::CONFLICT
+    );
+
+    // Clear SoftQuarantine: approvals succeed and grant expiry clamps to session `hard_expires_at`.
+    priv_store
+        .step_bunker(false, false, 0, true, Some("clear".into()))
+        .await
+        .unwrap();
+
+    let approved_access = access_store
+        .approve_with_state(&h.state, &h.user.id, access_req.id, Some(24))
+        .await
+        .unwrap();
+    assert_eq!(approved_access.expires_at.unwrap().timestamp(), ext_hard_ts);
+
+    let priv_req2 = priv_store
+        .request(crate::api::privilege_broker::NewPrivilegeRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: ext_subject.clone(),
+            requester_title: None,
+            target_host: "dgx-spark".into(),
+            scope: crate::api::privilege_broker::PrivilegeScope::OpsRead,
+            allowed_unit: None,
+            reason: "tail logs post-unbunker".into(),
+            session_scoped: true,
+            ttl_minutes: Some(240),
+        })
+        .await
+        .unwrap();
+    let approved_priv = priv_store
+        .approve_with_state(&h.state, &h.user.id, priv_req2.id, Some(240), Some(true))
+        .await
+        .unwrap();
+    assert_eq!(approved_priv.expires_at.unwrap().timestamp(), ext_hard_ts);
+    assert_eq!(
+        approved_priv.session_expires_at.unwrap().timestamp(),
+        ext_hard_ts
+    );
+
+    let approved_read = secret_broker
+        .approve(&h.state, read_req.id, None, Some(24))
+        .await
+        .unwrap();
+    assert_eq!(approved_read.status, RequestStatus::Approved);
+    let snap = secret_broker.snapshot().await;
+    let grant_exp =
+        chrono::DateTime::parse_from_rfc3339(snap["grants"][0]["expires_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp();
+    assert_eq!(grant_exp, ext_hard_ts);
+
+    // Expire the external session's `hard_expires_at` (which leaves existing requests Pending in
+    // memory): pending Write, Delete, Move, and batch approvals must all fail BEFORE touching
+    // Bitwarden or transitioning status out of Pending.
+    {
+        let conn = h.state.projects.connection.lock().unwrap();
+        conn.execute(
+            "UPDATE mcp_sessions_v1 SET hard_expires_at=?1 WHERE id=?2",
+            rusqlite::params![
+                chrono::Utc::now().timestamp() - 5,
+                ext_principal.session_id.to_string()
+            ],
+        )
+        .unwrap();
+    }
+
+    for req in [&write_req, &delete_req, &move_req] {
+        let err = secret_broker
+            .approve(&h.state, req.id, None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("revoked or expired"),
+            "expected session liveness rejection for {:?}, got: {err}",
+            req.kind
+        );
+        let item = ApprovalItem::secret(req);
+        let batch_err = secret_broker
+            .approve_batch(
+                &h.state,
+                &[BatchRef {
+                    kind: ApprovalKind::Secret,
+                    id: req.id,
+                    digest: item.digest,
+                }],
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(batch_err.contains("revoked or expired"), "{batch_err}");
+    }
+    // Requests remain pending (not executed or silently marked denied by Bitwarden).
+    assert_eq!(secret_broker.pending_count().await, 3);
+
+    // Explicit session revocation then expires those remaining pending requests.
+    let _ = revoke_external_session(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(ext_principal.session_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(secret_broker.pending_count().await, 0);
 }

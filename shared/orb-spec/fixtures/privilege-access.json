@@ -60,6 +60,29 @@
       "unlocks": "logs, status and disk checks as root; no changes",
       "lifetime": "for this session (max 1 h)",
       "requester": "Fleet health"
+    },
+    {
+      "request": {
+        "scope": "ops_read",
+        "target_host": "dgx-spark",
+        "allowed_unit": null,
+        "session_scoped": true,
+        "ttl_minutes": 60,
+        "requester_title": null,
+        "requester_mission_id": null,
+        "requester_label": null,
+        "requester": {
+          "kind": "external_session",
+          "session_id": "d5e6f7a8-0000-4000-8000-000000000088",
+          "client_kind": "cli",
+          "client_label": "sandboxed-mcp",
+          "host_hint": "macbook-air"
+        }
+      },
+      "title": "Read-only ops on dgx-spark",
+      "unlocks": "logs, status and disk checks as root; no changes",
+      "lifetime": "for this session (max 1 h)",
+      "requester": "External \u00b7 macbook-air (sandboxed-mcp)"
     }
   ]
 }

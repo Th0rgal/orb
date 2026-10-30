@@ -251,7 +251,7 @@ struct OrbBitwardenSettings: View {
                             // Grants of one mission are listed together so its title appears once.
                             ForEach(grantGroups, id: \.first!.selfID) { group in
                                 HStack {
-                                    Text(group[0]["mission_title"].text)
+                                    Text(OrbMissionAccessMonitor.requester(group[0]))
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
@@ -593,7 +593,7 @@ struct OrbBitwardenSettings: View {
         var order: [String] = []
         var groups: [String: [OrbJSON]] = [:]
         for g in grants {
-            let id = g["mission_id"].text
+            let id = OrbMissionAccessMonitor.subjectKey(g)
             if groups[id] == nil { order.append(id) }
             groups[id, default: []].append(g)
         }
@@ -666,11 +666,11 @@ struct OrbBitwardenSettings: View {
     @ViewBuilder
     private var pendingRequestsSection: some View {
         if !requests.isEmpty {
-            Section("Pending Mission Requests") {
+            Section("Pending Secret Requests") {
                 ForEach(requests, id: \.selfID) { r in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(describe(r)).font(.subheadline.weight(.medium))
-                        Text([r["mission_title"].text, r["paloma_project"].text].filter { !$0.isEmpty }.joined(separator: " · "))
+                        Text([OrbMissionAccessMonitor.requester(r), r["paloma_project"].text].filter { !$0.isEmpty }.joined(separator: " · "))
                             .font(.caption).foregroundStyle(.secondary)
                         if !r["reason"].text.isEmpty {
                             Text("“\(r["reason"].text)”").font(.caption).italic()

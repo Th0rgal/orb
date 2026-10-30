@@ -1,10 +1,12 @@
 # Approvals
 
-Missions ask for things only the user may grant: secret access (Bitwarden
-read, write, delete, move), privileged access on a host (`ops_read`,
+Missions and external MCP sessions (local Mac IDE harnesses, `sandboxed-mcp`
+CLI, CI, webhooks) ask for things only the user may grant: secret access
+(Bitwarden read, write, delete, move), privileged access on a host (`ops_read`,
 `service_deploy`, `root_exec`) and read access to another mission. These are
 three stores (`secret_broker.rs`, `privilege_broker.rs`, `mission_access.rs`)
-with one approval model on top (`src/api/approval_queue.rs`).
+with one subject identity (`RequesterSubject` in `src/api/approval_flow.rs`)
+and one approval model on top (`src/api/approval_queue.rs`).
 
 ## The model
 
@@ -14,14 +16,31 @@ Every pending request is an `ApprovalItem`:
 | --- | --- |
 | `kind` | `secret`, `privilege` or `mission_access` |
 | `id` | the request id in its store |
-| `requester_mission_id`, `requester_title` | who asks |
+| `requester_mission_id`, `requester_title` | mission id and title when raised by a mission (`null` for external sessions) |
+| `requester_subject`, `requester_label` | structured `RequesterSubject` (`mission` or `external_session`) and display label (`External · <host> (<label>)` or `External · <label>`) |
 | `tier` | what it does: `ops_read` / `service_deploy` / `root_exec`, `read` / `write` / `delete` / `move`, `read_mission` |
 | `target` | where: a host, a secret or project, a mission id |
 | `risk` | `routine`, `elevated` or `critical` (table in `shared/orb-spec/fixtures/approvals.json`) |
-| `digest` | SHA-256 over every field that changes what approving grants (tier, target, mission, lifetime, unit, a write's value digest). Not the reason. |
+| `digest` | domain-separated SHA-256 over every field that changes what approving grants: `orb-approval-v1` for missions (`{kind}\n{id}\n{mission_id}…`) and `orb-approval-v2` for external sessions (`{kind}\n{id}\n{canonical_subject}…`, pinning `session_id`, `client_kind`, and `SHA-256(trimmed_label + "\n" + trimmed_host)[:16]`). Not the reason. |
 
 `GET /api/approvals/queue` lists them for the signed-in user. The per-kind list
-endpoints also carry `digest` on pending requests.
+endpoints also carry `digest`, `requester` and `requester_label` on requests.
+
+## External MCP sessions & secret CLI
+
+`POST /api/mcp/external-sessions` (device-signed) mints bounded `mcp1.`
+sessions without a mission (`role` in `{executor, coordinator}`, never
+`operator`), listed via `GET /api/mcp/external-sessions` and revoked via
+`DELETE /api/mcp/external-sessions/:id` (cascading revocation across session-scoped
+privilege leases, secret grants and mission-access grants). Under Bunker
+`SoftQuarantine` new external secret/privilege/mission-access requests and
+approvals are blocked; under `HardLockdown` all external `mcp1.` sessions and
+renewals are denied.
+
+External callers poll `GET /api/mcp/requests/:kind/:id/wait?timeout_secs=…`
+until decided. On a local Mac, `sandboxed-mcp secret get|env|exec` fetches
+approved secrets into `0600` files inside a `0700` session-isolated directory
+(`session-<session_id>`) without printing secret values.
 
 ## One admission rule
 

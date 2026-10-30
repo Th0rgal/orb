@@ -34,8 +34,9 @@ use super::approval_flow::{self, ApprovalEvent, ApprovalState};
 use super::approval_queue::{self, ApprovalItem, BatchRef};
 use super::auth::AuthUser;
 use super::routes::AppState;
+pub use crate::orb_spec::BunkerState;
 use crate::orb_spec::{
-    bunker_step, observe_privd_command_shadow, privilege_step, BunkerState, PrivdCommandClass,
+    bunker_step, observe_privd_command_shadow, privilege_step, PrivdCommandClass,
     PrivdCommandStepInput, PrivdCommandVerdict, PrivdGrantScope, PrivilegeScopeRank,
     PrivilegeStepInput, ShadowCounter,
 };
@@ -517,7 +518,12 @@ pub struct PrivilegeRequest {
     pub owner: String,
     #[serde(default)]
     pub owner_username: String,
-    pub requester_mission_id: Uuid,
+    #[serde(default)]
+    pub requester_mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_label: Option<String>,
     #[serde(default)]
     pub requester_title: Option<String>,
     /// `"self"` for local root via `orb-privd.sock` / `orb-sudo`, or a fleet host.
@@ -551,6 +557,20 @@ fn default_true() -> bool {
 }
 
 impl PrivilegeRequest {
+    pub fn subject(&self) -> approval_flow::RequesterSubject {
+        if let Some(subject @ approval_flow::RequesterSubject::ExternalSession { .. }) =
+            &self.requester
+        {
+            return subject.clone();
+        }
+        if let Some(mission_id) = self.requester_mission_id {
+            return approval_flow::RequesterSubject::mission(mission_id);
+        }
+        self.requester
+            .clone()
+            .unwrap_or_else(|| approval_flow::RequesterSubject::mission(Uuid::nil()))
+    }
+
     pub fn evaluate(
         &self,
         now: DateTime<Utc>,
@@ -603,7 +623,12 @@ pub struct PrivilegeAuditEntry {
     pub at: DateTime<Utc>,
     pub owner: String,
     pub request_id: Uuid,
-    pub requester_mission_id: Uuid,
+    #[serde(default)]
+    pub requester_mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_label: Option<String>,
     pub target_host: String,
     pub scope: PrivilegeScope,
     /// `requested`, `approved`, `denied`, `expired`, `revoked`, `session_reaped`, `bunker_revoked`.
@@ -620,7 +645,12 @@ pub struct CommandAuditEntry {
     pub at: DateTime<Utc>,
     pub owner: String,
     pub grant_id: Uuid,
-    pub mission_id: Uuid,
+    #[serde(default)]
+    pub mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_label: Option<String>,
     #[serde(default)]
     pub mission_title: Option<String>,
     pub target_host: String,
@@ -716,6 +746,8 @@ impl Persisted {
             owner: r.owner.clone(),
             request_id: r.id,
             requester_mission_id: r.requester_mission_id,
+            requester: r.requester.clone(),
+            requester_label: r.requester_label.clone(),
             target_host: r.target_host.clone(),
             scope: r.scope,
             action: action.into(),
@@ -832,7 +864,7 @@ pub async fn reap_if_initialized(mission_id: Uuid, reason: &str) -> usize {
 pub struct NewPrivilegeRequest {
     pub owner: String,
     pub owner_username: String,
-    pub requester: Uuid,
+    pub requester: approval_flow::RequesterSubject,
     pub requester_title: Option<String>,
     pub target_host: String,
     pub scope: PrivilegeScope,
@@ -849,12 +881,18 @@ fn grant(
     now: DateTime<Utc>,
     ttl_minutes: Option<i64>,
     session_scoped: Option<bool>,
+    hard_expires_at: Option<DateTime<Utc>>,
 ) -> (String, String) {
     let ttl = clamp_ttl_minutes(ttl_minutes.or(Some(r.ttl_minutes)));
     let sess = session_scoped.unwrap_or(r.session_scoped);
     r.ttl_minutes = ttl;
     r.session_scoped = sess;
-    let exp = now + chrono::Duration::minutes(ttl);
+    let mut exp = now + chrono::Duration::minutes(ttl);
+    if let Some(hard) = hard_expires_at {
+        if hard < exp {
+            exp = hard;
+        }
+    }
     r.expires_at = Some(exp);
     r.session_expires_at = Some(exp);
     r.decided_at = Some(now);
@@ -936,6 +974,12 @@ impl PrivilegeBroker {
 
     pub async fn request(&self, new: NewPrivilegeRequest) -> Result<PrivilegeRequest, String> {
         let target_host = normalize_target_host(&new.target_host)?;
+        if new.requester.is_external() && target_host == "self" {
+            return Err(
+                "External MCP sessions have no placement node; specify an explicit fleet target_host instead of \"self\""
+                    .into(),
+            );
+        }
         let now = Utc::now();
         let mut data = self.data.lock().await;
         if data.current_bunker() != BunkerState::Normal {
@@ -947,7 +991,7 @@ impl PrivilegeBroker {
         let bunker = data.current_bunker();
         if let Some(existing) = data.requests.iter().rev().find(|r| {
             r.owner == new.owner
-                && r.requester_mission_id == new.requester
+                && r.subject().same_actor(&new.requester)
                 && r.target_host == target_host
                 && r.scope.to_rank() >= new.scope.to_rank()
                 && (r.state.is_pending() || r.live_grant(now, bunker))
@@ -961,19 +1005,23 @@ impl PrivilegeBroker {
         let open = data
             .requests
             .iter()
-            .filter(|r| r.owner == new.owner && r.requester_mission_id == new.requester)
+            .filter(|r| r.owner == new.owner && r.subject().same_actor(&new.requester))
             .filter(|r| r.state.is_pending())
             .count();
         if open >= MAX_PENDING_PER_MISSION {
             return Err(format!(
-                "This mission already has {open} pending privilege requests; wait for Thomas to answer them"
+                "This session already has {open} pending privilege requests; wait for Thomas to answer them"
             ));
         }
+        let requester_mission_id = new.requester.mission_id();
+        let requester_label = new.requester.external_display_label();
         let r = PrivilegeRequest {
             id: Uuid::new_v4(),
             owner: new.owner,
             owner_username: new.owner_username,
-            requester_mission_id: new.requester,
+            requester_mission_id,
+            requester: Some(new.requester),
+            requester_label,
             requester_title: new.requester_title,
             target_host,
             scope: new.scope,
@@ -1046,8 +1094,30 @@ impl PrivilegeBroker {
         event: ApprovalEvent,
         ttl_minutes: Option<i64>,
         session_scoped: Option<bool>,
+        state: Option<&Arc<AppState>>,
     ) -> Result<PrivilegeRequest, String> {
         let now = Utc::now();
+        let hard_expires_at = if matches!(event, ApprovalEvent::Approve) {
+            let session_id = {
+                let data = self.data.lock().await;
+                data.requests
+                    .iter()
+                    .find(|r| r.id == id && r.owner == owner)
+                    .and_then(|r| r.subject().session_id())
+            };
+            match session_id {
+                Some(sid) => {
+                    let st = state.ok_or_else(|| {
+                        "External session approval requires live AppState verification".to_string()
+                    })?;
+                    crate::control_mcp::gateway::external_session_approval_bounds(st, sid, now)
+                        .await?
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         let mut data = self.data.lock().await;
         data.prune(now);
         if matches!(event, ApprovalEvent::Approve) && data.current_bunker() != BunkerState::Normal {
@@ -1058,13 +1128,19 @@ impl PrivilegeBroker {
             .iter()
             .position(|r| r.id == id && r.owner == owner)
             .ok_or("Request not found")?;
+        if matches!(event, ApprovalEvent::Approve)
+            && data.requests[idx].subject().is_external()
+            && state.is_none()
+        {
+            return Err("External session approval requires live AppState verification".into());
+        }
         let before = data.requests[idx].clone();
         let r = &mut data.requests[idx];
         let next = r.state.apply(event)?;
         let mut minted_token: Option<String> = None;
         let detail = match event {
             ApprovalEvent::Approve => {
-                let (token, detail) = grant(r, now, ttl_minutes, session_scoped);
+                let (token, detail) = grant(r, now, ttl_minutes, session_scoped, hard_expires_at);
                 minted_token = Some(token);
                 Some(detail)
             }
@@ -1122,6 +1198,26 @@ impl PrivilegeBroker {
             ApprovalEvent::Approve,
             ttl_minutes,
             session_scoped,
+            None,
+        )
+        .await
+    }
+
+    pub async fn approve_with_state(
+        &self,
+        state: &Arc<AppState>,
+        owner: &str,
+        id: Uuid,
+        ttl_minutes: Option<i64>,
+        session_scoped: Option<bool>,
+    ) -> Result<PrivilegeRequest, String> {
+        self.transition(
+            owner,
+            id,
+            ApprovalEvent::Approve,
+            ttl_minutes,
+            session_scoped,
+            Some(state),
         )
         .await
     }
@@ -1151,10 +1247,57 @@ impl PrivilegeBroker {
         refs: &[BatchRef],
         confirm_critical: bool,
     ) -> Result<Vec<PrivilegeRequest>, String> {
+        self.approve_batch_inner(None, owner, refs, confirm_critical)
+            .await
+    }
+
+    pub async fn approve_batch_with_state(
+        &self,
+        state: &Arc<AppState>,
+        owner: &str,
+        refs: &[BatchRef],
+        confirm_critical: bool,
+    ) -> Result<Vec<PrivilegeRequest>, String> {
+        self.approve_batch_inner(Some(state), owner, refs, confirm_critical)
+            .await
+    }
+
+    async fn approve_batch_inner(
+        &self,
+        state: Option<&Arc<AppState>>,
+        owner: &str,
+        refs: &[BatchRef],
+        confirm_critical: bool,
+    ) -> Result<Vec<PrivilegeRequest>, String> {
         if refs.is_empty() {
             return Ok(Vec::new());
         }
         let now = Utc::now();
+        let session_ids: Vec<(Uuid, Option<Uuid>)> = {
+            let data = self.data.lock().await;
+            refs.iter()
+                .map(|want| {
+                    let sid = data
+                        .requests
+                        .iter()
+                        .find(|r| r.id == want.id && r.owner == owner && r.state.is_pending())
+                        .and_then(|r| r.subject().session_id());
+                    (want.id, sid)
+                })
+                .collect()
+        };
+        let mut session_bounds = std::collections::HashMap::new();
+        for (req_id, sid) in session_ids {
+            if let Some(sid) = sid {
+                let st = state.ok_or_else(|| {
+                    "External session approval requires live AppState verification".to_string()
+                })?;
+                let hard =
+                    crate::control_mcp::gateway::external_session_approval_bounds(st, sid, now)
+                        .await?;
+                session_bounds.insert(req_id, hard);
+            }
+        }
         let mut data = self.data.lock().await;
         data.prune(now);
         if data.current_bunker() != BunkerState::Normal {
@@ -1168,6 +1311,15 @@ impl PrivilegeBroker {
                 .position(|r| r.id == want.id && r.owner == owner && r.state.is_pending());
             let current = idx.map(|i| ApprovalItem::privilege(&data.requests[i]));
             approval_queue::admit(current.as_ref(), want, confirm_critical)?;
+            if let Some(i) = idx {
+                if data.requests[i].subject().is_external()
+                    && !session_bounds.contains_key(&want.id)
+                {
+                    return Err(
+                        "External session approval requires live AppState verification".into(),
+                    );
+                }
+            }
             idxs.extend(idx);
         }
         let before: Vec<PrivilegeRequest> =
@@ -1179,7 +1331,8 @@ impl PrivilegeBroker {
         for &idx in &idxs {
             let r = &mut data.requests[idx];
             r.state = r.state.apply(ApprovalEvent::Approve)?;
-            let (token, detail) = grant(r, now, None, None);
+            let hard_expires_at = session_bounds.get(&r.id).copied().flatten();
+            let (token, detail) = grant(r, now, None, None, hard_expires_at);
             let snapshot = r.clone();
             data.log(
                 &snapshot,
@@ -1204,25 +1357,54 @@ impl PrivilegeBroker {
     }
 
     pub async fn deny(&self, owner: &str, id: Uuid) -> Result<PrivilegeRequest, String> {
-        self.transition(owner, id, ApprovalEvent::Deny, None, None)
+        self.transition(owner, id, ApprovalEvent::Deny, None, None, None)
             .await
     }
 
     pub async fn revoke(&self, owner: &str, id: Uuid) -> Result<PrivilegeRequest, String> {
-        self.transition(owner, id, ApprovalEvent::Revoke, None, None)
+        self.transition(owner, id, ApprovalEvent::Revoke, None, None, None)
             .await
     }
 
     /// Reap all active session-scoped privilege grants for `mission_id` when its
     /// session finishes, pauses, or is cancelled (`orb_privilege_step` ClockDiscipline).
     pub async fn reap_mission_grants(&self, mission_id: Uuid, reason: &str) -> usize {
+        self.reap_actor_grants(
+            &approval_flow::RequesterSubject::mission(mission_id),
+            true,
+            reason,
+        )
+        .await
+    }
+
+    /// Reap all privilege grants and pending requests bound to an external MCP session.
+    pub async fn reap_session_grants(&self, session_id: Uuid, reason: &str) -> usize {
+        self.reap_actor_grants(
+            &approval_flow::RequesterSubject::external_session(
+                session_id,
+                approval_flow::ExternalClientKind::LocalMcp,
+                "revoked",
+                None,
+            ),
+            false,
+            reason,
+        )
+        .await
+    }
+
+    async fn reap_actor_grants(
+        &self,
+        actor: &approval_flow::RequesterSubject,
+        session_scoped_only: bool,
+        reason: &str,
+    ) -> usize {
         let now = Utc::now();
         let mut data = self.data.lock().await;
         let current_bunker = data.current_bunker();
         let mut reaped = Vec::new();
         for r in data.requests.iter_mut() {
-            if r.requester_mission_id == mission_id
-                && r.session_scoped
+            if r.subject().same_actor(actor)
+                && (!session_scoped_only || r.session_scoped)
                 && (r.state == ApprovalState::Approved || r.state.is_pending())
             {
                 let v = privilege_step(PrivilegeStepInput {
@@ -1232,7 +1414,7 @@ impl PrivilegeBroker {
                     requested_scope: r.scope.to_rank(),
                     max_granted_scope: r.scope.to_rank(),
                     bunker_state: current_bunker,
-                    revoked: false,
+                    revoked: !session_scoped_only,
                     now_epoch: now.timestamp().max(0) as u64,
                     grant_expires_at: r
                         .expires_at
@@ -1240,7 +1422,7 @@ impl PrivilegeBroker {
                         .unwrap_or(0),
                     session_expires_at: now.timestamp().max(0) as u64,
                 });
-                if v.reap_grant {
+                if v.reap_grant || !session_scoped_only {
                     r.state = ApprovalState::Revoked;
                     r.revoked_at = Some(now);
                     r.session_expires_at = Some(now);
@@ -1325,6 +1507,11 @@ impl PrivilegeBroker {
         &self,
         req: VerifyLeaseRequest,
     ) -> Result<VerifyLeaseResponse, String> {
+        let expected_actor = req
+            .requester
+            .clone()
+            .or_else(|| req.mission_id.map(approval_flow::RequesterSubject::mission))
+            .ok_or_else(|| "mission_id or requester subject is required".to_string())?;
         let now = Utc::now();
         let token_hash = sha256_hex(req.lease_token.trim());
         let mut data = self.data.lock().await;
@@ -1334,7 +1521,7 @@ impl PrivilegeBroker {
             .requests
             .iter()
             .find(|r| {
-                r.requester_mission_id == req.mission_id
+                r.subject().same_actor(&expected_actor)
                     && r.lease_token_sha256.as_deref() == Some(token_hash.as_str())
             })
             .cloned()
@@ -1458,6 +1645,8 @@ impl PrivilegeBroker {
             owner: grant.owner.clone(),
             grant_id: grant.id,
             mission_id: grant.requester_mission_id,
+            requester: grant.requester.clone(),
+            requester_label: grant.requester_label.clone(),
             mission_title: grant.requester_title.clone(),
             target_host: target_norm,
             scope: requested_scope,
@@ -1498,7 +1687,7 @@ impl PrivilegeBroker {
             .iter()
             .rev()
             .find(|r| {
-                if r.requester_mission_id != mission_id
+                if r.requester_mission_id != Some(mission_id)
                     || !(r.target_host == target_service
                         || r.target_host == "agent-core"
                         || r.target_host == "orb-core")
@@ -1806,7 +1995,11 @@ impl PrivilegeBroker {
         }
     }
 
-    pub async fn by_requester(&self, owner: &str, requester: Uuid) -> Vec<PrivilegeRequest> {
+    pub async fn by_requester(
+        &self,
+        owner: &str,
+        requester: &approval_flow::RequesterSubject,
+    ) -> Vec<PrivilegeRequest> {
         let mut data = self.data.lock().await;
         if data.prune(Utc::now()) {
             self.save(&data).await;
@@ -1814,10 +2007,38 @@ impl PrivilegeBroker {
         data.requests
             .iter()
             .rev()
-            .filter(|r| r.owner == owner && r.requester_mission_id == requester)
+            .filter(|r| r.owner == owner && r.subject().same_actor(requester))
             .take(50)
             .cloned()
             .collect()
+    }
+
+    /// Wait view used by `GET /api/mcp/requests/privilege/:id/wait`.
+    pub async fn wait_for_requester(
+        &self,
+        owner: &str,
+        requester: &approval_flow::RequesterSubject,
+        id: Uuid,
+        wait: Duration,
+    ) -> Result<Value, (StatusCode, String)> {
+        let initial = self
+            .get(owner, id)
+            .await
+            .filter(|r| r.subject().same_actor(requester))
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    "Privilege request not found".to_string(),
+                )
+            })?;
+        let final_req = if initial.state.is_pending() && !wait.is_zero() {
+            self.wait_decided(owner, id, wait).await.unwrap_or(initial)
+        } else {
+            initial
+        };
+        let mut out = agent_view(self, &final_req).await;
+        out["message"] = json!(decision_note(&final_req));
+        Ok(out)
     }
 }
 
@@ -1832,7 +2053,10 @@ pub struct BunkerStepResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyLeaseRequest {
-    pub mission_id: Uuid,
+    #[serde(default)]
+    pub mission_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<approval_flow::RequesterSubject>,
     pub lease_token: String,
     pub target_host: String,
     /// The machine whose `orb-privd` will run the command. A named-host
@@ -1984,13 +2208,16 @@ pub async fn handle_tool(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    let own = p
-        .mission_id
-        .ok_or("Privileged access tools are only available to mission-scoped sessions")?;
+    let subject = p.requester_subject();
+    if let Some(session_id) = subject.session_id() {
+        if !crate::control_mcp::gateway::external_session_is_live(state, session_id).await {
+            return Err("External MCP session is revoked or expired".into());
+        }
+    }
     let broker = store(state);
     match name {
         "list_privileged_access" => {
-            let list = broker.by_requester(&p.sub, own).await;
+            let list = broker.by_requester(&p.sub, &subject).await;
             let mut views = Vec::with_capacity(list.len());
             for r in &list {
                 views.push(agent_view(&broker, r).await);
@@ -2006,10 +2233,10 @@ pub async fn handle_tool(
                 .and_then(Value::as_str)
                 .and_then(|s| Uuid::parse_str(s.trim()).ok())
                 .ok_or("request_id must be a valid UUID")?;
-            // A mission may only drop its own grants; other missions' grants
+            // A session may only drop its own grants; other actors' grants
             // are revoked by Thomas from a client.
             match broker.get(&p.sub, req_id).await {
-                Some(r) if r.requester_mission_id == own => {}
+                Some(r) if r.subject().same_actor(&subject) => {}
                 _ => return Err("Request not found".into()),
             }
             let r = broker.revoke(&p.sub, req_id).await?;
@@ -2019,7 +2246,13 @@ pub async fn handle_tool(
             let target_host = args
                 .get("target_host")
                 .and_then(Value::as_str)
-                .unwrap_or("self");
+                .unwrap_or(if subject.is_external() { "" } else { "self" });
+            if target_host.trim().is_empty() {
+                return Err(
+                    "External MCP sessions have no placement node; specify an explicit fleet target_host"
+                        .into(),
+                );
+            }
             let scope_str = args
                 .get("scope")
                 .and_then(Value::as_str)
@@ -2047,24 +2280,29 @@ pub async fn handle_tool(
                 .unwrap_or(true);
             let ttl_minutes = args.get("ttl_minutes").and_then(Value::as_i64);
 
-            let user = AuthUser {
-                id: p.sub.clone(),
-                username: p.username.clone(),
+            let requester_title = if let Some(own) = p.mission_id {
+                let user = AuthUser {
+                    id: p.sub.clone(),
+                    username: p.username.clone(),
+                };
+                let missions = state.control.get_or_spawn(&user).await.mission_store;
+                let requester = missions
+                    .get_mission(own)
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or("Mission no longer exists")?;
+                requester.title
+            } else {
+                None
             };
-            let missions = state.control.get_or_spawn(&user).await.mission_store;
-            let requester = missions
-                .get_mission(own)
-                .await
-                .ok()
-                .flatten()
-                .ok_or("Mission no longer exists")?;
 
             let r = broker
                 .request(NewPrivilegeRequest {
                     owner: p.sub.clone(),
                     owner_username: p.username.clone(),
-                    requester: own,
-                    requester_title: requester.title,
+                    requester: subject,
+                    requester_title,
                     target_host: target_host.to_string(),
                     scope,
                     allowed_unit,
@@ -2094,7 +2332,16 @@ pub async fn handle_tool(
                 .unwrap_or("dgx-spark");
             let target_host = normalize_target_host(target_host)?;
             let target_host = target_host.as_str();
+            if subject.is_external() && target_host == "self" {
+                return Err(
+                    "External MCP sessions have no placement node; specify an explicit fleet target_host instead of \"self\""
+                        .into(),
+                );
+            }
             let placement_node = if target_host == "self" {
+                let own = p
+                    .mission_id
+                    .ok_or("target_host=\"self\" requires a mission-scoped session")?;
                 let missions = state
                     .control
                     .get_or_spawn(&AuthUser {
@@ -2155,7 +2402,7 @@ pub async fn handle_tool(
                     .await
                     .ok_or_else(|| "No active lease token for request_id (expired, revoked, or pending approval)".to_string())?
             } else {
-                let list = broker.by_requester(&p.sub, own).await;
+                let list = broker.by_requester(&p.sub, &subject).await;
                 let mut found_tok = None;
                 for r in &list {
                     if r.target_host.trim() == target_host && r.state == ApprovalState::Approved {
@@ -2176,7 +2423,8 @@ pub async fn handle_tool(
             let pre_verified = broker
                 .verify_and_log_command(VerifyLeaseRequest {
                     executing_host: Some(exec_host.clone()),
-                    mission_id: own,
+                    mission_id: p.mission_id,
+                    requester: Some(subject.clone()),
                     lease_token: lease_token.clone(),
                     target_host: target_host.to_string(),
                     requested_scope: None,
@@ -2250,7 +2498,8 @@ pub async fn handle_tool(
             let post_verified = broker
                 .verify_and_log_command(VerifyLeaseRequest {
                     executing_host: Some(exec_host.clone()),
-                    mission_id: own,
+                    mission_id: p.mission_id,
+                    requester: Some(subject),
                     lease_token,
                     target_host: target_host.to_string(),
                     requested_scope: Some(pre_verified.scope),
@@ -2390,6 +2639,9 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
 
 pub(crate) async fn notify_requester(state: &Arc<AppState>, r: &PrivilegeRequest) {
     use crate::api::control::{ControlCommand, MissionStatus};
+    let Some(requester_mission_id) = r.requester_mission_id else {
+        return;
+    };
     let user = AuthUser {
         id: r.owner.clone(),
         username: r.owner_username.clone(),
@@ -2397,7 +2649,7 @@ pub(crate) async fn notify_requester(state: &Arc<AppState>, r: &PrivilegeRequest
     let control = state.control.get_or_spawn(&user).await;
     let Ok(Some(m)) = control
         .mission_store
-        .get_mission(r.requester_mission_id)
+        .get_mission(requester_mission_id)
         .await
     else {
         return;
@@ -2426,7 +2678,7 @@ pub(crate) async fn notify_requester(state: &Arc<AppState>, r: &PrivilegeRequest
             id: Uuid::new_v4(),
             content,
             agent: None,
-            target_mission_id: Some(r.requester_mission_id),
+            target_mission_id: Some(requester_mission_id),
             strict: false,
             source: Some("privilege-access".to_string()),
             respond: tx,
@@ -2521,7 +2773,7 @@ async fn approve(
 ) -> Result<Json<PrivilegeRequest>, ApiError> {
     let id = parse_id(&id)?;
     let r = store(&state)
-        .approve(&user.id, id, body.ttl_minutes, body.session_scoped)
+        .approve_with_state(&state, &user.id, id, body.ttl_minutes, body.session_scoped)
         .await
         .map_err(|e| (StatusCode::CONFLICT, e))?;
     notify_requester(&state, &r).await;
@@ -2559,6 +2811,18 @@ async fn verify_and_log(
     State(state): State<Arc<AppState>>,
     Json(body): Json<VerifyLeaseRequest>,
 ) -> Result<Json<VerifyLeaseResponse>, ApiError> {
+    if let Some(session_id) = body
+        .requester
+        .as_ref()
+        .and_then(approval_flow::RequesterSubject::session_id)
+    {
+        if !crate::control_mcp::gateway::external_session_is_live(&state, session_id).await {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "External MCP session is revoked or expired".to_string(),
+            ));
+        }
+    }
     store(&state)
         .verify_and_log_command(body)
         .await
@@ -3108,15 +3372,12 @@ pub async fn describe_for_approval(
         .get(owner, id)
         .await
         .ok_or("Unknown privilege request")?;
-    let who = r
-        .requester_title
-        .clone()
-        .unwrap_or_else(|| format!("mission {}", &r.requester_mission_id.to_string()[..8]));
+    let who = r.subject().prompt_who(r.requester_title.as_deref());
     let mins = clamp_ttl_minutes(ttl_minutes.or(Some(r.ttl_minutes)));
     Ok(match action {
         "approve" => format!(
             "Grant {} {} on {} for session (max {} m): {}",
-            super::approvals::quoted(&who),
+            who,
             r.scope.as_str().to_uppercase(),
             super::approvals::quoted(&r.target_host),
             mins,
@@ -3124,7 +3385,7 @@ pub async fn describe_for_approval(
         ),
         _ => format!(
             "Decline {} {} on {}",
-            super::approvals::quoted(&who),
+            who,
             r.scope.as_str(),
             super::approvals::quoted(&r.target_host),
         ),
@@ -3151,7 +3412,7 @@ mod tests {
             .request(NewPrivilegeRequest {
                 owner: "thomas".into(),
                 owner_username: "thomas".into(),
-                requester: mission_id,
+                requester: approval_flow::RequesterSubject::mission(mission_id),
                 requester_title: None,
                 target_host: "thomas-md".into(),
                 scope: PrivilegeScope::RootExec,
@@ -3169,7 +3430,8 @@ mod tests {
         let token = broker.lease_token_for(req.id).await.unwrap();
         let on = |host: Option<&str>| VerifyLeaseRequest {
             executing_host: host.map(Into::into),
-            mission_id,
+            mission_id: Some(mission_id),
+            requester: None,
             lease_token: token.clone(),
             target_host: "thomas-md".into(),
             requested_scope: Some(PrivilegeScope::RootExec),
@@ -3221,7 +3483,7 @@ mod tests {
             .request(NewPrivilegeRequest {
                 owner: "thomas".into(),
                 owner_username: "thomas".into(),
-                requester: mission_id,
+                requester: approval_flow::RequesterSubject::mission(mission_id),
                 requester_title: Some("Fleet Kernel Upgrade".into()),
                 target_host: "self".into(),
                 scope: PrivilegeScope::RootExec,
@@ -3245,7 +3507,8 @@ mod tests {
         let verified = broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id,
+                mission_id: Some(mission_id),
+                requester: None,
                 lease_token: token.clone(),
                 target_host: "self".into(),
                 requested_scope: Some(PrivilegeScope::RootExec),
@@ -3279,7 +3542,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id,
+                mission_id: Some(mission_id),
+                requester: None,
                 lease_token: token,
                 target_host: "self".into(),
                 requested_scope: Some(PrivilegeScope::RootExec),
@@ -3303,7 +3567,7 @@ mod tests {
             .request(NewPrivilegeRequest {
                 owner: "thomas".into(),
                 owner_username: "thomas".into(),
-                requester: Uuid::new_v4(),
+                requester: approval_flow::RequesterSubject::mission(Uuid::new_v4()),
                 requester_title: None,
                 target_host: "self".into(),
                 scope: PrivilegeScope::OpsRead,
@@ -3326,7 +3590,7 @@ mod tests {
         NewPrivilegeRequest {
             owner: "thomas".into(),
             owner_username: "thomas".into(),
-            requester: mission,
+            requester: approval_flow::RequesterSubject::mission(mission),
             requester_title: None,
             target_host: "agent-core".into(),
             scope,
@@ -3340,7 +3604,8 @@ mod tests {
     fn verify(mission_id: Uuid, lease_token: String) -> VerifyLeaseRequest {
         VerifyLeaseRequest {
             executing_host: None,
-            mission_id,
+            mission_id: Some(mission_id),
+            requester: None,
             lease_token,
             target_host: "agent-core".into(),
             requested_scope: None,
@@ -3507,7 +3772,7 @@ mod tests {
             .request(NewPrivilegeRequest {
                 owner: "thomas".into(),
                 owner_username: "thomas".into(),
-                requester: mission_ro,
+                requester: approval_flow::RequesterSubject::mission(mission_ro),
                 requester_title: Some("Read-Only Ops".into()),
                 target_host: "agent-core".into(),
                 scope: PrivilegeScope::OpsRead,
@@ -3528,7 +3793,7 @@ mod tests {
             .request(NewPrivilegeRequest {
                 owner: "thomas".into(),
                 owner_username: "thomas".into(),
-                requester: mission_deploy,
+                requester: approval_flow::RequesterSubject::mission(mission_deploy),
                 requester_title: Some("Deploy Orb".into()),
                 target_host: "agent-core".into(),
                 scope: PrivilegeScope::ServiceDeploy,
@@ -3549,7 +3814,7 @@ mod tests {
             .request(NewPrivilegeRequest {
                 owner: "thomas".into(),
                 owner_username: "thomas".into(),
-                requester: mission_root,
+                requester: approval_flow::RequesterSubject::mission(mission_root),
                 requester_title: Some("Root Exec".into()),
                 target_host: "self".into(),
                 scope: PrivilegeScope::RootExec,
@@ -3570,7 +3835,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id: mission_ro,
+                mission_id: Some(mission_ro),
+                requester: None,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
                 requested_scope: Some(PrivilegeScope::OpsRead),
@@ -3595,7 +3861,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id: mission_ro,
+                mission_id: Some(mission_ro),
+                requester: None,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
                 requested_scope: Some(PrivilegeScope::OpsRead),
@@ -3613,7 +3880,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id: mission_ro,
+                mission_id: Some(mission_ro),
+                requester: None,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
                 requested_scope: Some(PrivilegeScope::OpsRead),
@@ -3631,7 +3899,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id: mission_deploy,
+                mission_id: Some(mission_deploy),
+                requester: None,
                 lease_token: deploy_token.clone(),
                 target_host: "agent-core".into(),
                 requested_scope: Some(PrivilegeScope::ServiceDeploy),
@@ -3663,7 +3932,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id: mission_root,
+                mission_id: Some(mission_root),
+                requester: None,
                 lease_token: root_token.clone(),
                 target_host: "self".into(),
                 requested_scope: Some(PrivilegeScope::RootExec),
@@ -3679,7 +3949,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id: mission_ro,
+                mission_id: Some(mission_ro),
+                requester: None,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
                 requested_scope: Some(PrivilegeScope::OpsRead),
@@ -3702,7 +3973,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id: mission_root,
+                mission_id: Some(mission_root),
+                requester: None,
                 lease_token: root_token.clone(),
                 target_host: "self".into(),
                 requested_scope: Some(PrivilegeScope::RootExec),
@@ -3720,7 +3992,8 @@ mod tests {
         assert!(broker
             .verify_and_log_command(VerifyLeaseRequest {
                 executing_host: None,
-                mission_id: mission_ro,
+                mission_id: Some(mission_ro),
+                requester: None,
                 lease_token: ro_token.clone(),
                 target_host: "agent-core".into(),
                 requested_scope: Some(PrivilegeScope::OpsRead),
@@ -3763,7 +4036,7 @@ mod tests {
             .request(NewPrivilegeRequest {
                 owner: "thomas".into(),
                 owner_username: "thomas".into(),
-                requester: m_nippur,
+                requester: approval_flow::RequesterSubject::mission(m_nippur),
                 requester_title: Some("Nippur Ops".into()),
                 target_host: "nippur".into(),
                 scope: PrivilegeScope::OpsRead,
@@ -3783,7 +4056,7 @@ mod tests {
             .request(NewPrivilegeRequest {
                 owner: "thomas".into(),
                 owner_username: "thomas".into(),
-                requester: m_ashur,
+                requester: approval_flow::RequesterSubject::mission(m_ashur),
                 requester_title: Some("Ashur Ops".into()),
                 target_host: "ashur".into(),
                 scope: PrivilegeScope::OpsRead,
@@ -3980,7 +4253,7 @@ mod tests {
         let tampers: [fn(&mut PrivilegeRequest); 5] = [
             |r| r.scope = PrivilegeScope::RootExec,
             |r| r.target_host = "ashur".into(),
-            |r| r.requester_mission_id = Uuid::new_v4(),
+            |r| r.requester_mission_id = Some(Uuid::new_v4()),
             |r| r.ttl_minutes = 240,
             |r| r.session_scoped = false,
         ];
@@ -4054,6 +4327,73 @@ mod tests {
         assert!(ok
             .iter()
             .all(|r| r.live_grant(Utc::now(), BunkerState::Normal)));
+    }
+
+    #[tokio::test]
+    async fn external_session_rejects_self_target_host_and_reaps_grants_on_revocation() {
+        let broker = temp_broker();
+        let session_id = Uuid::new_v4();
+        let external = approval_flow::RequesterSubject::external_session(
+            session_id,
+            approval_flow::ExternalClientKind::LocalMcp,
+            "macbook-claude",
+            Some("thomas-air".into()),
+        );
+
+        let err = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: external.clone(),
+                requester_title: None,
+                target_host: "self".into(),
+                scope: PrivilegeScope::OpsRead,
+                allowed_unit: None,
+                reason: "inspect local logs".into(),
+                session_scoped: true,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap_err();
+        assert!(err.contains("explicit fleet target_host"), "{err}");
+
+        let pending = broker
+            .request(NewPrivilegeRequest {
+                owner: "thomas".into(),
+                owner_username: "thomas".into(),
+                requester: external.clone(),
+                requester_title: None,
+                target_host: "dgx-spark".into(),
+                scope: PrivilegeScope::OpsRead,
+                allowed_unit: None,
+                reason: "inspect dgx-spark service logs".into(),
+                session_scoped: false,
+                ttl_minutes: Some(30),
+            })
+            .await
+            .unwrap();
+        assert_eq!(pending.requester_mission_id, None);
+        assert_eq!(
+            pending.requester_label.as_deref(),
+            Some("External · thomas-air (macbook-claude)")
+        );
+        // Standalone store without AppState fails closed on external-session approval.
+        assert!(broker
+            .approve("thomas", pending.id, Some(30), Some(false))
+            .await
+            .is_err());
+
+        let approved = broker
+            .transition(
+                "thomas",
+                pending.id,
+                ApprovalEvent::Approve,
+                Some(30),
+                Some(false),
+                None,
+            )
+            .await;
+        assert!(approved.is_err());
     }
 
     #[test]

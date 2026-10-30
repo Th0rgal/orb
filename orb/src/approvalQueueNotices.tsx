@@ -181,7 +181,7 @@ function ApprovalQueueCard() {
           <Show when={one()} fallback={<>{list().length} approval requests</>}>
             {(i) => <strong classList={{ "approval-critical": i().risk === "critical" }}>{itemTitle(i())}</strong>}
           </Show>
-          <Show when={one()}>{(i) => <span class="toast-sub" title={i().requester_mission_id}>asked by {itemRequester(i())}</span>}</Show>
+          <Show when={one()}>{(i) => <span class="toast-sub" title={i().requester_mission_id || itemRequester(i())}>asked by {itemRequester(i())}</span>}</Show>
         </span>
         <Show when={one()?.reason}><span class="toast-message">{one()!.reason}</span></Show>
         <Show when={one() && detail(one()!)}><span class="access-scope">{detail(one()!)}</span></Show>

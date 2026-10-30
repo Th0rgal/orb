@@ -1,3 +1,4 @@
+import CryptoKit
 import UserNotifications
 import LocalAuthentication
 import SwiftUI
@@ -209,7 +210,7 @@ struct OrbSecretRequestsSheet: View {
     }
 
     private func who(_ r: OrbJSON) -> String {
-        let title = r["mission_title"].text.isEmpty ? "Mission \(r["mission_id"].text.prefix(8))" : r["mission_title"].text
+        let title = OrbMissionAccessMonitor.requester(r)
         return [title, r["paloma_project"].text, OrbStyle.relativeTime(r["created_at"].text)].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
@@ -235,16 +236,17 @@ struct OrbSecretRequestsSheet: View {
 
     private func requestActions(_ r: OrbJSON) -> some View {
         HStack {
+            let actor = OrbMissionAccessMonitor.requester(r)
             if r["kind"].text != "read" {
                 Button("Approve") { act(r, scope: "", reason: monitor.describe(r)) }
             } else {
                 if !r["key"].text.isEmpty {
-                    Button("Secret") { act(r, scope: "secret", reason: "Give a mission \(r["key"].text)") }
+                    Button("Secret") { act(r, scope: "secret", reason: "Give \(actor) \(r["key"].text)") }
                 }
                 if !r["project_id"].text.isEmpty {
-                    Button("Project") { act(r, scope: "project", reason: "Give a mission project \(monitor.projectName(r["project_id"].text))") }
+                    Button("Project") { act(r, scope: "project", reason: "Give \(actor) project \(monitor.projectName(r["project_id"].text))") }
                 }
-                Button("All") { act(r, scope: "all", reason: "Give a mission every secret project") }
+                Button("All") { act(r, scope: "all", reason: "Give \(actor) every secret project") }
             }
             Spacer()
             Button("Decline", role: .destructive) { act(r, scope: nil, reason: "") }
@@ -389,11 +391,72 @@ final class OrbMissionAccessMonitor {
         return OrbStyle.parseDate(r["expires_at"].text).map { $0 > Date() } ?? false
     }
 
-    static func mission(_ title: String, _ id: String) -> String {
+    nonisolated private static func stripControls(_ s: String) -> String {
+        let filtered = s.unicodeScalars.filter { scalar in
+            let v = scalar.value
+            return !(v <= 0x1F || (0x7F...0x9F).contains(v))
+        }
+        return String(String.UnicodeScalarView(filtered)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func externalLabel(_ subject: OrbJSON) -> String? {
+        guard subject["kind"].text == "external_session" else { return nil }
+        let fallback = subject["client_kind"].text.isEmpty ? "local_mcp" : subject["client_kind"].text
+        let cleanedLabel = String(stripControls(subject["client_label"].text).unicodeScalars.prefix(80))
+        let label = cleanedLabel.isEmpty ? fallback : cleanedLabel
+        let host = String(stripControls(subject["host_hint"].text).unicodeScalars.prefix(80))
+        return host.isEmpty ? "External · \(label)" : "External · \(host) (\(label))"
+    }
+
+    nonisolated static func subjectOf(_ r: OrbJSON) -> OrbJSON {
+        if r["requester_subject"] != .null { return r["requester_subject"] }
+        if r["requester"] != .null { return r["requester"] }
+        let req = r["request"]
+        if req["requester_subject"] != .null { return req["requester_subject"] }
+        return req["requester"]
+    }
+
+    nonisolated static func subjectKey(_ r: OrbJSON) -> String {
+        let subject = subjectOf(r)
+        if subject["kind"].text == "external_session" { return "session:\(subject["session_id"].text)" }
+        if subject["kind"].text == "mission" { return "mission:\(subject["mission_id"].text)" }
+        let missionId = r["requester_mission_id"].text.isEmpty ? r["mission_id"].text : r["requester_mission_id"].text
+        if !missionId.isEmpty { return "mission:\(missionId)" }
+        let label = requester(r)
+        return label.isEmpty ? "mission:" : "external:\(label)"
+    }
+
+    nonisolated static func canonicalSubjectId(_ subject: OrbJSON) -> String {
+        if subject["kind"].text == "mission" { return "mission:\(subject["mission_id"].text)" }
+        let kind = subject["client_kind"].text.isEmpty ? "local_mcp" : subject["client_kind"].text
+        let label = subject["client_label"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = subject["host_hint"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hash = SHA256.hash(data: Data("\(label)\n\(host)".utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "session:\(subject["session_id"].text):\(kind):\(hash)"
+    }
+
+    nonisolated static func approvalDigest(kind: String, id: String, subject: OrbJSON, fields: [String]) -> String {
+        let head = subject["kind"].text == "mission"
+            ? "orb-approval-v1\n\(kind)\n\(id)\n\(subject["mission_id"].text)"
+            : "orb-approval-v2\n\(kind)\n\(id)\n\(canonicalSubjectId(subject))"
+        let payload = ([head] + fields).joined(separator: "\n")
+        return SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated static func mission(_ title: String, _ id: String) -> String {
         title.isEmpty ? "Mission \(id.prefix(8))" : title
     }
-    static func requester(_ r: OrbJSON) -> String { mission(r["requester_title"].text, r["requester_mission_id"].text) }
-    static func target(_ r: OrbJSON) -> String { mission(r["target_title"].text, r["target_mission_id"].text) }
+    nonisolated static func requester(_ r: OrbJSON) -> String {
+        let explicit = r["requester_label"].text.isEmpty ? r["request"]["requester_label"].text : r["requester_label"].text
+        if !explicit.isEmpty { return explicit }
+        let subject = subjectOf(r)
+        if let ext = externalLabel(subject) { return ext }
+        let title = r["requester_title"].text.isEmpty ? r["mission_title"].text : r["requester_title"].text
+        if !title.isEmpty { return title }
+        let missionId = [r["requester_mission_id"].text, r["mission_id"].text, subject["kind"].text == "mission" ? subject["mission_id"].text : ""].first { !$0.isEmpty } ?? ""
+        return mission("", missionId)
+    }
+    nonisolated static func target(_ r: OrbJSON) -> String { mission(r["target_title"].text, r["target_mission_id"].text) }
 
     @discardableResult
     func refresh() async -> Bool {

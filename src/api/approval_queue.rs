@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use super::approval_flow::RequesterSubject;
 use super::auth::AuthUser;
 use super::mission_access::AccessRequest;
 use super::privilege_broker::{PrivilegeRequest, PrivilegeScope};
@@ -44,8 +45,10 @@ pub enum ApprovalKind {
 pub struct ApprovalItem {
     pub kind: ApprovalKind,
     pub id: Uuid,
-    pub requester_mission_id: Uuid,
+    pub requester_mission_id: Option<Uuid>,
     pub requester_title: Option<String>,
+    pub requester_subject: RequesterSubject,
+    pub requester_label: Option<String>,
     /// Kind-specific action: `ops_read` / `service_deploy` / `root_exec`,
     /// `read` / `write` / `delete` / `move`, or `read_mission`.
     pub tier: String,
@@ -70,12 +73,29 @@ fn risk_label(r: ApprovalRisk) -> &'static str {
     }
 }
 
-fn digest(kind: ApprovalKind, id: Uuid, mission: Uuid, fields: &[&str]) -> String {
+/// Domain-separated approval digest:
+/// - `RequesterSubject::Mission { mission_id }` preserves `"orb-approval-v1\n{kind}\n{id}\n{mission_id}..."`
+///   byte-for-byte so existing mission approvals and `LegacyPrivilegeBatch` never regress.
+/// - `RequesterSubject::ExternalSession { .. }` uses `"orb-approval-v2\n{kind}\n{id}\n{canonical_subject}..."`.
+pub fn subject_digest(
+    kind: ApprovalKind,
+    id: Uuid,
+    subject: &RequesterSubject,
+    fields: &[&str],
+) -> String {
     let kind = serde_json::to_value(kind).unwrap_or_default();
-    let mut text = format!(
-        "orb-approval-v1\n{}\n{id}\n{mission}",
-        kind.as_str().unwrap_or("")
-    );
+    let kind_str = kind.as_str().unwrap_or("");
+    let mut text = match subject {
+        RequesterSubject::Mission { mission_id } => {
+            format!("orb-approval-v1\n{kind_str}\n{id}\n{mission_id}")
+        }
+        RequesterSubject::ExternalSession { .. } => {
+            format!(
+                "orb-approval-v2\n{kind_str}\n{id}\n{}",
+                subject.canonical_id()
+            )
+        }
+    };
     for f in fields {
         text.push('\n');
         text.push_str(f);
@@ -88,8 +108,9 @@ impl ApprovalItem {
     fn new(
         kind: ApprovalKind,
         id: Uuid,
-        mission: Uuid,
+        subject: RequesterSubject,
         title: Option<String>,
+        requester_label: Option<String>,
         tier: &str,
         target: String,
         risk: ApprovalRisk,
@@ -100,13 +121,18 @@ impl ApprovalItem {
     ) -> Self {
         let mut fields = vec![tier, target.as_str()];
         fields.extend_from_slice(extra);
+        let requester_mission_id = subject.mission_id();
+        let resolved_label = requester_label.or_else(|| subject.external_display_label());
+        let digest = subject_digest(kind, id, &subject, &fields);
         Self {
             kind,
             id,
-            requester_mission_id: mission,
+            requester_mission_id,
             requester_title: title,
+            requester_subject: subject,
+            requester_label: resolved_label,
             tier: tier.into(),
-            digest: digest(kind, id, mission, &fields),
+            digest,
             target,
             risk: risk_label(risk),
             risk_tier: risk,
@@ -125,8 +151,9 @@ impl ApprovalItem {
         Self::new(
             ApprovalKind::Privilege,
             r.id,
-            r.requester_mission_id,
+            r.subject(),
             r.requester_title.clone(),
+            r.requester_label.clone(),
             r.scope.as_str(),
             r.target_host.clone(),
             risk,
@@ -157,8 +184,9 @@ impl ApprovalItem {
         Self::new(
             ApprovalKind::Secret,
             r.id,
-            r.mission_id,
+            r.subject(),
             r.mission_title.clone(),
+            r.requester_label.clone(),
             tier,
             target,
             risk,
@@ -179,8 +207,9 @@ impl ApprovalItem {
         Self::new(
             ApprovalKind::MissionAccess,
             r.id,
-            r.requester_mission_id,
+            r.subject(),
             r.requester_title.clone(),
+            r.requester_label.clone(),
             "read_mission",
             r.target_mission_id.to_string(),
             ApprovalRisk::Elevated,
@@ -311,7 +340,17 @@ pub fn summary(items: &[ApprovalItem]) -> String {
     sorted.sort_by_key(|i| std::cmp::Reverse(i.risk_tier));
     let what: Vec<String> = sorted
         .iter()
-        .map(|i| format!("{} {}", i.tier.to_uppercase(), quoted(&i.target)))
+        .map(|i| match i.requester_label.as_deref() {
+            Some(label) if i.requester_subject.is_external() => {
+                format!(
+                    "{} {} for {}",
+                    i.tier.to_uppercase(),
+                    quoted(&i.target),
+                    quoted(label)
+                )
+            }
+            _ => format!("{} {}", i.tier.to_uppercase(), quoted(&i.target)),
+        })
         .collect();
     format!(
         "Approve {} requests ({}): {}",
@@ -429,11 +468,17 @@ pub async fn approve_all(
     body.check_shape().map_err(conflict)?;
     // Check everything before changing anything.
     let current = pending(&state, &user.id).await;
+    let now = Utc::now();
     for want in &body.items {
         let c = current
             .iter()
             .find(|c| c.kind == want.kind && c.id == want.id);
         admit(c, want, body.confirm_critical).map_err(conflict)?;
+        if let Some(session_id) = c.and_then(|item| item.requester_subject.session_id()) {
+            crate::control_mcp::gateway::external_session_approval_bounds(&state, session_id, now)
+                .await
+                .map_err(conflict)?;
+        }
     }
     let mission_refs = body.of(ApprovalKind::MissionAccess);
     if !mission_refs.is_empty() {
@@ -457,7 +502,8 @@ pub async fn approve_all(
         }
     }
     let privileges = super::privilege_broker::store(&state)
-        .approve_batch(
+        .approve_batch_with_state(
+            &state,
             &user.id,
             &body.of(ApprovalKind::Privilege),
             body.confirm_critical,
@@ -468,7 +514,7 @@ pub async fn approve_all(
         super::privilege_broker::notify_requester(&state, r).await;
     }
     let accesses = super::mission_access::store(&state)
-        .approve_batch(&user.id, &mission_refs, body.confirm_critical)
+        .approve_batch_with_state(&state, &user.id, &mission_refs, body.confirm_critical)
         .await
         .map_err(conflict)?;
     for r in &accesses {
@@ -563,6 +609,25 @@ mod tests {
                 "{c}"
             );
         }
+        for d in f["digests"].as_array().unwrap() {
+            let kind: ApprovalKind = serde_json::from_value(d["kind"].clone()).unwrap();
+            let id = Uuid::parse_str(d["id"].as_str().unwrap()).unwrap();
+            let subject: RequesterSubject = serde_json::from_value(d["subject"].clone()).unwrap();
+            assert_eq!(
+                subject.canonical_id(),
+                d["canonical_subject"].as_str().unwrap(),
+                "{}",
+                d["name"]
+            );
+            let fields: Vec<&str> = d["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            let got = subject_digest(kind, id, &subject, &fields);
+            assert_eq!(got, d["digest"].as_str().unwrap(), "{}", d["name"]);
+        }
     }
 
     #[test]
@@ -572,7 +637,11 @@ mod tests {
         for change in [
             |r: &mut PrivilegeRequest| r.scope = PrivilegeScope::RootExec,
             |r: &mut PrivilegeRequest| r.target_host = "ashur".into(),
-            |r: &mut PrivilegeRequest| r.requester_mission_id = Uuid::new_v4(),
+            |r: &mut PrivilegeRequest| {
+                let next = Uuid::new_v4();
+                r.requester_mission_id = Some(next);
+                r.requester = Some(RequesterSubject::mission(next));
+            },
             |r: &mut PrivilegeRequest| r.ttl_minutes = 240,
             |r: &mut PrivilegeRequest| r.session_scoped = false,
             |r: &mut PrivilegeRequest| r.allowed_unit = Some("orb-core.service".into()),
@@ -631,7 +700,7 @@ mod tests {
         let legacy = |host: &str| LegacyPrivilegeBatch {
             items: vec![LegacyPrivilegeItem {
                 id: r.id,
-                requester_mission_id: r.requester_mission_id,
+                requester_mission_id: r.requester_mission_id.unwrap(),
                 target_host: host.into(),
                 scope: r.scope,
                 allowed_unit: r.allowed_unit.clone(),
@@ -646,5 +715,59 @@ mod tests {
         assert!(admit(Some(&item), &same.items[0], false).is_ok());
         let moved = legacy("ashur").into_batch();
         assert!(admit(Some(&item), &moved.items[0], false).is_err());
+    }
+
+    #[test]
+    fn external_session_digest_uses_v2_domain_and_pins_label() {
+        let req_id = Uuid::new_v4();
+        let sess_id = Uuid::new_v4();
+        let ext = RequesterSubject::external_session(
+            sess_id,
+            super::super::approval_flow::ExternalClientKind::LocalMcp,
+            "claude-code",
+            Some("macbook-air".into()),
+        );
+        let mission = RequesterSubject::mission(sess_id);
+        let r_ext: PrivilegeRequest = serde_json::from_value(json!({
+            "id": req_id, "owner": "thomas", "requester": ext,
+            "target_host": "dgx-spark", "scope": PrivilegeScope::OpsRead,
+            "reason": "logs", "ttl_minutes": 60, "state": "pending", "created_at": Utc::now(),
+        }))
+        .unwrap();
+        let r_msn: PrivilegeRequest = serde_json::from_value(json!({
+            "id": req_id, "owner": "thomas", "requester_mission_id": sess_id,
+            "target_host": "dgx-spark", "scope": PrivilegeScope::OpsRead,
+            "reason": "logs", "ttl_minutes": 60, "state": "pending", "created_at": Utc::now(),
+        }))
+        .unwrap();
+        let item_ext = ApprovalItem::privilege(&r_ext);
+        let item_msn = ApprovalItem::privilege(&r_msn);
+        assert_eq!(item_ext.requester_mission_id, None);
+        assert_eq!(
+            item_ext.requester_label.as_deref(),
+            Some("External · macbook-air (claude-code)")
+        );
+        assert_eq!(item_msn.requester_subject, mission);
+        assert_ne!(item_ext.digest, item_msn.digest);
+
+        let ext_spoof = RequesterSubject::external_session(
+            sess_id,
+            super::super::approval_flow::ExternalClientKind::LocalMcp,
+            "other-client",
+            Some("macbook-air".into()),
+        );
+        let r_spoof: PrivilegeRequest = serde_json::from_value(json!({
+            "id": req_id, "owner": "thomas", "requester": ext_spoof,
+            "target_host": "dgx-spark", "scope": PrivilegeScope::OpsRead,
+            "reason": "logs", "ttl_minutes": 60, "state": "pending", "created_at": Utc::now(),
+        }))
+        .unwrap();
+        assert_ne!(ApprovalItem::privilege(&r_spoof).digest, item_ext.digest);
+
+        let batch_summary = summary(&[item_ext, item_msn]);
+        assert!(
+            batch_summary.contains("for \"External · macbook-air (claude-code)\""),
+            "{batch_summary}"
+        );
     }
 }

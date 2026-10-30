@@ -1,7 +1,7 @@
 import { api } from "./api";
 import { signedApi } from "./deviceApproval";
-import type { AccessState } from "./missionAccessApi";
-import { missionLabel } from "./missionAccessApi";
+import type { AccessState, RequesterSubject } from "./missionAccessApi";
+import { actorLabel } from "./missionAccessApi";
 
 /**
  * Privileged access requests: a mission asks for root, a service deploy or
@@ -14,7 +14,9 @@ export type PrivilegeScope = "ops_read" | "service_deploy" | "root_exec";
 
 export interface PrivilegeRequest {
   id: string;
-  requester_mission_id: string;
+  requester_mission_id?: string | null;
+  requester?: RequesterSubject | null;
+  requester_label?: string | null;
   requester_title?: string | null;
   target_host: string;
   scope: PrivilegeScope;
@@ -32,7 +34,9 @@ export interface PrivilegeRequest {
 export interface PrivilegeAudit {
   at: string;
   request_id: string;
-  requester_mission_id: string;
+  requester_mission_id?: string | null;
+  requester?: RequesterSubject | null;
+  requester_label?: string | null;
   target_host: string;
   scope: PrivilegeScope;
   action: string;
@@ -43,7 +47,10 @@ export interface PrivilegeCommandAudit {
   id: string;
   at: string;
   grant_id: string;
-  mission_id: string;
+  mission_id?: string | null;
+  requester?: RequesterSubject | null;
+  requester_label?: string | null;
+  mission_title?: string | null;
   target_host: string;
   scope: PrivilegeScope;
   command: string;
@@ -125,8 +132,9 @@ export const scopeUnlocks = (r: Pick<PrivilegeRequest, "scope" | "allowed_unit">
   r.scope === "service_deploy" && r.allowed_unit ? `restart and deploy ${r.allowed_unit} only` : SCOPE_UNLOCKS[r.scope] ?? "";
 export const hostLabel = (h: string) => (h === "self" ? "its own node" : h);
 export const requestTitle = (r: Pick<PrivilegeRequest, "scope" | "target_host">) => `${scopeLabel(r.scope)} on ${hostLabel(r.target_host)}`;
-export const requesterLabel = (r: Pick<PrivilegeRequest, "requester_title" | "requester_mission_id">) =>
-  missionLabel(r.requester_title, r.requester_mission_id);
+export const requesterLabel = (
+  r: Pick<PrivilegeRequest, "requester_title" | "requester_mission_id" | "requester_label" | "requester">,
+) => actorLabel(r);
 /** "for this session (max 4 h)" or "for 30 min". */
 export function lifetimeLabel(r: Pick<PrivilegeRequest, "session_scoped" | "ttl_minutes">): string {
   const m = r.ttl_minutes;

@@ -678,7 +678,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
                                     Text(
-                                        "${missionName(g["requester_title"], g["requester_mission_id"])} → ${missionName(g["target_title"], g["target_mission_id"])}",
+                                        "${OrbApprovalQueue.actorLabel(g)} → ${missionName(g["target_title"], g["target_mission_id"])}",
                                         color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                                     )
                                     val accessScope = if ((g["scope"] as? String) == "control") "Control" else "Read only"
@@ -692,7 +692,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 }) { Text("Revoke", fontSize = 12.sp) }
                             }
                         }
-                        grants.groupBy { it["mission_id"] as? String ?: "" }.values.forEach { group ->
+                        grants.groupBy { OrbApprovalQueue.subjectKey(it) }.values.forEach { group ->
                             group.forEach { g ->
                                 val scopeMap = dictOf(g["scope"])
                                 val label = when (scopeMap["kind"]) {
@@ -700,7 +700,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                     "project" -> "Project ${projects[scopeMap["project_id"] as? String] ?: ""}"
                                     else -> "Secret ${scopeMap["key"]}"
                                 }
-                                val mTitle = (g["mission_title"] as? String)?.takeIf { it.isNotBlank() } ?: "Mission"
+                                val mTitle = OrbApprovalQueue.actorLabel(g)
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
                                         Text("$mTitle · $label", color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -809,7 +809,7 @@ fun OrbSecretsSettingsPage(core: OrbCore, onBack: () -> Unit) {
                         historyAccess.forEach { h ->
                             val stateUpper = ((h["state"] as? String) ?: "").uppercase()
                             Text(
-                                text = "$stateUpper · ${missionName(h["requester_title"], h["requester_mission_id"])} → ${missionName(h["target_title"], h["target_mission_id"])}",
+                                text = "$stateUpper · ${OrbApprovalQueue.actorLabel(h)} → ${missionName(h["target_title"], h["target_mission_id"])}",
                                 color = OrbStyle.textMuted,
                                 fontSize = 11.sp,
                                 maxLines = 1,
