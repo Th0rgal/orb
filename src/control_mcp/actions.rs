@@ -34,11 +34,7 @@ pub fn init(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 fn scope(p: &Principal) -> String {
-    if p.mission_id.is_some() {
-        json!([p.sub, p.mission_id, p.project]).to_string()
-    } else {
-        json!([p.sub, p.session_id, p.project]).to_string()
-    }
+    json!([p.sub, p.action_scope_actor(), p.project]).to_string()
 }
 fn canonical(value: &Value) -> Value {
     match value {
@@ -680,5 +676,41 @@ mod tests {
             reserve(&conn, &p, &call()).unwrap()["action_id"],
             original["action_id"]
         );
+    }
+    #[test]
+    fn legacy_missionless_actions_stay_addressable_while_external_sessions_isolate_by_session_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        let mut legacy = principal();
+        legacy.role = Role::Coordinator;
+        legacy.mission_id = None;
+        legacy.client_kind = None;
+        let c = call();
+        let legacy_receipt = reserve(&conn, &legacy, &c).unwrap();
+        let legacy_id = legacy_receipt["action_id"].as_str().unwrap();
+        // Simulated pre-upgrade row shape `[owner, null, project]` stays readable & idempotent:
+        assert_eq!(
+            scope(&legacy),
+            json!([legacy.sub, null, legacy.project]).to_string()
+        );
+        assert_eq!(
+            read(&conn, &legacy, legacy_id).unwrap()["action_id"],
+            legacy_id
+        );
+        assert_eq!(reserve(&conn, &legacy, &c).unwrap()["action_id"], legacy_id);
+
+        // Newly minted external sessions (`client_kind.is_some()`) isolate by `session_id`:
+        let mut ext1 = legacy.clone();
+        ext1.session_id = Uuid::new_v4();
+        ext1.client_kind = Some(crate::api::approval_flow::ExternalClientKind::Cli);
+        let ext1_receipt = reserve(&conn, &ext1, &c).unwrap();
+        let ext1_id = ext1_receipt["action_id"].as_str().unwrap();
+        assert_ne!(ext1_id, legacy_id);
+        assert_eq!(reserve(&conn, &ext1, &c).unwrap()["action_id"], ext1_id);
+
+        let mut ext2 = ext1.clone();
+        ext2.session_id = Uuid::new_v4();
+        assert!(read(&conn, &ext2, ext1_id).is_err());
+        assert_ne!(reserve(&conn, &ext2, &c).unwrap()["action_id"], ext1_id);
     }
 }

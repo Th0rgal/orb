@@ -153,23 +153,133 @@ struct OrbStreamCommit: Equatable {
 /// its final committed length plus its tails (`incCost_eq`) instead of every prefix in full.
 @MainActor
 final class OrbStreamBlocks {
-    private var prefix = ""
+    private static let openFenceStreamThreshold = 4096
+
+    private var previous = ""
+    private var commitUTF8 = 0
+    private var scanUTF8 = 0
+    private var scanState = OrbStreamCommit()
     private var prefixBlocks: [OrbNativeMarkdownView.Block] = []
+
+    private var openFenceStartUTF8 = -1
+    private var openFenceBodyStartUTF8 = 0
+    private var openFenceBodyCursorUTF8 = 0
+    private var openFenceLang = ""
+    private var openFencePrefixBlocks: [OrbNativeMarkdownView.Block]?
+    private var openFenceAcc = ""
+    private var openFenceHasLines = false
+
+    /// UTF-8 bytes scanned by the checkpointed commit scanner (`Orb.Stream.CheckpointedScan`).
+    private(set) var scannedBytes = 0
     /// UTF-8 bytes handed to `parseBlocks` so far (`incCost`; checked against stream-cost.json).
     private(set) var parsedBytes = 0
 
+    private func resetOpenFence() {
+        openFenceStartUTF8 = -1
+        openFencePrefixBlocks = nil
+        openFenceAcc.removeAll(keepingCapacity: true)
+        openFenceHasLines = false
+    }
+
     func blocks(_ source: String) -> [OrbNativeMarkdownView.Block] {
-        if !source.hasPrefix(prefix) { prefix = ""; prefixBlocks = [] }
-        let start = source.utf8.index(source.utf8.startIndex, offsetBy: prefix.utf8.count)
-        let rest = Substring(source.utf8[start...])
-        let advance = OrbStreamCommit.committedOffset(rest)
-        let end = rest.utf8.index(rest.utf8.startIndex, offsetBy: advance)
-        if advance > 0 {
-            let chunk = String(Substring(rest.utf8[..<end]))
-            prefixBlocks += OrbNativeMarkdownView.parseBlocks(chunk)
-            prefix += chunk
+        if !source.hasPrefix(previous) {
+            commitUTF8 = 0
+            scanUTF8 = 0
+            scanState = OrbStreamCommit()
+            prefixBlocks = []
+            resetOpenFence()
         }
-        let tail = String(Substring(rest.utf8[end...]))
+        previous = source
+
+        let utf8 = source.utf8
+        var newCommitUTF8 = commitUTF8
+        var cursorIdx = utf8.index(utf8.startIndex, offsetBy: scanUTF8)
+        while let nlIdx = utf8[cursorIdx...].firstIndex(of: UInt8(ascii: "\n")) {
+            let lineSub = Substring(utf8[cursorIdx..<nlIdx])
+            let lineLen = lineSub.utf8.count
+            let lineStartUTF8 = scanUTF8
+            scanUTF8 += lineLen + 1
+            scannedBytes += lineLen + 1
+            cursorIdx = utf8.index(after: nlIdx)
+
+            let wasTick = scanState.tick
+            let beforeCommit = scanState.commit
+            scanState.scan(OrbStreamCommit.classify(lineSub))
+            if scanState.commit != beforeCommit {
+                newCommitUTF8 = scanUTF8
+                resetOpenFence()
+            } else if !wasTick && scanState.tick {
+                openFenceStartUTF8 = lineStartUTF8
+                openFenceBodyStartUTF8 = scanUTF8
+                openFenceBodyCursorUTF8 = scanUTF8
+                let trimmed = lineSub.trimmingCharacters(in: .whitespaces)
+                openFenceLang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                openFencePrefixBlocks = nil
+                openFenceAcc.removeAll(keepingCapacity: true)
+                openFenceHasLines = false
+            } else if wasTick && !scanState.tick {
+                resetOpenFence()
+            }
+        }
+
+        let commitStartIdx = utf8.index(utf8.startIndex, offsetBy: commitUTF8)
+        let advance = newCommitUTF8 - commitUTF8
+        let commitEndIdx: String.UTF8View.Index
+        if advance > 0 {
+            commitEndIdx = utf8.index(commitStartIdx, offsetBy: advance)
+            let chunk = String(Substring(utf8[commitStartIdx..<commitEndIdx]))
+            prefixBlocks += OrbNativeMarkdownView.parseBlocks(chunk)
+            commitUTF8 = newCommitUTF8
+        } else {
+            commitEndIdx = commitStartIdx
+        }
+
+        if scanState.tick && openFenceStartUTF8 >= commitUTF8 && scanUTF8 - openFenceBodyStartUTF8 >= Self.openFenceStreamThreshold {
+            let trailingSub = Substring(utf8[cursorIdx...])
+            if !trailingSub.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                var deltaBytes = advance
+                let preBlocks: [OrbNativeMarkdownView.Block]
+                if let cachedPre = openFencePrefixBlocks {
+                    preBlocks = cachedPre
+                } else {
+                    let fenceIdx = utf8.index(utf8.startIndex, offsetBy: openFenceStartUTF8)
+                    let preSlice = String(Substring(utf8[commitEndIdx..<fenceIdx]))
+                    deltaBytes += preSlice.utf8.count
+                    let parsedPre = preSlice.isEmpty ? [] : OrbNativeMarkdownView.parseBlocks(preSlice)
+                    openFencePrefixBlocks = parsedPre
+                    preBlocks = parsedPre
+                }
+                var bodyIdx = utf8.index(utf8.startIndex, offsetBy: openFenceBodyCursorUTF8)
+                while let nlIdx = utf8[bodyIdx...].firstIndex(of: UInt8(ascii: "\n")) {
+                    let rawLine = Substring(utf8[bodyIdx..<nlIdx])
+                    let rawLen = rawLine.utf8.count
+                    openFenceBodyCursorUTF8 += rawLen + 1
+                    deltaBytes += rawLen + 1
+                    if openFenceHasLines { openFenceAcc.append("\n") }
+                    openFenceAcc.append(contentsOf: rawLine)
+                    openFenceHasLines = true
+                    bodyIdx = utf8.index(after: nlIdx)
+                }
+                let totalUTF8 = utf8.count
+                let openCode: String
+                if openFenceBodyCursorUTF8 == totalUTF8 && openFenceBodyCursorUTF8 > openFenceBodyStartUTF8 {
+                    openCode = openFenceAcc + "\n"
+                } else if openFenceBodyCursorUTF8 < totalUTF8 {
+                    let trailStr = String(trailingSub)
+                    deltaBytes += trailStr.utf8.count
+                    openCode = openFenceHasLines ? openFenceAcc + "\n" + trailStr : trailStr
+                } else {
+                    openCode = ""
+                }
+                parsedBytes = OrbKernel.streamTokenCostStep(prevCost: parsedBytes, newAdvance: deltaBytes, tailBytes: 0)
+                let openBlock: OrbNativeMarkdownView.Block = openFenceLang.lowercased() == "mermaid"
+                    ? .mermaid(code: openCode, complete: false)
+                    : .code(language: openFenceLang, code: openCode)
+                return prefixBlocks + preBlocks + [openBlock]
+            }
+        }
+
+        let tail = String(Substring(utf8[commitEndIdx...]))
         parsedBytes = OrbKernel.streamTokenCostStep(prevCost: parsedBytes, newAdvance: advance, tailBytes: tail.utf8.count)
         return prefixBlocks + OrbNativeMarkdownView.parseBlocks(tail)
     }

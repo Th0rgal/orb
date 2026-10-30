@@ -538,5 +538,147 @@ theorem boundedStream_coalesced_eq_split (cap : Nat) (u1 u2 : Upd)
   simp only [foldBoundedStream, List.foldl_cons, List.foldl_nil,
     BoundedStreamState.init, stepBoundedStream]
   congr 1 <;> omega
+/-! ## 6. Checkpointed incremental chunk & line scanning (`G-ORB-6`)
 
+Instead of re-scanning `rest = source.drop prefix` from offset `0` on every delta
+(which scans $O(N^2)$ bytes when `commit` stays fixed inside a giant unclosed code
+fence), a checkpointed scanner retains `(scanState, pendingChars, scannedBytes)` across
+deltas. Each incoming delta feeds only its newly arrived characters; complete
+newline-terminated lines advance `scanState` once, and incomplete trailing characters
+wait in `pendingChars` until their newline arrives.
+
+Total scanned cost across any `k` delta chunks is strictly equal to `(chunks.flatten).length`
+($O(N)$, exact `1x` byte/char scan) even when `commit = 0` throughout an unclosed fence,
+while producing the exact same `Scan` state as scanning the concatenated stream at once. -/
+
+/-- Checkpointed line-scanner state across arbitrary delta boundaries. -/
+structure CheckpointedScan where
+  state : Scan
+  /-- Characters since the last `\n` (the still-growing trailing line, reversed for $O(1)$ push). -/
+  revLine : List Char
+  /-- Total characters/bytes scanned across all delta chunks so far. -/
+  scanned : Nat
+  deriving Repr, DecidableEq
+
+def CheckpointedScan.init : CheckpointedScan :=
+  { state := Scan.init, revLine := [], scanned := 0 }
+
+/-- Feed one character into the checkpointed scanner: on `\n`, classify the completed line
+    and advance `Scan` once; otherwise accumulate onto the open trailing line. -/
+def scanChar (cs : CheckpointedScan) (c : Char) : CheckpointedScan :=
+  if c == '\n' then
+    let line := classify (String.ofList cs.revLine.reverse)
+    { state := scanLine cs.state line, revLine := [], scanned := cs.scanned + 1 }
+  else
+    { cs with revLine := c :: cs.revLine, scanned := cs.scanned + 1 }
+
+/-- Feed one delta chunk (`List Char`) from the checkpointed cursor. -/
+def scanChunk (cs : CheckpointedScan) (chunk : List Char) : CheckpointedScan :=
+  chunk.foldl scanChar cs
+
+/-- Feed a sequence of delta chunks (`List (List Char)`) into the checkpointed scanner. -/
+def scanChunks (cs : CheckpointedScan) (chunks : List (List Char)) : CheckpointedScan :=
+  chunks.foldl scanChunk cs
+
+/-- Naive uncheckpointed scanner cost over cumulative prefixes of newline-terminated lines
+    when `commit` remains `0` (e.g. inside an unclosed code fence): frame `i` re-scans all
+    lines seen so far. -/
+def uncheckpointedScanLines : Nat → List (List Line) → Nat
+  | _, [] => 0
+  | acc, ls :: rest => (acc + ls.length) + uncheckpointedScanLines (acc + ls.length) rest
+
+/-- Checkpointed line-batch scanner: advances `Scan` only over newly completed lines `ls`
+    and records `ls.length` newly scanned lines. -/
+def scanLineBatch (s : Scan × Nat) (ls : List Line) : Scan × Nat :=
+  (scan s.1 ls, s.2 + ls.length)
+
+def scanLineBatches (s : Scan × Nat) (batches : List (List Line)) : Scan × Nat :=
+  batches.foldl scanLineBatch s
+
+/-- Chunk-invariance (`scan` over line batches): checkpointed scanning across arbitrary
+    delta batches produces the exact same `Scan` state (including `tick`, `fence`, `pos`,
+    and `commit`) as scanning `batches.flatten` from `s` in one pass. -/
+theorem scan_append (s : Scan) (xs ys : List Line) :
+    scan s (xs ++ ys) = scan (scan s xs) ys := by
+  simp [scan, List.foldl_append]
+
+theorem scanLineBatches_state_eq (s : Scan) (acc : Nat) (batches : List (List Line)) :
+    (scanLineBatches (s, acc) batches).1 = scan s batches.flatten := by
+  induction batches generalizing s acc with
+  | nil => simp [scanLineBatches, scan]
+  | cons b rest ih =>
+    change (scanLineBatches (scan s b, acc + b.length) rest).1 = scan s (b ++ rest.flatten)
+    rw [ih, scan_append]
+
+/-- Strict $O(N)$ (`1x`) line-scan cost: checkpointed scanning across arbitrary batches
+    scans `acc + batches.flatten.length` lines total, independent of batch count or open fences. -/
+theorem scanLineBatches_cost_linear (s : Scan) (acc : Nat) (batches : List (List Line)) :
+    (scanLineBatches (s, acc) batches).2 = acc + batches.flatten.length := by
+  induction batches generalizing s acc with
+  | nil => simp [scanLineBatches]
+  | cons b rest ih =>
+    change (scanLineBatches (scan s b, acc + b.length) rest).2 = acc + (b ++ rest.flatten).length
+    rw [ih, List.length_append]; omega
+
+/-- Character-level chunk-invariance (`G-ORB-6`): feeding arbitrary delta chunks (even split
+    mid-line or mid-fence marker) into `scanChunks` yields the exact same `CheckpointedScan`
+    state as feeding `chunks.flatten` in one pass. -/
+theorem scanChunk_append (cs : CheckpointedScan) (xs ys : List Char) :
+    scanChunk cs (xs ++ ys) = scanChunk (scanChunk cs xs) ys := by
+  simp [scanChunk, List.foldl_append]
+
+theorem scanChunks_eq_flatten (cs : CheckpointedScan) (chunks : List (List Char)) :
+    scanChunks cs chunks = scanChunk cs chunks.flatten := by
+  induction chunks generalizing cs with
+  | nil => simp [scanChunks, scanChunk]
+  | cons c rest ih =>
+    change scanChunks (scanChunk cs c) rest = scanChunk cs (c ++ rest.flatten)
+    rw [ih, scanChunk_append]
+
+theorem scanChar_scanned (cs : CheckpointedScan) (c : Char) :
+    (scanChar cs c).scanned = cs.scanned + 1 := by
+  unfold scanChar; split <;> rfl
+
+theorem scanChunk_scanned (cs : CheckpointedScan) (chunk : List Char) :
+    (scanChunk cs chunk).scanned = cs.scanned + chunk.length := by
+  induction chunk generalizing cs with
+  | nil => simp [scanChunk]
+  | cons c rest ih =>
+    change (scanChunk (scanChar cs c) rest).scanned = cs.scanned + (c :: rest).length
+    rw [ih, scanChar_scanned, List.length_cons]; omega
+
+/-- Exact $O(N)$ (`== N`) byte/character scan bound across `k` deltas: regardless of whether a
+    code fence stays unclosed (`commit = 0` for the entire stream), `scanChunks` inspects each
+    arriving character once (`scanned = chunks.flatten.length`). -/
+theorem scanChunks_cost_eq_total (chunks : List (List Char)) :
+    (scanChunks CheckpointedScan.init chunks).scanned = chunks.flatten.length := by
+  rw [scanChunks_eq_flatten, scanChunk_scanned]
+  simp [CheckpointedScan.init]
+
+/-- Checkpointed open-fence body accumulation cost: while an unclosed fence holds `commit`
+    fixed, appending each delta chunk `d` directly to the open code block inspects `d.length`
+    bytes instead of re-parsing the growing prefix, so `k` deltas of total size `N` cost `N`. -/
+def openFenceAppendCost : List Nat → Nat
+  | [] => 0
+  | d :: ds => d + openFenceAppendCost ds
+
+theorem openFenceAppendCost_eq_sum (ds : List Nat) :
+    openFenceAppendCost ds = ds.sum := by
+  induction ds with
+  | nil => rfl
+  | cons d ds ih => simp [openFenceAppendCost, ih]
+
+/-- Non-vacuity & adversarial unclosed-fence tightness witness:
+    4 deltas inside an unclosed ```` ```rust ```` fence keep `commit = 0`, scan `33` characters
+    linearly (`1x`) via `scanChunks` (matching single-pass `scanChunk`), whereas uncheckpointed
+    line re-scanning over 4 frames of 1 line each already scans `1 + 2 + 3 + 4 = 10 > 4` lines. -/
+example :
+    let chunks := ["```rust\n".toList, "let x = 1 | 2\n".toList, "\n".toList, "let y = 3\n".toList]
+    let res := scanChunks CheckpointedScan.init chunks
+    res = scanChunk CheckpointedScan.init chunks.flatten ∧
+    res.state.commit = 0 ∧
+    res.state.tick = true ∧
+    res.scanned = 33 ∧
+    uncheckpointedScanLines 0 [[ln false true (some (true, 3))], [ln false false], [ln true false], [ln false false]] = 10 := by
+  decide
 end Orb.Stream

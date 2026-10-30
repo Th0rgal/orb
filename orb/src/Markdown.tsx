@@ -2,7 +2,7 @@ import {requestHighlight} from "./codeHighlightClient";
 import { CodeBlock } from "./CodeBlock";
 import { isMermaidLang, MermaidBlock } from "./MermaidBlock";
 import { FileReference, FileReferenceText } from "./fileReferenceContext";
-import { For, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
+import { For, Index, Show, createEffect, onCleanup, createMemo, createSignal, type JSX } from "solid-js";
 import { openExternalUrl } from "./api";
 import { timed } from "./diagnostics";
 import { swallow } from "./log";
@@ -415,45 +415,294 @@ export function markdownText(source:string):string{
  return parseMarkdown(source).map(blockText).filter(Boolean).join('\n');
 }
 
+function listItemEqual(a: string | ListItem, b: string | ListItem): boolean {
+  if (typeof a === "string" || typeof b === "string") return a === b;
+  if (a.text !== b.text) return false;
+  const sa = a.sub, sb = b.sub;
+  if (!sa && !sb) return true;
+  if (!sa || !sb || sa.length !== sb.length) return false;
+  for (let i = 0; i < sa.length; i++) if (!blockEqual(sa[i], sb[i])) return false;
+  return true;
+}
+
+function blockEqual(a: Block, b: Block): boolean {
+  if (a === b) return true;
+  if (a.t !== b.t) return false;
+  switch (a.t) {
+    case "hr":
+      return true;
+    case "math":
+    case "p":
+    case "quote":
+      return a.text === (b as typeof a).text;
+    case "h":
+      return a.n === (b as typeof a).n && a.text === (b as typeof a).text;
+    case "pre":
+      return a.lang === (b as typeof a).lang && a.open === (b as typeof a).open && a.text === (b as typeof a).text;
+    case "ul":
+    case "ol": {
+      const bo = b as typeof a;
+      if (a.t === "ol" && a.start !== (bo as Extract<Block, { t: "ol" }>).start) return false;
+      if (a.items.length !== bo.items.length) return false;
+      for (let i = 0; i < a.items.length; i++) if (!listItemEqual(a.items[i], bo.items[i])) return false;
+      return true;
+    }
+    case "table": {
+      const bt = b as typeof a;
+      if (a.heads.length !== bt.heads.length || a.rows.length !== bt.rows.length || a.aligns.length !== bt.aligns.length) return false;
+      for (let i = 0; i < a.heads.length; i++) if (a.heads[i] !== bt.heads[i]) return false;
+      for (let i = 0; i < a.aligns.length; i++) if (a.aligns[i] !== bt.aligns[i]) return false;
+      for (let r = 0; r < a.rows.length; r++) {
+        if (a.rows[r].length !== bt.rows[r].length) return false;
+        for (let c = 0; c < a.rows[r].length; c++) if (a.rows[r][c] !== bt.rows[r][c]) return false;
+      }
+      return true;
+    }
+  }
+}
+
 /** The same block again keeps its object, so the list keeps its DOM. */
 function reuseBlocks(previous: Block[], next: Block[]): Block[] {
   return next.map((block, index) => {
     const old = previous[index];
-    return old && JSON.stringify(old) === JSON.stringify(block) ? old : block;
+    return old && blockEqual(old, block) ? old : block;
   });
 }
 
-export function incrementalMarkdown() {
-  let previous = "", boundary = 0, stable: Block[] = [], unstable: Block[] = [];
-  return (text: string): Block[] => {
-    if (!text.startsWith(previous)) { boundary = 0; stable = []; unstable = []; }
+function utf8LenSlice(s: string, start: number, end: number): number {
+  let bytes = 0;
+  for (let i = start; i < end; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) bytes += 1;
+    else if (c < 0x800) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < end && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      bytes += 4;
+      i++;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+export type IncrementalMarkdownParser = ((text: string) => Block[]) & {
+  readonly scannedBytes: number;
+  readonly parsedBytes: number;
+};
+
+export function incrementalMarkdown(): IncrementalMarkdownParser {
+  let previous = "", boundary = 0, scanCursor = 0;
+  let fenced = false, math = false, inList = false, listBaseIndent = 0, listAfterBlank = false, listKind: "ul" | "ol" = "ul", inQuote = false;
+  let fenceStart = -1, fenceBodyStart = 0, fenceIndent = 0, fenceIndentPad = "", fenceLang = "";
+  let fencePrefixBlocks: Block[] | null = null, fenceAccText = "", fenceBodyCursor = 0, fenceHasLines = false, fenceCleanRaw = false;
+  let stable: Block[] = [], unstable: Block[] = [];
+  let scannedBytes = 0, parsedBytes = 0;
+
+  const samePrefix = (next: string): boolean => {
+    const plen = previous.length;
+    if (plen === 0) return true;
+    return next.length >= plen && next.startsWith(previous);
+  };
+
+  const dedentLine = (raw: string): string => {
+    const clean = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    return fenceIndent > 0 && clean.startsWith(fenceIndentPad) ? clean.slice(fenceIndent) : clean;
+  };
+
+  const resetFenceState = () => {
+    fenceStart = -1;
+    fencePrefixBlocks = null;
+    fenceAccText = "";
+    fenceHasLines = false;
+    fenceCleanRaw = false;
+  };
+
+  const fn = ((text: string): Block[] => {
+    if (!samePrefix(text)) {
+      boundary = 0;
+      scanCursor = 0;
+      fenced = false;
+      math = false;
+      inList = false;
+      listBaseIndent = 0;
+      listAfterBlank = false;
+      inQuote = false;
+      resetFenceState();
+      stable = [];
+      unstable = [];
+    }
     previous = text;
-    const tail = text.slice(boundary);
-    let fenced = false, math = false, inList = false, end = 0, offset = 0;
-    for (const line of tail.split("\n").slice(0, -1)) {
-      offset += line.length + 1;
-      if (line.trimStart().startsWith("```")) fenced = !fenced;
+
+    let newCommitBoundary = boundary;
+    while (true) {
+      const nl = text.indexOf("\n", scanCursor);
+      if (nl === -1) break;
+      const rawLine = text.slice(scanCursor, nl);
+      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+      const lineStart = scanCursor;
+      scanCursor = nl + 1;
+      scannedBytes += utf8LenSlice(text, lineStart, nl) + 1;
+
+      if (!fenced && !math && /^ {0,3}>/.test(line)) {
+        const qLead = /^ */.exec(line)?.[0].length ?? 0;
+        if (!(inList && qLead > listBaseIndent)) {
+          inQuote = true;
+          inList = false;
+          listAfterBlank = false;
+          continue;
+        }
+      }
+      if (!fenced && !math && inQuote) {
+        if (!line.trim()) {
+          newCommitBoundary = scanCursor;
+        }
+        inQuote = false;
+      }
+
+      if (!math && line.trimStart().startsWith("```")) {
+        const fLead = /^ */.exec(line)?.[0].length ?? 0;
+        if (!fenced && inList && listAfterBlank && fLead <= listBaseIndent) {
+          inList = false;
+          listAfterBlank = false;
+        }
+        fenced = !fenced;
+        if (fenced && !inList) {
+          fenceStart = lineStart;
+          fenceBodyStart = scanCursor;
+          fenceBodyCursor = scanCursor;
+          fenceIndent = fLead;
+          fenceIndentPad = fenceIndent > 0 ? " ".repeat(fenceIndent) : "";
+          fenceLang = line.trimStart().slice(3).trim();
+          fencePrefixBlocks = null;
+          fenceAccText = "";
+          fenceHasLines = false;
+          fenceCleanRaw = fenceIndent === 0;
+        } else {
+          resetFenceState();
+        }
+        continue;
+      }
       if (!fenced && ["$$", "\\[", "\\]"].includes(line.trim())) math = !math;
       if (!fenced && !math) {
-        if (listMarker(line)) inList = true;
-        else if (!line.trim()) {
-          if (!inList) end = offset;
-          inList = false;
-        } else if (!/^ /.test(line)) {
-          inList = false;
+        const lm = listMarker(line);
+        if (lm) {
+          if (!inList) {
+            inList = true;
+            listBaseIndent = lm.indent;
+            listKind = lm.kind;
+            listAfterBlank = false;
+          } else if (listAfterBlank) {
+            if (lm.indent > listBaseIndent || (lm.indent === listBaseIndent && lm.kind === listKind)) {
+              listAfterBlank = false;
+            } else {
+              inList = true;
+              listBaseIndent = lm.indent;
+              listKind = lm.kind;
+              listAfterBlank = false;
+            }
+          } else if (lm.indent < listBaseIndent || (lm.indent === listBaseIndent && lm.kind !== listKind)) {
+            listBaseIndent = lm.indent;
+            listKind = lm.kind;
+          }
+        } else if (!line.trim()) {
+          if (!inList) newCommitBoundary = scanCursor;
+          else listAfterBlank = true;
+        } else {
+          const lead = /^ */.exec(line)?.[0].length ?? 0;
+          if (inList && listAfterBlank) {
+            if (lead > listBaseIndent) listAfterBlank = false;
+            else {
+              inList = false;
+              listAfterBlank = false;
+            }
+          } else if (inList && (isHrLine(line) || /^ {0,3}#{1,6}\s/.test(line))) {
+            inList = false;
+            listAfterBlank = false;
+          }
         }
       }
     }
-    if (end) {
-      stable = [...stable, ...parseMarkdown(tail.slice(0, end))];
-      boundary += end;
+
+    if (newCommitBoundary > boundary) {
+      const newlyCommitted = text.slice(boundary, newCommitBoundary);
+      parsedBytes += utf8LenSlice(text, boundary, newCommitBoundary);
+      stable = [...stable, ...parseMarkdown(newlyCommitted)];
+      boundary = newCommitBoundary;
       unstable = [];
     }
+
+    if (fenced && fenceStart >= boundary) {
+      const trailingRaw = text.slice(scanCursor);
+      const trailingClean = trailingRaw.endsWith("\r") ? trailingRaw.slice(0, -1) : trailingRaw;
+      if (!trailingClean.trimStart().startsWith("```")) {
+        if (fencePrefixBlocks === null) {
+          const prefixSlice = text.slice(boundary, fenceStart);
+          parsedBytes += utf8LenSlice(text, boundary, fenceStart);
+          fencePrefixBlocks = prefixSlice ? reuseBlocks(unstable, parseMarkdown(prefixSlice)) : [];
+        }
+        if (fenceCleanRaw) {
+          if (text.indexOf("\r", fenceBodyCursor) !== -1) {
+            fenceCleanRaw = false;
+            if (fenceHasLines) fenceAccText = text.slice(fenceBodyStart, fenceBodyCursor - 1);
+          } else {
+            const lastNl = text.lastIndexOf("\n");
+            if (lastNl >= fenceBodyCursor) {
+              parsedBytes += utf8LenSlice(text, fenceBodyCursor, lastNl + 1);
+              fenceBodyCursor = lastNl + 1;
+              fenceHasLines = true;
+            }
+            if (fenceBodyCursor < text.length) parsedBytes += utf8LenSlice(text, fenceBodyCursor, text.length);
+            const openText = text.slice(fenceBodyStart);
+            const openBlock: Block = { t: "pre", lang: fenceLang, text: openText, open: true };
+            const prevOpen = unstable[fencePrefixBlocks.length];
+            if (prevOpen && prevOpen.t === "pre" && prevOpen.lang === fenceLang && prevOpen.open === true && prevOpen.text === openText) {
+              return [...stable, ...unstable];
+            }
+            unstable = [...fencePrefixBlocks, openBlock];
+            return [...stable, ...unstable];
+          }
+        }
+        while (true) {
+          const nl = text.indexOf("\n", fenceBodyCursor);
+          if (nl === -1) break;
+          const rawLine = text.slice(fenceBodyCursor, nl);
+          parsedBytes += utf8LenSlice(text, fenceBodyCursor, nl) + 1;
+          fenceBodyCursor = nl + 1;
+          const dedented = dedentLine(rawLine);
+          fenceAccText = fenceHasLines ? `${fenceAccText}\n${dedented}` : dedented;
+          fenceHasLines = true;
+        }
+        let openText: string;
+        if (fenceBodyCursor === text.length && fenceBodyCursor > fenceBodyStart) {
+          openText = `${fenceAccText}\n`;
+        } else if (fenceBodyCursor < text.length) {
+          parsedBytes += utf8LenSlice(text, fenceBodyCursor, text.length);
+          const dedentedTrail = dedentLine(trailingRaw);
+          openText = fenceHasLines ? `${fenceAccText}\n${dedentedTrail}` : dedentedTrail;
+        } else {
+          openText = "";
+        }
+        const openBlock: Block = { t: "pre", lang: fenceLang, text: openText, open: true };
+        const prevOpen = unstable[fencePrefixBlocks.length];
+        if (prevOpen && prevOpen.t === "pre" && prevOpen.lang === fenceLang && prevOpen.open === true && prevOpen.text === openText) {
+          return [...stable, ...unstable];
+        }
+        unstable = [...fencePrefixBlocks, openBlock];
+        return [...stable, ...unstable];
+      }
+    }
+
     // The unstable tail is re-parsed each time; blocks that did not change
     // (everything but the last one, usually) keep their identity.
-    unstable = reuseBlocks(unstable, parseMarkdown(text.slice(boundary)));
+    const tailSlice = text.slice(boundary);
+    parsedBytes += utf8LenSlice(text, boundary, text.length);
+    unstable = reuseBlocks(unstable, parseMarkdown(tailSlice));
     return [...stable, ...unstable];
-  };
+  }) as IncrementalMarkdownParser;
+
+  Object.defineProperties(fn, {
+    scannedBytes: { get: () => scannedBytes },
+    parsedBytes: { get: () => parsedBytes },
+  });
+  return fn;
 }
 
 function renderListItem(it: string | ListItem, compact?: boolean): JSX.Element {
@@ -484,7 +733,7 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
   ) : b.t === "ul" ? (
     <ul>{b.items.map((it) => renderListItem(it, compact))}</ul>
   ) : b.t === "pre" ? (
-    isMermaidLang(b.lang) ? <MermaidBlock text={b.text} complete={!b.open} /> : <CodeBlock text={b.text} lang={b.lang} />
+    isMermaidLang(b.lang) ? <MermaidBlock text={b.text} complete={!b.open} /> : <CodeBlock text={b.text} lang={b.lang} streaming={Boolean(b.open)} />
   ) : b.t === "quote" ? (
     <blockquote>
       <MdView text={b.text} compact={compact} />
@@ -518,6 +767,34 @@ function renderBlock(b: Block, compact?: boolean): JSX.Element {
   );
 }
 
+function renderBlockSlot(block: () => Block, compact?: boolean): JSX.Element {
+  const kind = createMemo(() => {
+    const b = block();
+    if (b.t === "pre") return isMermaidLang(b.lang) ? "pre:mermaid" : "pre:code";
+    if (b.t === "h") return `h:${b.n}`;
+    return b.t;
+  });
+  return (
+    <Show when={kind()} keyed>
+      {(k) => {
+        if (k === "pre:code") {
+          const pre = () => block() as Extract<Block, { t: "pre" }>;
+          return <CodeBlock text={pre().text} lang={pre().lang} streaming={Boolean(pre().open)} />;
+        }
+        if (k === "pre:mermaid") {
+          const pre = () => block() as Extract<Block, { t: "pre" }>;
+          return <MermaidBlock text={pre().text} complete={!pre().open} />;
+        }
+        if (k === "p") {
+          const p = () => block() as Extract<Block, { t: "p" }>;
+          return <p>{inline(p().text)}</p>;
+        }
+        return <>{() => renderBlock(block(), compact)}</>;
+      }}
+    </Show>
+  );
+}
+
 // Parsed blocks of recently shown messages: rows that remount while a long
 // transcript scrolls skip re-parsing. Blocks are immutable data.
 const parsedMessages = new Map<string, Block[]>();
@@ -535,7 +812,7 @@ export function MdView(p: { text: string; compact?: boolean }) {
   });
   return (
     <div class={`md ${p.compact ? "md-compact" : ""}`}>
-      <For each={blocks()}>{(b) => renderBlock(b, p.compact)}</For>
+      <Index each={blocks()}>{(b) => renderBlockSlot(b, p.compact)}</Index>
     </div>
   );
 }

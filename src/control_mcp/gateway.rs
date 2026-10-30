@@ -55,6 +55,16 @@ pub struct Principal {
 }
 
 impl Principal {
+    pub fn action_scope_actor(&self) -> Option<Uuid> {
+        if let Some(mission_id) = self.mission_id {
+            Some(mission_id)
+        } else if self.client_kind.is_some() {
+            Some(self.session_id)
+        } else {
+            None
+        }
+    }
+
     pub fn requester_subject(&self) -> crate::api::approval_flow::RequesterSubject {
         if let Some(mission_id) = self.mission_id {
             crate::api::approval_flow::RequesterSubject::mission(mission_id)
@@ -1314,15 +1324,10 @@ async fn run_accepted(
     )
     .map_err(|_| ToolError::denied("Authentication unavailable"))?
     .0;
-    let scope_actor = p.mission_id.unwrap_or(p.session_id);
     let key = crate::project_context::digest(
         json!([
             p.sub,
-            if p.mission_id.is_some() {
-                json!(p.mission_id)
-            } else {
-                json!(scope_actor)
-            },
+            p.action_scope_actor(),
             p.project,
             call.name,
             arguments["idempotency_key"]
@@ -1875,17 +1880,19 @@ pub async fn renew(
                 ));
             }
         }
-        let kind = p.client_kind.unwrap_or_default();
-        p.client_kind = Some(kind);
-        if let Some(ref label) = renew_body.client_label {
-            p.client_label = Some(crate::api::approval_flow::sanitize_client_label(
-                label, kind,
-            ));
-        } else if p.client_label.is_none() {
-            p.client_label = Some(kind.as_str().to_string());
-        }
-        if let Some(ref host) = renew_body.host_hint {
-            p.host_hint = crate::api::approval_flow::sanitize_host_hint(host);
+        if subject_kind_out == "external_session" || p.client_kind.is_some() {
+            let kind = p.client_kind.unwrap_or_default();
+            p.client_kind = Some(kind);
+            if let Some(ref label) = renew_body.client_label {
+                p.client_label = Some(crate::api::approval_flow::sanitize_client_label(
+                    label, kind,
+                ));
+            } else if p.client_label.is_none() {
+                p.client_label = Some(kind.as_str().to_string());
+            }
+            if let Some(ref host) = renew_body.host_hint {
+                p.host_hint = crate::api::approval_flow::sanitize_host_hint(host);
+            }
         }
         let rolling = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
         p.exp = hard_expires_at.map_or(rolling, |hard| rolling.min(hard)) as usize;

@@ -10,8 +10,7 @@ enum OrbRichHeightCache {
         hasher.combine(size)
         return hasher.finalize()
     }
-    static func get(_ source: String, _ size: DynamicTypeSize) -> CGFloat {
-        if let cached = heights[key(source, size)] { return cached }
+    static func estimate(_ source: String) -> CGFloat {
         // Heuristic height estimate accounting for paragraphs, code blocks, and headings
         var totalHeight: CGFloat = 0
         var inCodeBlock = false
@@ -37,7 +36,12 @@ enum OrbRichHeightCache {
         }
         return min(4800, max(24, totalHeight))
     }
-    static func set(_ value: CGFloat, for source: String, _ size: DynamicTypeSize) {
+    static func get(_ source: String, _ size: DynamicTypeSize, streaming: Bool = false) -> CGFloat {
+        if !streaming, let cached = heights[key(source, size)] { return cached }
+        return estimate(source)
+    }
+    static func set(_ value: CGFloat, for source: String, _ size: DynamicTypeSize, streaming: Bool = false) {
+        guard !streaming else { return }
         if heights.count > 512 { heights.removeAll(keepingCapacity: true) }
         heights[key(source, size)] = value
     }
@@ -516,13 +520,13 @@ struct OrbRichText: View {
     @State private var height: CGFloat?
     @Environment(\.dynamicTypeSize) private var textSize
     private var resolvedHeight: CGFloat {
-        height ?? OrbRichHeightCache.get(source, textSize)
+        height ?? OrbRichHeightCache.get(source, textSize, streaming: streaming)
     }
     var body: some View {
         if Self.preferNativeWhenSimple && !OrbNativeMarkdownView.requiresWebRenderer(source) {
             OrbNativeMarkdownView(source: source, streaming: streaming, onArtifact: onArtifact)
         } else {
-            RichWeb(source: source, height: Binding(
+            RichWeb(source: source, streaming: streaming, height: Binding(
                 get: { resolvedHeight },
                 set: { height = $0 }
             ), onArtifact: onArtifact, textSize: textSize)
@@ -531,6 +535,7 @@ struct OrbRichText: View {
     }
     private struct RichWeb: UIViewRepresentable {
         let source: String
+        let streaming: Bool
         @Binding var height: CGFloat
         let onArtifact: (String) -> Void
         let textSize: DynamicTypeSize
@@ -544,6 +549,7 @@ struct OrbRichText: View {
         }
         func updateUIView(_ view: WKWebView, context: Context) {
             context.coordinator.onArtifact = onArtifact
+            context.coordinator.streaming = streaming
             guard context.coordinator.source != source || context.coordinator.textSize != textSize else {
                 if context.coordinator.ready {
                     view.evaluateJavaScript("if(window.orbReport)window.orbReport();")
@@ -597,6 +603,7 @@ struct OrbRichText: View {
         final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             var source: String?
             var textSize: DynamicTypeSize?
+            var streaming = false
             var ready = false, loading = false
             var updateScript = ""
             var height: Binding<CGFloat>
@@ -614,7 +621,7 @@ struct OrbRichText: View {
                 guard let body = message.body as? [String: Any] else { return }
                 if let value = body["height"] as? Double, value.isFinite {
                     let resolved = max(24, CGFloat(value))
-                    if let source, let textSize { OrbRichHeightCache.set(resolved, for: source, textSize) }
+                    if let source, let textSize { OrbRichHeightCache.set(resolved, for: source, textSize, streaming: streaming) }
                     if abs(height.wrappedValue - resolved) > 0.5 {
                         height.wrappedValue = resolved
                     }

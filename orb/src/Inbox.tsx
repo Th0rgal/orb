@@ -103,7 +103,7 @@ import { projectColor } from "./projectAppearance";
 import { InboxSkeleton } from "./Skeleton";
 import { streamMission, type StreamEvent } from "./stream";
 import { Transcript, type StreamItem } from "./Transcript";
-import { applyStreamEvent } from "./transcriptModel";
+import { applyStreamEvent, applyStreamEvents } from "./transcriptModel";
 import { imageByteLimit, imageMime } from "./imageTypes";
 import "./Inbox.css";
 
@@ -1149,11 +1149,12 @@ export function InboxPage(p: {
             });
           };
 
-          const appendLiveEvent = (ev: StreamEvent) => {
-            pushMissionLiveEvent(id, ev);
+          const appendLiveBatch = (evs: StreamEvent[]) => {
+            if (!evs.length) return;
+            for (const ev of evs) pushMissionLiveEvent(id, ev);
             const snap = peekReadyTranscript(id) ?? peekTranscript(id);
             const curItems = snap?.items ?? [];
-            const nextItems = applyStreamEvent(curItems, ev);
+            const nextItems = applyStreamEvents(curItems, evs);
             if (nextItems !== curItems) {
               if (snap) {
                 putTranscript(id, { ...snap, items: nextItems });
@@ -1162,6 +1163,7 @@ export function InboxPage(p: {
               }
             }
           };
+          const appendLiveEvent = (ev: StreamEvent) => appendLiveBatch([ev]);
 
           const rawTranscriptItems = createMemo<StreamItem[] | undefined>(
             () => {
@@ -1201,6 +1203,9 @@ export function InboxPage(p: {
               () => {
                 void refreshTranscript(id).catch(swallow("inbox.refreshTranscript", { mission: id }));
               },
+              undefined,
+              undefined,
+              appendLiveBatch,
             );
             onCleanup(() => {
               stopStream();

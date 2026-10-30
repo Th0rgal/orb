@@ -501,7 +501,8 @@ export function isFillerBubble(item: StreamItem, index: number, items: StreamIte
   if (!FILLER_ONLY.test(item.text.trim())) return false;
   // An error is not an answer: it must not license hiding the only output there
   // was. Only real text that followed does.
-  for (const next of items.slice(index + 1)) {
+  for (let i = index + 1; i < items.length; i++) {
+    const next = items[i];
     if (next.kind === "user" || next.kind === "error") return false;
     if (next.kind === "text" && next.text.trim() && !FILLER_ONLY.test(next.text.trim())) return true;
   }
@@ -510,8 +511,27 @@ export function isFillerBubble(item: StreamItem, index: number, items: StreamIte
 
 /** The transcript as shown: filler bubbles dropped, everything else intact. */
 export function withoutFiller(items: StreamItem[]): StreamItem[] {
-  const keep = items.filter((item, index) => !isFillerBubble(item, index, items));
-  return keep.length === items.length ? items : keep;
+  if (items.length <= 1) return items;
+  let followedByRealText = false;
+  let dropped: Uint8Array | null = null;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "user" || item.kind === "error") {
+      followedByRealText = false;
+    } else if (item.kind === "text") {
+      const trimmed = item.text.trim();
+      if (trimmed && FILLER_ONLY.test(trimmed)) {
+        if (!item.live && followedByRealText) {
+          dropped ??= new Uint8Array(items.length);
+          dropped[i] = 1;
+        }
+      } else if (trimmed) {
+        followedByRealText = true;
+      }
+    }
+  }
+  if (!dropped) return items;
+  return items.filter((_, i) => dropped![i] === 0);
 }
 
 /** A delivered follow-up supersedes the previous attempt's terminal notice.

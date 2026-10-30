@@ -45,11 +45,22 @@ it('visible polling skips overlap, recovers from errors and stops cleanly',async
 });
 
 it('batch replay equals sequential replay including duplicates and tool boundaries',async()=>{
- const {buildTranscript,applyStreamEvent,applyStreamEvents}=await import('../src/transcriptModel');
+ const {buildTranscript,applyStreamEvent,applyStreamEvents,withoutFiller,isFillerBubble}=await import('../src/transcriptModel');
  const events=[{type:'user_message',eventId:'u',data:{id:'u',content:'Question'}},...Array.from({length:100},(_,i)=>({type:'text_delta',eventId:`d${i}`,data:{content:'x'}})),{type:'tool_call',eventId:'call',data:{tool_call_id:'t',name:'read',args:{path:'a'}}},{type:'tool_result',eventId:'result',data:{tool_call_id:'t',result:'ok'}}];
  let sequential=buildTranscript([]);for(const event of events)sequential=applyStreamEvent(sequential,event);
  const batch=applyStreamEvents(buildTranscript([]),events);
  expect(batch).toEqual(sequential);expect(applyStreamEvents(batch,events)).toEqual(batch);
+ const mixed=buildTranscript([
+  {type:'user_message',eventId:'u1',data:{id:'u1',content:'Run'}},
+  {type:'assistant_message',eventId:'a1',data:{content:'...'}},
+  {type:'tool_call',eventId:'tc1',data:{tool_call_id:'c1',name:'bash',args:{command:'ls'}}},
+  {type:'assistant_message',eventId:'a2',data:{content:'..'}},
+  {type:'assistant_message',eventId:'a3',data:{content:'Real answer'}},
+  {type:'user_message',eventId:'u2',data:{id:'u2',content:'Next'}},
+  {type:'assistant_message',eventId:'a4',data:{content:'.'}},
+  {type:'error',eventId:'e1',data:{message:'boom',resumable:true}},
+ ]);
+ expect(withoutFiller(mixed)).toEqual(mixed.filter((item,idx)=>!isFillerBubble(item,idx,mixed)));
 });
 
 it('a fresh consumer sees a shared request failure while a stale-tolerant consumer retains the cache',async()=>{

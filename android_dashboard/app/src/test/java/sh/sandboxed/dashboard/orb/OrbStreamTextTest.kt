@@ -55,6 +55,34 @@ class OrbStreamTextTest {
         check(incremental < full) { "incremental $incremental ms vs full $full ms" }
     }
 
+    /** Unclosed 256 KB code fence streamed in 1 KB frames scans & parses O(N) bytes and matches full parse. */
+    @Test
+    fun unclosedFenceStreamsInLinearCostAndMatchesFullParse() {
+        val totalKb = 256
+        val stream = OrbStreamBlocks()
+        val acc = StringBuilder(totalKb * 1024 + 512)
+        var lastBlocks: List<OrbMdBlock> = emptyList()
+        for (k in 0 until totalKb) {
+            val sb = StringBuilder()
+            if (k == 0) sb.append("Here is the generated code:\n\n```rust\n")
+            var li = 0
+            while (sb.length < 1024) {
+                sb.append("pub fn step_${k}_${li}(x: u64, y: u64) -> u64 { (x | y) ^ 0x55aa_${k} }\n")
+                li++
+            }
+            acc.append(sb.substring(0, 1024))
+            lastBlocks = stream.blocks(cleanRichText(acc.toString(), streaming = true))
+        }
+        val openBytes = acc.toString().toByteArray(Charsets.UTF_8).size
+        check(stream.scannedBytes <= openBytes) { "scannedBytes=${stream.scannedBytes} > openBytes=$openBytes" }
+        check(stream.parsedBytes <= openBytes * 2) { "parsedBytes=${stream.parsedBytes} is superlinear for $openBytes bytes" }
+        assertEquals(parseMdBlocks(cleanRichText(acc.toString(), streaming = false)), lastBlocks)
+
+        acc.append("\n```\n\nFinished.\n\n")
+        val closedBlocks = stream.blocks(cleanRichText(acc.toString(), streaming = false))
+        assertEquals(parseMdBlocks(cleanRichText(acc.toString(), streaming = false)), closedBlocks)
+    }
+
     private fun longReply(sections: Int): String = buildString {
         append("STREAM_LONG_OK: here is the full report.")
         for (k in 0 until sections) {

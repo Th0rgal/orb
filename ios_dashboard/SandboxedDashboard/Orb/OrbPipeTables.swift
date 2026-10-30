@@ -62,8 +62,62 @@ enum OrbPipeTables {
         return run.count >= 3 ? String(run) : nil
     }
 
+    private static func hasLoosePipeOutsideFence(_ src: String) -> Bool {
+        let utf8 = src.utf8
+        var scanFenceChar: UInt8 = 0
+        var scanFenceLen = 0
+        var lineStart = utf8.startIndex
+        while true {
+            let nl = utf8[lineStart...].firstIndex(of: UInt8(ascii: "\n"))
+            let lineEnd = nl ?? utf8.endIndex
+            var p = lineStart
+            while p < lineEnd && (utf8[p] == UInt8(ascii: " ") || utf8[p] == UInt8(ascii: "\t")) {
+                p = utf8.index(after: p)
+            }
+            let c = p < lineEnd ? utf8[p] : 0
+            if c == UInt8(ascii: "`") || c == UInt8(ascii: "~") {
+                var q = p
+                var run = 0
+                while q < lineEnd && utf8[q] == c {
+                    run += 1
+                    q = utf8.index(after: q)
+                }
+                if run >= 3 {
+                    if scanFenceLen > 0 {
+                        if c == scanFenceChar && run >= scanFenceLen {
+                            scanFenceChar = 0
+                            scanFenceLen = 0
+                        }
+                    } else {
+                        scanFenceChar = c
+                        scanFenceLen = run
+                    }
+                    guard let nl else { break }
+                    lineStart = utf8.index(after: nl)
+                    continue
+                }
+            }
+            if scanFenceLen == 0 && c != UInt8(ascii: "|") && p < lineEnd {
+                var cur = p
+                while let bar = utf8[cur..<lineEnd].firstIndex(of: UInt8(ascii: "|")) {
+                    if bar > p {
+                        let prev = utf8[utf8.index(before: bar)]
+                        let nextIdx = utf8.index(after: bar)
+                        if prev == UInt8(ascii: " ") && nextIdx < lineEnd && utf8[nextIdx] == UInt8(ascii: " ") {
+                            return true
+                        }
+                    }
+                    cur = utf8.index(after: bar)
+                }
+            }
+            guard let nl else { break }
+            lineStart = utf8.index(after: nl)
+        }
+        return false
+    }
+
     static func normalize(_ src: String) -> String {
-        guard src.contains(" | ") else { return src }
+        guard src.contains(" | "), hasLoosePipeOutsideFence(src) else { return src }
         let lines = src.components(separatedBy: "\n")
         var starts = [Int](repeating: 0, count: lines.count)
         for k in lines.indices.dropFirst() { starts[k] = starts[k - 1] + lines[k - 1].utf16.count + 1 }
