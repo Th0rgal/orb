@@ -57,12 +57,10 @@ export const AsyncButton = forwardRef<HTMLButtonElement, AsyncButtonProps>(
     const inFlight = useRef(false);
     const mounted = useRef(true);
 
-    useEffect(
-      () => () => {
-        mounted.current = false;
-      },
-      []
-    );
+    useEffect(() => {
+      mounted.current = true;
+      return () => { mounted.current = false; };
+    }, []);
 
     const isBusy = Boolean(busy) || internalBusy;
 
@@ -149,12 +147,10 @@ export function useAsyncAction<TArgs extends unknown[]>(
     handlerRef.current = handler;
   }, [handler]);
 
-  useEffect(
-    () => () => {
-      mounted.current = false;
-    },
-    []
-  );
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const run = useCallback(
     async (...args: TArgs) => {
