@@ -287,6 +287,29 @@ it("checkpointed streaming over a giant unclosed fence scans O(N) bytes and matc
   expect(parse(full)).toEqual(parseMarkdown(full));
 });
 
+it("detects mid-document interior edits >4096 chars, preserves list-nested open fences after blank lines, and scans long GFM preambles linearly", () => {
+  const parse = incrementalMarkdown();
+  const paras = Array.from({ length: 50 }, (_, i) => `Paragraph ${String(i).padStart(2, "0")}: ` + "x".repeat(84));
+  const doc1 = paras.join("\n\n");
+  expect(doc1.length).toBeGreaterThan(4096);
+  expect(parse(doc1)).toEqual(parseMarkdown(doc1));
+  const doc2 = doc1.slice(0, 301) + "Y" + doc1.slice(302) + "\n\nTail";
+  expect(parse(doc2)).toEqual(parseMarkdown(doc2));
+
+  const parseListFence = incrementalMarkdown();
+  const openNested = "- item\n\n  ```js\n  const x = 1;\n";
+  expect(parseListFence(openNested)).toEqual(parseMarkdown(openNested));
+  const closedNested = openNested + "  ```\n";
+  expect(parseListFence(closedNested)).toEqual(parseMarkdown(closedNested));
+
+  const longGfm = Array.from({ length: 10000 }, () => "plain text without pipes").join("\n") + "\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+  const t0 = performance.now();
+  const parsed = parseMarkdown(longGfm);
+  const dt = performance.now() - t0;
+  expect(parsed.at(-1)).toMatchObject({ t: "table" });
+  expect(dt).toBeLessThan(200);
+});
+
 it("renders nested indented bullet and numbered lists instead of collapsing dashed lines onto one line", () => {
   const src = [
     "### 2.2 Assumptions That Mask a Code / Logic Edge Case",

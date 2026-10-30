@@ -75,6 +75,7 @@ export function normalizeLoosePipeTables(src: string): string {
   let hasLooseCandidate = false;
   let scanFence: string | null = null;
   let lineStart = 0;
+  let nextPipe = src.indexOf(" | ", 0);
   while (lineStart <= src.length) {
     const nl = src.indexOf("\n", lineStart);
     const lineEnd = nl === -1 ? src.length : nl;
@@ -91,8 +92,9 @@ export function normalizeLoosePipeTables(src: string): string {
         scanFence = marker;
       }
     } else if (!scanFence && c !== 124) {
-      const pipe = src.indexOf(" | ", p);
-      if (pipe !== -1 && pipe < lineEnd) {
+      while (nextPipe !== -1 && nextPipe < p) nextPipe = src.indexOf(" | ", p);
+      if (nextPipe === -1) break;
+      if (nextPipe < lineEnd) {
         hasLooseCandidate = true;
         break;
       }

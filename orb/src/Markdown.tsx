@@ -490,7 +490,7 @@ export type IncrementalMarkdownParser = ((text: string) => Block[]) & {
 
 export function incrementalMarkdown(): IncrementalMarkdownParser {
   let previous = "", boundary = 0, scanCursor = 0;
-  let fenced = false, math = false, inList = false, inQuote = false;
+  let fenced = false, math = false, inList = false, listBaseIndent = 0, listAfterBlank = false, listKind: "ul" | "ol" = "ul", inQuote = false;
   let fenceStart = -1, fenceBodyStart = 0, fenceIndent = 0, fenceIndentPad = "", fenceLang = "";
   let fencePrefixBlocks: Block[] | null = null, fenceAccText = "", fenceBodyCursor = 0, fenceHasLines = false, fenceCleanRaw = false;
   let stable: Block[] = [], unstable: Block[] = [];
@@ -499,17 +499,7 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
   const samePrefix = (next: string): boolean => {
     const plen = previous.length;
     if (plen === 0) return true;
-    if (next.length < plen) return false;
-    if (plen <= 4096) return next.startsWith(previous);
-    const step = plen >> 3;
-    for (let p = 0; p < plen; p += step) {
-      if (next.charCodeAt(p) !== previous.charCodeAt(p)) return false;
-    }
-    return (
-      next.charCodeAt(plen - 1) === previous.charCodeAt(plen - 1) &&
-      next.slice(plen - 256, plen) === previous.slice(plen - 256, plen) &&
-      next.slice(0, 256) === previous.slice(0, 256)
-    );
+    return next.length >= plen && next.startsWith(previous);
   };
 
   const dedentLine = (raw: string): string => {
@@ -532,6 +522,8 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
       fenced = false;
       math = false;
       inList = false;
+      listBaseIndent = 0;
+      listAfterBlank = false;
       inQuote = false;
       resetFenceState();
       stable = [];
@@ -550,9 +542,13 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
       scannedBytes += utf8LenSlice(text, lineStart, nl) + 1;
 
       if (!fenced && !math && /^ {0,3}>/.test(line)) {
-        inQuote = true;
-        inList = false;
-        continue;
+        const qLead = /^ */.exec(line)?.[0].length ?? 0;
+        if (!(inList && qLead > listBaseIndent)) {
+          inQuote = true;
+          inList = false;
+          listAfterBlank = false;
+          continue;
+        }
       }
       if (!fenced && !math && inQuote) {
         if (!line.trim()) {
@@ -562,12 +558,17 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
       }
 
       if (!math && line.trimStart().startsWith("```")) {
+        const fLead = /^ */.exec(line)?.[0].length ?? 0;
+        if (!fenced && inList && listAfterBlank && fLead <= listBaseIndent) {
+          inList = false;
+          listAfterBlank = false;
+        }
         fenced = !fenced;
         if (fenced && !inList) {
           fenceStart = lineStart;
           fenceBodyStart = scanCursor;
           fenceBodyCursor = scanCursor;
-          fenceIndent = /^ */.exec(line)?.[0].length ?? 0;
+          fenceIndent = fLead;
           fenceIndentPad = fenceIndent > 0 ? " ".repeat(fenceIndent) : "";
           fenceLang = line.trimStart().slice(3).trim();
           fencePrefixBlocks = null;
@@ -581,12 +582,41 @@ export function incrementalMarkdown(): IncrementalMarkdownParser {
       }
       if (!fenced && ["$$", "\\[", "\\]"].includes(line.trim())) math = !math;
       if (!fenced && !math) {
-        if (listMarker(line)) inList = true;
-        else if (!line.trim()) {
+        const lm = listMarker(line);
+        if (lm) {
+          if (!inList) {
+            inList = true;
+            listBaseIndent = lm.indent;
+            listKind = lm.kind;
+            listAfterBlank = false;
+          } else if (listAfterBlank) {
+            if (lm.indent > listBaseIndent || (lm.indent === listBaseIndent && lm.kind === listKind)) {
+              listAfterBlank = false;
+            } else {
+              inList = true;
+              listBaseIndent = lm.indent;
+              listKind = lm.kind;
+              listAfterBlank = false;
+            }
+          } else if (lm.indent < listBaseIndent || (lm.indent === listBaseIndent && lm.kind !== listKind)) {
+            listBaseIndent = lm.indent;
+            listKind = lm.kind;
+          }
+        } else if (!line.trim()) {
           if (!inList) newCommitBoundary = scanCursor;
-          inList = false;
-        } else if (!/^ /.test(line)) {
-          inList = false;
+          else listAfterBlank = true;
+        } else {
+          const lead = /^ */.exec(line)?.[0].length ?? 0;
+          if (inList && listAfterBlank) {
+            if (lead > listBaseIndent) listAfterBlank = false;
+            else {
+              inList = false;
+              listAfterBlank = false;
+            }
+          } else if (inList && (isHrLine(line) || /^ {0,3}#{1,6}\s/.test(line))) {
+            inList = false;
+            listAfterBlank = false;
+          }
         }
       }
     }

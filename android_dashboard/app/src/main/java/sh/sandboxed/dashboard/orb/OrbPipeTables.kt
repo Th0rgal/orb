@@ -71,6 +71,7 @@ object OrbPipeTables {
     private fun hasLoosePipeOutsideFence(src: String): Boolean {
         var scanFence: String? = null
         var lineStart = 0
+        var nextPipe = src.indexOf(" | ", 0)
         while (lineStart <= src.length) {
             val nl = src.indexOf('\n', lineStart)
             val lineEnd = if (nl == -1) src.length else nl
@@ -88,8 +89,9 @@ object OrbPipeTables {
                     scanFence = marker
                 }
             } else if (scanFence == null && c != '|') {
-                val pipe = src.indexOf(" | ", p)
-                if (pipe in p until lineEnd) return true
+                while (nextPipe != -1 && nextPipe < p) nextPipe = src.indexOf(" | ", p)
+                if (nextPipe == -1) break
+                if (nextPipe < lineEnd) return true
             }
             if (nl == -1) break
             lineStart = nl + 1
