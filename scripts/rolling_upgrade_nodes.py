@@ -217,12 +217,63 @@ def default_runtime_busy_probe(unit_name="sandboxed-node", env_file="/etc/sandbo
     return busy
 
 
+def _discover_live_work_dir(unit_name="sandboxed-node", env_file="/etc/sandboxed-node.env"):
+    """Discover the running worker's SANDBOXED_NODE_WORK_DIR when observable."""
+    pid_res = subprocess.run(
+        ["systemctl", "show", "--property=MainPID", "--value", unit_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    main_pid = pid_res.stdout.strip()
+    if pid_res.returncode == 0 and main_pid.isdigit() and int(main_pid) > 0:
+        proc_env = _read_proc_environ(main_pid)
+        if proc_env:
+            env_vars = _parse_simple_env_file(env_file)
+            env_vars.update(proc_env)
+            return env_vars.get("SANDBOXED_NODE_WORK_DIR") or "/var/lib/sandboxed-node/work"
+    env_vars = _parse_simple_env_file(env_file)
+    if "SANDBOXED_NODE_WORK_DIR" in env_vars and env_vars["SANDBOXED_NODE_WORK_DIR"]:
+        return env_vars["SANDBOXED_NODE_WORK_DIR"]
+    return None
+
+
+def _resolve_worker_ledger(
+    db_path=None,
+    unit_name="sandboxed-node",
+    env_file="/etc/sandboxed-node.env",
+    live_work_dir_probe=None,
+):
+    """Resolve and cross-check the worker's SQLite job ledger path (fail-closed)."""
+    probe = live_work_dir_probe or (lambda: _discover_live_work_dir(unit_name=unit_name, env_file=env_file))
+    live_work_dir = probe()
+    live_db = (Path(live_work_dir) / "jobs.db") if live_work_dir else None
+
+    if db_path:
+        supplied = Path(db_path)
+        if live_db is not None and os.path.realpath(str(supplied)) != os.path.realpath(str(live_db)):
+            raise RuntimeError(
+                f"supplied ledger {supplied} does not match running worker ledger {live_db}"
+            )
+        resolved = supplied
+    else:
+        resolved = live_db if live_db is not None else Path("/var/lib/sandboxed-node/work/jobs.db")
+
+    if not resolved.is_file() or resolved.is_symlink():
+        raise RuntimeError(f"node job ledger is missing or a symlink: {resolved}")
+    return resolved
+
+
+def _sqlite_uri(path, mode):
+    return f"{Path(path).resolve().as_uri()}?mode={mode}"
+
+
 def _count_active_db_jobs(conn):
     has_jobs = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
     ).fetchone()
     if not has_jobs:
-        return 0
+        raise RuntimeError("node job ledger is missing required 'jobs' table")
     return int(
         conn.execute(
             "SELECT COUNT(*) FROM jobs WHERE state NOT IN ('succeeded','failed','cancelled','retired','completed','lost')"
@@ -231,29 +282,33 @@ def _count_active_db_jobs(conn):
 
 
 def probe_worker_state(
-    db_path,
+    db_path=None,
     binary_path="/usr/local/bin/sandboxed-node",
     staged_suffix=".new",
     unit_name="sandboxed-node",
     service_ctl=None,
     runtime_busy_probe=None,
+    live_work_dir_probe=None,
 ):
     """Return dict with keys staged, running, healthy, quarantined."""
     ctl = service_ctl or SystemdServiceCtl()
     busy_probe = runtime_busy_probe or (lambda: default_runtime_busy_probe(unit_name))
+    resolved_db = _resolve_worker_ledger(
+        db_path=db_path,
+        unit_name=unit_name,
+        live_work_dir_probe=live_work_dir_probe,
+    )
     staged_path = Path(binary_path + staged_suffix)
     failed_path = Path(binary_path + staged_suffix + ".failed")
     staged = staged_path.exists()
     quarantined = (not staged) and failed_path.exists()
     healthy = bool(ctl.is_active(unit_name))
 
-    db_running = 0
-    if Path(db_path).exists():
-        con = sqlite3.connect(db_path, timeout=5.0)
-        try:
-            db_running = _count_active_db_jobs(con)
-        finally:
-            con.close()
+    con = sqlite3.connect(_sqlite_uri(resolved_db, "ro"), uri=True, timeout=5.0)
+    try:
+        db_running = _count_active_db_jobs(con)
+    finally:
+        con.close()
     runtime_running = int(busy_probe()) if staged else 0
     return {
         "staged": staged,
@@ -264,7 +319,7 @@ def probe_worker_state(
 
 
 def perform_fenced_upgrade(
-    db_path,
+    db_path=None,
     binary_path="/usr/local/bin/sandboxed-node",
     staged_suffix=".new",
     backup_suffix=".prev",
@@ -272,6 +327,7 @@ def perform_fenced_upgrade(
     unit_name="sandboxed-node",
     service_ctl=None,
     runtime_busy_probe=None,
+    live_work_dir_probe=None,
 ):
     """Drain-verified, write-fenced atomic worker upgrade with automatic rollback.
 
@@ -286,6 +342,11 @@ def perform_fenced_upgrade(
     """
     ctl = service_ctl or SystemdServiceCtl()
     busy_probe = runtime_busy_probe or (lambda: default_runtime_busy_probe(unit_name))
+    resolved_db = _resolve_worker_ledger(
+        db_path=db_path,
+        unit_name=unit_name,
+        live_work_dir_probe=live_work_dir_probe,
+    )
 
     bin_path = Path(binary_path)
     staged_path = Path(binary_path + staged_suffix)
@@ -297,15 +358,12 @@ def perform_fenced_upgrade(
     if not staged_path.is_file():
         raise RuntimeError(f"staged binary does not exist: {staged_path}")
 
-    # 1. Unlocked pre-check so busy nodes never contend on jobs.db
-    if Path(db_path).exists():
-        ro_con = sqlite3.connect(db_path, timeout=5.0)
-        try:
-            c1 = _count_active_db_jobs(ro_con)
-        finally:
-            ro_con.close()
-    else:
-        c1 = 0
+    # 1. Unlocked pre-check on verified existing ledger so busy nodes never contend on jobs.db
+    ro_con = sqlite3.connect(_sqlite_uri(resolved_db, "ro"), uri=True, timeout=5.0)
+    try:
+        c1 = _count_active_db_jobs(ro_con)
+    finally:
+        ro_con.close()
     c1 = max(c1, int(busy_probe()))
     if c1 != 0:
         return f"BUSY:{c1}"
@@ -314,18 +372,15 @@ def perform_fenced_upgrade(
         time.sleep(verify_delay_secs)
 
     # 2. Acquire worker-side admission fence BEFORE final zero-work verification
-    db_file = Path(db_path)
-    db_file.parent.mkdir(parents=True, exist_ok=True)
+    #    (?mode=rw refuses to create a missing DB file; schema is re-verified inside the lock)
     owner_uid_gid = None
-    for candidate_owner in (db_file, db_file.parent):
-        try:
-            st = candidate_owner.lstat()
-            owner_uid_gid = (st.st_uid, st.st_gid)
-            break
-        except OSError:
-            continue
+    try:
+        st = resolved_db.lstat()
+        owner_uid_gid = (st.st_uid, st.st_gid)
+    except OSError as error:
+        raise RuntimeError(f"cannot stat node ledger {resolved_db}: {error}") from error
 
-    fence_con = sqlite3.connect(db_path, timeout=2.0, isolation_level=None)
+    fence_con = sqlite3.connect(_sqlite_uri(resolved_db, "rw"), uri=True, timeout=2.0, isolation_level=None)
     fence_held = False
     try:
         try:
@@ -356,7 +411,7 @@ def perform_fenced_upgrade(
             fence_con.execute("ROLLBACK")
             fence_held = False
             fence_con.close()
-            _restore_db_ownership(db_path, owner_uid_gid)
+            _restore_db_ownership(resolved_db, owner_uid_gid)
             if replaced_binary and backup_path.is_file():
                 shutil.copy2(backup_path, restoring_path)
                 os.chmod(restoring_path, 0o755)
@@ -376,7 +431,7 @@ def perform_fenced_upgrade(
             except Exception:
                 pass
         fence_con.close()
-        _restore_db_ownership(db_path, owner_uid_gid)
+        _restore_db_ownership(resolved_db, owner_uid_gid)
 
     # 3. Activate new binary and verify health; roll back and quarantine on failure
     try:
@@ -416,6 +471,9 @@ def _remote_worker_prelude():
         inspect.getsource(_read_proc_environ),
         inspect.getsource(_restore_db_ownership),
         inspect.getsource(default_runtime_busy_probe),
+        inspect.getsource(_discover_live_work_dir),
+        inspect.getsource(_resolve_worker_ledger),
+        inspect.getsource(_sqlite_uri),
         inspect.getsource(_count_active_db_jobs),
         inspect.getsource(probe_worker_state),
         inspect.getsource(perform_fenced_upgrade),
@@ -517,14 +575,15 @@ def rolling_upgrade_step(
 
     pending_remotes = []
     currently_cordoned_pending = []
-    blocking_errors = 0
+    probe_errors = 0
+    upgrade_failures = 0
 
     def try_upgrade_remote(host, db_path):
-        nonlocal blocking_errors
+        nonlocal upgrade_failures
         try:
             outcome = node_ops.upgrade_remote(host, db_path)
         except Exception as error:
-            blocking_errors += 1
+            upgrade_failures += 1
             emit("upgrade_failed", node=host, error=str(error))
             return False
         if outcome == "UPGRADED":
@@ -542,7 +601,7 @@ def rolling_upgrade_step(
                 node_ops.probe_remote(host, db_path)
             )
         except Exception as error:
-            blocking_errors += 1
+            probe_errors += 1
             emit("probe_error", node=host, error=str(error))
             pending_remotes.append((host, db_path, -1))
             if cordoned_map.get(host, False):
@@ -551,7 +610,7 @@ def rolling_upgrade_step(
 
         if not staged:
             if quarantined or not healthy:
-                blocking_errors += 1
+                upgrade_failures += 1
                 pending_remotes.append((host, db_path, -1))
                 if cordoned_map.get(host, False):
                     currently_cordoned_pending.append(host)
@@ -569,7 +628,7 @@ def rolling_upgrade_step(
             continue
 
         is_cord = cordoned_map.get(host, False)
-        if is_cord and running == 0:
+        if is_cord and running == 0 and upgrade_failures == 0:
             if apply:
                 if try_upgrade_remote(host, db_path):
                     continue
@@ -593,9 +652,9 @@ def rolling_upgrade_step(
             cordoned_map[excess] = False
         emit("uncordoned_excess_wave", node=excess)
 
-    # Advance cordons only when all remote probes/upgrades are healthy (fail-closed)
+    # Advance cordons only when all remote probes and prior upgrades succeeded (fail-closed)
     slots = max_concurrent_cordons - len(currently_cordoned_pending)
-    if slots > 0 and blocking_errors == 0:
+    if slots > 0 and probe_errors == 0 and upgrade_failures == 0:
         candidates = [
             (running, host, db_path)
             for (host, db_path, running) in pending_remotes
@@ -603,6 +662,8 @@ def rolling_upgrade_step(
         ]
         candidates.sort()
         for running, host, db_path in candidates[:slots]:
+            if upgrade_failures > 0:
+                break
             if apply:
                 core_api.set_cordon(host, True)
                 cordoned_map[host] = True
@@ -632,7 +693,7 @@ def rolling_upgrade_step(
                         healthy=healthy,
                     )
             else:
-                if running == 0:
+                if running == 0 and upgrade_failures == 0:
                     if apply:
                         try:
                             outcome = node_ops.upgrade_local(local_jobs_db)
@@ -648,6 +709,9 @@ def rolling_upgrade_step(
                     else:
                         local_pending = True
                         emit("would_upgrade_local", running_jobs=0)
+                elif running == 0:
+                    local_pending = True
+                    emit("local_blocked_by_remote_error", running_jobs=0)
                 else:
                     local_pending = True
                     emit("local_waiting", running_jobs=running)
@@ -666,7 +730,7 @@ def parse_node_spec(raw):
     host, sep, db_path = raw.partition(":")
     if not host:
         raise ValueError(f"invalid --node spec: {raw!r}")
-    return host, (db_path if sep and db_path else "/var/lib/sandboxed-node/jobs.db")
+    return host, (db_path if sep and db_path else None)
 
 
 def main(argv=None):

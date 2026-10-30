@@ -310,6 +310,7 @@ class RollingUpgradeNodesTest(unittest.TestCase):
                     verify_delay_secs=0.0,
                     service_ctl=FailingStartCtl(),
                     runtime_busy_probe=lambda: 0,
+                    live_work_dir_probe=lambda: str(root),
                 )
 
             self.assertEqual(bin_path.read_text(), "v1-good")
@@ -323,6 +324,7 @@ class RollingUpgradeNodesTest(unittest.TestCase):
                 binary_path=str(bin_path),
                 service_ctl=type("HealthyCtl", (), {"is_active": lambda self, _u: True})(),
                 runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(root),
             )
             self.assertFalse(probe_after_fail["staged"])
             self.assertTrue(probe_after_fail["quarantined"])
@@ -379,6 +381,7 @@ class RollingUpgradeNodesTest(unittest.TestCase):
                 verify_delay_secs=0.01,
                 service_ctl=FencedSuccessCtl(),
                 runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(root),
             )
             t.join(timeout=5.0)
 
@@ -397,11 +400,114 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             prelude_check = (
                 roll._remote_worker_prelude()
                 + "\nctl = type('C', (), {'is_active': lambda s, u: True})()"
-                + f"\nprint(json.dumps(probe_worker_state({str(db_path)!r}, binary_path={str(bin_path)!r}, service_ctl=ctl, runtime_busy_probe=lambda: 0)))\n"
+                + f"\nprint(json.dumps(probe_worker_state(None, binary_path={str(bin_path)!r}, service_ctl=ctl, runtime_busy_probe=lambda: 0, live_work_dir_probe=lambda: {str(root)!r})))\n"
             )
             proc = subprocess.run([sys.executable, "-"], input=prelude_check, capture_output=True, text=True, check=True)
             parsed = json.loads(proc.stdout.strip())
             self.assertEqual(parsed, {"staged": False, "running": 0, "healthy": True, "quarantined": False})
+
+    def test_missing_schemaless_or_mismatched_ledgers_fail_closed_and_wave_halts(self):
+        self.assertEqual(roll.parse_node_spec("ashur"), ("ashur", None))
+        self.assertEqual(
+            roll.parse_node_spec("ashur:/var/lib/sandboxed-node/jobs.db"),
+            ("ashur", "/var/lib/sandboxed-node/jobs.db"),
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            missing_db = root / "nonexistent" / "jobs.db"
+            bin_path = root / "sandboxed-node"
+            staged_path = root / "sandboxed-node.new"
+            bin_path.write_text("v1")
+            staged_path.write_text("v2")
+
+            noop_ctl = type(
+                "NoopCtl",
+                (),
+                {
+                    "is_active": lambda s, _u: True,
+                    "stop": lambda s, _u: None,
+                    "start": lambda s, _u: None,
+                    "start_best_effort": lambda s, _u: None,
+                    "restart_best_effort": lambda s, _u: None,
+                },
+            )()
+
+            # Missing DB raises and NEVER creates a phantom empty jobs.db
+            with self.assertRaises(RuntimeError):
+                roll.perform_fenced_upgrade(
+                    db_path=str(missing_db),
+                    binary_path=str(bin_path),
+                    verify_delay_secs=0.0,
+                    service_ctl=noop_ctl,
+                    runtime_busy_probe=lambda: 0,
+                    live_work_dir_probe=lambda: None,
+                )
+            self.assertFalse(missing_db.exists())
+
+            # Schema-less SQLite file (no 'jobs' table) fails closed
+            empty_db = root / "empty.db"
+            sqlite3.connect(empty_db).close()
+            with self.assertRaises(RuntimeError):
+                roll.probe_worker_state(
+                    db_path=str(empty_db),
+                    binary_path=str(bin_path),
+                    service_ctl=noop_ctl,
+                    runtime_busy_probe=lambda: 0,
+                    live_work_dir_probe=lambda: None,
+                )
+
+            # Explicit db_path mismatching live worker SANDBOXED_NODE_WORK_DIR fails closed
+            live_dir = root / "work"
+            live_dir.mkdir()
+            real_db = live_dir / "jobs.db"
+            c = sqlite3.connect(real_db)
+            c.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+            c.commit()
+            c.close()
+
+            wrong_db = root / "jobs.db"
+            c2 = sqlite3.connect(wrong_db)
+            c2.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+            c2.commit()
+            c2.close()
+
+            with self.assertRaises(RuntimeError):
+                roll.perform_fenced_upgrade(
+                    db_path=str(wrong_db),
+                    binary_path=str(bin_path),
+                    verify_delay_secs=0.0,
+                    service_ctl=noop_ctl,
+                    runtime_busy_probe=lambda: 0,
+                    live_work_dir_probe=lambda: str(live_dir),
+                )
+
+        # Mid-wave failure on first candidate stops before cordoning/upgrading second candidate
+        cordoned = {"ashur": False, "nippur": False}
+        server = _start_core_api_server(cordoned)
+        try:
+            api = roll.HttpCoreApi(f"http://127.0.0.1:{server.server_port}", roll.mint_hs256_jwt("test-secret"))
+            ops = FakeNodeOps(
+                {
+                    "ashur": {"staged": True, "running": 0, "fail_upgrade": True},
+                    "nippur": {"staged": True, "running": 0},
+                }
+            )
+            evs, done = roll.rolling_upgrade_step(
+                core_api=api,
+                node_ops=ops,
+                remote_nodes=[("ashur", None), ("nippur", None)],
+                max_concurrent_cordons=2,
+                apply=True,
+            )
+            self.assertFalse(done)
+            self.assertTrue(cordoned["ashur"])
+            self.assertFalse(cordoned["nippur"])
+            self.assertEqual(ops.upgraded_remotes, [])
+            self.assertTrue(any(e["action"] == "upgrade_failed" and e["node"] == "ashur" for e in evs))
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":
