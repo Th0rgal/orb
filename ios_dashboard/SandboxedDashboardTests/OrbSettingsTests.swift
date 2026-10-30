@@ -17,6 +17,35 @@ final class OrbSettingsTests: XCTestCase {
             }
         }
     }
+    func testInboxPolicyMatchesSharedSpec() throws {
+        let spec = try OrbSpec.json("fixtures/inbox-summary-policy.json")
+        XCTAssertEqual(OrbInboxPolicy.ecoQuietMs, (spec["ecoQuietMs"] as? NSNumber)?.doubleValue)
+        for c in try XCTUnwrap(spec["normalization"] as? [[String: Any]]) {
+            let name = c["name"] as? String ?? "?"
+            let got = OrbInboxPolicy.normalize(try XCTUnwrap(c["input"] as? [String: Any]))
+            let expected = try XCTUnwrap(c["expected"] as? [String: Any])
+            XCTAssertEqual(got.inboxEnabled, expected["inboxEnabled"] as? Bool, name)
+            XCTAssertEqual(got.includeAutonomous, expected["includeAutonomous"] as? Bool, name)
+            XCTAssertEqual(got.aiSummary, expected["aiSummary"] as? Bool, name)
+            XCTAssertEqual(got.summaryMode.rawValue, expected["summaryMode"] as? String, name)
+            XCTAssertEqual(got.model, expected["model"] as? String, name)
+        }
+        for g in try XCTUnwrap(spec["gates"] as? [[String: Any]]) {
+            let name = g["name"] as? String ?? "?"
+            let prefs = try XCTUnwrap(g["prefs"] as? [String: Any])
+            let norm = OrbInboxPolicy.normalize(prefs)
+            let got = OrbInboxPolicy.shouldRequestDigest(
+                inboxEnabled: norm.inboxEnabled,
+                aiSummary: norm.aiSummary,
+                summaryMode: norm.summaryMode,
+                surface: try XCTUnwrap(g["surface"] as? String),
+                isLive: try XCTUnwrap(g["isLive"] as? Bool),
+                updatedMs: try XCTUnwrap((g["updatedMs"] as? NSNumber)?.doubleValue),
+                nowMs: try XCTUnwrap((g["nowMs"] as? NSNumber)?.doubleValue)
+            )
+            XCTAssertEqual(got, g["expected"] as? Bool, name)
+        }
+    }
     /// Core trims messages, so a keyboard's trailing space must not leave the
     /// optimistic bubble next to the stored copy.
     func testOptimisticMessageMatchesTrimmedCoreCopy() {

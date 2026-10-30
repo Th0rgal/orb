@@ -405,11 +405,12 @@ test(`Inbox surfaces Needs You and Ready for Review while keeping working agents
   await expect(doneRow).toBeVisible();
   if (bunkerState > 0) await expect(page.getByTestId("bunker-mode-notice-card")).toBeVisible();
 
-  // The compact settings control keeps the current model in its accessible label.
+  // The compact settings control keeps the current model in its accessible label and opens Agents → Inbox & summaries.
   const modelPill = page.locator(".inbox-model-pill");
   await expect(modelPill).toHaveAttribute("aria-label", "Inbox settings (AI · builtin/smart)");
   await modelPill.click();
-  await expect(page.locator(".settings-page > .s-inner > h2")).toHaveText("Notifications");
+  await expect(page.locator(".settings-page > .s-inner > h2")).toHaveText("Agents");
+  await expect(page.getByRole("tab", { name: "Inbox & summaries", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByLabel("AI summaries", { exact: true })).toHaveValue("builtin/smart");
 });
 }

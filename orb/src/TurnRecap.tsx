@@ -5,12 +5,17 @@ import { getCachedInboxDigest, requestInboxDigest, inboxDigestVersion } from "./
 import { DONE_STATUSES, isFailedStatus } from "./missionStatus";
 import { missionResponseTimestampMs } from "./missionUnread";
 import { inboxConfig } from "./inboxSettings";
+import { shouldRequestInboxDigest } from "./inboxPolicy";
 
 const tone: Record<string, string> = { succeeded: "Done", failed: "Failed", interrupted: "Interrupted", waiting: "Waiting", needs_input: "Needs you" };
 
 /** End-of-turn recap under the last answer (Claude Code's next-step box), reusing the
  * Inbox AI summary for this exact response so it costs no extra model call when cached. */
 export function TurnRecap(p: { mission?: Mission; items: StreamItem[]; busy: boolean; onDraft: (text: string) => void }) {
+  const enabled = createMemo(() => {
+    const cfg = inboxConfig();
+    return cfg.inboxEnabled !== false && cfg.aiSummary;
+  });
   const updatedMs = createMemo(() => (p.mission ? missionResponseTimestampMs(p.mission) : 0));
   const latestTurn = createMemo(() => {
     let lastUser = -1;
@@ -22,7 +27,7 @@ export function TurnRecap(p: { mission?: Mission; items: StreamItem[]; busy: boo
   });
   // Require real assistant prose in the latest turn: an error-only failed launch has no answer to recap.
   const answered = createMemo(() => latestTurn().some((i) => i.kind === "text" && !!i.text.trim()));
-  const digest = createMemo(() => { inboxDigestVersion(); return p.mission && updatedMs() ? getCachedInboxDigest(p.mission.id, updatedMs()) : undefined; });
+  const digest = createMemo(() => { inboxDigestVersion(); return enabled() && p.mission && updatedMs() ? getCachedInboxDigest(p.mission.id, updatedMs()) : undefined; });
   // Only the summary of this response, never an older one.
   const current = createMemo(() => { const d = digest(); return d && d.updatedMs === updatedMs() ? d : undefined; });
   const verdict = createMemo(() => {
@@ -35,11 +40,13 @@ export function TurnRecap(p: { mission?: Mission; items: StreamItem[]; busy: boo
     return current()?.verdict ?? "waiting";
   });
   createEffect(() => {
-    if (!p.mission || p.busy || !answered() || !updatedMs() || !inboxConfig().aiSummary) return;
-    requestInboxDigest(p.mission, p.items, updatedMs(), 20);
+    const cfg = inboxConfig();
+    const ts = updatedMs();
+    if (!p.mission || p.busy || !answered() || !ts || !shouldRequestInboxDigest(cfg, "recap", false, ts)) return;
+    requestInboxDigest(p.mission, p.items, ts, 20, "recap");
   });
   return (
-    <Show when={!p.busy && answered() && current()}>{(d) => (
+    <Show when={enabled() && !p.busy && answered() && current()}>{(d) => (
       <aside class={`turn-recap verdict-${verdict()}`} aria-label="Turn summary">
         <div class="turn-recap-head"><span class="turn-recap-dot" aria-hidden="true" />{tone[verdict()] ?? verdict()}</div>
         <p>{d().outcome}</p>

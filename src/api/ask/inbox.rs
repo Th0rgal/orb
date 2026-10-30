@@ -370,6 +370,40 @@ async fn recorded_snapshot(
 }
 
 pub const DEFAULT_SUMMARY_MODEL: &str = "builtin/smart";
+const ECO_QUIET_INTERVAL: chrono::Duration = chrono::Duration::seconds(3600 - 5);
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_summary_mode() -> String {
+    "standard".into()
+}
+
+pub(crate) fn normalize_summary_mode(raw: &str) -> &'static str {
+    match raw.trim() {
+        "on_open" => "on_open",
+        "eco" => "eco",
+        _ => "standard",
+    }
+}
+
+pub(crate) fn inbox_enabled(state: &Value) -> bool {
+    state["preferences"]["inboxEnabled"].as_bool() != Some(false)
+}
+
+pub(crate) fn summary_mode(state: &Value) -> &'static str {
+    state["preferences"]["summaryMode"]
+        .as_str()
+        .map(normalize_summary_mode)
+        .unwrap_or("standard")
+}
+
+pub(crate) fn eco_quiet_satisfied(updated_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(updated_at)
+        .map(|t| now.signed_duration_since(t.with_timezone(&chrono::Utc)) >= ECO_QUIET_INTERVAL)
+        .unwrap_or(false)
+}
 
 /// The model to summarize with, or `None` when the user turned AI summaries off.
 /// Core owns this choice: a stale or older client cannot spend LLM calls the user disabled.
@@ -392,6 +426,7 @@ pub(crate) fn summary_model(state: &Value, requested: Option<String>) -> Option<
 }
 
 /// `204 No Content` when summaries are off: no snapshot is read and no LLM is called.
+/// `409 Conflict` when Inbox is disabled or `summaryMode` defers live / recently active runs.
 pub async fn generate(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -411,6 +446,9 @@ pub async fn generate(
             "Could not load Inbox state".into(),
         )
     })?;
+    if !inbox_enabled(&inbox_state) {
+        return Err((StatusCode::CONFLICT, "Inbox is disabled".into()));
+    }
     let Some(model) = summary_model(&inbox_state, req.model) else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
@@ -444,9 +482,17 @@ pub async fn generate(
             return Ok(Json(summary).into_response());
         }
     }
+    let mode = summary_mode(&inbox_state);
+    let now = chrono::Utc::now();
     // While a mission streams, every event changes its revision. Reuse a summary generated
     // in the last interval instead of paying one LLM call per poll (most were discarded).
     if crate::api::controller_honesty::is_live_writer_status(mission.status) {
+        if mode != "standard" {
+            return Err((
+                StatusCode::CONFLICT,
+                "Summary waits until the run settles".into(),
+            ));
+        }
         if let Some(summary) = store
             .latest_inbox_digest(&key)
             .await
@@ -454,10 +500,15 @@ pub async fn generate(
             .flatten()
             .and_then(|v| serde_json::from_str::<Summary>(&v).ok())
         {
-            if recently_generated(&summary.generated_at, chrono::Utc::now()) {
+            if recently_generated(&summary.generated_at, now) {
                 return Ok(Json(summary).into_response());
             }
         }
+    } else if mode == "eco" && !eco_quiet_satisfied(&mission.updated_at, now) {
+        return Err((
+            StatusCode::CONFLICT,
+            "Eco mode waits 1 hour of inactivity before summarizing".into(),
+        ));
     }
     let cfg = crate::api::metadata_llm::build_assistant_llm_config(
         &state.ai_providers,
@@ -526,9 +577,13 @@ pub async fn generate(
 // Presentation preferences and read receipts are per-user, separate from execution state.
 // In particular, marking unread never clears the mission's acknowledgement receipt.
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct Preferences {
+    #[serde(default = "default_true")]
+    inbox_enabled: bool,
     ai_summary: bool,
+    #[serde(default = "default_summary_mode")]
+    summary_mode: String,
     include_autonomous: bool,
     model: String,
     #[serde(skip_serializing)]
@@ -585,6 +640,7 @@ pub async fn save_preferences(
 ) -> Result<StatusCode, Error> {
     validate_mutation(&prefs.client_id, prefs.mutation_seq, prefs.expected_version)?;
     prefs.model = prefs.model.trim().to_string();
+    prefs.summary_mode = normalize_summary_mode(&prefs.summary_mode).into();
     if prefs.model.is_empty() || prefs.model.len() > 240 {
         return Err((StatusCode::BAD_REQUEST, "Invalid summary model".into()));
     }
@@ -1027,5 +1083,63 @@ mod tests {
         assert!(b.try_lock().is_err());
         drop(held);
         assert!(b.try_lock().is_ok());
+    }
+    #[test]
+    fn inbox_policy_and_legacy_preferences_match_shared_spec() {
+        let legacy: Preferences = serde_json::from_value(json!({
+            "aiSummary": true,
+            "includeAutonomous": false,
+            "model": "builtin/fast",
+            "clientId": "00000000-0000-0000-0000-000000000001",
+            "mutationSeq": 1,
+            "expectedVersion": 0
+        }))
+        .unwrap();
+        assert!(legacy.inbox_enabled);
+        assert_eq!(legacy.summary_mode, "standard");
+
+        let spec: Value = serde_json::from_str(include_str!(
+            "../../../shared/orb-spec/fixtures/inbox-summary-policy.json"
+        ))
+        .unwrap();
+        for case in spec["normalization"].as_array().unwrap() {
+            let input = &case["input"];
+            let expected = &case["expected"];
+            let state = json!({ "preferences": input });
+            assert_eq!(
+                inbox_enabled(&state),
+                expected["inboxEnabled"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                summary_mode(&state),
+                expected["summaryMode"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+            let want_model = if expected["aiSummary"].as_bool().unwrap() {
+                expected["model"].as_str()
+            } else {
+                None
+            };
+            assert_eq!(
+                summary_model(&state, None).as_deref(),
+                want_model,
+                "{}",
+                case["name"]
+            );
+        }
+
+        let now = chrono::Utc::now();
+        assert!(!eco_quiet_satisfied(
+            &(now - chrono::Duration::minutes(59)).to_rfc3339(),
+            now
+        ));
+        assert!(eco_quiet_satisfied(
+            &(now - chrono::Duration::minutes(60)).to_rfc3339(),
+            now
+        ));
+        assert!(!eco_quiet_satisfied("", now));
     }
 }

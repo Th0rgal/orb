@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import type { Mission } from "../src/api";
 import { buildInboxSections, classifyInboxMission, countUnreadInboxMissions, listUnreadInboxCandidates } from "../src/inboxModel";
-import { applySharedInboxPreferences, inboxConfig, InboxSettings, saveInboxConfig } from "../src/inboxSettings";
+import {
+  applySharedInboxPreferences,
+  inboxConfig,
+  InboxSettings,
+  InboxSummariesSettings,
+  saveInboxConfig,
+} from "../src/inboxSettings";
 import { sideQuestionKey } from "../src/sideQuestionStorage";
 import type { StreamItem } from "../src/transcriptModel";
 
@@ -66,51 +72,97 @@ describe("Inbox creation scope", () => {
 describe("Inbox scope settings", () => {
   it("defaults to off, including saved settings from before this preference existed", () => {
     expect(inboxConfig().includeAutonomous).toBe(false);
+    expect(inboxConfig().inboxEnabled).toBe(true);
+    expect(inboxConfig().summaryMode).toBe("standard");
     localStorage.setItem(sideQuestionKey("settings:inbox"), JSON.stringify({ aiSummary: false, model: "builtin/fast" }));
-    expect(inboxConfig()).toEqual({ aiSummary: false, model: "builtin/fast", includeAutonomous: false });
+    expect(inboxConfig()).toEqual({
+      inboxEnabled: true,
+      aiSummary: false,
+      summaryMode: "standard",
+      model: "builtin/fast",
+      includeAutonomous: false,
+    });
   });
 
-  it("persists the switch, can turn it off again, and preserves it when saving the model", () => {
-    const view = render(() => <InboxSettings />);
+  it("persists Enable Inbox, autonomous scope, and summary mode while preserving choices", () => {
+    const view = render(() => <InboxSummariesSettings />);
+    const enableToggle = screen.getByRole("switch", { name: "Enable Inbox" });
     const toggle = screen.getByRole("switch", { name: "Include autonomous agents" });
+    const modePicker = screen.getByLabelText("Summary mode") as HTMLSelectElement;
+    expect(enableToggle.getAttribute("aria-checked")).toBe("true");
     expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(modePicker.value).toBe("standard");
     fireEvent.click(toggle);
+    fireEvent.change(modePicker, { target: { value: "eco" } });
     expect(inboxConfig().includeAutonomous).toBe(true);
+    expect(inboxConfig().summaryMode).toBe("eco");
     saveInboxConfig({ aiSummary: true, model: "builtin/fast" });
     expect(inboxConfig().includeAutonomous).toBe(true);
+    expect(inboxConfig().summaryMode).toBe("eco");
+    fireEvent.click(enableToggle);
+    expect(inboxConfig().inboxEnabled).toBe(false);
+    expect(inboxConfig().summaryMode).toBe("eco");
     view.unmount();
-    render(() => <InboxSettings />);
+    render(() => <InboxSummariesSettings />);
+    fireEvent.click(screen.getByRole("switch", { name: "Enable Inbox" }));
+    expect(inboxConfig().inboxEnabled).toBe(true);
+    expect(inboxConfig().summaryMode).toBe("eco");
     fireEvent.click(screen.getByRole("switch", { name: "Include autonomous agents" }));
     expect(inboxConfig().includeAutonomous).toBe(false);
+  });
+
+  it("links Notifications to Agents → Inbox & summaries", () => {
+    const opened: string[] = [];
+    render(() => <InboxSettings onOpenPage={(id) => opened.push(id)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Configure" }));
+    expect(opened).toEqual(["inbox-summaries"]);
   });
 });
 
 describe("AI summaries picker", () => {
-  it("remembers a selected model across Off, remount and re-enable", () => {
-    saveInboxConfig({ aiSummary: true, model: "team/summary", includeAutonomous: true }, false);
-    const view = render(() => <InboxSettings />);
+  it("remembers a selected model and summary mode across Off, remount and re-enable", () => {
+    saveInboxConfig({ inboxEnabled: true, aiSummary: true, summaryMode: "eco", model: "team/summary", includeAutonomous: true }, false);
+    const view = render(() => <InboxSummariesSettings />);
     const picker = screen.getByLabelText("AI summaries");
     fireEvent.change(picker, { target: { value: "" } });
-    expect(inboxConfig()).toEqual({ aiSummary: false, model: "team/summary", includeAutonomous: true });
+    expect(inboxConfig()).toEqual({
+      inboxEnabled: true,
+      aiSummary: false,
+      summaryMode: "eco",
+      model: "team/summary",
+      includeAutonomous: true,
+    });
     view.unmount();
-    render(() => <InboxSettings />);
+    render(() => <InboxSummariesSettings />);
     const restored = screen.getByLabelText("AI summaries") as HTMLSelectElement;
     expect(restored.value).toBe("");
     fireEvent.change(restored, { target: { value: "team/summary" } });
-    expect(inboxConfig()).toEqual({ aiSummary: true, model: "team/summary", includeAutonomous: true });
+    expect(inboxConfig()).toEqual({
+      inboxEnabled: true,
+      aiSummary: true,
+      summaryMode: "eco",
+      model: "team/summary",
+      includeAutonomous: true,
+    });
   });
   it("reflects shared preferences while mounted without overwriting them on Off", async () => {
-    saveInboxConfig({ aiSummary: true, model: "builtin/smart" }, false);
-    render(() => <InboxSettings />);
-    applySharedInboxPreferences({ aiSummary: true, model: "team/remote", includeAutonomous: true });
+    saveInboxConfig({ inboxEnabled: true, aiSummary: true, summaryMode: "standard", model: "builtin/smart" }, false);
+    render(() => <InboxSummariesSettings />);
+    applySharedInboxPreferences({ inboxEnabled: true, aiSummary: true, summaryMode: "on_open", model: "team/remote", includeAutonomous: true });
     const picker = screen.getByLabelText("AI summaries") as HTMLSelectElement;
     await waitFor(() => expect(picker.value).toBe("team/remote"));
     fireEvent.change(picker, { target: { value: "" } });
-    expect(inboxConfig()).toEqual({ aiSummary: false, model: "team/remote", includeAutonomous: true });
+    expect(inboxConfig()).toEqual({
+      inboxEnabled: true,
+      aiSummary: false,
+      summaryMode: "on_open",
+      model: "team/remote",
+      includeAutonomous: true,
+    });
   });
   it("cancels custom edits without enabling summaries or replacing the saved model", () => {
-    saveInboxConfig({ aiSummary: false, model: "builtin/fast" }, false);
-    render(() => <InboxSettings />);
+    saveInboxConfig({ inboxEnabled: true, aiSummary: false, summaryMode: "standard", model: "builtin/fast" }, false);
+    render(() => <InboxSummariesSettings />);
     fireEvent.change(screen.getByLabelText("AI summaries"), { target: { value: "__custom__" } });
     fireEvent.input(screen.getByLabelText("Model or chain ID"), { target: { value: "custom/new" } });
     fireEvent.click(screen.getByText("Cancel"));

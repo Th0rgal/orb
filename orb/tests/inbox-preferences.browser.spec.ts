@@ -186,3 +186,49 @@ for (const theme of ["light", "dark"]) test(`Custom summary drafts require expli
     await expect(picker).toHaveValue("");
   }
 });
+
+test("Agents → Inbox & summaries can disable Inbox and gate Eco summaries to 1h quiet", async ({ page }) => {
+  await openInbox(page);
+  await page.keyboard.press("Meta+b"); // restore sidebar hidden by openInbox
+  const digestCalls: string[] = [];
+  await page.route("**/api/control/missions/*/inbox-digest", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[4];
+    digestCalls.push(id);
+    await route.fulfill({ status: 204, body: "" });
+  });
+
+  // Open Agents → Inbox & summaries from the Inbox header gear.
+  await page.locator(".inbox-model-pill").click();
+  await expect(page.getByRole("tab", { name: "Inbox & summaries", exact: true })).toHaveAttribute("aria-selected", "true");
+
+  // Disable Inbox: sidebar hides Inbox, Back skips disabled Inbox, and Meta+i is ignored.
+  const enableToggle = page.getByRole("switch", { name: "Enable Inbox" });
+  await expect(enableToggle).toHaveAttribute("aria-checked", "true");
+  await enableToggle.click();
+  await expect(enableToggle).toHaveAttribute("aria-checked", "false");
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.locator("#orb-sidebar").getByRole("button", { name: /^Inbox/ })).toHaveCount(0);
+  await expect(page.locator(".inbox-page")).toHaveCount(0);
+  await page.keyboard.press("Meta+i");
+  await expect(page.locator(".inbox-page")).toHaveCount(0);
+
+  // Re-enable Inbox and switch to Eco mode: recent (< 1h) missions do not call /inbox-digest.
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.locator('[data-settings-section="agents"]').click();
+  await page.getByRole("tab", { name: "Inbox & summaries", exact: true }).click();
+  await page.getByRole("switch", { name: "Enable Inbox" }).click();
+  await page.getByLabel("AI summaries", { exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("listbox").getByRole("option", { name: "builtin/fast", exact: true }).click();
+  await page.getByLabel("Summary mode", { exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("listbox").getByRole("option", { name: "Eco (1h quiet)", exact: true }).click();
+
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.locator("#orb-sidebar").getByRole("button", { name: /^Inbox/ })).toBeVisible();
+  // All fixture missions updated at 11:30–11:50 vs clock 12:00 (< 1h quiet), so Eco makes 0 calls.
+  await page.keyboard.press("Meta+i");
+  await expect(page.locator(".inbox-page h2")).toHaveText("Inbox");
+  await expect(page.locator(".inbox-model-pill")).toHaveAttribute("aria-label", "Inbox settings (Eco · builtin/fast)");
+  expect(digestCalls).toEqual([]);
+});

@@ -416,7 +416,7 @@ struct OrbHome: View {
     /// Split out of `body` so the Swift type checker finishes in reasonable time.
     private var homeRoot: some View {
         Group {
-            if homeTab == "inbox" {
+            if homeTab == "inbox" && OrbInboxSettings.shared.inboxEnabled {
                 OrbInboxView(
                     projects: projects,
                     actionableCount: $inboxCount,
@@ -437,14 +437,19 @@ struct OrbHome: View {
             }
         }
         .background(OrbStyle.background)
-        .navigationTitle(homeTab == "inbox" ? "Inbox" : "Projects")
+        .navigationTitle(homeTab == "inbox" && OrbInboxSettings.shared.inboxEnabled ? "Inbox" : "Projects")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(OrbStyle.background.opacity(0.92), for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { Button { settings = true } label: { OrbCircle(symbol: "person.crop.circle") }.accessibilityLabel("Settings") }
-            ToolbarItem(placement: .principal) { homeModePicker }
+            if OrbInboxSettings.shared.inboxEnabled {
+                ToolbarItem(placement: .principal) { homeModePicker }
+            }
             ToolbarItem(placement: .topBarTrailing) { Button { creating = true } label: { OrbCircle(symbol: "folder.badge.plus") }.accessibilityLabel("New project") }
+        }
+        .onChange(of: OrbInboxSettings.shared.inboxEnabled) { _, enabled in
+            if !enabled && homeTab == "inbox" { homeTab = "projects" }
         }
         .safeAreaInset(edge: .bottom) { OrbMoveBanner() }
         .safeAreaInset(edge: .top, spacing: 0) { secretBanner }
@@ -493,7 +498,7 @@ struct OrbHome: View {
                 } else if let p = Self.argValue("-orb_open_project") {
                     linkedProjectObj = projects.first(where: { $0.id == p }) ?? OrbRow(.object(["slug": .string(p), "title": .string(p == "verity-core" ? "Verity" : p.capitalized)]), project: true)
                 }
-                if OrbNotificationCenter.shared.pendingFocus != nil {
+                if OrbNotificationCenter.shared.pendingFocus != nil && OrbInboxSettings.shared.inboxEnabled {
                     homeTab = "inbox"
                 }
                 await load()
@@ -501,7 +506,7 @@ struct OrbHome: View {
                 consumeDeepLink()
             }
             .onChange(of: OrbNotificationCenter.shared.pendingFocus) { _, newValue in
-                if newValue != nil {
+                if newValue != nil && OrbInboxSettings.shared.inboxEnabled {
                     withAnimation(.snappy(duration: 0.2)) {
                         homeTab = "inbox"
                     }
@@ -548,20 +553,24 @@ struct OrbHome: View {
     private func consumeDeepLink() {
         guard let url = deepLinks.take() else { return }
         if let focus = OrbInboxFocusRequest.parse(url: url) {
-            homeTab = "inbox"
-            if !focus.missionID.isEmpty {
-                OrbNotificationCenter.shared.focusInbox(
-                    missionID: focus.missionID,
-                    expandPeek: focus.expandPeek,
-                    openReply: focus.openReply
-                )
+            if OrbInboxSettings.shared.inboxEnabled {
+                homeTab = "inbox"
+                if !focus.missionID.isEmpty {
+                    OrbNotificationCenter.shared.focusInbox(
+                        missionID: focus.missionID,
+                        expandPeek: focus.expandPeek,
+                        openReply: focus.openReply
+                    )
+                }
             }
         } else if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "mission", !url.lastPathComponent.isEmpty, url.lastPathComponent != "/" {
             linkedProject = ""
             linkedFolder = ""
             linkedMission = url.lastPathComponent
         } else if ["orb", "sandboxed"].contains(url.scheme ?? ""), url.host == "inbox" {
-            homeTab = "inbox"
+            if OrbInboxSettings.shared.inboxEnabled {
+                homeTab = "inbox"
+            }
         }
     }
 

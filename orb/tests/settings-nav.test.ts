@@ -13,7 +13,7 @@ describe("shared/orb-spec/fixtures/settings-nav.json", () => {
 });
 
 it("keeps every old page id inside a section", () => {
-  const old: Record<string, string> = { settings: "account", execution: "agents", routing: "models", "usage-settings": "models", "hermes-settings": "agents", "btw-settings": "agents", "skills-settings": "agents", "bitwarden-settings": "security", "inbox-settings": "notifications" };
+  const old: Record<string, string> = { settings: "account", execution: "agents", routing: "models", "usage-settings": "models", "hermes-settings": "agents", "btw-settings": "agents", "inbox-summaries": "agents", "skills-settings": "agents", "bitwarden-settings": "security", "inbox-settings": "notifications" };
   for (const [id, section] of Object.entries(old)) expect(settingsSectionFor(id)?.id).toBe(section);
   expect(settingsSectionFor("inbox")).toBeUndefined();
   expect(settingsSectionFor(null)).toBeUndefined();

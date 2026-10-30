@@ -64,6 +64,7 @@ for (const [id, section, tab] of [
   ["routing-keys", "Models", "API Keys"],
   ["hermes-settings", "Agents", "Assistant"],
   ["btw-settings", "Agents", "Quick questions (/btw)"],
+  ["inbox-summaries", "Agents", "Inbox & summaries"],
   ["skills-settings", "Agents", "Skills"],
   ["execution", "Agents", "Local agents"],
   ["bitwarden-settings", "Security", "Secrets vault"],

@@ -3,7 +3,15 @@ import { swallow } from "./log";
 import { connectionVersion, getApiUrl, getJwt, isConnected } from "./api";
 import { sideQuestionKey } from "./sideQuestionStorage";
 
-export type SharedInboxPreferences = { aiSummary: boolean; includeAutonomous: boolean; model: string };
+import type { InboxSummaryMode } from "./inboxPolicy";
+
+export type SharedInboxPreferences = {
+  inboxEnabled?: boolean;
+  aiSummary: boolean;
+  summaryMode?: InboxSummaryMode;
+  includeAutonomous: boolean;
+  model: string;
+};
 export type SharedInboxState = Record<string, unknown> & { preferences?: SharedInboxPreferences };
 let mutation = 0;
 let pending = 0;

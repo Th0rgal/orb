@@ -100,6 +100,7 @@ enum class OrbSettingsRoute {
     Assistant,
     Machines,
     Inbox,
+    InboxSummaries,
     Secrets,
     Bitwarden,
     Dictation,
@@ -319,6 +320,15 @@ fun OrbSettingsSheet(
                 }
                 OrbSettingsRoute.Inbox -> {
                     OrbInboxSettingsPage(
+                        onBack = back,
+                        onOpenSummaries = {
+                            section = OrbSettingsSection.Agents
+                            route = OrbSettingsRoute.InboxSummaries
+                        }
+                    )
+                }
+                OrbSettingsRoute.InboxSummaries -> {
+                    OrbInboxSummariesSettingsPage(
                         onBack = back
                     )
                 }
@@ -379,7 +389,12 @@ private fun pageSubtitle(route: OrbSettingsRoute, baseURL: String, providers: In
     OrbSettingsRoute.Skills -> "Shared Library skills"
     OrbSettingsRoute.Assistant -> "Hermes coordinator model, memory & persona"
     OrbSettingsRoute.Machines -> "$nodes nodes"
-    OrbSettingsRoute.Inbox -> if (OrbInboxSettings.aiSummary) "AI Overview · ${OrbInboxSettings.model}" else "AI Overview off"
+    OrbSettingsRoute.Inbox -> if (OrbNotifications.notificationsEnabled) "Alerts on" else "Alerts off"
+    OrbSettingsRoute.InboxSummaries -> when {
+        !OrbInboxSettings.inboxEnabled -> "Inbox off"
+        !OrbInboxSettings.aiSummary -> "AI Overview off"
+        else -> "${OrbInboxSettings.summaryMode.label} · ${OrbInboxSettings.model}"
+    }
     OrbSettingsRoute.Secrets -> "Fleet Bunker Mode, devices, approvals & grants"
     OrbSettingsRoute.Bitwarden -> "Bitwarden Secrets Manager vault"
     OrbSettingsRoute.Fido -> "Biometric approvals · trust window ${OrbFidoSettings.trust.minutes.let { if (it <= 0) "off" else "$it min" }}"
