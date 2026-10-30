@@ -1618,25 +1618,6 @@ pub(in crate::api) async fn create_mission_inner(
         None
     };
 
-    // Validate agent exists before creating mission (fail fast with clear error)
-    // Skip validation for Claude Code, Codex, Antigravity, and Grok - they have their own built-in agents
-    if let Some(ref agent_name) = agent {
-        let backend_id = backend.as_deref();
-        let skip_validation = matches!(
-            backend_id,
-            Some("claudecode" | "codex" | "grok" | "antigravity" | "vibe")
-        );
-        if !skip_validation {
-            super::super::library::validate_agent_exists(
-                &state,
-                agent_name,
-                effective_config_profile.as_deref(),
-            )
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-        }
-    }
-
     // Validate backend exists
     if let Some(ref backend_id) = backend {
         if let Some(message) = crate::backend::retired_backend_error(backend_id) {

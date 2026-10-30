@@ -55,7 +55,7 @@ test('claude code mission generates correct config', async ({ page }) => {
   const settingsContent = await fs.readFile(claudeSettings, 'utf8');
   expect(settingsContent).toContain('mcpServers');
 
-  const skillsRes = await page.request.get('/api/library/skills');
+  const skillsRes = await page.request.get('/api/library/skill');
   if (skillsRes.ok()) {
     const skills = await skillsRes.json();
     if (skills.length > 0) {

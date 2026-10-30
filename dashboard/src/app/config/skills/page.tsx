@@ -1,18 +1,14 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import YAML from "yaml";
 import {
   getLibrarySkill,
   getSkillReference,
   saveSkillReference,
   deleteSkillReference,
-  importSkill,
   validateSkillName,
-  searchSkillsRegistry,
-  installFromRegistry,
   type Skill,
-  type RegistrySkillListing,
 } from '@/lib/api';
 import {
   GitBranch,
@@ -24,31 +20,20 @@ import {
   Plus,
   Save,
   Trash2,
-  X,
   File,
   Folder,
   FolderOpen,
   ChevronRight,
   ChevronDown,
-  Download,
   FileText,
-  ExternalLink,
-  Pencil,
-  Search,
-  Globe,
   Package,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { LibraryUnavailable } from '@/components/library-unavailable';
 import { useLibrary } from '@/contexts/library-context';
 import { ConfigCodeEditor } from '@/components/config-code-editor';
-import { RenameDialog } from '@/components/rename-dialog';
 import { useToast } from '@/components/toast';
 import { validateFrontmatterBlock } from '@/lib/frontmatter-validation';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
 
 interface FileNode {
   name: string;
@@ -65,17 +50,11 @@ interface Frontmatter {
   [key: string]: string | undefined;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Utility Functions
-// ─────────────────────────────────────────────────────────────────────────────
-
 function buildFileTree(references: string[]): FileNode[] {
   const root: FileNode[] = [];
 
-  // Always include SKILL.md at the top
   root.push({ name: 'SKILL.md', path: 'SKILL.md', type: 'file' });
 
-  // Build tree from references
   for (const ref of references) {
     const parts = ref.split('/');
     let current = root;
@@ -103,7 +82,6 @@ function buildFileTree(references: string[]): FileNode[] {
     }
   }
 
-  // Sort: folders first, then alphabetically
   const sortNodes = (nodes: FileNode[]): FileNode[] => {
     return nodes.sort((a, b) => {
       if (a.name === 'SKILL.md') return -1;
@@ -132,10 +110,6 @@ function parseFrontmatter(content: string): { frontmatter: Frontmatter; body: st
   const yamlStr = content.substring(4, endIndex);
   const body = content.substring(endIndex + 4).trimStart();
 
-  // Real YAML parsing: block scalars (`description: >`), quoted strings,
-  // and escapes must round-trip. A previous hand-rolled line parser read a
-  // block-scalar description as the literal string ">" and saving then
-  // destroyed the real description.
   const frontmatter: Frontmatter = {};
   try {
     const parsed = YAML.parse(yamlStr);
@@ -146,9 +120,6 @@ function parseFrontmatter(content: string): { frontmatter: Frontmatter; body: st
       }
     }
   } catch {
-    // Unparseable frontmatter: drop the (rare, machine-written) bad block and
-    // keep the post-delimiter body. Returning the whole file as body would
-    // duplicate the --- block once any field is added and re-saved.
     return { frontmatter: {}, body };
   }
 
@@ -161,15 +132,9 @@ function buildContent(frontmatter: Frontmatter, body: string): string {
     return body;
   }
 
-  // Serialize through the YAML library so quoting/escaping is always valid
-  // and round-trips with parseFrontmatter.
   const yaml = YAML.stringify(Object.fromEntries(entries), { lineWidth: 0 }).trimEnd();
   return `---\n${yaml}\n---\n\n${body}`;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// File Tree Component
-// ─────────────────────────────────────────────────────────────────────────────
 
 interface FileTreeProps {
   nodes: FileNode[];
@@ -263,10 +228,6 @@ function FileTree({
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Frontmatter Editor Component
-// ─────────────────────────────────────────────────────────────────────────────
-
 interface FrontmatterEditorProps {
   frontmatter: Frontmatter;
   onChange: (frontmatter: Frontmatter) => void;
@@ -277,7 +238,6 @@ function FrontmatterEditor({ frontmatter, onChange, disabled }: FrontmatterEdito
   const updateField = (key: string, value: string) => {
     onChange({ ...frontmatter, [key]: value || undefined });
   };
-
 
   return (
     <div className="space-y-3 p-3 rounded-lg bg-white/[0.02] border border-white/[0.06]">
@@ -324,230 +284,6 @@ function FrontmatterEditor({ frontmatter, onChange, disabled }: FrontmatterEdito
     </div>
   );
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Import Dialog Component
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface ImportDialogProps {
-  open: boolean;
-  onClose: () => void;
-  onImport: (skill: Skill) => void;
-}
-
-function ImportDialog({ open, onClose, onImport }: ImportDialogProps) {
-  const [name, setName] = useState('');
-  const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [dragActive, setDragActive] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleFile = (f: File) => {
-    const ext = f.name.split('.').pop()?.toLowerCase();
-    if (ext !== 'zip' && ext !== 'md') {
-      setError('Please upload a .zip or .md file');
-      return;
-    }
-    setFile(f);
-    setError(null);
-
-    // Auto-detect name from filename if not set
-    if (!name.trim()) {
-      const baseName = f.name.replace(/\.(zip|md)$/i, '');
-      const sanitized = baseName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-      setName(sanitized);
-    }
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleFile(e.dataTransfer.files[0]);
-    }
-  };
-
-  const handleDrag = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === 'dragenter' || e.type === 'dragover') {
-      setDragActive(true);
-    } else if (e.type === 'dragleave') {
-      setDragActive(false);
-    }
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!file) {
-      setError('Please select a file');
-      return;
-    }
-
-    if (!name.trim()) {
-      setError('Please enter a skill name');
-      return;
-    }
-
-    const validation = validateSkillName(name.trim());
-    if (!validation.valid) {
-      setError(validation.error || 'Invalid skill name');
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const skill = await importSkill(name.trim(), file);
-      onImport(skill);
-      setName('');
-      setFile(null);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to import skill');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    if (open) {
-      document.addEventListener('keydown', handleKeyDown);
-      return () => document.removeEventListener('keydown', handleKeyDown);
-    }
-  }, [open, onClose]);
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-lg p-6 rounded-xl bg-[#1a1a1c] border border-white/[0.06]">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-medium text-white">Import Skill</h3>
-          <button onClick={onClose} className="p-1 rounded hover:bg-white/[0.06]">
-            <X className="h-4 w-4 text-white/60" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {/* File Drop Zone */}
-          <div
-            onDragEnter={handleDrag}
-            onDragLeave={handleDrag}
-            onDragOver={handleDrag}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
-            className={cn(
-              'border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors',
-              dragActive
-                ? 'border-indigo-500 bg-indigo-500/10'
-                : file
-                  ? 'border-emerald-500/50 bg-emerald-500/5'
-                  : 'border-white/[0.12] hover:border-white/[0.2] hover:bg-white/[0.02]'
-            )}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".zip,.md"
-              onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
-              className="hidden"
-              disabled={loading}
-            />
-            {file ? (
-              <div className="flex items-center justify-center gap-2 text-emerald-400">
-                <Check className="h-5 w-5" />
-                <span className="text-sm font-medium">{file.name}</span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setFile(null);
-                  }}
-                  className="ml-2 p-1 rounded hover:bg-white/[0.08]"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-            ) : (
-              <>
-                <Upload className="h-8 w-8 text-white/30 mx-auto mb-2" />
-                <p className="text-sm text-white/60 mb-1">
-                  Drop a file here or click to browse
-                </p>
-                <p className="text-xs text-white/40">
-                  Supports .zip (skill folder) or .md (SKILL.md)
-                </p>
-              </>
-            )}
-          </div>
-
-          <div>
-            <label className="block text-sm text-white/60 mb-1.5">Skill Name *</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'));
-                setError(null);
-              }}
-              placeholder="my-skill"
-              className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50"
-              disabled={loading}
-            />
-            <p className="text-xs text-white/40 mt-1">
-              Lowercase alphanumeric with hyphens
-            </p>
-          </div>
-
-          {error && (
-            <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-              {error}
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-white/60 hover:text-white"
-              disabled={loading}
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={loading || !file || !name.trim()}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loading ? (
-                <>
-                  <Loader className="h-4 w-4 animate-spin" />
-                  Importing...
-                </>
-              ) : (
-                <>
-                  <Upload className="h-4 w-4" />
-                  Import
-                </>
-              )}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// New File Dialog Component
-// ─────────────────────────────────────────────────────────────────────────────
 
 interface NewFileDialogProps {
   open: boolean;
@@ -646,7 +382,7 @@ function NewFileDialog({ open, onClose, onCreate, skillName }: NewFileDialogProp
               className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50"
             />
             <p className="text-xs text-white/40 mt-1">
-              Relative to skills/{skillName}/
+              Relative to skill/{skillName}/
             </p>
           </div>
 
@@ -676,10 +412,6 @@ function NewFileDialog({ open, onClose, onCreate, skillName }: NewFileDialogProp
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Main Skills Page
-// ─────────────────────────────────────────────────────────────────────────────
-
 export default function SkillsPage() {
   const {
     status,
@@ -699,16 +431,13 @@ export default function SkillsPage() {
   } = useLibrary();
   const { showError } = useToast();
 
-  // Skill selection state
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [loadingSkill, setLoadingSkill] = useState(false);
 
-  // File tree state
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
-  // Editor state
   const [fileContent, setFileContent] = useState('');
   const [frontmatter, setFrontmatter] = useState<Frontmatter>({});
   const [bodyContent, setBodyContent] = useState('');
@@ -716,35 +445,20 @@ export default function SkillsPage() {
   const [saving, setSaving] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
 
-  // Tab state - simplified to just two tabs
-  type SkillTab = 'installed' | 'browse';
-  const [activeTab, setActiveTab] = useState<SkillTab>('installed');
-
-  // Registry state
-  const [registrySearch, setRegistrySearch] = useState('');
-  const [registryResults, setRegistryResults] = useState<RegistrySkillListing[]>([]);
-  const [searchingRegistry, setSearchingRegistry] = useState(false);
-  const [installingSkills, setInstallingSkills] = useState<Set<string>>(new Set());
-
-  // Dialog state
   const [showNewSkillDialog, setShowNewSkillDialog] = useState(false);
-  const [showImportDialog, setShowImportDialog] = useState(false);
   const [showNewFileDialog, setShowNewFileDialog] = useState(false);
   const [showCommitDialog, setShowCommitDialog] = useState(false);
-  const [showRenameDialog, setShowRenameDialog] = useState(false);
   const [newSkillName, setNewSkillName] = useState('');
   const [newSkillError, setNewSkillError] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState('');
 
-  // Ref to track content changes
   const contentRef = useRef({ frontmatter, bodyContent });
   contentRef.current = { frontmatter, bodyContent };
 
-  // Build file tree when skill changes
   useEffect(() => {
     if (selectedSkill) {
-      setFileTree(buildFileTree(selectedSkill.references));
-      // Expand all folders by default
+      const tree = buildFileTree(selectedSkill.references);
+      setFileTree(tree);
       const folders = new Set<string>();
       const collectFolders = (nodes: FileNode[]) => {
         for (const node of nodes) {
@@ -754,12 +468,11 @@ export default function SkillsPage() {
           }
         }
       };
-      collectFolders(buildFileTree(selectedSkill.references));
+      collectFolders(tree);
       setExpandedFolders(folders);
     }
   }, [selectedSkill]);
 
-  // Handle keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
@@ -770,7 +483,6 @@ export default function SkillsPage() {
       }
       if (e.key === 'Escape') {
         if (showNewSkillDialog) setShowNewSkillDialog(false);
-        if (showImportDialog) setShowImportDialog(false);
         if (showNewFileDialog) setShowNewFileDialog(false);
         if (showCommitDialog) setShowCommitDialog(false);
       }
@@ -778,7 +490,7 @@ export default function SkillsPage() {
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDirty, selectedSkill, selectedFile, showNewSkillDialog, showImportDialog, showNewFileDialog, showCommitDialog]);
+  }, [isDirty, selectedSkill, selectedFile, showNewSkillDialog, showNewFileDialog, showCommitDialog]);
 
   const loadSkill = async (name: string) => {
     try {
@@ -787,7 +499,6 @@ export default function SkillsPage() {
       setSelectedSkill(skill);
       setSelectedFile('SKILL.md');
 
-      // Parse and set SKILL.md content
       const { frontmatter: fm, body } = parseFrontmatter(skill.content);
       setFrontmatter(fm);
       setBodyContent(body);
@@ -841,7 +552,6 @@ export default function SkillsPage() {
           return;
         }
         await saveSkill(selectedSkill.name, content);
-        // Reload skill to get updated references
         const updated = await getLibrarySkill(selectedSkill.name);
         setSelectedSkill(updated);
         setFileContent(content);
@@ -906,13 +616,12 @@ Describe what this skill does.
 
   const handleDeleteFile = async (path: string) => {
     if (!selectedSkill) return;
-    if (path === 'SKILL.md') return; // Can't delete SKILL.md
+    if (path === 'SKILL.md') return;
 
     if (!confirm(`Delete "${path}"?`)) return;
 
     try {
       await deleteSkillReference(selectedSkill.name, path);
-      // Reload skill to get updated references
       const updated = await getLibrarySkill(selectedSkill.name);
       setSelectedSkill(updated);
 
@@ -934,10 +643,8 @@ Describe what this skill does.
 
     try {
       if (isFolder) {
-        // Create a placeholder file to create the folder
         await saveSkillReference(selectedSkill.name, `${path}/.gitkeep`, '');
       } else {
-        // Create empty file with default content based on extension
         const ext = path.split('.').pop()?.toLowerCase();
         let content = '';
         if (ext === 'md') {
@@ -946,7 +653,6 @@ Describe what this skill does.
         await saveSkillReference(selectedSkill.name, path, content);
       }
 
-      // Reload skill to get updated references
       const updated = await getLibrarySkill(selectedSkill.name);
       setSelectedSkill(updated);
 
@@ -1012,94 +718,6 @@ Describe what this skill does.
     } catch {
       // Error handled by context
     }
-  };
-
-  const handleImportSuccess = async (skill: Skill) => {
-    await refresh();
-    await loadSkill(skill.name);
-  };
-
-  // Registry search with debounce
-  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const currentSearchRef = useRef<string>('');
-  const handleRegistrySearch = useCallback((query: string) => {
-    setRegistrySearch(query);
-    currentSearchRef.current = query;
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current);
-    }
-    if (!query.trim()) {
-      setRegistryResults([]);
-      return;
-    }
-    searchTimeoutRef.current = setTimeout(async () => {
-      setSearchingRegistry(true);
-      try {
-        const results = await searchSkillsRegistry(query);
-        // Only update results if query hasn't changed (avoid race condition)
-        if (currentSearchRef.current === query) {
-          setRegistryResults(results);
-        }
-      } catch (err) {
-        console.error('Failed to search registry:', err);
-        if (currentSearchRef.current === query) {
-          setRegistryResults([]);
-        }
-      } finally {
-        if (currentSearchRef.current === query) {
-          setSearchingRegistry(false);
-        }
-      }
-    }, 300);
-  }, []);
-
-  // Cleanup debounce timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (searchTimeoutRef.current) {
-        clearTimeout(searchTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const handleInstallFromRegistry = async (identifier: string, skillName: string) => {
-    const skillKey = `${identifier}@${skillName}`;
-    setInstallingSkills(prev => new Set(prev).add(skillKey));
-    try {
-      const skill = await installFromRegistry({ identifier, skills: [skillName] });
-      await refresh();
-      await loadSkill(skill.name);
-      setActiveTab('installed');
-    } catch (err) {
-      console.error('Failed to install skill:', err);
-      showError(err instanceof Error ? err.message : 'Failed to install skill', 'Installation Failed');
-    } finally {
-      setInstallingSkills(prev => {
-        const next = new Set(prev);
-        next.delete(skillKey);
-        return next;
-      });
-    }
-  };
-
-  // Check if a skill is already installed (from registry)
-  const isSkillInstalled = useCallback((identifier: string, skillName: string) => {
-    return skills.some(s =>
-      s.source?.type === 'SkillsRegistry' &&
-      s.source.identifier === identifier &&
-      s.source.skill_name === skillName
-    );
-  }, [skills]);
-
-  const handleRenameSuccess = async () => {
-    await refresh();
-    // The skill was renamed, so we need to clear selection
-    // since the old name no longer exists
-    setSelectedSkill(null);
-    setSelectedFile(null);
-    setFileContent('');
-    setFrontmatter({});
-    setBodyContent('');
   };
 
   if (loading) {
@@ -1182,214 +800,61 @@ Describe what this skill does.
 
       {/* Main Content */}
       <div className="flex-1 min-h-0 rounded-xl bg-white/[0.02] border border-white/[0.06] overflow-hidden flex">
-        {/* Skills List with Tabs */}
+        {/* Skills List */}
         <div className="w-64 border-r border-white/[0.06] flex flex-col min-h-0">
-          {/* Tab Headers - Two tabs: Installed and Browse */}
-          <div className="flex border-b border-white/[0.06]">
+          <div className="p-3 border-b border-white/[0.06] flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-white">
+              <Package className="h-3.5 w-3.5 text-indigo-400" />
+              <span>Skills</span>
+              {skills.length > 0 && (
+                <span className="text-[10px] text-white/40">({skills.length})</span>
+              )}
+            </div>
             <button
-              onClick={() => setActiveTab('installed')}
-              className={cn(
-                'flex-1 px-3 py-2.5 text-xs font-medium transition-colors relative',
-                activeTab === 'installed'
-                  ? 'text-white'
-                  : 'text-white/50 hover:text-white/70'
-              )}
+              onClick={() => setShowNewSkillDialog(true)}
+              className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors"
+              title="New Skill"
             >
-              <div className="flex items-center justify-center gap-1.5">
-                <Package className="h-3 w-3" />
-                <span>Installed</span>
-                {skills.length > 0 && (
-                  <span className="text-[10px] text-white/40">({skills.length})</span>
-                )}
-              </div>
-              {activeTab === 'installed' && (
-                <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-indigo-500 rounded-full" />
-              )}
-            </button>
-            <button
-              onClick={() => setActiveTab('browse')}
-              className={cn(
-                'flex-1 px-3 py-2.5 text-xs font-medium transition-colors relative',
-                activeTab === 'browse'
-                  ? 'text-white'
-                  : 'text-white/50 hover:text-white/70'
-              )}
-            >
-              <div className="flex items-center justify-center gap-1.5">
-                <Globe className="h-3 w-3" />
-                <span>Browse</span>
-              </div>
-              {activeTab === 'browse' && (
-                <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-indigo-500 rounded-full" />
-              )}
+              <Plus className="h-3 w-3" />
+              New
             </button>
           </div>
 
-          {/* Tab Content */}
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            {/* Installed Tab - All skills (local + from registry) */}
-            {activeTab === 'installed' && (
-              <div className="p-2">
-                {/* Action buttons */}
-                <div className="flex items-center gap-1 mb-2 px-1">
-                  <button
-                    onClick={() => setShowImportDialog(true)}
-                    className="flex-1 flex items-center justify-center gap-1.5 p-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors"
-                    title="Import from Git"
-                  >
-                    <Download className="h-3 w-3" />
-                    Import
-                  </button>
-                  <button
-                    onClick={() => setShowNewSkillDialog(true)}
-                    className="flex-1 flex items-center justify-center gap-1.5 p-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors"
-                    title="New Skill"
-                  >
-                    <Plus className="h-3 w-3" />
-                    New
-                  </button>
-                </div>
-                {skills.length === 0 ? (
-                  <div className="text-center py-8">
-                    <Package className="h-8 w-8 text-white/20 mx-auto mb-2" />
-                    <p className="text-xs text-white/40 mb-3">No skills yet</p>
-                    <div className="flex flex-col gap-2">
-                      <button
-                        onClick={() => setShowNewSkillDialog(true)}
-                        className="text-xs text-indigo-400 hover:text-indigo-300"
-                      >
-                        Create your first skill
-                      </button>
-                      <button
-                        onClick={() => setActiveTab('browse')}
-                        className="text-xs text-white/40 hover:text-white/60"
-                      >
-                        or browse skills.sh
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  skills.map((skill) => {
-                    const isFromRegistry = skill.source?.type === 'SkillsRegistry';
-                    const description = selectedSkill?.name === skill.name
-                      ? (skill.description || frontmatter.description)
-                      : skill.description;
-                    return (
-                      <button
-                        key={skill.name}
-                        onClick={() => loadSkill(skill.name)}
-                        className={cn(
-                          'w-full text-left p-2.5 rounded-lg transition-colors mb-1',
-                          selectedSkill?.name === skill.name
-                            ? 'bg-white/[0.08] text-white'
-                            : 'text-white/60 hover:bg-white/[0.04] hover:text-white'
-                        )}
-                      >
-                        <div className="flex items-center gap-1.5">
-                          {isFromRegistry && (
-                            <Globe className="h-3 w-3 text-indigo-400 flex-shrink-0" />
-                          )}
-                          <p className="text-sm font-medium truncate">{skill.name}</p>
-                        </div>
-                        {description && (
-                          <p className={cn(
-                            "text-xs text-white/40 truncate mt-0.5",
-                            isFromRegistry && "ml-[18px]"
-                          )}>{description}</p>
-                        )}
-                      </button>
-                    );
-                  })
-                )}
+          <div className="flex-1 min-h-0 overflow-y-auto p-2">
+            {skills.length === 0 ? (
+              <div className="text-center py-8">
+                <Package className="h-8 w-8 text-white/20 mx-auto mb-2" />
+                <p className="text-xs text-white/40 mb-3">No skills yet</p>
+                <button
+                  onClick={() => setShowNewSkillDialog(true)}
+                  className="text-xs text-indigo-400 hover:text-indigo-300"
+                >
+                  Create your first skill
+                </button>
               </div>
-            )}
-
-            {/* Browse Tab */}
-            {activeTab === 'browse' && (
-              <div className="h-full flex flex-col">
-                <div className="p-2 pb-0">
-                  <div className="relative mb-2">
-                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40" />
-                    <input
-                      type="text"
-                      placeholder="Search skills.sh..."
-                      value={registrySearch}
-                      onChange={(e) => handleRegistrySearch(e.target.value)}
-                      className="w-full pl-8 pr-3 py-2 text-xs bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50"
-                    />
-                    {searchingRegistry && (
-                      <Loader className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40 animate-spin" />
+            ) : (
+              skills.map((skill) => {
+                const description = selectedSkill?.name === skill.name
+                  ? (skill.description || frontmatter.description)
+                  : skill.description;
+                return (
+                  <button
+                    key={skill.name}
+                    onClick={() => loadSkill(skill.name)}
+                    className={cn(
+                      'w-full text-left p-2.5 rounded-lg transition-colors mb-1',
+                      selectedSkill?.name === skill.name
+                        ? 'bg-white/[0.08] text-white'
+                        : 'text-white/60 hover:bg-white/[0.04] hover:text-white'
                     )}
-                  </div>
-                </div>
-                <div className="flex-1 min-h-0 overflow-y-auto px-2">
-                  {!registrySearch ? (
-                    <div className="text-center py-6">
-                      <Globe className="h-8 w-8 text-white/20 mx-auto mb-2" />
-                      <p className="text-xs text-white/40 mb-1">Search the skills.sh registry</p>
-                      <p className="text-[10px] text-white/30">
-                        Try &quot;react&quot;, &quot;typescript&quot;, or &quot;vercel-labs&quot;
-                      </p>
-                    </div>
-                  ) : registryResults.length === 0 && !searchingRegistry ? (
-                    <div className="text-center py-6">
-                      <Search className="h-6 w-6 text-white/20 mx-auto mb-2" />
-                      <p className="text-xs text-white/40">No results found</p>
-                    </div>
-                  ) : (
-                    registryResults.map((result) => {
-                      const skillKey = `${result.identifier}@${result.name}`;
-                      const installed = isSkillInstalled(result.identifier, result.name);
-                      const installing = installingSkills.has(skillKey);
-                      return (
-                        <div
-                          key={skillKey}
-                          className="p-2.5 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] transition-colors mb-1.5 border border-white/[0.04]"
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0 flex-1">
-                              <p className="text-sm font-medium text-white truncate">{result.name}</p>
-                              <p className="text-[10px] text-white/40 truncate">{result.identifier}</p>
-                              {result.description && (
-                                <p className="text-xs text-white/50 mt-1 line-clamp-2">{result.description}</p>
-                              )}
-                            </div>
-                            {installed ? (
-                              <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded flex-shrink-0">
-                                Installed
-                              </span>
-                            ) : (
-                              <button
-                                onClick={() => handleInstallFromRegistry(result.identifier, result.name)}
-                                disabled={installing}
-                                className="text-xs text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 px-2.5 py-1 rounded transition-colors disabled:opacity-50 flex-shrink-0 flex items-center gap-1"
-                              >
-                                {installing ? (
-                                  <Loader className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <Plus className="h-3 w-3" />
-                                )}
-                                Add
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-                <div className="p-2 pt-1.5 border-t border-white/[0.06]">
-                  <a
-                    href="https://skills.sh"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-1.5 text-xs text-white/40 hover:text-white/60 transition-colors"
                   >
-                    <ExternalLink className="h-3 w-3" />
-                    Open skills.sh
-                  </a>
-                </div>
-              </div>
+                    <p className="text-sm font-medium truncate">{skill.name}</p>
+                    {description && (
+                      <p className="text-xs text-white/40 truncate mt-0.5">{description}</p>
+                    )}
+                  </button>
+                );
+              })
             )}
           </div>
         </div>
@@ -1434,37 +899,19 @@ Describe what this skill does.
             <>
               <div className="p-3 border-b border-white/[0.06] flex items-center justify-between">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-white truncate">{selectedFile}</p>
-                    {selectedSkill.source?.type === 'SkillsRegistry' && (
-                      <span className="flex items-center gap-1 text-[10px] text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded">
-                        <Globe className="h-2.5 w-2.5" />
-                        {selectedSkill.source.identifier}
-                        {selectedSkill.source.version && ` @ ${selectedSkill.source.version}`}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs text-white/40">skills/{selectedSkill.name}/{selectedFile}</p>
+                  <p className="text-sm font-medium text-white truncate">{selectedFile}</p>
+                  <p className="text-xs text-white/40">skill/{selectedSkill.name}/{selectedFile}</p>
                 </div>
                 <div className="flex items-center gap-2">
                   {isDirty && <span className="text-xs text-amber-400">Unsaved</span>}
                   {selectedFile === 'SKILL.md' && (
-                    <>
-                      <button
-                        onClick={() => setShowRenameDialog(true)}
-                        className="p-1.5 rounded-lg text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors"
-                        title="Rename Skill"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        onClick={handleDeleteSkill}
-                        className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 transition-colors"
-                        title="Delete Skill"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </>
+                    <button
+                      onClick={handleDeleteSkill}
+                      className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 transition-colors"
+                      title="Delete Skill"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   )}
                   <button
                     onClick={handleSave}
@@ -1504,12 +951,6 @@ Describe what this skill does.
                         value={bodyContent}
                         onChange={handleBodyChange}
                         disabled={saving}
-                        highlightEncrypted={
-                          selectedFile === 'SKILL.md' ||
-                          selectedFile?.toLowerCase().endsWith('.md') ||
-                          selectedFile?.toLowerCase().endsWith('.mdx') ||
-                          selectedFile?.toLowerCase().endsWith('.markdown')
-                        }
                         language={
                           selectedFile?.toLowerCase().endsWith('.json')
                             ? 'json'
@@ -1612,13 +1053,6 @@ Describe what this skill does.
         </div>
       )}
 
-      {/* Import Dialog */}
-      <ImportDialog
-        open={showImportDialog}
-        onClose={() => setShowImportDialog(false)}
-        onImport={handleImportSuccess}
-      />
-
       {/* New File Dialog */}
       {selectedSkill && (
         <NewFileDialog
@@ -1626,17 +1060,6 @@ Describe what this skill does.
           onClose={() => setShowNewFileDialog(false)}
           onCreate={handleCreateFile}
           skillName={selectedSkill.name}
-        />
-      )}
-
-      {/* Rename Dialog */}
-      {selectedSkill && (
-        <RenameDialog
-          open={showRenameDialog}
-          onOpenChange={setShowRenameDialog}
-          itemType="skill"
-          currentName={selectedSkill.name}
-          onSuccess={handleRenameSuccess}
         />
       )}
     </div>

@@ -33,7 +33,7 @@ fn upgrade_legacy_opus_default(mut config: Value) -> Value {
             if configured.is_some() {
                 object.insert(
                     key.to_string(),
-                    Value::String(crate::library::normalize_claude_code_default_model(
+                    Value::String(crate::model_policy::normalize_claude_code_default_model(
                         configured,
                     )),
                 );

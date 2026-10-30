@@ -24,14 +24,12 @@ POST /api/workspaces
   "path": "/path/to/workspace",
   "skills": ["skill-name"],
   "plugins": ["plugin-id"],
-  "template": "template-name",
   "distro": "ubuntu-noble",
   "env_vars": {"KEY": "VALUE"},
   "shared_network": false,
   "tailscale_mode": "tailnet_only",
   "mcps": ["lean_lsp"],
   "mcps_replace_defaults": false,
-  "config_profile": "default",
   "init_script": "#!/bin/bash\napt install -y nodejs"
 }
 ```
@@ -43,14 +41,12 @@ POST /api/workspaces
 | `path` | string | No | Custom working directory path |
 | `skills` | string[] | No | Library skill names to sync |
 | `plugins` | string[] | No | Plugin identifiers for hooks |
-| `template` | string | No | Template name (forces `container` type) |
 | `distro` | string | No | Linux distro for containers |
 | `env_vars` | object | No | Environment variables |
 | `shared_network` | boolean/null | No | `false` enables an isolated veth; `true`/`null` uses the host network |
 | `tailscale_mode` | string/null | No | `exit_node` or `tailnet_only` for isolated Tailscale workspaces |
 | `mcps` | string[] | No | MCP config names enabled for missions in this workspace |
 | `mcps_replace_defaults` | boolean | No | When true, do not add default-enabled MCPs |
-| `config_profile` | string/null | No | Default backend config profile |
 | `init_script` | string | No | Script to run on container build |
 | `placement` | string | No | `"core"`, `"client"` (local Orb machine), or `"node"` |
 | `remote_node_id` | string/null | No | Target fleet node ID when running on a remote `sandboxed-node` |
@@ -79,14 +75,12 @@ PUT /api/workspaces/:id
   "name": "new-name",
   "skills": ["skill-1", "skill-2"],
   "plugins": ["plugin-id"],
-  "template": "template-name",
   "distro": "ubuntu-noble",
   "env_vars": {"KEY": "VALUE"},
   "shared_network": false,
   "tailscale_mode": "tailnet_only",
   "mcps": ["lean_lsp"],
   "mcps_replace_defaults": true,
-  "config_profile": "lean",
   "init_script": "#!/bin/bash\napt install -y nodejs"
 }
 ```
@@ -96,26 +90,6 @@ PUT /api/workspaces/:id
 Updates persist workspace configuration but do not implicitly rebuild a
 container. Use `/build` with `rebuild: true` when filesystem provisioning must
 be recreated.
-
-## Apply a Template
-
-```
-POST /api/workspaces/:id/apply-template
-```
-
-**Body**:
-
-```json
-{"template": "verity-lean"}
-```
-
-The template name is optional when the workspace already references one.
-Template-controlled fields replace the corresponding workspace fields. This
-endpoint does not rebuild the container by itself.
-
-If any encrypted template value failed to decrypt, the request returns an error
-and leaves the workspace unchanged. It never persists a
-`[DECRYPTION_FAILED]` placeholder over an existing secret.
 
 ## Delete Workspace
 
@@ -383,90 +357,19 @@ curl "http://localhost:3000/api/workspaces/{id}/debug" \
 curl "http://localhost:3000/api/workspaces/{id}/init-log" \
   -H "Authorization: Bearer <token>"
 
-# 3. Update the template with a fix
-curl -X PUT "http://localhost:3000/api/library/workspace-template/my-template" \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"init_script": "#!/bin/bash\n# fixed script..."}'
-
-# 4. Update workspace to use new init script
+# 3. Update workspace with a fixed init script
 curl -X PUT "http://localhost:3000/api/workspaces/{id}" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"init_script": "#!/bin/bash\n# fixed script..."}'
 
-# 5. Re-run the init script (fast iteration)
+# 4. Re-run the init script (fast iteration)
 curl -X POST "http://localhost:3000/api/workspaces/{id}/rerun-init" \
   -H "Authorization: Bearer <token>"
 
-# 6. If it works, do a full rebuild to verify
+# 5. If it works, do a full rebuild to verify
 curl -X POST "http://localhost:3000/api/workspaces/{id}/build?rebuild=true" \
   -H "Authorization: Bearer <token>"
-```
-
----
-
-## Workspace Templates
-
-Templates are stored in the library and define reusable workspace configurations.
-
-### List Templates
-
-```
-GET /api/library/workspace-template
-```
-
-**Response**:
-```json
-[
-  {
-    "name": "nodejs-dev",
-    "description": "Node.js development environment",
-    "path": "workspace-template/nodejs-dev.json"
-  }
-]
-```
-
-### Get Template
-
-```
-GET /api/library/workspace-template/:name
-```
-
-**Response**:
-```json
-{
-  "name": "nodejs-dev",
-  "description": "Node.js development environment",
-  "path": "workspace-template/nodejs-dev.json",
-  "distro": "ubuntu-noble",
-  "skills": ["typescript-dev"],
-  "env_vars": {"NODE_ENV": "development"},
-  "init_script": "#!/bin/bash\napt install -y nodejs npm"
-}
-```
-
-### Save Template
-
-```
-PUT /api/library/workspace-template/:name
-```
-
-**Body**:
-```json
-{
-  "description": "Node.js development environment",
-  "distro": "ubuntu-noble",
-  "skills": ["typescript-dev"],
-  "env_vars": {"NODE_ENV": "development"},
-  "init_script": "#!/bin/bash\napt install -y nodejs npm"
-}
-```
-
-### Delete Template
-
-```
-DELETE /api/library/workspace-template/:name
 ```
 
 ---
@@ -484,7 +387,6 @@ DELETE /api/library/workspace-template/:name
   "created_at": "2025-01-13T10:00:00Z",
   "skills": ["skill-1"],
   "plugins": ["plugin-id"],
-  "template": "nodejs-dev",
   "distro": "ubuntu-noble",
   "env_vars": {"KEY": "VALUE"},
   "init_script": "#!/bin/bash\n..."
@@ -542,25 +444,6 @@ curl -X POST "http://localhost:3000/api/workspaces/{id}/exec" \
   -d '{"command": "python3 --version"}'
 ```
 
-### Create Workspace from Template
-
-```bash
-# 1. List available templates
-curl "http://localhost:3000/api/library/workspace-template" \
-  -H "Authorization: Bearer <token>"
-
-# 2. Create workspace using template
-curl -X POST "http://localhost:3000/api/workspaces" \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "nodejs-project",
-    "template": "nodejs-dev"
-  }'
-
-# 3. Build and use as shown above
-```
-
 ### Update Workspace Skills
 
 ```bash
@@ -570,7 +453,7 @@ curl -X PUT "http://localhost:3000/api/workspaces/{id}" \
   -H "Content-Type: application/json" \
   -d '{"skills": ["python-dev", "rust-dev"]}'
 
-# Force sync workspace skills/tools
+# Force sync workspace skills
 curl -X POST "http://localhost:3000/api/workspaces/{id}/sync" \
   -H "Authorization: Bearer <token>"
 ```

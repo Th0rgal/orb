@@ -18,11 +18,9 @@ trust the agent with full system access.
 own network stack. Container workspaces are the recommended choice for
 production missions: a misbehaving agent cannot damage the host.
 
-### Templates
+### Container Provisioning
 
-A **template** is a reusable blueprint for container workspaces. Templates are
-stored in your Library repository under `workspace-template/<name>.json` and
-define:
+Container workspaces define their environment directly:
 
 - **Distro** --- base Linux distribution (Ubuntu Noble, Jammy, Debian Bookworm,
   or Arch Linux).
@@ -31,13 +29,12 @@ define:
   development tools, etc.
 - **Skills** --- Library skills to sync into the workspace (e.g.,
   `github-cli`, `ops`).
-- **Environment variables** --- secrets and configuration injected at build time
-  and available during missions.
-- **Encrypted keys** --- env var names whose values are encrypted at rest.
+- **Environment variables** --- configuration injected at build time and
+  available during missions.
 - **Networking** --- shared (host network) or isolated (private network with
   optional Tailscale VPN).
 
-When you create a workspace from a template, Core:
+When you build a container workspace, Core:
 
 1. Creates a minimal root filesystem using `debootstrap` (Debian/Ubuntu) or
    `pacstrap` (Arch).
@@ -55,7 +52,7 @@ Each mission targets a specific workspace. When a mission starts, Core:
 
 1. Creates a mission directory under `workspaces/mission-<short-id>` inside the
    selected workspace.
-2. Syncs skills, rules, and backend-specific configuration into that mission
+2. Syncs skills and backend-specific configuration into that mission
    directory.
 3. Launches the selected harness with that mission directory as its working
    directory, inside the workspace's host or container execution context.
@@ -67,22 +64,17 @@ or on the host (for host workspaces).
 Several missions can target the same logical workspace. They reuse its root
 filesystem, installed packages, toolchains, and intentionally shared project
 paths, while keeping harness configuration and default file effects in separate
-mission directories. A project template can expose a canonical checkout such as
+mission directories. A workspace can expose a canonical checkout such as
 `/workspace/verity/base` and helpers that create private clones for writers.
 Sharing a workspace therefore saves setup time and cache space; it does not make
 the missions share one mutable working directory by default.
 
-### Workspace and Template Management
+### Workspace Management
 
-Workspaces and templates can be managed from the dashboard, the HTTP API, or
-Hermes through `assistant-mcp`. Updating a workspace changes its persisted
-configuration. Applying a template replaces template-controlled fields; a
-container rebuild then recreates the environment from that definition.
-
-Template reads exposed to an assistant redact every `env_vars` value. If an
-encrypted value cannot be decrypted, Core refuses to apply or
-patch-save that template instead of replacing a previously valid secret with a
-decryption-error placeholder.
+Workspaces can be managed from Orb, the dashboard, the HTTP API, or Hermes
+through `assistant-mcp`. Updating a workspace changes its persisted
+configuration; a container rebuild recreates the environment from that
+definition.
 
 ## Networking
 
@@ -178,42 +170,7 @@ the known built-in `workspace-mcp` compatibility proxy. A custom server merely
 named `workspace` does not receive that grant. Native harness bash is preferred
 for ordinary commands and receives the workspace environment directly.
 
-## Template Reference
-
-### Structure
-
-Templates live in `workspace-template/<name>.json` in your Library repo:
-
-```json
-{
-  "name": "my-template",
-  "description": "A workspace for my project",
-  "distro": "ubuntu-noble",
-  "skills": ["github-cli", "ops"],
-  "env_vars": {
-    "SSH_PRIVATE_KEY_B64": "<base64-encoded key>",
-    "MY_API_KEY": "sk-..."
-  },
-  "encrypted_keys": ["SSH_PRIVATE_KEY_B64", "MY_API_KEY"],
-  "init_script": "#!/bin/bash\nset -euo pipefail\napt-get update\napt-get install -y git curl\n",
-  "shared_network": true
-}
-```
-
-### Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | Template identifier |
-| `description` | string | Human-readable description |
-| `distro` | string | `ubuntu-noble`, `ubuntu-jammy`, `debian-bookworm`, or `arch-linux` |
-| `skills` | string[] | Library skills to sync |
-| `env_vars` | object | Environment variables available during init and missions |
-| `encrypted_keys` | string[] | Env var names encrypted at rest (requires `PRIVATE_KEY`) |
-| `init_script` | string | Bash script executed once at container build time |
-| `shared_network` | bool/null | `true` or `null` = host network; `false` = isolated veth |
-
-### Init Script Best Practices
+## Init Script Best Practices
 
 - Start with `set -euo pipefail` and error trapping.
 - Log to `/var/log/sandboxed-init.log` for debugging.
@@ -227,40 +184,13 @@ Templates live in `workspace-template/<name>.json` in your Library repo:
 - Clean up apt caches (`rm -rf /var/lib/apt/lists/*`) at the end to reduce
   container size.
 
-### Included Templates
-
-**ubuntu** --- General-purpose Ubuntu Noble workspace with SSH/GPG keys, GitHub
-CLI, Bitwarden Secrets CLI, Bun, uv, and Playwright. Good starting point for
-most tasks.
-
-**tailscale-ubuntu** --- Same as `ubuntu` plus Tailscale VPN for residential IP
-routing. Uses isolated networking (`shared_network: false`). Set `TS_AUTHKEY`
-and `TS_EXIT_NODE` in env vars.
-
-**minecraft** --- Specialized workspace for Minecraft development and
-automation. Includes Java 21, Maven, Gradle, X11/i3 desktop stack, Shard
-launcher, mc-cli, Playwright, and pre-configured Fabric + NeoForge profiles.
-
-**verity-lean** --- Reproducible Verity environment pinned to Lean 4.24, a
-specific Verity revision, `lean-lsp-mcp`, GitHub CLI, and audit/isolated-clone
-helpers. The canonical checkout is warmed for reads; writer missions should use
-`verity-isolated-clone` so mutable `.lake` state is not shared.
-
 ## Recommendations
-
-**Start with the `ubuntu` template.** It includes everything most agents need:
-git, SSH keys, GitHub CLI, Bun (for MCP servers), uv (for Python), and
-Playwright (for browser automation). Customize by forking this template.
 
 **Use container workspaces for production.** Host workspaces are convenient for
 development but give the agent unrestricted access. Container workspaces isolate
 the agent's filesystem and can be rebuilt cleanly.
 
-**Keep secrets in encrypted env vars.** Add secret names to `encrypted_keys` and
-set `PRIVATE_KEY` in the Core environment. The values are encrypted at
-rest in the Library repo and decrypted at mission runtime.
-
-**Use `rerun-init` for fast iteration.** When developing a template's init
+**Use `rerun-init` for fast iteration.** When developing a workspace's init
 script, use `POST /api/workspaces/:id/rerun-init` instead of rebuilding the
 entire container. This re-executes the init script on the existing filesystem.
 
@@ -277,18 +207,8 @@ endpoints:
 | List workspaces | GET | `/api/workspaces` |
 | Create workspace | POST | `/api/workspaces` |
 | Build container | POST | `/api/workspaces/:id/build` |
-| Apply template fields | POST | `/api/workspaces/:id/apply-template` |
 | Execute command | POST | `/api/workspaces/:id/exec` |
 | Re-run init script | POST | `/api/workspaces/:id/rerun-init` |
 | Get init log | GET | `/api/workspaces/:id/init-log` |
 | Debug info | GET | `/api/workspaces/:id/debug` |
 | Delete workspace | DELETE | `/api/workspaces/:id` |
-
-Templates are managed through the Library API:
-
-| Action | Method | Endpoint |
-|--------|--------|----------|
-| List templates | GET | `/api/library/workspace-template` |
-| Get template | GET | `/api/library/workspace-template/:name` |
-| Save template | PUT | `/api/library/workspace-template/:name` |
-| Delete template | DELETE | `/api/library/workspace-template/:name` |

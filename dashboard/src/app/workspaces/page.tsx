@@ -10,16 +10,12 @@ import {
   deleteWorkspace,
   buildWorkspace,
   updateWorkspace,
-  listWorkspaceTemplates,
-  saveWorkspaceTemplate,
   listLibrarySkills,
-  listConfigProfiles,
   getWorkspaceDebug,
   getWorkspaceInitLog,
   CONTAINER_DISTROS,
   type Workspace,
   type ContainerDistro,
-  type ConfigProfileSummary,
   type WorkspaceDebugInfo,
   type InitLogResponse,
   type TailscaleMode,
@@ -37,14 +33,13 @@ import {
   Terminal,
   RefreshCw,
   Save,
-  Bookmark,
   Sparkles,
   Play,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/toast';
 import { ConfigCodeEditor } from '@/components/config-code-editor';
-import { EnvVarsEditor, type EnvRow, toEnvRows, envRowsToMap, getEncryptedKeys } from '@/components/env-vars-editor';
+import { EnvVarsEditor, type EnvRow, toEnvRows, envRowsToMap } from '@/components/env-vars-editor';
 import { WorkspaceResources } from '@/components/workspace-resources';
 import { RemoteNodesPanel } from '@/components/remote-nodes-panel';
 
@@ -73,10 +68,9 @@ export default function WorkspacesPage() {
   const [showNewWorkspaceDialog, setShowNewWorkspaceDialog] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState('');
   const [newWorkspaceType, setNewWorkspaceType] = useState<'host' | 'container'>('container');
-  const [newWorkspaceTemplate, setNewWorkspaceTemplate] = useState('');
   const [skillsFilter, setSkillsFilter] = useState('');
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
-  const [workspaceTab, setWorkspaceTab] = useState<'overview' | 'skills' | 'environment' | 'template' | 'build'>('overview');
+  const [workspaceTab, setWorkspaceTab] = useState<'overview' | 'skills' | 'environment' | 'build'>('overview');
 
   // Build state
   const [building, setBuilding] = useState(false);
@@ -90,23 +84,12 @@ export default function WorkspacesPage() {
   const [initScript, setInitScript] = useState('');
   const [sharedNetwork, setSharedNetwork] = useState<boolean | null>(null);
   const [tailscaleMode, setTailscaleMode] = useState<TailscaleMode | null>(null);
-  const [configProfile, setConfigProfile] = useState('');
   const [savingWorkspace, setSavingWorkspace] = useState(false);
-  const [savingTemplate, setSavingTemplate] = useState(false);
-  const [templateName, setTemplateName] = useState('');
-  const [templateDescription, setTemplateDescription] = useState('');
 
   // SWR: fetch workspaces (shared key with overview page)
   const { data: workspaces = [], isLoading: loading, mutate: mutateWorkspaces } = useSWR(
     'workspaces',
     listWorkspaces,
-    { revalidateOnFocus: false }
-  );
-
-  // SWR: fetch templates
-  const { data: templates = [], error: templatesError, mutate: mutateTemplates } = useSWR(
-    'workspace-templates',
-    listWorkspaceTemplates,
     { revalidateOnFocus: false }
   );
 
@@ -117,16 +100,9 @@ export default function WorkspacesPage() {
     { revalidateOnFocus: false }
   );
 
-  // SWR: fetch config profiles
-  const { data: configProfiles = [], error: configProfilesError } = useSWR<ConfigProfileSummary[]>(
-    'config-profiles',
-    listConfigProfiles,
-    { revalidateOnFocus: false }
-  );
-
   // Dynamic tabs based on workspace state - Build tab only shows for container workspaces
   const getWorkspaceTabs = (workspace: Workspace | null) => {
-    const tabs: { id: 'overview' | 'skills' | 'environment' | 'template' | 'build'; label: string }[] = [
+    const tabs: { id: 'overview' | 'skills' | 'environment' | 'build'; label: string }[] = [
       { id: 'overview', label: 'Overview' },
       { id: 'skills', label: 'Skills' },
       { id: 'environment', label: 'Env' },
@@ -135,7 +111,6 @@ export default function WorkspacesPage() {
     if (workspace?.workspace_type === 'container') {
       tabs.push({ id: 'build', label: 'Build' });
     }
-    tabs.push({ id: 'template', label: 'Template' });
     return tabs;
   };
   const workspaceTabs = getWorkspaceTabs(selectedWorkspace);
@@ -178,19 +153,10 @@ export default function WorkspacesPage() {
       setInitScript(selectedWorkspace.init_script ?? '');
       setSharedNetwork(selectedWorkspace.shared_network ?? null);
       setTailscaleMode(selectedWorkspace.tailscale_mode ?? null);
-      setConfigProfile(selectedWorkspace.config_profile ?? '');
       setSelectedSkills(selectedWorkspace.skills ?? []);
-      setTemplateName(`${selectedWorkspace.name}-template`);
-      setTemplateDescription('');
       setWorkspaceTab('overview');
     }
   }, [selectedWorkspace, lastSelectedId]);
-
-  useEffect(() => {
-    if (newWorkspaceTemplate) {
-      setNewWorkspaceType('container');
-    }
-  }, [newWorkspaceTemplate]);
 
   const selectedWorkspaceId = selectedWorkspace?.id;
   const selectedWorkspaceStatus = selectedWorkspace?.status;
@@ -287,21 +253,15 @@ export default function WorkspacesPage() {
     if (!newWorkspaceName.trim()) return;
     try {
       setCreating(true);
-      const workspaceType = newWorkspaceTemplate ? 'container' : newWorkspaceType;
       const created = await createWorkspace({
         name: newWorkspaceName,
-        workspace_type: workspaceType,
-        template: newWorkspaceTemplate || undefined,
+        workspace_type: newWorkspaceType,
       });
 
-      // Refresh workspace list immediately after creation so it appears in the UI
-      // even if the build step fails later
       await mutateWorkspaces();
 
-      // For container workspaces WITHOUT a template, trigger build manually.
-      // Template-based workspaces are auto-built by the backend, so skip the explicit build call.
       let workspaceToShow = created;
-      if (workspaceType === 'container' && !newWorkspaceTemplate) {
+      if (newWorkspaceType === 'container') {
         try {
           workspaceToShow = await buildWorkspace(
             created.id,
@@ -310,19 +270,16 @@ export default function WorkspacesPage() {
           );
         } catch (buildErr) {
           showError(buildErr instanceof Error ? buildErr.message : 'Failed to start build');
-          // Refresh workspace to get error status
           try {
             workspaceToShow = await getWorkspace(created.id);
           } catch {
             // If getWorkspace also fails, use created workspace
           }
-          // Refresh list again to show error status
           await mutateWorkspaces();
         }
       }
       setShowNewWorkspaceDialog(false);
       setNewWorkspaceName('');
-      setNewWorkspaceTemplate('');
       setSelectedWorkspace(workspaceToShow);
     } catch (err) {
       showError(err instanceof Error ? err.message : 'Failed to create workspace');
@@ -382,7 +339,6 @@ export default function WorkspacesPage() {
         skills: selectedSkills,
         shared_network: sharedNetwork,
         tailscale_mode: tailscaleMode,
-        config_profile: configProfile.trim() ? configProfile.trim() : null,
       });
       setSelectedWorkspace(updated);
       await mutateWorkspaces();
@@ -391,34 +347,6 @@ export default function WorkspacesPage() {
       showError(err instanceof Error ? err.message : 'Failed to save workspace settings');
     } finally {
       setSavingWorkspace(false);
-    }
-  };
-
-  const handleSaveTemplate = async () => {
-    if (!selectedWorkspace) return;
-    const trimmedName = templateName.trim();
-    if (!trimmedName) {
-      showError('Template name is required');
-      return;
-    }
-    try {
-      setSavingTemplate(true);
-      const env_vars = envRowsToMap(envRows);
-      const encrypted_keys = getEncryptedKeys(envRows);
-      await saveWorkspaceTemplate(trimmedName, {
-        description: templateDescription.trim() || undefined,
-        distro: selectedDistro,
-        skills: selectedSkills,
-        env_vars,
-        encrypted_keys,
-        init_script: initScript,
-        config_profile: configProfile.trim() || undefined,
-      });
-      await mutateTemplates();
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Failed to save workspace template');
-    } finally {
-      setSavingTemplate(false);
     }
   };
 
@@ -636,50 +564,6 @@ export default function WorkspacesPage() {
                   {/* Path - Minimal */}
                   <div className="text-xs text-white/40">
                     <code className="font-mono text-white/60">{selectedWorkspace.path}</code>
-                  </div>
-
-                  {configProfilesError && (
-                    <div className="rounded-lg bg-amber-500/5 border border-amber-500/15 p-3">
-                      <p className="text-xs text-amber-300/80">
-                        Failed to load config profiles. Try refreshing the page.
-                      </p>
-                    </div>
-                  )}
-
-                  <div className="rounded-lg bg-white/[0.02] border border-white/[0.05] p-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-xs text-white/60 font-medium">Config Profile</p>
-                        <p className="text-[10px] text-white/30 mt-0.5">
-                          Default settings for missions started in this workspace.
-                        </p>
-                      </div>
-                    </div>
-                    <select
-                      value={configProfile}
-                      onChange={(e) => setConfigProfile(e.target.value)}
-                      className="mt-2 w-full rounded-lg border border-white/[0.06] bg-black/20 px-2.5 py-1.5 text-xs text-white focus:border-indigo-500/50 focus:outline-none appearance-none cursor-pointer"
-                      style={{
-                        backgroundImage:
-                          "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
-                        backgroundPosition: 'right 0.5rem center',
-                        backgroundRepeat: 'no-repeat',
-                        backgroundSize: '1em 1em',
-                      }}
-                    >
-                      <option value="" className="bg-[#1a1a1a]">
-                        Default (none)
-                      </option>
-                      {configProfiles.map((profile) => (
-                        <option
-                          key={profile.name}
-                          value={profile.name}
-                          className="bg-[#1a1a1a]"
-                        >
-                          {profile.name}{profile.is_default ? ' (default)' : ''}
-                        </option>
-                      ))}
-                    </select>
                   </div>
 
                   {selectedWorkspace.error_message && (
@@ -1024,64 +908,11 @@ export default function WorkspacesPage() {
                   <EnvVarsEditor
                     rows={envRows}
                     onChange={setEnvRows}
-                    description="Injected into workspace shells and MCP tool runs. Use workspace templates to configure encryption for sensitive values."
+                    description="Injected into workspace shells and MCP tool runs."
                   />
                   <p className="text-xs text-white/35">
                     Applied to new missions automatically. Running missions keep their original values.
                   </p>
-                </div>
-              )}
-
-              {workspaceTab === 'template' && (
-                <div className="px-6 py-5">
-                  <div className="rounded-xl bg-white/[0.02] border border-white/[0.05] overflow-hidden">
-                    <div className="px-4 py-3 border-b border-white/[0.05] flex items-center gap-2">
-                      <Bookmark className="h-4 w-4 text-indigo-400" />
-                      <p className="text-xs text-white/50 font-medium">Save as Template</p>
-                    </div>
-                    <div className="p-4 space-y-4">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div>
-                          <label className="text-xs text-white/40 block mb-2">Template Name</label>
-                          <input
-                            value={templateName}
-                            onChange={(e) => setTemplateName(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
-                            placeholder="my-template"
-                            className="w-full px-3 py-2 rounded-lg bg-black/20 border border-white/[0.06] text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-indigo-500/50"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-xs text-white/40 block mb-2">Description</label>
-                          <input
-                            value={templateDescription}
-                            onChange={(e) => setTemplateDescription(e.target.value)}
-                            placeholder="Short description"
-                            className="w-full px-3 py-2 rounded-lg bg-black/20 border border-white/[0.06] text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-indigo-500/50"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="pt-3 border-t border-white/[0.04]">
-                        <div className="flex items-center justify-between">
-                          <p className="text-xs text-white/35">
-                            Saves current distro, env vars, and init script to library.
-                          </p>
-                          <button
-                            onClick={handleSaveTemplate}
-                            disabled={savingTemplate || !templateName.trim()}
-                            className="flex items-center gap-2 px-4 py-2 text-xs font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg disabled:opacity-50 transition-colors"
-                          >
-                            {savingTemplate ? (
-                              <Loader className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Save className="h-3.5 w-3.5" />
-                            )}
-                            Save Template
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
                 </div>
               )}
             </div>
@@ -1154,7 +985,6 @@ export default function WorkspacesPage() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md px-4"
           onClick={() => {
             setShowNewWorkspaceDialog(false);
-            setNewWorkspaceTemplate('');
           }}
         >
           <div
@@ -1172,7 +1002,6 @@ export default function WorkspacesPage() {
                 <button
                   onClick={() => {
                     setShowNewWorkspaceDialog(false);
-                    setNewWorkspaceTemplate('');
                   }}
                   className="p-2 -mr-1 rounded-lg text-white/40 hover:text-white/70 hover:bg-white/[0.06] transition-colors"
                 >
@@ -1195,38 +1024,10 @@ export default function WorkspacesPage() {
               </div>
 
               <div>
-                <label className="text-xs text-white/40 mb-2 block">Template</label>
-                <select
-                  value={newWorkspaceTemplate}
-                  onChange={(e) => setNewWorkspaceTemplate(e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-lg bg-black/20 border border-white/[0.06] text-sm text-white focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer"
-                  style={{
-                    backgroundImage:
-                      "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
-                    backgroundPosition: 'right 0.75rem center',
-                    backgroundRepeat: 'no-repeat',
-                    backgroundSize: '1.25em 1.25em',
-                  }}
-                >
-                  <option value="" className="bg-[#161618]">None</option>
-                  {templates.map((template) => (
-                    <option key={template.name} value={template.name} className="bg-[#161618]">
-                      {template.name}
-                      {template.distro ? ` · ${template.distro}` : ''}
-                    </option>
-                  ))}
-                </select>
-                {templatesError && (
-                  <p className="text-xs text-red-400 mt-1.5">{templatesError instanceof Error ? templatesError.message : 'Failed to load templates'}</p>
-                )}
-              </div>
-
-              <div>
                 <label className="text-xs text-white/40 mb-2 block">Type</label>
                 <select
                   value={newWorkspaceType}
                   onChange={(e) => setNewWorkspaceType(e.target.value as 'host' | 'container')}
-                  disabled={Boolean(newWorkspaceTemplate)}
                   className="w-full px-3 py-2.5 rounded-lg bg-black/20 border border-white/[0.06] text-sm text-white focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer disabled:opacity-50"
                   style={{
                     backgroundImage:
@@ -1240,9 +1041,7 @@ export default function WorkspacesPage() {
                   <option value="container" className="bg-[#161618]">Isolated (container)</option>
                 </select>
                 <p className="text-xs text-white/35 mt-2">
-                  {newWorkspaceTemplate
-                    ? 'Templates always create isolated workspaces'
-                    : newWorkspaceType === 'host'
+                  {newWorkspaceType === 'host'
                     ? 'Runs directly on host machine'
                     : 'Creates isolated Linux filesystem'}
                 </p>
@@ -1253,7 +1052,6 @@ export default function WorkspacesPage() {
               <button
                 onClick={() => {
                   setShowNewWorkspaceDialog(false);
-                  setNewWorkspaceTemplate('');
                 }}
                 className="px-4 py-2 text-sm text-white/50 hover:text-white/80 transition-colors"
               >

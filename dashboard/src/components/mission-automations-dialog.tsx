@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
 import {
   AlertTriangle,
   Check,
@@ -19,7 +18,6 @@ import {
   X,
 } from 'lucide-react';
 import { cn, formatRelativeTime } from '@/lib/utils';
-import { useLibrary } from '@/contexts/library-context';
 import { ShimmerAutomationRow } from '@/components/ui/shimmer';
 import {
   type Automation,
@@ -34,7 +32,6 @@ import {
   deleteAutomation,
   getAutomationExecutions,
   getMissionAutomationExecutions,
-  getLibraryCommand,
   postControlMessage,
   cancelMission,
 } from '@/lib/api';
@@ -93,7 +90,7 @@ export interface MissionAutomationsDialogProps {
 }
 
 type IntervalUnit = 'seconds' | 'minutes' | 'hours' | 'days';
-type CommandSourceType = 'library' | 'inline' | 'native_loop';
+type CommandSourceType = 'inline' | 'native_loop';
 type TriggerKind = 'interval' | 'agent_finished' | 'webhook';
 
 const UNIT_TO_SECONDS: Record<IntervalUnit, number> = {
@@ -178,26 +175,6 @@ const STATUS_STYLES: Record<string, string> = {
   skipped: 'text-white/30',
 };
 
-export function shouldPrefillInlinePromptOnSourceSwitch(
-  previousSourceType: CommandSourceType,
-  nextSourceType: CommandSourceType,
-  inlinePrompt: string
-): boolean {
-  return (
-    previousSourceType === 'library' &&
-    nextSourceType === 'inline' &&
-    inlinePrompt.trim().length === 0
-  );
-}
-
-export function clearInlinePrefillCache(
-  commandNameRef: { current: string },
-  libraryCommandContentRef: { current: string }
-): void {
-  commandNameRef.current = '';
-  libraryCommandContentRef.current = '';
-}
-
 /**
  * Project the raw automation list for display.
  *
@@ -264,7 +241,6 @@ export function MissionAutomationsDialog({
   const requestIdRef = useRef(0);
   const cacheRef = useRef<Map<string, Automation[]>>(new Map());
   const automationsRef = useRef<Automation[]>([]);
-  const { commands, loading: commandsLoading, libraryUnavailable } = useLibrary();
 
   // -- Automations state --
   const [automations, setAutomations] = useState<Automation[]>([]);
@@ -279,13 +255,8 @@ export function MissionAutomationsDialog({
   }, [automations]);
 
   // -- Create form state --
-  const [commandSourceType, setCommandSourceType] = useState<CommandSourceType>('library');
-  const [commandName, setCommandName] = useState('');
-  const commandNameRef = useRef('');
-  const libraryCommandContentRef = useRef('');
+  const [commandSourceType, setCommandSourceType] = useState<CommandSourceType>('inline');
   const [inlinePrompt, setInlinePrompt] = useState('');
-  const commandSourceTypeRef = useRef<CommandSourceType>('library');
-  const inlinePromptRef = useRef('');
   /** Objective text when commandSourceType === 'native_loop'. */
   const [nativeLoopObjective, setNativeLoopObjective] = useState('');
   const [triggerKind, setTriggerKind] = useState<TriggerKind>('interval');
@@ -323,23 +294,6 @@ export function MissionAutomationsDialog({
   // -- Clipboard --
   const [copiedWebhookId, setCopiedWebhookId] = useState<string | null>(null);
 
-  const commandsByName = useMemo(() => {
-    return new Map(commands.map((command) => [command.name, command]));
-  }, [commands]);
-
-  useEffect(() => {
-    commandSourceTypeRef.current = commandSourceType;
-  }, [commandSourceType]);
-
-  useEffect(() => {
-    inlinePromptRef.current = inlinePrompt;
-  }, [inlinePrompt]);
-
-  const setInlinePromptState = useCallback((nextPrompt: string) => {
-    inlinePromptRef.current = nextPrompt;
-    setInlinePrompt(nextPrompt);
-  }, []);
-
   // Helper to add auto-populated variables (merges with existing, never overwrites manual)
   const addAutoVariables = useCallback((names: string[]) => {
     setVariables((prev) => {
@@ -354,91 +308,18 @@ export function MissionAutomationsDialog({
     });
   }, []);
 
-  // Auto-populate variables when a library command is selected
-  const handleCommandNameChange = useCallback(
-    (name: string) => {
-      setCommandName(name);
-      commandNameRef.current = name;
-      libraryCommandContentRef.current = '';
-      const cmd = commandsByName.get(name);
-      if (cmd?.params?.length) {
-        addAutoVariables(cmd.params.map((p) => p.name));
-      } else if (name) {
-        // Fetch full command content to extract <variable/> placeholders
-        const capturedName = name;
-        getLibraryCommand(name)
-          .then((full) => {
-            // Guard against stale response if user changed selection
-            if (commandNameRef.current !== capturedName) return;
-            libraryCommandContentRef.current = full.content;
-            const fromParams = full.params?.map((p) => p.name) ?? [];
-            const fromContent = extractPromptVariables(full.content);
-            const all = [...new Set([...fromParams, ...fromContent])];
-            if (all.length > 0) addAutoVariables(all);
-          })
-          .catch(() => {});
-      }
-    },
-    [commandsByName, addAutoVariables]
-  );
-
-  const handleSourceTypeChange = useCallback(
-    (nextSourceType: CommandSourceType) => {
-      commandSourceTypeRef.current = nextSourceType;
-      if (
-        shouldPrefillInlinePromptOnSourceSwitch(commandSourceType, nextSourceType, inlinePrompt)
-      ) {
-        const selectedName = commandNameRef.current.trim();
-        const prefetchedContent = libraryCommandContentRef.current.trim();
-        if (prefetchedContent.length > 0) {
-          setInlinePromptState(prefetchedContent);
-          addAutoVariables(extractPromptVariables(prefetchedContent));
-        } else if (selectedName) {
-          const expectedName = selectedName;
-          void getLibraryCommand(selectedName)
-            .then((full) => {
-              if (
-                commandNameRef.current !== expectedName ||
-                commandSourceTypeRef.current !== 'inline' ||
-                inlinePromptRef.current.trim().length > 0
-              ) {
-                return;
-              }
-              const content = full.content.trim();
-              if (!content) return;
-              libraryCommandContentRef.current = content;
-              setInlinePromptState(content);
-              addAutoVariables(extractPromptVariables(content));
-            })
-            .catch(() => {});
-        }
-      }
-      setCommandSourceType(nextSourceType);
-    },
-    [addAutoVariables, commandSourceType, inlinePrompt, setInlinePromptState]
-  );
-
-  // Re-populate variables when commands finish loading (fixes late-load race condition)
-  useEffect(() => {
-    if (commandSourceType !== 'library' || !commandName) return;
-    const cmd = commandsByName.get(commandName);
-    if (cmd?.params?.length) {
-      addAutoVariables(cmd.params.map((p) => p.name));
-    }
-  }, [commandsByName, commandName, commandSourceType, addAutoVariables]);
-
   // Debounced inline prompt variable parsing
   const promptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleInlinePromptChange = useCallback(
     (text: string) => {
-      setInlinePromptState(text);
+      setInlinePrompt(text);
       if (promptTimerRef.current) clearTimeout(promptTimerRef.current);
       promptTimerRef.current = setTimeout(() => {
         const detected = extractPromptVariables(text);
         addAutoVariables(detected);
       }, 400);
     },
-    [addAutoVariables, setInlinePromptState]
+    [addAutoVariables]
   );
 
   // Detected built-in variables in inline prompt
@@ -446,33 +327,6 @@ export function MissionAutomationsDialog({
     () => (commandSourceType === 'inline' ? extractDetectedBuiltins(inlinePrompt) : []),
     [commandSourceType, inlinePrompt]
   );
-
-  // Required params for current command (for validation hints)
-  const requiredParams = useMemo(() => {
-    if (commandSourceType !== 'library' || !commandName) return new Set<string>();
-    const cmd = commandsByName.get(commandName);
-    if (!cmd?.params) return new Set<string>();
-    return new Set(cmd.params.filter((p) => p.required).map((p) => p.name));
-  }, [commandSourceType, commandName, commandsByName]);
-
-  // Param descriptions for placeholder text
-  const paramDescriptions = useMemo(() => {
-    if (commandSourceType !== 'library' || !commandName) return new Map<string, string>();
-    const cmd = commandsByName.get(commandName);
-    if (!cmd?.params) return new Map<string, string>();
-    return new Map(
-      cmd.params
-        .filter((p) => p.description)
-        .map((p) => [p.name, p.description!])
-    );
-  }, [commandSourceType, commandName, commandsByName]);
-
-  // Warning: required params with no value
-  const missingRequiredParams = useMemo(() => {
-    if (requiredParams.size === 0) return [];
-    const filledKeys = new Map(variables.map((v) => [v.key, v.value]));
-    return [...requiredParams].filter((k) => !filledKeys.get(k)?.trim());
-  }, [requiredParams, variables]);
 
   const intervalSeconds = useMemo(() => {
     const value = Number(intervalValue);
@@ -712,22 +566,12 @@ export function MissionAutomationsDialog({
     }
 
     // Build command source
-    let command_source: CommandSource;
-    if (commandSourceType === 'library') {
-      const name = commandName.trim();
-      if (!name) {
-        toast.error('Select a command for the automation');
-        return;
-      }
-      command_source = { type: 'library', name };
-    } else {
-      const content = inlinePrompt.trim();
-      if (!content) {
-        toast.error('Enter a prompt for the automation');
-        return;
-      }
-      command_source = { type: 'inline', content };
+    const content = inlinePrompt.trim();
+    if (!content) {
+      toast.error('Enter a prompt for the automation');
+      return;
     }
+    const command_source: CommandSource = { type: 'inline', content };
 
     // Build trigger
     let trigger: TriggerType;
@@ -784,9 +628,7 @@ export function MissionAutomationsDialog({
         ...automationsRef.current.filter((a) => a.id !== created.id),
       ]);
       // Reset form
-      setCommandName('');
-      clearInlinePrefillCache(commandNameRef, libraryCommandContentRef);
-      setInlinePromptState('');
+      setInlinePrompt('');
       setIntervalValue('5');
       setIntervalUnit('minutes');
       setStopPolicyType('when_failing_consecutively');
@@ -954,9 +796,7 @@ export function MissionAutomationsDialog({
 
   // -- Validation --
   const isCommandValid =
-    commandSourceType === 'library'
-      ? commandName.trim().length > 0
-      : commandSourceType === 'native_loop'
+    commandSourceType === 'native_loop'
       ? nativeLoopObjective.trim().length > 0
       : inlinePrompt.trim().length > 0;
   const isTriggerValid =
@@ -1040,16 +880,6 @@ export function MissionAutomationsDialog({
                   </button>
                 </div>
 
-                {libraryUnavailable && commandSourceType === 'library' && (
-                  <div className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                    <AlertTriangle className="h-3.5 w-3.5 mt-0.5" />
-                    <span>
-                      Library is not configured. Set it up in Settings to access commands, or use an
-                      inline prompt instead.
-                    </span>
-                  </div>
-                )}
-
                 {/* Row 1: Command source type + Trigger type */}
                 {(() => {
                   const harnessForBackend =
@@ -1072,14 +902,11 @@ export function MissionAutomationsDialog({
                         <select
                           value={commandSourceType}
                           onChange={(e) =>
-                            handleSourceTypeChange(e.target.value as CommandSourceType)
+                            setCommandSourceType(e.target.value as CommandSourceType)
                           }
                           className={cn(selectClass, 'w-full')}
                           style={selectStyle}
                         >
-                          <option value="library" className="bg-[#1a1a1a]">
-                            Library command
-                          </option>
                           <option value="inline" className="bg-[#1a1a1a]">
                             Inline prompt
                           </option>
@@ -1145,39 +972,6 @@ export function MissionAutomationsDialog({
                       Submits <code className="text-indigo-400/70">/goal &lt;objective&gt;</code>{' '}
                       to this mission. The harness CLI runs its own continuation loop; each
                       iteration is recorded here.
-                    </div>
-                  </div>
-                ) : commandSourceType === 'library' ? (
-                  <div>
-                    <label className="block text-xs text-white/50 mb-1.5">Command</label>
-                    <select
-                      value={commandName}
-                      onChange={(e) => handleCommandNameChange(e.target.value)}
-                      className={cn(selectClass, 'w-full')}
-                      style={selectStyle}
-                    >
-                      <option value="" className="bg-[#1a1a1a]">
-                        {commandsLoading ? 'Loading commands...' : 'Select a command'}
-                      </option>
-                      {commands.map((command) => (
-                        <option key={command.name} value={command.name} className="bg-[#1a1a1a]">
-                          {command.name}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="mt-1 text-[11px] text-white/30">
-                      {commandName && commandsByName.get(commandName)?.description}
-                      {!commandName && (
-                        <span>
-                          Choose from library commands.{' '}
-                          <Link
-                            href="/config/commands"
-                            className="text-indigo-400 hover:text-indigo-300"
-                          >
-                            Manage commands
-                          </Link>
-                        </span>
-                      )}
                     </div>
                   </div>
                 ) : (
@@ -1406,64 +1200,36 @@ export function MissionAutomationsDialog({
                   </div>
                   {variables.length > 0 && (
                     <div className="space-y-2">
-                      {variables.map((v, i) => {
-                        const isRequired = requiredParams.has(v.key);
-                        const description = paramDescriptions.get(v.key);
-                        return (
-                          <div key={i} className="flex items-center gap-2">
-                            <div className="relative w-1/3">
-                              <input
-                                value={v.key}
-                                onChange={(e) => handleVariableChange(i, 'key', e.target.value)}
-                                placeholder="key"
-                                className={cn(
-                                  'w-full rounded-lg border bg-white/[0.02] px-2.5 py-1.5 text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-indigo-500/50',
-                                  isRequired
-                                    ? 'border-amber-500/30'
-                                    : 'border-white/[0.06]'
-                                )}
-                              />
-                              {isRequired && (
-                                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-amber-400 text-[10px]">
-                                  *
-                                </span>
-                              )}
-                            </div>
+                      {variables.map((v, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <div className="relative w-1/3">
                             <input
-                              value={v.value}
-                              onChange={(e) => handleVariableChange(i, 'value', e.target.value)}
-                              placeholder={description || 'default value'}
-                              className="flex-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-indigo-500/50"
+                              value={v.key}
+                              onChange={(e) => handleVariableChange(i, 'key', e.target.value)}
+                              placeholder="key"
+                              className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-indigo-500/50"
                             />
-                            <button
-                              onClick={() => handleRemoveVariable(i)}
-                              className="p-1 text-white/30 hover:text-red-400 transition-colors"
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </button>
                           </div>
-                        );
-                      })}
+                          <input
+                            value={v.value}
+                            onChange={(e) => handleVariableChange(i, 'value', e.target.value)}
+                            placeholder="default value"
+                            className="flex-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-indigo-500/50"
+                          />
+                          <button
+                            onClick={() => handleRemoveVariable(i)}
+                            className="p-1 text-white/30 hover:text-red-400 transition-colors"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
                       <div className="text-[11px] text-white/30">
                         Reference in prompt as{' '}
                         <code className="text-indigo-400/70">&lt;key/&gt;</code>. When triggered via
                         API, pass <code className="text-white/40">{'"variables": {"key": "value"}'}</code> to
                         override defaults.
                       </div>
-                    </div>
-                  )}
-                  {missingRequiredParams.length > 0 && (
-                    <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200/80">
-                      <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
-                      <span>
-                        Required params with no default:{' '}
-                        {missingRequiredParams.map((k) => (
-                          <code key={k} className="text-amber-300">
-                            {k}
-                          </code>
-                        )).reduce<React.ReactNode[]>((acc, el, i) => (i === 0 ? [el] : [...acc, ', ', el]), [])}
-                        . Values can be provided at trigger time.
-                      </span>
                     </div>
                   )}
                 </div>
@@ -1540,10 +1306,6 @@ export function MissionAutomationsDialog({
                   {visibleAutomations.map((automation) => {
                     const label = getAutomationLabel(automation);
                     const sourceTag = getAutomationSourceTag(automation);
-                    const command =
-                      automation.command_source?.type === 'library'
-                        ? commandsByName.get(automation.command_source.name)
-                        : undefined;
                     const scheduleLabel = getAutomationScheduleLabel(automation);
                     const lastRunLabel = automation.last_triggered_at
                       ? formatRelativeTime(new Date(automation.last_triggered_at))
@@ -1594,16 +1356,13 @@ export function MissionAutomationsDialog({
                                     </span>
                                   );
                                 })()}
-                              {automation.command_source?.type === 'library' && !command && (
+                              {automation.command_source?.type === 'library' && (
                                 <span className="flex items-center gap-1 text-[11px] text-amber-300">
                                   <AlertTriangle className="h-3 w-3" />
-                                  Missing
+                                  Retired
                                 </span>
                               )}
                             </div>
-                            {command?.description && (
-                              <div className="text-xs text-white/40">{command.description}</div>
-                            )}
                             <div className="flex items-center gap-2 text-xs text-white/40">
                               {isWebhook ? (
                                 <span className="flex items-center gap-1">

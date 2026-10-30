@@ -417,9 +417,6 @@ async fn authorize(
                 | "create_workspace"
                 | "update_workspace"
                 | "delete_workspace"
-                | "rebuild_workspace_from_template"
-                | "save_workspace_template"
-                | "delete_workspace_template"
                 | "get_backend_auth_status"
                 | "deploy_sandboxed_sh"
         ) {

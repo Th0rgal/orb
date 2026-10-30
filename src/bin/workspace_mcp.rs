@@ -487,99 +487,6 @@ impl Tool for UpdateSkillTool {
     }
 }
 
-/// Tool: update_init_script
-///
-/// Updates an init script fragment in the library directory and triggers
-/// workspace syncing via the backend API.
-struct UpdateInitScriptTool;
-
-#[async_trait]
-impl Tool for UpdateInitScriptTool {
-    fn name(&self) -> &str {
-        "update_init_script"
-    }
-
-    fn description(&self) -> &str {
-        "Update an init script fragment in the library. Init scripts are reusable shell scripts \
-         that run during workspace initialization. Use this to create or update setup scripts \
-         that can be shared across workspaces."
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "script_name": {
-                    "type": "string",
-                    "description": "Name of the init script fragment (folder name in library/init-script/)"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The shell script content for SCRIPT.sh"
-                }
-            },
-            "required": ["script_name", "content"]
-        })
-    }
-
-    async fn execute(&self, args: Value, _working_dir: &Path) -> anyhow::Result<String> {
-        let script_name = args["script_name"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'script_name' argument"))?;
-
-        let content = args["content"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
-
-        // Validate script name (prevent path traversal)
-        if script_name.contains("..") || script_name.contains('/') || script_name.contains('\\') {
-            return Err(anyhow::anyhow!(
-                "Invalid script name: contains path separators or '..'"
-            ));
-        }
-
-        // Get backend API URL (defaults to localhost in dev)
-        let api_base = std::env::var("SANDBOXED_SH_API_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
-
-        // Get auth token if set
-        let auth_token = std::env::var("SANDBOXED_SH_API_TOKEN").ok();
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
-
-        let url = format!("{}/api/library/init-script/{}", api_base, script_name);
-
-        // Build request with optional auth
-        let mut request = client
-            .put(&url)
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({ "content": content }));
-
-        if let Some(token) = auth_token {
-            request = request.header("Authorization", format!("Bearer {}", token));
-        }
-
-        let response = request.send().await?;
-        let status = response.status();
-
-        if status.is_success() {
-            Ok(format!(
-                "Successfully updated init script '{}'. Changes will sync to workspaces.",
-                script_name
-            ))
-        } else {
-            let error_text = response.text().await.unwrap_or_default();
-            Err(anyhow::anyhow!(
-                "Failed to update init script: {} - {}",
-                status,
-                error_text
-            ))
-        }
-    }
-}
-
 fn tool_set() -> HashMap<String, Arc<dyn Tool>> {
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
@@ -591,10 +498,6 @@ fn tool_set() -> HashMap<String, Arc<dyn Tool>> {
     tools.insert("grep_search".to_string(), Arc::new(tools::GrepSearch));
     tools.insert("fetch_url".to_string(), Arc::new(tools::FetchUrl));
     tools.insert("update_skill".to_string(), Arc::new(UpdateSkillTool));
-    tools.insert(
-        "update_init_script".to_string(),
-        Arc::new(UpdateInitScriptTool),
-    );
 
     tools
 }

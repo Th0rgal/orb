@@ -27,7 +27,6 @@ use super::{
     collect_skill_contents, ensure_claudecode_skill_frontmatter, SkillContent, Workspace,
     WorkspaceType, DEFAULT_WORKSPACE_ID,
 };
-use crate::library::env_crypto::strip_encrypted_tags;
 use crate::library::{LibraryStore, SkillScope, SkillSummary, SKILL_AUDIENCE_MISSION};
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -155,7 +154,7 @@ pub fn native_skill_files(skills: &[SkillContent]) -> BTreeMap<String, Vec<u8>> 
         let mut files = BTreeMap::new();
         files.insert(
             format!("skills/{}/SKILL.md", skill.name),
-            strip_encrypted_tags(&content).into_bytes(),
+            content.into_bytes(),
         );
         let mut ok = true;
         for (path, content) in &skill.files {
@@ -165,7 +164,7 @@ pub fn native_skill_files(skills: &[SkillContent]) -> BTreeMap<String, Vec<u8>> 
             }
             files.insert(
                 format!("skills/{}/{}", skill.name, path),
-                strip_encrypted_tags(content).into_bytes(),
+                content.as_bytes().to_vec(),
             );
         }
         if ok {
@@ -243,15 +242,12 @@ pub fn build_skill_tarball(skills: &[SkillContent]) -> anyhow::Result<(Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::SkillSource;
 
     fn lib(name: &str, audience: &[&str], scope: SkillScope) -> SkillSummary {
         SkillSummary {
             name: name.into(),
             description: None,
             path: format!("skill/{name}"),
-            source: SkillSource::Local,
-            setup_commands: Vec::new(),
             audience: audience.iter().map(|s| s.to_string()).collect(),
             scope,
             line_count: 1,
@@ -320,10 +316,7 @@ mod tests {
             name: name.into(),
             description: Some("d".into()),
             content: body.into(),
-            files: vec![(
-                "references/a.md".into(),
-                "x <encrypted>sek</encrypted>".into(),
-            )],
+            files: vec![("references/a.md".into(), "x ref".into())],
         }
     }
 
@@ -350,21 +343,15 @@ mod tests {
     }
 
     #[test]
-    fn skill_tarball_is_deterministic_and_strips_secrets() {
+    fn skill_tarball_is_deterministic() {
         let a = build_skill_tarball(&[
-            content(
-                "beta",
-                "---\ndescription: d\n---\nuse <encrypted v=\"1\">tok</encrypted>",
-            ),
+            content("beta", "---\ndescription: d\n---\nuse body"),
             content("alpha", "plain"),
         ])
         .unwrap();
         let b = build_skill_tarball(&[
             content("alpha", "plain"),
-            content(
-                "beta",
-                "---\ndescription: d\n---\nuse <encrypted v=\"1\">tok</encrypted>",
-            ),
+            content("beta", "---\ndescription: d\n---\nuse body"),
         ])
         .unwrap();
         assert_eq!(a, b);
@@ -381,9 +368,8 @@ mod tests {
         );
         let beta = &files["skills/beta/SKILL.md"];
         assert!(beta.contains("name: beta"), "{beta}");
-        assert!(beta.contains("use tok"), "{beta}");
-        assert!(!beta.contains("encrypted"), "{beta}");
-        assert_eq!(files["skills/beta/references/a.md"], "x sek");
+        assert!(beta.contains("use body"), "{beta}");
+        assert_eq!(files["skills/beta/references/a.md"], "x ref");
         assert!(files["skills/alpha/SKILL.md"].starts_with("---\n"));
     }
 

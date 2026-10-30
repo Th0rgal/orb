@@ -347,14 +347,7 @@ async fn reinitialize_library(state: &Arc<AppState>, remote: &str) -> Result<(),
 
     match crate::library::LibraryStore::new(library_path, remote).await {
         Ok(store) => {
-            // Sync OpenCode plugins
-            if let Ok(plugins) = store.get_plugins().await {
-                if let Err(e) = crate::opencode_config::sync_global_plugins(&plugins).await {
-                    tracing::warn!("Failed to sync OpenCode plugins: {}", e);
-                }
-            }
-
-            tracing::info!("Configuration library reinitialized from {}", remote);
+            tracing::info!("Skills library reinitialized from {}", remote);
             let library = Arc::new(store);
             *state.library.write().await = Some(Arc::clone(&library));
 
@@ -693,7 +686,7 @@ async fn restore_backup(
             Ok(key_hex) => {
                 let trimmed = key_hex.trim();
                 if !trimmed.is_empty() {
-                    if let Err(e) = crate::library::env_crypto::set_private_key_hex(trimmed).await {
+                    if let Err(e) = crate::env_crypto::set_private_key_hex(trimmed).await {
                         errors.push(format!("Failed to activate restored encryption key: {}", e));
                     }
                 }

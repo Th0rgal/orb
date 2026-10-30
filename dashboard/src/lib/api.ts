@@ -1550,19 +1550,6 @@ export interface LibraryStatus {
   modified_files: string[];
 }
 
-// MCP Server definition (OpenCode-aligned format)
-export interface McpServerDef {
-  type: "local" | "remote";
-  // Local (stdio) server fields
-  command?: string[];
-  env?: Record<string, string>;
-  // Remote (HTTP) server fields
-  url?: string;
-  headers?: Record<string, string>;
-  // Common
-  enabled?: boolean;
-}
-
 // Skill file within a skill folder
 export interface SkillFile {
   name: string;
@@ -1570,65 +1557,19 @@ export interface SkillFile {
   content: string;
 }
 
-// Skill source/provenance - local or from skills.sh registry
-export type SkillSource =
-  | { type: "Local" }
-  | {
-      type: "SkillsRegistry";
-      identifier: string;
-      skill_name?: string;
-      version?: string;
-      installed_at?: string;
-      updated_at?: string;
-    };
-
 export interface SkillSummary {
   name: string;
   description: string | null;
   path: string;
-  source?: SkillSource;
 }
 
 export interface Skill {
   name: string;
   description: string | null;
   path: string;
-  source?: SkillSource;
   content: string;
   files: SkillFile[];
   references: string[];
-}
-
-// Skills registry (skills.sh) types
-export interface RegistrySkillListing {
-  identifier: string;
-  name: string;
-  description: string | null;
-}
-
-// Library Agent types
-export interface LibraryAgentSummary {
-  name: string;
-  description: string | null;
-  path: string;
-}
-
-export interface LibraryAgent {
-  name: string;
-  description: string | null;
-  path: string;
-  content: string;
-  model: string | null;
-  tools: Record<string, boolean>;
-  permissions: Record<string, string>;
-}
-
-// Migration report
-export interface MigrationReport {
-  directories_renamed: [string, string][];
-  files_converted: string[];
-  errors: string[];
-  success: boolean;
 }
 
 export interface CommandParam {
@@ -1641,14 +1582,6 @@ export interface CommandSummary {
   name: string;
   description: string | null;
   path: string;
-  params?: CommandParam[];
-}
-
-export interface Command {
-  name: string;
-  description: string | null;
-  path: string;
-  content: string;
   params?: CommandParam[];
 }
 
@@ -1717,27 +1650,15 @@ export async function pushLibrary(): Promise<void> {
   return libPost("/api/library/push", undefined, "Failed to push library");
 }
 
-// Get MCP servers
-export async function getLibraryMcps(): Promise<Record<string, McpServerDef>> {
-  return libGet("/api/library/mcps", "Failed to fetch MCPs");
-}
-
-// Save MCP servers
-export async function saveLibraryMcps(
-  servers: Record<string, McpServerDef>,
-): Promise<void> {
-  return libPut("/api/library/mcps", servers, "Failed to save MCPs");
-}
-
 // List skills
 export async function listLibrarySkills(): Promise<SkillSummary[]> {
-  return libGet("/api/library/skills", "Failed to fetch skills");
+  return libGet("/api/library/skill", "Failed to fetch skills");
 }
 
 // Get skill
 export async function getLibrarySkill(name: string): Promise<Skill> {
   return libGet(
-    `/api/library/skills/${encodeURIComponent(name)}`,
+    `/api/library/skill/${encodeURIComponent(name)}`,
     "Failed to fetch skill",
   );
 }
@@ -1748,7 +1669,7 @@ export async function saveLibrarySkill(
   content: string,
 ): Promise<void> {
   return libPut(
-    `/api/library/skills/${encodeURIComponent(name)}`,
+    `/api/library/skill/${encodeURIComponent(name)}`,
     { content },
     "Failed to save skill",
   );
@@ -1757,7 +1678,7 @@ export async function saveLibrarySkill(
 // Delete skill
 export async function deleteLibrarySkill(name: string): Promise<void> {
   return libDel(
-    `/api/library/skills/${encodeURIComponent(name)}`,
+    `/api/library/skill/${encodeURIComponent(name)}`,
     "Failed to delete skill",
   );
 }
@@ -1768,7 +1689,7 @@ export async function getSkillReference(
   refPath: string,
 ): Promise<string> {
   const res = await apiFetch(
-    `/api/library/skills/${encodeURIComponent(skillName)}/references/${refPath}`,
+    `/api/library/skill/${encodeURIComponent(skillName)}/files/${refPath}`,
   );
   await ensureLibraryResponse(res, "Failed to fetch reference file");
   return res.text();
@@ -1781,7 +1702,7 @@ export async function saveSkillReference(
   content: string,
 ): Promise<void> {
   return libPut(
-    `/api/library/skills/${encodeURIComponent(skillName)}/references/${refPath}`,
+    `/api/library/skill/${encodeURIComponent(skillName)}/files/${refPath}`,
     { content },
     "Failed to save reference file",
   );
@@ -1793,63 +1714,8 @@ export async function deleteSkillReference(
   refPath: string,
 ): Promise<void> {
   return libDel(
-    `/api/library/skills/${encodeURIComponent(skillName)}/references/${refPath}`,
+    `/api/library/skill/${encodeURIComponent(skillName)}/files/${refPath}`,
     "Failed to delete reference file",
-  );
-}
-
-// Import skill from file (.zip or .md)
-export async function importSkill(name: string, file: File): Promise<Skill> {
-  const formData = new FormData();
-  formData.append("file", file);
-
-  const res = await apiFetch(
-    `/api/library/skills/import?name=${encodeURIComponent(name)}`,
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "Failed to import skill");
-  }
-
-  return res.json();
-}
-
-// Skills Registry (skills.sh) API
-
-export async function searchSkillsRegistry(
-  query: string,
-): Promise<RegistrySkillListing[]> {
-  return libGet(
-    `/api/library/skill/registry/search?q=${encodeURIComponent(query)}`,
-    "Failed to search skills registry",
-  );
-}
-
-export async function listRepoSkills(identifier: string): Promise<string[]> {
-  return libGet(
-    `/api/library/skill/registry/list/${encodeURIComponent(identifier)}`,
-    "Failed to list repo skills",
-  );
-}
-
-export interface InstallFromRegistryRequest {
-  identifier: string;
-  skills?: string[];
-  name?: string;
-}
-
-export async function installFromRegistry(
-  request: InstallFromRegistryRequest,
-): Promise<Skill> {
-  return libPost(
-    "/api/library/skill/registry/install",
-    request,
-    "Failed to install from registry",
   );
 }
 
@@ -1877,306 +1743,6 @@ export function validateSkillName(name: string): {
     };
   }
   return { valid: true };
-}
-
-// List commands
-export async function listLibraryCommands(): Promise<CommandSummary[]> {
-  return libGet("/api/library/commands", "Failed to fetch commands");
-}
-
-// Builtin commands response
-export interface BuiltinCommandsResponse {
-  opencode: CommandSummary[];
-  claudecode: CommandSummary[];
-  /** Grok builtin commands (Core-driven /goal). */
-  grok?: CommandSummary[];
-  /** Codex builtin commands (codex 0.128.0+ — empty on older binaries). */
-  codex?: CommandSummary[];
-}
-
-// Get builtin slash commands for each backend
-export async function getBuiltinCommands(): Promise<BuiltinCommandsResponse> {
-  const res = await apiFetch("/api/library/builtin-commands");
-  if (!res.ok) {
-    // Fallback to empty if endpoint not available
-    return { opencode: [], claudecode: [], codex: [], grok: [] };
-  }
-  const json = await res.json();
-  return {
-    opencode: json.opencode ?? [],
-    claudecode: json.claudecode ?? [],
-    grok: json.grok ?? [],
-    codex: json.codex ?? [],
-  };
-}
-
-// Get command
-export async function getLibraryCommand(name: string): Promise<Command> {
-  return libGet(
-    `/api/library/commands/${encodeURIComponent(name)}`,
-    "Failed to fetch command",
-  );
-}
-
-// Save command
-export async function saveLibraryCommand(
-  name: string,
-  content: string,
-): Promise<void> {
-  return libPut(
-    `/api/library/commands/${encodeURIComponent(name)}`,
-    { content },
-    "Failed to save command",
-  );
-}
-
-// Delete command
-export async function deleteLibraryCommand(name: string): Promise<void> {
-  return libDel(
-    `/api/library/commands/${encodeURIComponent(name)}`,
-    "Failed to delete command",
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Library Agents
-// ─────────────────────────────────────────────────────────────────────────────
-
-// List library agents
-export async function listLibraryAgents(): Promise<LibraryAgentSummary[]> {
-  return libGet("/api/library/agent", "Failed to fetch library agents");
-}
-
-// Get library agent
-export async function getLibraryAgent(name: string): Promise<LibraryAgent> {
-  return libGet(
-    `/api/library/agent/${encodeURIComponent(name)}`,
-    "Failed to fetch library agent",
-  );
-}
-
-// Save library agent
-export async function saveLibraryAgent(
-  name: string,
-  agent: LibraryAgent,
-): Promise<void> {
-  return libPut(
-    `/api/library/agent/${encodeURIComponent(name)}`,
-    agent,
-    "Failed to save library agent",
-  );
-}
-
-// Delete library agent
-export async function deleteLibraryAgent(name: string): Promise<void> {
-  return libDel(
-    `/api/library/agent/${encodeURIComponent(name)}`,
-    "Failed to delete library agent",
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Workspace Templates
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface WorkspaceTemplateSummary {
-  name: string;
-  description?: string;
-  path: string;
-  distro?: string;
-  skills?: string[];
-  init_scripts?: string[];
-}
-
-export type TailscaleMode = "exit_node" | "tailnet_only";
-
-export interface WorkspaceTemplate {
-  name: string;
-  description?: string;
-  path: string;
-  distro?: string;
-  skills: string[];
-  env_vars: Record<string, string>;
-  encrypted_keys: string[];
-  init_scripts: string[];
-  init_script: string;
-  shared_network?: boolean | null;
-  tailscale_mode?: TailscaleMode | null;
-  config_profile?: string;
-}
-
-export async function listWorkspaceTemplates(): Promise<
-  WorkspaceTemplateSummary[]
-> {
-  return libGet(
-    "/api/library/workspace-template",
-    "Failed to fetch workspace templates",
-  );
-}
-
-export async function getWorkspaceTemplate(
-  name: string,
-): Promise<WorkspaceTemplate> {
-  return libGet(
-    `/api/library/workspace-template/${encodeURIComponent(name)}`,
-    "Failed to fetch workspace template",
-  );
-}
-
-export async function saveWorkspaceTemplate(
-  name: string,
-  data: {
-    description?: string;
-    distro?: string;
-    skills?: string[];
-    env_vars?: Record<string, string>;
-    encrypted_keys?: string[];
-    init_scripts?: string[];
-    init_script?: string;
-    shared_network?: boolean | null;
-    tailscale_mode?: TailscaleMode | null;
-    config_profile?: string;
-  },
-): Promise<void> {
-  return libPut(
-    `/api/library/workspace-template/${encodeURIComponent(name)}`,
-    data,
-    "Failed to save workspace template",
-  );
-}
-
-export async function deleteWorkspaceTemplate(name: string): Promise<void> {
-  return libDel(
-    `/api/library/workspace-template/${encodeURIComponent(name)}`,
-    "Failed to delete workspace template",
-  );
-}
-
-export async function renameWorkspaceTemplate(
-  oldName: string,
-  newName: string,
-): Promise<void> {
-  // Get the existing template
-  const template = await getWorkspaceTemplate(oldName);
-  // Save with new name
-  await saveWorkspaceTemplate(newName, {
-    description: template.description,
-    distro: template.distro,
-    skills: template.skills,
-    env_vars: template.env_vars,
-    encrypted_keys: template.encrypted_keys,
-    init_scripts: template.init_scripts,
-    init_script: template.init_script,
-    shared_network: template.shared_network,
-    tailscale_mode: template.tailscale_mode,
-    config_profile: template.config_profile,
-  });
-  // Delete old template
-  await deleteWorkspaceTemplate(oldName);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Init Scripts
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface InitScriptSummary {
-  name: string;
-  description?: string | null;
-  path: string;
-}
-
-export interface InitScript extends InitScriptSummary {
-  content: string;
-}
-
-export async function listInitScripts(): Promise<InitScriptSummary[]> {
-  return libGet("/api/library/init-script", "Failed to fetch init scripts");
-}
-
-export async function getInitScript(name: string): Promise<InitScript> {
-  return libGet(
-    `/api/library/init-script/${encodeURIComponent(name)}`,
-    "Failed to fetch init script",
-  );
-}
-
-export async function saveInitScript(
-  name: string,
-  content: string,
-): Promise<void> {
-  return libPut(
-    `/api/library/init-script/${encodeURIComponent(name)}`,
-    { content },
-    "Failed to save init script",
-  );
-}
-
-export async function deleteInitScript(name: string): Promise<void> {
-  return libDel(
-    `/api/library/init-script/${encodeURIComponent(name)}`,
-    "Failed to delete init script",
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Library Rename
-// ─────────────────────────────────────────────────────────────────────────────
-
-export type LibraryItemType =
-  | "skill"
-  | "command"
-  | "rule"
-  | "agent"
-  | "tool"
-  | "workspace-template";
-
-export interface RenameChange {
-  type: "rename_file" | "update_reference" | "update_workspace";
-  from?: string;
-  to?: string;
-  file?: string;
-  field?: string;
-  old_value?: string;
-  new_value?: string;
-  workspace_id?: string;
-  workspace_name?: string;
-}
-
-export interface RenameResult {
-  success: boolean;
-  changes: RenameChange[];
-  warnings: string[];
-  error?: string;
-}
-
-/**
- * Rename a library item and update all references.
- * Supports dry_run mode to preview changes before applying them.
- */
-export async function renameLibraryItem(
-  itemType: LibraryItemType,
-  oldName: string,
-  newName: string,
-  dryRun: boolean = false,
-): Promise<RenameResult> {
-  return libPost(
-    `/api/library/rename/${itemType}/${encodeURIComponent(oldName)}`,
-    { new_name: newName, dry_run: dryRun },
-    "Failed to rename item",
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Library Migration
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Migrate library structure to new format
-export async function migrateLibrary(): Promise<MigrationReport> {
-  return libPost(
-    "/api/library/migrate",
-    undefined,
-    "Failed to migrate library",
-  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2335,338 +1901,6 @@ export async function restartOpenCodeService(): Promise<{
     undefined,
     "Failed to restart OpenCode service",
   );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Core Config API
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface SandboxedConfig {
-  hidden_agents: string[];
-  default_agent: string | null;
-}
-
-// Get Core config from Library
-export async function getSandboxedConfig(): Promise<SandboxedConfig> {
-  try {
-    return await apiGet(
-      "/api/library/sandboxed-sh/config",
-      "Failed to get Core config",
-    );
-  } catch {
-    // Return default config if endpoint doesn't exist (not yet implemented)
-    return { hidden_agents: [], default_agent: null };
-  }
-}
-
-// Save Core config to Library
-export async function saveSandboxedConfig(
-  config: SandboxedConfig,
-): Promise<void> {
-  return apiPut(
-    "/api/library/sandboxed-sh/config",
-    config,
-    "Failed to save Core config",
-  );
-}
-
-// Get visible agents (filtered by Core config)
-export async function getVisibleAgents(): Promise<unknown> {
-  try {
-    return await apiGet(
-      "/api/library/sandboxed-sh/agents",
-      "Failed to get visible agents",
-    );
-  } catch {
-    // Return empty array if endpoint doesn't exist (not yet implemented)
-    return [];
-  }
-}
-
-// Claude Code config stored in Library
-export interface ClaudeCodeConfig {
-  default_model: string | null;
-  default_agent: string | null;
-  hidden_agents: string[];
-}
-
-// Get Claude Code config from Library
-export async function getClaudeCodeConfig(): Promise<ClaudeCodeConfig> {
-  return apiGet(
-    "/api/library/claudecode/config",
-    "Failed to get Claude Code config",
-  );
-}
-
-// Save Claude Code config to Library
-export async function saveClaudeCodeConfig(
-  config: ClaudeCodeConfig,
-): Promise<void> {
-  return apiPut(
-    "/api/library/claudecode/config",
-    config,
-    "Failed to save Claude Code config",
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Config Profiles API
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface ConfigProfileSummary {
-  name: string;
-  is_default: boolean;
-  path: string;
-}
-
-export interface ConfigProfileFile {
-  path: string;
-  content: string;
-}
-
-export interface ConfigProfile {
-  name: string;
-  is_default: boolean;
-  path: string;
-  files: ConfigProfileFile[];
-  opencode_settings: Record<string, unknown>;
-  sandboxed_config: SandboxedConfig;
-  claudecode_config: ClaudeCodeConfig;
-}
-
-// List all config profiles
-export async function listConfigProfiles(): Promise<ConfigProfileSummary[]> {
-  return apiGet(
-    "/api/library/config-profile",
-    "Failed to list config profiles",
-  );
-}
-
-// Create a new config profile
-export async function createConfigProfile(
-  name: string,
-  baseProfile?: string,
-): Promise<ConfigProfile> {
-  return apiPost(
-    "/api/library/config-profile",
-    { name, base_profile: baseProfile },
-    "Failed to create config profile",
-  );
-}
-
-// Get a config profile by name
-export async function getConfigProfile(name: string): Promise<ConfigProfile> {
-  return apiGet(
-    `/api/library/config-profile/${encodeURIComponent(name)}`,
-    "Failed to get config profile",
-  );
-}
-
-// Save a config profile
-export async function saveConfigProfile(
-  name: string,
-  profile: ConfigProfile,
-): Promise<void> {
-  return apiPut(
-    `/api/library/config-profile/${encodeURIComponent(name)}`,
-    profile,
-    "Failed to save config profile",
-  );
-}
-
-// Delete a config profile
-export async function deleteConfigProfile(name: string): Promise<void> {
-  return apiDel(
-    `/api/library/config-profile/${encodeURIComponent(name)}`,
-    "Failed to delete config profile",
-  );
-}
-
-// Get Core config for a specific profile
-export async function getSandboxedConfigForProfile(
-  profile: string,
-): Promise<SandboxedConfig> {
-  try {
-    return await apiGet(
-      `/api/library/config-profile/${encodeURIComponent(profile)}/sandboxed-sh/config`,
-      "Failed to get Core config for profile",
-    );
-  } catch {
-    // Return default config if endpoint doesn't exist (not yet implemented)
-    return { hidden_agents: [], default_agent: null };
-  }
-}
-
-// Save Core config for a specific profile
-export async function saveSandboxedConfigForProfile(
-  profile: string,
-  config: SandboxedConfig,
-): Promise<void> {
-  return apiPut(
-    `/api/library/config-profile/${encodeURIComponent(profile)}/sandboxed-sh/config`,
-    config,
-    "Failed to save Core config for profile",
-  );
-}
-
-// Get Claude Code config for a specific profile
-export async function getClaudeCodeConfigForProfile(
-  profile: string,
-): Promise<ClaudeCodeConfig> {
-  return apiGet(
-    `/api/library/config-profile/${encodeURIComponent(profile)}/claudecode/config`,
-    "Failed to get Claude Code config for profile",
-  );
-}
-
-// Save Claude Code config for a specific profile
-export async function saveClaudeCodeConfigForProfile(
-  profile: string,
-  config: ClaudeCodeConfig,
-): Promise<void> {
-  return apiPut(
-    `/api/library/config-profile/${encodeURIComponent(profile)}/claudecode/config`,
-    config,
-    "Failed to save Claude Code config for profile",
-  );
-}
-
-// List all files in a config profile
-export async function listConfigProfileFiles(
-  profile: string,
-): Promise<string[]> {
-  return apiGet(
-    `/api/library/config-profile/${encodeURIComponent(profile)}/files`,
-    "Failed to list config profile files",
-  );
-}
-
-// Get a specific file from a config profile
-export async function getConfigProfileFile(
-  profile: string,
-  filePath: string,
-): Promise<string> {
-  const response = await fetch(
-    apiUrl(
-      `/api/library/config-profile/${encodeURIComponent(profile)}/file/${filePath}`,
-    ),
-    {
-      headers: authHeader(),
-    },
-  );
-  if (!response.ok) {
-    throw new Error(
-      `Failed to get config profile file: ${response.statusText}`,
-    );
-  }
-  return response.text();
-}
-
-// Save a specific file in a config profile
-export async function saveConfigProfileFile(
-  profile: string,
-  filePath: string,
-  content: string,
-): Promise<void> {
-  const response = await fetch(
-    apiUrl(
-      `/api/library/config-profile/${encodeURIComponent(profile)}/file/${filePath}`,
-    ),
-    {
-      method: "PUT",
-      headers: {
-        ...authHeader(),
-        "Content-Type": "text/plain",
-      },
-      body: content,
-    },
-  );
-  if (!response.ok) {
-    throw new Error(
-      `Failed to save config profile file: ${response.statusText}`,
-    );
-  }
-}
-
-// Delete a specific file from a config profile
-export async function deleteConfigProfileFile(
-  profile: string,
-  filePath: string,
-): Promise<void> {
-  const response = await fetch(
-    apiUrl(
-      `/api/library/config-profile/${encodeURIComponent(profile)}/file/${filePath}`,
-    ),
-    {
-      method: "DELETE",
-      headers: authHeader(),
-    },
-  );
-  if (!response.ok) {
-    throw new Error(
-      `Failed to delete config profile file: ${response.statusText}`,
-    );
-  }
-}
-
-// List default files for a harness from the library
-export async function listHarnessDefaultFiles(
-  harness: string,
-): Promise<string[]> {
-  return apiGet(
-    `/api/library/harness-default/${encodeURIComponent(harness)}`,
-    "Failed to list harness default files",
-  );
-}
-
-// Get a harness default file from the library
-export async function getHarnessDefaultFile(
-  harness: string,
-  fileName: string,
-): Promise<string> {
-  const response = await fetch(
-    apiUrl(
-      `/api/library/harness-default/${encodeURIComponent(harness)}/${fileName}`,
-    ),
-    {
-      headers: authHeader(),
-    },
-  );
-  if (!response.ok) {
-    if (response.status === 404) {
-      throw new Error(`Harness default file not found: ${harness}/${fileName}`);
-    }
-    throw new Error(
-      `Failed to get harness default file: ${response.statusText}`,
-    );
-  }
-  return response.text();
-}
-
-// Save a harness default file in the library
-export async function saveHarnessDefaultFile(
-  harness: string,
-  fileName: string,
-  content: string,
-): Promise<void> {
-  const response = await fetch(
-    apiUrl(
-      `/api/library/harness-default/${encodeURIComponent(harness)}/${fileName}`,
-    ),
-    {
-      method: "PUT",
-      headers: {
-        ...authHeader(),
-        "Content-Type": "text/plain",
-      },
-      body: content,
-    },
-  );
-  if (!response.ok) {
-    throw new Error(
-      `Failed to save harness default file: ${response.statusText}`,
-    );
-  }
 }
 
 // AI provider types and functions are exported from ./api/providers.

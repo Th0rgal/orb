@@ -259,7 +259,7 @@ impl AutomationManagerMcp {
                     "  \"fresh_session\": \"always\"\n",
                     "}\n",
                     "Trigger types: cron (expression + timezone), interval (seconds), durable_job_terminal (job_id).\n",
-                    "Command source types: inline (content), library (name), local_file (path).\n",
+                    "Command source types: inline (content), local_file (path).\n",
                     "Cron examples: '0 8 * * *' daily 8am, '0 9 * * 1' Mon 9am, '*/30 * * * *' every 30min."
                 ).to_string(),
                 input_schema: json!({
@@ -270,9 +270,8 @@ impl AutomationManagerMcp {
                             "type": "object",
                             "description": "Command to execute. Use {\"type\": \"inline\", \"content\": \"prompt text\"} for inline prompts.",
                             "properties": {
-                                "type": {"type": "string", "description": "One of: inline, library, local_file"},
+                                "type": {"type": "string", "description": "One of: inline, local_file"},
                                 "content": {"type": "string", "description": "The prompt/command text (when type=inline)"},
-                                "name": {"type": "string", "description": "Library command name (when type=library)"},
                                 "path": {"type": "string", "description": "File path (when type=local_file)"}
                             },
                             "required": ["type"]

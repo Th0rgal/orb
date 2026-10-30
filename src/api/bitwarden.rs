@@ -19,7 +19,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::library::env_crypto;
+use crate::env_crypto;
 use crate::settings::BitwardenSettings;
 
 use super::routes::AppState;

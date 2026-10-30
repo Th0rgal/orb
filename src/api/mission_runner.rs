@@ -98,7 +98,6 @@ use crate::util::{auth_entry_has_credentials, build_history_context, env_var_boo
 use crate::workspace::{self, Workspace, WorkspaceType};
 use crate::workspace_exec::WorkspaceExec;
 
-use super::automation_variables::substitute_custom_variables;
 use super::control::{
     resolve_claudecode_default_model, resolve_codex_default_model, resolve_grok_default_model,
     safe_truncate_index, AgentEvent, AgentTreeNode, ControlRunState, ControlStatus,
@@ -3843,101 +3842,6 @@ impl MissionRunner {
     }
 }
 
-/// Try to resolve a library command from a user message starting with `/`.
-/// If the message starts with `/command-name` and a matching command exists in the library,
-/// returns the command's body content (frontmatter stripped). Otherwise returns the original message.
-async fn resolve_library_command(library: &SharedLibrary, message: &str) -> String {
-    let trimmed = message.trim();
-
-    // Must start with / and have at least one non-slash character
-    if !trimmed.starts_with('/') || trimmed.len() < 2 {
-        return message.to_string();
-    }
-
-    // Extract command name and optional arguments
-    let without_slash = &trimmed[1..];
-    let (command_name, args) = match without_slash.find(|c: char| c.is_whitespace()) {
-        Some(pos) => (&without_slash[..pos], without_slash[pos..].trim()),
-        None => (without_slash, ""),
-    };
-
-    // Try to fetch from library
-    let lib_guard = library.read().await;
-    let Some(lib) = lib_guard.as_ref() else {
-        return message.to_string();
-    };
-
-    match lib.get_command(command_name).await {
-        Ok(command) => {
-            // Strip frontmatter from content to get the body
-            let (_frontmatter, body) = crate::library::types::parse_frontmatter(&command.content);
-            let body = body.trim();
-            let bound = bind_command_params(&command.params, args);
-            let substituted = substitute_custom_variables(body, &bound);
-            let missing_required: Vec<&str> = command
-                .params
-                .iter()
-                .filter(|p| p.required && !bound.contains_key(&p.name))
-                .map(|p| p.name.as_str())
-                .collect();
-
-            tracing::info!(
-                command_name = command_name,
-                has_args = !args.is_empty(),
-                bound_param_count = bound.len(),
-                missing_required = ?missing_required,
-                "Resolved library command"
-            );
-            substituted
-        }
-        Err(_) => {
-            // Not a library command, pass through as-is (may be a builtin like /plan)
-            message.to_string()
-        }
-    }
-}
-
-/// Build positional command parameter bindings from raw `/command` arguments.
-///
-/// If more arguments than parameters are provided, overflow is folded into the
-/// last declared parameter to preserve the full argument payload.
-fn bind_command_params(
-    params: &[crate::library::types::CommandParam],
-    raw_args: &str,
-) -> HashMap<String, String> {
-    if params.is_empty() || raw_args.trim().is_empty() {
-        return HashMap::new();
-    }
-
-    let args: Vec<&str> = raw_args.split_whitespace().collect();
-    if args.is_empty() {
-        return HashMap::new();
-    }
-
-    let mut bound = HashMap::new();
-
-    if args.len() > params.len() {
-        for (param, arg) in params
-            .iter()
-            .take(params.len().saturating_sub(1))
-            .zip(args.iter())
-        {
-            bound.insert(param.name.clone(), (*arg).to_string());
-        }
-
-        let last_name = params[params.len() - 1].name.clone();
-        let tail = args[params.len() - 1..].join(" ");
-        bound.insert(last_name, tail);
-        return bound;
-    }
-
-    for (param, arg) in params.iter().zip(args.iter()) {
-        bound.insert(param.name.clone(), (*arg).to_string());
-    }
-
-    bound
-}
-
 /// Check whether a failed turn result indicates a corrupt/stale/exhausted Claude Code
 /// session that can be recovered by resetting the session and retrying.
 ///
@@ -4272,9 +4176,6 @@ pub(crate) async fn run_mission_turn(
         user_message_len = user_message.len(),
         "Mission turn started"
     );
-
-    // Resolve library commands (e.g., /bugbot-review → expanded command content)
-    let user_message = resolve_library_command(&library, &user_message).await;
 
     // Build context with history
     let max_history_chars = config.context.max_history_total_chars;
@@ -10337,7 +10238,7 @@ fn cleanup_old_debug_files(
 mod tests {
     use super::{
         actual_cost_cents_from_total_cost_usd, apply_opencode_auth_env, apply_terminal_result_text,
-        bind_command_params, build_opencode_auth_from_ai_providers, classify_copied_opencode_probe,
+        build_opencode_auth_from_ai_providers, classify_copied_opencode_probe,
         claudecode_idle_timeout_for_state, claudecode_incomplete_turn_message,
         claudecode_install_command, claudecode_malformed_startup_message,
         claudecode_pre_turn_transport_message, claudecode_resume_current_session_message,
@@ -10385,7 +10286,6 @@ mod tests {
     };
     use crate::agents::{AgentResult, CostSource, TerminalReason};
     use crate::cost::resolve_cost_cents_and_source;
-    use crate::library::types::CommandParam;
     use crate::workspace::WorkspaceType;
     use serde_json::json;
     use std::borrow::Cow;
@@ -12183,66 +12083,6 @@ mod tests {
             "\x1b[32mStarting opencode server\x1b[0m\n\x1b[33mAll tasks completed.\x1b[0m";
         let result = strip_opencode_banner_lines(ansi_only);
         assert!(result.trim().is_empty());
-    }
-
-    #[test]
-    fn bind_command_params_maps_args_by_declared_order() {
-        let params = vec![
-            CommandParam {
-                name: "env".to_string(),
-                required: true,
-                description: None,
-            },
-            CommandParam {
-                name: "version".to_string(),
-                required: true,
-                description: None,
-            },
-        ];
-        let bound = bind_command_params(&params, "staging 1.2.3");
-        assert_eq!(bound.get("env").map(String::as_str), Some("staging"));
-        assert_eq!(bound.get("version").map(String::as_str), Some("1.2.3"));
-    }
-
-    #[test]
-    fn bind_command_params_folds_overflow_into_last_param() {
-        let params = vec![
-            CommandParam {
-                name: "service".to_string(),
-                required: true,
-                description: None,
-            },
-            CommandParam {
-                name: "details".to_string(),
-                required: false,
-                description: None,
-            },
-        ];
-        let bound = bind_command_params(&params, "api deploy now please");
-        assert_eq!(bound.get("service").map(String::as_str), Some("api"));
-        assert_eq!(
-            bound.get("details").map(String::as_str),
-            Some("deploy now please")
-        );
-    }
-
-    #[test]
-    fn bind_command_params_leaves_missing_trailing_params_unbound() {
-        let params = vec![
-            CommandParam {
-                name: "env".to_string(),
-                required: true,
-                description: None,
-            },
-            CommandParam {
-                name: "version".to_string(),
-                required: true,
-                description: None,
-            },
-        ];
-        let bound = bind_command_params(&params, "staging");
-        assert_eq!(bound.get("env").map(String::as_str), Some("staging"));
-        assert!(!bound.contains_key("version"));
     }
 
     // ── extract_str tests ─────────────────────────────────────────────

@@ -61,7 +61,7 @@ pub(super) fn resolve_tz_offset(
 /// Background task that checks for automations and triggers them at their intervals.
 pub(super) async fn automation_scheduler_loop(
     mission_store: Arc<dyn MissionStore>,
-    library: SharedLibrary,
+    _library: SharedLibrary,
     cmd_tx: mpsc::Sender<ControlCommand>,
     workspaces: workspace::SharedWorkspaceStore,
     events_tx: broadcast::Sender<AgentEvent>,
@@ -462,23 +462,12 @@ pub(super) async fn automation_scheduler_loop(
             // Fetch the command content based on the command source
             let command_content = match &automation.command_source {
                 CommandSource::Library { name } => {
-                    if let Some(lib) = library.read().await.as_ref() {
-                        match lib.get_command(name).await {
-                            Ok(command) => automation_library_command_body(&command.content),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to fetch command '{}' for automation {}: {}",
-                                    name,
-                                    automation.id,
-                                    e
-                                );
-                                continue;
-                            }
-                        }
-                    } else {
-                        tracing::debug!("Library not initialized, skipping automation trigger");
-                        continue;
-                    }
+                    tracing::warn!(
+                        "Skipping retired library command '{}' for automation {}",
+                        name,
+                        automation.id
+                    );
+                    continue;
                 }
                 CommandSource::LocalFile { path } => {
                     // Read file from mission workspace
@@ -740,16 +729,9 @@ pub(super) async fn automation_scheduler_loop(
     }
 }
 
-/// Keep automation library command execution consistent with `/command` usage:
-/// frontmatter is metadata and should never be injected into model prompts.
-pub(super) fn automation_library_command_body(command_content: &str) -> String {
-    let (_frontmatter, body) = crate::library::types::parse_frontmatter(command_content);
-    body.trim().to_string()
-}
-
 /// Resolve the command content for a single automation, applying variable
 /// substitution.  Returns `None` if the command cannot be resolved (e.g.
-/// library unavailable, file not found).
+/// file not found or retired command source).
 pub(super) async fn resolve_automation_command(
     automation: &mission_store::Automation,
     mission_id: Uuid,
@@ -764,12 +746,12 @@ pub(super) async fn resolve_automation_command(
 
     let command_content = match &automation.command_source {
         CommandSource::Library { name } => {
-            let lib = state.library.read().await;
-            let lib = lib.as_ref()?;
-            lib.get_command(name)
-                .await
-                .ok()
-                .map(|c| automation_library_command_body(&c.content))?
+            tracing::warn!(
+                "Skipping retired library command '{}' for automation {}",
+                name,
+                automation.id
+            );
+            return None;
         }
         CommandSource::LocalFile { path } => {
             let ws = workspace.as_ref()?;

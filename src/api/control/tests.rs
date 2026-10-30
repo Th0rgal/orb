@@ -5742,29 +5742,6 @@ fn test_mission_search_cache_hit_by_freshness_requires_recency_match() {
 }
 
 #[test]
-fn test_automation_library_command_body_strips_frontmatter() {
-    let content = r#"---
-description: Analyze failures
-params: [service]
----
-
-Investigate <service/> failures.
-"#;
-    assert_eq!(
-        automation_library_command_body(content),
-        "Investigate <service/> failures."
-    );
-}
-
-#[test]
-fn test_automation_library_command_body_without_frontmatter() {
-    assert_eq!(
-        automation_library_command_body("  Echo current status. \n"),
-        "Echo current status."
-    );
-}
-
-#[test]
 fn test_enqueue_agent_finished_messages_appends_after_existing_queue_items() {
     let existing_target = Uuid::new_v4();
     let restart_target = Uuid::new_v4();

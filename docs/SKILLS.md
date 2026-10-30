@@ -84,8 +84,8 @@ resolved set, so globals and project selections are not denied.
 ### Remote node missions
 
 The core resolves the same set and builds a deterministic `tar.gz` of
-`skills/<name>/...`. Entries are sorted, mtime/uid/gid are zero, frontmatter
-is normalized like the native writer, and `<encrypted>` tags are stripped.
+`skills/<name>/...`. Entries are sorted, mtime/uid/gid are zero, and frontmatter
+is normalized like the native writer.
 The archive is uploaded to the node's existing `POST /uploads` as
 `library-skills-<sha12>.tar.gz`, so no node update is needed. The core keeps
 an in-memory cache keyed by (node, sha256) so an unchanged set is not

@@ -6,7 +6,7 @@ import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { Plus, X, ExternalLink, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import useSWR from 'swr';
-import { getVisibleAgents, getSandboxedConfig, listBackends, listBackendAgents, getClaudeCodeConfig, listBackendModelOptions, listAntigravityModels, listProviders, type Backend, type BackendAgent, type BackendModelOption, type ModelEffort, type Provider } from '@/lib/api';
+import { listBackends, listBackendAgents, listBackendModelOptions, listAntigravityModels, listProviders, type Backend, type BackendAgent, type BackendModelOption, type ModelEffort, type Provider } from '@/lib/api';
 import type { Workspace } from '@/lib/api';
 import { isBackendAvailable, useBackendConfigs } from '@/lib/use-backend-configs';
 import { toast } from '@/components/toast';
@@ -85,30 +85,6 @@ interface CombinedAgent {
   value: string; // "backend:agent" format
 }
 
-// Parse agent names from API response
-const parseAgentNames = (payload: unknown): string[] => {
-  const normalizeEntry = (entry: unknown): string | null => {
-    if (typeof entry === 'string') return entry;
-    if (entry && typeof entry === 'object') {
-      const name = (entry as { name?: unknown }).name;
-      if (typeof name === 'string') return name;
-      const id = (entry as { id?: unknown }).id;
-      if (typeof id === 'string') return id;
-    }
-    return null;
-  };
-
-  const raw = Array.isArray(payload)
-    ? payload
-    : (payload as { agents?: unknown })?.agents;
-  if (!Array.isArray(raw)) return [];
-
-  const names = raw
-    .map(normalizeEntry)
-    .filter((name): name is string => Boolean(name));
-  return Array.from(new Set(names));
-};
-
 export function NewMissionDialog({
   workspaces,
   disabled = false,
@@ -181,22 +157,10 @@ export function NewMissionDialog({
       : isBackendAvailable(backendConfigs[b.id]))) || [];
   }, [backends, backendConfigs]);
 
-  const workspaceProfile = useMemo(() => {
-    const targetWorkspace = newMissionWorkspace
-      ? workspaces.find((workspace) => workspace.id === newMissionWorkspace)
-      : workspaces.find((workspace) => workspace.id === '00000000-0000-0000-0000-000000000000')
-        || workspaces.find((workspace) => workspace.workspace_type === 'host');
-    return targetWorkspace?.config_profile || null;
-  }, [newMissionWorkspace, workspaces]);
-
-  // SWR: fetch agents for each enabled backend.  OpenCode agents are
-  // profile-aware: native `.opencode/agents/*.md` files live under the
-  // selected workspace's library config profile.
+  // SWR: fetch agents for each enabled backend.
   const { data: opencodeAgents, mutate: mutateOpencodeAgents } = useSWR<BackendAgent[]>(
-    open && enabledBackends.some(b => b.id === 'opencode')
-      ? `backend-opencode-agents:${workspaceProfile ?? 'default'}`
-      : null,
-    () => listBackendAgents('opencode', workspaceProfile),
+    open && enabledBackends.some(b => b.id === 'opencode') ? 'backend-opencode-agents' : null,
+    () => listBackendAgents('opencode'),
     { revalidateOnFocus: true, dedupingInterval: 5000 }
   );
   const { data: claudecodeAgents, mutate: mutateClaudecodeAgents } = useSWR<BackendAgent[]>(
@@ -214,56 +178,19 @@ export function NewMissionDialog({
     () => listBackendAgents('grok'),
     { revalidateOnFocus: true, dedupingInterval: 5000 }
   );
-  // SWR: fallback for opencode agents
-  const { data: agentsPayload, mutate: mutateAgentsPayload } = useSWR(open ? 'opencode-agents' : null, getVisibleAgents, {
-    revalidateOnFocus: true,
-    dedupingInterval: 5000,
-  });
-  const { data: config, mutate: mutateConfig } = useSWR(open ? 'sandboxed-config' : null, getSandboxedConfig, {
-    revalidateOnFocus: true,
-    dedupingInterval: 5000,
-  });
-
-  // SWR: fetch Claude Code config for hidden agents
-  const { data: claudeCodeLibConfig } = useSWR(
-    open && enabledBackends.some(b => b.id === 'claudecode') ? 'claudecode-lib-config' : null,
-    getClaudeCodeConfig,
-    { revalidateOnFocus: false, dedupingInterval: 30000 }
-  );
 
   // Combine all agents from enabled backends
   const allAgents = useMemo((): CombinedAgent[] => {
     const result: CombinedAgent[] = [];
-    const openCodeHiddenAgents = config?.hidden_agents || [];
-    const claudeCodeHiddenAgents = claudeCodeLibConfig?.hidden_agents || [];
 
     for (const backend of enabledBackends) {
-      // Use consistent {id, name} format for all backends
       let agents: { id: string; name: string }[] = [];
 
       if (backend.id === 'opencode') {
-        // Filter out hidden OpenCode agents by name
-        const backendAgents = opencodeAgents || [];
-        const visibleAgents = backendAgents.filter(a => !openCodeHiddenAgents.includes(a.name));
-        if (visibleAgents.length > 0) {
-          agents = visibleAgents;
-        } else if (backendAgents.length > 0) {
-          // If all OpenCode agents are hidden, fall back to the raw list so the backend remains usable.
-          agents = backendAgents;
-        } else {
-          // Fallback to parsing agent names from raw payload
-          const fallbackNames = parseAgentNames(agentsPayload).filter(
-            name => !openCodeHiddenAgents.includes(name)
-          );
-          agents = fallbackNames.map(name => ({ id: name, name }));
-        }
-
+        agents = opencodeAgents || [];
       } else if (backend.id === 'claudecode') {
-        // Filter out hidden Claude Code agents by name
-        const allClaudeAgents = claudecodeAgents || [];
-        agents = allClaudeAgents.filter(a => !claudeCodeHiddenAgents.includes(a.name));
+        agents = claudecodeAgents || [];
       } else if (backend.id === 'codex') {
-        // Codex agents
         agents = codexAgents || [
           { id: 'default', name: 'Codex Agent' },
         ];
@@ -278,7 +205,6 @@ export function NewMissionDialog({
         agents = [{ id: 'build', name: 'Build' }];
       }
 
-      // Use agent.id for CLI value, agent.name for display (consistent across all backends)
       for (const agent of agents) {
         result.push({
           backend: backend.id,
@@ -291,7 +217,7 @@ export function NewMissionDialog({
     }
 
     return result;
-  }, [enabledBackends, opencodeAgents, claudecodeAgents, codexAgents, grokAgents, agentsPayload, config, claudeCodeLibConfig]);
+  }, [enabledBackends, opencodeAgents, claudecodeAgents, codexAgents, grokAgents]);
 
   // Group agents by backend for display
   const agentsByBackend = useMemo(() => {
@@ -476,8 +402,6 @@ export function NewMissionDialog({
   // Set initial values when dialog opens (only once per open)
   useEffect(() => {
     if (!open || defaultSet) return;
-    // Wait for config to finish loading
-    if (config === undefined) return;
     // Wait for agents to load
     if (allAgents.length === 0) return;
 
@@ -524,18 +448,7 @@ export function NewMissionDialog({
       return;
     }
 
-    // Fallback: try to find the default agent from config
-    if (config?.default_agent) {
-      const defaultAgent = allAgents.find(a => a.agent === config.default_agent);
-      if (defaultAgent) {
-        setSelectedAgentValue(defaultAgent.value);
-        setDefaultSet(true);
-        return;
-      }
-    }
-
     // Fallback: use first available backend with priority claudecode → opencode → grok → codex
-    // Try Claude Code first
     const claudeCodeAgent = allAgents.find(a => a.backend === 'claudecode');
     if (claudeCodeAgent) {
       setSelectedAgentValue(claudeCodeAgent.value);
@@ -543,7 +456,6 @@ export function NewMissionDialog({
       return;
     }
 
-    // Try OpenCode second
     const openCodeAgent = allAgents.find(a => a.backend === 'opencode');
     if (openCodeAgent) {
       setSelectedAgentValue(openCodeAgent.value);
@@ -560,12 +472,11 @@ export function NewMissionDialog({
       }
     }
 
-    // Final fallback: use first available agent (shouldn't reach here)
     if (allAgents.length > 0) {
       setSelectedAgentValue(allAgents[0].value);
     }
     setDefaultSet(true);
-  }, [open, defaultSet, allAgents, config, initialValues]);
+  }, [open, defaultSet, allAgents, initialValues]);
 
   useEffect(() => {
     // Clear effort if the current selection isn't valid for the selected
@@ -606,8 +517,6 @@ export function NewMissionDialog({
       mutateClaudecodeAgents?.(),
       mutateCodexAgents?.(),
       mutateGrokAgents?.(),
-      mutateAgentsPayload?.(),
-      mutateConfig?.(),
       refreshAntigravityModels(),
     ]);
   };
@@ -637,9 +546,7 @@ export function NewMissionDialog({
       backend: parsed?.backend || 'claudecode',
       modelOverride: modelOverrideValue,
       modelEffort: modelEffortValue,
-      configProfile: isEditMode
-        ? initialValues?.configProfile ?? null
-        : workspaceProfile || undefined,
+      configProfile: isEditMode ? initialValues?.configProfile ?? null : undefined,
     };
   };
 

@@ -3,9 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMissionAutomation, listMissionAutomations } from '@/lib/api';
 import { MissionAutomationsDialog } from './mission-automations-dialog';
 
-vi.mock('@/contexts/library-context', () => ({
-  useLibrary: () => ({ commands: [], loading: false, libraryUnavailable: false }),
-}));
 vi.mock('@/components/toast', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('@/lib/api', () => ({
   listMissionAutomations: vi.fn().mockResolvedValue([]),

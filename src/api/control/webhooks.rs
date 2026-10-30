@@ -177,22 +177,13 @@ pub async fn webhook_receiver(
     // Fetch the command content based on the command source
     let command_content = match &automation.command_source {
         CommandSource::Library { name } => {
-            if let Some(lib) = state.library.read().await.as_ref() {
-                match lib.get_command(name.as_str()).await {
-                    Ok(command) => automation_library_command_body(&command.content),
-                    Err(e) => {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Failed to fetch command '{}': {}", name, e),
-                        ));
-                    }
-                }
-            } else {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Library not initialized".to_string(),
-                ));
-            }
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Library command '{}' cannot be executed: Library commands have been retired",
+                    name
+                ),
+            ));
         }
         CommandSource::LocalFile { path } => {
             // Read file from mission workspace

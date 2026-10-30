@@ -2,12 +2,11 @@
 //!
 //! An operator decision, not a statement about Anthropic's release process:
 //! this backend runs the current Opus and Fable, and declines to start new work
-//! on the older generations it has moved off. Four independent paths could
-//! otherwise select a model — the provider catalog, the `claude-*` escape hatch
-//! in `validate_model_override`, the `DEFAULT_MODEL` environment variable, and a
-//! library config profile's `default_model` — and each previously carried its
-//! own partial list. This module is the single place that decides, so they
-//! agree.
+//! on the older generations it has moved off. Independent paths could otherwise
+//! select a model — the provider catalog, the `claude-*` escape hatch in
+//! `validate_model_override`, the `DEFAULT_MODEL` environment variable, and the
+//! Claude Code harness default — and each previously carried its own partial
+//! list. This module is the single place that decides, so they agree.
 //!
 //! Direction matters: only *older* generations are retired. A model newer than
 //! the current one (`claude-opus-6`) and a dated or suffixed alias of a current
@@ -27,6 +26,22 @@ use std::borrow::Cow;
 pub const CURRENT_CLAUDE_OPUS: &str = "claude-opus-5";
 /// The Fable this deployment runs, offered alongside Opus rather than replacing it.
 pub const CURRENT_CLAUDE_FABLE: &str = "claude-fable-5-1";
+/// Bare Anthropic model id used as the Claude Code CLI default.
+pub const CLAUDE_CODE_DEFAULT_MODEL: &str = CURRENT_CLAUDE_OPUS;
+
+/// Normalize a configured Claude Code default model to a current bare Anthropic
+/// model id. Empty or retired values resolve to the current model of their line.
+pub fn normalize_claude_code_default_model(model: Option<String>) -> String {
+    let configured = model.unwrap_or_default();
+    let trimmed = configured.trim();
+    if trimmed.is_empty() {
+        return CLAUDE_CODE_DEFAULT_MODEL.to_string();
+    }
+    match retired_claude_model(trimmed) {
+        Some(replacement) => replacement.to_string(),
+        None => trimmed.to_string(),
+    }
+}
 
 /// Oldest Opus major version still run. Anything below is retired.
 const MIN_OPUS_MAJOR: u32 = 5;

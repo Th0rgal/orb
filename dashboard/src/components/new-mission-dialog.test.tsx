@@ -4,9 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   getBackendConfig,
-  getClaudeCodeConfig,
-  getSandboxedConfig,
-  getVisibleAgents,
   listBackendAgents,
   listBackendModelOptions,
   listAntigravityModels,
@@ -24,16 +21,9 @@ vi.mock('next/navigation', () => ({
 }));
 
 vi.mock('@/lib/api', () => ({
-  getVisibleAgents: vi.fn().mockResolvedValue([]),
-  getSandboxedConfig: vi.fn().mockResolvedValue({ hidden_agents: [], default_agent: null }),
   listBackends: vi.fn().mockResolvedValue([{ id: 'codex', name: 'Codex' }]),
   listBackendAgents: vi.fn().mockResolvedValue([{ id: 'default', name: 'Default' }]),
   getBackendConfig: vi.fn().mockResolvedValue({ enabled: true, cli_available: true }),
-  getClaudeCodeConfig: vi.fn().mockResolvedValue({
-    hidden_agents: [],
-    default_model: null,
-    default_agent: null,
-  }),
   listAntigravityModels: vi.fn().mockResolvedValue([]),
   listBackendModelOptions: vi.fn().mockResolvedValue({ backends: {} }),
   listProviders: vi.fn().mockResolvedValue({ providers: [] }),
@@ -53,11 +43,6 @@ function renderDialog(
 
 describe('NewMissionDialog', () => {
   beforeEach(() => {
-    vi.mocked(getVisibleAgents).mockResolvedValue([]);
-    vi.mocked(getSandboxedConfig).mockResolvedValue({
-      hidden_agents: [],
-      default_agent: null,
-    });
     vi.mocked(listBackends).mockResolvedValue([{ id: 'codex', name: 'Codex' }]);
     vi.mocked(listBackendAgents).mockResolvedValue([{ id: 'default', name: 'Default' }]);
     vi.mocked(getBackendConfig).mockResolvedValue({
@@ -66,11 +51,6 @@ describe('NewMissionDialog', () => {
       enabled: true,
       settings: {},
       cli_available: true,
-    });
-    vi.mocked(getClaudeCodeConfig).mockResolvedValue({
-      hidden_agents: [],
-      default_model: null,
-      default_agent: null,
     });
     vi.mocked(listBackendModelOptions).mockResolvedValue({ backends: {} });
     vi.mocked(listProviders).mockResolvedValue({ providers: [] });
