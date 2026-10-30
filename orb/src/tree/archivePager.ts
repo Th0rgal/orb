@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
-import { connectionVersion, isBtwMission, listArchivedMissions, type Mission } from "../api";
+import { connectionVersion, excludeBtwMissions, listArchivedMissions, type Mission } from "../api";
 
 /** Page size of `GET` archived missions; a full page means there may be more. */
 export const ARCHIVE_PAGE_SIZE = 100;
@@ -34,7 +34,7 @@ export function createArchivePager(deps: {
       try {
         const rows = await listArchivedMissions(more ? offset : 0);
         if (!deps.currentConnection(version) || revision !== deps.revision()) return;
-        const projected = rows.filter(m => !isBtwMission(m) && !deps.deleted.has(m.id)).map(m => deps.archiving.has(m.id) ? {...m,status:deps.archiving.get(m.id)!} : m);
+        const projected = excludeBtwMissions(rows).filter(m => !deps.deleted.has(m.id)).map(m => deps.archiving.has(m.id) ? {...m,status:deps.archiving.get(m.id)!} : m);
         setArchivedMissions(previous => { if (!more) return projected; const known = new Set(previous.map(old => old.id)); return [...previous, ...projected.filter(m => !known.has(m.id))]; });
         offset = (more ? offset : 0) + rows.length;
         loaded = true;

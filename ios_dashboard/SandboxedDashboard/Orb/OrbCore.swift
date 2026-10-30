@@ -83,6 +83,9 @@ struct OrbRow: Identifiable, Hashable, Sendable {
         backend = value["backend"].text
         cloud = value["backend"].text.hasPrefix("cloud_") || value["execution_kind"].text == "cloud" || value["tags"].items.contains(where: { $0.text.hasPrefix("cloud:") }) || value["cloud"] != .null
         updatedAt = value["updated_at"].text.isEmpty ? value["created_at"].text : value["updated_at"].text
+        if !project {
+            OrbHierarchy.observe(self)
+        }
     }
     /// The conversation this one was forked from (a `fork-of:` tag, or an older fork stored as a child).
     var forkSource: String? {
@@ -97,20 +100,45 @@ struct OrbRow: Identifiable, Hashable, Sendable {
         if let found = payloadParentID { OrbHierarchy.remember(id, parent: found); return found }
         return OrbHierarchy.parent(of: id)
     }
-    private var payloadParentID: String? {
+    fileprivate var payloadParentID: String? {
         let p = raw["parent_mission_id"].text
         if !p.isEmpty && forkSource != p { return p }
         let cp = raw["callback_parent_mission_id"].text
-        return cp.isEmpty ? nil : cp
+        if !cp.isEmpty { return cp }
+        for tag in raw["tags"].items.map(\.text) {
+            let lower = tag.lowercased()
+            for prefix in ["parent:", "parent_mission:", "parent-mission:", "spawned_by:", "spawned-by:"] {
+                if lower.hasPrefix(prefix) {
+                    let value = String(tag.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !value.isEmpty { return value }
+                }
+            }
+        }
+        return nil
     }
-    var mobile: Bool { !raw["tags"].items.contains(where: { $0.text.hasPrefix("btw-parent:") }) }
+    fileprivate var hasDirectBtwTag: Bool {
+        raw["tags"].items.map(\.text).contains { $0.hasPrefix("btw-parent:") || $0 == "btw-subagent" }
+    }
+    var mobile: Bool { !OrbHierarchy.isBtw(self) }
     var active: Bool { missionState?.isActive ?? false }
 }
 
-/// Parent links remembered across payloads, so a partial answer cannot un-nest a child.
+/// Parent links and `/btw` subtree markers remembered across payloads, so a partial
+/// answer cannot un-nest a child or surface a `/btw` worker as a conversation.
 enum OrbHierarchy {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var parents: [String: String] = [:]
+    nonisolated(unsafe) private static var btwIDs: Set<String> = []
+    static func observe(_ row: OrbRow) {
+        guard !row.id.isEmpty else { return }
+        let parent = row.payloadParentID
+        let directBtw = row.hasDirectBtwTag
+        guard parent != nil || directBtw else { return }
+        lock.lock()
+        if let parent { parents[row.id] = parent }
+        if directBtw { btwIDs.insert(row.id) }
+        lock.unlock()
+    }
     static func remember(_ id: String, parent: String) {
         guard !id.isEmpty else { return }
         lock.lock(); parents[id] = parent; lock.unlock()
@@ -119,11 +147,33 @@ enum OrbHierarchy {
         lock.lock(); defer { lock.unlock() }
         return parents[id]
     }
+    static func isBtw(_ row: OrbRow) -> Bool {
+        if row.hasDirectBtwTag {
+            if !row.id.isEmpty {
+                lock.lock(); btwIDs.insert(row.id); lock.unlock()
+            }
+            return true
+        }
+        lock.lock(); defer { lock.unlock() }
+        if !row.id.isEmpty, btwIDs.contains(row.id) { return true }
+        var seen: Set<String> = row.id.isEmpty ? [] : [row.id]
+        var cursor = row.payloadParentID ?? parents[row.id]
+        while let current = cursor, seen.count < 16, seen.insert(current).inserted {
+            if btwIDs.contains(current) { return true }
+            cursor = parents[current]
+        }
+        return false
+    }
     /// Explicit re-parent (nil detaches): the only way a remembered parent changes.
     static func reparent(_ id: String, parent: String?) {
         lock.lock(); parents[id] = parent; lock.unlock()
     }
-    static func reset() { lock.lock(); parents.removeAll(); lock.unlock() }
+    static func reset() {
+        lock.lock()
+        parents.removeAll()
+        btwIDs.removeAll()
+        lock.unlock()
+    }
 }
 
 struct OrbNestedMission: Identifiable, Hashable {
@@ -140,6 +190,12 @@ struct OrbNestedMission: Identifiable, Hashable {
 }
 
 enum OrbMissionTree {
+    /// Exclude `/btw` side-question forks and every descendant worker in their subtrees.
+    static func filterMobile(_ rows: [OrbRow]) -> [OrbRow] {
+        for row in rows { OrbHierarchy.observe(row) }
+        return rows.filter(\.mobile)
+    }
+
     /// Keep archived/completed parents as context for visible child workers without restoring all archived missions.
     static func treeRows(_ missions: [OrbRow], visible: (OrbRow) -> Bool) -> [OrbRow] {
         var byID: [String: OrbRow] = [:]
@@ -563,6 +619,7 @@ enum OrbReadCache {
     }
     /// Settings → Debug info → Clear caches: drops memory and disk copies for every account.
     static func clearAll() {
+        OrbHierarchy.reset()
         for item in pending.values { item.task.cancel() }
         pending.removeAll()
         values.removeAll()

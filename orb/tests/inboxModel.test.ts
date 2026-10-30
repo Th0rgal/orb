@@ -669,3 +669,14 @@ it('keeps an automatic recovery in Working instead of review or retry',()=>{
  expect(sections.attentionCount).toBe(0);
  expect(classifyInboxMission({...mission,status:'paused'})).toBe('ready');
 });
+
+it('excludes /btw side sessions and their descendant workers even when includeAutonomous is true',()=>{
+ const main=makeMission({id:'0c532a32',title:'evm.fast',status:'completed',project:'orb'});
+ const btw=makeMission({id:'23af9c91',title:'evm.fast · btw',status:'completed',project:'orb',tags:['btw-parent:0c532a32']});
+ const worker=makeMission({id:'6b1abe32',title:'Carbon 4 strategy consult',status:'failed',project:'orb',parent_mission_id:'23af9c91',tags:['consult-model','origin:mission']});
+ const taggedWorker=makeMission({id:'7788ccdd',title:'Tagged btw subagent',status:'failed',project:'orb',tags:['btw-subagent','origin:mission']});
+ const sections=buildInboxSections([worker,btw,taggedWorker,main],sampleProjects,undefined,undefined,Date.now(),null,{includeAutonomous:true});
+ expect(sections.needsYou.map(i=>i.id)).toEqual([]);
+ expect(sections.ready.map(i=>i.id)).toEqual(['0c532a32']);
+ expect(sections.working.map(i=>i.id)).toEqual([]);
+});

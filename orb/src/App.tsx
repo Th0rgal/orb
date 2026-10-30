@@ -12,7 +12,8 @@ import { connectClientLink, reportClientHarnesses, type RemoteStart } from "./cl
 import {requireSpeedSupport} from './CodexSpeedPicker';
 import { Menu } from "./Menu";
 import { missionParent } from "./missionTree";
-import { isPartialList, mergeMission, reconcileMissionList, type Misses, resetMissionHierarchy } from "./missionHierarchy";
+import { btwParentId, isBtwMission, isPartialList, mergeMission, reconcileMissionList, type Misses, resetMissionHierarchy } from "./missionHierarchy";
+import { hintSideQuestionOpen, sideQuestionKey } from "./sideQuestionStorage";
 import { draftCyber, setDraftCyber, requireCyberSupport } from "./cyberAccess";
 import {trackScrollbarHover} from "./scrollbarHover";
 import {WorkingDirectoryPicker} from "./WorkingDirectoryPicker";
@@ -322,7 +323,7 @@ export default function App() {
           if (!m.project?.trim()) {
             void getMission(m.id)
               .then(updated => {
-                if (isMissionDeleting(updated.id)) return;
+                if (isMissionDeleting(updated.id) || isBtwMission(updated)) return;
                 const slug = updated.project?.trim() || DEFAULT_PROJECT.slug;
                 setProjectMissions(cur => {
                   const existing = cur[slug] ?? [];
@@ -442,6 +443,15 @@ export default function App() {
   });
   createEffect(() => {
     if (!inboxConfig().inboxEnabled && selected() === "inbox") open(null);
+  });
+  createEffect(() => {
+    const m = openMission();
+    const parent = btwParentId(m);
+    if (m && parent && selected() === `m:${m.id}`) {
+      hintSideQuestionOpen(sideQuestionKey(parent));
+      setOpenMission(null);
+      open(`m:${parent}`, false);
+    }
   });
   createEffect(() => {
     const mid = currentMissionId();
@@ -961,6 +971,14 @@ export default function App() {
   });
 
   const commitFork = (m: Mission) => {
+    if (isBtwMission(m)) {
+      const parent = btwParentId(m);
+      if (parent) {
+        hintSideQuestionOpen(sideQuestionKey(parent));
+        open(`m:${parent}`, false);
+      }
+      return;
+    }
     batch(() => {
       setMissions(ms => [m, ...ms.filter(x => x.id !== m.id)]);
       setOpenMission(m);

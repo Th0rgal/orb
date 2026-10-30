@@ -1159,7 +1159,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       <div class="dock" ref={floatingDock}>
         <JumpToLatest pinned={pin.pinned} onJump={pin.pin} />
         <div class="col">
-          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})} onOpenSession={p.onFork?async id=>p.onFork?.(await getMission(id)):undefined}/></Show>
+          <Show when={p.id}><SideQuestions mission={p.id} items={viewItems()} ref={handle=>sideQuestions=handle} onTransfer={text=>setSideRevision({text,append:true})}/></Show>
           <RemoteQueue mission={p.id}
             ref={handle => remoteQueue = handle}
             editing={editingQueued()}

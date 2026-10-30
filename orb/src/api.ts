@@ -10,7 +10,8 @@ import { createSignal } from "solid-js";
 import { getProjectCronFromJob, hermesPatch, normalizeControllerView, type HermesControllerView, type HermesJob } from "./cronSchema";
 import { applyProjectRoster } from "./projectAppearance";
 import { note, requestDone } from "./diagnostics";
-import { configureParentResolver, openBeyondPage, partialList, resetMissionHierarchy, stickHierarchy } from "./missionHierarchy";
+import { btwParentId, configureParentResolver, excludeBtwMissions, isBtwMission, openBeyondPage, partialList, resetMissionHierarchy, stickHierarchy } from "./missionHierarchy";
+export { btwParentId, excludeBtwMissions, isBtwMission };
 
 const URL_KEY = "orb.apiUrl";
 const JWT_KEY = "orb.jwt";
@@ -53,7 +54,9 @@ function disconnectNativeSync(){
   void invoke("local_origin_disconnect",{connection:{api_url:getApiUrl(),token:getJwt()}}).catch(swallow("api.disconnect.localOrigin"));
 }
 export function setConnection(url: string, token: string) {
-  if(getJwt() && (url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt()))disconnectNativeSync();
+  const changed = url.replace(/\/+$/,"")!==getApiUrl() || token!==getJwt();
+  if(getJwt() && changed)disconnectNativeSync();
+  if(changed){resetMissionHierarchy();ancestorCache.clear();}
   setApiUrl(url);
   localStorage.setItem(JWT_KEY, token);
   setConnected(true);
@@ -66,6 +69,7 @@ export function setConnection(url: string, token: string) {
 export function clearConnection() {
   disconnectNativeSync();
   resetMissionHierarchy();
+  ancestorCache.clear();
   const hadConnection = connected() || !!getJwt();
   localStorage.removeItem(JWT_KEY);
   persistDesktopConnection(null);
@@ -912,11 +916,6 @@ export function slugify(title: string): string {
     .slice(0, 64);
 }
 
-/** Side agents remain addressable by ID, but are not standalone conversations. */
-export function isBtwMission(mission: Pick<Mission, "tags">): boolean {
-  return mission.tags?.some(tag => tag.startsWith("btw-parent:")) ?? false;
-}
-
 /** Last known copy of each parent fetched by id, so a transient failure never
  * drops an existing parent and turns its workers into roots. */
 const ancestorCache = new Map<string, {row: Mission; at: number}>();
@@ -926,9 +925,9 @@ const ancestorCache = new Map<string, {row: Mission; at: number}>();
 export const ANCESTOR_TTL_MS = 60_000;
 async function fetchAncestor(id: string): Promise<Mission | null> {
   const cached = ancestorCache.get(id);
-  if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return cached.row;
+  if (cached && Date.now() - cached.at < ANCESTOR_TTL_MS) return stickHierarchy(cached.row);
   try { const row = await api<Mission>(`/api/control/missions/${encodeURIComponent(id)}`); ancestorCache.set(id, {row, at: Date.now()}); return row; }
-  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached?.row ?? null; }
+  catch (error) { if (error instanceof ApiError && error.status === 404) { ancestorCache.delete(id); return null; } return cached ? stickHierarchy(cached.row) : null; }
 }
 // The sidebar's parent resolver: null only when Core says the parent is gone.
 configureParentResolver(async id => {
@@ -938,8 +937,12 @@ configureParentResolver(async id => {
 /** Pages are ordered by recent activity: add parents that fell off the page. */
 async function includeAncestors(rows: Mission[], project?: string): Promise<Mission[]> {
   const { withAncestors } = await import("./missionTree");
-  // A parent filed in another project is listed there, not here.
-  return withAncestors(rows, async id => { const row = await fetchAncestor(id); return row && (project === undefined || row.project === project) ? row : null; });
+  // Walk ancestors across projects so sticky hierarchy observes cross-project /btw
+  // roots; a non-/btw parent filed in another project is still listed there, not here.
+  const all = await withAncestors(rows, fetchAncestor);
+  if (project === undefined) return all;
+  const ownIds = new Set(rows.map(r => r.id));
+  return all.filter(r => ownIds.has(r.id) || r.project === project);
 }
 
 /** A project's recent history (archived included) plus the open missions
@@ -961,8 +964,8 @@ async function projectRows(slug: string): Promise<Mission[]> {
 /** Missions tagged with this project (exact slug match on the backend). */
 export async function listProjectMissions(slug: string): Promise<Mission[]> {
   const origins=await import("./localOrigins"),observedAt=origins.observe();
-  const local=(await origins.localOrigins()).filter(m=>m.project===slug && !isBtwMission(m));
-  try{const remote=await includeAncestors(await projectRows(slug),slug);await origins.rememberCoreState(local,remote,observedAt);const pending=local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id))));return [...pending,...remote.filter(m=>!isBtwMission(m) && !pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return partialList(local);throw error;}
+  const local=excludeBtwMissions(await origins.localOrigins()).filter(m=>m.project===slug);
+  try{const remote=await includeAncestors(await projectRows(slug),slug);await origins.rememberCoreState(local,remote,observedAt);const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))));return [...pending,...excludeBtwMissions(remote).filter(m=>!pending.some(l=>l.id===m.id))];}catch(error){if(local.length)return partialList(local);throw error;}
 }
 
 export async function listProjectFiles(slug: string, path: string): Promise<ProjectFileEntry[]> {
@@ -1007,8 +1010,8 @@ export async function deleteProjectFile(slug: string, path: string): Promise<voi
 
 export async function listMissions(limit = 200): Promise<Mission[]> {
   const origins = await import("./localOrigins"), observedAt = origins.observe();
-  const local = (await origins.localOrigins()).filter(m=>!isBtwMission(m));
-  try { const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?limit=${limit}`)); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`))],observedAt); const pending=local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id)))); return [...pending,...remote.filter(row=>!isBtwMission(row) && !pending.some(item=>item.id===row.id))]; }
+  const local = excludeBtwMissions(await origins.localOrigins());
+  try { const remote = await includeAncestors(await api<Mission[]>(`/api/control/missions?limit=${limit}`)); await origins.rememberCoreState(local,[...remote,...await origins.unlistedCoreState(local,remote,id=>api<Mission>(`/api/control/missions/${id}`))],observedAt); const pending=excludeBtwMissions(local.filter(origins.localPending).map(row=>stickHierarchy(origins.withCoreEffort(row,remote.find(m=>m.id===row.id))))); return [...pending,...excludeBtwMissions(remote).filter(row=>!pending.some(item=>item.id===row.id))]; }
   catch(error){if(local.length)return partialList(local);throw error;}
 }
 
@@ -1016,7 +1019,7 @@ export async function listMissions(limit = 200): Promise<Mission[]> {
 export async function listCompletedMissions(limit = 100): Promise<Mission[] | null> {
   try {
     const remote = await api<Mission[]>(`/api/control/missions?status=completed&limit=${limit}`);
-    return remote.filter((row) => !isBtwMission(row));
+    return excludeBtwMissions(remote);
   } catch {
     return null;
   }

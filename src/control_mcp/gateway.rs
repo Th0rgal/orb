@@ -23,7 +23,7 @@ fn sets_reserved_btw_tag(args: &Value) -> bool {
         .is_some_and(|tags| {
             tags.iter()
                 .filter_map(Value::as_str)
-                .any(|t| t.starts_with("btw-parent:"))
+                .any(crate::api::mission_horizon::is_reserved_btw_tag)
         })
 }
 const BTW_PARENT_READS: &[&str] = &[
@@ -2071,6 +2071,7 @@ mod tests {
         assert!(sets_reserved_btw_tag(
             &json!({"tags": ["x", format!("btw-parent:{parent}")]})
         ));
+        assert!(sets_reserved_btw_tag(&json!({"tags": ["btw-subagent"]})));
         assert!(!sets_reserved_btw_tag(
             &json!({"tags": ["btw", "project:x"]})
         ));

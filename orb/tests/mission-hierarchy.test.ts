@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from "vitest";
-import { configureParentResolver, mergeMission, observeMission, openBeyondPage, partialList, reconcileMissionList, reparentMission, resetMissionHierarchy, resolveParent, stickHierarchy, withHierarchy, type HierarchyFields, type Misses } from "../src/missionHierarchy";
+import { configureParentResolver, excludeBtwMissions, isBtwMission, mergeMission, observeMission, openBeyondPage, partialList, reconcileMissionList, reparentMission, resetMissionHierarchy, resolvedParents, resolveParent, stickHierarchy, withHierarchy, type HierarchyFields, type Misses } from "../src/missionHierarchy";
 import { nestMissions, type NestedMission } from "../src/missionTree";
 
 type Row = HierarchyFields & { status: string; updated_at?: string; status_message?: string | null; [k: string]: unknown };
@@ -189,4 +189,33 @@ test("open missions beyond the page: live always, stopped only while recent, chi
     row("page-parent", { status: "active" }),
   ];
   expect(openBeyondPage(history, extra, now).map(m => m.id)).toEqual(["old-live", "recent-root", "recent-nested-child", "live-child"]);
+});
+
+test("excludes /btw side sessions and descendant workers even when resolved asynchronously (incident 0c532a32 -> 23af9c91 -> 6b1abe32)", async () => {
+  const main = row("0c532a32", { title: "evm.fast", project: "verity-core", tags: ["orb-folder:Ethereum"] });
+  const btw = row("23af9c91", { title: "evm.fast · btw", project: "verity-core", tags: ["fork-workspace:52bbf658", "btw-parent:0c532a32"] });
+  const worker = row("6b1abe32", { title: "Carbon 4 strategy consult", status: "completed", project: "verity-core", parent_mission_id: "23af9c91", tags: ["consult-model", "origin:mission"] });
+  const grandchild = row("9911aa22", { title: "Verifier leaf", status: "completed", project: "verity-core", parent_mission_id: "6b1abe32" });
+  const taggedSubagent = row("7788ccdd", { title: "Tagged subagent", status: "completed", project: "verity-core", tags: ["btw-subagent"] });
+
+  // 1. In-batch exclusion regardless of child-before-parent ordering:
+  expect(excludeBtwMissions([grandchild, worker, btw, taggedSubagent, main]).map(m => m.id)).toEqual(["0c532a32"]);
+
+  // 2. Async parent resolution replay: suppose a page omitted `23af9c91` (e.g. archived page or filtered list)
+  // and `placeholderParent` called `resolveParent("23af9c91")` for `6b1abe32`.
+  resetMissionHierarchy();
+  stickHierarchy(worker);
+  stickHierarchy(grandchild);
+  configureParentResolver(async id => (id === "23af9c91" ? btw : undefined));
+  expect(resolveParent("23af9c91")).toBe("loading");
+  await new Promise(r => setTimeout(r, 0));
+
+  // `23af9c91` must NOT enter `resolvedParents()` (which would inject `evm.fast · btw  1 >` into the sidebar),
+  // and sticky lineage now marks both `6b1abe32` and `9911aa22` as `/btw` descendants.
+  expect(resolvedParents()).toEqual([]);
+  expect(resolveParent("23af9c91")).toBe("gone");
+  expect(isBtwMission(btw)).toBe(true);
+  expect(isBtwMission(worker)).toBe(true);
+  expect(isBtwMission(grandchild)).toBe(true);
+  expect(openBeyondPage([main], [btw, worker, grandchild]).map(m => m.id)).toEqual([]);
 });

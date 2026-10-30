@@ -446,6 +446,32 @@ function parseBtwThread(m:Mission,events:StoredEvent[]):Omit<ParsedBtwThread,'st
  return {turns,active};
 }
 
+export async function reconnectBtwSession(parent:string,sideId:string):Promise<BtwSession>{
+ const existing=btwSession(parent);
+ const mission=await getMission(sideId,{coreOnly:true});
+ const events=await getMissionEvents(mission.id,{view:'history'}).catch(()=>[] as StoredEvent[]);
+ const ordered=[...events].sort((a,b)=>a.sequence-b.sequence);
+ let question=existing?.id===mission.id?existing.question:'';
+ for(const ev of ordered){
+  if(ev.event_type==='user_message')question=extractBtwUserQuestion(ev.content)||question;
+ }
+ const local=mission.tags?.includes('placement:client')??false;
+ const session:BtwSession={
+  id:mission.id,
+  question:question||'Side question',
+  harness:mission.backend||existing?.harness||'opencode',
+  model:mission.model_override||existing?.model||'builtin/smart',
+  local,
+  active:ACTIVE.includes(mission.status),
+  baseline:0,
+  placement:existing?.placement,
+  contextVersion:existing?.contextVersion,
+  conversationCursor:existing?.conversationCursor,
+ };
+ save(parent,session);
+ return session;
+}
+
 export async function reconcileBtwServerHistory(parent:string,localHistory:SideExchange[],signal?:AbortSignal):Promise<{history:SideExchange[];activeSession?:BtwSession;latest?:string}>{
  const version=connectionVersion();
  let rows:Mission[]=[];

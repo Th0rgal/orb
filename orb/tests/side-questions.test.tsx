@@ -4,9 +4,12 @@ import { createSignal } from 'solid-js';
 import { Composer } from '../src/composer/Composer';
 import { SideQuestions, type SideQuestionsHandle } from '../src/SideQuestionPanel';
 import { askSide, boundedHistory, sideContext } from '../src/sideQuestionClient';
-const serverReconcile=vi.hoisted(()=>({fn:async(_parent:string,local:any[])=>({history:local} as {history:any[];activeSession?:any;latest?:string})}));
+const serverReconcile=vi.hoisted(()=>({
+ fn:async(_parent:string,local:any[])=>({history:local} as {history:any[];activeSession?:any;latest?:string}),
+ reconnect:async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0}),
+}));
 const watchMock=vi.hoisted(()=>({fn:async(_parent:string,_signal:AbortSignal,_receive:(e:any)=>void)=>{}}));
-vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -15,7 +18,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -174,7 +177,23 @@ it('offers a reconnect path for a live side session after its local attempt is l
  await handle.ask('Unsent question');
  fireEvent.click(await screen.findByText('Open existing side agent'));
  expect(open).toHaveBeenCalledWith(id);
- expect(screen.getText ? screen.getByText('Unsent question') : screen.getByText('Unsent question')).toBeTruthy();
+ expect(screen.getByText('Unsent question')).toBeTruthy();
+});
+
+it('reconnects an existing side session inside /btw without forking into the sidebar when onOpenSession is omitted',async()=>{
+ const id='23af9c91-5304-4679-ae0f-90671af270c9';
+ vi.stubGlobal('fetch',vi.fn(async()=>response([{type:'error',message:`A side agent is already queued or running for this conversation (${id}). Reconnect to or stop that side session before starting another; this question was not sent.`}])));
+ const reconnectSpy=vi.fn(async(_parent:string,sideId:string)=>({id:sideId,question:'Earlier question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0}));
+ serverReconcile.reconnect=reconnectSpy;
+ serverReconcile.fn=async()=>({history:[{id:'turn-1',question:'Earlier question',answer:'Side synthesis ready.'}],latest:id});
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="0c532a32-2fb5-4fd6-ba6b-b9820d12c097" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('Follow-up side question');
+ fireEvent.click(await screen.findByText('Open existing side agent'));
+ await waitFor(()=>expect(reconnectSpy).toHaveBeenCalledWith('0c532a32-2fb5-4fd6-ba6b-b9820d12c097',id));
+ expect(await screen.findByText('Side synthesis ready.')).toBeTruthy();
+ const input=screen.getByPlaceholderText('Ask a side question…') as HTMLTextAreaElement;
+ await waitFor(()=>expect(input.value).toBe('Follow-up side question'));
 });
 
 it('strips synthetic remote cancellation notes from saved side history on mount',async()=>{

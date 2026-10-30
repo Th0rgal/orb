@@ -472,8 +472,9 @@ export function classifyInboxMission(
   mission: Mission,
   interaction?: InboxInteraction,
   scope: InboxScope = {},
+  byId?: ReadonlyMap<string, Mission>,
 ): InboxCategory {
-  if (isBtwMission(mission) || !isInInboxScope(mission, scope)) return "hidden";
+  if (isBtwMission(mission, byId) || !isInInboxScope(mission, scope)) return "hidden";
   const status = mission.status || "";
   if (HIDDEN_STATUSES.has(status)) return "hidden";
   // An active mission with a live pending interaction immediately surfaces in Needs You
@@ -1364,9 +1365,10 @@ export function buildInboxItem(
   selectedMissionId?: string | null,
   childSummary?: InboxChildSummary,
   scope: InboxScope = {},
+  byId?: ReadonlyMap<string, Mission>,
 ): InboxItem | null {
   const interaction = extractInboxInteraction(mission, items, observed);
-  const category = classifyInboxMission(mission, interaction, scope);
+  const category = classifyInboxMission(mission, interaction, scope, byId);
   if (category === "hidden") return null;
 
   const projectSlug = mission.project || DEFAULT_PROJECT.slug;
@@ -1596,10 +1598,11 @@ export function listUnreadInboxCandidates(
       ? new Set([DEFAULT_PROJECT.slug, ...projects.map((p) => p.slug)])
       : null;
 
+  const byId = new Map(missions.map((m) => [m.id, m]));
   const unreadFailureByParent = new Set<string>();
   for (const m of missions) {
     if (!scope.includeAutonomous) break;
-    if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
+    if (isBtwMission(m, byId) || HIDDEN_STATUSES.has(m.status || "")) continue;
     if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded_by:") || t.startsWith("superseded-by:"))) continue;
     const parentId = missionParent(m);
     if (!parentId) continue;
@@ -1623,7 +1626,7 @@ export function listUnreadInboxCandidates(
       const slug = rawSlug || DEFAULT_PROJECT.slug;
       if (!liveSlugs.has(slug)) continue;
     }
-    if (isBtwMission(mission)) continue;
+    if (isBtwMission(mission, byId)) continue;
     const status = mission.status || "";
     if (HIDDEN_STATUSES.has(status)) continue;
 
@@ -1737,11 +1740,12 @@ export function buildInboxSections(
       ? new Set([DEFAULT_PROJECT.slug, ...projects.map((p) => p.slug)])
       : null;
 
+  const byId = new Map(missions.map((m) => [m.id, m]));
   // Group child worker/track runs under their parent orchestrator mission so
   // parent cards can surface a compact track summary badge (e.g. "1 track failed").
   const childrenByParent = new Map<string, InboxChildSummary>();
   for (const m of missions) {
-    if (isBtwMission(m) || HIDDEN_STATUSES.has(m.status || "")) continue;
+    if (isBtwMission(m, byId) || HIDDEN_STATUSES.has(m.status || "")) continue;
     if (m.tags?.some((t) => t === "superseded" || t.startsWith("superseded_by:") || t.startsWith("superseded-by:"))) continue;
     const parentId = missionParent(m);
     if (!parentId) continue;
@@ -1793,6 +1797,7 @@ export function buildInboxSections(
       selectedMissionId,
       childrenByParent.get(mission.id),
       scope,
+      byId,
     );
     if (!item) continue;
     if (item.category === "needs_you") needsYou.push(item);

@@ -51,7 +51,7 @@ passed to the agent; local images also use native harness attachment arguments.
 
 Core creates the side mission through `POST /api/control/missions/:id/btw/agent`.
 Only that internal launch path permits the source workspace to remain occupied.
-Side missions carry `btw-parent:<id>` and are excluded from Orb's conversation lists, project folders, and global archives. They remain accessible by ID for the side panel's transcript and lifecycle operations. Archive pagination counts raw rows before filtering, so hidden sessions cannot skip subsequent pages.
+Side missions carry `btw-parent:<id>` — and workers they launch carry `btw-subagent` in addition to `parent_mission_id` — so the entire `/btw` subtree is excluded from Orb's conversation lists, project folders, Inbox, conversation search, and global archives on desktop, iOS, and Android. They remain accessible by ID for the side panel's transcript and lifecycle operations. Reconnecting to an already-running side session (`409` on launch) attaches the `/btw` panel to that session in place and never opens it as a standalone conversation. Archive pagination counts raw rows before filtering, so hidden sessions cannot skip subsequent pages.
 Local runs use the ordinary client-run protocol with a distinct run and harness
 session identity. Remote runs use the regular mission runner.
 

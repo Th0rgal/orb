@@ -14,8 +14,10 @@ import {
 import { Portal } from "solid-js/web";
 import {
   connectionVersion,
+  excludeBtwMissions,
   getApiUrl,
   getMissionPassageContext,
+  isBtwMission,
   isConnected,
   searchConversationMessages,
   type ConversationSearchHit,
@@ -154,7 +156,7 @@ export default function SearchDialog(p: SearchDialogProps) {
     const proj = projectFilter();
     const since = sinceIsoForPreset(datePreset());
     const sinceMs = since ? Date.parse(since) : 0;
-    return p.recentMissions
+    return excludeBtwMissions(p.recentMissions)
       .filter(m => {
         if (!m?.id) return false;
         if (proj && (m.project ?? "") !== proj) return false;
@@ -187,6 +189,7 @@ export default function SearchDialog(p: SearchDialogProps) {
     const groups: Group[] = [];
     const byMission = new Map<string, Group>();
     for (const hit of rawHits()) {
+      if (isBtwMission({ id: hit.mission_id })) continue;
       let group = byMission.get(hit.mission_id);
       if (!group) {
         const title =

@@ -32,7 +32,10 @@ export type HierarchyFields = {
 /** Tags that place a mission inside another one (or out of the root list). */
 export const isHierarchyTag = (tag: string) =>
   tag.startsWith("worker-dispatch:") || tag === "superseded" || tag.startsWith("superseded_by:") ||
-  tag.startsWith("superseded-by:") || tag.startsWith("fork-of:") || tag.startsWith("btw-parent:");
+  tag.startsWith("superseded-by:") || tag.startsWith("fork-of:") || tag.startsWith("btw-parent:") ||
+  tag === "btw-subagent";
+
+const isDirectBtwTag = (tag: string) => tag.startsWith("btw-parent:") || tag === "btw-subagent";
 
 type Link = { parent?: string; callback?: string; tags: string[] };
 type Seen = { title?: string | null; project?: string | null; status?: string };
@@ -173,6 +176,59 @@ export function reparentMission(id: string, fields: { parent_mission_id?: string
 /** What the Orb last saw of a mission, for a placeholder row's label. */
 export const seenMission = (id: string): Readonly<Seen> | undefined => seen.get(id);
 
+export type BtwCandidate = {
+  id?: string;
+  parent_mission_id?: string | null;
+  callback_parent_mission_id?: string | null;
+  tags?: readonly string[] | null;
+};
+
+const directParentOf = (m: BtwCandidate): string | undefined => {
+  const fork = m.tags?.find(t => t.startsWith("fork-of:"))?.slice(8);
+  const p = nonEmpty(m.parent_mission_id);
+  if (p && p !== fork) return p;
+  return nonEmpty(m.callback_parent_mission_id);
+};
+
+/** Main conversation ID when `m` is itself a `/btw` side session (`btw-parent:<id>`). */
+export function btwParentId(m: { id?: string; tags?: readonly string[] | null } | null | undefined): string | undefined {
+  if (!m) return undefined;
+  const direct = m.tags?.find(t => t.startsWith("btw-parent:"))?.slice("btw-parent:".length);
+  if (direct) return direct;
+  return m.id ? links.get(m.id)?.tags.find(t => t.startsWith("btw-parent:"))?.slice("btw-parent:".length) : undefined;
+}
+
+/** True when `m` is a `/btw` side session or any worker/descendant in its subtree. */
+export function isBtwMission(
+  m: BtwCandidate | null | undefined,
+  byId?: ReadonlyMap<string, BtwCandidate>,
+): boolean {
+  if (!m) return false;
+  if (m.tags?.some(isDirectBtwTag)) return true;
+  const seenIds = new Set<string>();
+  if (m.id) {
+    if (links.get(m.id)?.tags.some(isDirectBtwTag)) return true;
+    seenIds.add(m.id);
+  }
+  const link0 = m.id ? links.get(m.id) : undefined;
+  let cur = directParentOf(m) ?? link0?.parent ?? link0?.callback;
+  while (cur && !seenIds.has(cur)) {
+    seenIds.add(cur);
+    const row = byId?.get(cur);
+    const link = links.get(cur);
+    if (row?.tags?.some(isDirectBtwTag) || link?.tags.some(isDirectBtwTag)) return true;
+    cur = (row ? directParentOf(row) : undefined) ?? link?.parent ?? link?.callback;
+  }
+  return false;
+}
+
+/** Pure batch filter excluding `/btw` side sessions and their descendants regardless of row order. */
+export function excludeBtwMissions<M extends HierarchyFields>(rows: readonly M[]): M[] {
+  const byId = new Map<string, HierarchyFields>();
+  for (const row of rows) if (row && typeof row.id === "string") byId.set(row.id, row);
+  return rows.filter(row => !isBtwMission(row, byId));
+}
+
 // ---------------------------------------------------------------------------
 // Parent resolver: a child whose parent is not loaded is held under a
 // placeholder while the parent is fetched by id. Only a parent confirmed gone
@@ -195,13 +251,23 @@ export function configureParentResolver(fetch: (id: string) => Promise<Hierarchy
 /** Ask for a parent. Returns its current state; tracks `resolverVersion` for reactivity. */
 export function resolveParent(id: string): ParentState {
   resolverVersion();
+  if (isBtwMission({ id })) return "gone";
   const state = parentState.get(id);
   if (state) return state;
   parentState.set(id, "loading");
   const attempt = () => {
     if (!fetcher) return;
     fetcher(id).then(row => {
-      if (row) { observeMission(row); parentRows.set(id, row); parentState.set(id, "found"); }
+      if (row) {
+        observeMission(row);
+        if (isBtwMission(row)) {
+          parentRows.delete(id);
+          parentState.set(id, "gone");
+        } else {
+          parentRows.set(id, row);
+          parentState.set(id, "found");
+        }
+      }
       else parentState.set(id, "gone");
       bumpResolver(v => v + 1);
     }, () => {
@@ -215,15 +281,21 @@ export function resolveParent(id: string): ParentState {
   return "loading";
 }
 
+/** Track reactive parent-resolution updates (e.g. when a missing parent resolves as `/btw`). */
+export function trackHierarchyResolution(): void {
+  resolverVersion();
+}
+
 /** A parent the resolver fetched, for listing as context next to its children. */
 export function resolvedParent<M extends HierarchyFields>(id: string): M | undefined {
   resolverVersion();
-  return parentRows.get(id) as M | undefined;
+  const row = parentRows.get(id) as M | undefined;
+  return row && !isBtwMission(row) ? row : undefined;
 }
 /** Every parent the resolver has fetched. */
 export function resolvedParents<M extends HierarchyFields>(): M[] {
   resolverVersion();
-  return [...parentRows.values()] as M[];
+  return excludeBtwMissions([...parentRows.values()] as M[]);
 }
 
 /** A parent is known to be gone; seen as a list row again it is back. */
@@ -300,9 +372,12 @@ type OpenRow = HierarchyFields & { status: string; updated_at?: string | null; c
  * a finished parent.
  */
 export function openBeyondPage<M extends OpenRow>(history: readonly M[], extra: readonly M[], now = Date.now()): M[] {
+  const byId = new Map<string, OpenRow>();
+  for (const m of history) byId.set(m.id, m);
+  for (const m of extra) if (!byId.has(m.id)) byId.set(m.id, m);
   const listed = new Set(history.map(m => m.id));
   const at = (m: M) => Date.parse(m.updated_at || m.created_at || "") || 0;
-  const wanted = extra.filter(m => !listed.has(m.id) && (LIVE_OPEN.has(m.status) || (RECENT_OPEN.has(m.status) && now - at(m) <= RECENT_OPEN_MS)));
+  const wanted = extra.filter(m => !listed.has(m.id) && !isBtwMission(m, byId) && (LIVE_OPEN.has(m.status) || (RECENT_OPEN.has(m.status) && now - at(m) <= RECENT_OPEN_MS)));
   const ids = new Set([...listed, ...wanted.map(m => m.id)]);
   const parentOf = (m: M) => nonEmpty(m.parent_mission_id) ?? nonEmpty(m.callback_parent_mission_id);
   return wanted.filter(m => { const p = parentOf(m); return !p || LIVE_OPEN.has(m.status) || ids.has(p); });

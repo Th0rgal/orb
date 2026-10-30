@@ -5015,9 +5015,31 @@ pub trait MissionStore: Send + Sync {
             .as_deref()
             .and_then(|c| c.parse::<usize>().ok())
             .unwrap_or(0);
+        let by_id: std::collections::HashMap<Uuid, &Mission> =
+            missions.iter().map(|m| (m.id, m)).collect();
+        let is_in_btw_subtree = |m: &Mission| -> bool {
+            if crate::api::mission_horizon::is_btw_subtree_mission(m) {
+                return true;
+            }
+            let mut cursor = m.parent_mission_id;
+            let mut seen = std::collections::HashSet::from([m.id]);
+            while let Some(pid) = cursor.filter(|id| seen.len() < 16 && seen.insert(*id)) {
+                let Some(parent) = by_id.get(&pid) else {
+                    break;
+                };
+                if crate::api::mission_horizon::is_btw_subtree_mission(parent) {
+                    return true;
+                }
+                cursor = parent.parent_mission_id;
+            }
+            false
+        };
         let mut all_hits = Vec::new();
-        for m in missions {
+        for m in &missions {
             if m.project.tags.iter().any(|t| t == SUPERSEDED_TAG) {
+                continue;
+            }
+            if query.mission_id.is_none() && is_in_btw_subtree(m) {
                 continue;
             }
             if !query.include_archived && m.status == MissionStatus::Acknowledged {

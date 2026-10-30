@@ -371,4 +371,61 @@ final class OrbContractTests: XCTestCase {
         ]))
         XCTAssertEqual(OrbMissionTree.nest([resumedSource, opencodeFork]).map(\.id), ["codex-src"])
     }
+
+    func testBtwSideSessionAndDescendantSubtreeAreExcludedInAnyOrder() {
+        OrbHierarchy.reset()
+        // Production incident replay (`0c532a32` -> `23af9c91` -> `6b1abe32`):
+        // a worker launched by a `/btw` side session lacks `btw-parent:*` and must
+        // still be excluded even when listed before its `/btw` parent.
+        let mainJSON: OrbJSON = .object([
+            "id": .string("0c532a32"),
+            "title": .string("evm.fast"),
+            "status": .string("active"),
+            "updated_at": .string("2026-10-30T02:20:00Z")
+        ])
+        let btwJSON: OrbJSON = .object([
+            "id": .string("23af9c91"),
+            "title": .string("evm.fast · btw"),
+            "status": .string("active"),
+            "tags": .array([.string("fork-workspace:52bbf658"), .string("btw-parent:0c532a32")]),
+            "updated_at": .string("2026-10-30T02:13:00Z")
+        ])
+        let legacyWorkerJSON: OrbJSON = .object([
+            "id": .string("6b1abe32"),
+            "title": .string("Carbon 4 strategy consult"),
+            "status": .string("completed"),
+            "parent_mission_id": .string("23af9c91"),
+            "tags": .array([.string("consult-model"), .string("origin:mission")]),
+            "updated_at": .string("2026-10-30T02:15:00Z")
+        ])
+        let grandchildJSON: OrbJSON = .object([
+            "id": .string("9911aa22"),
+            "title": .string("Verifier check"),
+            "status": .string("completed"),
+            "parent_mission_id": .string("6b1abe32"),
+            "updated_at": .string("2026-10-30T02:16:00Z")
+        ])
+        let taggedSubagentJSON: OrbJSON = .object([
+            "id": .string("7788ccdd"),
+            "title": .string("Tagged /btw subagent"),
+            "status": .string("completed"),
+            "tags": .array([.string("btw-subagent")]),
+            "updated_at": .string("2026-10-30T02:17:00Z")
+        ])
+
+        // Child-before-parent order (`updated_at DESC`):
+        OrbHierarchy.reset()
+        let childFirst = [grandchildJSON, legacyWorkerJSON, btwJSON, taggedSubagentJSON, mainJSON].map { OrbRow($0) }.filter(\.mobile)
+        XCTAssertEqual(childFirst.map(\.id), ["0c532a32"])
+
+        // Sticky memory: if a later page omits `btwJSON` and `parent_mission_id`, `6b1abe32` stays hidden.
+        let partialWorker = OrbRow(.object([
+            "id": .string("6b1abe32"),
+            "title": .string("Carbon 4 strategy consult"),
+            "status": .string("completed")
+        ]))
+        XCTAssertFalse(partialWorker.mobile)
+        XCTAssertEqual(OrbInboxModel.classify(row: partialWorker, interaction: nil, includeAutonomous: true), .hidden)
+        OrbHierarchy.reset()
+    }
 }

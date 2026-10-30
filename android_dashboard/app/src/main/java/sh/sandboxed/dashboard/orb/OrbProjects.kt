@@ -1260,9 +1260,7 @@ fun OrbProjectPage(
             }
             val rows = missionsTask.await()
             if (rows != null) {
-                val mobile = rows.filter { m ->
-                    OrbJSON.strList(m.raw, "tags").none { it.startsWith("btw-parent:") }
-                }
+                val mobile = OrbMissionTree.filterMobile(rows)
                 fetchedProjectMissions = mobile
                 OrbReadCache.saveRows("project_missions_$projectSlug", mobile)
                 for (m in mobile) {

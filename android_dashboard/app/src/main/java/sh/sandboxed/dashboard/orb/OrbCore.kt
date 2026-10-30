@@ -282,10 +282,10 @@ object OrbMissionTree {
     /** Forks share the conversation's name. */
     fun forkTitle(title: String): String = title.removeSuffix(LEGACY_FORK_SUFFIX)
 
-    /** Parent links are sticky (docs/specs/sidebar-hierarchy.md): a payload that
-     * omits the link (a mutation answer, a list served while Hermes restarts)
-     * never moves a known child to the root. Only [reparent] changes one. */
+    /** Parent links and `/btw` subtree markers are sticky (docs/specs/sidebar-hierarchy.md):
+     * a payload that omits the link never moves a known child to the root or leaks a `/btw` worker. */
     private val knownParents = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val knownBtw = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** Explicit re-parent (null detaches): the only way a remembered parent changes. */
     fun reparent(id: String, parent: String?) {
@@ -293,7 +293,50 @@ object OrbMissionTree {
     }
 
     /** Forget every remembered link (connection switch, tests). */
-    fun resetHierarchy() = knownParents.clear()
+    fun resetHierarchy() {
+        knownParents.clear()
+        knownBtw.clear()
+    }
+
+    private fun hasDirectBtwTag(mission: OrbRow): Boolean =
+        OrbJSON.strList(mission.raw, "tags").any { it.startsWith("btw-parent:") || it == "btw-subagent" }
+
+    fun observe(mission: OrbRow) {
+        val id = mission.str("id") ?: mission.id
+        if (id.isEmpty()) return
+        payloadParentId(mission)?.let { knownParents[id] = it }
+        if (hasDirectBtwTag(mission)) knownBtw.add(id)
+    }
+
+    /** True for `/btw` side-question forks (`btw-parent:*`), `btw-subagent` workers, and every descendant in their subtrees. */
+    fun isBtwMission(mission: OrbRow, byId: Map<String, OrbRow>? = null): Boolean {
+        val id = mission.str("id") ?: mission.id
+        if (hasDirectBtwTag(mission)) {
+            if (id.isNotEmpty()) knownBtw.add(id)
+            return true
+        }
+        if (id.isNotEmpty() && knownBtw.contains(id)) return true
+        val seen = mutableSetOf<String>()
+        if (id.isNotEmpty()) seen.add(id)
+        var cursor = payloadParentId(mission) ?: (if (id.isNotEmpty()) knownParents[id] else null)
+        while (cursor != null && seen.size < 16 && seen.add(cursor)) {
+            if (knownBtw.contains(cursor)) return true
+            val anc = byId?.get(cursor)
+            if (anc != null && hasDirectBtwTag(anc)) {
+                knownBtw.add(cursor)
+                return true
+            }
+            cursor = (if (anc != null) payloadParentId(anc) else null) ?: knownParents[cursor]
+        }
+        return false
+    }
+
+    /** Observe hierarchy links across the batch first, then exclude `/btw` missions and their descendants. */
+    fun filterMobile(missions: List<OrbRow>): List<OrbRow> {
+        for (m in missions) observe(m)
+        val byId = missions.associateBy { it.id }
+        return missions.filterNot { isBtwMission(it, byId) }
+    }
 
     /** The mission that launched this one. A fork is another version, never launched work. */
     fun parentId(mission: OrbRow): String? {
@@ -1008,6 +1051,7 @@ class OrbCore private constructor(context: Context) {
     }
 
     private fun resetInMemoryAccountState() {
+        OrbMissionTree.resetHierarchy()
         _projects.value = emptyList()
         _missions.value = emptyList()
         _hermesSessions.value = emptyList()
@@ -1028,9 +1072,8 @@ class OrbCore private constructor(context: Context) {
     /** Fresh rows update known missions without removing older rows absent from the global page. */
     private fun seedMissionAndProjectCaches(missionsList: List<OrbRow>, fresh: Boolean = false) {
         val byProject = mutableMapOf<String, MutableList<OrbRow>>()
-        for (m in missionsList) {
+        for (m in OrbMissionTree.filterMobile(missionsList)) {
             val tags = OrbJSON.strList(m.raw, "tags")
-            if (tags.any { it.startsWith("btw-parent:") }) continue
             val hist = m.rows("history")
             if (hist.isNotEmpty()) {
                 OrbReadCache.saveRowsMemoryOnly("mission_msgs_${m.id}", hist)
@@ -1048,7 +1091,7 @@ class OrbCore private constructor(context: Context) {
 
     private fun loadCachedSnapshots() {
         val p = OrbJSON.dictList(OrbDisk.read("projects")).map { OrbRow(it) }
-        val m = OrbJSON.dictList(OrbDisk.read("missions")).map { OrbRow(it) }
+        val m = OrbMissionTree.filterMobile(OrbJSON.dictList(OrbDisk.read("missions")).map { OrbRow(it) })
         val h = OrbJSON.dictList(OrbDisk.read("hermes_sessions")).map { OrbRow(it) }
         val w = OrbJSON.dictList(OrbDisk.read("workspaces")).map { OrbRow(it) }
         val b = OrbJSON.dictList(OrbDisk.read("backends")).map { OrbRow(it) }
@@ -1129,7 +1172,7 @@ class OrbCore private constructor(context: Context) {
             coroutineScope {
                 val mDeferred = async { fetchRows("/api/control/missions?limit=100&all=true", null) }
                 val pDeferred = async { fetchRows("/api/projects", "projects") }
-                val m = mDeferred.await()
+                val m = OrbMissionTree.filterMobile(mDeferred.await())
                 val p = pDeferred.await()
                 _missions.value = m
                 _projects.value = p
@@ -1169,7 +1212,8 @@ class OrbCore private constructor(context: Context) {
                 anyCoreSuccess = true
                 launch(Dispatchers.IO) { OrbDisk.write("projects", p.map { it.raw }) }
             }
-            mResult.onSuccess { m ->
+            mResult.onSuccess { rawM ->
+                val m = OrbMissionTree.filterMobile(rawM)
                 _missions.value = m
                 anyCoreSuccess = true
                 launch(Dispatchers.IO) {

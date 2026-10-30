@@ -3,7 +3,7 @@ import { folderLabel } from "../folderLabels";
 import { displayTitle } from "../goal";
 import { isWorking } from "../missionStatus";
 import { countNested, countVersions, forkTitle, holds, missionParent, nestMissions, versionLabel, type NestedMission } from "../missionTree";
-import { resolveParent, seenMission } from "../missionHierarchy";
+import { excludeBtwMissions, resolveParent, seenMission, trackHierarchyResolution } from "../missionHierarchy";
 import { filesMovedAway, filesMovedInto } from "../moves";
 import { renamedTitle } from "../renames";
 import type { TreeNode } from "../treeModel";
@@ -142,8 +142,9 @@ export function createProjectTree(deps: {
     return { id: `project:${slug}`, data: { kind: "project", slug, label: renamedTitle("project", slug, project.title) || slug }, expanded: open, children };
   });
   const archiveNodes = (): Node[] => {
+    trackHierarchyResolution();
     const byProject = new Map<string, Mission[]>();
-    for (const m of deps.archivedMissionRows()) {
+    for (const m of excludeBtwMissions(deps.archivedMissionRows())) {
       const slug = m.project ?? "";
       byProject.set(slug, [...(byProject.get(slug) ?? []), m]);
     }

@@ -31,7 +31,19 @@ export function sideQuestionKey(mission: string): string {
 // Last known open/closed state per thread, so a mission switch can place the dock in the
 // same frame as the transcript instead of after the async storage read.
 const openHints = new Map<string, boolean>();
-export function peekSideQuestionOpen(key: string): boolean | undefined { return openHints.get(key); }
+const forcedOpen = new Set<string>();
+export function peekSideQuestionOpen(key: string): boolean | undefined {
+  return forcedOpen.has(key) ? true : openHints.get(key);
+}
+export function hintSideQuestionOpen(key: string): void {
+  forcedOpen.add(key);
+  openHints.set(key, true);
+}
+export function consumeSideQuestionOpenHint(key: string): boolean {
+  const forced = forcedOpen.delete(key);
+  if (forced) openHints.set(key, true);
+  return forced;
+}
 export async function readSideQuestion(key: string): Promise<SavedSideQuestion | undefined> {
   try {
     const value = await readSideThread<SavedSideQuestion>(key).catch(()=>undefined) ?? JSON.parse(localStorage.getItem(key) ?? 'null');
