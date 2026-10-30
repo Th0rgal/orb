@@ -102,6 +102,7 @@ export interface CreateAutomationInput {
   variables?: Record<string, string>;
   stop_policy?: StopPolicy;
   fresh_session?: FreshSession;
+  retry_config?: Automation["retry_config"];
   start_immediately?: boolean;
 }
 
