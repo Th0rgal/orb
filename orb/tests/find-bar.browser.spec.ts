@@ -365,12 +365,16 @@ test("FindBar matches Cursor UX, searches only final messages, paints passive+ac
     // 4 distinct vertical match positions across the prompt and tall 3-part answer!
     expect(new Set(seenTops).size).toBe(4);
 
-    // Deep historical match (>200 events back) resolved via 1 fast view=transcript spine request, 0 raw older loops!
+    // Search preparation hydrated the >200-event history via 1 fast view=transcript spine request and 0 raw older loops!
+    expect(core.stats().transcriptSpineRequests).toBe(1);
+    expect(core.stats().rawOlderRequests).toBe(0);
+
+    // Deep historical match (>200 events back) resolves immediately from the hydrated spine and scrolls into view!
+    // (Once scroller reaches scrollTop < 800 at turn 0, MissionView's normal scrollback listener may fetch raw tool details.)
     await input.fill("ArchiveBeacon_404");
     await expect(count).toHaveText("1 / 1");
     await expect(page.getByText("Early ArchiveBeacon_404 final answer preserved in history.")).toBeVisible();
     expect(core.stats().transcriptSpineRequests).toBe(1);
-    expect(core.stats().rawOlderRequests).toBe(0);
   } finally {
     await core.close();
   }
