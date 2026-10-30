@@ -14,7 +14,7 @@ import { useSidePanel } from './FilePanel';
 import { createPinnedScroll } from './mission/pinnedScroll';
 import { createEffect, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js';
 import { connectionVersion } from './api';
-import { readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion } from './sideQuestionStorage';
+import { consumeSideQuestionOpenHint, readSideQuestion, peekSideQuestionOpen, writeSideQuestion, sideQuestionKey, BTW_HISTORY_LIMIT, type QueuedSideQuestion } from './sideQuestionStorage';
 import { UserTurn, ThoughtSequence } from "./Transcript";
 import { MdView } from './Markdown';
 import { ErrorNotice } from './ErrorNotice';
@@ -50,6 +50,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [preparing,setPreparing]=createSignal(false);
  const [runStatus,setRunStatus]=createSignal('');
  const [notSent,setNotSent]=createSignal(false);
+ const [draftRevision,setDraftRevision]=createSignal<{text:string;append?:boolean}|undefined>();
  const [question,setQuestion]=createSignal(''),[answer,setAnswer]=createSignal(''),[narration,setNarration]=createSignal<string[]>([]),[draft,setDraft]=createSignal(''),[error,setError]=createSignal(''),[model,setModel]=createSignal('');
  let abort:AbortController|undefined;
  // Set while this panel itself is launching/answering a question.
@@ -78,6 +79,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  };
  const [loadedKey,setLoadedKey]=createSignal('');
  let ready:Promise<void>=Promise.resolve();
+ let reconnectSession:(sideId:string)=>Promise<void>=async sideId=>{await p.onOpenSession?.(sideId);};
  createEffect(on(key,current=>{
   abort?.abort();setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);
   let stale=false;onCleanup(()=>{stale=true;});
@@ -98,11 +100,24 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      setBusy(false);setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());resync?.();queueMicrotask(sendNext);}
    }).catch(e=>{if(!stale&&!controller.signal.aborted){setError(e instanceof Error?e.message:String(e));setBusy(false);}});
   };
+  reconnectSession=async(sideId:string)=>{
+   if(p.onOpenSession){await p.onOpenSession(sideId);return;}
+   const unsent=question().trim();
+   let reconnectFn:typeof btwMod.reconnectBtwSession|undefined;
+   try{if('reconnectBtwSession' in btwMod)reconnectFn=btwMod.reconnectBtwSession;}catch{}
+   const session=typeof reconnectFn==='function'?await reconnectFn(missionId,sideId):undefined;
+   if(stale||key()!==current)return;
+   setError('');setNotSent(false);setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);
+   if(unsent&&!draft().trim())setDraftRevision({text:unsent});
+   if(session?.active)watchActive(session);
+   resync?.();
+  };
   if(peekSideQuestionOpen(current)){setOpen(true);side?.show();}
   ready=readSideQuestion(current).then(saved=>{
   if(stale)return;
+  const shouldOpen=consumeSideQuestionOpenHint(current)||Boolean(saved?.open);
   const cleanHistory=(saved?.history??[]).filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()}));
-  setHistory(cleanHistory);setBusy(false);setOpen(saved?.open??false);
+  setHistory(cleanHistory);setBusy(false);setOpen(shouldOpen);
   setQuestion(saved?.pending?.question??'');
   setAnswer(saved?.pending?.answer&&!isSyntheticRemoteAssistantNote(saved.pending.answer)?saved.pending.answer:'');
   let launching:Promise<void>|undefined;
@@ -148,7 +163,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   setLoadedKey(current);
   // Never delay the tab for it: a fork's earlier history fills an empty tab when it arrives.
   if(!saved)void inheritSideQuestion(missionId).then(earlier=>{if(!stale&&key()===current&&earlier&&!history().length&&!busy())setHistory(earlier.history.filter(row=>!isSyntheticRemoteAssistantNote(row.answer)).map(row=>({...row,id:row.id??crypto.randomUUID()})));});
-  if(saved?.open)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
+  if(shouldOpen)queueMicrotask(()=>{if(loadedKey()===current)side?.show();});
   if(hasReconcile){
    const reconcile=reconcileServer!;
    // The newest thread stays live while the tab is open: a question asked on
@@ -304,7 +319,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      <Show when={content().text}><MdView compact searchable text={content().text}/></Show>
      <Show when={content().details}><details class="legacy-log"><summary>Original execution log</summary><pre>{content().details}</pre></details></Show>
      <Show when={exchange.pending}><p class="sr-only" role="status">{preparing()?'Sending…':'Side agent is working…'}</p></Show>
-     <Show when={exchange.error}><ErrorNotice error={exchange.error!} title={notSent()?"Question not sent":"Couldn’t complete side question"}><button type="button" class="error-notice-link" onClick={retry} disabled={busy()}>Retry</button><button type="button" class="error-notice-link" onClick={dismiss} disabled={busy()}>Dismiss</button><Show when={p.onOpenSession&&exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button type="button" class="error-notice-link" onClick={()=>{void Promise.resolve(p.onOpenSession?.(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></ErrorNotice></Show>
+     <Show when={exchange.error}><ErrorNotice error={exchange.error!} title={notSent()?"Question not sent":"Couldn’t complete side question"}><button type="button" class="error-notice-link" onClick={retry} disabled={busy()}>Retry</button><button type="button" class="error-notice-link" onClick={dismiss} disabled={busy()}>Dismiss</button><Show when={exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button type="button" class="error-notice-link" onClick={()=>{void Promise.resolve(reconnectSession(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></ErrorNotice></Show>
      <Show when={!exchange.pending&&!exchange.error}><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${content().text||exchange.answer}`)}>Use in agent draft ↗</button></Show>
     </article>;}}</For>
     <Show when={queue().length}><section class="followup-queue btw-queue" aria-label="Queued side questions" aria-live="polite">
@@ -320,7 +335,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     <Show when={btwSession(p.mission) && busy()}><NativeInteraction mission={btwSession(p.mission)!.id} active={busy()} remote={!btwSession(p.mission)!.local} items={btwItems(p.mission)}/></Show>
    </div>
    <Show when={storageError()}><p class="dim" role="status">Local storage is unavailable. This side conversation may be lost on refresh.</p></Show>
-   <div class="btw-composer-dock"><Composer sideQuestion onPending={prepareSend} picker={false} placeholder={busy()?"Queue a side question…":"Ask a side question…"} busy={busy()} scope={key()} uploadTarget="side" onDraft={setDraft} onSend={(text,images,files)=>ask(text,images,files)} onStop={cancel}/><div class="btw-footer"><span class="btw-footer-tag">/btw</span><span class="under-sep" aria-hidden="true">·</span><span class="btw-footer-model" title="Independent agent sharing the main workspace">{model()||`${btwConfig().harness} · ${btwConfig().model}`}</span></div></div>
+   <div class="btw-composer-dock"><Composer sideQuestion revision={draftRevision()} onPending={prepareSend} picker={false} placeholder={busy()?"Queue a side question…":"Ask a side question…"} busy={busy()} scope={key()} uploadTarget="side" onDraft={setDraft} onSend={(text,images,files)=>ask(text,images,files)} onStop={cancel}/><div class="btw-footer"><span class="btw-footer-tag">/btw</span><span class="under-sep" aria-hidden="true">·</span><span class="btw-footer-model" title="Independent agent sharing the main workspace">{model()||`${btwConfig().harness} · ${btwConfig().model}`}</span></div></div>
   </section></Portal></Show>
  </>;
 }

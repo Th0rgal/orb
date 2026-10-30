@@ -90,7 +90,7 @@ import { createMissionMoves } from "./tree/moves";
 import { createProjectTree, missionFolder, missionIdFromTreeId, type Node, type RowData } from "./tree/TreeView";
 import { MachineBadge, missionMachine, missionCopyId, rowDetail, ROW_TIP_ID, launchedToggle as launchedToggleView, type RowTipContent } from "./tree/missionRow";
 import { FileSkeleton } from "./Skeleton";
-import { isPartialList, mergeMission, reconcileMissionList, type Misses, resolvedParents, withHierarchy } from "./missionHierarchy";
+import { excludeBtwMissions, isBtwMission, isPartialList, mergeMission, reconcileMissionList, type Misses, resolvedParents, withHierarchy } from "./missionHierarchy";
 import { forkLeaders, missionParent, missionSubtree, missionTreeRows, archiveOnlyRows, isSupersededInTree, ARCHIVE_DAY_MS, ARCHIVE_WEEK_MS, filterArchivedMissionsByAge, expandMissionDescendants } from "./missionTree";
 
 export { isMissionDeleting } from "./tree/selection";
@@ -164,7 +164,7 @@ export function LiveProjectsSection(p: {
     const current = currentMission();
     // A paginated project list may not contain an older open conversation, and
     // the open conversation's live status updates ahead of the project poll.
-    const withCurrent = current?.project === slug && !isArchived(current)
+    const withCurrent = current?.project === slug && !isArchived(current) && !isBtwMission(current)
       ? (rows.some(m => m.id === current.id)
         ? rows.map(m => m.id === current.id ? { ...mergeMission(m, current, "partial"), status: archiving.get(m.id) ?? current.status } : m)
         : [withHierarchy(current), ...rows])
@@ -175,7 +175,7 @@ export function LiveProjectsSection(p: {
     // Parents the resolver fetched by id (paged out of this project's list) are listed as context.
     for (const m of [...withCurrent, ...extraArchived]) shown.add(m.id);
     const fetchedParents = withMovedMissions(resolvedParents<Mission>()).filter(m => (m.project ?? "") === slug && !shown.has(m.id) && !listedIds.has(m.id));
-    const allRows = [...withCurrent, ...extraArchived, ...fetchedParents];
+    const allRows = excludeBtwMissions([...withCurrent, ...extraArchived, ...fetchedParents]);
     const byId = new Map(allRows.map(m => [m.id, m]));
     const selectedId = p.selected()?.startsWith("m:") ? p.selected()!.slice(2) : undefined;
     return missionTreeRows(allRows, m => !isArchived(m) && (m.id === selectedId || !isSupersededInTree(m, byId)));
@@ -796,7 +796,7 @@ export function LiveProjectsSection(p: {
     const onMissionForked = (event: Event) => {
       const { mission } = (event as CustomEvent<{ mission: Mission }>).detail ?? {};
       const slug = mission?.project?.trim();
-      if (!mission?.id || !slug) return;
+      if (!mission?.id || !slug || isBtwMission(mission)) return;
       missionRevision++;
       const clean = withHierarchy(mission);
       batch(() => {

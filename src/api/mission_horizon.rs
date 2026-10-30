@@ -492,6 +492,17 @@ pub fn bound_session_from_projects_db(working_dir: &Path, slug: &str) -> Option<
     None
 }
 
+/// Tag stamped onto subagents/workers launched inside a `/btw` side-question
+/// subtree so every client and store query can exclude them without walking
+/// unbounded lineage, while keeping `btw-parent:<uuid>` reserved for the `/btw`
+/// thread itself.
+pub const BTW_SUBAGENT_TAG: &str = "btw-subagent";
+
+/// True when `tag` is a reserved `/btw` lineage marker (`btw-parent:*` or `btw-subagent`).
+pub fn is_reserved_btw_tag(tag: &str) -> bool {
+    tag.starts_with("btw-parent:") || tag == BTW_SUBAGENT_TAG
+}
+
 /// True when a mission is an interactive `/btw` side-question fork (`btw-parent:<uuid>`).
 /// Side-question turns answer the operator inline in Orb and must never wake Paloma
 /// or project conversations on completion.
@@ -503,13 +514,23 @@ pub fn is_btw_side_mission(mission: &Mission) -> bool {
         .any(|tag| tag.starts_with("btw-parent:"))
 }
 
+/// True when a mission is either a `/btw` side-question thread or a worker
+/// launched inside a `/btw` subtree (`btw-subagent`).
+pub fn is_btw_subtree_mission(mission: &Mission) -> bool {
+    mission
+        .project
+        .tags
+        .iter()
+        .any(|tag| is_reserved_btw_tag(tag))
+}
+
 /// Shipped wake decision for a mission-status webhook: project binding,
 /// then origin, else isolated.
 /// A worker started by another mission reports to that mission unless it has its own
 /// direct `origin_session_id` (not merely a project-level binding). Interactive `/btw`
-/// side missions also never wake Paloma.
+/// side missions and their descendants also never wake Paloma.
 pub fn reports_to_parent_mission(mission: &Mission, _wake: Option<&WakeTarget>) -> bool {
-    is_btw_side_mission(mission)
+    is_btw_subtree_mission(mission)
         || (mission.parent_mission_id.is_some()
             && mission
                 .origin_session_id
@@ -576,7 +597,13 @@ mod tests {
         let mut btw = parent.clone();
         btw.project.tags.push(format!("btw-parent:{}", parent.id));
         assert!(is_btw_side_mission(&btw));
+        assert!(is_btw_subtree_mission(&btw));
         assert!(reports_to_parent_mission(&btw, Some(&bound)));
+        let mut btw_worker = parent.clone();
+        btw_worker.project.tags.push(BTW_SUBAGENT_TAG.to_string());
+        assert!(!is_btw_side_mission(&btw_worker));
+        assert!(is_btw_subtree_mission(&btw_worker));
+        assert!(reports_to_parent_mission(&btw_worker, Some(&bound)));
         // A mission without a parent is not a worker.
         assert!(!reports_to_parent_mission(
             &parent,

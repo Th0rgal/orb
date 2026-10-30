@@ -874,10 +874,7 @@ object OrbInboxModel {
         return Regex("^you are a sub-?agent\\b", RegexOption.IGNORE_CASE).containsMatchIn((mission.str("title", "name") ?: "").trim())
     }
 
-    private fun isMobile(mission: OrbRow): Boolean {
-        val tags = OrbJSON.strList(mission.raw, "tags")
-        return tags.none { it.startsWith("btw-parent:") }
-    }
+    private fun isMobile(mission: OrbRow): Boolean = !OrbMissionTree.isBtwMission(mission)
 
     fun build(projects: List<OrbRow>, missions: List<OrbRow>, answeredCallIds: Set<String> = emptySet()): List<OrbInboxItem> {
         val _rev1 = revision
@@ -898,7 +895,7 @@ object OrbInboxModel {
             if (s.isNotEmpty()) projectsBySlug[s] = p
         }
 
-        val mobileMissions = missions.filter { isMobile(it) }
+        val mobileMissions = OrbMissionTree.filterMobile(missions)
 
         val childrenByParent = mutableMapOf<String, MutableList<OrbRow>>()
         val seenChildren = mutableSetOf<String>()

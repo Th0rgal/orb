@@ -145,4 +145,23 @@ class OrbMissionTreeTest {
         )
         assertEquals(listOf("codex-src"), OrbMissionTree.nest(listOf(resumedSource, opencodeFork)).map { it.id })
     }
+
+    @Test
+    fun excludesBtwSideSessionsAndDescendantWorkersInAnyOrder() {
+        OrbMissionTree.resetHierarchy()
+        val main = m("0c532a32", "title" to "evm.fast")
+        val btw = m("23af9c91", "title" to "evm.fast · btw", "tags" to listOf("fork-workspace:52bbf658", "btw-parent:0c532a32"))
+        val legacyWorker = m("6b1abe32", "title" to "Carbon 4 strategy consult", "parent_mission_id" to "23af9c91", "tags" to listOf("consult-model"))
+        val grandchild = m("9911aa22", "title" to "Verifier check", "parent_mission_id" to "6b1abe32")
+        val taggedSubagent = m("7788ccdd", "title" to "Tagged /btw subagent", "tags" to listOf("btw-subagent"))
+
+        // Child-before-parent order (`updated_at DESC`):
+        val filtered = OrbMissionTree.filterMobile(listOf(grandchild, legacyWorker, btw, taggedSubagent, main))
+        assertEquals(listOf("0c532a32"), filtered.map { it.id })
+
+        // Sticky memory: if a subsequent partial payload omits parent_mission_id and tags, worker stays excluded.
+        val partialWorker = m("6b1abe32", "title" to "Carbon 4 strategy consult")
+        assertTrue(OrbMissionTree.isBtwMission(partialWorker))
+        OrbMissionTree.resetHierarchy()
+    }
 }

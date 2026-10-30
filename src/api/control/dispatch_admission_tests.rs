@@ -12123,6 +12123,141 @@ async fn superseding_side_mission_propagates_side_launch_receipt() {
 }
 
 #[tokio::test]
+async fn child_and_grandchild_under_btw_side_mission_inherit_btw_subagent_tag_and_preserve_it() {
+    let h = Harness::new().await;
+    h.state.backend_registry.write().await.register(Arc::new(
+        crate::backend::claudecode::ClaudeCodeBackend::new(),
+    ));
+    let main_id = Uuid::new_v4();
+    let side = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("evm.fast · btw"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            side.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("btw-parent:{main_id}")]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let worker_req: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Carbon 4 strategy consult",
+        "backend": "claudecode",
+        "placement": "client",
+        "parent_mission_id": side.id,
+        "tags": ["consult-model", "origin:mission"],
+    }))
+    .unwrap();
+    let worker_res = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(worker_req)),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let worker_id = Uuid::parse_str(worker_res.1 .0["id"].as_str().unwrap()).unwrap();
+    let worker = h
+        .control
+        .mission_store
+        .get_mission(worker_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        worker
+            .project
+            .tags
+            .contains(&crate::api::mission_horizon::BTW_SUBAGENT_TAG.to_string()),
+        "worker tags: {:?}",
+        worker.project.tags
+    );
+    assert!(
+        !worker
+            .project
+            .tags
+            .iter()
+            .any(|t| t.starts_with("btw-parent:")),
+        "worker must not mint btw-parent:<id>: {:?}",
+        worker.project.tags
+    );
+
+    let grandchild_req: CreateMissionRequest = serde_json::from_value(json!({
+        "title": "Nested verifier leaf",
+        "backend": "claudecode",
+        "placement": "client",
+        "parent_mission_id": worker_id,
+    }))
+    .unwrap();
+    let grandchild_res = super::create_mission_inner(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Some(Json(grandchild_req)),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let grandchild_id = Uuid::parse_str(grandchild_res.1 .0["id"].as_str().unwrap()).unwrap();
+    let grandchild = h
+        .control
+        .mission_store
+        .get_mission(grandchild_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(grandchild
+        .project
+        .tags
+        .contains(&crate::api::mission_horizon::BTW_SUBAGENT_TAG.to_string()));
+
+    h.control
+        .mission_store
+        .update_mission_status(worker_id, MissionStatus::Completed)
+        .await
+        .unwrap();
+    let patch_req: UpdateMissionProjectRequest = serde_json::from_value(json!({
+        "tags": ["custom-tag"],
+    }))
+    .unwrap();
+    let patched = super::mission_settings::update_mission_project_locked(
+        false,
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(worker_id),
+        Json(patch_req),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(
+        patched
+            .project
+            .tags
+            .contains(&crate::api::mission_horizon::BTW_SUBAGENT_TAG.to_string()),
+        "settings patch must preserve btw-subagent: {:?}",
+        patched.project.tags
+    );
+    assert!(patched.project.tags.contains(&"custom-tag".to_string()));
+}
+
+#[tokio::test]
 async fn post_message_to_superseded_remote_side_mission_returns_conflict_and_leaves_no_waiting_queue_entry(
 ) {
     let h = Harness::new().await;

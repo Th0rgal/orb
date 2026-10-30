@@ -1887,6 +1887,30 @@ pub(in crate::api) async fn create_mission_inner(
             tags.push(client_placement::TAG.to_string());
         }
     }
+    if let Some(parent_id) = req.parent_mission_id {
+        let mut cursor = Some(parent_id);
+        let mut seen = std::collections::HashSet::new();
+        let mut in_btw_subtree = false;
+        while let Some(id) = cursor.filter(|id| seen.len() < 16 && seen.insert(*id)) {
+            let Ok(Some(ancestor)) = parent_control.mission_store.get_mission(id).await else {
+                break;
+            };
+            if crate::api::mission_horizon::is_btw_subtree_mission(&ancestor) {
+                in_btw_subtree = true;
+                break;
+            }
+            cursor = ancestor.parent_mission_id;
+        }
+        if in_btw_subtree {
+            let tags = normalized_request_tags.get_or_insert_with(Vec::new);
+            if !tags
+                .iter()
+                .any(|existing| existing == crate::api::mission_horizon::BTW_SUBAGENT_TAG)
+            {
+                tags.push(crate::api::mission_horizon::BTW_SUBAGENT_TAG.to_string());
+            }
+        }
+    }
     if let Some(estimated_gib) = effective_estimated_disk_gib {
         let tag = format!("disk-estimate-gib:{estimated_gib}");
         let tags = normalized_request_tags.get_or_insert_with(Vec::new);
@@ -2501,7 +2525,10 @@ pub(in crate::api) async fn create_mission_inner(
         .project
         .tags
         .iter()
-        .filter(|tag| tag.starts_with(DISK_RESERVATION_TAG_PREFIX))
+        .filter(|tag| {
+            tag.starts_with(DISK_RESERVATION_TAG_PREFIX)
+                || crate::api::mission_horizon::is_reserved_btw_tag(tag)
+        })
         .cloned()
         .collect();
     if !durable_reservation_tags.is_empty() {

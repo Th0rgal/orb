@@ -1461,10 +1461,67 @@ fn tokenize_unicode61(input: &str) -> Vec<String> {
     out
 }
 
+fn raw_tags_have_btw_marker(raw_tags: Option<&str>) -> bool {
+    let Some(raw) = raw_tags else {
+        return false;
+    };
+    raw.contains("\"btw-parent:") || raw.contains("\"btw-subagent\"")
+}
+
+fn ancestor_chain_has_btw_marker(
+    conn: &Connection,
+    start_parent: Option<Uuid>,
+    memo: &mut HashMap<Uuid, bool>,
+) -> Result<bool, String> {
+    let Some(first) = start_parent else {
+        return Ok(false);
+    };
+    if let Some(&cached) = memo.get(&first) {
+        return Ok(cached);
+    }
+    let mut stmt = conn
+        .prepare_cached("SELECT parent_mission_id, tags FROM missions WHERE id = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut visited: Vec<Uuid> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursor = Some(first);
+    let mut found = false;
+    while let Some(id) = cursor.filter(|id| seen.len() < 16 && seen.insert(*id)) {
+        if let Some(&cached) = memo.get(&id) {
+            found = cached;
+            break;
+        }
+        visited.push(id);
+        let row: Option<(Option<String>, Option<String>)> = stmt
+            .query_row(params![id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some((next_parent, tags)) = row else {
+            break;
+        };
+        if raw_tags_have_btw_marker(tags.as_deref()) {
+            found = true;
+            break;
+        }
+        cursor = next_parent.and_then(|s| Uuid::parse_str(&s).ok());
+    }
+    for id in visited {
+        memo.insert(id, found);
+    }
+    Ok(found)
+}
+
 pub(super) fn read_coverage_sync(conn: &Connection) -> Result<SearchIndexCoverage, String> {
     let total_missions: usize = conn
         .query_row(
-            "SELECT COUNT(*) FROM missions WHERE (tags IS NULL OR tags NOT LIKE '%\"superseded%')",
+            "SELECT COUNT(*) FROM missions m
+             WHERE (m.tags IS NULL OR (m.tags NOT LIKE '%\"superseded%' AND m.tags NOT LIKE '%\"btw-parent:%' AND m.tags NOT LIKE '%\"btw-subagent\"%'))
+               AND (m.parent_mission_id IS NULL OR NOT EXISTS (
+                   SELECT 1 FROM missions p
+                   WHERE p.id = m.parent_mission_id
+                     AND p.tags IS NOT NULL
+                     AND (p.tags LIKE '%\"btw-parent:%' OR p.tags LIKE '%\"btw-subagent\"%')
+               ))",
             [],
             |r| r.get::<_, i64>(0),
         )
@@ -1615,6 +1672,10 @@ impl SqliteMissionStore {
             if let Some(mid) = query.mission_id {
                 base_params.push(SqlValue::Text(mid.to_string()));
                 filter_clauses.push_str(&format!(" AND d.mission_id = ?{}", base_params.len()));
+            } else {
+                filter_clauses.push_str(
+                    " AND (m.tags IS NULL OR (m.tags NOT LIKE '%\"btw-parent:%' AND m.tags NOT LIKE '%\"btw-subagent\"%'))",
+                );
             }
             if !query.include_archived {
                 filter_clauses.push_str(" AND m.status <> 'acknowledged'");
@@ -1727,6 +1788,7 @@ impl SqliteMissionStore {
                 )
                 .map_err(|e| e.to_string())?;
 
+            let mut btw_parent_memo: HashMap<Uuid, bool> = HashMap::new();
             let mut candidates: Vec<Candidate> = Vec::with_capacity(winners.len());
             for (doc_id, lexical_score) in winners {
                 let Some(row_tuple) = hydrate_stmt
@@ -1775,6 +1837,11 @@ impl SqliteMissionStore {
                     continue;
                 };
                 let parent_mission_id = parent_str.and_then(|s| Uuid::parse_str(&s).ok());
+                if query.mission_id.is_none()
+                    && ancestor_chain_has_btw_marker(&conn, parent_mission_id, &mut btw_parent_memo)?
+                {
+                    continue;
+                }
                 let status = parse_mission_status(&status_str);
 
                 let mut score = lexical_score.max(0.01);

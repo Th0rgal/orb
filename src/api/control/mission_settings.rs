@@ -335,7 +335,10 @@ async fn resolve_project_edit_tags(
         .project
         .tags
         .iter()
-        .filter(|tag| tag.starts_with(DISK_RESERVATION_TAG_PREFIX))
+        .filter(|tag| {
+            tag.starts_with(DISK_RESERVATION_TAG_PREFIX)
+                || crate::api::mission_horizon::is_reserved_btw_tag(tag)
+        })
         .cloned()
         .collect();
     for reservation in &durable_reservation_tags {

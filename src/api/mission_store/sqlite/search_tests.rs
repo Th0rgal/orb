@@ -1146,3 +1146,143 @@ async fn search_benchmark_12k_conversations_200k_messages() {
         "warm p95 latency {p95:.2} ms exceeded 200 ms target"
     );
 }
+
+#[tokio::test]
+async fn search_excludes_btw_side_sessions_and_descendant_workers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteMissionStore::new(dir.path().to_path_buf(), "alice")
+        .await
+        .unwrap();
+
+    let main = store
+        .create_mission(
+            Some("evm.fast"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .log_event(
+            main.id,
+            &AgentEvent::UserMessage {
+                id: Uuid::new_v4(),
+                content: "BtwSubtreeIsolationBeacon_4242 in main mission".to_string(),
+                queued: false,
+                mission_id: Some(main.id),
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let btw = store
+        .create_mission(
+            Some("evm.fast · btw"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            btw.id,
+            MissionProjectPatch {
+                tags: Some(vec![format!("btw-parent:{}", main.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .log_event(
+            btw.id,
+            &AgentEvent::UserMessage {
+                id: Uuid::new_v4(),
+                content: "BtwSubtreeIsolationBeacon_4242 in side session".to_string(),
+                queued: false,
+                mission_id: Some(btw.id),
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Legacy child worker without `btw-subagent` tag (only `parent_mission_id = btw.id`)
+    // plus grandchild worker under that child.
+    let legacy_worker = store
+        .create_mission_with_parent(
+            Some("Carbon 4 strategy consult"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(btw.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .log_event(
+            legacy_worker.id,
+            &AgentEvent::UserMessage {
+                id: Uuid::new_v4(),
+                content: "BtwSubtreeIsolationBeacon_4242 in legacy /btw worker".to_string(),
+                queued: false,
+                mission_id: Some(legacy_worker.id),
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let grandchild = store
+        .create_mission_with_parent(
+            Some("Nested verifier check"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(legacy_worker.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .log_event(
+            grandchild.id,
+            &AgentEvent::UserMessage {
+                id: Uuid::new_v4(),
+                content: "BtwSubtreeIsolationBeacon_4242 in grandchild worker".to_string(),
+                queued: false,
+                mission_id: Some(grandchild.id),
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let res = store
+        .search_conversations(&ConversationSearchQuery {
+            query: "BtwSubtreeIsolationBeacon_4242".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(res.hits.len(), 1);
+    assert_eq!(res.hits[0].mission_id, main.id);
+}

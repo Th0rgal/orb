@@ -424,3 +424,60 @@ Regression sequences:
    `project = null` worker children: moving the leader transfers every
    co-located version and its launched children together, while moving an
    individual non-leader version leaves sibling versions in place.
+
+## `/btw` side-session subtree isolation
+
+### Root causes (with evidence, 2026-10-30 — `evm.fast · btw` surfaced in `Ethereum`)
+
+On `agent-core` on 2026-10-30 (`01:32Z`–`02:12Z`), asking a `/btw` side question
+on `0c532a32` (`evm.fast`, project `verity-core`, folder `Ethereum`) spawned side
+session `23af9c91` (`evm.fast · btw`, `tags = ["fork-workspace:...", "btw-parent:0c532a32-..."]`),
+which called `consult_model` and created child worker `6b1abe32` (`Carbon 4 strategy consult: init-e finite-K completion`,
+`parent_mission_id = "23af9c91-..."`, `tags = ["consult-model", "origin:mission", ...]`).
+`evm.fast · btw` (`1 >`) then appeared as a top-level mission in the `Ethereum`
+sidebar:
+
+1. **Direct-tag-only `isBtwMission` orphaned `/btw` workers and pulled the `/btw`
+   parent back through `resolveParent`.** `listProjectMissions` and `listMissions`
+   filtered out `23af9c91` (`btw-parent:*`) while keeping `6b1abe32` (no `btw-*`
+   tag). `TreeView` saw `6b1abe32`'s parent `23af9c91` missing, called
+   `resolveParent("23af9c91")`, stored `23af9c91` in `resolvedParents()`, and
+   `ProjectFiles.visibleMissions` (`fetchedParents`) injected `23af9c91` back into
+   `allRows` without checking `isBtwMission`, retaining it (`1 >`) via
+   `missionTreeRows`. On iOS and Android (no `resolveParent`), stripping only
+   `btw-parent:*` promoted `6b1abe32` to a root conversation.
+2. **`SideQuestions` `"Open existing side agent"` called `commitFork`, and
+   `withCurrent` / `search_index` admitted `/btw` missions.** `MissionView.tsx`
+   wired `SideQuestions.onOpenSession` to `p.onFork`, which inserted the `/btw`
+   mission into `App.missions` and `ProjectFiles.missions[slug]` (`orb:mission-forked`)
+   and selected `m:<btw_id>` in the main pane; `withCurrent` prepended `current`
+   without checking `!isBtwMission(current)`; and `search_index.rs` excluded only
+   `superseded` tags, surfacing `/btw` missions and their workers in conversation
+   search.
+
+### Invariant
+
+**B1. `/btw` side sessions and every descendant in their launched subtrees never
+appear in the sidebar, Inbox, Archives, or conversation search.**
+- A mission is in a `/btw` subtree (`isBtwMission` on desktop, `!OrbRow.mobile` /
+  `OrbMissionTree.filterMobile` on iOS, `OrbMissionTree.isBtwMission` /
+  `OrbMissionTree.filterMobile` on Android) iff it carries `btw-parent:*` or
+  `btw-subagent`, or its `parent_mission_id` / `callback_parent_mission_id`
+  ancestor chain (across the current batch or sticky hierarchy links) reaches a
+  `/btw` mission.
+- Core stamps the reserved `btw-subagent` tag on children created under a
+  `btw-parent:*` or `btw-subagent` ancestor, preserves `btw-parent:*` and
+  `btw-subagent` across metadata updates, forbids MCP agents from minting either
+  tag, treats `btw-subagent` as reporting only to its parent, and excludes
+  `btw-parent:*`, `btw-subagent`, and children of `/btw` missions from global
+  conversation search.
+- Desktop `includeAncestors` walks ancestors across projects before filtering so
+  sticky `missionHierarchy` links observe cross-project and paged-out `/btw`
+  roots; `resolveParent` marks `/btw` parents `"gone"` without storing them in
+  `resolvedParents`; and `visibleMissions`, `archiveNodes`, `inboxModel`, and
+  `SearchDialog` exclude all `/btw` subtree missions reactively across
+  `resolverVersion()`.
+- Reconnecting to a running side session in `SideQuestions` attaches the `/btw`
+  panel in place (`reconnectBtwSession`) without calling `commitFork`, and
+  selecting a `btw-parent:<parentId>` mission in `App` redirects to
+  `m:<parentId>` with its `/btw` panel hinted open.
