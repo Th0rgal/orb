@@ -104,24 +104,50 @@ export function filesMovedInto(toProject: string, dir: string): { name: string; 
 }
 
 /**
+ * Show one or more related moves (e.g. a mission and its launched subtree)
+ * now and persist them via a single `save` call. On failure every entry
+ * returns to its old place together, one error toast is shown and the error
+ * is rethrown.
+ */
+export async function moveBatchOptimistically(
+  items: readonly { key: string; move: PendingMove }[],
+  save: () => Promise<unknown>,
+  label = "the conversation",
+): Promise<void> {
+  if (!items.length) {
+    await save();
+    return;
+  }
+  const staged = items.map(({ key, move }) => ({ key, entry: { ...move, acceptedAt: undefined } as PendingMove }));
+  for (const { key, entry } of staged) update(key, entry);
+  try {
+    await save();
+  } catch (error) {
+    for (const { key, entry } of staged) clearIf(key, entry);
+    const primary = items[0]!;
+    log.warn(`move.${primary.move.kind}`, errorText(error), { key: primary.key, to: primary.move.toProject });
+    notify({ kind: "error", key: `move:${primary.key}`, title: `Couldn’t move ${label}`, message: errorText(error) });
+    throw error;
+  }
+  const now = Date.now();
+  const accepted: { key: string; entry: PendingMove }[] = [];
+  for (const { key, entry } of staged) {
+    if (pending().get(key) !== entry) continue;
+    const next = { ...entry, acceptedAt: now };
+    update(key, next);
+    accepted.push({ key, entry: next });
+  }
+  setTimeout(() => {
+    for (const { key, entry } of accepted) clearIf(key, entry);
+  }, MOVE_CONFIRM_MS);
+}
+
+/**
  * Show the move now and send it with `save`. On failure the item returns to
  * its old place, an error toast is shown and the error is rethrown.
  */
 export async function moveOptimistically(key: string, move: PendingMove, save: () => Promise<unknown>, label = "the conversation"): Promise<void> {
-  const entry: PendingMove = { ...move, acceptedAt: undefined };
-  update(key, entry);
-  try {
-    await save();
-  } catch (error) {
-    clearIf(key, entry);
-    log.warn(`move.${move.kind}`, errorText(error), { key, to: move.toProject });
-    notify({ kind: "error", key: `move:${key}`, title: `Couldn’t move ${label}`, message: errorText(error) });
-    throw error;
-  }
-  if (pending().get(key) !== entry) return;
-  const accepted = { ...entry, acceptedAt: Date.now() };
-  update(key, accepted);
-  setTimeout(() => clearIf(key, accepted), MOVE_CONFIRM_MS);
+  await moveBatchOptimistically([{ key, move }], save, label);
 }
 
 /** Show a move that will be sent shortly (a batch shows all its items at once). */

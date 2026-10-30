@@ -1,6 +1,6 @@
 import { batch, createMemo, createSignal } from "solid-js";
 import { visibleTree, type TreeRow } from "../treeModel";
-import type { Node, RowData } from "./TreeView";
+import { missionIdFromTreeId, type Node, type RowData } from "./TreeView";
 
 /** Missions whose deletion is in flight, shared with the rest of the app. */
 const [deletingIds, setDeletingIds] = createSignal<ReadonlySet<string>>(new Set());
@@ -17,15 +17,16 @@ export function isSelectableRow(row: TreeRow<RowData>, deleting: ReadonlySet<str
 
 /**
  * Multi-selection state of the projects sidebar tree. Tree ids are `m:<id>`
- * (missions), `pf:<slug>:<path>` (files/folders) and `pc:<slug>:<id>` (crons).
+ * (missions), `mp:<slug>:<id>` (cross-project placeholder parents),
+ * `pf:<slug>:<path>` (files/folders) and `pc:<slug>:<id>` (crons).
  * `visibleNodes` returns the nodes currently rendered, in order, for range selection.
  */
 export function createTreeSelection(deps: { visibleNodes: () => Node[] }) {
   const [selectedTreeIds, setSelectedTreeIds] = createSignal<string[]>([]);
-  const selectedAgents = createMemo(() => selectedTreeIds().filter(id => id.startsWith("m:")).map(id => id.slice(2)));
+  const selectedAgents = createMemo(() => [...new Set(selectedTreeIds().map(missionIdFromTreeId).filter((id): id is string => !!id))]);
   const setSelectedAgents = (next: string[] | ((prev: string[]) => string[])) => {
     setSelectedTreeIds(prev => {
-      const currentMissions = prev.filter(id => id.startsWith("m:")).map(id => id.slice(2));
+      const currentMissions = [...new Set(prev.map(missionIdFromTreeId).filter((id): id is string => !!id))];
       const updated = typeof next === "function" ? next(currentMissions) : next;
       return updated.map(id => `m:${id}`);
     });
@@ -36,11 +37,15 @@ export function createTreeSelection(deps: { visibleNodes: () => Node[] }) {
   let anchor: string | null = null;
   const selectionAnchor = () => anchor;
   const setSelectionAnchor = (id: string | null) => { anchor = id; };
+  const isDeletingTreeId = (treeId: string, deleting: ReadonlySet<string>) => {
+    const mid = missionIdFromTreeId(treeId);
+    return !!mid && deleting.has(mid);
+  };
   const clickSelectableRow = (e: MouseEvent, treeId: string, onPlainClick: () => void) => batch(() => {
-    if (treeId.startsWith("m:") && deletingIds().has(treeId.slice(2))) return;
+    if (isDeletingTreeId(treeId, deletingIds())) return;
     setSelectionActive(true);
     const deleting = deletingIds();
-    const anchorValid = anchor && (!anchor.startsWith("m:") || !deleting.has(anchor.slice(2)));
+    const anchorValid = anchor && !isDeletingTreeId(anchor, deleting);
     if (e.shiftKey && anchorValid) {
       const visible = visibleTree(deps.visibleNodes())
         .filter(row => isSelectableRow(row, deleting))
@@ -48,7 +53,7 @@ export function createTreeSelection(deps: { visibleNodes: () => Node[] }) {
       const a = visible.indexOf(anchor!), b = visible.indexOf(treeId);
       if (a >= 0 && b >= 0) {
         const range = visible.slice(Math.min(a, b), Math.max(a, b) + 1);
-        const kept = selectedTreeIds().filter(x => !x.startsWith("m:") || !deleting.has(x.slice(2)));
+        const kept = selectedTreeIds().filter(x => !isDeletingTreeId(x, deleting));
         setSelectedTreeIds(e.metaKey || e.ctrlKey ? [...new Set([...kept, ...range])] : range);
         return;
       }
@@ -68,8 +73,8 @@ export function createTreeSelection(deps: { visibleNodes: () => Node[] }) {
   };
   const selectedTreeFor = (treeId: string) => {
     const deleting = deletingIds();
-    const current = selectedTreeIds().filter(x => !x.startsWith("m:") || !deleting.has(x.slice(2)));
-    return current.includes(treeId) ? current : (treeId.startsWith("m:") && deleting.has(treeId.slice(2)) ? [] : [treeId]);
+    const current = selectedTreeIds().filter(x => !isDeletingTreeId(x, deleting));
+    return current.includes(treeId) ? current : (isDeletingTreeId(treeId, deleting) ? [] : [treeId]);
   };
   return {
     selectedTreeIds, setSelectedTreeIds, selectedAgents, setSelectedAgents,

@@ -166,6 +166,15 @@ pub(crate) async fn recover_dispatch(
     store: &Arc<dyn MissionStore>,
     id: Uuid,
 ) -> Result<(), String> {
+    super::mission_settings::recover_subtree_project_edits_for_mission(state, store, id).await?;
+    recover_dispatch_single(state, store, id).await
+}
+
+pub(super) async fn recover_dispatch_single(
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+    id: Uuid,
+) -> Result<(), String> {
     let key = id.to_string();
     let Some(journal) = state.projects.dispatch_admission(&key)? else {
         return Ok(());
@@ -333,13 +342,58 @@ pub(super) async fn finish_project_edit(
     });
     journal["assignment_lifetime"] = serde_json::json!("quiescent-retag-v1");
     state.projects.save_dispatch_admission(&key, &journal)?;
-    recover_dispatch(state, store, id).await
+    recover_dispatch_single(state, store, id).await
+}
+
+async fn find_store_for_recovery(
+    state: &Arc<AppState>,
+    id: Uuid,
+) -> Result<Arc<dyn MissionStore>, String> {
+    if let Some((store, _)) = state.control.find_mission_store_owner(id).await? {
+        return Ok(store);
+    }
+    let inventory = state.control.mission_store_inventory().await?;
+    for path in inventory.offline_sqlite {
+        let store: Arc<dyn MissionStore> = Arc::new(
+            crate::api::mission_store::SqliteMissionStore::open_for_admission_recovery(path)
+                .await?,
+        );
+        if store.get_mission(id).await?.is_some() {
+            return Ok(store);
+        }
+    }
+    for user in inventory.offline_file_users {
+        let store: Arc<dyn MissionStore> = Arc::new(
+            crate::api::mission_store::FileMissionStore::new(inventory.base_dir.clone(), &user)
+                .await?,
+        );
+        if store.get_mission(id).await?.is_some() {
+            return Ok(store);
+        }
+    }
+    Err("admission recovery owner is not available".to_string())
 }
 
 /// Periodic recovery must also reach missions with no HTTP session since
 /// restart. Opening their existing store does not start a runner or grant
 /// authority to a different user; the receipt names the exact mission.
 pub(crate) async fn recover_sweep(state: &Arc<AppState>) -> Result<(), String> {
+    for (root_str, receipt) in state.projects.subtree_project_edits()? {
+        let Ok(root_id) = Uuid::parse_str(&root_str) else {
+            continue;
+        };
+        let recovered = async {
+            let store = find_store_for_recovery(state, root_id).await?;
+            super::mission_settings::recover_subtree_project_edit_entry(
+                state, &store, &root_str, receipt,
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = recovered {
+            tracing::warn!(mission_id = %root_id, %error, "Subtree project transfer recovery remains journaled for retry");
+        }
+    }
     for (attempt, journal) in state.projects.dispatch_admissions()? {
         if journal["phase"] == "pending" {
             continue;
@@ -348,34 +402,8 @@ pub(crate) async fn recover_sweep(state: &Arc<AppState>) -> Result<(), String> {
             continue;
         };
         let recovered = async {
-            if let Some((store, _)) = state.control.find_mission_store_owner(id).await? {
-                return recover_dispatch(state, &store, id).await;
-            }
-            let inventory = state.control.mission_store_inventory().await?;
-            for path in inventory.offline_sqlite {
-                let store: Arc<dyn MissionStore> = Arc::new(
-                    crate::api::mission_store::SqliteMissionStore::open_for_admission_recovery(
-                        path,
-                    )
-                    .await?,
-                );
-                if store.get_mission(id).await?.is_some() {
-                    return recover_dispatch(state, &store, id).await;
-                }
-            }
-            for user in inventory.offline_file_users {
-                let store: Arc<dyn MissionStore> = Arc::new(
-                    crate::api::mission_store::FileMissionStore::new(
-                        inventory.base_dir.clone(),
-                        &user,
-                    )
-                    .await?,
-                );
-                if store.get_mission(id).await?.is_some() {
-                    return recover_dispatch(state, &store, id).await;
-                }
-            }
-            Err("admission recovery owner is not available".to_string())
+            let store = find_store_for_recovery(state, id).await?;
+            recover_dispatch_single(state, &store, id).await
         }
         .await;
         if let Err(error) = recovered {

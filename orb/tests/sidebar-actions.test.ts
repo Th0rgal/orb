@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { missionCopyId, newFilePath, REFERENCE_FILE_EXT } from "../src/ProjectFiles";
-import { copyText } from "../src/clipboard";
+import { copyText, isClipboardReferenceRetired, isUnsyncedClipboard, retireClipboardReference, writeClipboardReference } from "../src/clipboard";
 
 describe("Copy mission ID copies the sandboxed mission id", () => {
   const mission = {
@@ -53,6 +53,23 @@ describe("clipboard failures surface instead of looking like a success", () => {
   it("throws a message when the platform refuses the write", async () => {
     setClipboard({ writeText: async () => { throw new Error("NotAllowedError"); } });
     await expect(copyText("abc")).rejects.toThrow(/refused.*NotAllowedError/i);
+    setClipboard(original);
+  });
+
+  it("tracks unsynced local references and retires superseded references when system writes fail", async () => {
+    setClipboard({ writeText: async () => {} });
+    await writeClipboardReference("orb:file:a");
+    expect(isUnsyncedClipboard("orb:file:a")).toBe(false);
+    expect(isClipboardReferenceRetired("orb:file:a")).toBe(false);
+
+    setClipboard({ writeText: async () => { throw new Error("NotAllowedError"); } });
+    await writeClipboardReference("orb:file:b");
+    expect(isUnsyncedClipboard("orb:file:b")).toBe(true);
+    expect(isClipboardReferenceRetired("orb:file:a")).toBe(true);
+
+    retireClipboardReference("orb:file:b");
+    expect(isUnsyncedClipboard("orb:file:b")).toBe(false);
+    expect(isClipboardReferenceRetired("orb:file:b")).toBe(true);
     setClipboard(original);
   });
 });

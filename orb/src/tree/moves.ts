@@ -1,11 +1,19 @@
 import { createSignal } from "solid-js";
 import { bumpProjects, connectionVersion, getApiUrl, type Mission } from "../api";
-import { cutMission, moveMissions, planMissionMoves, readCutMission } from "../missionMove";
+import {
+  isClipboardReferenceRetired,
+  isUnsyncedClipboard,
+  restoreClipboardReference,
+  retireClipboardReference,
+  writeClipboardReference,
+} from "../clipboard";
+import { makeCutMission, moveMissions, planMissionMoves, readCutMission } from "../missionMove";
 
 /**
- * Cut/paste of conversations between projects and folders in the sidebar.
+ * Cut/paste and drag-move of conversations between projects and folders in the sidebar.
  * A multi-selection move uses `pendingMoves`; a single one goes through the
- * clipboard (`cutMission`) so it also works across windows.
+ * clipboard (`makeCutMission`) so it also works across windows while keeping an
+ * in-memory fallback when WebKit refuses async clipboard writes.
  */
 export function createMissionMoves(deps: {
   allKnownMissions: () => Mission[];
@@ -18,20 +26,41 @@ export function createMissionMoves(deps: {
   loadMissions: (slug: string) => Promise<void>;
   setActionError: (error: string | null) => void;
 }) {
-  const [cutId, setCutId] = createSignal<string | null>(null);
+  const [cutId, setCutIdRaw] = createSignal<string | null>(null);
   const [pendingMoves, setPendingMoves] = createSignal<string[]>([]);
   let moving = false;
   let consumedCut = "";
   let cutClipboard = "";
-  const beginMove = (id: string) => {
-    if (moving) return;
-    const version = connectionVersion();
-    void cutMission(id).then(text => {
-      if (version !== connectionVersion()) return;
-      cutClipboard = text; setCutId(id); deps.setActionError(null);
-    }).catch(e => deps.setActionError(String(e)));
+  const setCutId = (id: string | null) => {
+    if (id === null && cutClipboard) {
+      consumedCut = cutClipboard;
+      retireClipboardReference(cutClipboard);
+      cutClipboard = "";
+    } else if (id !== null && cutClipboard && readCutMission(cutClipboard, getApiUrl()) !== id) {
+      retireClipboardReference(cutClipboard);
+      cutClipboard = "";
+    }
+    setCutIdRaw(id);
   };
-  /** `clipboardText` is what Cmd+V already read; without it the in-app cut is used. */
+  const beginMove = (id: string, clipboardData?: DataTransfer | null) => {
+    if (moving) return;
+    const text = makeCutMission(id);
+    cutClipboard = text; consumedCut = ""; setCutIdRaw(id); deps.setActionError(null);
+    void writeClipboardReference(text, clipboardData);
+  };
+  const moveDirect = (ids: string[], slug: string, path: string) => {
+    if (moving || !ids.length) return;
+    moving = true;
+    const version = connectionVersion();
+    if (ids.some(id => id === cutId() || pendingMoves().includes(id))) {
+      retireClipboardReference(cutClipboard);
+      setPendingMoves([]); setCutIdRaw(null); cutClipboard = "";
+    }
+    deps.setActionError(null);
+    deps.revealDestination(slug, path);
+    void run(ids, slug, path, version, () => {}).finally(() => { moving = false; });
+  };
+  /** `clipboardText` is what Cmd+V / onPaste already read; without it the in-app cut is used. */
   const pasteMission = (slug: string, path: string, clipboardText?: string) => {
     if (moving) return;
     if (pendingMoves().length) {
@@ -39,10 +68,10 @@ export function createMissionMoves(deps: {
       const ids = [...pendingMoves()], version = connectionVersion();
       // No long grayed "cut" state: the rows are at their destination now
       // (moves.ts overlay) and only failures come back.
-      setPendingMoves([]); setCutId(null); deps.setActionError(null);
+      setPendingMoves([]); setCutIdRaw(null); deps.setActionError(null);
       deps.revealDestination(slug, path);
       void run(ids, slug, path, version, failed => {
-        setPendingMoves(failed); setCutId(failed[0] ?? null);
+        setPendingMoves(failed); setCutIdRaw(failed[0] ?? null);
       }).finally(() => { moving = false; });
       return;
     }
@@ -50,14 +79,30 @@ export function createMissionMoves(deps: {
     const version = connectionVersion();
     void (async () => {
       // A second clipboard read in the same gesture is refused by WebKit (NotAllowedError).
-      let clipboard = clipboardText ?? cutClipboard;
-      let missionId = clipboard === consumedCut ? null : readCutMission(clipboard, getApiUrl());
-      if (!missionId && cutClipboard && clipboard !== cutClipboard) { clipboard = cutClipboard; missionId = readCutMission(clipboard, getApiUrl()); }
+      const incoming = clipboardText && !isClipboardReferenceRetired(clipboardText) ? clipboardText : "";
+      const preferLocalCut = !!cutClipboard && cutClipboard !== consumedCut && isUnsyncedClipboard(cutClipboard);
+      if (preferLocalCut && incoming && incoming !== cutClipboard) retireClipboardReference(incoming);
+      let clipboard = preferLocalCut ? cutClipboard : (incoming || cutClipboard);
+      let missionId = !clipboard || clipboard === consumedCut || isClipboardReferenceRetired(clipboard)
+        ? null
+        : readCutMission(clipboard, getApiUrl());
+      if (!missionId && cutClipboard && cutClipboard !== consumedCut && !isClipboardReferenceRetired(cutClipboard) && clipboard !== cutClipboard) {
+        clipboard = cutClipboard;
+        missionId = readCutMission(clipboard, getApiUrl());
+      }
       if (!missionId || version !== connectionVersion()) return;
-      consumedCut = clipboard; cutClipboard = "";
-      setCutId(null); deps.setActionError(null);
+      const wasUnsynced = isUnsyncedClipboard(clipboard);
+      consumedCut = clipboard; cutClipboard = ""; retireClipboardReference(clipboard);
+      setCutIdRaw(null); deps.setActionError(null);
       deps.revealDestination(slug, path);
-      await run([missionId], slug, path, version, failed => { if (failed.length) { cutClipboard = clipboard; consumedCut = ""; setCutId(missionId); } });
+      await run([missionId], slug, path, version, failed => {
+        if (failed.length) {
+          cutClipboard = clipboard;
+          consumedCut = "";
+          restoreClipboardReference(clipboard, wasUnsynced);
+          setCutIdRaw(missionId);
+        }
+      });
     })().catch(e => deps.setActionError(`Couldn’t move conversation: ${String(e)}`)).finally(() => { moving = false; });
   };
   /** Move `ids` (and the missions they launched) in parallel; `done` gets the failed selection ids. */
@@ -69,14 +114,23 @@ export function createMissionMoves(deps: {
     // Load the destination before leaving the source, so no row blinks out.
     await deps.loadMissions(slug);
     if (version !== connectionVersion()) return;
-    for (const step of plan) if (!failedIds.has(step.id)) deps.leaveProjects(step.id, slug);
+    const sourceSlugs = new Set<string>();
+    for (const step of plan) {
+      if (!failedIds.has(step.id)) {
+        deps.leaveProjects(step.id, slug);
+        if (step.from && step.from !== slug) sourceSlugs.add(step.from);
+      }
+    }
+    for (const src of sourceSlugs) void deps.loadMissions(src);
     done(ids.filter(id => failedIds.has(id)));
     // Each failure already returned its row and showed an inline toast
     // (moves.ts); the failed rows stay cut so the user can retry.
     bumpProjects();
   }
   return {
-    cutId, setCutId, pendingMoves, setPendingMoves, beginMove, pasteMission,
-    isMoving: () => moving, hasCutClipboard: () => !!cutClipboard,
+    cutId, setCutId, pendingMoves, setPendingMoves, beginMove, moveDirect, pasteMission,
+    isMoving: () => moving,
+    hasCutClipboard: () => !!cutClipboard && cutClipboard !== consumedCut && !isClipboardReferenceRetired(cutClipboard),
+    hasUnsyncedCutClipboard: () => !!cutClipboard && cutClipboard !== consumedCut && isUnsyncedClipboard(cutClipboard),
   };
 }

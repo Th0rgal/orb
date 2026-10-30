@@ -1454,14 +1454,32 @@ pub(super) async fn control_actor_loop(
                         };
                         match cmd {
                             ControlCommand::UpdateProject { mission_id, user, request, respond } => {
-                                let busy = running_mission_id == Some(mission_id)
-                                    || parallel_runners.contains_key(&mission_id)
-                                    || queue_has_pending_target_mission(&queue, mission_id)
-                                    || queue.iter().any(|entry| entry.3.is_none())
-                                    || background_tasks.read().await.get(&mission_id).is_some_and(|tasks| !tasks.is_empty());
+                                let any_untargeted_queued = queue.iter().any(|entry| entry.3.is_none());
+                                let bg_busy: std::collections::HashSet<Uuid> = background_tasks
+                                    .read()
+                                    .await
+                                    .iter()
+                                    .filter(|(_, tasks)| !tasks.is_empty())
+                                    .map(|(&mid, _)| mid)
+                                    .collect();
+                                let is_actor_busy = |mid: Uuid| -> bool {
+                                    running_mission_id == Some(mid)
+                                        || parallel_runners.contains_key(&mid)
+                                        || queue_has_pending_target_mission(&queue, mid)
+                                        || any_untargeted_queued
+                                        || bg_busy.contains(&mid)
+                                };
                                 let result = if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
                                     match dispatch_admission::durable_lock(&state.config).await {
-                                        Ok(_file_guard) => update_mission_project_locked(busy, State(state), Extension(user), Path(mission_id), Json(request)).await.map(|Json(m)| m),
+                                        Ok(_file_guard) => update_mission_project_subtree_locked(
+                                            &is_actor_busy,
+                                            State(state),
+                                            Extension(user),
+                                            Path(mission_id),
+                                            Json(request),
+                                        )
+                                        .await
+                                        .map(|Json(m)| m),
                                         Err(error) => Err(internal_error(error)),
                                     }
                                 } else {
