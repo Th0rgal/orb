@@ -158,4 +158,50 @@ final class OrbSendFlowTests: XCTestCase {
         XCTAssertFalse(OrbSendFlow.canDrain(awaitingAck: false, draining: true, pending: 1), "one drain at a time keeps order")
         XCTAssertFalse(OrbSendFlow.canDrain(awaitingAck: false, draining: false, pending: 0))
     }
+
+    func testSlotWaitInfoDetectsRemoteAndCoreSlotQueues() {
+        let remoteQueued = OrbJSON.object([
+            "status": .string("running"),
+            "remote_job": .object([
+                "node_id": .string("nippur"),
+                "node_state": .string("queued"),
+                "phase": .string("node_queued"),
+            ]),
+        ])
+        let r = OrbConversation.slotWaitInfo(remoteQueued)
+        XCTAssertEqual(r?.label, "Waiting for a free slot on nippur…")
+        XCTAssertEqual(r?.canForce, true)
+
+        let remoteForced = OrbJSON.object([
+            "status": .string("running"),
+            "remote_job": .object([
+                "node_id": .string("nippur"),
+                "node_state": .string("queued"),
+                "forced": .bool(true),
+            ]),
+        ])
+        XCTAssertEqual(OrbConversation.slotWaitInfo(remoteForced)?.canForce, false)
+
+        let remoteEnded = OrbJSON.object([
+            "status": .string("completed"),
+            "remote_job": .object([
+                "node_id": .string("nippur"),
+                "node_state": .string("queued"),
+                "finished_at": .string("2026-10-31T00:00:00Z"),
+            ]),
+        ])
+        XCTAssertNil(OrbConversation.slotWaitInfo(remoteEnded))
+
+        let coreQueued = OrbJSON.object([
+            "status": .string("pending"),
+            "queue_wait": .object([
+                "reason": .string("waiting_for_slot"),
+                "slots_used": .number(4),
+                "slots_max": .number(4),
+            ]),
+        ])
+        let c = OrbConversation.slotWaitInfo(coreQueued)
+        XCTAssertEqual(c?.label, "Waiting for a free slot (4/4 in use)…")
+        XCTAssertEqual(c?.canForce, true)
+    }
 }

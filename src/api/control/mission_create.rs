@@ -2603,7 +2603,7 @@ pub(in crate::api) async fn create_mission_inner(
             .iter()
             .filter(|tag| {
                 tag.starts_with(DISK_RESERVATION_TAG_PREFIX)
-                    || crate::api::mission_horizon::is_reserved_btw_tag(tag)
+                    || crate::api::mission_horizon::is_reserved_lineage_tag(tag)
             })
             .cloned()
             .collect();

@@ -779,6 +779,15 @@ unsafe extern "C" {
         provider_active: u32,
         provider_max: u32,
     ) -> u32;
+    fn orb_slot_bypass_step(
+        is_operator_force: u8,
+        is_agent_caller: u8,
+        is_waiting_slot: u8,
+        regular_running: u32,
+        regular_max: u32,
+        forced_running: u32,
+        forced_max: u32,
+    ) -> u32;
     fn orb_verify_log_window(
         off: u64,
         req: u64,
@@ -2075,6 +2084,59 @@ pub fn vm_cap_admit(input: VmCapInput) -> bool {
         )
     };
     ((raw >> 8) & 1) != 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotBypassDecision {
+    AdmitRegular,
+    AdmitForcedBypass,
+    RejectCapacity,
+    RejectUnauthorizedCaller,
+    RejectNotWaiting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotBypassInput {
+    pub is_operator_force: bool,
+    pub is_agent_caller: bool,
+    pub is_waiting_slot: bool,
+    pub regular_running: u32,
+    pub regular_max: u32,
+    pub forced_running: u32,
+    pub forced_max: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotBypassVerdict {
+    pub admitted: bool,
+    pub decision: SlotBypassDecision,
+    pub raw: u32,
+}
+
+pub fn slot_bypass_step(input: SlotBypassInput) -> SlotBypassVerdict {
+    let raw = unsafe {
+        orb_slot_bypass_step(
+            u8::from(input.is_operator_force),
+            u8::from(input.is_agent_caller),
+            u8::from(input.is_waiting_slot),
+            input.regular_running,
+            input.regular_max,
+            input.forced_running,
+            input.forced_max,
+        )
+    };
+    let decision = match raw {
+        257 => SlotBypassDecision::AdmitRegular,
+        258 => SlotBypassDecision::AdmitForcedBypass,
+        513 => SlotBypassDecision::RejectUnauthorizedCaller,
+        514 => SlotBypassDecision::RejectNotWaiting,
+        _ => SlotBypassDecision::RejectCapacity,
+    };
+    SlotBypassVerdict {
+        admitted: (raw & 256) != 0,
+        decision,
+        raw,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5957,6 +6019,10 @@ pub mod raw_cabi {
         unsafe { super::orb_vm_cap_admit(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) }
     }
     #[inline]
+    pub fn orb_slot_bypass_step(a0: u8, a1: u8, a2: u8, a3: u32, a4: u32, a5: u32, a6: u32) -> u32 {
+        unsafe { super::orb_slot_bypass_step(a0, a1, a2, a3, a4, a5, a6) }
+    }
+    #[inline]
     pub fn orb_node_gc_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
         unsafe { super::orb_node_gc_step(a0, a1, a2, a3, a4, a5, a6) }
     }
@@ -6835,6 +6901,15 @@ pub mod raw_cabi {
                 args[8] as u32,
                 args[9] as u32,
                 args[10] as u32,
+            ) as u64,
+            "orb_slot_bypass_step" if args.len() == 7 => orb_slot_bypass_step(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u32,
+                args[4] as u32,
+                args[5] as u32,
+                args[6] as u32,
             ) as u64,
             "orb_node_gc_step" if args.len() == 7 => orb_node_gc_step(
                 args[0], args[1], args[2], args[3], args[4], args[5], args[6],
@@ -8474,7 +8549,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 128);
+        assert_eq!(count, 129);
     }
 }
 
@@ -9630,5 +9705,76 @@ mod stateful_tests {
                 "case {case_idx}"
             );
         }
+    }
+
+    #[test]
+    fn slot_bypass_step_enforces_operator_force_bounds_and_regular_independence() {
+        // Operator force bypasses saturated regular slots when the 1 forced slot is free.
+        let forced_ok = slot_bypass_step(SlotBypassInput {
+            is_operator_force: true,
+            is_agent_caller: false,
+            is_waiting_slot: true,
+            regular_running: 6,
+            regular_max: 6,
+            forced_running: 0,
+            forced_max: 1,
+        });
+        assert!(forced_ok.admitted);
+        assert_eq!(forced_ok.decision, SlotBypassDecision::AdmitForcedBypass);
+
+        // Second forced attempt while forced_running == 1 is rejected.
+        let forced_busy = slot_bypass_step(SlotBypassInput {
+            is_operator_force: true,
+            is_agent_caller: false,
+            is_waiting_slot: true,
+            regular_running: 6,
+            regular_max: 6,
+            forced_running: 1,
+            forced_max: 1,
+        });
+        assert!(!forced_busy.admitted);
+        assert_eq!(forced_busy.decision, SlotBypassDecision::RejectCapacity);
+
+        // Autonomous agent callers cannot self-force.
+        let agent_caller = slot_bypass_step(SlotBypassInput {
+            is_operator_force: true,
+            is_agent_caller: true,
+            is_waiting_slot: true,
+            regular_running: 6,
+            regular_max: 6,
+            forced_running: 0,
+            forced_max: 1,
+        });
+        assert!(!agent_caller.admitted);
+        assert_eq!(
+            agent_caller.decision,
+            SlotBypassDecision::RejectUnauthorizedCaller
+        );
+
+        // Non-waiting target is rejected.
+        let not_waiting = slot_bypass_step(SlotBypassInput {
+            is_operator_force: true,
+            is_agent_caller: false,
+            is_waiting_slot: false,
+            regular_running: 2,
+            regular_max: 6,
+            forced_running: 0,
+            forced_max: 1,
+        });
+        assert!(!not_waiting.admitted);
+        assert_eq!(not_waiting.decision, SlotBypassDecision::RejectNotWaiting);
+
+        // Regular worker admission ignores forced_running so forced jobs do not count in limits.
+        let reg_with_forced = slot_bypass_step(SlotBypassInput {
+            is_operator_force: false,
+            is_agent_caller: true,
+            is_waiting_slot: false,
+            regular_running: 5,
+            regular_max: 6,
+            forced_running: 1,
+            forced_max: 1,
+        });
+        assert!(reg_with_forced.admitted);
+        assert_eq!(reg_with_forced.decision, SlotBypassDecision::AdmitRegular);
     }
 }

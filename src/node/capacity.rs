@@ -277,11 +277,12 @@ impl Admission {
     }
 }
 
-/// Both admission pools and live free-disk floor of a node.
+/// Admission pools (`main`, `side`, and 1-slot operator `force`) and live free-disk floor of a node.
 #[derive(Clone)]
 pub struct NodeCapacity {
     pub main: Arc<Admission>,
     pub side: Arc<Admission>,
+    pub force: Arc<Admission>,
     min_free_gb: Arc<AtomicU64>,
     /// Whether this is the process's own node (publishes the live values
     /// read by the per-job memory budget and GC floor).
@@ -300,6 +301,7 @@ impl NodeCapacity {
         Self {
             main,
             side,
+            force: Admission::new(1),
             min_free_gb: Arc::new(AtomicU64::new(current_min_free_gb())),
             publish: false,
         }
@@ -313,6 +315,7 @@ impl NodeCapacity {
         Self {
             main: Admission::new(capacity.max(1) as usize),
             side: Admission::new(side_capacity.max(1)),
+            force: Admission::new(1),
             min_free_gb: Arc::new(AtomicU64::new(min_free_gb)),
             publish: true,
         }

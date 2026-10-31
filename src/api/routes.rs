@@ -1189,6 +1189,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control::start_mission_parallel),
         )
         .route(
+            "/api/control/missions/:id/force-slot",
+            post(control::force_mission_slot),
+        )
+        .route(
             "/api/control/inbox-state",
             get(crate::api::ask::inbox::get_state),
         )
@@ -1922,6 +1926,26 @@ async fn list_remote_nodes(
         .filter(|w| w.spark_offload_enabled())
         .map(|w| w.name)
         .collect();
+    let managed_compute = match state.managed() {
+        Some(manager) => {
+            let budget = manager.budget().await;
+            let boat_enabled = manager.is_boat_enabled();
+            Some(crate::remote_node::ManagedComputeFleetSummary {
+                enabled: manager.is_enabled(),
+                boat_enabled,
+                default_subagent_target: if boat_enabled {
+                    "auto-managed:boat".to_string()
+                } else {
+                    "auto".to_string()
+                },
+                active_machines: budget.active,
+                max_concurrent: manager
+                    .provider_max_concurrent("boat")
+                    .or(budget.max_concurrent),
+            })
+        }
+        None => None,
+    };
     Json(crate::remote_node::RemoteNodesResponse {
         enabled: settings.enabled,
         nodes,
@@ -1931,6 +1955,7 @@ async fn list_remote_nodes(
             enabled_workspaces: spark_workspaces,
         },
         remote_launch: control::remote_launch_capabilities(),
+        managed_compute,
     })
 }
 

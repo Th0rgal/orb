@@ -60,6 +60,8 @@ pub struct DispatchOutcome {
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forced: bool,
 }
 
 /// Pure status transition applied after one heartbeat probe.
@@ -583,6 +585,7 @@ pub fn select_node_auto_with_estimated_disk_and_source(
             .active_jobs
             .saturating_add(heartbeat.queued_jobs)
             .saturating_sub(heartbeat.side_jobs)
+            .saturating_sub(heartbeat.forced_jobs)
             .saturating_add(heartbeat.active_leases)
             .saturating_add(reservations.get(&node.id).copied().unwrap_or(0));
         if load >= heartbeat.capacity_total.saturating_mul(2) {
@@ -817,6 +820,8 @@ pub struct RemoteNodeView {
     pub active_leases: Option<u32>,
     pub active_jobs: Option<u32>,
     pub queued_jobs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forced_jobs: Option<u32>,
     pub cpu_total: Option<u32>,
     pub mem_total_bytes: Option<u64>,
     pub mem_available_bytes: Option<u64>,
@@ -873,6 +878,7 @@ impl RemoteNodeView {
             active_leases: heartbeat.map(|h| h.active_leases),
             active_jobs: heartbeat.map(|h| h.active_jobs),
             queued_jobs: heartbeat.map(|h| h.queued_jobs),
+            forced_jobs: heartbeat.and_then(|h| (h.forced_jobs > 0).then_some(h.forced_jobs)),
             cpu_total: heartbeat.map(|h| h.cpu_total),
             mem_total_bytes: heartbeat.map(|h| h.mem_total_bytes),
             mem_available_bytes: heartbeat.map(|h| h.mem_available_bytes),
@@ -908,6 +914,20 @@ pub struct RemoteNodesResponse {
     /// How `POST /api/control/missions` treats `remote_node_id` on this
     /// backend. Absent on backends that still require a raw `remote_command`.
     pub remote_launch: RemoteLaunchCapabilities,
+    /// On-demand cloud VM lane (`auto-managed:boat`, etc.) so placement callers
+    /// can prefer elastic cloud capacity over saturated static fleet nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_compute: Option<ManagedComputeFleetSummary>,
+}
+
+/// Elastic cloud VM summary surfaced in `GET /api/remote-nodes`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedComputeFleetSummary {
+    pub enabled: bool,
+    pub boat_enabled: bool,
+    pub default_subagent_target: String,
+    pub active_machines: usize,
+    pub max_concurrent: Option<usize>,
 }
 
 /// Typed remote-launch contract (see `docs/REMOTE_NODES.md`).
@@ -1673,6 +1693,7 @@ mod tests {
             error: None,
             started_at: Utc::now(),
             finished_at: None,
+            forced: false,
         };
         fleet.record_outcome(outcome("queued", Some(job_id)));
         fleet.record_outcome(outcome("succeeded", Some(job_id)));
@@ -1795,5 +1816,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(picked, "babylon");
+    }
+
+    #[test]
+    fn forced_jobs_do_not_consume_regular_auto_placement_load() {
+        let nodes = vec![node_config("nippur"), node_config("babylon")];
+        let mut statuses = HashMap::new();
+        // Nippur has capacity=1, active_jobs=1 (which is the single forced_job), queued=0.
+        // Its regular slot is therefore free (load = 0), while Babylon has 1 regular active job.
+        let mut nippur = cached_online("nippur", &["lean"], 100, 32, 1, 1, 0);
+        {
+            let hb = nippur.last_heartbeat.as_mut().unwrap();
+            hb.capacity_available = 1;
+            hb.forced_jobs = 1;
+        }
+        let babylon = cached_online("babylon", &["lean"], 100, 32, 1, 1, 0);
+        statuses.insert("nippur".to_string(), nippur);
+        statuses.insert("babylon".to_string(), babylon);
+
+        let picked =
+            select_node_auto(&nodes, &statuses, &["lean".to_string()], 20 * GIB, 8 * GIB).unwrap();
+        assert_eq!(picked, "nippur");
     }
 }

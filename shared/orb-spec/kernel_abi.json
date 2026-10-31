@@ -3926,6 +3926,41 @@
         }
       ],
       "internal": true
+    },
+    {
+      "name": "orb_slot_bypass_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "isOperatorForce",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isAgentCaller",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isWaitingSlot",
+          "type": "uint8_t"
+        },
+        {
+          "name": "regularRunning",
+          "type": "uint32_t"
+        },
+        {
+          "name": "regularMax",
+          "type": "uint32_t"
+        },
+        {
+          "name": "forcedRunning",
+          "type": "uint32_t"
+        },
+        {
+          "name": "forcedMax",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true
     }
   ]
 }

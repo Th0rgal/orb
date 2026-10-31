@@ -1012,6 +1012,7 @@ pub(super) async fn submit_leased_remote_job(
             error: None,
             started_at,
             finished_at: None,
+            forced: false,
         });
 
     let poll_owner = RemoteMissionOwner::live(control);
@@ -1173,6 +1174,7 @@ pub(super) async fn observe_untracked_remote_job_cancellation(
                         error: status.error.clone(),
                         started_at,
                         finished_at: Some(chrono::Utc::now()),
+                        forced: status.forced,
                     });
                     return;
                 }
@@ -2055,6 +2057,7 @@ pub(super) async fn poll_recovered_remote_build(
                         error: status.error,
                         started_at,
                         finished_at: Some(chrono::Utc::now()),
+                        forced: status.forced,
                     });
                 match crate::remote_node::job_ledger::finalize_with_artifacts(
                     &working_dir,
@@ -2144,7 +2147,11 @@ pub(super) async fn poll_remote_job(
     // mission's next queued follow-up may now be deliverable: wake the
     // remote queue pump instead of waiting for its next 3 s tick.
     let _wake_queue = remote_queue::WakeOnDrop;
-    let outcome = |state: &str, exit_code: Option<i32>, error: Option<String>, terminal: bool| {
+    let outcome = |state: &str,
+                   exit_code: Option<i32>,
+                   error: Option<String>,
+                   terminal: bool,
+                   forced: bool| {
         crate::remote_node::DispatchOutcome {
             mission_id,
             node_id: node.id.clone(),
@@ -2154,11 +2161,13 @@ pub(super) async fn poll_remote_job(
             error,
             started_at,
             finished_at: terminal.then(chrono::Utc::now),
+            forced,
         }
     };
     let mut grok =
         remote_grok::NativeGrokObserver::attach(&owner, &node.id, mission_id, job_id).await;
     let mut last_state = "queued".to_string();
+    let mut last_forced = false;
     let mut failures = 0u32;
     // Once received, terminal proof survives a subsequent observation outage
     // while mission/ledger persistence is retried.
@@ -2289,6 +2298,7 @@ pub(super) async fn poll_remote_job(
                                 None,
                                 Some(REMOTE_NODE_GONE.into()),
                                 true,
+                                last_forced,
                             ));
                             return;
                         }
@@ -2352,11 +2362,13 @@ pub(super) async fn poll_remote_job(
                         None,
                         Some("Node temporarily unreachable; existing job retained".into()),
                         false,
+                        last_forced,
                     ));
                     continue;
                 }
             }
             Ok(mut status) => {
+                last_forced = status.forced;
                 if failures >= MAX_CONSECUTIVE_FAILURES {
                     last_state.clear();
                     fleet.record_outcome(outcome(
@@ -2364,6 +2376,7 @@ pub(super) async fn poll_remote_job(
                         status.exit_code,
                         status.error.clone(),
                         false,
+                        status.forced,
                     ));
                 }
                 failures = 0;
@@ -2403,7 +2416,13 @@ pub(super) async fn poll_remote_job(
                         Some(ledger_dir),
                     )
                     .await;
-                    fleet.record_outcome(outcome("lost", None, status.error.clone(), false));
+                    fleet.record_outcome(outcome(
+                        "lost",
+                        None,
+                        status.error.clone(),
+                        false,
+                        status.forced,
+                    ));
                     continue;
                 }
                 let terminal = crate::remote_node::job_state_confirms_termination(&status.state);
@@ -2419,6 +2438,7 @@ pub(super) async fn poll_remote_job(
                         status.exit_code,
                         status.error.clone(),
                         true,
+                        status.forced,
                     ));
                     crate::remote_node::job_ledger::remove(ledger_dir, job_id).await;
                     return;
@@ -2433,6 +2453,7 @@ pub(super) async fn poll_remote_job(
                         status.exit_code,
                         status.error.clone(),
                         true,
+                        status.forced,
                     ));
                     let success = status.state == "succeeded";
                     let content = format!(
@@ -2742,7 +2763,7 @@ pub(super) async fn poll_remote_job(
                         let _ = owner.mission_store.log_event(mission_id, &event).await;
                         owner.send(event);
                     }
-                    fleet.record_outcome(outcome(&status.state, None, None, false));
+                    fleet.record_outcome(outcome(&status.state, None, None, false, status.forced));
                     last_state = status.state.clone();
                 }
             }

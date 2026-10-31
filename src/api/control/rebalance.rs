@@ -62,7 +62,12 @@ pub(super) fn is_superseded(working_dir: &std::path::Path, job_id: Uuid) -> bool
 }
 
 fn node_load(heartbeat: &crate::remote_node::protocol::NodeHeartbeat) -> u32 {
-    heartbeat.active_jobs + heartbeat.queued_jobs + heartbeat.active_leases
+    heartbeat
+        .active_jobs
+        .saturating_add(heartbeat.queued_jobs)
+        .saturating_sub(heartbeat.side_jobs)
+        .saturating_sub(heartbeat.forced_jobs)
+        .saturating_add(heartbeat.active_leases)
 }
 
 /// The node with a free slot (load below capacity) that satisfies the

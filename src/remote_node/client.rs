@@ -5,8 +5,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::protocol::{
-    CancelJobResponse, ExecuteResponse, JobLogChunk, LeaseRequest, NodeHeartbeat, NodeJobStatus,
-    SubmitJobRequest, SubmitJobResponse,
+    CancelJobResponse, ExecuteResponse, ForceJobRequest, ForceJobResponse, JobLogChunk,
+    LeaseRequest, NodeHeartbeat, NodeJobStatus, SubmitJobRequest, SubmitJobResponse,
 };
 use super::{RemoteNodeConfig, RemoteNodeError};
 
@@ -298,6 +298,38 @@ impl RemoteNodeClient {
             .await
             .map_err(|e| RemoteNodeError::Request(e.to_string()))
     }
+
+    /// Request operator force-start of a queued job (`POST /jobs/:id/force`).
+    pub async fn force_job(
+        &self,
+        node: &RemoteNodeConfig,
+        shared_token: &str,
+        job_id: Uuid,
+        request: &ForceJobRequest,
+    ) -> Result<ForceJobResponse, RemoteNodeError> {
+        let url = format!("{}/jobs/{}/force", node.base_url, job_id);
+        let response = self
+            .http
+            .post(url)
+            .timeout(JOB_STATUS_TIMEOUT)
+            .bearer_auth(shared_token)
+            .json(request)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(RemoteNodeError::Rejected {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        response
+            .json::<ForceJobResponse>()
+            .await
+            .map_err(|e| RemoteNodeError::Request(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +360,7 @@ mod tests {
                 active_jobs: 0,
                 queued_jobs: 0,
                 side_jobs: 0,
+                forced_jobs: 0,
                 cached_toolchains: vec![],
                 source_bundle_capacity: Some(crate::node::lean::source_bundle_capacity()),
                 min_free_disk_bytes: Some(10 << 30),

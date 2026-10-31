@@ -666,7 +666,7 @@ function MissionTasksCard(p: { key: string; tasks: TaskItem[]; ended?: boolean; 
   );
 }
 
-export function Transcript(p: { sizeKey?: string; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; needsPrepareSearch?:()=>boolean; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader }) {
+export function Transcript(p: { sizeKey?: string; backend?: string | null; prepareSearch?:(signal:AbortSignal)=>Promise<void>; needsPrepareSearch?:()=>boolean; renderText?: (item: {key: string; text: string; live?: boolean}, fallback: JSX.Element) => JSX.Element; items: StreamItem[]; pending?: boolean; /** Message id still being handed to the agent (Send now). */ sending?: string; working?: boolean; workingLabel?: string; onForceSlot?: () => void; forceSlotPending?: boolean; /** `messageId`: the stored message being edited, which the new text replaces. */ onSend?: (text: string, messageId?: string) => boolean | Promise<boolean>; onResume?: () => void; onOpenSource?: () => void; loadToolCall?: ToolCallLoader }) {
   // Reconcile by stable keys: existing WorkFold/ToolRow instances and parsed
   // historical Markdown survive token updates and history resynchronization.
   const disclosures=new Map<string,boolean>();
@@ -774,7 +774,7 @@ export function Transcript(p: { sizeKey?: string; backend?: string | null; prepa
           }
         }}
       </For>}</VirtualTurns></DisclosureState.Provider></ToolCallLoaderContext.Provider>
-      <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} label={p.workingLabel} /></Show>
+      <Show when={p.working && !liveTail(p.items)}><WorkingRow items={p.items} label={p.workingLabel} onForceSlot={p.onForceSlot} forceSlotPending={p.forceSlotPending} /></Show>
       <Show when={checklist()?.tasks.length}>
         <MissionTasksCard key={checklist()!.key} tasks={checklist()!.tasks} ended={p.working === false} outcome={turnOutcomeAfter(p.items, checklist()!.key)} />
       </Show>
@@ -865,12 +865,12 @@ export function liveTail(items: StreamItem[]): boolean {
 
 /** The only "working" indicator: a transcript row shaped like "Thinking", shown
  * when no live row is visible, with the elapsed turn time. */
-function WorkingRow(p: { items: StreamItem[]; label?: string }) {
+function WorkingRow(p: { items: StreamItem[]; label?: string; onForceSlot?: () => void; forceSlotPending?: boolean }) {
   const now = useNow(1000);
   const seen = Date.now();
   const started = createMemo(() => turnStartedAt(p.items) ?? seen);
   // The label is the announced status; the ticking time is not read out.
   return <Show when={!["tool", "think"].includes(p.items.at(-1)?.kind ?? "")}><div class="st-think st-working">
-    <div class="st-think-head"><span class="shimmer agent-wait-status" role="status" aria-live="polite">{p.label || "Working"}</span><span class="st-working-time" aria-hidden="true">{formatElapsed(now() - started())}</span></div>
+    <div class="st-think-head"><span class="shimmer agent-wait-status" role="status" aria-live="polite">{p.label || "Working"}</span><Show when={p.onForceSlot}><button type="button" class="force-slot-btn" disabled={p.forceSlotPending} title="Bypass the worker slot queue using the 1-extra operator slot" onClick={() => p.onForceSlot?.()}>{p.forceSlotPending ? "Starting…" : "Run now"}</button></Show><span class="st-working-time" aria-hidden="true">{formatElapsed(now() - started())}</span></div>
   </div></Show>;
 }

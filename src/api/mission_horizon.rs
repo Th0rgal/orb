@@ -252,6 +252,7 @@ pub async fn cancel_superseded_remote_jobs_by_id(
                         error: status.error,
                         started_at: handle.started_at,
                         finished_at: Some(chrono::Utc::now()),
+                        forced: status.forced,
                     });
             }
         } else if !owns_active_lease {
@@ -704,6 +705,18 @@ pub const BTW_SUBAGENT_TAG: &str = "btw-subagent";
 /// True when `tag` is a reserved `/btw` lineage marker (`btw-parent:*` or `btw-subagent`).
 pub fn is_reserved_btw_tag(tag: &str) -> bool {
     tag.starts_with("btw-parent:") || tag == BTW_SUBAGENT_TAG
+}
+
+/// True when `tag` is a Core-minted fork lineage marker (`fork-of:*` or `fork-workspace:*`).
+/// Conversation forks inherit read scope from earlier versions, so MCP callers
+/// must never mint or strip these tags directly.
+pub fn is_reserved_fork_tag(tag: &str) -> bool {
+    tag.starts_with("fork-of:") || tag.starts_with("fork-workspace:")
+}
+
+/// True when `tag` is any Core-reserved lineage marker (`/btw` or `fork-*`).
+pub fn is_reserved_lineage_tag(tag: &str) -> bool {
+    is_reserved_btw_tag(tag) || is_reserved_fork_tag(tag)
 }
 
 /// True when a mission is an interactive `/btw` side-question fork (`btw-parent:<uuid>`).
@@ -1470,6 +1483,7 @@ mod tests {
                                 error: None,
                                 log_tail: None,
                                 artifacts: Vec::new(),
+                                forced: false,
                             })
                         },
                     ),

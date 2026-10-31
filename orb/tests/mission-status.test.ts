@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { isArchivable, isFailedStatus, isLive, isQueued, isReopenable, isRunning, isSettingsIdle, isWorking, missionActivity, queueWaitLabel, statusPresentation } from "../src/missionStatus";
+import { canForceSlot, isArchivable, isFailedStatus, isLive, isQueued, isReopenable, isRunning, isSettingsIdle, isWorking, missionActivity, queueWaitLabel, statusPresentation } from "../src/missionStatus";
 
 const STATUSES = ["active", "running", "starting", "resuming", "pending", "queued", "waiting_background", "awaiting_user", "waiting_user", "acknowledged", "blocked", "paused", "completed", "failed", "not_feasible", "interrupted", "cancelled"] as const;
 // status:   running queued live working archivable reopenable failed settingsIdle label
@@ -43,4 +43,16 @@ it("a pending mission waiting for a Core slot says so instead of a bare Queued",
   expect(queueWaitLabel({ status: "pending" })).toBeNull();
   expect(queueWaitLabel({ status: "active", queue_wait })).toBeNull();
   expect(missionActivity({ status: "pending" })).toEqual({ working: true, reason: "queued" });
+});
+
+it("canForceSlot only offers Run now while waiting on a node slot or Core parallel slot", () => {
+  const queue_wait = { reason: "waiting_for_slot", slots_used: 2, slots_max: 2 };
+  expect(canForceSlot({ status: "pending", queue_wait })).toBe(true);
+  expect(canForceSlot({ status: "active", queue_wait })).toBe(false);
+  expect(canForceSlot({ status: "pending" })).toBe(false);
+
+  expect(canForceSlot({ status: "active", remote_job: { phase: "observed", node_state: "queued", node_id: "nippur" } })).toBe(true);
+  expect(canForceSlot({ status: "active", remote_job: { phase: "observed", node_state: "queued", forced: true, node_id: "nippur" } })).toBe(false);
+  expect(canForceSlot({ status: "active", remote_job: { phase: "observed", node_state: "running", node_id: "nippur" } })).toBe(false);
+  expect(canForceSlot({ status: "active", remote_job: { phase: "finished", node_state: "queued", finished_at: "2026-10-31T00:00:00Z" } })).toBe(false);
 });

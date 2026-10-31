@@ -441,6 +441,10 @@ impl Harness {
             )
             .route("/missions/:id/resume", axum::routing::post(resume_mission))
             .route(
+                "/missions/:id/force-slot",
+                axum::routing::post(force_mission_slot),
+            )
+            .route(
                 "/missions/:id/board/tasks",
                 axum::routing::post(upsert_mission_board_tasks),
             )
@@ -14805,6 +14809,258 @@ async fn pending_mission_behind_a_full_slot_reports_waiting_for_slot_then_runs()
 }
 
 #[tokio::test]
+async fn force_slot_endpoint_bypasses_saturated_core_and_remote_node_slots() {
+    if isolated_track_http_test("force_slot_endpoint_bypasses_saturated_core_and_remote_node_slots")
+    {
+        return;
+    }
+
+    // 1. Remote-node queued mission: `POST /missions/:id/force-slot` mints a `SCOPE_JOB_FORCE`
+    //    lease, calls `POST /jobs/:id/force` on the node, enforces a 1-slot ceiling (`409`),
+    //    and surfaces `forced = true` on `remote_job`.
+    let force_token_env = "SANDBOXED_TEST_FORCE_SLOT_NODE_TOKEN";
+    std::env::set_var(force_token_env, "test-force-slot-secret");
+    let forced_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let forced_active_handler = forced_active.clone();
+    let remote_app = axum::Router::new().route(
+        "/jobs/:id/force",
+        axum::routing::post(
+            move |Path(job_id): Path<Uuid>,
+                  Json(req): Json<crate::remote_node::ForceJobRequest>| {
+                let forced_active = forced_active_handler.clone();
+                async move {
+                    let claims = crate::remote_node::validate_lease_token(
+                        &req.lease_token,
+                        "test-force-slot-secret",
+                        "nippur",
+                        crate::remote_node::SCOPE_JOB_FORCE,
+                        chrono::Utc::now(),
+                    )
+                    .expect("force lease token must carry valid SCOPE_JOB_FORCE");
+                    assert_eq!(claims.mission_id, req.mission_id);
+                    assert_eq!(claims.job_id, Some(job_id));
+                    if forced_active.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({"error": "force-start slot is already in use"})),
+                        );
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "job_id": job_id,
+                            "state": "running",
+                            "forced": true,
+                        })),
+                    )
+                }
+            },
+        ),
+    );
+    let remote_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_addr = remote_listener.local_addr().unwrap();
+    let remote_server = tokio::spawn(async move {
+        let _ = axum::serve(remote_listener, remote_app).await;
+    });
+    let nippur = crate::remote_node::RemoteNodeConfig {
+        id: "nippur".into(),
+        base_url: format!("http://{remote_addr}"),
+        token_env: force_token_env.into(),
+        labels: None,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let h = Harness::with_capacity(
+        FixtureDir {
+            path: dir.path().to_path_buf(),
+            _cleanup: Some(dir),
+        },
+        vec![nippur],
+        true,
+        1,
+    )
+    .await;
+
+    let r1 = active_mission(&h, "remote queued 1").await;
+    let r1_job = Uuid::new_v4();
+    crate::remote_node::job_ledger::record(
+        &h.state.config.working_dir,
+        accepted_mission_handle(r1.id, "nippur", r1_job, chrono::Utc::now()),
+    )
+    .await
+    .unwrap();
+    ensure_remote_job_lease(h.control.mission_store.as_ref(), r1.id, r1_job, "nippur")
+        .await
+        .unwrap();
+    h.state
+        .fleet
+        .record_outcome(crate::remote_node::DispatchOutcome {
+            mission_id: r1.id,
+            node_id: "nippur".into(),
+            job_id: Some(r1_job),
+            state: "queued".into(),
+            exit_code: None,
+            error: None,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            forced: false,
+        });
+
+    let r1_forced = h
+        .state
+        .http_client
+        .post(format!("{}/missions/{}/force-slot", h.url, r1.id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1_forced.status(), StatusCode::OK);
+    let r1_json: Value = r1_forced.json().await.unwrap();
+    assert_eq!(r1_json["remote_job"]["node_state"], "running");
+    assert_eq!(r1_json["remote_job"]["forced"], true);
+
+    let r2 = active_mission(&h, "remote queued 2").await;
+    let r2_job = Uuid::new_v4();
+    crate::remote_node::job_ledger::record(
+        &h.state.config.working_dir,
+        accepted_mission_handle(r2.id, "nippur", r2_job, chrono::Utc::now()),
+    )
+    .await
+    .unwrap();
+    ensure_remote_job_lease(h.control.mission_store.as_ref(), r2.id, r2_job, "nippur")
+        .await
+        .unwrap();
+    let r2_conflict = h
+        .state
+        .http_client
+        .post(format!("{}/missions/{}/force-slot", h.url, r2.id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2_conflict.status(), StatusCode::CONFLICT);
+    remote_server.abort();
+    std::env::remove_var(force_token_env);
+
+    // 2. Core parallel-slot bypass: saturate `max_parallel = 1` with `holder`, queue two local
+    //    `Pending` missions (`queued1`, `queued2`), force-start `queued1` immediately while
+    //    `holder` still runs, verify `queued2` is rejected with `409` while `queued1` occupies
+    //    the single bypass slot, and verify `DispatchCapacity` still counts only `holder`.
+    h.state
+        .backend_registry
+        .write()
+        .await
+        .register(Arc::new(crate::backend::codex::CodexBackend::new()));
+    let holder = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("core slot holder"),
+            None,
+            None,
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+    let holder_dir = install_native_fixture(&h, holder.id, "before").await;
+    assert!(h
+        .request(
+            false,
+            holder.id,
+            json!({"content":"/goal hold regular slot"})
+        )
+        .await
+        .status()
+        .is_success());
+    wait_native_file(&holder_dir.join("started")).await;
+
+    let mut queued_ids = Vec::new();
+    let mut queued_dirs = Vec::new();
+    for title in ["core queued 1", "core queued 2"] {
+        let resp = h
+            .state
+            .http_client
+            .post(format!("{}/missions", h.url))
+            .json(&json!({"title": title, "backend": "codex", "prompt": "/goal hold forced slot"}))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let body: Value = resp.json().await.unwrap();
+        let id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+        let qdir = install_native_fixture(&h, id, "before").await;
+        queued_ids.push(id);
+        queued_dirs.push(qdir);
+    }
+    let (queued1, queued2) = (queued_ids[0], queued_ids[1]);
+    let (queued1_dir, queued2_dir) = (&queued_dirs[0], &queued_dirs[1]);
+
+    // Force-start `queued1` while `holder` still holds the regular slot.
+    let f1 = h
+        .state
+        .http_client
+        .post(format!("{}/missions/{queued1}/force-slot", h.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(f1.status(), StatusCode::OK, "{}", f1.text().await.unwrap());
+    wait_native_file(&queued1_dir.join("started")).await;
+
+    // While `queued1` is running in the 1-extra forced slot, `queued2` cannot also force-start.
+    let f2 = h
+        .state
+        .http_client
+        .post(format!("{}/missions/{queued2}/force-slot", h.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(f2.status(), StatusCode::CONFLICT);
+    assert!(!queued2_dir.join("started").exists());
+
+    // `DispatchCapacity` must still report `slots_used == 1` (`holder` only, excluding `queued1`).
+    let q2_mission: Value = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let m: Value = h
+                .state
+                .http_client
+                .get(format!("{}/missions/{queued2}", h.url))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if m["health_verdict"] == "waiting_for_slot" {
+                return m;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("queued2 should report waiting_for_slot");
+    assert_eq!(q2_mission["queue_wait"]["slots_used"], 1);
+    assert_eq!(q2_mission["queue_wait"]["slots_max"], 1);
+    assert_eq!(
+        q2_mission["queue_wait"]["running_mission_ids"],
+        json!([holder.id])
+    );
+
+    // Release `queued1`, then `holder`, then `queued2`.
+    std::fs::write(queued1_dir.join("release"), "").unwrap();
+    wait_native_status(&h, queued1, MissionStatus::Blocked).await;
+    std::fs::write(holder_dir.join("release"), "").unwrap();
+    wait_native_status(&h, holder.id, MissionStatus::Blocked).await;
+    wait_native_file(&queued2_dir.join("started")).await;
+    std::fs::write(queued2_dir.join("release"), "").unwrap();
+    wait_native_status(&h, queued2, MissionStatus::Blocked).await;
+
+    NATIVE_FIXTURES.lock().unwrap().remove(&holder.id);
+    NATIVE_FIXTURES.lock().unwrap().remove(&queued1);
+    NATIVE_FIXTURES.lock().unwrap().remove(&queued2);
+}
+
+#[tokio::test]
 async fn workspace_purge_archived_fork_still_protects_quarantined_source() {
     let h = Harness::new().await;
     let source = h.writer(MissionStatus::Acknowledged, None).await;
@@ -17386,6 +17642,7 @@ async fn child_placement_handles_client_parent_auth_fallback_and_idempotent_retr
             active_jobs: 0,
             queued_jobs: 0,
             side_jobs: 0,
+            forced_jobs: 0,
             cached_toolchains: Vec::new(),
             lean_runtime_ready: Some(true),
             source_bundle_capacity: None,
@@ -17769,6 +18026,7 @@ async fn bugbot_regressions_pin_boat_provider_exclude_vibe_cleanup_rented_vm_and
             active_jobs: 0,
             queued_jobs: 0,
             side_jobs: 0,
+            forced_jobs: 0,
             cached_toolchains: Vec::new(),
             lean_runtime_ready: Some(true),
             source_bundle_capacity: None,
@@ -17982,6 +18240,7 @@ async fn bugbot_regressions_pin_boat_provider_exclude_vibe_cleanup_rented_vm_and
                             error: None,
                             log_tail: None,
                             artifacts: Vec::new(),
+                            forced: false,
                         })
                     }
                 }
@@ -18003,6 +18262,7 @@ async fn bugbot_regressions_pin_boat_provider_exclude_vibe_cleanup_rented_vm_and
                         error: None,
                         log_tail: None,
                         artifacts: Vec::new(),
+                        forced: false,
                     })
                 },
             ),
@@ -18110,4 +18370,268 @@ async fn bugbot_regressions_pin_boat_provider_exclude_vibe_cleanup_rented_vm_and
     for m in &manager.list(24).await.machines {
         crate::managed::unregister_test_node(m);
     }
+}
+
+#[tokio::test]
+async fn fork_lineage_inherits_read_scope_resolves_zero_padded_prefixes_and_expires_stale_access_requests(
+) {
+    use crate::api::approval_flow::RequesterSubject;
+    use crate::api::mission_store::MissionProjectPatch;
+    use crate::control_mcp::{
+        gateway::{call, Call, Principal},
+        Role,
+    };
+
+    let h = Harness::new().await;
+    let store = &h.control.mission_store;
+    let access = crate::api::mission_access::store(&h.state);
+
+    // Original mission `v1` ("turbo-lean improvements") with child worker `child` and
+    // an approved read grant on external/grandchild mission `reviewed`.
+    let v1 = store
+        .create_mission(
+            Some("turbo-lean improvements"),
+            None,
+            None,
+            None,
+            None,
+            Some("claudecode"),
+            None,
+        )
+        .await
+        .unwrap();
+    let child = store
+        .create_mission_with_parent(
+            Some("launch reviewer"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(v1.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let reviewed = store
+        .create_mission(
+            Some("Review PR #311 @ ef271c0 (astra)"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    let other_target = store
+        .create_mission(
+            Some("Other quorum check"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let v1_grant = access
+        .request(crate::api::mission_access::NewRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: RequesterSubject::mission(v1.id),
+            requester_title: v1.title.clone(),
+            target: reviewed.id,
+            target_title: reviewed.title.clone(),
+            scope: crate::api::mission_access::AccessScope::Read,
+            reason: "verify review verdict".into(),
+            ttl_hours: Some(24),
+        })
+        .await
+        .unwrap();
+    access
+        .approve(&h.user.id, v1_grant.id, Some(24))
+        .await
+        .unwrap();
+
+    // Operator transfers `v1` onto OpenCode (`v2`, tagged `fork-of:<v1.id>`).
+    let v2 = store
+        .create_mission(
+            Some("turbo-lean improvements"),
+            None,
+            None,
+            None,
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            v2.id,
+            MissionProjectPatch {
+                tags: Some(vec![
+                    format!("fork-workspace:{}", v1.id),
+                    format!("fork-of:{}", v1.id),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let v2_principal = Principal {
+        sub: h.user.id.clone(),
+        username: h.user.username.clone(),
+        role: Role::Executor,
+        mission_id: Some(v2.id),
+        project: None,
+        action_run_generation: None,
+        session_id: Uuid::new_v4(),
+        exp: (chrono::Utc::now().timestamp() + 3600) as usize,
+        client_kind: None,
+        client_label: None,
+        host_hint: None,
+    };
+
+    // 1. `v2` can read `v1`, `v1`'s child `child`, and `v1`'s approved grant `reviewed` directly,
+    //    while control tools on `child` / `reviewed` stay denied.
+    for readable in [v1.id, child.id, reviewed.id] {
+        let Json(res) = call(
+            State(h.state.clone()),
+            Extension(v2_principal.clone()),
+            Json(Call {
+                name: "get_mission".into(),
+                arguments: json!({ "mission_id": readable }),
+            }),
+        )
+        .await;
+        assert_eq!(res["ok"], true, "v2 must read {readable}: {res}");
+    }
+    let Json(denied_control) = call(
+        State(h.state.clone()),
+        Extension(v2_principal.clone()),
+        Json(Call {
+            name: "cancel_mission".into(),
+            arguments: json!({ "mission_id": child.id }),
+        }),
+    )
+    .await;
+    assert_eq!(denied_control["ok"], false);
+
+    // 2. Calling `request_mission_access` with a zero-padded 8-char prefix UUID
+    //    (`<8hex>-0000-0000-0000-000000000000`) resolves to the real mission instead of creating
+    //    a phantom `403 You do not own the target mission` item!
+    let other_prefix = &other_target.id.to_string()[..8];
+    let zero_padded = format!("{other_prefix}-0000-0000-0000-000000000000");
+    let req_args = json!({
+        "target_mission_id": zero_padded,
+        "reason": "verify quorum verdict",
+        "ttl_hours": 1
+    });
+    let resolved = crate::api::mission_access::handle_tool(
+        &h.state,
+        &v2_principal,
+        "request_mission_access",
+        &req_args,
+    );
+    // Approve concurrently so `handle_tool` returns immediately without waiting 20s.
+    let state_for_approve = h.state.clone();
+    let owner_id = h.user.id.clone();
+    let expected_target = other_target.id;
+    let approver = tokio::spawn(async move {
+        for _ in 0..50 {
+            let pending = crate::api::mission_access::store(&state_for_approve)
+                .pending_items(&owner_id)
+                .await;
+            if let Some(item) = pending.first() {
+                return crate::api::mission_access::store(&state_for_approve)
+                    .approve(&owner_id, item.id, Some(1))
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("pending request was not created");
+    });
+    let out = resolved.await.unwrap();
+    let approved_req = approver.await.unwrap();
+    assert_eq!(approved_req.target_mission_id, expected_target);
+    assert_eq!(out["target_mission_id"], json!(expected_target));
+    assert_eq!(out["status"], "approved");
+
+    // 3. Unknown non-existent UUIDs are rejected immediately (never persisted as unapprovable cards).
+    let missing_uuid = Uuid::new_v4();
+    let err = crate::api::mission_access::handle_tool(
+        &h.state,
+        &v2_principal,
+        "request_mission_access",
+        &json!({
+            "target_mission_id": missing_uuid,
+            "reason": "probe nonexistent"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("was not found"), "{err}");
+
+    // 4. Legacy pending requests on disk whose target mission does not exist OR whose
+    //    requesting mission has been archived (`Acknowledged`) auto-expire when listing
+    //    `approval_queue::pending` so they never 403 `approve-all`.
+    let phantom_req = access
+        .request(crate::api::mission_access::NewRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: RequesterSubject::mission(v2.id),
+            requester_title: v2.title.clone(),
+            target: Uuid::new_v4(),
+            target_title: None,
+            scope: crate::api::mission_access::AccessScope::Read,
+            reason: "legacy phantom row".into(),
+            ttl_hours: Some(24),
+        })
+        .await
+        .unwrap();
+    let stale_archived_req = access
+        .request(crate::api::mission_access::NewRequest {
+            owner: h.user.id.clone(),
+            owner_username: h.user.username.clone(),
+            requester: RequesterSubject::mission(v1.id),
+            requester_title: v1.title.clone(),
+            target: other_target.id,
+            target_title: other_target.title.clone(),
+            scope: crate::api::mission_access::AccessScope::Read,
+            reason: "opened by superseded session before archive".into(),
+            ttl_hours: Some(24),
+        })
+        .await
+        .unwrap();
+    store
+        .update_mission_status(v1.id, MissionStatus::Acknowledged)
+        .await
+        .unwrap();
+
+    let queue_items = crate::api::approval_queue::pending(&h.state, &h.user.id).await;
+    assert!(
+        queue_items.is_empty(),
+        "phantom target and archived-requester items must be pruned: {queue_items:?}"
+    );
+    assert_eq!(
+        access.get(&h.user.id, phantom_req.id).await.unwrap().state,
+        crate::api::approval_flow::ApprovalState::Expired
+    );
+    assert_eq!(
+        access
+            .get(&h.user.id, stale_archived_req.id)
+            .await
+            .unwrap()
+            .state,
+        crate::api::approval_flow::ApprovalState::Expired
+    );
 }

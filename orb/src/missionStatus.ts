@@ -152,7 +152,7 @@ export function handoffPending(status: Status, handoff: Handoff | null | undefin
 export type ActivityReason = "running" | "queued" | "starting" | "stopping" | "handoff" | "idle" | "failed" | "needs_you";
 export type MissionActivity = { working: boolean; reason: ActivityReason; label?: string };
 
-type ActivityJob = { phase?: string | null; node_state?: string | null; node_id?: string | null; lease_state?: string | null; terminal_reason?: string | null; finished_at?: string | null; exit_code?: number | null } | null | undefined;
+type ActivityJob = { phase?: string | null; node_state?: string | null; forced?: boolean; node_id?: string | null; lease_state?: string | null; terminal_reason?: string | null; finished_at?: string | null; exit_code?: number | null } | null | undefined;
 type ActivityQueueWait = { reason?: string; slots_used?: number; slots_max?: number } | null | undefined;
 type ActivityMission = { id?: string; status?: string | null; remote_node_id?: string | null; remote_job?: ActivityJob; queue_wait?: ActivityQueueWait; execution?: { state?: string | null } | null } | null | undefined;
 type ActivityItem = { kind: string; queued?: boolean };
@@ -162,6 +162,14 @@ export function queueWaitLabel(mission: { status?: string | null; queue_wait?: A
   const wait = mission?.queue_wait;
   if (!isQueued(mission?.status) || wait?.reason !== "waiting_for_slot") return null;
   return wait.slots_max ? `Waiting for a free slot (${wait.slots_used ?? wait.slots_max}/${wait.slots_max} in use)` : "Waiting for a free slot";
+}
+
+/** True when a mission is waiting on either a remote node worker slot or a Core parallel slot and can be force-started via the 1-extra operator bypass slot. */
+export function canForceSlot(mission: ActivityMission): boolean {
+  if (!mission) return false;
+  const job = mission.remote_job;
+  if (job && !remoteJobEnded(job) && job.node_state === "queued" && !job.forced) return true;
+  return queueWaitLabel(mission) !== null;
 }
 
 const TERMINAL_LEASES = new Set(["released", "expired", "lost", "terminal", "terminated", "finished", "failed", "cancelled", "canceled"]);
