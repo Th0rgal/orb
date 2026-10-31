@@ -367,9 +367,10 @@ def call_core_verify(payload: dict) -> dict:
 
 
 def handle_update_harness(req: dict) -> dict:
-    name = str(req.get("name", ""))
+    raw_name = str(req.get("name", ""))
+    name = "vibe" if raw_name == "vibe-acp" else raw_name
     version = str(req.get("version", ""))
-    if name not in {"claude", "codex", "opencode", "grok"} or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+    if name not in {"claude", "codex", "opencode", "grok", "vibe"} or not re.fullmatch(r"\d+\.\d+\.\d+", version):
         return {"ok": False, "exit_code": 2, "stderr": "Invalid harness name or semantic version"}
     helper = "/usr/local/sbin/orb-update-harness"
     if not Path(helper).is_file():

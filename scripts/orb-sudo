@@ -46,7 +46,7 @@ def main() -> int:
 
     if argv[0] == "--update-harness":
         if len(argv) != 3:
-            sys.stderr.write("Usage: orb-sudo --update-harness {claude|codex|opencode|grok} VERSION\n")
+            sys.stderr.write("Usage: orb-sudo --update-harness {claude|codex|opencode|grok|vibe} VERSION\n")
             return 2
         resp = send_request({"action": "update_harness", "name": argv[1], "version": argv[2]})
         if resp.get("stdout"):

@@ -5,6 +5,8 @@ test('software inventory is subtle, expandable and queues updates without a page
  const section=page.getByRole('region',{name:'Agent software'});
  const toggle=section.getByRole('button',{name:/Agent software/});
  await expect(toggle).toHaveAttribute('aria-expanded','false');
+ await expect(toggle).toContainText('1 restart needed');
+ await expect(toggle).toContainText('1 missing');
  await expect(toggle).toContainText('2 updates');
  await toggle.click();
  await expect(section.getByText('Restart required')).toBeVisible();

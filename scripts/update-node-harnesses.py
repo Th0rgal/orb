@@ -24,8 +24,16 @@ import time
 import urllib.request
 
 ROOT = Path('/opt/sandboxed-tools')
-ORIGINS = ('https://registry.npmjs.org/', 'https://api.github.com/repos/anomalyco/opencode/',
-           'https://github.com/anomalyco/opencode/releases/download/', 'https://x.ai/cli/')
+HARNESS_TOOLS_ROOT = Path('/opt/sandboxed-harnesses')
+DEFAULT_VIBE_VERSION = '2.19.1'
+ORIGINS = (
+    'https://registry.npmjs.org/',
+    'https://api.github.com/repos/anomalyco/opencode/',
+    'https://github.com/anomalyco/opencode/releases/download/',
+    'https://api.github.com/repos/astral-sh/uv/',
+    'https://github.com/astral-sh/uv/releases/download/',
+    'https://x.ai/cli/',
+)
 
 
 def fetch(url):
@@ -68,9 +76,20 @@ def extract_member(blob, name, destination):
     destination.chmod(0o755)
 
 
+def user_exists(user):
+    if not user:
+        return False
+    try:
+        import pwd
+        pwd.getpwnam(user)
+        return True
+    except (ImportError, KeyError):
+        return False
+
+
 def run_probe(binary, args, user=None):
     command = [str(binary), *args]
-    if user:
+    if user and user_exists(user):
         command = ['runuser', '-u', user, '--', *command]
     result = subprocess.run(command, capture_output=True, text=True, timeout=30,
                             env={**os.environ, 'DISABLE_AUTOUPDATER': '1', 'NO_COLOR': '1'})
@@ -87,6 +106,7 @@ def probe(binary, name, version, user):
         'opencode': (['run', '--help'], ['--format', '--model', '--session']),
         'claude': (['--help'], ['--output-format', '--resume', '--print']),
         'grok': (['--help'], ['--output-format', '--resume']),
+        'vibe': (['--help'], ['ACP']),
     }[name]
     help_text = run_probe(binary, args, user)
     if not all(flag in help_text for flag in required):
@@ -97,6 +117,8 @@ def probe(binary, name, version, user):
 def resolve(name, pins):
     if name in pins:
         return stable(pins[name])
+    if name == 'vibe':
+        return DEFAULT_VIBE_VERSION
     if name == 'opencode':
         return stable(metadata('https://api.github.com/repos/anomalyco/opencode/releases/latest')['tag_name'].removeprefix('v'))
     if name == 'grok':
@@ -105,7 +127,71 @@ def resolve(name, pins):
     return stable(metadata(f'https://registry.npmjs.org/{package}/latest')['version'])
 
 
+def ensure_uv():
+    uv_link = Path('/usr/local/bin/uv')
+    if uv_link.is_file():
+        probe_out = subprocess.run([str(uv_link), '--version'], capture_output=True, text=True, timeout=15)
+        if probe_out.returncode == 0:
+            return uv_link
+    native_arch = {'x86_64': 'x86_64', 'aarch64': 'aarch64'}[platform.machine()]
+    release = metadata('https://api.github.com/repos/astral-sh/uv/releases/latest')
+    uv_version = stable(release['tag_name'].removeprefix('v'))
+    archive_stem = f'uv-{native_arch}-unknown-linux-gnu'
+    asset = next(a for a in release['assets'] if a['name'] == f'{archive_stem}.tar.gz')
+    blob = fetch(asset['browser_download_url'])
+    if asset.get('digest') != 'sha256:' + hashlib.sha256(blob).hexdigest():
+        raise ValueError('uv GitHub release digest mismatch')
+    uv_root = ROOT / 'uv'
+    uv_root.mkdir(parents=True, exist_ok=True)
+    destination = uv_root / uv_version
+    binary = destination / 'uv'
+    if not binary.exists():
+        with tempfile.TemporaryDirectory(prefix='.stage-', dir=uv_root) as temporary:
+            stage = Path(temporary)
+            stage.chmod(0o755)
+            candidate = stage / 'uv'
+            extract_member(blob, f'{archive_stem}/uv', candidate)
+            run_probe(candidate, ['--version'])
+            stage.rename(destination)
+    temp_link = uv_link.with_name('.uv.next')
+    temp_link.unlink(missing_ok=True)
+    temp_link.symlink_to(binary)
+    temp_link.replace(uv_link)
+    return uv_link
+
+
+def reconcile_vibe(version, user):
+    if shutil.disk_usage(ROOT).free < 2 * 1024**3:
+        raise ValueError('Need 2 GiB free for safe staging')
+    uv = ensure_uv()
+    old_umask = os.umask(0o022)
+    try:
+        tools_dir = HARNESS_TOOLS_ROOT / 'tools'
+        python_dir = HARNESS_TOOLS_ROOT / 'python'
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        python_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [str(uv), 'tool', 'install', '--force', '--python', '3.12', f'mistral-vibe=={version}'],
+            check=True,
+            timeout=300,
+            env={
+                **os.environ,
+                'HOME': '/root',
+                'UV_TOOL_DIR': str(tools_dir),
+                'UV_TOOL_BIN_DIR': '/usr/local/bin',
+                'UV_PYTHON_INSTALL_DIR': str(python_dir),
+            },
+        )
+    finally:
+        os.umask(old_umask)
+    link = Path('/usr/local/bin/vibe-acp')
+    observed = probe(link, 'vibe', version, user)
+    return {'version': version, 'observed': observed, 'path': str(link)}
+
+
 def reconcile(name, version, user):
+    if name == 'vibe':
+        return reconcile_vibe(version, user)
     if name == 'codex':
         subprocess.run(['/usr/bin/python3', '/usr/local/sbin/update-node-codex'],
                        env={**os.environ, 'CODEX_NODE_VERSION': version}, check=True, timeout=300)
@@ -229,7 +315,7 @@ def update_agy():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--only', choices=['opencode', 'claude', 'codex', 'grok', 'agy'])
+    parser.add_argument('--only', choices=['opencode', 'claude', 'codex', 'grok', 'vibe', 'agy'])
     parser.add_argument('--probe-user', default='sandboxed-node')
     parser.add_argument('--version', type=stable, help='Exact stable version; requires --only')
     args = parser.parse_args()
@@ -243,7 +329,7 @@ def main():
     with (ROOT / '.harness-update.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         results = {}
-        for name in ([args.only] if args.only else ['opencode', 'claude', 'codex', 'grok', 'agy']):
+        for name in ([args.only] if args.only else ['opencode', 'claude', 'codex', 'grok', 'vibe', 'agy']):
             try:
                 if name == 'agy':
                     results[name] = {'ok': True, **update_agy()}

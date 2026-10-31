@@ -18,7 +18,7 @@
 
 mod command;
 mod groups;
-mod harness;
+pub(crate) mod harness;
 mod io;
 mod lifecycle;
 mod orphans;

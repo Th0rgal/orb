@@ -5,7 +5,7 @@ import { api, getRemoteNodes, connectionVersion, isConnected } from "./api";
 import { historyScope } from "./resourceCache";
 import { pathOverrides } from "./localAgents";
 export type SoftwareLaunch={session:string;harness:string;version:string|null;runner:string;started_at:number;pid:number};
-export type SoftwareComponent={id:string;name:string;version:string|null;path:string|null;installed:boolean;owner:string;update_supported:boolean;latest:string|null;release_error:string|null;running:SoftwareLaunch[];instructions:string};
+export type SoftwareComponent={id:string;name:string;version:string|null;path:string|null;installed:boolean;owner:string;update_supported:boolean;latest:string|null;release_error:string|null;running:SoftwareLaunch[];instructions:string;ready?:boolean|null;ready_detail?:string|null};
 export type SoftwareJob={id:string;component:string;version:string;path:string;state:string;error:string|null;created_at:number;updated_at:number};
 export type SoftwareInventory={checked_at:number;components:SoftwareComponent[];runtime:{name:string;version:string;build:string;path:string|null;restart_required:boolean;running?:SoftwareLaunch[]};jobs:SoftwareJob[]};
 export type SoftwareMachine={id:string;name:string;online:boolean;inventory?:SoftwareInventory;error?:string};
@@ -54,15 +54,36 @@ export function refreshSoftware(force=false):Promise<void>{
  })().finally(()=>{if(epoch===generation){flight=undefined;setRefreshing(false);}});
  return flight;
 }
+export function matchesSoftwareJob(job:SoftwareJob,row:SoftwareComponent){
+ return job.component===row.id&&(!row.path||job.path===row.path);
+}
+export function canInstallSoftware(row:SoftwareComponent){
+ return !row.installed&&row.update_supported&&!!row.latest;
+}
+export function canUpdateSoftware(row:SoftwareComponent){
+ return row.installed&&row.update_supported&&!!row.path&&newer(row.latest,row.version);
+}
+export function softwareAttentionSummary(list:SoftwareMachine[]){
+ const restarts=list.filter(m=>m.inventory?.runtime.restart_required).length;
+ const missing=list.reduce((n,m)=>n+(m.inventory?.components.filter(r=>!r.installed).length??0),0);
+ const unready=list.reduce((n,m)=>n+(m.inventory?.components.filter(r=>r.installed&&r.ready===false).length??0),0);
+ const updates=list.reduce((n,m)=>n+(m.inventory?.components.filter(r=>r.installed&&newer(r.latest,r.version)).length??0),0);
+ return [
+  restarts?`${restarts} restart${restarts===1?'':'s'} needed`:'',
+  missing?`${missing} missing`:'',
+  unready?`${unready} setup needed`:'',
+  updates?`${updates} update${updates===1?'':'s'}`:'',
+ ].filter(Boolean).join(' · ');
+}
 export async function updateSoftware(machine:string,row:SoftwareComponent,refresh=true){
- if(!row.latest||!row.path||!row.update_supported)throw new Error('This installation is managed externally');
- const body={component:row.id,version:row.latest,path:row.path};
+ if(!row.latest||!row.update_supported||(!row.path&&row.installed))throw new Error('This installation is managed externally');
+ const body={component:row.id,version:row.latest,path:row.path??''};
  if(machine==='local')await native()!('software_update',body);
  else await api(`/api/software/updates${machine==='core'?'':`?node=${encodeURIComponent(machine)}`}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  if(refresh){if(flight)await flight;await refreshSoftware();}
 }
 export function availableSoftwareUpdates(){
- return machines().filter(m=>m.online&&!m.error&&m.inventory).flatMap(machine=>machine.inventory!.components.filter(row=>row.update_supported&&row.path&&newer(row.latest,row.version)&&!machine.inventory!.jobs.some(j=>j.component===row.id&&j.path===row.path&&["queued","installing"].includes(j.state))).map(row=>({machine,row})));
+ return machines().filter(m=>m.online&&!m.error&&m.inventory).flatMap(machine=>machine.inventory!.components.filter(row=>(canUpdateSoftware(row)||canInstallSoftware(row))&&!machine.inventory!.jobs.some(j=>matchesSoftwareJob(j,row)&&["queued","installing"].includes(j.state))).map(row=>({machine,row})));
 }
 export async function updateAllSoftware(){
  const pending=availableSoftwareUpdates(),connection=connectionVersion();
