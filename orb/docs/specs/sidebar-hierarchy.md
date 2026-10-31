@@ -229,12 +229,30 @@ missions, live or recently interrupted, still show.
 ## iOS and Android
 
 Both apps nest by the same fields (`OrbRow.parentMissionID`,
-`OrbMissionTree.parentId`). H2 is implemented there: `OrbHierarchy` (Swift)
-and `OrbMissionTree.knownParents` (Kotlin) remember links, and `reparent` /
-reset change them. H1 and H3 placeholders and M1 reconciliation are not yet
-implemented on mobile. Mobile lists are refetched wholesale, and an orphan is
-drawn at the root as before. Porting `reconcileMissionList` and the
-placeholder is the follow-up.
+`OrbMissionTree.parentId`), remember sticky parent links, `/btw` markers, and
+seen display facts across payloads (`OrbHierarchy` in Swift, `OrbMissionTree` in
+Kotlin), and implement M2 + ancestor resolution + H1/H3 placeholders +
+superseded subtree hiding in lockstep with desktop:
+
+- **Project listing (`OrbCore.missions(_:includeArchived:)` on iOS,
+  `OrbCore.projectMissions` on Android):** fetches the recent history page
+  (`all=true&limit=100`, or full paged history when `includeArchived` is
+  requested) in parallel with unarchived/open rows (`limit=200`, paged up to
+  `offset < 1000`), merges `openBeyondPage` (M2: live open rows always; stopped
+  open rows within 7 days; children only when live or their parent is already
+  listed), and resolves paged-out ancestors up to depth 8 via `withAncestors`
+  (`GET /api/control/missions/:id`, cached for 60s, keeping last-known rows on
+  transient network errors and treating only HTTP 404 as confirmed gone).
+  Same-project ancestors sit immediately before their newest descendant;
+  cross-project `/btw` ancestors are observed so their worker subtrees stay
+  hidden; non-`/btw` cross-project parents stay in their own project and hold
+  their children here under a placeholder row (`placeholderParent`).
+- **Placeholders and superseded subtrees (`OrbMissionTree.nest(..., placeholder:)`,
+  `OrbMissionTree.isSupersededInTree`):** an orphan child whose parent has not
+  answered 404 is held under a stand-in parent row (`orb_placeholder`) rather
+  than promoted to the project root, and non-live superseded missions (and
+  descendants of superseded ancestors) are excluded from the unarchived project
+  list just like desktop `visibleMissions`.
 
 ## Tests
 
@@ -254,7 +272,9 @@ placeholder is the follow-up.
   recent or live): no stale row is drawn, while live and recent roots are.
 - Core: `callback_parent::tests::attach_adds_a_derived_parent_and_keeps_an_existing_one`.
 - Mobile: `OrbContractTests.testParentLinkIsStickyAcrossPayloadsThatOmitIt`,
-  `OrbMissionTreeTest.parentLinkIsStickyAcrossPayloadsThatOmitIt`.
+  `OrbContractTests.testOpenBeyondPageWithAncestorsPlaceholdersAndSupersededParity`,
+  `OrbMissionTreeTest.parentLinkIsStickyAcrossPayloadsThatOmitIt`,
+  `OrbMissionTreeTest.openBeyondPageWithAncestorsPlaceholdersAndSupersededParity`.
 
 ## Cut/paste and cross-project transfer ownership
 

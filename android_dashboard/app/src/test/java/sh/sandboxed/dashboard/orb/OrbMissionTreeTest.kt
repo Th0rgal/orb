@@ -1,6 +1,8 @@
 package sh.sandboxed.dashboard.orb
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -48,8 +50,13 @@ class OrbMissionTreeTest {
         val tree = OrbMissionTree.nest(listOf(
             m("a", "parent_mission_id" to "b"),
             m("b", "parent_mission_id" to "a"),
+            m("self", "parent_mission_id" to "self"),
         ))
-        assertEquals(0, tree.size) // both have a listed parent, so neither is a root
+        fun all(nodes: List<OrbNestedMission>): List<String> =
+            nodes.flatMap { listOf(it.id) + all(it.children) }
+        // Matches desktop `orb/tests/mission-tree.test.ts` & iOS: a link that would close a loop stays at the top so no mission vanishes.
+        assertEquals(listOf("a", "b", "self"), all(tree).sorted())
+        assertTrue("self" in tree.map { it.id })
     }
 
     @Test
@@ -162,6 +169,92 @@ class OrbMissionTreeTest {
         // Sticky memory: if a subsequent partial payload omits parent_mission_id and tags, worker stays excluded.
         val partialWorker = m("6b1abe32", "title" to "Carbon 4 strategy consult")
         assertTrue(OrbMissionTree.isBtwMission(partialWorker))
+        OrbMissionTree.resetHierarchy()
+    }
+
+    @Test
+    fun openBeyondPageWithAncestorsPlaceholdersAndSupersededParity() = runBlocking {
+        OrbMissionTree.resetHierarchy()
+        val nowMs = 1_793_451_600_000L // 2026-10-31T13:00:00Z
+
+        // 1. M2 (`openBeyondPage`): live roots/children always kept; stopped roots kept < 7d; stale or unlisted-parent stopped children dropped.
+        val page0 = listOf(
+            m("listed-root", "title" to "Recent root", "status" to "completed", "updated_at" to "2026-10-31T12:55:00Z")
+        )
+        val openPool = listOf(
+            m("9409f9a9", "title" to "evm.fast (claude takeover)", "status" to "active", "updated_at" to "2026-09-25T10:00:00Z"),
+            m("recent-stopped", "title" to "Recent interrupted", "status" to "interrupted", "updated_at" to "2026-10-29T12:00:00Z"),
+            m("stale-stopped", "title" to "Old interrupted", "status" to "interrupted", "updated_at" to "2026-10-01T12:00:00Z"),
+            m("stale-child-unlisted", "title" to "Orphan interrupted worker", "status" to "interrupted", "parent_mission_id" to "completed-off-page", "updated_at" to "2026-10-30T12:00:00Z"),
+            m("recent-child-listed", "title" to "Stopped worker of live root", "status" to "interrupted", "parent_mission_id" to "9409f9a9", "updated_at" to "2026-10-30T12:00:00Z"),
+            m("live-child-unlisted", "title" to "Live worker of paged-out completed root", "status" to "waiting_background", "parent_mission_id" to "completed-off-page", "updated_at" to "2026-10-10T12:00:00Z"),
+            m("btw-live", "title" to "evm.fast · btw", "status" to "active", "tags" to listOf("btw-parent:9409f9a9"), "updated_at" to "2026-10-31T12:59:00Z"),
+        )
+        val beyond = OrbMissionTree.openBeyondPage(page0, openPool, nowMs = nowMs)
+        assertEquals(
+            listOf("9409f9a9", "recent-stopped", "recent-child-listed", "live-child-unlisted"),
+            beyond.map { it.id }
+        )
+
+        // 2. Multi-hop `withAncestors` + cross-project placeholder + cross-project `/btw` exclusion (Assistant incident replay).
+        OrbMissionTree.resetHierarchy()
+        val initialRows = listOf(
+            m("gc-312-a", "title" to "Re-review PR #312 @1445a50 (P0-4)", "status" to "active", "project" to "assistant", "parent_mission_id" to "6ce45940", "updated_at" to "2026-10-31T12:58:00Z"),
+            m("gc-312-b", "title" to "Re-review PR #312 @1445a50 (P0-4)", "status" to "active", "project" to "assistant", "parent_mission_id" to "75a05dbd", "updated_at" to "2026-10-31T12:57:00Z"),
+            m("w-pr303", "title" to "PR #303 r2: drop worktree", "status" to "active", "project" to "assistant", "parent_mission_id" to "4c6242f6", "updated_at" to "2026-10-31T12:56:00Z"),
+            m("cross-kid", "title" to "GuestInv spec review r5", "status" to "active", "project" to "assistant", "parent_mission_id" to "9409f9a9", "updated_at" to "2026-10-31T12:55:00Z"),
+            m("btw-kid", "title" to "Unstamped /btw worker", "status" to "active", "project" to "assistant", "parent_mission_id" to "paged-btw", "updated_at" to "2026-10-31T12:54:00Z"),
+        )
+        val remoteAncestors = mapOf(
+            "6ce45940" to m("6ce45940", "title" to "turbo-lean WS3", "status" to "completed", "project" to "assistant", "parent_mission_id" to "9f559751", "updated_at" to "2026-10-31T10:00:00Z"),
+            "75a05dbd" to m("75a05dbd", "title" to "turbo-lean WS2", "status" to "completed", "project" to "assistant", "parent_mission_id" to "9f559751", "updated_at" to "2026-10-31T09:50:00Z"),
+            "9f559751" to m("9f559751", "title" to "turbo-lean improvements", "status" to "completed", "project" to "assistant", "updated_at" to "2026-10-31T12:42:00Z"),
+            "4c6242f6" to m("4c6242f6", "title" to "improve turbo-lean for clifv", "status" to "completed", "project" to "assistant", "updated_at" to "2026-10-31T08:00:00Z"),
+            "9409f9a9" to m("9409f9a9", "title" to "evm.fast (claude takeover)", "status" to "active", "backend" to "claudecode", "project" to "verity-core", "updated_at" to "2026-10-30T08:00:00Z"),
+            "paged-btw" to m("paged-btw", "title" to "evm.fast · btw", "status" to "active", "project" to "verity-core", "tags" to listOf("btw-parent:9409f9a9"), "updated_at" to "2026-10-31T12:50:00Z"),
+        )
+        val ownIds = initialRows.map { it.id }.toSet()
+        val withAnc = OrbMissionTree.withAncestors(initialRows) { id -> remoteAncestors[id] }
+        val scoped = withAnc.filter { it.id in ownIds || it.str("project") == "assistant" }
+        val mobile = OrbMissionTree.filterMobile(scoped)
+        assertFalse(mobile.any { it.id == "btw-kid" })
+        val nested = OrbMissionTree.nest(mobile, placeholder = OrbMissionTree.placeholderParent("assistant"))
+        assertEquals(listOf("9f559751", "4c6242f6", "9409f9a9"), nested.map { it.id })
+        assertEquals(4, nested[0].childCount)
+        assertEquals(2, nested[0].runningChildCount)
+        assertEquals(listOf("6ce45940", "75a05dbd"), nested[0].children.map { it.id })
+        assertEquals(listOf("gc-312-a"), nested[0].children[0].children.map { it.id })
+        assertEquals(listOf("w-pr303"), nested[1].children.map { it.id })
+        // Cross-project parent `9409f9a9` is rendered as a placeholder carrying seen title/backend/status/project.
+        assertTrue(OrbMissionTree.isPlaceholder(nested[2].mission))
+        assertEquals("evm.fast (claude takeover)", OrbInboxModel.missionHeadline(nested[2].mission))
+        assertEquals("claudecode", nested[2].mission.str("backend"))
+        assertEquals("active", nested[2].mission.str("status"))
+        assertEquals("verity-core", nested[2].mission.str("project"))
+        assertEquals(listOf("cross-kid"), nested[2].children.map { it.id })
+
+        // 3. Transiently unfetched parent uses "Parent mission" placeholder; confirmed 404 (`markGone`) lets child stand at root.
+        val transientOrphan = m("orphan-transient", "title" to "Worker waiting on slow parent", "status" to "active", "parent_mission_id" to "parent-slow")
+        val held = OrbMissionTree.nest(listOf(transientOrphan), placeholder = OrbMissionTree.placeholderParent("assistant"))
+        assertEquals(listOf("parent-slow"), held.map { it.id })
+        assertTrue(OrbMissionTree.isPlaceholder(held[0].mission))
+        assertEquals("Parent mission", OrbInboxModel.missionHeadline(held[0].mission))
+        assertEquals(listOf("orphan-transient"), held[0].children.map { it.id })
+
+        OrbMissionTree.markGone("parent-404")
+        val confirmedOrphan = m("orphan-404", "title" to "Worker whose parent was deleted", "status" to "active", "parent_mission_id" to "parent-404")
+        val released = OrbMissionTree.nest(listOf(confirmedOrphan), placeholder = OrbMissionTree.placeholderParent("assistant"))
+        assertEquals(listOf("orphan-404"), released.map { it.id })
+        assertFalse(OrbMissionTree.isPlaceholder(released[0].mission))
+
+        // 4. `isSupersededInTree`: hides non-live superseded missions and descendants, never live missions.
+        val supParent = m("sup-p", "status" to "completed", "tags" to listOf("superseded_by:new-p"))
+        val supChild = m("sup-c", "status" to "completed", "parent_mission_id" to "sup-p")
+        val liveSup = m("sup-live", "status" to "active", "tags" to listOf("superseded"))
+        val supMap = listOf(supParent, supChild, liveSup).associateBy { it.id }
+        assertTrue(OrbMissionTree.isSupersededInTree(supParent, supMap))
+        assertTrue(OrbMissionTree.isSupersededInTree(supChild, supMap))
+        assertFalse(OrbMissionTree.isSupersededInTree(liveSup, supMap))
         OrbMissionTree.resetHierarchy()
     }
 }
