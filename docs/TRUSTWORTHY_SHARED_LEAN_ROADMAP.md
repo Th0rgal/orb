@@ -1,25 +1,51 @@
 # Orb Trustworthy Shared-Lean Roadmap & Phase DAG
 
-## Current acceptance status (Codex handoff, 2026-10-28)
+## Current acceptance status (2026-10-31)
 
 **P0–P7 remain unaccepted.** The phase DAG and exit gates below are requirements,
-not receipts that they have executed. P0 is in progress; P1 has a compiler-side
-harness PR but full Orb/LeanSys conformance remains open; P2–P7 remain open.
-Compiler and Orb repairs are tracked in draft PRs turbo-lean #264 and Orb #1396.
-Bounded source-and-receipt reviews of turbo `8108785` and Orb `5d961353`
-found no new confirmed repair regression; both remained overall BLOCKED.
-Fresh exact-head reviews are required for subsequent changes. Turbo has no GitHub
-check rollup; Orb kernel-abi passed, while draft Rust jobs were skipped.
-No phase acceptance, merge or production deployment follows from those checks.
+not receipts that they have executed. P0 merged (#1396) and P2 (#1398), P4–P6
+(#1420), P7 (#1439) and External MCP Sessions (#1419) also merged; each retained
+honest open-work statements rather than claiming full acceptance.
 
-The coverage registry remains incomplete: 107 entries are unconnected and 21
+**P1/P3 local evidence now exists.** turbo-lean Stage 1D #280 merged at
+`e585ba96f58cb06414ce5e3216f3ffc0ce235300` after exact-head green CI and a
+clean Codex review. At Orb `3c70e5ada` / Turbo `e585ba9` / LeanSys
+`c089f3e3`, the six-engine kernel conformance passed all 128 public exports
+(1044 cases, 5220 comparisons, zero mismatches) and the P3 qualification
+executed real x86_64, real dgx-spark ARM64, Node WASM MVP/SIMD128/shipped
+module, and Linux-loaded Android x86_64 JNI paths with zero mismatches:
+[results and receipt hashes](P1_SHARED_KERNEL_CONFORMANCE.md),
+[P3 report](P3_TARGET_QUALIFICATION_REPORT.md).
+
+That local evidence is not phase acceptance: **23 partial / 106 unconnected**
+coverage entries remain; physical iPhone 13 mini and Pixel 8 stay
+`BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is `BLOCKED_HOST_UNREACHABLE`,
+iOS/macOS/Android-ARM64 remain cross-compilation-only, and per-case receipts are
+unsigned local consistency records, not attestations. Production artifact
+switching and end-to-end caller wiring remain future work. Independent
+exact-head reviews remain required for subsequent changes.
+
+## Historical handoff status (Codex, 2026-10-28)
+
+The 2026-10-28 handoff recorded P0 in progress, P1 harness-only, and P2–P7
+open, with bounded reviews of turbo `8108785` and Orb `5d961353` finding no new
+confirmed repair regression while both remained overall BLOCKED. Those statements
+were accurate then and are preserved below as history; they do not describe the
+current local-evidence state above.
+
+Compiler and Orb repairs were tracked in draft PRs turbo-lean #264 and Orb #1396.
+Turbo has no GitHub check rollup; Orb kernel-abi passed, while draft Rust jobs
+were skipped. No phase acceptance, merge or production deployment followed from
+those checks.
+
+The coverage registry remains incomplete: 106 entries are unconnected and 23
 have explicit partial evidence in `shared/orb-spec/coverage_evidence.json`.
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.
-Its 128 manifest entries are 94 `orb_*` exports (`Orb.Kernel.*`), 33 `leansys_*`
+Its 129 manifest entries are 95 `orb_*` exports (`Orb.Kernel.*`), 33 `leansys_*`
 exports (`LeanSys.Spec.*`, verified against pinned `lean-sys` by `gen_orb_kernel_unboxed.py`),
 and the compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg` (`model: null`).
-The 127 public exports cover all public Orb/LeanSys exports; the helper
+The 128 public exports cover all public Orb/LeanSys exports; the helper
 remains inventoried separately rather than being counted as an extra public gate.
 Shadow observations now count missing host HOME poststates as unobserved,
 never as ExactMatch; remote execution observation remains open. The stale-snapshot repair also includes newly stored supersession in the

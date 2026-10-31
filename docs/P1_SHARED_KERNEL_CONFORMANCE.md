@@ -1,7 +1,7 @@
 # Shared-kernel conformance: implementation and limits
 
 `scripts/run_shared_kernel_conformance.py` executes every public symbol in
-`shared/orb-spec/kernel_abi.json`: 94 Orb exports and 33 LeanSys exports. The
+`shared/orb-spec/kernel_abi.json`: 95 Orb exports and 33 LeanSys exports. The
 inventoried compiler helper is excluded from the public surface. The complete
 [P0–P7 roadmap](TRUSTWORTHY_SHARED_LEAN_ROADMAP.md) and acceptance gates still apply.
 No phase is accepted by this harness.
@@ -33,7 +33,8 @@ of command logs bind the supplied local receipts; dynamic libraries, operating
 system, compiler correctness and hardware execution remain assumptions.
 
 For each export the corpus includes six boundary vectors (0, 1, 2, 3, maximum,
-maximum minus one) and two reproducibly seeded random vectors: 1016 cases total.
+maximum minus one) and two reproducibly seeded random vectors: 1024 base cases.
+Lean-witnessed domain mutation vectors extend the current run to 1044 cases.
 This small scalar corpus is not exhaustive fuzzing. Stock Lean executes wrappers
 calling the actual exported Lean definitions. Those wrappers also compile via
 stock `lean -c` and `leanc`. Native C is compiled from the vendored artifact;
@@ -144,3 +145,37 @@ partial mismatch and forces FAIL. SystemExit/KeyboardInterrupt remain outside
 that catch. Early tool-resolution failures can leave only commands.json rather
 than a normal report; such setup failures establish no engine qualification and
 must retain their original evidence directory rather than retrying over it.
+
+## Exact-head qualification, 2026-10-31
+
+Fresh execution at Orb `3c70e5ada278a4e37e0180255f360aa2ff5fe86c`,
+Turbo `e585ba96f58cb06414ce5e3216f3ffc0ce235300` (merged Stage 1D #280),
+and LeanSys `c089f3e31dbd36f2bde2219913d5b9c90da670be` exited **0 / PASS**.
+All three input checkouts were clean. Later documentation commits are not new
+execution heads and do not retroactively change these receipts.
+
+All six engines executed 1044 cases over 128 public exports: 5220 comparisons,
+zero observed mismatches. Rust production wrappers passed 1044 rows; shipped
+x86_64 JNI passed 524 rows over 64 JNI exports; 19 projection fixture cases passed.
+The loop/alias/RC corpus passed 42 cases across stock Lean, extracted C, LNIR and
+optimized LNIR, with seven probes, zero live objects and passing symbolic TV.
+All seven mutation families killed three domain mutants each: **21 distinct
+domain mutants**, each executed in native and WASM (42 kills), plus two scalar
+shim executions, giving **44 killed mutation executions**, not 44 distinct mutants.
+The conformance harness unit suite passed 21 tests.
+
+Evidence directory: `/srv/sandboxed-storage/host-tmp/opencode/p1-final-e585ba9-20261031`.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| `report.json` | `88acaae9c5c7add56e9258ef51c83925f35a446d9d9ca8a4b807f55df0d8ad70` |
+| `provenance.json` | `8f1a3af1c0f7040561953d630d59e10774bc7770242be4197c0f4066dff51016` |
+| `commands.json` | `e93caaf14b6b1f43c3465ea1177949419df5a7cc6f3b2ad49922a9041f03c907` |
+| `case-receipts.jsonl` | `c34b6a17857a35845ad8d6ec3c925fac7e8afb252dd216f0cc88cef19dd16939` |
+
+These are local unsigned receipts, not durable public artifact hosting or proof
+of complete host wiring. The current registry remains **23 partial / 106
+unconnected** across 129 manifest entries. Physical iPhone/Pixel execution remains
+blocked. See [P3 target qualification](P3_TARGET_QUALIFICATION_REPORT.md) for the
+separate execution-versus-cross-compilation scope. Earlier incomplete runs above
+remain historical evidence; they are not relabeled by this successful run.
