@@ -151,7 +151,9 @@ extension OrbConversation {
                     working: true,
                     headline: workModel.liveHeadline(fallback: baseStepLabel()),
                     elapsed: elapsedClock(at: context.date),
-                    accessibilityStatus: progress(at: context.date)
+                    accessibilityStatus: progress(at: context.date),
+                    onForceSlot: canForceSlot ? { Task { await forceSlot() } } : nil,
+                    forceSlotPending: forcingSlot
                 )
             }
         } else if !workModel.isEmpty {

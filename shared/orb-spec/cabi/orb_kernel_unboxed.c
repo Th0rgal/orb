@@ -13349,6 +13349,71 @@ goto v___jp_5793_;
 }
 }
 
+LEAN_EXPORT uint32_t orb_slot_bypass_step(uint8_t v_isOperatorForce_5842_, uint8_t v_isAgentCaller_5843_, uint8_t v_isWaitingSlot_5844_, uint32_t v_regularRunning_5845_, uint32_t v_regularMax_5846_, uint32_t v_forcedRunning_5847_, uint32_t v_forcedMax_5848_){
+_start:
+{
+uint8_t v___x_5849_; uint8_t v___x_5850_;
+v___x_5849_ = 1;
+v___x_5850_ = lean_uint8_dec_eq(v_isOperatorForce_5842_, v___x_5849_);
+if (v___x_5850_ == 0)
+{
+uint8_t v___x_5851_;
+v___x_5851_ = lean_uint32_dec_lt(v_regularRunning_5845_, v_regularMax_5846_);
+if (v___x_5851_ == 0)
+{
+uint32_t v___x_5852_;
+v___x_5852_ = 512;
+return v___x_5852_;
+}
+else
+{
+uint32_t v___x_5853_;
+v___x_5853_ = 257;
+return v___x_5853_;
+}
+}
+else
+{
+uint8_t v___x_5854_;
+v___x_5854_ = lean_uint8_dec_eq(v_isAgentCaller_5843_, v___x_5849_);
+if (v___x_5854_ == 0)
+{
+uint8_t v___x_5855_;
+v___x_5855_ = lean_uint8_dec_eq(v_isWaitingSlot_5844_, v___x_5849_);
+if (v___x_5855_ == 0)
+{
+uint32_t v___x_5856_;
+v___x_5856_ = 514;
+return v___x_5856_;
+}
+else
+{
+uint8_t v___x_5857_;
+v___x_5857_ = lean_uint32_dec_lt(v_forcedRunning_5847_, v_forcedMax_5848_);
+if (v___x_5857_ == 0)
+{
+uint32_t v___x_5858_;
+v___x_5858_ = 512;
+return v___x_5858_;
+}
+else
+{
+uint32_t v___x_5859_;
+v___x_5859_ = 258;
+return v___x_5859_;
+}
+}
+}
+else
+{
+uint32_t v___x_5860_;
+v___x_5860_ = 513;
+return v___x_5860_;
+}
+}
+}
+}
+
 LEAN_EXPORT uint8_t leansys_verify_slice_bounds(uint64_t v_off_143_, uint64_t v_len_144_, uint64_t v_cap_145_){
 _start:
 {

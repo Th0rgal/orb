@@ -343,6 +343,20 @@ leases are rejected, and vice versa).
   (`[{path, sha256, size_bytes}]`).
 - `POST /jobs/:id/cancel` — SIGTERMs the job's process group (SIGKILL after
   10s); returns the current state and whether a live job got the request.
+- `POST /jobs/:id/force` — user-authorized slot bypass (`SCOPE_JOB_FORCE`
+  HMAC lease bound to `mission_id` + `job_id`, minted by Core's authenticated
+  `POST /api/control/missions/:id/force-slot` endpoint). Admits up to **1**
+  extra user-forced job per node (`forced_capacity = 1`, gated by the formal
+  Lean 4 decision function `orb_slot_bypass_step`) immediately without waiting
+  for or consuming a regular `SANDBOXED_NODE_CAPACITY` permit. Returns `200`
+  with `{job_id, state: "running", forced: true}` (or the job's current state
+  if it already started normally), `404` when the job does not exist, and `409`
+  when the node's single force-bypass slot is already in use (`forced_jobs` on
+  `/heartbeat`). Forced jobs do not count against regular slot admission or
+  auto-placement load (`active_jobs` excludes `forced_jobs` on `select_node_auto`).
+  Core applies the same `orb_slot_bypass_step` gate to Core-hosted parallel
+  mission slots (`queue_wait.reason == "waiting_for_slot"`, `forced_slot` on
+  `MissionRunner`) and never exposes `force-slot` to autonomous MCP tools.
 - `GET /jobs?limit=N` — recent jobs, newest first (default 20, no log tails).
 
 Async mission dispatch from core:

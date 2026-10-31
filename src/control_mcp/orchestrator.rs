@@ -614,12 +614,12 @@ impl OrchestratorMcp {
             },
             ToolDefinition {
                 name: "create_worker_mission".to_string(),
-                description: "LEGACY — prefer plan_tasks, which schedules, retries, and notifies automatically. Create a new worker mission (child of the current boss mission). The worker will start executing immediately and inherits the parent's actual machine and working directory by default (including Orb local sessions). Pass working_directory to use a prepared folder or Git worktree. No Git repository is required and none is created automatically. Use a stable idempotency_key for retries. IMPORTANT: You must set the 'backend' field to match the harness you want (claudecode, codex, antigravity, grok, opencode, vibe). If omitted, inherits the parent harness.".to_string(),
+                description: "LEGACY — prefer plan_tasks, which schedules, retries, and notifies automatically. Create a new worker mission (child of the current boss mission). By default (when remote_node_id and workspace_id are omitted), the worker runs on an elastic Boat cloud VM (auto-managed:boat, falling back to auto across least-loaded static nodes when Boat is disabled); pass remote_node_id=\"same\" ONLY when the worker must share or fork uncommitted files on the parent's exact machine. Pass working_directory to use a prepared folder or Git worktree. No Git repository is required and none is created automatically. Use a stable idempotency_key for retries. IMPORTANT: You must set the 'backend' field to match the harness you want (claudecode, codex, antigravity, grok, opencode, vibe). If omitted, inherits the parent harness.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "required": ["title", "prompt"],
                     "properties": {
-                        "remote_node_id": { "type": "string", "description": "Explicitly run on another node. Omit to inherit the parent machine." },
+                        "remote_node_id": { "type": "string", "description": "Omit to run on Boat cloud VMs (auto-managed:boat, or auto fallback); pass \"same\" only to co-locate on the parent machine, or pass \"auto-managed:<size>\" for a larger cloud VM. Avoid pinning busy static nodes." },
                         "placement": { "type": "string", "enum": ["core"], "description": "Explicitly run on Core instead of the parent machine." },
                         "idempotency_key": { "type": "string", "description": "Stable dispatch key; reuse it when retrying the same task." },
                         "title": {

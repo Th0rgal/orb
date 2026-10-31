@@ -5,12 +5,14 @@ use axum::{
     Json, Router,
 };
 use sandboxed_sh::node::{
-    read_log_tail, JobRecord, JobRunner, JobStore, NodeQueueFull, DEFAULT_MAX_JOB_SECS,
+    read_log_tail, ForceJobError, JobRecord, JobRunner, JobStore, NodeQueueFull,
+    DEFAULT_MAX_JOB_SECS,
 };
 use sandboxed_sh::remote_node::{
     bearer_token, node_token_matches, parse_labels, run_lease_command, validate_lease_token,
-    CancelJobResponse, ExecuteResponse, LeaseClaims, LeaseRequest, NodeHeartbeat, NodeJobStatus,
-    RemoteNodeError, SubmitJobRequest, SubmitJobResponse, NODE_PROTOCOL_VERSION, SCOPE_JOB_SUBMIT,
+    CancelJobResponse, ExecuteResponse, ForceJobRequest, ForceJobResponse, LeaseClaims,
+    LeaseRequest, NodeHeartbeat, NodeJobStatus, RemoteNodeError, SubmitJobRequest,
+    SubmitJobResponse, NODE_PROTOCOL_VERSION, SCOPE_JOB_FORCE, SCOPE_JOB_SUBMIT,
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -228,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/jobs/:id/files", post(job_files))
         .route("/jobs/:id/log", get(get_job_log))
         .route("/jobs/:id/cancel", post(cancel_job))
+        .route("/jobs/:id/force", post(force_job))
         .with_state(state);
 
     info!("starting sandboxed-node on {bind}");
@@ -426,6 +429,7 @@ async fn heartbeat(
         active_jobs: state.runner.active_count(),
         queued_jobs: state.runner.queued_count(),
         side_jobs: state.runner.side_job_count(),
+        forced_jobs: state.runner.forced_job_count(),
         cached_toolchains: sandboxed_sh::node::cached_toolchains(&state.work_root),
         source_bundle_capacity: Some(sandboxed_sh::node::lean::source_bundle_capacity()),
         min_free_disk_bytes: Some(state.runner.capacity().min_free_bytes()),
@@ -517,7 +521,11 @@ async fn execute(
     }
 }
 
-fn job_status_from_record(record: &JobRecord, log_tail: Option<String>) -> NodeJobStatus {
+fn job_status_from_record(
+    record: &JobRecord,
+    log_tail: Option<String>,
+    forced: bool,
+) -> NodeJobStatus {
     NodeJobStatus {
         cancellation: record.cancellation.clone(),
         job_id: record.id,
@@ -534,6 +542,7 @@ fn job_status_from_record(record: &JobRecord, log_tail: Option<String>) -> NodeJ
             .as_deref()
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default(),
+        forced,
     }
 }
 
@@ -671,7 +680,8 @@ async fn get_job(
         Some(path) => read_log_tail(Path::new(path)).await,
         None => None,
     };
-    Ok(Json(job_status_from_record(&record, log_tail)))
+    let forced = state.runner.is_forced_job(record.id);
+    Ok(Json(job_status_from_record(&record, log_tail, forced)))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -754,6 +764,62 @@ async fn cancel_job(
     }))
 }
 
+/// `POST /jobs/:id/force` — operator force-start for a queued job using the
+/// 1-slot bypass permit (`job:force` lease scope).
+async fn force_job(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<Uuid>,
+    Json(request): Json<ForceJobRequest>,
+) -> Result<Json<ForceJobResponse>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let (claims, _) = validate_lease_any(&state, &request.lease_token, SCOPE_JOB_FORCE)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    if claims.mission_id != request.mission_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "lease is scoped to a different mission".to_string(),
+        ));
+    }
+    if claims.job_id != Some(id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "lease is scoped to a different job".to_string(),
+        ));
+    }
+    let record = state
+        .jobs
+        .get(id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("job {id} not found")))?;
+    if record.mission_id != request.mission_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "job belongs to a different mission".to_string(),
+        ));
+    }
+    match state.runner.force_start(id).await {
+        Ok(outcome) => Ok(Json(ForceJobResponse {
+            job_id: id,
+            state: outcome.state.to_string(),
+            forced: outcome.forced,
+        })),
+        Err(ForceJobError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, format!("job {id} not found")))
+        }
+        Err(ForceJobError::NotQueued(current)) => Err((
+            StatusCode::CONFLICT,
+            format!("job {id} is {current}, not queued"),
+        )),
+        Err(ForceJobError::ForceSlotBusy) => Err((
+            StatusCode::CONFLICT,
+            "Force-start slot is already in use on this node".to_string(),
+        )),
+        Err(ForceJobError::Internal(err)) => Err(internal_error(err)),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ListJobsQuery {
     limit: Option<usize>,
@@ -771,7 +837,9 @@ async fn list_jobs(
     Ok(Json(
         records
             .iter()
-            .map(|record| job_status_from_record(record, None))
+            .map(|record| {
+                job_status_from_record(record, None, state.runner.is_forced_job(record.id))
+            })
             .collect(),
     ))
 }

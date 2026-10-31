@@ -323,6 +323,29 @@ impl Drop for BackgroundGuard {
     }
 }
 
+type ForceWakeSender = tokio::sync::oneshot::Sender<(
+    super::capacity::AdmissionPermit,
+    tokio::sync::oneshot::Sender<bool>,
+)>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForceJobOutcome {
+    pub state: &'static str,
+    pub forced: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ForceJobError {
+    #[error("job {0} not found")]
+    NotFound(Uuid),
+    #[error("job is {0}, not queued")]
+    NotQueued(String),
+    #[error("force-start slot is already in use on this node")]
+    ForceSlotBusy,
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
 struct QueuedJob {
     id: Uuid,
     mission_id: Uuid,
@@ -352,6 +375,8 @@ pub struct JobRunner {
     max_queued_override: Option<u32>,
     cancels: Mutex<HashMap<Uuid, CancellationToken>>,
     side_jobs: Mutex<HashSet<Uuid>>,
+    forced_jobs: Mutex<HashSet<Uuid>>,
+    force_waiters: Mutex<HashMap<Uuid, ForceWakeSender>>,
     /// Queued or running ordinary jobs per workspace mission. A companion
     /// turn is eligible only while its workspace has an entry here.
     background: Mutex<HashMap<Uuid, u32>>,
@@ -432,6 +457,8 @@ impl JobRunner {
             max_queued_override,
             cancels: Mutex::new(HashMap::new()),
             side_jobs: Mutex::new(HashSet::new()),
+            forced_jobs: Mutex::new(HashSet::new()),
+            force_waiters: Mutex::new(HashMap::new()),
             background: Mutex::new(HashMap::new()),
             queued: AtomicU32::new(0),
             active: AtomicU32::new(0),
@@ -458,39 +485,101 @@ impl JobRunner {
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
                 let runner = Arc::clone(&dispatcher);
-                let (admission, background) = match &job.payload {
+                let (admission, background, allow_force) = match &job.payload {
                     JobPayload::RawCommand {
                         side_question: true,
                         ..
-                    } => (Arc::clone(&side_admission), None),
+                    } => (Arc::clone(&side_admission), None, false),
                     JobPayload::RawCommand {
                         companion_of: Some(workspace),
                         ..
                     } if runner.has_background(*workspace) => {
-                        (Arc::clone(&companion_admission), None)
+                        (Arc::clone(&companion_admission), None, false)
                     }
                     JobPayload::RawCommand {
                         companion_of: Some(_),
                         ..
-                    } => (Arc::clone(&admission), None),
+                    } => (Arc::clone(&admission), None, true),
                     _ => (
                         Arc::clone(&admission),
                         Some(BackgroundGuard::new(&runner, job.mission_id)),
+                        true,
                     ),
+                };
+                let force_rx = if allow_force {
+                    let (force_tx, force_rx) = tokio::sync::oneshot::channel();
+                    dispatcher
+                        .force_waiters
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(job.id, force_tx);
+                    Some(force_rx)
+                } else {
+                    None
                 };
                 tokio::spawn(async move {
                     let _background = background;
-                    let permit = match admission.acquire_owned().await {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            runner.queued.fetch_sub(1, Ordering::AcqRel);
-                            runner.drop_cancel_token(job.id);
-                            return;
+                    let (permit, forced_ack) = if let Some(force_rx) = force_rx {
+                        tokio::select! {
+                            biased;
+                            forced = force_rx => match forced {
+                                Ok((permit, ack_tx)) => (permit, Some(ack_tx)),
+                                Err(_) => match admission.acquire_owned().await {
+                                    Ok(permit) => (permit, None),
+                                    Err(_) => {
+                                        runner.queued.fetch_sub(1, Ordering::AcqRel);
+                                        runner.drop_cancel_token(job.id);
+                                        return;
+                                    }
+                                },
+                            },
+                            acquired = admission.acquire_owned() => {
+                                runner
+                                    .force_waiters
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .remove(&job.id);
+                                match acquired {
+                                    Ok(permit) => (permit, None),
+                                    Err(_) => {
+                                        runner.queued.fetch_sub(1, Ordering::AcqRel);
+                                        runner.drop_cancel_token(job.id);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        match admission.acquire_owned().await {
+                            Ok(permit) => (permit, None),
+                            Err(_) => {
+                                runner.queued.fetch_sub(1, Ordering::AcqRel);
+                                runner.drop_cancel_token(job.id);
+                                return;
+                            }
                         }
                     };
+                    let is_forced = forced_ack.is_some();
+                    if is_forced {
+                        runner
+                            .forced_jobs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(job.id);
+                    }
                     let claimed = match runner.store.mark_running_if_queued(job.id).await {
                         Ok(claimed) => claimed,
                         Err(err) => {
+                            if is_forced {
+                                runner
+                                    .forced_jobs
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .remove(&job.id);
+                            }
+                            if let Some(ack_tx) = forced_ack {
+                                let _ = ack_tx.send(false);
+                            }
                             runner.queued.fetch_sub(1, Ordering::AcqRel);
                             runner.drop_cancel_token(job.id);
                             tracing::warn!(job_id = %job.id, "failed to claim queued job: {err}");
@@ -498,13 +587,34 @@ impl JobRunner {
                         }
                     };
                     if !claimed {
+                        if is_forced {
+                            runner
+                                .forced_jobs
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&job.id);
+                        }
+                        if let Some(ack_tx) = forced_ack {
+                            let _ = ack_tx.send(false);
+                        }
                         runner.drop_cancel_token(job.id);
                         return;
                     }
                     runner.queued.fetch_sub(1, Ordering::AcqRel);
                     runner.active.fetch_add(1, Ordering::AcqRel);
+                    if let Some(ack_tx) = forced_ack {
+                        let _ = ack_tx.send(true);
+                    }
+                    let job_id = job.id;
                     runner.run_one(job).await;
                     runner.active.fetch_sub(1, Ordering::AcqRel);
+                    if is_forced {
+                        runner
+                            .forced_jobs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&job_id);
+                    }
                     drop(permit);
                 });
             }
@@ -540,8 +650,146 @@ impl JobRunner {
             .len() as u32
     }
 
+    pub fn forced_job_count(&self) -> u32 {
+        self.forced_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len() as u32
+    }
+
+    pub fn is_forced_job(&self, job_id: Uuid) -> bool {
+        self.forced_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&job_id)
+    }
+
     pub fn active_count(&self) -> u32 {
         self.active.load(Ordering::Acquire)
+    }
+
+    /// Operator force-start for a queued job (`POST /jobs/:id/force`).
+    ///
+    /// Admits up to 1 extra user-forced job per node via `orb_slot_bypass_step`
+    /// and `capacity.force` without consuming a regular `capacity.main` permit.
+    pub async fn force_start(&self, job_id: Uuid) -> Result<ForceJobOutcome, ForceJobError> {
+        let record = self
+            .store
+            .get(job_id)
+            .await?
+            .ok_or(ForceJobError::NotFound(job_id))?;
+        match record.state {
+            JobState::Running => {
+                return Ok(ForceJobOutcome {
+                    state: "running",
+                    forced: self.is_forced_job(job_id),
+                });
+            }
+            JobState::Queued => {}
+            other => return Err(ForceJobError::NotQueued(other.as_str().to_string())),
+        }
+
+        let verdict = crate::orb_spec::slot_bypass_step(crate::orb_spec::SlotBypassInput {
+            is_operator_force: true,
+            is_agent_caller: false,
+            is_waiting_slot: true,
+            regular_running: u32::try_from(self.capacity.main.in_use()).unwrap_or(u32::MAX),
+            regular_max: self.capacity.capacity(),
+            forced_running: u32::try_from(self.capacity.force.in_use()).unwrap_or(u32::MAX),
+            forced_max: u32::try_from(self.capacity.force.capacity()).unwrap_or(1),
+        });
+        if !verdict.admitted {
+            return Err(ForceJobError::ForceSlotBusy);
+        }
+
+        let permit = self
+            .capacity
+            .force
+            .try_acquire_owned()
+            .map_err(|_| ForceJobError::ForceSlotBusy)?;
+
+        // Wait briefly if `submit` just persisted the queued row and the
+        // dispatcher loop has not yet registered the waiter channel.
+        let mut waiter = None;
+        for attempt in 0..20 {
+            waiter = self
+                .force_waiters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&job_id);
+            if waiter.is_some() {
+                break;
+            }
+            if let Some(latest) = self.store.get(job_id).await? {
+                if latest.state == JobState::Running {
+                    drop(permit);
+                    return Ok(ForceJobOutcome {
+                        state: "running",
+                        forced: self.is_forced_job(job_id),
+                    });
+                }
+                if latest.state != JobState::Queued {
+                    drop(permit);
+                    return Err(ForceJobError::NotQueued(latest.state.as_str().to_string()));
+                }
+            }
+            if attempt < 19 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        let Some(force_tx) = waiter else {
+            drop(permit);
+            let latest = self
+                .store
+                .get(job_id)
+                .await?
+                .ok_or(ForceJobError::NotFound(job_id))?;
+            return match latest.state {
+                JobState::Running => Ok(ForceJobOutcome {
+                    state: "running",
+                    forced: self.is_forced_job(job_id),
+                }),
+                other => Err(ForceJobError::NotQueued(other.as_str().to_string())),
+            };
+        };
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        if force_tx.send((permit, ack_tx)).is_err() {
+            let latest = self
+                .store
+                .get(job_id)
+                .await?
+                .ok_or(ForceJobError::NotFound(job_id))?;
+            return match latest.state {
+                JobState::Running => Ok(ForceJobOutcome {
+                    state: "running",
+                    forced: self.is_forced_job(job_id),
+                }),
+                other => Err(ForceJobError::NotQueued(other.as_str().to_string())),
+            };
+        }
+
+        match ack_rx.await {
+            Ok(true) => Ok(ForceJobOutcome {
+                state: "running",
+                forced: true,
+            }),
+            Ok(false) | Err(_) => {
+                let latest = self
+                    .store
+                    .get(job_id)
+                    .await?
+                    .ok_or(ForceJobError::NotFound(job_id))?;
+                match latest.state {
+                    JobState::Running => Ok(ForceJobOutcome {
+                        state: "running",
+                        forced: self.is_forced_job(job_id),
+                    }),
+                    other => Err(ForceJobError::NotQueued(other.as_str().to_string())),
+                }
+            }
+        }
     }
 
     /// Log file path for a job id.
@@ -687,6 +935,10 @@ impl JobRunner {
         token.cancel();
         if self.store.cancel_if_queued(job_id).await? {
             self.queued.fetch_sub(1, Ordering::AcqRel);
+            self.force_waiters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&job_id);
             self.side_jobs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -891,6 +1143,10 @@ impl JobRunner {
     }
 
     fn drop_cancel_token(&self, job_id: Uuid) {
+        self.force_waiters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&job_id);
         self.side_jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -3200,6 +3456,111 @@ mod tests {
         let record = store.get(job_id).await.unwrap().unwrap();
         assert_eq!(record.state, JobState::Cancelled);
         assert!(record.finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn force_start_bypasses_saturated_pool_with_single_extra_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let admission = crate::node::capacity::Admission::new(1);
+        let main_permit = admission.acquire_owned().await.unwrap();
+        let runner =
+            JobRunner::spawn_with_admission(store.clone(), dir.path().into(), 1, 30, admission);
+
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let third = Uuid::new_v4();
+        for (id, cmd) in [(first, "sleep 30"), (second, "sleep 30"), (third, "true")] {
+            runner
+                .submit(
+                    id,
+                    Uuid::new_v4(),
+                    JobPayload::RawCommand {
+                        command: cmd.into(),
+                        side_question: false,
+                        companion_of: None,
+                        long_running: false,
+                        timeout_secs: None,
+                        env: None,
+                        managed_auth: vec![],
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while runner.force_waiters.lock().unwrap().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            store.get(first).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(runner.forced_job_count(), 0);
+
+        let outcome = runner.force_start(first).await.unwrap();
+        assert_eq!(
+            outcome,
+            ForceJobOutcome {
+                state: "running",
+                forced: true,
+            }
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.get(first).await.unwrap().unwrap().state != JobState::Running {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(runner.is_forced_job(first));
+        assert_eq!(runner.forced_job_count(), 1);
+        assert_eq!(runner.capacity.main.available_permits(), 0);
+        assert_eq!(
+            store.get(third).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+
+        // Second force-start while the single bypass slot is active fails with ForceSlotBusy.
+        let busy = runner.force_start(second).await.unwrap_err();
+        assert!(matches!(busy, ForceJobError::ForceSlotBusy));
+
+        // Cancelling the forced job frees the bypass slot without waking unforced queued jobs.
+        assert!(runner.cancel(first).await.unwrap());
+        assert_eq!(
+            wait_for_terminal(&store, first).await.state,
+            JobState::Cancelled
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while runner.forced_job_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            store.get(third).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+
+        // Now `third` can use the freed bypass slot, and releasing `main_permit` lets `second` run.
+        assert_eq!(
+            runner.force_start(third).await.unwrap(),
+            ForceJobOutcome {
+                state: "running",
+                forced: true,
+            }
+        );
+        assert_eq!(
+            wait_for_terminal(&store, third).await.state,
+            JobState::Succeeded
+        );
+        drop(main_permit);
+        assert!(runner.cancel(second).await.unwrap());
+        let _ = wait_for_terminal(&store, second).await;
     }
 }
 

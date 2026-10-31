@@ -1,6 +1,6 @@
 import { missionAssignedNode, missionNode, nodeLabel } from "../machines/nodes";
 import { followProjectFolder, seedDelivered, seededPrompt } from "../localFolder";
-import { executionPhaseLabel, isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, remoteJobEnded } from "../missionStatus";
+import { canForceSlot, executionPhaseLabel, isArchived, isFailedStatus, isLive, isRunning, isSettingsIdle, remoteJobEnded } from "../missionStatus";
 import { errorText, log, swallow } from "../log";
 import { flushClientLink } from "../clientLink";
 import {CodexSpeedPicker, missionSpeed} from '../CodexSpeedPicker';
@@ -63,6 +63,7 @@ import {
   getMission,
   shortModelLabel,
   cancelMission,
+  forceMissionSlot,
   setClientMissionStatus,
   sendMissionMessage,
   ApiError,
@@ -994,6 +995,27 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
     finally { setRecoveryPending(false); }
   };
 
+  const [forceSlotPending, setForceSlotPending] = createSignal(false);
+  const forceStartSlot = async () => {
+    const targetMissionId = boundMissionId || p.id;
+    if (!targetMissionId || forceSlotPending()) return;
+    setForceSlotPending(true);
+    try {
+      const updated = await forceMissionSlot(targetMissionId);
+      if (!staleMission()) {
+        statusSeen++;
+        setMission(updated);
+      }
+    } catch (error) {
+      if (!staleMission()) {
+        notify({ kind: "error", key: `force-slot:${targetMissionId}`, title: "Couldn’t run immediately", message: launchError(error) });
+      }
+    } finally {
+      setForceSlotPending(false);
+    }
+  };
+  const forceSlotHandler = () => canForceSlot(mission()) ? () => void forceStartSlot() : undefined;
+
   const sendRemoteImmediate = async (
     ordered: { id: string; content: string; attached?: boolean }[],
     liveInjected?: { id: string; content: string; attached?: boolean }[],
@@ -1117,10 +1139,10 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
                 <Show when={receipt}>
                   {(r) => (
                     <>
-                      <LaunchStatus destination={missionDestination(mission(), r())} mission={mission()} goal={missionGoal(mission(), r())} />
+                      <LaunchStatus destination={missionDestination(mission(), r())} mission={mission()} goal={missionGoal(mission(), r())} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
                       <UserTurn text={r().prompt} images={r().images} pending={working()} onSend={p.id ? sendEditedPrompt : undefined} />
                       <Show when={working()}>
-                        <MissionPending destination={missionDestination(mission(), r())} label={phaseLabel()} />
+                        <MissionPending destination={missionDestination(mission(), r())} label={phaseLabel()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
                       </Show>
                     </>
                   )}
@@ -1134,9 +1156,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
                 with the send, not when the turn starts ~1 s later (a second
                 shift of the transcript under the new message). */}
             <Show when={mission() && !(awaitingTurn() || optimisticList().some(item => !item.waiting && !item.failed)) && (!missionPhase(mission(), activity()).moving || ["Checking submission", "Checking remote job"].includes(missionPhase(mission(), activity()).label))}>
-              <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} />
+              <LaunchStatus destination={missionDestination(mission(), receipt)} mission={mission()} activity={activity()} goal={missionGoal(mission(), receipt)} onResume={() => void actOnRecovery("resume")} onCancelRecovery={() => void actOnRecovery("cancel")} recoveryPending={recoveryPending()} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} />
             </Show>
-            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
+            <Transcript sizeKey={p.id ? `m:${p.id}` : undefined} backend={mission()?.backend} loadToolCall={p.id ? (callId => fullToolCall(p.id!, callId)) : undefined} sending={handoff()?.id} working={working()} workingLabel={(awaiting() && p.id && (transcriptVersion(), peekTranscript(p.id)?.activity)) || `${phaseLabel()} on ${missionDestination(mission(), receipt)}…`} onForceSlot={forceSlotHandler()} forceSlotPending={forceSlotPending()} prepareSearch={prepareSearch} needsPrepareSearch={needsPrepareSearch} items={nonQueuedViewItems()} pending={working() && !activity()} onSend={p.id ? sendEditedPrompt : undefined} onOpenSource={openOriginalSource()} onResume={!busy() && !localQueueActive() && (clientPlaced() || (!remoteQueuedIds().length && !items().some(i => i.kind === "user" && i.queued))) && missionPhase(mission(), false).failed && missionPhase(mission(), false).label !== "Cancelled" ? resume : undefined} />
             <Show when={awaiting() && items().length > 0}><ActivitySkeleton /></Show>
             <TurnRecap mission={mission() ?? undefined} items={viewItems()} busy={busy()} onDraft={text=>setSideRevision({text,append:false})} />
             <Show when={!resendKnown() ? resend() : undefined}>{row=><div class="resend-feedback">

@@ -209,6 +209,27 @@ pub(super) async fn automation_scheduler_loop(
                 continue;
             }
 
+            // A conversation fork (`fork-of:<id>`) retires pre-fork reminders even
+            // when the replaced version finished its turn before the fork or has not
+            // yet been archived by the client (sidebar-hierarchy.md invariant W2).
+            if automation.variables.contains_key("__wakeup_source")
+                && continuations::pre_fork_reminder_superseded(
+                    &mission_store,
+                    mission.id,
+                    &automation.created_at,
+                )
+                .await
+                .unwrap_or(false)
+            {
+                if let Err(error) =
+                    continuations::drop_for_forked(&mission_store, mission.id, Some(&automation))
+                        .await
+                {
+                    tracing::warn!(automation_id = %automation.id, %error, "Could not drop pre-fork reminder of a forked mission");
+                }
+                continue;
+            }
+
             if matches!(automation.trigger, TriggerType::AgentFinished)
                 && mission_is_terminal_for_goal_loop(mission.status)
             {

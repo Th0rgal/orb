@@ -3492,6 +3492,36 @@ select.orb-select-native:disabled { cursor: default; }
 .recovery-actions button { padding: 0; border: 0; background: none; color: var(--fg-2); font-size: 12px; cursor: pointer; }
 .recovery-actions button:hover { color: var(--fg); }
 
+.force-slot-btn {
+  padding: 2px 7px;
+  border: 1px solid var(--stroke-strong);
+  border-radius: 5px;
+  background: var(--bg-2);
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+  outline: none;
+  box-shadow: none;
+  transition: border-color var(--t) var(--ease), color var(--t) var(--ease), background-color var(--t) var(--ease);
+}
+.force-slot-btn:hover:not(:disabled) {
+  border-color: var(--fg-3);
+  color: var(--fg);
+  background: var(--bg-3);
+}
+.force-slot-btn:focus-visible {
+  border-color: var(--focus-border);
+  outline: 1px solid var(--focus-border);
+  outline-offset: 0;
+  box-shadow: none;
+}
+.force-slot-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Subtle inline download feedback and resumable background upload progress. */
 .file-binary-action {
   position: relative;

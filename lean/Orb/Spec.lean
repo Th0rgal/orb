@@ -5900,4 +5900,95 @@ theorem vm_cap_zero_provider_limit_blocks_provider
     cases hm : (hasPoolMx == 1) <;>
     simp_all
 
+structure SlotBypassCheck where
+  isOperatorForce : UInt8
+  isAgentCaller   : UInt8
+  isWaitingSlot   : UInt8
+  regularRunning  : UInt32
+  regularMax      : UInt32
+  forcedRunning   : UInt32
+  forcedMax       : UInt32
+  deriving Repr, DecidableEq
+
+def SlotBypassCheck.Admissible (s : SlotBypassCheck) : Bool :=
+  if s.isOperatorForce == 1 then
+    !(s.isAgentCaller == 1) && (s.isWaitingSlot == 1) && decide (s.forcedRunning < s.forcedMax)
+  else
+    decide (s.regularRunning < s.regularMax)
+
+def slotBypassMetaGate : MetaGateSpec SlotBypassCheck (fun s => SlotBypassCheck.Admissible s = true) where
+  gate s :=
+    (slotBypassStep
+      s.isOperatorForce s.isAgentCaller s.isWaitingSlot
+      s.regularRunning s.regularMax s.forcedRunning s.forcedMax &&& 256) != 0
+  sound s h := by
+    unfold SlotBypassCheck.Admissible
+    unfold slotBypassStep at h
+    cases hf : (s.isOperatorForce == 1) <;>
+      cases ha : (s.isAgentCaller == 1) <;>
+      cases hw : (s.isWaitingSlot == 1) <;>
+      by_cases hb : s.forcedRunning < s.forcedMax <;>
+      by_cases hr : s.regularRunning < s.regularMax <;>
+      (simp only [hf, ha, hw, hb, hr, decide_true, decide_false, ↓reduceIte] at h ⊢; revert h; decide)
+  complete s h := by
+    unfold SlotBypassCheck.Admissible at h
+    unfold slotBypassStep
+    cases hf : (s.isOperatorForce == 1) <;>
+      cases ha : (s.isAgentCaller == 1) <;>
+      cases hw : (s.isWaitingSlot == 1) <;>
+      by_cases hb : s.forcedRunning < s.forcedMax <;>
+      by_cases hr : s.regularRunning < s.regularMax <;>
+      (simp only [hf, ha, hw, hb, hr, decide_true, decide_false, ↓reduceIte] at h ⊢; revert h; decide)
+  posWitness := ⟨1, 0, 1, 6, 6, 0, 1⟩
+  negWitness := ⟨1, 0, 1, 6, 6, 1, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def slotBypassScopedAuthority : ScopedAuthority SlotBypassCheck where
+  admit s := slotBypassMetaGate.gate s
+  scopeValid s := !(s.isOperatorForce == 1 && s.isAgentCaller == 1)
+  sound s h := by
+    have hadm := slotBypassMetaGate.sound s h
+    unfold SlotBypassCheck.Admissible at hadm
+    cases hf : (s.isOperatorForce == 1) <;>
+      cases ha : (s.isAgentCaller == 1) <;>
+      simp_all
+
+def slotBypassConservedResource : ConservedResource SlotBypassCheck where
+  admit s := slotBypassMetaGate.gate s
+  withinBudget s :=
+    if s.isOperatorForce == 1 then
+      decide (s.forcedRunning < s.forcedMax)
+    else
+      decide (s.regularRunning < s.regularMax)
+  conserved s h := by
+    have hadm := slotBypassMetaGate.sound s h
+    unfold SlotBypassCheck.Admissible at hadm
+    cases hf : (s.isOperatorForce == 1) <;> simp_all
+
+/-- Explicit operator force (`isOperatorForce = 1, isAgentCaller = 0, isWaitingSlot = 1`)
+    admits (`258`) even when regular slots are saturated (`regularRunning = regularMax`) provided
+    the extra forced slot is free (`forcedRunning < forcedMax`), rejects autonomous agent callers
+    (`513`), rejects non-waiting missions (`514`), and rejects when the forced slot is already
+    occupied (`512`). -/
+theorem slot_bypass_bypasses_saturated_regular_and_enforces_guards
+    (regMax forcedAct forcedMx : UInt32)
+    (h_force : forcedAct < forcedMx) :
+    slotBypassStep 1 0 1 regMax regMax forcedAct forcedMx = 258 ∧
+    slotBypassStep 1 1 1 regMax regMax forcedAct forcedMx = 513 ∧
+    slotBypassStep 1 0 0 regMax regMax forcedAct forcedMx = 514 ∧
+    slotBypassStep 1 0 1 regMax regMax forcedMx forcedMx = 512 := by
+  unfold slotBypassStep
+  have h_self : ¬ (forcedMx < forcedMx) := Nat.lt_irrefl forcedMx.toNat
+  simp [h_force, h_self]
+
+/-- Standard worker admission (`isOperatorForce = 0`) is strictly independent of `forcedRunning`
+    and `forcedMax`: a running forced worker never consumes or reduces regular worker slots. -/
+theorem slot_bypass_regular_admission_ignores_forced_workers
+    (agent wait : UInt8) (regRun regMax fRunA fMaxA fRunB fMaxB : UInt32) :
+    slotBypassStep 0 agent wait regRun regMax fRunA fMaxA =
+      slotBypassStep 0 agent wait regRun regMax fRunB fMaxB := by
+  unfold slotBypassStep
+  rfl
+
 end Orb.Spec

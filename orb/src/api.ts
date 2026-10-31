@@ -299,6 +299,7 @@ export interface RemoteJob {
   node_id: string;
   phase: string;
   node_state?: string | null;
+  forced?: boolean;
   exit_code?: number | null;
   error?: string | null;
   accepted_at?: string | null;
@@ -1343,6 +1344,11 @@ async function confirmCoreChange(change: { id: string; status?: string; title?: 
 
 export async function cancelMission(id: string): Promise<void> {
   await api<void>(`/api/control/missions/${id}/cancel`, { method: "POST" });
+}
+
+/** Force-start a slot-queued mission immediately using the bounded 1-extra operator bypass slot. */
+export async function forceMissionSlot(id: string): Promise<Mission> {
+  return api<Mission>(`/api/control/missions/${encodeURIComponent(id)}/force-slot`, { method: "POST" });
 }
 
 export async function markMissionOpened(id: string): Promise<void> {

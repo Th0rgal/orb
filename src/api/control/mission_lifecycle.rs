@@ -34,6 +34,216 @@ pub async fn start_mission_parallel(
         .map_err(|e| (StatusCode::CONFLICT, e))
 }
 
+/// Force-start a slot-queued mission immediately using the bounded 1-extra
+/// operator bypass slot (`orb_slot_bypass_step`), without counting toward
+/// standard worker limits on either `sandboxed-node` or Core's parallel pool.
+pub async fn force_mission_slot(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(mission_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = resolve_actor(None, &user);
+    let control = control_for_user(&state, &user).await;
+    let mission = control
+        .mission_store
+        .get_mission(mission_id)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Mission {mission_id} not found"),
+            )
+        })?;
+    if mission.backend.starts_with("cloud_") {
+        return Err((
+            StatusCode::CONFLICT,
+            "Hosted cloud conversations do not wait on local or node worker slots".into(),
+        ));
+    }
+    if mission_is_client_placed(&control, mission_id)
+        .await
+        .map_err(internal_error)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "This mission runs on its Orb computer and does not wait on server slots".into(),
+        ));
+    }
+
+    let handles = crate::remote_node::job_ledger::load(&state.config.working_dir)
+        .await
+        .map_err(internal_error)?;
+    let remote_handle = handles
+        .iter()
+        .filter(|h| {
+            h.mission_id == mission_id
+                && matches!(
+                    h.kind,
+                    crate::remote_node::job_ledger::JobHandleKind::Mission
+                        | crate::remote_node::job_ledger::JobHandleKind::Tentative
+                )
+        })
+        .max_by_key(|h| (h.submission_sequence, h.started_at))
+        .cloned();
+
+    if let Some(handle) = remote_handle {
+        let node = state
+            .config
+            .remote_nodes
+            .node(&handle.node_id)
+            .cloned()
+            .or_else(|| crate::managed::node_config(&handle.node_id).cloned())
+            .ok_or_else(|| {
+                (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "Remote node '{}' is no longer registered in Core",
+                        handle.node_id
+                    ),
+                )
+            })?;
+        let shared_token = crate::remote_node::node_token(&node.token_env)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "Remote node '{}' has no token in {}",
+                        node.id, node.token_env
+                    ),
+                )
+            })?;
+        let claims = crate::remote_node::LeaseClaims {
+            mission_id,
+            node_id: node.id.clone(),
+            scope: crate::remote_node::SCOPE_JOB_FORCE.to_string(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).timestamp(),
+            job_id: Some(handle.job_id),
+        };
+        let lease_token = crate::remote_node::create_lease_token(&claims, &shared_token)
+            .map_err(internal_error)?;
+        let client = crate::remote_node::RemoteNodeClient::default();
+        let req = crate::remote_node::ForceJobRequest {
+            mission_id,
+            lease_token,
+        };
+        match client
+            .force_job(&node, &shared_token, handle.job_id, &req)
+            .await
+        {
+            Ok(resp) => {
+                state
+                    .fleet
+                    .record_outcome(crate::remote_node::DispatchOutcome {
+                        mission_id,
+                        node_id: node.id.clone(),
+                        job_id: Some(handle.job_id),
+                        state: resp.state.clone(),
+                        exit_code: None,
+                        error: None,
+                        started_at: handle.started_at,
+                        finished_at: None,
+                        forced: resp.forced,
+                    });
+                let _ = control.events_tx.send(AgentEvent::MissionStatusChanged {
+                    completion: None,
+                    execution: None,
+                    mission_id,
+                    status: mission.status,
+                    summary: Some(format!("Force-started queued job on {}", node.id)),
+                });
+                tracing::info!(
+                    mission_id = %mission_id,
+                    node_id = %node.id,
+                    job_id = %handle.job_id,
+                    actor = %actor,
+                    state = %resp.state,
+                    forced = resp.forced,
+                    "Operator force-started remote node job"
+                );
+                return super::mission_read::get_mission(
+                    State(state),
+                    Extension(user),
+                    Path(mission_id),
+                )
+                .await;
+            }
+            Err(crate::remote_node::RemoteNodeError::Rejected { status: 404, .. }) => {
+                if client
+                    .get_job(&node, &shared_token, handle.job_id)
+                    .await
+                    .is_ok()
+                {
+                    return Err((
+                        StatusCode::NOT_IMPLEMENTED,
+                        format!(
+                            "Remote node '{}' does not support force-starting queued jobs yet; upgrade sandboxed-node",
+                            node.id
+                        ),
+                    ));
+                }
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!(
+                        "Queued job {} is no longer on node '{}'",
+                        handle.job_id, node.id
+                    ),
+                ));
+            }
+            Err(crate::remote_node::RemoteNodeError::Rejected { status: 409, body }) => {
+                let message = if body.trim().is_empty() {
+                    format!(
+                        "Force-start slot is already in use on '{}'; wait for the active forced job to finish",
+                        node.id
+                    )
+                } else {
+                    body
+                };
+                return Err((StatusCode::CONFLICT, message));
+            }
+            Err(crate::remote_node::RemoteNodeError::Rejected { status, body }) => {
+                let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+                return Err((
+                    code,
+                    if body.trim().is_empty() {
+                        format!(
+                            "Remote node '{}' rejected force-start (HTTP {status})",
+                            node.id
+                        )
+                    } else {
+                        body
+                    },
+                ));
+            }
+            Err(error) => {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!("Could not reach remote node '{}': {error}", node.id),
+                ));
+            }
+        }
+    }
+
+    let (tx, rx) = oneshot::channel();
+    control
+        .cmd_tx
+        .send(ControlCommand::ForceMissionSlot {
+            mission_id,
+            respond: tx,
+        })
+        .await
+        .map_err(session_unavailable)?;
+    rx.await.map_err(recv_failed)??;
+    tracing::info!(
+        mission_id = %mission_id,
+        actor = %actor,
+        "Operator force-started Core slot-queued mission"
+    );
+    super::mission_read::get_mission(State(state), Extension(user), Path(mission_id)).await
+}
+
 /// Cancel a specific mission.
 pub async fn cancel_mission(
     State(state): State<Arc<AppState>>,

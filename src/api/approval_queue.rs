@@ -313,14 +313,17 @@ pub fn admit(current: Option<&ApprovalItem>, want: &BatchRef, confirm: bool) -> 
 
 /// Pending items of every kind for `owner`, newest first.
 pub async fn pending(state: &Arc<AppState>, owner: &str) -> Vec<ApprovalItem> {
+    let user = AuthUser {
+        id: owner.to_string(),
+        username: owner.to_string(),
+    };
+    let missions = state.control.get_or_spawn(&user).await.mission_store;
+    let access = super::mission_access::store(state);
+    access.expire_stale_for_store(&missions, owner).await;
     let mut items = super::privilege_broker::store(state)
         .pending_items(owner)
         .await;
-    items.extend(
-        super::mission_access::store(state)
-            .pending_items(owner)
-            .await,
-    );
+    items.extend(access.pending_items(owner).await);
     items.extend(super::secret_broker::broker(state).pending_items().await);
     items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
     items

@@ -415,7 +415,7 @@ def main(argv=None):
     # `internal` also marks six public-prefix steppers not exposed to mobile.
     # The roadmap includes those steppers; exclude only the compiler helper.
     functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
-    if len(functions) != 128 or len(manifest["functions"]) != 129:
+    if len(functions) != 129 or len(manifest["functions"]) != 130:
         raise ValueError("public export inventory changed; qualify the new surface explicitly")
     if run(["git", "rev-parse", "HEAD"], SYS).strip() != "c089f3e31dbd36f2bde2219913d5b9c90da670be":
         raise ValueError("unexpected LeanSys revision")

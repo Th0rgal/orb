@@ -614,6 +614,24 @@ extension OrbConversation {
             self.error = "Couldn’t send now. \(error.localizedDescription)"
         }
     }
+
+    func forceSlot() async {
+        guard let id, !forcingSlot else { return }
+        forcingSlot = true
+        defer { forcingSlot = false }
+        do {
+            let updated = try await api.call("/api/control/missions/\(OrbCore.escape(id))/force-slot", method: "POST")
+            if updated != .null {
+                mission = updated
+                OrbDisk.saveAsync(updated, key: "mission:\(id)")
+            }
+            OrbReadCache.invalidate("mission:\(id)")
+            await refresh(force: true)
+        } catch {
+            self.error = "Couldn’t run immediately. \(error.localizedDescription)"
+        }
+    }
+
     func safeURL(_ value: String) -> URL? { guard let url = URL(string: value), url.scheme == "https", url.user == nil, url.password == nil else { return nil }; return url }
 
     func openWorkspaceOrArtifact(_ rawLink: String) async {

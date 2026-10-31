@@ -520,6 +520,13 @@ pub enum ControlCommand {
         content: String,
         respond: oneshot::Sender<Result<(), String>>,
     },
+    /// Force-start a slot-queued mission immediately using the bounded 1-extra
+    /// operator bypass slot (`orb_slot_bypass_step`), without counting toward
+    /// standard parallel mission slots.
+    ForceMissionSlot {
+        mission_id: Uuid,
+        respond: oneshot::Sender<Result<(), (axum::http::StatusCode, String)>>,
+    },
     /// Cancel a specific mission
     CancelMission {
         mission_id: Uuid,

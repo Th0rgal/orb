@@ -250,6 +250,7 @@ pub(super) fn remote_job_projection(
         "node_id": node_id,
         "phase": phase,
         "node_state": outcome.map(|outcome| outcome.state.clone()),
+        "forced": outcome.is_some_and(|outcome| outcome.forced),
         "exit_code": outcome.and_then(|outcome| outcome.exit_code),
         "error": outcome.and_then(|outcome| outcome.error.clone()),
         "accepted_at": handle.and_then(|handle| handle.accepted_at),

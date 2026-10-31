@@ -3242,6 +3242,11 @@ pub struct MissionRunner {
     /// never treated as authority.
     pub pr_readonly: bool,
 
+    /// Whether the currently executing turn was explicitly force-started by an
+    /// operator via `orb_slot_bypass_step`, exempting it from standard parallel
+    /// worker slot accounting for the duration of that turn.
+    pub forced_slot: bool,
+
     /// Message queue for this mission
     pub queue: VecDeque<QueuedMessage>,
 
@@ -3349,6 +3354,7 @@ impl MissionRunner {
             fast_mode,
             service_tier,
             pr_readonly: false,
+            forced_slot: false,
             queue: VecDeque::new(),
             inflight_message: None,
             history: Vec::new(),
@@ -3461,6 +3467,13 @@ impl MissionRunner {
         )
     }
 
+    /// Check if this runner holds one of the standard parallel mission slots.
+    /// Operator-forced turns (`forced_slot`) are admitted into the bounded
+    /// 1-slot bypass pool and do not consume standard worker slots.
+    pub fn counts_toward_slot_limit(&self) -> bool {
+        self.is_running() && !self.forced_slot
+    }
+
     /// Check if this runner has finished.
     pub fn is_finished(&self) -> bool {
         matches!(self.state, MissionRunState::Finished)
@@ -3557,6 +3570,7 @@ impl MissionRunner {
             self.running_handle = None;
             self.cancel_token = None;
             self.inflight_message = None;
+            self.forced_slot = false;
             self.reset_turn_tool_calls();
             self.state = MissionRunState::Finished;
             self.cancellation_force_clear_deadline = None;
@@ -3782,6 +3796,7 @@ impl MissionRunner {
         if handle.is_finished() {
             self.cancellation_force_clear_deadline = None;
             self.inflight_message = None;
+            self.forced_slot = false;
             // A completed or panicked turn can leave an unmatched ToolCall in
             // harnesses that omit ToolResult events. Never expose that stale
             // hint while queued or carry it into the next turn.

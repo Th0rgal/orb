@@ -2368,4 +2368,41 @@ def vmCapAdmit
   else
     512
 
+/--
+  Operator force-slot admission gate (`orb_slot_bypass_step`).
+  Models an explicit user-initiated bypass ("Run now") for a queued job or mission waiting on a
+  saturated worker pool, admitting up to `forcedMax` (1) extra forced worker without counting
+  against regular worker slot limits:
+
+  Return word layout (`UInt32`, zero horizontal counter packing):
+  - `bit 8 (256)` = `admitted` (`1` iff admitted).
+  - `257` (`1 ||| 256`): admitted into regular worker pool (`isOperatorForce != 1` and
+    `regularRunning < regularMax` — invariant in `forcedRunning` so forced jobs never count
+    against regular worker slot limits).
+  - `258` (`2 ||| 256`): admitted into dedicated operator-forced bypass slot
+    (`isOperatorForce == 1`, `isAgentCaller != 1`, `isWaitingSlot == 1`, and
+    `forcedRunning < forcedMax`, bypassing `regularRunning >= regularMax`).
+  - `512`: rejected — pool or forced bypass slot at capacity.
+  - `513` (`1 ||| 512`): rejected — autonomous agent caller cannot invoke operator force bypass
+    (`ScopedAuthority`).
+  - `514` (`2 ||| 512`): rejected — target mission/job is not currently waiting for a slot.
+-/
+@[inline, export orb_slot_bypass_step]
+def slotBypassStep
+    (isOperatorForce isAgentCaller isWaitingSlot : UInt8)
+    (regularRunning regularMax forcedRunning forcedMax : UInt32) : UInt32 :=
+  if isOperatorForce == 1 then
+    if isAgentCaller == 1 then
+      513
+    else if !(isWaitingSlot == 1) then
+      514
+    else if forcedRunning < forcedMax then
+      258
+    else
+      512
+  else if regularRunning < regularMax then
+    257
+  else
+    512
+
 end Orb.Kernel

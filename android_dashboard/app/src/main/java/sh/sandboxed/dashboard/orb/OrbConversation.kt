@@ -493,6 +493,35 @@ object OrbTimelineBuilder {
     }
 }
 
+data class OrbSlotWaitInfo(
+    val label: String,
+    val canForce: Boolean
+)
+
+fun orbSlotWaitInfo(row: OrbRow?): OrbSlotWaitInfo? {
+    if (row == null) return null
+    val job = row.dict("remote_job")
+    val jobEnded = job != null && (
+        OrbJSON.str(job, "phase") == "finished" ||
+            OrbJSON.str(job, "finished_at") != null ||
+            OrbJSON.str(job, "terminal_reason") != null
+        )
+    if (job != null && !jobEnded && OrbJSON.str(job, "node_state") == "queued") {
+        val node = OrbJSON.str(job, "node_id") ?: row.str("remote_node_id")
+        val label = if (node.isNullOrEmpty()) "Waiting for a free slot…" else "Waiting for a free slot on $node…"
+        return OrbSlotWaitInfo(label = label, canForce = OrbJSON.bool(job, "forced") != true)
+    }
+    val status = (row.str("status", "state") ?: "").lowercase()
+    val wait = row.dict("queue_wait")
+    if ((status == "pending" || status == "queued") && OrbJSON.str(wait, "reason") == "waiting_for_slot") {
+        val maxSlots = OrbJSON.int(wait, "slots_max") ?: 0
+        val usedSlots = OrbJSON.int(wait, "slots_used") ?: maxSlots
+        val label = if (maxSlots > 0) "Waiting for a free slot ($usedSlots/$maxSlots in use)…" else "Waiting for a free slot…"
+        return OrbSlotWaitInfo(label = label, canForce = true)
+    }
+    return null
+}
+
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun OrbConversationPage(
@@ -552,6 +581,7 @@ fun OrbConversationPage(
 
     var isSending by remember { mutableStateOf(false) }
     var isStopping by remember { mutableStateOf(false) }
+    var isForcingSlot by remember(missionId) { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var previewFilePath by remember { mutableStateOf<String?>(null) }
     // Shared files: chip previews, the Files tab, and shared_files metadata (size, url).
@@ -599,6 +629,12 @@ fun OrbConversationPage(
         if (missionId == null) null
         else allMissions.firstOrNull { it.id == missionId } ?: currentMission
     }
+    val slotWait = remember(liveRow) { orbSlotWaitInfo(liveRow) }
+    val isCloudMission = remember(liveRow) {
+        val cloud = liveRow?.dict("cloud")
+        !OrbJSON.str(cloud, "provider").isNullOrEmpty()
+    }
+    val canForceSlot = missionId != null && !isCloudMission && slotWait?.canForce == true
 
     val handoffActive = OrbHandoff.pending(liveRow?.str("status", "state"), handoff, System.currentTimeMillis())
     val isLive = remember(liveRow, isSending, handoffActive) {
@@ -1199,6 +1235,27 @@ fun OrbConversationPage(
                 errorMessage = e.message
             } finally {
                 isStopping = false
+            }
+        }
+    }
+
+    fun forceSlotNow() {
+        val id = missionId ?: return
+        if (isForcingSlot || !canForceSlot) return
+        isForcingSlot = true
+        scope.launch {
+            try {
+                val res = core.request("/api/control/missions/${core.encodeComponent(id)}/force-slot", method = "POST")
+                val updated = OrbJSON.dict(res)
+                if (updated != null) {
+                    currentMission = OrbRow(id, updated)
+                }
+                core.refreshMissionsQuietly()
+                loadHistory(id)
+            } catch (e: Throwable) {
+                errorMessage = "Couldn't run immediately. ${e.message ?: ""}".trim()
+            } finally {
+                isForcingSlot = false
             }
         }
     }
@@ -1829,12 +1886,20 @@ fun OrbConversationPage(
                         }
                     }
                     is OrbTurn.WorkFold -> {
+                        val workingLabel = when {
+                            handoffActive -> "Sending…"
+                            slotWait != null -> slotWait.label
+                            events.isEmpty() -> missionId?.let { OrbPresentation.activity(it) }?.takeIf { it.isNotEmpty() }
+                            else -> null
+                        }
                         androidx.compose.runtime.CompositionLocalProvider(
-                            LocalOrbWorkingLabel provides (if (handoffActive) "Sending…" else if (events.isEmpty()) missionId?.let { OrbPresentation.activity(it) }?.takeIf { it.isNotEmpty() } else null)
+                            LocalOrbWorkingLabel provides workingLabel
                         ) {
                             OrbWorkFoldView(
                                 fold = turn,
-                                onPreviewFile = { previewFilePath = it }
+                                onPreviewFile = { previewFilePath = it },
+                                onForceSlot = if (turn.isLive && canForceSlot) ({ forceSlotNow() }) else null,
+                                forceSlotPending = isForcingSlot
                             )
                         }
                     }
@@ -2906,7 +2971,9 @@ private fun OrbAssistantTurnView(
 @Composable
 fun OrbWorkFoldView(
     fold: OrbTurn.WorkFold,
-    onPreviewFile: (String) -> Unit
+    onPreviewFile: (String) -> Unit,
+    onForceSlot: (() -> Unit)? = null,
+    forceSlotPending: Boolean = false
 ) {
     var expanded by remember { mutableStateOf(false) }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -3032,6 +3099,27 @@ fun OrbWorkFoldView(
                     .weight(1f, fill = false)
                     .orbShimmer(active = fold.isLive)
             )
+            if (fold.isLive && onForceSlot != null) {
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.08f))
+                        .border(1.dp, OrbStyle.borderStrong, CircleShape)
+                        .orbPressClickable(enabled = !forceSlotPending, onClick = onForceSlot)
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                        .testTag("force-slot-run-now"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (forceSlotPending) "Starting…" else "Run now",
+                        color = if (forceSlotPending) OrbStyle.textSecondary else Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
             if (elapsedText != null) {
                 Text(
                     text = elapsedText,

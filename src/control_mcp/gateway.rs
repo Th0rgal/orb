@@ -18,7 +18,6 @@ fn btw_parent_tool_allowed(tool: &str) -> bool {
     crate::api::mission_access::READ_TOOLS.contains(&tool)
         || crate::api::mission_access::CONTROL_TOOLS.contains(&tool)
 }
-
 fn direct_btw_parent_ids(owner_tags: &[String]) -> Vec<Uuid> {
     owner_tags
         .iter()
@@ -33,7 +32,7 @@ fn fork_parent_id(tags: &[String]) -> Option<Uuid> {
         .find_map(|raw| Uuid::parse_str(raw.trim()).ok())
 }
 
-async fn fork_lineage(
+pub(crate) async fn fork_lineage(
     store: &Arc<dyn crate::api::mission_store::MissionStore>,
     start: Uuid,
 ) -> Vec<Uuid> {
@@ -79,13 +78,13 @@ pub(crate) async fn btw_associated_with_target(
     false
 }
 
-fn sets_reserved_btw_tag(args: &Value) -> bool {
+fn sets_reserved_lineage_tag(args: &Value) -> bool {
     args.get("tags")
         .and_then(Value::as_array)
         .is_some_and(|tags| {
             tags.iter()
                 .filter_map(Value::as_str)
-                .any(crate::api::mission_horizon::is_reserved_btw_tag)
+                .any(crate::api::mission_horizon::is_reserved_lineage_tag)
         })
 }
 
@@ -546,10 +545,19 @@ async fn authorize(
                         continue;
                     }
                     // An approved mission-access grant crosses projects for
-                    // tools covered by its scope. Executors are audited by the
-                    // tree check below.
+                    // tools covered by its scope (including read grants inherited
+                    // across `fork-of:` versions). Executors are audited below.
                     let grant = if field == "mission_id" {
-                        granted_access(state, p, &tool.definition.name, id).await
+                        let subjects = caller_grant_subjects(&store, p).await;
+                        granted_access_for_subjects(
+                            state,
+                            &p.sub,
+                            p.requester_subject(),
+                            &subjects,
+                            &tool.definition.name,
+                            id,
+                        )
+                        .await
                     } else {
                         None
                     };
@@ -585,10 +593,12 @@ async fn authorize(
             }
         }
     }
-    // `btw-parent:` grants default access to the associated parent conversation; only Core's
-    // /btw launch may set it, never an agent through MCP.
-    if sets_reserved_btw_tag(args) {
-        return Err(ToolError::denied("The btw-parent tag is reserved"));
+    // `btw-parent:` and `fork-of:` / `fork-workspace:` grant read/control lineage across missions;
+    // only Core's /btw or conversation-fork endpoints may mint them, never an agent via MCP.
+    if sets_reserved_lineage_tag(args) {
+        return Err(ToolError::denied(
+            "Lineage tags (btw-parent, btw-subagent, fork-of, fork-workspace) are reserved",
+        ));
     }
     authorize_job(state, p, args).await?;
     if tool.handler == super::Handler::Workspace {
@@ -651,6 +661,7 @@ async fn authorize(
         .await
         .map_err(|_| ToolError::denied("Mission unavailable"))?
         .ok_or_else(|| ToolError::denied("Mission no longer exists"))?;
+    let fork_chain = fork_lineage(&store, own).await;
     for field in ["mission_id", "supersedes_mission_id"] {
         if let Some(raw) = args.get(field).filter(|v| !v.is_null()) {
             let id = raw
@@ -667,11 +678,37 @@ async fn authorize(
             let allowed_btw_parent = field == "mission_id"
                 && btw_parent_tool_allowed(&tool.definition.name)
                 && btw_associated_with_target(&store, &owner.project.tags, id).await;
-            if id != own && m.parent_mission_id != Some(own) && !allowed_btw_parent {
+            // A conversation fork (`fork-of:<id>`) is a continuation of the same session on a
+            // new harness: read tools may inspect earlier versions in its fork chain and
+            // children launched by those versions, while control tools stay scoped to `own`.
+            let reads_fork_lineage = field == "mission_id"
+                && crate::api::mission_access::READ_TOOLS.contains(&tool.definition.name.as_str())
+                && (fork_chain.contains(&id)
+                    || m.parent_mission_id
+                        .is_some_and(|parent| fork_chain.contains(&parent)));
+            if id != own
+                && m.parent_mission_id != Some(own)
+                && !allowed_btw_parent
+                && !reads_fork_lineage
+            {
                 // Device-signed grant approved by Thomas (request_mission_access):
-                // `read` opens READ_TOOLS; `control` opens READ_TOOLS and CONTROL_TOOLS.
+                // `read` opens READ_TOOLS (including read grants approved on earlier `fork-of:`
+                // versions); `control` opens READ_TOOLS and CONTROL_TOOLS for the exact subject.
                 let grant = if field == "mission_id" {
-                    granted_access(state, p, &tool.definition.name, id).await
+                    let subjects: Vec<crate::api::approval_flow::RequesterSubject> = fork_chain
+                        .iter()
+                        .copied()
+                        .map(crate::api::approval_flow::RequesterSubject::mission)
+                        .collect();
+                    granted_access_for_subjects(
+                        state,
+                        &p.sub,
+                        p.requester_subject(),
+                        &subjects,
+                        &tool.definition.name,
+                        id,
+                    )
+                    .await
                 } else {
                     None
                 };
@@ -998,6 +1035,47 @@ async fn granted_access(
     crate::api::mission_access::store(state)
         .grant_for_tool(&p.sub, &p.requester_subject(), target, tool)
         .await
+}
+
+/// Live grant across `direct_subject` (covering both `read` and `control` grants)
+/// and, for read-only tools, across any `fork-of:` ancestor in `fork_subjects`.
+async fn granted_access_for_subjects(
+    state: &Arc<AppState>,
+    owner: &str,
+    direct_subject: crate::api::approval_flow::RequesterSubject,
+    fork_subjects: &[crate::api::approval_flow::RequesterSubject],
+    tool: &str,
+    target: Uuid,
+) -> Option<Uuid> {
+    let access = crate::api::mission_access::store(state);
+    if let Some(grant) = access
+        .grant_for_tool(owner, &direct_subject, target, tool)
+        .await
+    {
+        return Some(grant);
+    }
+    if crate::api::mission_access::READ_TOOLS.contains(&tool) {
+        for subject in fork_subjects {
+            if let Some(grant) = access.grant_for_tool(owner, subject, target, tool).await {
+                return Some(grant);
+            }
+        }
+    }
+    None
+}
+
+async fn caller_grant_subjects(
+    store: &std::sync::Arc<dyn crate::api::mission_store::MissionStore>,
+    p: &Principal,
+) -> Vec<crate::api::approval_flow::RequesterSubject> {
+    match p.mission_id {
+        Some(own) => fork_lineage(store, own)
+            .await
+            .into_iter()
+            .map(crate::api::approval_flow::RequesterSubject::mission)
+            .collect(),
+        None => vec![p.requester_subject()],
+    }
 }
 
 async fn record_granted_access(state: &Arc<AppState>, p: &Principal, grant: Uuid, tool: &str) {
@@ -2313,14 +2391,22 @@ mod tests {
         let root_btw_tags = vec![format!("btw-parent:{}", root.id)];
         assert!(btw_associated_with_target(&store, &root_btw_tags, forked.id).await);
 
-        assert!(sets_reserved_btw_tag(
+        assert!(sets_reserved_lineage_tag(
             &json!({"tags": ["x", format!("btw-parent:{}", root.id)]})
         ));
-        assert!(sets_reserved_btw_tag(&json!({"tags": ["btw-subagent"]})));
-        assert!(!sets_reserved_btw_tag(
+        assert!(sets_reserved_lineage_tag(
+            &json!({"tags": ["btw-subagent"]})
+        ));
+        assert!(sets_reserved_lineage_tag(
+            &json!({"tags": [format!("fork-of:{}", root.id)]})
+        ));
+        assert!(sets_reserved_lineage_tag(
+            &json!({"tags": [format!("fork-workspace:{}", root.id)]})
+        ));
+        assert!(!sets_reserved_lineage_tag(
             &json!({"tags": ["btw", "project:x"]})
         ));
-        assert!(!sets_reserved_btw_tag(&json!({"title": "no tags"})));
+        assert!(!sets_reserved_lineage_tag(&json!({"title": "no tags"})));
     }
     #[test]
     fn core_enforces_eight_calls_even_when_stdio_is_bypassed() {

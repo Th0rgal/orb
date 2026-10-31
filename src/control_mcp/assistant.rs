@@ -4649,11 +4649,13 @@ fn compact_compute_fleet(fleet: &Value) -> Value {
             "queued_remote_jobs": queued_jobs,
         },
         "placement_policy": {
-            "ordinary_cpu_work": "prefer online non-GPU nodes with immediate capacity, then lowest normalized utilization",
-            "gpu_work": "request the gpu label explicitly",
+            "subagents_and_workers": "when managed_compute.boat_enabled is true, omit remote_node_id (defaults to auto-managed:boat) or pass auto-managed:boat:<size> so subagents run on disposable cloud VMs; avoid explicitly pinning static fleet nodes (e.g. nippur) especially when capacity_available == 0 or queued_jobs > 0",
+            "ordinary_cpu_work": "prefer elastic cloud VMs (auto-managed:boat) or online non-GPU nodes with immediate capacity, then lowest normalized utilization",
+            "gpu_work": "request the gpu label explicitly or rent via auto-managed:vastai:<gpu>",
             "parallel_clean_builds": "use distinct missions and verify distinct node/job/head receipts",
             "lean_builds": "workspaces listed under spark_offload.enabled_workspaces can also offload Lean builds to the DGX Spark lane (separate from these nodes)",
         },
+        "managed_compute": fleet.get("managed_compute").cloned().unwrap_or(Value::Null),
         "nodes": compact_nodes,
         "recent_jobs": fleet.get("recent_jobs").cloned().unwrap_or_else(|| json!([])),
         "spark_offload": fleet.get("spark_offload").cloned().unwrap_or(Value::Null),
@@ -7219,7 +7221,14 @@ mod tests {
                     "queued_jobs": 0
                 }
             ],
-            "recent_jobs": [{"job_id": "job", "node_id": "cpu", "state": "succeeded"}]
+            "recent_jobs": [{"job_id": "job", "node_id": "cpu", "state": "succeeded"}],
+            "managed_compute": {
+                "enabled": true,
+                "boat_enabled": true,
+                "default_subagent_target": "auto-managed:boat",
+                "active_machines": 2,
+                "max_concurrent": 16
+            }
         });
 
         let compact = compact_compute_fleet(&raw);
@@ -7228,6 +7237,14 @@ mod tests {
         assert_eq!(compact["summary"]["lean_slots_total"], 3);
         assert_eq!(compact["summary"]["lean_slots_available"], 2);
         assert_eq!(compact["summary"]["active_remote_jobs"], 1);
+        assert_eq!(
+            compact["managed_compute"]["default_subagent_target"],
+            "auto-managed:boat"
+        );
+        assert!(compact["placement_policy"]["subagents_and_workers"]
+            .as_str()
+            .unwrap()
+            .contains("auto-managed:boat"));
         assert!(compact["nodes"][0].get("base_url").is_none());
         assert_eq!(
             compact["nodes"][0]["source_bundle_capacity"]["complete_bytes"],

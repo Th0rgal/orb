@@ -210,6 +210,19 @@ pub async fn deliver(
             tracing::info!(mission = %m.id, "Dropped scheduled delivery for an archived mission");
             continue;
         }
+        if !e.variables_used.contains_key("__delivery_manual")
+            && pre_fork_reminder_superseded(store, m.id, &e.triggered_at).await?
+        {
+            // A conversation fork replaces the session even before the source row is archived.
+            e.status = ExecutionStatus::Cancelled;
+            e.error = Some("Mission forked forward; pre-fork reminder dropped".into());
+            e.completed_at = Some(crate::api::mission_store::now_string());
+            store.update_automation_execution(e).await?;
+            store.fence_mission_wakeups(m.id).await?;
+            store.cancel_mission_continuations(m.id).await?;
+            tracing::info!(mission = %m.id, "Dropped pre-fork scheduled delivery for a forked mission");
+            continue;
+        }
         let paused_or_interrupted = match m.status {
             MissionStatus::Paused => true,
             MissionStatus::Interrupted => m.terminal_reason.as_deref() != Some("client_runner"),
@@ -473,6 +486,83 @@ pub async fn drop_for_archived(
             variables_used: a.variables.clone(),
             completed_at: Some(crate::api::mission_store::now_string()),
             error: Some("Mission archived; reminder dropped".into()),
+            retry_count: 0,
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Latest `created_at` among conversation forks (`fork-of:<mission>`) replacing `mission`.
+pub async fn latest_fork_created_at(
+    store: &Arc<dyn MissionStore>,
+    mission: Uuid,
+) -> Result<Option<DateTime<Utc>>, String> {
+    let forks = store
+        .list_missions_filtered(
+            &crate::api::mission_store::MissionFilter {
+                tag: Some(format!("fork-of:{mission}")),
+                ..Default::default()
+            },
+            10,
+            0,
+        )
+        .await?;
+    Ok(forks
+        .iter()
+        .filter_map(|m| DateTime::parse_from_rfc3339(&m.created_at).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .max())
+}
+
+/// True when `created_or_triggered_at` precedes a conversation fork (`fork-of:<mission>`),
+/// meaning the reminder or staged delivery belongs to the pre-fork session rather than a
+/// later manual reopen of `mission`.
+pub async fn pre_fork_reminder_superseded(
+    store: &Arc<dyn MissionStore>,
+    mission: Uuid,
+    created_or_triggered_at: &str,
+) -> Result<bool, String> {
+    let Some(fork_at) = latest_fork_created_at(store, mission).await? else {
+        return Ok(false);
+    };
+    let Ok(item_at) = DateTime::parse_from_rfc3339(created_or_triggered_at) else {
+        return Ok(true);
+    };
+    Ok(item_at.with_timezone(&Utc) <= fork_at)
+}
+
+/// Forking a conversation forward (harness transfer / edit-and-resend, not `/btw`)
+/// ends the replaced version's automatic reminders and goal-loop automations so an
+/// older timer cannot wake the pre-fork session alongside its replacement.
+pub async fn drop_for_forked(
+    store: &Arc<dyn MissionStore>,
+    mission: Uuid,
+    dropped: Option<&Automation>,
+) -> Result<(), String> {
+    stop_for_mission(store, mission).await?;
+    if let Ok(automations) = store.get_mission_automations(mission).await {
+        for a in automations {
+            if a.active && matches!(a.trigger, TriggerType::AgentFinished) {
+                let _ = store.update_automation_active(a.id, false).await;
+            }
+        }
+    }
+    let Some(a) = dropped else {
+        return Ok(());
+    };
+    tracing::info!(%mission, automation = %a.id, "Dropped pre-fork reminder for a forked mission");
+    store
+        .create_automation_execution(AutomationExecution {
+            id: Uuid::new_v4(),
+            automation_id: a.id,
+            mission_id: mission,
+            triggered_at: crate::api::mission_store::now_string(),
+            trigger_source: "forked".into(),
+            status: ExecutionStatus::Skipped,
+            webhook_payload: None,
+            variables_used: a.variables.clone(),
+            completed_at: Some(crate::api::mission_store::now_string()),
+            error: Some("Mission forked forward; pre-fork reminder dropped".into()),
             retry_count: 0,
         })
         .await
@@ -1318,6 +1408,78 @@ mod tests {
         assert_eq!(
             store.get_automation_executions(a.id, None).await.unwrap()[0].status,
             ExecutionStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_fork_drops_pre_fork_reminders_without_blocking_later_reopen() {
+        let (_dir, store, a) = fixture().await;
+        // Source mission completed its turn after arming a 30-minute reminder `a`.
+        store
+            .update_mission_status(a.mission_id, MissionStatus::Completed)
+            .await
+            .unwrap();
+        stage(&store, &a, "check PR #311".into()).await.unwrap();
+
+        // Operator transfers the conversation onto another harness (`fork-of:<source>`).
+        let fork = store
+            .create_mission(
+                Some("turbo-lean improvements"),
+                None,
+                None,
+                None,
+                None,
+                Some("opencode"),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                fork.id,
+                crate::api::mission_store::MissionProjectPatch {
+                    tags: Some(vec![
+                        format!("fork-workspace:{}", a.mission_id),
+                        format!("fork-of:{}", a.mission_id),
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            pre_fork_reminder_superseded(&store, a.mission_id, &a.created_at)
+                .await
+                .unwrap(),
+            "reminder armed before the conversation fork must be superseded"
+        );
+
+        // Even before `a.mission_id` is archived (`Completed`, not `Acknowledged`),
+        // `deliver` drops the pre-fork staged delivery instead of waking the old harness.
+        let (tx, mut rx) = mpsc::channel(4);
+        let (events_tx, _) = broadcast::channel(4);
+        deliver(&store, &tx, &events_tx, None).await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "superseded pre-fork reminder must never inject a UserMessage"
+        );
+        let executions = store.get_automation_executions(a.id, None).await.unwrap();
+        assert_eq!(executions[0].status, ExecutionStatus::Cancelled);
+
+        // If the operator deliberately reopens the earlier version AFTER the fork and arms
+        // a brand-new reminder at `fork_at + 10s`, that post-fork reminder is NOT dropped.
+        let post_fork_at = (latest_fork_created_at(&store, a.mission_id)
+            .await
+            .unwrap()
+            .unwrap()
+            + chrono::Duration::seconds(10))
+        .to_rfc3339();
+        assert!(
+            !pre_fork_reminder_superseded(&store, a.mission_id, &post_fork_at)
+                .await
+                .unwrap(),
+            "new reminder armed after deliberately reopening an earlier version must stay live"
         );
     }
 }
