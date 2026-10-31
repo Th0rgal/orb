@@ -401,6 +401,14 @@ fun OrbMachinesSettingsPage(
                         }
                     }
                 }
+
+                item {
+                    OrbAgentSoftwareBlock(
+                        core = core,
+                        fleetNodes = fleetNodes,
+                        reloadKey = managedReloadKey
+                    )
+                }
             }
         }
     }

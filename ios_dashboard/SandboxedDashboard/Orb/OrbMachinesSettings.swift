@@ -15,6 +15,7 @@ struct OrbMachinesSettings: View {
     @State private var managedFetchedAt = Date.now
     @State private var managedBusy = false
     @State private var busyProvider: String?
+    @State private var softwareReloadToken = 0
     var body: some View {
         List {
             OrbSettingsError(message: fleetError)
@@ -79,6 +80,7 @@ struct OrbMachinesSettings: View {
                     }
                 }
             }
+            OrbAgentSoftwareSection(nodes: nodes, reloadToken: softwareReloadToken)
         }
         .scrollContentBackground(.hidden).background(OrbStyle.background)
         .navigationTitle("Machines").navigationBarTitleDisplayMode(.inline)
@@ -107,6 +109,7 @@ struct OrbMachinesSettings: View {
         do {
             let value = try await client.call("/api/remote-nodes")
             nodes = value["nodes"].items; fleetReady = true; fleetError = ""
+            softwareReloadToken &+= 1
         } catch is CancellationError { return }
         catch { fleetReady = false; fleetError = "Fleet unavailable. \(error.localizedDescription)" }
     }

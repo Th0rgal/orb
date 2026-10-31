@@ -35,7 +35,11 @@ thread_local! {
     /// Per-test state directory. A process-wide env var would also capture the
     /// launches of unrelated tests running in parallel.
     static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_FLEET: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const { std::cell::RefCell::new(None) };
 }
+
+const FLEET_MANAGED_IDS: &[&str] = &["claudecode", "codex", "opencode", "grok", "vibe"];
+const DEFAULT_VIBE_RELEASE: &str = "2.19.1";
 pub fn root() -> Result<PathBuf, String> {
     #[cfg(test)]
     if let Some(p) = TEST_ROOT.with(|r| r.borrow().clone()) {
@@ -104,6 +108,10 @@ pub struct Component {
     pub release_error: Option<String>,
     pub running: Vec<Launch>,
     pub instructions: String,
+    #[serde(default)]
+    pub ready: Option<bool>,
+    #[serde(default)]
+    pub ready_detail: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Launch {
@@ -391,6 +399,11 @@ fn owner(path: &Path) -> String {
 }
 /// Fleet launchers must resolve into the component's administrator-owned tree.
 fn fleet_component(path: &Path) -> Option<&'static str> {
+    #[cfg(test)]
+    if let Some((bin_dir, _)) = TEST_FLEET.with(|r| r.borrow().clone()) {
+        let name = TOOLS.iter().find(|t| path == bin_dir.join(t.2))?.2;
+        return path.is_file().then_some(name);
+    }
     let name = TOOLS
         .iter()
         .find(|t| {
@@ -401,19 +414,26 @@ fn fleet_component(path: &Path) -> Option<&'static str> {
         .2;
     let resolved = std::fs::canonicalize(path).ok()?;
     (resolved.starts_with(Path::new("/opt/sandboxed-tools").join(name))
-        || resolved.starts_with(Path::new("/opt/orb-tools").join(name)))
+        || resolved.starts_with(Path::new("/opt/orb-tools").join(name))
+        || (name == "vibe-acp"
+            && resolved.starts_with("/opt/sandboxed-harnesses/tools/mistral-vibe")))
     .then_some(name)
 }
-/// Infer the package from its manifest, not merely a bin directory name.
-fn native_update(path: &Path, component: &str, target: &str) -> Option<(PathBuf, Vec<String>)> {
+
+fn fleet_helper_command(bin_name: &str, target: &str) -> Option<(PathBuf, Vec<String>)> {
+    #[cfg(test)]
+    if let Some((_, helper)) = TEST_FLEET.with(|r| r.borrow().clone()) {
+        return helper
+            .is_file()
+            .then(|| (helper, vec![bin_name.into(), target.into()]));
+    }
     #[cfg(target_os = "linux")]
-    if let Some(name) = fleet_component(path) {
-        let expected = TOOLS.iter().find(|t| t.0 == component)?.2;
+    {
         let helper = Path::new("/usr/local/sbin/orb-update-harness");
-        if name != expected || !helper.is_file() {
+        if !helper.is_file() {
             return None;
         }
-        let mut args = vec![name.into(), target.into()];
+        let mut args = vec![bin_name.into(), target.into()];
         if unsafe { libc::geteuid() } == 0 {
             return Some((helper.into(), args));
         }
@@ -421,11 +441,54 @@ fn native_update(path: &Path, component: &str, target: &str) -> Option<(PathBuf,
         if Path::new("/run/orb-privd.sock").exists() && privd_client.is_file() {
             return Some((
                 privd_client.into(),
-                vec!["--update-harness".into(), name.into(), target.into()],
+                vec!["--update-harness".into(), bin_name.into(), target.into()],
             ));
         }
-        args.splice(0..0, ["-n".into(), helper.to_string_lossy().into_owned()]);
-        return Some((PathBuf::from("/usr/bin/sudo"), args));
+        if Path::new("/usr/bin/sudo").is_file() {
+            args.splice(0..0, ["-n".into(), helper.to_string_lossy().into_owned()]);
+            return Some((PathBuf::from("/usr/bin/sudo"), args));
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (bin_name, target);
+        None
+    }
+}
+
+fn fleet_install_path(component: &str) -> Option<PathBuf> {
+    if !FLEET_MANAGED_IDS.contains(&component) {
+        return None;
+    }
+    let bin = TOOLS.iter().find(|t| t.0 == component)?.2;
+    fleet_helper_command(bin, "0.0.0")?;
+    let bin_dir = {
+        #[cfg(test)]
+        {
+            TEST_FLEET
+                .with(|r| r.borrow().as_ref().map(|(d, _)| d.clone()))
+                .unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
+        }
+        #[cfg(not(test))]
+        {
+            PathBuf::from("/usr/local/bin")
+        }
+    };
+    let launcher = bin_dir.join(bin);
+    (!launcher.exists() && std::fs::symlink_metadata(&launcher).is_err()).then_some(launcher)
+}
+
+/// Infer the package from its manifest, not merely a bin directory name.
+fn native_update(path: &Path, component: &str, target: &str) -> Option<(PathBuf, Vec<String>)> {
+    if let Some(name) = fleet_component(path) {
+        let expected = TOOLS.iter().find(|t| t.0 == component)?.2;
+        if name != expected {
+            return None;
+        }
+        if let Some(cmd) = fleet_helper_command(name, target) {
+            return Some(cmd);
+        }
     }
     if component == "claudecode" && owner(path) == "Claude installer" {
         return Some((path.to_path_buf(), vec!["install".into(), target.into()]));
@@ -514,14 +577,55 @@ fn save_jobs(jobs: &[UpdateJob]) -> Result<(), String> {
 
 pub fn scan(name: &str, overrides: &HashMap<String, String>) -> Inventory {
     let live = active();
-    let components=TOOLS.iter().map(|(id,label,bin,_)|{
-  let path=overrides.get(*id).filter(|p|!p.trim().is_empty()).map(PathBuf::from).or_else(||resolve(bin));
-  let ver=path.as_deref().and_then(version);let installed=path.as_ref().is_some_and(|p|p.is_file());
-  let owner=path.as_deref().map(owner).unwrap_or_else(||"External".into());
-  let native=path.as_deref().is_some_and(|p|native_update(p,id,"0.0.0").is_some());
-  let supported=native||(*id=="codex"&&path.as_deref().is_some_and(codex_launcher));
-  Component{id:(*id).into(),name:(*label).into(),version:ver,path:path.map(|p|p.display().to_string()),installed,owner:owner.clone(),update_supported:supported,latest:None,release_error:None,running:live.iter().filter(|r|r.harness==*id).cloned().collect(),instructions:if native {format!("Updates use the detected {owner} installation and its existing package directory. Orb waits for agents to finish, then verifies the installed version. No installer is replaced.")} else if supported {"Update installs the exact official npm package in an isolated directory, verifies its CLI, then switches the launcher. Previous installation is preserved for rollback.".into()} else {"Managed externally. Update with the installer that owns this executable, then refresh. Running sessions keep their launch version.".into()}}
- }).collect();
+    let components = TOOLS
+        .iter()
+        .map(|(id, label, bin, _)| {
+            let has_override = overrides.get(*id).is_some_and(|p| !p.trim().is_empty());
+            let path = overrides
+                .get(*id)
+                .filter(|p| !p.trim().is_empty())
+                .map(PathBuf::from)
+                .or_else(|| resolve(bin));
+            let ver = path.as_deref().and_then(version);
+            let installed = path.as_ref().is_some_and(|p| p.is_file());
+            let fresh_fleet = !installed && !has_override && fleet_install_path(id).is_some();
+            let owner = if fresh_fleet {
+                "Fleet installer".into()
+            } else {
+                path.as_deref().map(owner).unwrap_or_else(|| "External".into())
+            };
+            let native = path
+                .as_deref()
+                .is_some_and(|p| native_update(p, id, "0.0.0").is_some());
+            let supported = fresh_fleet
+                || native
+                || (*id == "codex" && path.as_deref().is_some_and(codex_launcher));
+            let instructions = if fresh_fleet {
+                "Installs the verified official release via orb-update-harness and links /usr/local/bin.".into()
+            } else if native {
+                format!("Updates use the detected {owner} installation and its existing package directory. Orb waits for agents to finish, then verifies the installed version. No installer is replaced.")
+            } else if supported {
+                "Update installs the exact official npm package in an isolated directory, verifies its CLI, then switches the launcher. Previous installation is preserved for rollback.".into()
+            } else {
+                "Managed externally. Update with the installer that owns this executable, then refresh. Running sessions keep their launch version.".into()
+            };
+            Component {
+                id: (*id).into(),
+                name: (*label).into(),
+                version: ver,
+                path: path.map(|p| p.display().to_string()),
+                installed,
+                owner,
+                update_supported: supported,
+                latest: None,
+                release_error: None,
+                running: live.iter().filter(|r| r.harness == *id).cloned().collect(),
+                instructions,
+                ready: None,
+                ready_detail: None,
+            }
+        })
+        .collect();
     Inventory {
         checked_at: now(),
         components,
@@ -547,22 +651,46 @@ pub async fn releases(inventory: &mut Inventory, force: bool) {
         return;
     };
     for row in &mut inventory.components {
-        if !row.installed {
+        if (!row.installed && !row.update_supported) || (!force && row.latest.is_some()) {
             continue;
         }
-        let Some(package) = TOOLS.iter().find(|t| t.0 == row.id).and_then(|t| t.3) else {
+        if row.id == "vibe" {
+            row.latest = Some(DEFAULT_VIBE_RELEASE.into());
             continue;
-        };
+        }
+        let cache_key = row.id.clone();
         let cached = CACHE
             .get_or_init(Default::default)
             .lock()
             .ok()
-            .and_then(|m| m.get(package).cloned())
+            .and_then(|m| m.get(&cache_key).cloned())
             .filter(|(t, _)| !force && now().saturating_sub(*t) < 21600);
         if let Some((_, v)) = cached {
             row.latest = Some(v);
             continue;
         }
+        if row.id == "grok" {
+            match client.get("https://x.ai/cli/stable").send().await {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(text) = r.text().await {
+                        let trimmed = text.trim();
+                        if numeric_version(trimmed).as_deref() == Some(trimmed) {
+                            row.latest = Some(trimmed.into());
+                            if let Ok(mut cache) = CACHE.get_or_init(Default::default).lock() {
+                                cache.insert(cache_key, (now(), trimmed.into()));
+                            }
+                            continue;
+                        }
+                    }
+                    row.release_error = Some("Release metadata unavailable".into());
+                }
+                _ => row.release_error = Some("Could not check releases".into()),
+            }
+            continue;
+        }
+        let Some(package) = TOOLS.iter().find(|t| t.0 == row.id).and_then(|t| t.3) else {
+            continue;
+        };
         let url = format!(
             "https://registry.npmjs.org/{}/latest",
             package.replace('/', "%2f")
@@ -576,7 +704,7 @@ pub async fn releases(inventory: &mut Inventory, force: bool) {
                     {
                         row.latest = Some(v.into());
                         if let Ok(mut cache) = CACHE.get_or_init(Default::default).lock() {
-                            cache.insert(package.into(), (now(), v.into()));
+                            cache.insert(cache_key, (now(), v.into()));
                         }
                         continue;
                     }
@@ -589,10 +717,41 @@ pub async fn releases(inventory: &mut Inventory, force: bool) {
 }
 
 pub fn queue(component: &str, target: &str, path: &str) -> Result<UpdateJob, String> {
+    if numeric_version(target).as_deref() != Some(target) {
+        return Err("This installation is managed externally".into());
+    }
+    if path.trim().is_empty() {
+        let install_path = fleet_install_path(component)
+            .ok_or_else(|| "This installation is managed externally".to_string())?;
+        let resolved_path = install_path.display().to_string();
+        let _lock = lock("jobs.lock", true)?;
+        let mut all = jobs();
+        if let Some(job) = all.iter().find(|j| {
+            j.path == resolved_path && matches!(j.state.as_str(), "queued" | "installing")
+        }) {
+            return Ok(job.clone());
+        }
+        if install_path.exists() || std::fs::symlink_metadata(&install_path).is_ok() {
+            return Err("Installation changed since inventory scan; refresh and retry".into());
+        }
+        let job = UpdateJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            component: component.into(),
+            version: target.into(),
+            path: resolved_path,
+            previous_target: String::new(),
+            installer: Some("Fleet installer".into()),
+            state: "queued".into(),
+            error: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        all.push(job.clone());
+        save_jobs(&all)?;
+        return Ok(job);
+    }
     let native = native_update(Path::new(path), component, target).is_some();
-    if numeric_version(target).as_deref() != Some(target)
-        || !(native || (component == "codex" && codex_launcher(Path::new(path))))
-    {
+    if !(native || (component == "codex" && codex_launcher(Path::new(path)))) {
         return Err("This installation is managed externally".into());
     }
     let _lock = lock("jobs.lock", true)?;
@@ -676,15 +835,33 @@ fn switch_link(_: &Path, _: &Path) -> Result<(), String> {
 fn install(job: &UpdateJob) -> Result<(), String> {
     let path = Path::new(&job.path);
     if let Some(installer) = &job.installer {
-        if owner(path) != *installer
-            || std::fs::read_link(path).map_err(io)? != Path::new(&job.previous_target)
-        {
-            return Err(
-                "Installation changed since this update was queued. Refresh and retry.".into(),
-            );
-        }
-        let (manager, args) = native_update(path, &job.component, &job.version)
-            .ok_or("Installer could not be verified; refresh and retry")?;
+        let (manager, args) = if job.previous_target.is_empty() {
+            if installer != "Fleet installer"
+                || path.exists()
+                || std::fs::symlink_metadata(path).is_ok()
+            {
+                return Err(
+                    "Installation changed since this install was queued. Refresh and retry.".into(),
+                );
+            }
+            let bin = TOOLS
+                .iter()
+                .find(|t| t.0 == job.component)
+                .map(|t| t.2)
+                .ok_or("Installer could not be verified; refresh and retry")?;
+            fleet_helper_command(bin, &job.version)
+                .ok_or("Installer could not be verified; refresh and retry")?
+        } else {
+            if owner(path) != *installer
+                || std::fs::read_link(path).map_err(io)? != Path::new(&job.previous_target)
+            {
+                return Err(
+                    "Installation changed since this update was queued. Refresh and retry.".into(),
+                );
+            }
+            native_update(path, &job.component, &job.version)
+                .ok_or("Installer could not be verified; refresh and retry")?
+        };
         let result = probe(
             &manager,
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1080,6 +1257,42 @@ CLI
             std::fs::canonicalize(&global).unwrap().to_str().unwrap(),
             "preserve the owning npm prefix"
         );
+
+        // Fresh Fleet install when a harness binary is not yet installed.
+        let fleet_bin = temp.path().join("fleet-bin");
+        std::fs::create_dir_all(&fleet_bin).unwrap();
+        let helper = temp.path().join("orb-update-harness");
+        script(
+            &helper,
+            &format!(
+                r#"#!/bin/sh
+[ "$1" = "vibe-acp" ] && [ "$2" = "2.19.1" ] || exit 7
+cat > '{}/vibe-acp' <<'VIBE'
+#!/bin/sh
+echo 'vibe-acp 2.19.1'
+VIBE
+chmod +x '{}/vibe-acp'
+"#,
+                fleet_bin.display(),
+                fleet_bin.display()
+            ),
+        );
+        TEST_FLEET.with(|r| *r.borrow_mut() = Some((fleet_bin.clone(), helper.clone())));
+        let fresh_job = queue("vibe", "2.19.1", "").unwrap();
+        assert_eq!(fresh_job.installer.as_deref(), Some("Fleet installer"));
+        assert_eq!(fresh_job.previous_target, "");
+        assert_eq!(
+            queue("vibe", "2.19.1", "").unwrap().id,
+            fresh_job.id,
+            "duplicate fresh install clicks share one job"
+        );
+        tick_with_busy(|_| false).unwrap();
+        assert_eq!(jobs().last().unwrap().state, "completed");
+        assert_eq!(
+            numeric_version(&version(&fleet_bin.join("vibe-acp")).unwrap()).as_deref(),
+            Some("2.19.1")
+        );
+        TEST_FLEET.with(|r| *r.borrow_mut() = None);
         TEST_ROOT.with(|r| *r.borrow_mut() = None);
         match old_path {
             Some(v) => std::env::set_var("PATH", v),

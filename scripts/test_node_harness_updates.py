@@ -50,6 +50,31 @@ class UpdateSafety(unittest.TestCase):
                 updater.prune_versions(root, root/'1.0.2')
             self.assertTrue((root/'1.0.0').exists())
 
+    def test_vibe_resolves_pinned_release_and_checks_acp_contract(self):
+        self.assertEqual(updater.resolve('vibe', {}), '2.19.1')
+        self.assertEqual(updater.resolve('vibe', {'vibe': '2.20.0'}), '2.20.0')
+        with patch.object(updater, 'run_probe', side_effect=['vibe-acp 2.19.1', 'Run Mistral Vibe in ACP mode']):
+            self.assertEqual(updater.probe('/usr/local/bin/vibe-acp', 'vibe', '2.19.1', 'sandboxed-node'), 'vibe-acp 2.19.1')
+        with patch.object(updater, 'run_probe', side_effect=['vibe-acp 2.19.1', 'legacy cli']):
+            with self.assertRaisesRegex(ValueError, 'contract'):
+                updater.probe('/usr/local/bin/vibe-acp', 'vibe', '2.19.1', 'sandboxed-node')
+
+    def test_uv_digest_mismatch_is_rejected(self):
+        fake_release = {
+            'tag_name': '0.13.6',
+            'assets': [{
+                'name': 'uv-x86_64-unknown-linux-gnu.tar.gz',
+                'browser_download_url': 'https://github.com/astral-sh/uv/releases/download/0.13.6/uv-x86_64-unknown-linux-gnu.tar.gz',
+                'digest': 'sha256:0000',
+            }],
+        }
+        with patch.object(updater.Path, 'is_file', return_value=False), \
+             patch.object(updater.platform, 'machine', return_value='x86_64'), \
+             patch.object(updater, 'metadata', return_value=fake_release), \
+             patch.object(updater, 'fetch', return_value=b'tampered'):
+            with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+                updater.ensure_uv()
+
 if __name__ == '__main__': unittest.main()
 
 
