@@ -381,6 +381,37 @@ def export_map(path, namespace):
         r"@\[[^\]]*\bexport\s+(\w+)[^\]]*\]\s*def\s+(\w+)", text)}
 
 
+def public_export_functions(manifest):
+    # `internal` also marks public-prefix steppers not exposed to mobile.
+    # The roadmap includes those steppers; exclude only the compiler helper.
+    functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
+    if len(functions) != 129 or len(manifest["functions"]) != 130:
+        raise ValueError("public export inventory changed; qualify the new surface explicitly")
+    return functions
+
+
+def build_corpus(functions):
+    bits = {"uint8_t": 8, "uint32_t": 32, "uint64_t": 64}
+    rng = random.Random(20261028)
+    cases = []
+    for f in functions:
+        for kind in range(8):
+            args = []
+            for p in f["params"]:
+                cap = (1 << bits[p["type"]]) - 1
+                args.append([0, 1, 2, 3, cap, cap - 1, rng.randrange(cap + 1), rng.randrange(cap + 1)][kind])
+            cases.append({"id": len(cases), "symbol": f["name"], "args": args})
+    witness_cases = {}
+    for mut_id, _, _, target_sym, _, witness_args in DOMAIN_MUTANTS:
+        existing = [c["id"] for c in cases if c["symbol"] == target_sym and c["args"] == witness_args]
+        if not existing:
+            cid = len(cases)
+            cases.append({"id": cid, "symbol": target_sym, "args": list(witness_args)})
+            existing = [cid]
+        witness_cases[mut_id] = existing
+    return cases, witness_cases
+
+
 def terminate(*_):
     raise SystemExit(143)
 
@@ -412,11 +443,7 @@ def main(argv=None):
     # Unwind subprocess ownership on durable-job termination as well as timeout.
     signal.signal(signal.SIGTERM, terminate)
     manifest = load_manifest(ORB / "shared/orb-spec/kernel_abi.json")
-    # `internal` also marks six public-prefix steppers not exposed to mobile.
-    # The roadmap includes those steppers; exclude only the compiler helper.
-    functions = [f for f in manifest["functions"] if f["name"].startswith(("orb_", "leansys_"))]
-    if len(functions) != 129 or len(manifest["functions"]) != 130:
-        raise ValueError("public export inventory changed; qualify the new surface explicitly")
+    functions = public_export_functions(manifest)
     if run(["git", "rev-parse", "HEAD"], SYS).strip() != "c089f3e31dbd36f2bde2219913d5b9c90da670be":
         raise ValueError("unexpected LeanSys revision")
     sources = [(ORB / "lean/Orb/Kernel.lean", "Orb.Kernel"),
@@ -427,26 +454,10 @@ def main(argv=None):
     if not {f["name"] for f in functions} <= exports.keys():
         raise ValueError("unresolved Lean export")
     bits = {"uint8_t": 8, "uint32_t": 32, "uint64_t": 64}
-    rng = random.Random(20261028)
-    cases = []
-    for f in functions:
-        for kind in range(8):
-            args = []
-            for p in f["params"]:
-                cap = (1 << bits[p["type"]]) - 1
-                args.append([0, 1, 2, 3, cap, cap - 1, rng.randrange(cap + 1), rng.randrange(cap + 1)][kind])
-            cases.append({"id": len(cases), "symbol": f["name"], "args": args})
-    witness_cases = {}
-    for mut_id, _, _, target_sym, _, witness_args in DOMAIN_MUTANTS:
-        existing = [c["id"] for c in cases if c["symbol"] == target_sym and c["args"] == witness_args]
-        if not existing:
-            cid = len(cases)
-            cases.append({"id": cid, "symbol": target_sym, "args": list(witness_args)})
-            existing = [cid]
-        witness_cases[mut_id] = existing
+    cases, witness_cases = build_corpus(functions)
     (OUT / "cases.json").write_text(json.dumps(cases) + "\n")
     (OUT / "cases.txt").write_text("".join(f"{c['id']}:{c['symbol']}:" + ",".join(map(str, c['args'])) + "\n" for c in cases))
-    report = {"status": "INCOMPLETE", "public_exports": 128, "cases": len(cases),
+    report = {"status": "INCOMPLETE", "public_exports": len(functions), "cases": len(cases),
               "heads": {"orb": run(["git", "rev-parse", "HEAD"], ORB).strip(),
                         "turbo": run(["git", "rev-parse", "HEAD"], TURBO).strip()},
               "sources": {str(p): digest(p) for p, _ in sources},
@@ -638,7 +649,7 @@ for (const c of cases) {
             qualification_failed = True
             report["host_adapters"]["rust_orb_spec"] = {"status": "FAIL", "mismatches": rust_mismatches}
         else:
-            report["host_adapters"]["rust_orb_spec"] = {"status": "PASS", "rows": len(rust_host_rows), "exports": 128}
+            report["host_adapters"]["rust_orb_spec"] = {"status": "PASS", "rows": len(rust_host_rows), "exports": len(functions)}
     except Exception as error:
         report["host_adapters"]["rust_orb_spec"] = {"status": "BLOCKED", "reason": str(error)}
         qualification_failed |= isinstance(error, (RowFailure, ValueError))

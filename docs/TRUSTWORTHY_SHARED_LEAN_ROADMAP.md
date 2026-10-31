@@ -3,27 +3,42 @@
 ## Current acceptance status (2026-10-31)
 
 **P0–P7 remain unaccepted.** The phase DAG and exit gates below are requirements,
-not receipts that they have executed. P0 merged (#1396) and P2 (#1398), P4–P6
-(#1420), P7 (#1439) and External MCP Sessions (#1419) also merged; each retained
-honest open-work statements rather than claiming full acceptance.
+not receipts that they have executed. P0 (`#1396`), P2 (`#1398`), P4–P6 (`#1420`),
+P7 (`#1439`), External MCP Sessions (`#1419`), P1/P3 evidence reporting (`#1483`),
+spec-audit pin bump (`#1487`), and P3 signed consistency receipts / opt-in
+LeanNative scalar backend rollback (`#1490`) merged while retaining honest
+open-work statements rather than claiming phase acceptance.
 
 **P1/P3 local evidence now exists.** turbo-lean Stage 1D #280 merged at
 `e585ba96f58cb06414ce5e3216f3ffc0ce235300` after exact-head green CI and a
-clean Codex review. At Orb `3c70e5ada` / Turbo `e585ba9` / LeanSys
-`c089f3e3`, the six-engine kernel conformance passed all 128 public exports
-(1044 cases, 5220 comparisons, zero mismatches) and the P3 qualification
-executed real x86_64, real dgx-spark ARM64, Node WASM MVP/SIMD128/shipped
-module, and Linux-loaded Android x86_64 JNI paths with zero mismatches:
+clean Codex review (and `lean/turbo-lean-revision` is pinned to `e585ba96`). At
+the historical execution head Orb `3c70e5ada278a4e37e0180255f360aa2ff5fe86c` /
+Turbo `e585ba96f58cb06414ce5e3216f3ffc0ce235300` / LeanSys
+`c089f3e31dbd36f2bde2219913d5b9c90da670be`, the six-engine kernel conformance
+passed all 128 public exports at that head (1044 cases, 5220 comparisons, zero
+mismatches) and the P3 qualification executed real x86_64, real dgx-spark ARM64,
+Node WASM MVP/SIMD128/shipped module, and Linux-loaded Android x86_64 JNI paths
+with zero mismatches (`QUALIFIED_WITH_HONEST_DEVICE_BLOCKERS`):
 [results and receipt hashes](P1_SHARED_KERNEL_CONFORMANCE.md),
-[P3 report](P3_TARGET_QUALIFICATION_REPORT.md).
+[P3 report](P3_TARGET_QUALIFICATION_REPORT.md). Later `#1488` added
+`orb_slot_bypass_step`, expanding the current manifest to **130 entries / 129
+public exports** (96 `orb_*` + 33 `leansys_*` + 1 compiler helper), and `#1490`
+added the repo-owned 260-case (`130 * 2`) Ed25519-signed local P3 consistency
+receipt and `ORB_KERNEL_BACKEND=stock-c` default rollback without retroactively
+relabeling the `3c70e5ada` multi-target run.
 
-That local evidence is not phase acceptance: **23 partial / 106 unconnected**
-coverage entries remain; physical iPhone 13 mini and Pixel 8 stay
-`BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is `BLOCKED_HOST_UNREACHABLE`,
-iOS/macOS/Android-ARM64 remain cross-compilation-only, and per-case receipts are
-unsigned local consistency records, not attestations. Production artifact
-switching and end-to-end caller wiring remain future work. Independent
-exact-head reviews remain required for subsequent changes.
+That local evidence is not phase acceptance: **23 partial / 107 unconnected**
+coverage entries remain across the current 130-entry manifest (`acceptance:
+INCOMPLETE`; 23 partial / 106 unconnected at `3c70e5ada`); physical iPhone 13
+mini and Pixel 8 stay `BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is
+`BLOCKED_HOST_UNREACHABLE`, iOS/macOS/Android-ARM64 remain
+cross-compilation-only, P1 per-case SHA-256 receipts remain unsigned local
+consistency records, and `#1490`'s Ed25519 P3 receipts record local `Tested`
+consistency (`kernel_proof: false`) rather than remote hardware attestation or a
+compiler proof (`verified: true` + `overallAssurance: Tested` is not a kernel
+proof). Production artifact switching (`ORB_KERNEL_BACKEND` remains `stock-c` by
+default) and end-to-end caller wiring remain future work. Independent exact-head
+reviews remain required for subsequent changes.
 
 ## Historical handoff status (Codex, 2026-10-28)
 
@@ -38,14 +53,18 @@ Turbo has no GitHub check rollup; Orb kernel-abi passed, while draft Rust jobs
 were skipped. No phase acceptance, merge or production deployment followed from
 those checks.
 
-The coverage registry remains incomplete: 106 entries are unconnected and 23
-have explicit partial evidence in `shared/orb-spec/coverage_evidence.json`.
+The coverage registry remains incomplete: 106 entries were unconnected and 23
+had explicit partial evidence in `shared/orb-spec/coverage_evidence.json` at the
+2026-10-28 handoff (on current `master`, after `#1488` added
+`orb_slot_bypass_step`, 107 entries are unconnected and 23 partial across 130
+manifest entries: 96 `orb_*` + 33 `leansys_*` + 1 compiler helper).
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.
-Its 129 manifest entries are 95 `orb_*` exports (`Orb.Kernel.*`), 33 `leansys_*`
+At that handoff its 129 manifest entries were 95 `orb_*` exports (`Orb.Kernel.*`), 33 `leansys_*`
 exports (`LeanSys.Spec.*`, verified against pinned `lean-sys` by `gen_orb_kernel_unboxed.py`),
 and the compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg` (`model: null`).
-The 128 public exports cover all public Orb/LeanSys exports; the helper
+Those 128 public exports covered all public Orb/LeanSys exports at that head (129 on
+current `master`); the helper
 remains inventoried separately rather than being counted as an extra public gate.
 Shadow observations now count missing host HOME poststates as unobserved,
 never as ExactMatch; remote execution observation remains open. The stale-snapshot repair also includes newly stored supersession in the
@@ -100,8 +119,8 @@ This document persists the complete, executable **Orb Trustworthy Shared-Lean Ro
 
 | Repository / Component | Baseline Revision Inspected | Role |
 | :--- | :--- | :--- |
-| **`Th0rgal/orb`** | `e6b3283eff02e644660a79acc8b0a6d4c6a14331` | Core backend, `orb-spec` crate, desktop/iOS/Android clients, formal kernel (`Orb.Kernel`, `Orb.Spec`, `Orb.Stream`, `Orb.Scroll`) |
-| **`Th0rgal/turbo-lean`** (`lean/turbo-lean-revision` pin) | `2aedbc0207ccf866c41d0392b82c7187c3941ee6` | Incremental Lean verifier, kernel-audited `.olean` provenance, `audit-spec`, `LeanNative` compiler & `LNIR` operational semantics |
+| **`Th0rgal/orb`** | `e6b3283eff02e644660a79acc8b0a6d4c6a14331` | Initial baseline inspected at roadmap authoring (see Current acceptance status above for `3c70e5ada` execution evidence and current `master`) |
+| **`Th0rgal/turbo-lean`** (`lean/turbo-lean-revision` pin) | `e585ba96f58cb06414ce5e3216f3ffc0ce235300` (was `2aedbc0207ccf866c41d0392b82c7187c3941ee6` at initial authoring) | Incremental Lean verifier, kernel-audited `.olean` provenance, `audit-spec`, `LeanNative` compiler & `LNIR` operational semantics |
 | **`Th0rgal/turbo-lean`** (`main` HEAD at mission start) | `fbd36764a27c62705c825744d9f0a5ca7523811e` | Includes M1.4–M5 refactored pipeline (`ConLeche`, `ElabAudit`, `EqSat`, `LoopSchedule`, `OwnershipRC`, `CoreCLI` compression) |
 | **`Th0rgal/lean-sys`** | `c089f3e31dbd36f2bde2219913d5b9c90da670be` | Verified systems gates & scanners (`leansys_*`) |
 
@@ -134,7 +153,7 @@ This document persists the complete, executable **Orb Trustworthy Shared-Lean Ro
 │    native/WASM binary vs host wrappers  │ │  • Compile orb_kernel_unboxed.c  │
 │  • Cryptographic per-case receipts      │ │    to orb_kernel.wasm (0 waiting │
 │  • Missing engine => FAIL/INCOMPLETE    │ │    on P3 compiler research)      │
-│  • All 127 Orb/LeanSys exports + fuzz   │ │  • Generated TS adapters + BigInt│
+│  • All public Orb/LeanSys exports + fuzz│ │  • Generated TS adapters + BigInt│
 │  • Engine & harness mutation tests      │ │  • Async bootstrap + retry UI    │
 └──────────────────────┬──────────────────┘ └──────────────┬───────────────────┘
                        │                                   │
@@ -208,5 +227,5 @@ This document persists the complete, executable **Orb Trustworthy Shared-Lean Ro
    - Available execution hosts in this environment:
      - `agent-core` (`x86_64-unknown-linux-gnu`, AMD Ryzen 5 3600, 62 GiB RAM)
      - `dgx-spark` (`aarch64-unknown-linux-gnu`, Linux 6.14 ARM64)
-     - `macbook-air` (`arm64-apple-macosx`, Apple M2 `T8112`, macOS, plus Xcode `iPhone 13 mini Simulator`)
+     - `macbook-air` (`arm64-apple-macosx`, Apple M2 `T8112`, macOS, plus Xcode `iPhone 13 mini Simulator`; currently `BLOCKED_HOST_UNREACHABLE` due to SSH timeout at `10.88.0.100` in the 2026-10-31 P3 qualification run)
    - Physical `iPhone 13 mini` hardware (`apple-a15` iOS device) and physical `Pixel 8` (`tensor-g3` Android device) are not USB/network-attached (`xcrun xctrace list devices` lists only `air (2)` and simulators; `adb` is not attached). Therefore, physical iPhone 13 mini and physical Pixel 8 device execution checks remain explicitly marked **`BLOCKED_PHYSICAL_DEVICE`** in all reports and target qualification matrices, while `macbook-air` (real Apple M2 macOS hardware), `iPhone 13 mini Simulator` (on Mac), `dgx-spark` (real ARM64 Linux hardware), `agent-core` (real x86_64 Linux + WASM V8/Node/Playwright + Android JNI host `.so`), and cross-compiled Mach-O/ELF/WASM binary inspections require execution receipts before qualification.

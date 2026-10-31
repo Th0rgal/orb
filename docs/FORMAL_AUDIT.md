@@ -2,8 +2,8 @@
 
 The reviewed turbo-lean source revision is recorded in
 [`lean/turbo-lean-revision`](../lean/turbo-lean-revision). It currently pins
-`2aedbc0207ccf866c41d0392b82c7187c3941ee6` from
-[Th0rgal/turbo-lean](https://github.com/Th0rgal/turbo-lean/commit/2aedbc0207ccf866c41d0392b82c7187c3941ee6).
+`e585ba96f58cb06414ce5e3216f3ffc0ce235300` from
+[Th0rgal/turbo-lean](https://github.com/Th0rgal/turbo-lean/commit/e585ba96f58cb06414ce5e3216f3ffc0ce235300).
 Its package version is `0.1.0`; that version alone does not identify the source.
 
 The Kernel ABI workflow checks out that exact revision, verifies the checkout
