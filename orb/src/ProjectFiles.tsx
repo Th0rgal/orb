@@ -1626,7 +1626,15 @@ export function LiveProjectsSection(p: {
     });
     updateStatus(() => status);
     try {
-      await Promise.all(targets.map(t => restore ? reopenMission(t.id) : archiveMission(t.id)));
+      if (!restore && targets.length > 1 && targets.some(t => t.id === mission.id)) {
+        // Core cascades status=acknowledged to parent_mission_id descendants;
+        // archiving the root first avoids N redundant POSTs while still
+        // archiving callback-only children and confirming local origins.
+        await archiveMission(mission.id);
+        await Promise.all(targets.filter(t => t.id !== mission.id).map(t => archiveMission(t.id)));
+      } else {
+        await Promise.all(targets.map(t => restore ? reopenMission(t.id) : archiveMission(t.id)));
+      }
       if (!currentConnection(version)) return;
       if (restore) {
         for (const t of targets) archivedInSession.delete(t.id);
