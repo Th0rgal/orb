@@ -216,14 +216,18 @@ object OrbTimelineBuilder {
      */
     fun withLiveBubble(base: Base, hasStreamingText: Boolean): List<OrbTurn> =
         if (!hasStreamingText) base.turns
-        else base.turns + OrbTurn.Assistant(id = "streaming-assistant", text = "", timestamp = null, isStreaming = true)
+        else OrbTranscriptGates.ensureUniqueTurns(
+            base.turns + OrbTurn.Assistant(id = "streaming-assistant", text = "", timestamp = null, isStreaming = true)
+        )
 
     /** The streaming reply on top of [base] (tests, one-off snapshots). */
     fun withStreaming(base: Base, streamingText: String): List<OrbTurn> {
         // Live text the stored history already holds is not shown twice (reloads, SSE replays).
         val liveText = OrbSendFlow.dedupeLiveText(streamingText, base.storedAnswers)
         if (liveText.trim().isEmpty()) return base.turns
-        return base.turns + OrbTurn.Assistant(id = "streaming-assistant", text = liveText, timestamp = null, isStreaming = true)
+        return OrbTranscriptGates.ensureUniqueTurns(
+            base.turns + OrbTurn.Assistant(id = "streaming-assistant", text = liveText, timestamp = null, isStreaming = true)
+        )
     }
 
     fun buildBase(
@@ -392,7 +396,7 @@ object OrbTimelineBuilder {
             normalizedRole to (msg.str("content", "text", "message") ?: "")
         }
         val storedAnswers = OrbSendFlow.currentTurnStoredAnswers(messagePairs, narrationSet)
-        return Base(turns, storedAnswers)
+        return Base(OrbTranscriptGates.ensureUniqueTurns(turns), storedAnswers)
     }
 
     private fun isControllerWake(text: String): Boolean {

@@ -92,3 +92,4 @@ __pycache__/
 *.pyc
 .vercel
 .env*.local
+/ios_dashboard/OrbModelPackage/.build/

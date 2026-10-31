@@ -9,12 +9,16 @@ on:
     paths:
       - ".github/workflows/android-apk.yml"
       - "android_dashboard/**"
+      - "shared/orb-spec/**"
+      - "lean/Orb/**"
   pull_request:
     branches: [master, main]
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - ".github/workflows/android-apk.yml"
       - "android_dashboard/**"
+      - "shared/orb-spec/**"
+      - "lean/Orb/**"
   workflow_dispatch:
 
 env:
@@ -47,6 +51,9 @@ jobs:
 
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Verify R8 release minification and resource shrinking (unsigned)
+        run: ./gradlew :app:assembleRelease --no-daemon
 
       # Report-only until the existing lint baseline is cleaned up.
       - name: Lint (non-blocking)
