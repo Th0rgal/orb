@@ -43,4 +43,38 @@ class OrbHarnessTransferTest {
             assertEquals(fixture["request"], result.request)
         }
     }
+    @Test fun agentCatalogExcludesRetiredGeminiAndMapsAntigravityModels() {
+        val backends = listOf(
+            OrbRow("gemini", mapOf("id" to "gemini", "name" to "Gemini CLI")),
+            OrbRow("antigravity", mapOf("id" to "antigravity", "name" to "Google Antigravity")),
+            OrbRow("codex", mapOf("id" to "codex", "name" to "Codex")),
+        )
+        assertEquals(
+            listOf("antigravity", "codex", "hermes", "cursor_cloud", "grok_bot"),
+            OrbAgentCatalog.backendOptions(backends, existing = false)
+        )
+        assertEquals(
+            listOf("antigravity", "codex"),
+            OrbAgentCatalog.backendOptions(backends, existing = true)
+        )
+        assertEquals("Antigravity CLI", OrbAgentCatalog.backendLabel("antigravity", backends))
+        val models = OrbAgentCatalog.modelsForBackend(
+            "antigravity",
+            mapOf(
+                "backends" to mapOf(
+                    "antigravity" to listOf(
+                        mapOf("value" to "agy-model", "label" to "Google Antigravity — Gemini 4 Carbon"),
+                        mapOf("value" to "gemini-4-argon-high", "label" to "Google Antigravity — Gemini 4 Argon (High)"),
+                    )
+                )
+            )
+        )
+        assertEquals(
+            listOf(
+                OrbAgentCatalog.ModelChoice("agy-model", "Google Antigravity — Gemini 4 Carbon"),
+                OrbAgentCatalog.ModelChoice("gemini-4-argon-high", "Google Antigravity — Gemini 4 Argon (High)"),
+            ),
+            models
+        )
+    }
 }

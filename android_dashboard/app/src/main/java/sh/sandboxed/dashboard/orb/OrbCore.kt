@@ -856,6 +856,9 @@ class OrbCore private constructor(context: Context) {
     private val _backends = MutableStateFlow<List<OrbRow>>(emptyList())
     val backends: StateFlow<List<OrbRow>> = _backends.asStateFlow()
 
+    private val _backendModels = MutableStateFlow<OrbDict>(emptyMap())
+    val backendModels: StateFlow<OrbDict> = _backendModels.asStateFlow()
+
     private val _repositories = MutableStateFlow<List<OrbRow>>(emptyList())
     val repositories: StateFlow<List<OrbRow>> = _repositories.asStateFlow()
 
@@ -1058,6 +1061,7 @@ class OrbCore private constructor(context: Context) {
         _hermesSessions.value = emptyList()
         _workspaces.value = emptyList()
         _backends.value = emptyList()
+        _backendModels.value = emptyMap()
         _repositories.value = emptyList()
         _providers.value = emptyList()
         _providerPortfolio.value = emptyMap()
@@ -1096,6 +1100,7 @@ class OrbCore private constructor(context: Context) {
         val h = OrbJSON.dictList(OrbDisk.read("hermes_sessions")).map { OrbRow(it) }
         val w = OrbJSON.dictList(OrbDisk.read("workspaces")).map { OrbRow(it) }
         val b = OrbJSON.dictList(OrbDisk.read("backends")).map { OrbRow(it) }
+        val bm = OrbJSON.dict(OrbDisk.read("backend_models")) ?: emptyMap()
         val r = OrbJSON.dictList(OrbDisk.read("repositories")).map { OrbRow(it) }
         val pr = OrbJSON.dictList(OrbDisk.read("providers")).map { OrbRow(it) }
         val n = OrbJSON.dictList(OrbDisk.read("nodes")).map { OrbRow(it) }
@@ -1105,6 +1110,7 @@ class OrbCore private constructor(context: Context) {
         _hermesSessions.value = h
         _workspaces.value = w
         _backends.value = b
+        _backendModels.value = bm
         _repositories.value = r
         _providers.value = pr
         _nodes.value = n
@@ -1200,6 +1206,7 @@ class OrbCore private constructor(context: Context) {
             val mTask = async { orbTry(OrbLog.Category.Network, "/api/control/missions") { fetchRows("/api/control/missions?limit=100&all=true", null) } }
             val wTask = async { orbTry(OrbLog.Category.Network, "/api/workspaces") { fetchRows("/api/workspaces", null) } }
             val bTask = async { orbTry(OrbLog.Category.Network, "/api/backends") { fetchRows("/api/backends", null) } }
+            val bmTask = async { orbTry(OrbLog.Category.Network, "/api/providers/backend-models") { fetchDict("/api/providers/backend-models") } }
             val prTask = async { orbTry(OrbLog.Category.Network, "/api/ai/providers") { fetchRows("/api/ai/providers", "providers") } }
             val nTask = async { orbTry(OrbLog.Category.Network, "/api/remote-nodes") { fetchDict("/api/remote-nodes") } }
             val aTask = async { orbTry(OrbLog.Category.Network, "/api/system/hermes-assistant/status") { fetchDict("/api/system/hermes-assistant/status") } }
@@ -1240,6 +1247,11 @@ class OrbCore private constructor(context: Context) {
             bTask.await().onSuccess { b ->
                 _backends.value = b
                 launch(Dispatchers.IO) { OrbDisk.write("backends", b.map { it.raw }) }
+            }
+            bmTask.await().onSuccess { bm ->
+                val map = OrbJSON.dict(bm["backends"]) ?: bm
+                _backendModels.value = map
+                launch(Dispatchers.IO) { OrbDisk.write("backend_models", map) }
             }
             prTask.await().onSuccess { rows ->
                 _providers.value = rows

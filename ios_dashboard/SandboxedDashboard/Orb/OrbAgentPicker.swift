@@ -202,7 +202,8 @@ struct OrbAgentPicker: View {
     }
     private func applyAgentCatalog(_ catalog: OrbJSON) {
         let response = catalog["backends"]
-        backends = response.items.isEmpty ? response["backends"].items : response.items
+        let rawBackends = response.items.isEmpty ? response["backends"].items : response.items
+        backends = rawBackends.filter { $0["id"].text != "gemini" }
         nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
         if !existing && selection.node.isEmpty {
             selection.node = OrbSelection.firstAvailableNodeID(nodes) ?? "core"

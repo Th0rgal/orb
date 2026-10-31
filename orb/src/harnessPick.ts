@@ -7,6 +7,7 @@ import {
   localInstalled,
 } from "./localAgents";
 import {
+  ApiError,
   listHarnessChoices,
   type HarnessChoice,
   connectionVersion,
@@ -23,22 +24,26 @@ export const [remoteHarnessChoices, setRemoteHarnessChoices] = createSignal<Harn
 export const [nodeAntigravityModels, setNodeAntigravityModels] = createSignal<Record<string, [string,string][]>>({});
 const nodeModelRequests = new Set<string>();
 export async function refreshNodeAntigravityModels(machine: string) {
-  if (machine === "local") return;
+  if (!machine || machine === "local" || machine === "side") return;
   const version = connectionVersion(), key = `${version}:${machine}`;
   if (nodeModelRequests.has(key)) return;
   nodeModelRequests.add(key);
   try {
     const models = await listNodeAntigravityModels(machine);
     if (version === connectionVersion()) setNodeAntigravityModels(old => ({...old, [key]:models}));
-  } catch {
+  } catch (error) {
     // A slow or failed lookup must not hide Antigravity on this machine for the whole
-    // session: keep whatever was known and retry shortly instead of caching [].
-    if (version === connectionVersion()) setTimeout(() => void refreshNodeAntigravityModels(machine), 15_000);
+    // session: keep whatever was known and retry shortly unless the node does not exist.
+    const permanent = error instanceof ApiError && (error.status === 404 || error.status === 409);
+    if (!permanent && version === connectionVersion()) setTimeout(() => void refreshNodeAntigravityModels(machine), 15_000);
   }
   finally { nodeModelRequests.delete(key); }
 }
 export const harnessChoices = (machine = "core"): HarnessChoice[] => {
-  const models = machine === "local" ? (localInstalled().find(row => row.id === "antigravity")?.models ?? []) : (nodeAntigravityModels()[`${connectionVersion()}:${machine}`] ?? []);
+  const version = connectionVersion(), nodeModels = nodeAntigravityModels();
+  const models = machine === "local"
+    ? (localInstalled().find(row => row.id === "antigravity")?.models ?? [])
+    : (nodeModels[`${version}:${machine}`]?.length ? nodeModels[`${version}:${machine}`] : (nodeModels[`${version}:core`] ?? []));
   const claude = machine === "local" ? (localInstalled().find(row => row.id === "claudecode")?.models ?? []) : [];
   return destinationHarnessChoices(remoteHarnessChoices(), machine, models, localInstalled().some(row => row.id === "vibe" && row.installed), claude);
 };

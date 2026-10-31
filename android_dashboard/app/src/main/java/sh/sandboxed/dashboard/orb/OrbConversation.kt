@@ -507,6 +507,7 @@ fun OrbConversationPage(
     val scope = rememberCoroutineScope()
     val allMissions by core.missions.collectAsState()
     val backends by core.backends.collectAsState()
+    val backendModels by core.backendModels.collectAsState()
     val workspaces by core.workspaces.collectAsState()
     val providers by core.providers.collectAsState()
     val repositories by core.repositories.collectAsState()
@@ -567,11 +568,11 @@ fun OrbConversationPage(
         mutableStateOf(
             currentMission?.str("backend", "harness", "backend_id")
                 ?: backends.firstOrNull()?.str("id", "name")
-                ?: "claude"
+                ?: "claudecode"
         )
     }
     var selectedModel by remember(currentMission?.id) {
-        mutableStateOf(currentMission?.str("model", "model_id") ?: "")
+        mutableStateOf(currentMission?.str("model_override", "model", "model_id") ?: "")
     }
     var selectedWorkspaceId by remember(currentMission?.id, project.id) {
         mutableStateOf(
@@ -1155,7 +1156,7 @@ fun OrbConversationPage(
                         "backend" to selectedBackend,
                         "tags" to tags
                     )
-                    if (selectedModel.isNotEmpty()) body["model"] = selectedModel
+                    if (selectedModel.isNotEmpty()) body["model_override"] = selectedModel
                     if (selectedWorkspaceId.isNotEmpty()) body["workspace_id"] = selectedWorkspaceId
                     if (selectedAccount.isNotEmpty()) body["account_id"] = selectedAccount
                     if (selectedRepo.isNotEmpty()) body["repo"] = selectedRepo
@@ -2492,7 +2493,7 @@ fun OrbConversationPage(
                                 )
                                 Text(
                                     text = buildString {
-                                        append(selectedBackend.ifEmpty { "Agent" })
+                                        append(OrbAgentCatalog.backendLabel(selectedBackend.ifEmpty { "Agent" }, backends))
                                         if (selectedModel.isNotEmpty()) {
                                             append(" · ")
                                             append(selectedModel.substringAfterLast('/'))
@@ -2621,6 +2622,7 @@ fun OrbConversationPage(
     if (showAgentPicker) {
         OrbAgentPickerSheet(
             backends = backends,
+            backendModels = backendModels,
             workspaces = workspaces,
             providers = providers,
             repositories = repositories,
@@ -3186,10 +3188,49 @@ private fun OrbBackgroundWakeRow(turn: OrbTurn.Wake) {
     }
 }
 
+/** Pure harness and model catalog projection for Android's agent picker; unit-tested. */
+object OrbAgentCatalog {
+    private val fallbackNames = mapOf(
+        "claudecode" to "Claude Code",
+        "codex" to "Codex",
+        "grok" to "Grok",
+        "opencode" to "OpenCode",
+        "antigravity" to "Antigravity CLI",
+        "vibe" to "Mistral Vibe",
+        "hermes" to "Hermes",
+        "cursor_cloud" to "Cursor Cloud",
+        "grok_bot" to "Grok Bot",
+    )
+
+    data class ModelChoice(val value: String, val label: String)
+
+    fun backendOptions(backends: List<OrbRow>, existing: Boolean): List<String> {
+        val fromServer = backends
+            .mapNotNull { it.str("id", "slug", "name") }
+            .filter { it != "gemini" }
+        return if (existing) fromServer.distinct() else (fromServer + listOf("hermes", "cursor_cloud", "grok_bot")).distinct()
+    }
+
+    fun backendLabel(id: String, backends: List<OrbRow>): String =
+        fallbackNames[id]
+            ?: backends.firstOrNull { (it.str("id", "slug") ?: it.id) == id }?.str("name")
+            ?: id
+
+    fun modelsForBackend(backend: String, backendModels: OrbDict): List<ModelChoice> {
+        val raw = backendModels["backends"]?.let { OrbJSON.dict(it) } ?: backendModels
+        return OrbJSON.dictList(raw[backend]).mapNotNull { item ->
+            val value = OrbJSON.str(item, "value", "id") ?: return@mapNotNull null
+            val label = OrbJSON.str(item, "label", "displayName", "name") ?: value
+            ModelChoice(value = value, label = label)
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrbAgentPickerSheet(
     backends: List<OrbRow>,
+    backendModels: OrbDict = emptyMap(),
     workspaces: List<OrbRow>,
     providers: List<OrbRow>,
     repositories: List<OrbRow>,
@@ -3218,8 +3259,10 @@ fun OrbAgentPickerSheet(
     val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
 
     val backendOptions = remember(backends, existing) {
-        val fromServer = backends.mapNotNull { it.str("id", "name", "slug") }
-        if (existing) fromServer.distinct() else (fromServer + listOf("hermes", "cursor_cloud", "grok_bot")).distinct()
+        OrbAgentCatalog.backendOptions(backends, existing)
+    }
+    val modelChoices = remember(selectedBackend, backendModels) {
+        OrbAgentCatalog.modelsForBackend(selectedBackend, backendModels)
     }
 
     ModalBottomSheet(
@@ -3293,7 +3336,7 @@ fun OrbAgentPickerSheet(
                                 .padding(horizontal = 13.dp, vertical = 8.dp)
                         ) {
                             Text(
-                                text = b,
+                                text = OrbAgentCatalog.backendLabel(b, backends),
                                 color = if (active) Color.Black else Color.White,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -3369,7 +3412,7 @@ fun OrbAgentPickerSheet(
             }
 
             // Model override
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
                     text = "MODEL (OPTIONAL)",
                     color = OrbStyle.textMuted,
@@ -3377,6 +3420,51 @@ fun OrbAgentPickerSheet(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.7.sp
                 )
+                if (modelChoices.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val defaultActive = selectedModel.isEmpty()
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (defaultActive) Color.White else OrbStyle.surface)
+                                .border(1.dp, if (defaultActive) Color.Transparent else OrbStyle.border, CircleShape)
+                                .orbPressClickable { if (!locked) onSelectModel("") }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                        ) {
+                            Text(
+                                text = "Service default",
+                                color = if (defaultActive) Color.Black else Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        modelChoices.forEach { choice ->
+                            val active = selectedModel == choice.value
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(if (active) Color.White else OrbStyle.surface)
+                                    .border(1.dp, if (active) Color.Transparent else OrbStyle.border, CircleShape)
+                                    .orbPressClickable { if (!locked) onSelectModel(choice.value) }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    text = choice.label.substringAfterLast("—").trim(),
+                                    color = if (active) Color.Black else Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -3387,7 +3475,7 @@ fun OrbAgentPickerSheet(
                 ) {
                     if (selectedModel.isEmpty()) {
                         Text(
-                            text = "Default model for $selectedBackend",
+                            text = "Default model for ${OrbAgentCatalog.backendLabel(selectedBackend, backends)}",
                             color = OrbStyle.textMuted,
                             fontSize = 14.sp,
                             maxLines = 1,

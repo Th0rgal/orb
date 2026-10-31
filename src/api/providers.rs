@@ -2291,6 +2291,11 @@ pub async fn list_backend_model_options(
             .any(|part| id.contains(part))
     };
     push_options("vibe", Some(&["mistral"]), true, Some(vibe_filter));
+    let antigravity_opts =
+        antigravity_backend_model_options(&store_providers, state.config.working_dir.as_path());
+    if !antigravity_opts.is_empty() {
+        backends.insert("antigravity".to_string(), antigravity_opts);
+    }
 
     let codex_candidates: Vec<String> = backends
         .get("codex")
@@ -2512,6 +2517,94 @@ async fn discover_workspace_antigravity_models(
         .map_err(str::to_string)
 }
 
+fn is_native_antigravity_cli_model_id(id: &str) -> bool {
+    !id.contains("image")
+        && !matches!(
+            id,
+            "gemini-3-flash" | "gemini-3.1-flash-lite" | "gemini-3.5-flash-lite"
+        )
+}
+
+fn eligible_antigravity_account(account: &AIProvider) -> bool {
+    account.enabled
+        && account.provider_type == ProviderType::Antigravity
+        && (account.has_credentials() || account.cli_proxy_auth_file.is_some())
+        && !account
+            .cli_proxy_auth_file
+            .as_deref()
+            .is_some_and(crate::api::antigravity_accounts::needs_verification)
+}
+
+/// Discovered models across connected, eligible Google Antigravity accounts,
+/// grouped for the native `agy` CLI (`agy-model` / `agy-demo`) and excluding
+/// proxy-only Cloud Code variants that `agy models` does not accept.
+fn antigravity_backend_model_options(
+    accounts: &[AIProvider],
+    work_dir: &std::path::Path,
+) -> Vec<BackendModelOption> {
+    let state = crate::model_catalog::read_state(work_dir);
+    let mut raw_models = Vec::new();
+    for account in accounts.iter().filter(|a| eligible_antigravity_account(a)) {
+        let route = crate::model_discovery::route(account);
+        let connection =
+            crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
+        let Some(success) = state
+            .connections
+            .iter()
+            .find(|o| o.connection == connection)
+            .and_then(|o| o.last_success.as_ref())
+        else {
+            continue;
+        };
+        for model in &success.models {
+            if is_native_antigravity_cli_model_id(&model.id) {
+                raw_models.push((model.id.clone(), model.name.clone()));
+            }
+        }
+    }
+    if raw_models.is_empty() {
+        return Vec::new();
+    }
+    let mut grouped = crate::antigravity::group_models(raw_models);
+    if !grouped.iter().any(|(id, _)| id == "agy-model") && accounts_offer_carbon(&state, accounts) {
+        grouped.insert(0, ("agy-model".to_string(), "Gemini 4 Carbon".to_string()));
+    } else if let Some(pos) = grouped.iter().position(|(id, _)| id == "agy-model") {
+        if pos > 0 {
+            let carbon = grouped.remove(pos);
+            grouped.insert(0, carbon);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(value, label)| BackendModelOption {
+            value,
+            label: format!("Google Antigravity — {label}"),
+            description: None,
+            provider_id: None,
+        })
+        .collect()
+}
+
+fn accounts_offer_carbon(
+    state: &crate::model_catalog::DiscoveryState,
+    accounts: &[AIProvider],
+) -> bool {
+    accounts.iter().any(|account| {
+        if !eligible_antigravity_account(account) {
+            return false;
+        }
+        let route = crate::model_discovery::route(account);
+        let connection =
+            crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
+        state
+            .connections
+            .iter()
+            .find(|o| o.connection == connection)
+            .and_then(|o| o.last_success.as_ref())
+            .is_some_and(|s| s.models.iter().any(|m| m.id == "agy-model-high"))
+    })
+}
+
 /// When a connected, eligible Antigravity account in Core's catalog offers
 /// Gemini 4 Carbon (`agy-model-high`), include `("agy-model", "Gemini 4 Carbon")`
 /// in the native picker even if the machine currently holds a higher-priority
@@ -2530,28 +2623,7 @@ fn supplement_entitled_carbon_model(
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
-    let any_offers_carbon = accounts.iter().any(|account| {
-        if !account.enabled || account.provider_type != ProviderType::Antigravity {
-            return false;
-        }
-        if account
-            .cli_proxy_auth_file
-            .as_deref()
-            .is_some_and(crate::api::antigravity_accounts::needs_verification)
-        {
-            return false;
-        }
-        let route = crate::model_discovery::route(account);
-        let connection =
-            crate::model_catalog::route_key(&account.id.to_string(), &route.base, &route.profile);
-        state
-            .connections
-            .iter()
-            .find(|o| o.connection == connection)
-            .and_then(|o| o.last_success.as_ref())
-            .is_some_and(|s| s.models.iter().any(|m| m.id == "agy-model-high"))
-    });
-    if any_offers_carbon {
+    if accounts_offer_carbon(&state, &accounts) {
         models.insert(0, ("agy-model".to_string(), "Gemini 4 Carbon".to_string()));
     }
 }
@@ -4061,5 +4133,96 @@ mod tests {
             native_models[0],
             ("agy-model".into(), "Gemini 4 Carbon".into())
         );
+
+        // Backend model options expose grouped native Antigravity CLI models while
+        // excluding proxy-only Cloud Code IDs and disconnected accounts.
+        let mut agy_general = AIProvider::new(ProviderType::Antigravity, "general".into());
+        agy_general.cli_proxy_auth_file = Some("antigravity-general.json".into());
+        let disconnected = AIProvider::new(ProviderType::Antigravity, "disconnected".into());
+        let general_route = crate::model_discovery::route(&agy_general);
+        let disconnected_route = crate::model_discovery::route(&disconnected);
+        let full_state = crate::model_catalog::DiscoveryState {
+            schema_version: 1,
+            connections: vec![
+                crate::model_catalog::Observation {
+                    connection: crate::model_catalog::route_key(
+                        &agy_general.id.to_string(),
+                        &general_route.base,
+                        &general_route.profile,
+                    ),
+                    provider_id: "antigravity".into(),
+                    access_profile: "oauth".into(),
+                    exportable: false,
+                    checked_at: chrono::Utc::now(),
+                    status: "discovered".into(),
+                    diagnostic: None,
+                    last_success: Some(crate::model_catalog::Success {
+                        observed_at: chrono::Utc::now(),
+                        completeness: crate::model_catalog::Completeness::Complete,
+                        models: vec![
+                            ProviderModel {
+                                id: "gemini-4-argon-high".into(),
+                                name: "Gemini 4 Argon (High)".into(),
+                                description: None,
+                            },
+                            ProviderModel {
+                                id: "gemini-3.1-flash-image".into(),
+                                name: "Gemini 3.1 Flash Image".into(),
+                                description: None,
+                            },
+                            ProviderModel {
+                                id: "gemini-3-flash".into(),
+                                name: "Gemini 3 Flash".into(),
+                                description: None,
+                            },
+                        ],
+                    }),
+                    fallback_models: vec![],
+                },
+                state.connections[0].clone(),
+                crate::model_catalog::Observation {
+                    connection: crate::model_catalog::route_key(
+                        &disconnected.id.to_string(),
+                        &disconnected_route.base,
+                        &disconnected_route.profile,
+                    ),
+                    provider_id: "antigravity".into(),
+                    access_profile: "oauth".into(),
+                    exportable: false,
+                    checked_at: chrono::Utc::now(),
+                    status: "discovered".into(),
+                    diagnostic: None,
+                    last_success: Some(crate::model_catalog::Success {
+                        observed_at: chrono::Utc::now(),
+                        completeness: crate::model_catalog::Completeness::Complete,
+                        models: vec![ProviderModel {
+                            id: "claude-opus-5-5-high".into(),
+                            name: "Claude Opus 5.5 (High)".into(),
+                            description: None,
+                        }],
+                    }),
+                    fallback_models: vec![],
+                },
+            ],
+        };
+        crate::model_catalog::write_state(dir.path(), &full_state).unwrap();
+        let backend_options = antigravity_backend_model_options(
+            &[agy_general, agy, disconnected.clone()],
+            dir.path(),
+        );
+        assert_eq!(
+            backend_options
+                .iter()
+                .map(|m| (m.value.as_str(), m.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("agy-model", "Google Antigravity — Gemini 4 Carbon"),
+                (
+                    "gemini-4-argon-high",
+                    "Google Antigravity — Gemini 4 Argon (High)"
+                ),
+            ]
+        );
+        assert!(antigravity_backend_model_options(&[disconnected], dir.path()).is_empty());
     }
 }
