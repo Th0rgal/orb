@@ -3131,8 +3131,6 @@ select.orb-select-native:disabled { cursor: default; }
 .reminder-details [role=status] { margin-left:8px; }
 .next-reminder { display:flex; gap:8px; color:var(--fg-3); font-size:12px; padding:10px; }
 
-.agent-progress-meta { color: var(--fg-3); font-size: 11px; line-height: 1.6; padding-top: 3px; overflow-wrap: anywhere; }
-
 /* Shared SSH connections use the same compact spacing as machine rows. */
 .ssh-address-book { margin: 22px 0; }
 .ssh-address-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 8px; }

@@ -642,7 +642,7 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
 
   /** Anything the agent has actually said or done in this turn. */
   const activity = () => {
-    if (localRunActive(p.id) && localActivities(p.id).length > 0) return true;
+    if (localRunActive(p.id) && localActivities(p.id).some(a => a.kind !== "status" && a.id !== "antigravity:status" && (a.kind !== "thinking" || !!a.detail?.trim()))) return true;
     const list = viewItems();
     const lastUser = list.reduce((last, item, index) => item.kind === "user" && !item.queued ? index : last, -1);
     return list.slice(lastUser + 1).some(i => (i.kind === "tool" || ((i.kind === "text" || i.kind === "think") && !!i.text.trim())));
@@ -724,7 +724,9 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
       let lastUserIdx = -1;
       for (let i = list.length - 1; i >= 0; i--) { const it = list[i]; if (it.kind === "user" && !it.queued) { lastUserIdx = i; break; } }
       let hasCanonicalToolsAfterUser = false;
-      for (let i = lastUserIdx + 1; i < list.length; i++) { if (list[i].kind === "tool") { hasCanonicalToolsAfterUser = true; break; } }
+      for (let i = lastUserIdx + 1; i < list.length; i++) {
+        if (list[i].kind === "tool" || list[i].kind === "think") { hasCanonicalToolsAfterUser = true; break; }
+      }
       if (!hasCanonicalToolsAfterUser) {
         const copy = [...list];
         let insertAt = copy.length;
@@ -1143,8 +1145,8 @@ export function NativeMissionView(p: { id: string; launch?:LaunchReceipt; launch
                 <Show when={row().state==='error'}><button onClick={()=>void deliverResend()}>Retry</button></Show>
               </div>
             </div>}</Show>
-            <Show when={clientPlaced() && localActivities(p.id).some(a => a.kind === "status" || a.id === "antigravity:status" || a.background || a.id.startsWith("task:"))}>
-              <AgentActivity items={localActivities(p.id)} running={localRunActive(p.id)} completed={activityShouldCollapse(mission()?.status, localRunActive(p.id))} />
+            <Show when={clientPlaced() && localActivities(p.id).some(a => a.background || a.id.startsWith("task:"))}>
+              <AgentActivity items={localActivities(p.id).filter(a => a.background || a.id.startsWith("task:"))} running={localRunActive(p.id)} completed={activityShouldCollapse(mission()?.status, localRunActive(p.id))} />
             </Show>
             <NativeInteraction mission={p.id} active={clientPlaced() ? localRunActive(p.id) : busy()} remote={!clientPlaced()} items={viewItems()} onSend={text => sendMsg(text, [], [])} />
             <Show when={!sendError()}>

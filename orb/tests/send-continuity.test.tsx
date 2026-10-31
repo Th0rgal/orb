@@ -275,3 +275,35 @@ it('keeps one continuous Sending → Working state through a Send now stop',asyn
  expect(screen.queryByText('Mission interrupted')).toBeNull();
  endHandoff('handoff');
 });
+
+it('shows one Working on This computer… line for local Antigravity runs without duplicate AgentActivity status rows',async()=>{
+ const {getMission}=await import('../src/api');
+ const {localActivities}=await import('../src/localAgents');
+ const localMission:Mission={id:'local-agy',backend:'antigravity',status:'active',tags:['placement:client'],history:[{role:'user',content:'Hello'}],created_at:'',updated_at:''};
+ vi.mocked(getMission).mockImplementation(async()=>localMission);
+ vi.stubGlobal('fetch',vi.fn(async()=>Response.json([],{headers:{'X-Orb-Events-Protocol':'1','X-Has-More':'false','X-Max-Sequence':'0'}})));
+ const host=window as any,prevInternal=host.__TAURI_INTERNALS__,prevTauri=host.__TAURI__;
+ host.__TAURI__={core:{Channel:class{onmessage=(_v:any)=>{};}}};
+ const activities=[{id:'antigravity:status',kind:'status',label:'Working…',done:false,failed:false,started_at:Date.now()-9000,updated_at:Date.now(),detail:'Displayed thought summaries are read from this native conversation when available.'}];
+ host.__TAURI_INTERNALS__={invoke:async(cmd:string,args?:any)=>{
+  if(cmd==='local_bindings_subscribe'){args?.onEvent?.onmessage({revision:1,bindings:{'local-agy':{harness:'antigravity',bin:'agy',cwd:'/tmp'}}});return 1;}
+  if(cmd==='local_bindings_refresh')return {revision:1,bindings:{'local-agy':{harness:'antigravity',bin:'agy',cwd:'/tmp'}}};
+  if(cmd==='local_agents_poll')return {text:'',done:false,resumed:false,activities};
+  if(cmd==='local_agents_subscribe'){args?.onEvent?.onmessage({text:'',reset:false,activities});return 1;}
+  return null;
+ }};
+ let unmount=()=> {};
+ try{
+  const view=render(()=><NativeMissionView id="local-agy" initial={localMission}/>);
+  unmount=view.unmount;
+  await waitFor(()=>expect(localActivities('local-agy')).toHaveLength(1));
+  await waitFor(()=>expect(view.container.querySelector('.st-working')?.textContent).toMatch(/^Working on This computer…/));
+  expect(view.container.querySelector('.agent-activity')).toBeNull();
+  expect(screen.queryByText(/Waiting for thought summaries/)).toBeNull();
+  expect(view.container.querySelector('.scroll .user')?.classList.contains('pending')).toBe(true);
+ }finally{
+  unmount();
+  window.dispatchEvent(new Event('pagehide'));
+  host.__TAURI_INTERNALS__=prevInternal;host.__TAURI__=prevTauri;
+ }
+});
