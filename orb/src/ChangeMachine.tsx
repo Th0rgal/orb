@@ -67,6 +67,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
   const [error, setError] = createSignal("");
   const [inventory, setInventory] = createSignal<WorkspaceInventory>();
   const [choice, setChoice] = createSignal<Choice>({});
+  const [light, setLight] = createSignal(true);
   let cancelled = false;
   let alive = true;
   let root!: HTMLDivElement;
@@ -125,7 +126,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       queueMicrotask(() => {if(!root?.contains(document.activeElement))root?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();});
       const pending = [...view.actions].reverse().find(activeTransfer);
       if (pending) {
-        setAction(pending); setBackend(pending.backend); setModel(pending.model ?? "");
+        setAction(pending); setBackend(pending.backend); setModel(pending.model ?? ""); setLight(Boolean(pending.light));
         setSelected(rows.find(r => sameMachine(r.machine, pending.destination)) ?? { machine: pending.destination, label: machineLabel(pending.destination), available: true });
       }
     } catch (e) { if (alive && version===connectionVersion()) fail(e); }
@@ -184,17 +185,40 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       a = await snapshotTransfer(a); setAction(a); setInventory(undefined); setStage("");
     } catch (e) { fail(e); } finally { if (cancelled && action()) await cancel(); setBusy(false); }
   };
+  const finishMove = async (a: TransferAction) => {
+    setStage(a.light ? "Staging conversation…" : "Copying workspace…");
+    a = await copyTransfer(a, (done, total) => setProgress(total ? done / total : 1), () => cancelled, features);
+    if (cancelled) throw new Error("Transfer cancelled before activation.");
+    setStage("Verifying destination…"); a = await verifyTransfer(a); setAction(a);
+    if (cancelled) throw new Error("Transfer cancelled before activation.");
+    setStage("Activating destination…"); const mission = await activateTransfer(a);
+    p.onMoved(mission); p.onClose();
+  };
+  const moveLight = async () => {
+    const target = selected(); if (!target || busy() || !ready() || !target.available || !compatible()) return;
+    cancelled = false; setBusy(true); setError(""); setStage("Preparing transfer…");
+    try {
+      if (current().kind === "client" && running() && !localBinding(p.mission.id)) throw new Error("Open this conversation on its source computer to stop it before moving.");
+      if (running()) await stopSource();
+      let a: TransferAction = action() ?? await transferRequest<TransferAction>(p.mission.id, { op: "prepare", light: true, destination: target.machine, client_id: client, idempotency_key: requestKey, backend: backend(), model: model(), effort: backend() === p.mission.backend ? p.mission.model_effort : "" });
+      setAction(a);
+      if (!a.manifest) {
+        if (a.source.kind === "client" && !localBinding(p.mission.id)) throw new Error("Update the connected backend to move without workspace files.");
+        const found = await inventoryTransfer(a);
+        if (found) await selectTransfer(a, { omit: found.rows.map(r => r.path), include: [] });
+        a = await snapshotTransfer(a); setAction(a);
+      }
+      await finishMove(a);
+    } catch (e) {
+      fail(e);
+      if (cancelled && action()) await cancel();
+    } finally { setBusy(false); }
+  };
   const move = async () => {
-    let a = action(); if (!a || busy()) return;
+    const a = action(); if (!a || busy()) return;
     cancelled = false; setBusy(true); setError("");
     try {
-      setStage("Copying workspace…");
-      a = await copyTransfer(a, (done, total) => setProgress(total ? done / total : 1), () => cancelled, features);
-      if (cancelled) throw new Error("Transfer cancelled before activation.");
-      setStage("Verifying destination…"); a = await verifyTransfer(a); setAction(a);
-      if (cancelled) throw new Error("Transfer cancelled before activation.");
-      setStage("Activating destination…"); const mission = await activateTransfer(a);
-      p.onMoved(mission); p.onClose();
+      await finishMove(a);
     } catch (e) {
       fail(e);
       if (cancelled) await cancel();
@@ -228,7 +252,7 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
       <div class="transfer-body">
         <Show when={loading()}><p role="status">{destinations().length?"Updating machines…":"Checking machines…"}</p></Show>
         <Show when={selected()?.reason}><p role="status">{selected()!.reason}</p></Show>
-        <Show when={!action()?.manifest && !inventory()}><p>The conversation and its workspace files move together. The agent waits for your next message.</p></Show>
+        <Show when={!action()?.manifest && !inventory()}><p>{light() ? "Moves the conversation only; no workspace files are transferred. The agent waits for your next message." : "The conversation and selected workspace files move together. The agent waits for your next message."}</p></Show>
         <Show when={!action()}>
           <div class="transfer-options">
             <label>Harness<Select aria-label="Transfer harness" value={backend()} disabled={busy()} onChange={e => { setBackend(e.currentTarget.value); setModel(destinationChoices().find(c => c.backend.id === e.currentTarget.value)?.models[0]?.value ?? ""); }}>
@@ -236,18 +260,22 @@ export function ChangeMachine(p: { mission: Mission; choices: HarnessChoice[]; c
               <For each={availableHarnesses()}>{c => <option value={c.backend.id} selected={c.backend.id === backend()}>{c.backend.name}</option>}</For>
             </Select></label>
             <label>Model<Select aria-label="Transfer model" value={model()} disabled={busy()} onChange={e => setModel(e.currentTarget.value)}><For each={models()}>{m => <option value={m.value} selected={m.value === model()}>{m.label}</option>}</For></Select></label>
+            <label>Files<Select aria-label="Transfer files" value={light() ? "light" : "workspace"} disabled={busy()} onChange={e => setLight(e.currentTarget.value === "light")}>
+              <option value="light" selected={light()}>Light — no files</option>
+              <option value="workspace" selected={!light()}>Transfer workspace files…</option>
+            </Select></label>
           </div>
           <Show when={!compatible()}><p>Choose a harness and model available on this machine.</p></Show>
         </Show>
         <Show when={!action()?.manifest && inventory()}>{found => <TransferSelection inventory={found()} choice={choice()} disabled={busy()} onChoice={setChoice} />}</Show>
-        <Show when={action()?.manifest}>{m => <TransferInventory manifest={m()} />}</Show>
+        <Show when={!action()?.light ? action()?.manifest : undefined}>{m => <TransferInventory manifest={m()} />}</Show>
         <Show when={error()}><ErrorNotice error={error()} /></Show>
       </div>
       <footer class="transfer-foot">
         <Show when={busy() && stage()}><div class="transfer-status" role="status"><span>{stage()}</span><Show when={stage().startsWith("Copying")}><span>{Math.round(progress() * 100)}% of {formatBytes(action()?.manifest?.bytes ?? 0)}</span><progress max="1" value={progress()} /></Show></div></Show>
         <div class="transfer-actions">
           <button class="pill" disabled={stage() === "Activating destination…" && busy()} onClick={() => busy() ? cancelled = true : void cancel()}>Cancel</button>
-          <Show when={action()?.manifest} fallback={<Show when={inventory()} fallback={<button class="pill on" disabled={!ready() || busy() || !selected()?.available || !compatible() || !model()} onClick={() => void prepare()}>{running() ? "Stop and prepare" : "Prepare transfer"}</button>}><button class="pill on" disabled={busy() || !fits()} onClick={() => void snapshot()}>Continue</button></Show>}>
+          <Show when={action()?.manifest} fallback={<Show when={inventory()} fallback={<button class="pill on" disabled={!ready() || busy() || !selected()?.available || !compatible() || !model()} onClick={() => void (light() ? moveLight() : prepare())}>{light() ? (running() ? "Stop and move" : `Move to ${selected()!.label}`) : (running() ? "Stop and prepare" : "Prepare transfer")}</button>}><button class="pill on" disabled={busy() || !fits()} onClick={() => void snapshot()}>Continue</button></Show>}>
             <Show when={!busy()}><button class="pill on" onClick={() => void move()}>Move to {selected()!.label}</button></Show>
           </Show>
         </div>

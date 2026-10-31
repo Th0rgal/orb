@@ -83,9 +83,10 @@ Creation paths:
   `worker_location::dispatch_lock`, Core reuses an unclaimed retry reservation
   keyed by `(tenant, parent_mission_id, idempotency_key)` if an earlier attempt
   timed out before claim, else reuses an idle sibling VM of the same
-  provider/size/image (`reuse_idle`), else spawns a fresh VM (auto-selecting the
-  newest `ready` Boat worker snapshot for `(tenant, project)` when
-  `managed_from_snapshot` is omitted, unless `"none"`/`"base"` opts out). Once
+  provider/size/image (`reuse_idle`), else spawns a fresh VM in light mode
+  (clean `orb-node-base` image with no snapshot files restored by default; a
+  warm Boat project snapshot is restored only when `managed_from_snapshot`
+  explicitly names a snapshot or `"latest"`). Once
   the child mission is created, Core atomically claims the VM for the child
   (`owner_mission_id = child`, `requested_by_mission_id = parent`); if mission
   creation fails, the rented VM is destroyed (`requested: launch_failed`).
@@ -252,7 +253,9 @@ Code: `src/managed/snapshots.rs`. Agent guide: `skills/managed-compute/SKILL.md`
   Antigravity sign-in cannot be saved or forked. Visible and usable only
   within the same tenant and project. Pricing: 10 included, then \$1.70/month.
 - **From a snapshot**: `spawn_managed_machine(from_snapshot)` and
-  `start_mission(auto-managed, managed_from_snapshot)`; `last_used_at` is
+  `start_mission(auto-managed, managed_from_snapshot)` (explicit snapshot
+  name/label or `"latest"`; omitted or `"light"`/`"none"`/`"base"` boots the
+  clean base image); `last_used_at` is
   recorded. Budget and caps apply as for any rent.
 - **Fork** (`fork_managed_machine`, `POST /:id/fork`): new machine from the
   source's latest background snapshot (up to ~1 min stale), owner = caller,

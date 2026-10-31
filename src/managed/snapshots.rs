@@ -270,13 +270,35 @@ impl ManagedManager {
             return Ok((src.image.clone(), None, Some((src.id.clone(), pid)), mode));
         }
         if let Some(name) = req.from_snapshot.as_deref().map(str::trim).filter(|n| {
-            !n.is_empty() && !n.eq_ignore_ascii_case("none") && !n.eq_ignore_ascii_case("base")
+            !n.is_empty()
+                && !n.eq_ignore_ascii_case("none")
+                && !n.eq_ignore_ascii_case("base")
+                && !n.eq_ignore_ascii_case("light")
         }) {
+            let latest_name = if name.eq_ignore_ascii_case("latest") {
+                Some(
+                    self.newest_ready_worker_snapshot(
+                        req.owner_user_id.as_deref(),
+                        req.snapshot_project.as_deref(),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        ManagedError::new(
+                            "snapshot_not_found",
+                            404,
+                            "No ready project snapshot found; omit from_snapshot for light mode or see list_managed_snapshots",
+                        )
+                    })?,
+                )
+            } else {
+                None
+            };
+            let target_name = latest_name.as_deref().unwrap_or(name);
             let mut snaps = self.snapshots.lock().await;
             let snap = snaps
                 .iter_mut()
                 .find(|s| {
-                    (s.name == name || s.label == name)
+                    (s.name == target_name || s.label == target_name)
                         && snapshot_visible(
                             s,
                             req.owner_user_id.as_deref(),

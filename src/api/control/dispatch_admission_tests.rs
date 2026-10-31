@@ -9205,6 +9205,7 @@ async fn unified_mcp_delegation_follows_committed_transfer_and_fences_in_progres
                 key: "mcp-placement-test".into(),
                 revision: 0,
                 phase: "preparing".into(),
+                light: false,
                 source: Machine::Core,
                 destination: Machine::Node {
                     id: "old-agent".into(),
@@ -10014,6 +10015,7 @@ async fn transferred_claude_starts_with_context_then_resumes_same_session() {
                 key: "claude-transfer".into(),
                 revision: 0,
                 phase: "preparing".into(),
+                light: false,
                 source: Machine::Client {
                     id: "source-mac".into(),
                 },
@@ -17126,8 +17128,9 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
     .await
     .unwrap();
 
-    // Seed a warm ready project snapshot for `(h.user.id, "lido")` so omitted
-    // `managed_from_snapshot` automatically picks it up.
+    // Seed an oversized warm ready project snapshot for `(h.user.id, "lido")`:
+    // omitted `managed_from_snapshot` must NOT auto-select it (light mode boots
+    // clean `orb-node-base`), whereas explicit `managed_from_snapshot` opts in.
     let snap_dir = h._dir.path().join(".sandboxed-sh");
     std::fs::create_dir_all(&snap_dir).unwrap();
     std::fs::write(
@@ -17140,11 +17143,11 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
             owner_mission_id: Some(parent.id.to_string()),
             owner_user_id: Some(h.user.id.clone()),
             source_machine_id: "mmseed".into(),
-            source_size: "default".into(),
+            source_size: "xlarge".into(),
             created_at: chrono::Utc::now(),
             last_used_at: None,
             status: "ready".into(),
-            size_bytes: None,
+            size_bytes: Some(87_806_124_032),
             error: None,
             monthly_usd: 0.0,
         }])
@@ -17167,8 +17170,8 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
     .0;
     let principal = gateway::verify(&h.state, session["token"].as_str().unwrap()).unwrap();
 
-    // 1. MCP `start_mission` with omitted `remote_node_id`: preview + replay
-    //    succeeds, stamps `auto-managed`, spawns a Boat VM from `lido-warm`,
+    // 1. MCP `start_mission` with omitted `remote_node_id` and omitted `managed_from_snapshot`:
+    //    spawns a Boat VM in light mode (`orb-node-base`, zero snapshot transfer),
     //    claims it for the child, and never touches `babylon-parent` or attaches `fork-workspace`.
     let start_accepted = gateway::call(
         State(h.state.clone()),
@@ -17217,13 +17220,14 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
     assert_eq!(boat_guest.submissions.lock().unwrap().len(), 1);
     let spawned_specs = provider.spawned_specs.lock().unwrap().clone();
     assert_eq!(spawned_specs.len(), 1);
-    assert_eq!(spawned_specs[0].image.as_deref(), Some("lido-warm"));
+    assert_eq!(spawned_specs[0].image.as_deref(), Some("orb-node-base"));
 
     let child_vm_id = start_receipt["result"]["managed_machine"]["id"]
         .as_str()
         .unwrap()
         .to_string();
     let child_vm = manager.get(&child_vm_id).await.unwrap();
+    assert_eq!(child_vm.source_snapshot, None);
     assert_eq!(
         child_vm.owner_mission_id.as_deref(),
         Some(&child_id.to_string() as &str)
@@ -17233,8 +17237,40 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
         Some(&parent.id.to_string() as &str)
     );
 
+    // 1b. Explicit `managed_from_snapshot: "lido-warm"` opts into the warm snapshot.
+    let warm_accepted = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "start_mission".into(),
+            arguments: json!({
+                "title": "warm subagent worker",
+                "prompt": "run warm probe",
+                "backend": "opencode",
+                "model_override": "openai/gpt-6-astra",
+                "remote_node_id": "auto-managed:xlarge",
+                "managed_from_snapshot": "lido-warm",
+                "writer": false,
+                "idempotency_key": "subagent-boat-warm-1"
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(warm_accepted["ok"], true, "{warm_accepted}");
+    let warm_receipt = wait_for_mcp_action(
+        &h,
+        &principal,
+        warm_accepted["result"]["action_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(warm_receipt["state"], "completed", "{warm_receipt}");
+    let spawned_specs = provider.spawned_specs.lock().unwrap().clone();
+    assert_eq!(spawned_specs.len(), 2);
+    assert_eq!(spawned_specs[1].image.as_deref(), Some("lido-warm"));
+
     // 2. MCP `consult_model` with omitted `remote_node_id` and `files=[...]`:
-    //    succeeds through two-pass authorization, routes to Boat, and returns `placement_note`.
+    //    succeeds through two-pass authorization, routes to Boat in light mode, and returns `placement_note`.
     let consult_accepted = gateway::call(
         State(h.state.clone()),
         Extension(principal.clone()),
@@ -17263,7 +17299,10 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
         .unwrap()
         .contains("remote_node_id=\"same\""));
     assert_eq!(parent_node.submissions.lock().unwrap().len(), 0);
-    assert_eq!(boat_guest.submissions.lock().unwrap().len(), 2);
+    assert_eq!(boat_guest.submissions.lock().unwrap().len(), 3);
+    let spawned_specs = provider.spawned_specs.lock().unwrap().clone();
+    assert_eq!(spawned_specs.len(), 3);
+    assert_eq!(spawned_specs[2].image.as_deref(), Some("orb-node-base"));
 
     // 3. Explicit `remote_node_id: "same"` co-locates on `babylon-parent` and
     //    attaches `fork-workspace:<parent_id>`.
@@ -17551,7 +17590,6 @@ async fn child_placement_handles_client_parent_auth_fallback_and_idempotent_retr
         },
         Some("lido".into()),
         Some(&preclaim_tag),
-        true,
     )
     .await
     .unwrap();

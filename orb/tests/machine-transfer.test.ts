@@ -116,5 +116,18 @@ it("never asks for an archive copy without the feature or from this computer", a
   await copyTransfer(action, vi.fn());
   const { bulkCopyTransfer } = await import("../src/machineTransfer");
   expect(await bulkCopyTransfer({ ...action, destination: { kind: "core" } }, vi.fn())).toBe(false);
+  expect(await bulkCopyTransfer({ ...action, light: true }, vi.fn())).toBe(false);
   expect(calls.some(c => c.op === "bulk_copy")).toBe(false);
+});
+it("skips client source workspace recheck when activating a light transfer", async () => {
+  const calls: Record<string, any>[] = [];
+  const lightClient: TransferAction = { ...action, light: true, source: { kind: "client", id: "other-mac" }, manifest: { bytes: 0, excluded: [], files: [] }, phase: "verified" };
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    calls.push(body);
+    return new Response(JSON.stringify(body.op === "activate" ? { ...lightClient, phase: "activated" } : { id: lightClient.mission_id, machine_transfer: { ...lightClient, phase: "activated" } }), { status: 200 });
+  });
+  const moved = await activateTransfer(lightClient);
+  expect(moved.id).toBe(lightClient.mission_id);
+  expect(calls[0]).toEqual({ op: "activate", transfer_id: lightClient.id, client_source_verified: undefined });
 });

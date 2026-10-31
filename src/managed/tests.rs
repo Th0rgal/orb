@@ -4075,7 +4075,7 @@ async fn dispatch_reservation_reuses_unclaimed_vm_and_clears_on_claim() {
 }
 
 #[tokio::test]
-async fn newest_ready_worker_snapshot_is_project_and_tenant_scoped_and_none_opts_out() {
+async fn newest_ready_worker_snapshot_is_project_and_tenant_scoped_and_light_is_default() {
     let dir = tempfile::tempdir().unwrap();
     let mut st = settings();
     st.max_concurrent = None;
@@ -4118,10 +4118,31 @@ async fn newest_ready_worker_snapshot_is_project_and_tenant_scoped_and_none_opts
         None
     );
 
-    // Explicit `"none"` / `"base"` opts out of warm snapshot selection and boots clean base image.
-    let clean = m
+    // Omitted `from_snapshot` or `"light"` / `"none"` / `"base"` boots clean base image with zero snapshot transfer.
+    for opt in [
+        None,
+        Some("light".into()),
+        Some("none".into()),
+        Some("base".into()),
+    ] {
+        let clean = m
+            .spawn(SpawnRequest {
+                from_snapshot: opt,
+                snapshot_project: Some("orb".into()),
+                owner_user_id: Some("t1".into()),
+                wait: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(clean.image, "orb-node-base");
+        assert_eq!(clean.source_snapshot, None);
+    }
+
+    // Explicit `"latest"` selects the newest ready project snapshot.
+    let warm = m
         .spawn(SpawnRequest {
-            from_snapshot: Some("none".into()),
+            from_snapshot: Some("latest".into()),
             snapshot_project: Some("orb".into()),
             owner_user_id: Some("t1".into()),
             wait: Some(false),
@@ -4129,6 +4150,6 @@ async fn newest_ready_worker_snapshot_is_project_and_tenant_scoped_and_none_opts
         })
         .await
         .unwrap();
-    assert_eq!(clean.image, "orb-node-base");
-    assert_eq!(clean.source_snapshot, None);
+    assert_eq!(warm.image, s2.name);
+    assert_eq!(warm.source_snapshot.as_deref(), Some(s2.name.as_str()));
 }
