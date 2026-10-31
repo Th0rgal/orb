@@ -5902,6 +5902,65 @@ sandboxed-harness-version:grok=\n";
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn local_allowed_lake_build_emits_turbo_lean_advisory_unless_opted_out() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let real_lake = root.path().join("real-lake");
+        std::fs::write(&real_lake, b"#!/bin/sh\nprintf 'real:%s' \"$*\"\n").unwrap();
+        let mut permissions = std::fs::metadata(&real_lake).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&real_lake, permissions).unwrap();
+
+        // 1. Metadata query (`lake setup-file`) stays completely quiet on stderr
+        let meta_out = std::process::Command::new("/bin/sh")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/lake"))
+            .args(["setup-file", "Main.lean"])
+            .env("SANDBOXED_REAL_LAKE", &real_lake)
+            .env("SANDBOXED_COMPUTE_POLICY", "local_allowed")
+            .output()
+            .unwrap();
+        assert!(meta_out.status.success());
+        assert_eq!(
+            String::from_utf8(meta_out.stdout).unwrap(),
+            "real:setup-file Main.lean"
+        );
+        assert!(meta_out.stderr.is_empty());
+
+        // 2. Heavy `lake build` under `local_allowed` emits actionable turbo-lean stderr guidance
+        let build_out = std::process::Command::new("/bin/sh")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/lake"))
+            .args(["build", "Target"])
+            .env("SANDBOXED_REAL_LAKE", &real_lake)
+            .env("SANDBOXED_COMPUTE_POLICY", "local_allowed")
+            .env_remove("SANDBOXED_ALLOW_RAW_LAKE")
+            .output()
+            .unwrap();
+        assert!(build_out.status.success());
+        assert_eq!(
+            String::from_utf8(build_out.stdout).unwrap(),
+            "real:build Target"
+        );
+        let stderr = String::from_utf8(build_out.stderr).unwrap();
+        assert!(stderr.contains("use `turbo-lean` instead"), "{stderr:?}");
+        assert!(stderr.contains("turbo-lean build"), "{stderr:?}");
+        assert!(stderr.contains("turbo-lean check"), "{stderr:?}");
+
+        // 3. Opt-out via SANDBOXED_ALLOW_RAW_LAKE=1 silences the advisory
+        let opt_out = std::process::Command::new("/bin/sh")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/lake"))
+            .args(["build", "Target"])
+            .env("SANDBOXED_REAL_LAKE", &real_lake)
+            .env("SANDBOXED_COMPUTE_POLICY", "local_allowed")
+            .env("SANDBOXED_ALLOW_RAW_LAKE", "1")
+            .output()
+            .unwrap();
+        assert!(opt_out.status.success());
+        assert!(opt_out.stderr.is_empty());
+    }
+
     #[test]
     fn compute_policy_defaults_fail_closed_for_beal_and_verity() {
         let root = tempfile::tempdir().unwrap();

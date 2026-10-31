@@ -26,7 +26,9 @@ import storage_inventory as inv  # noqa: E402
 
 SETTLED_NODE_JOB_STATES = {"succeeded", "failed", "cancelled", "retired", "completed", "lost"}
 ELIGIBLE_CORE_STATUSES = inv.TERMINAL | {"acknowledged"}
+IDLE_ELIGIBLE_CORE_STATUSES = {"awaiting_user", "paused"}
 NESTED_DOT_CACHE_NAMES = {"turbo-lean", "mathlib", "opencode", "uv", "pip", "go-build"}
+NESTED_DOT_CARGO_NAMES = {"registry", "git"}
 
 
 def _unescape_mountinfo_path(raw):
@@ -307,6 +309,7 @@ def find_reclaimable_subdirs(
     mission_dir,
     allowed_names=inv.RECLAIMABLE_WORKER_CACHES,
     nested_dot_cache_names=NESTED_DOT_CACHE_NAMES,
+    nested_dot_cargo_names=NESTED_DOT_CARGO_NAMES,
     mountpoints=frozenset(),
 ):
     """Yield non-overlapping reconstructible cache subdirectories on the same device."""
@@ -314,8 +317,11 @@ def find_reclaimable_subdirs(
     root_dev = root_path.lstat().st_dev
     allowed = {name.lower() for name in allowed_names}
     nested_cache = {name.lower() for name in nested_dot_cache_names}
+    nested_cargo = {name.lower() for name in nested_dot_cargo_names}
     for current, dirs, _ in os.walk(root_path, followlinks=False):
-        parent_is_dot_cache = Path(current).name.lower() == ".cache"
+        parent_name = Path(current).name.lower()
+        parent_is_dot_cache = parent_name == ".cache"
+        parent_is_dot_cargo = parent_name == ".cargo"
         kept = []
         for name in sorted(dirs):
             candidate = Path(current, name)
@@ -326,8 +332,10 @@ def find_reclaimable_subdirs(
             if not stat.S_ISDIR(meta.st_mode) or is_mount_boundary(candidate, meta, root_dev, mountpoints):
                 continue
             lower_name = name.lower()
-            is_reclaimable = lower_name in allowed or (
-                parent_is_dot_cache and lower_name in nested_cache
+            is_reclaimable = (
+                lower_name in allowed
+                or (parent_is_dot_cache and lower_name in nested_cache)
+                or (parent_is_dot_cargo and lower_name in nested_cargo)
             )
             # Never treat a Git checkout or bare repository as a build cache,
             # even if a directory happens to share a cache basename.
@@ -409,18 +417,37 @@ def _process_candidate_caches(
     return reclaimed_bytes, reclaimed_dirs, all_ok
 
 
+def _is_timestamp_older_than(raw_ts, cutoff):
+    """Return True only when ``raw_ts`` parses cleanly as an ISO timestamp < ``cutoff``."""
+    parsed = inv.iso_time(raw_ts)
+    return parsed is not None and parsed < cutoff
+
+
 def reclaim_worker_caches(
     node_work_dir,
     missions_dir=None,
     missions_snapshot=None,
     apply=False,
     terminal_only=False,
+    idle_hours=None,
+    orphan_idle_hours=None,
+    now_override=None,
     extra_step_globs=(),
     open_file_probe=default_open_file_probe,
     mountpoints=None,
 ):
     """Run dry-run or live cache reclamation and return (records, ok)."""
-    now = dt.datetime.now(dt.timezone.utc)
+    now = now_override if now_override is not None else dt.datetime.now(dt.timezone.utc)
+    idle_cutoff = (
+        now - dt.timedelta(hours=float(idle_hours))
+        if idle_hours is not None and float(idle_hours) >= 0
+        else None
+    )
+    orphan_cutoff = (
+        now - dt.timedelta(hours=float(orphan_idle_hours))
+        if orphan_idle_hours is not None and float(orphan_idle_hours) >= 0
+        else None
+    )
     records = [{
         "record_type": "audit",
         "action": "reclaim_started",
@@ -495,25 +522,66 @@ def reclaim_worker_caches(
             continue
 
         core_rec = core_records.get(mid_key)
-        if core_rec is None:
-            continue
-        if core_rec["status"] not in allowed_statuses:
-            continue
-
         node_rec = node_records.get(mid_key)
+
         if node_rec is not None:
             unset_states = set(node_rec.get("node_job_states", {})) - SETTLED_NODE_JOB_STATES
             if unset_states:
-                records.append({
-                    "record_type": "cache_item",
-                    "action": "skip",
-                    "mission_id": core_rec["mission_id"],
-                    "mission_status": core_rec["status"],
-                    "path": str(entry),
-                    "reason": "active_node_job_protected",
-                    "unsettled_job_states": sorted(unset_states),
-                })
+                if core_rec is not None and (
+                    core_rec["status"] in allowed_statuses
+                    or (idle_cutoff is not None and core_rec["status"] in IDLE_ELIGIBLE_CORE_STATUSES)
+                ):
+                    records.append({
+                        "record_type": "cache_item",
+                        "action": "skip",
+                        "mission_id": core_rec["mission_id"],
+                        "mission_status": core_rec["status"],
+                        "path": str(entry),
+                        "reason": "active_node_job_protected",
+                        "unsettled_job_states": sorted(unset_states),
+                    })
                 continue
+
+        context_fields = None
+        if core_rec is not None:
+            status = core_rec["status"]
+            if status in allowed_statuses:
+                context_fields = {
+                    "mission_id": core_rec["mission_id"],
+                    "mission_status": status,
+                    "owner": core_rec["owner"],
+                }
+            elif (
+                not terminal_only
+                and idle_cutoff is not None
+                and status in IDLE_ELIGIBLE_CORE_STATUSES
+                and _is_timestamp_older_than(core_rec.get("updated_at"), idle_cutoff)
+                and (
+                    node_rec is None
+                    or node_rec.get("last_job_finished_at") is None
+                    or _is_timestamp_older_than(node_rec.get("last_job_finished_at"), idle_cutoff)
+                )
+            ):
+                context_fields = {
+                    "mission_id": core_rec["mission_id"],
+                    "mission_status": status,
+                    "owner": core_rec["owner"],
+                }
+        elif (
+            not terminal_only
+            and orphan_cutoff is not None
+            and node_rec is not None
+            and bool(node_rec.get("node_job_states"))
+            and _is_timestamp_older_than(node_rec.get("last_job_finished_at"), orphan_cutoff)
+        ):
+            context_fields = {
+                "mission_id": mid_key,
+                "mission_status": "orphan_settled_jobs",
+                "owner": node_rec.get("owner", "node_orphan"),
+            }
+
+        if context_fields is None:
+            continue
 
         added_bytes, added_dirs, batch_ok = _process_candidate_caches(
             parent_dir=entry,
@@ -522,11 +590,7 @@ def reclaim_worker_caches(
             apply=apply,
             open_file_probe=open_file_probe,
             records=records,
-            context_fields={
-                "mission_id": core_rec["mission_id"],
-                "mission_status": core_rec["status"],
-                "owner": core_rec["owner"],
-            },
+            context_fields=context_fields,
         )
         total_allocated += added_bytes
         reclaimed_count += added_dirs
@@ -574,6 +638,18 @@ def main(argv=None):
     parser.add_argument("--missions-snapshot", help="JSONL snapshot exported via storage_inventory.py --export-missions")
     parser.add_argument("--extra-step-glob", action="append", default=[], help="Optional scratch step glob to prune when lsof-idle")
     parser.add_argument("--terminal-only", action="store_true", help="Exclude archived ('acknowledged') missions")
+    parser.add_argument(
+        "--idle-hours",
+        type=float,
+        default=None,
+        help="Also reclaim reconstructible caches inside awaiting_user/paused missions idle for at least N hours",
+    )
+    parser.add_argument(
+        "--orphan-idle-hours",
+        type=float,
+        default=None,
+        help="Also reclaim reconstructible caches inside worker UUID dirs absent from Core whose jobs.db jobs settled >= N hours ago",
+    )
     parser.add_argument("--audit-log", help="Append JSONL audit records to this file")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Report eligible caches without deleting (default)")
@@ -587,6 +663,8 @@ def main(argv=None):
         missions_snapshot=args.missions_snapshot,
         apply=args.apply,
         terminal_only=args.terminal_only,
+        idle_hours=args.idle_hours,
+        orphan_idle_hours=args.orphan_idle_hours,
         extra_step_globs=args.extra_step_glob,
         open_file_probe=probe,
     )

@@ -1,10 +1,10 @@
 [Unit]
-Description=Daily reclamation of reconstructible build caches on settled worker missions
+Description=Periodic reclamation of reconstructible build caches on settled or idle worker missions
 
 [Timer]
 OnBootSec=15min
-OnUnitInactiveSec=12h
-RandomizedDelaySec=15min
+OnUnitInactiveSec=2h
+RandomizedDelaySec=10min
 Persistent=true
 
 [Install]

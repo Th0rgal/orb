@@ -17,7 +17,15 @@ import uuid
 
 ACTIVE = {"active", "pending", "waiting_background"}
 TERMINAL = {"completed", "failed", "interrupted", "blocked", "not_feasible"}
-RECLAIMABLE_WORKER_CACHES = {".elan", ".lake", "target", "toolchains", ".rustup", "node_modules"}
+RECLAIMABLE_WORKER_CACHES = {
+    ".elan",
+    ".lake",
+    "target",
+    "toolchains",
+    ".rustup",
+    "node_modules",
+    "conecache",
+}
 
 
 def iso_time(value):
@@ -297,7 +305,7 @@ def kind_for(path):
         return "mission_dir"
     if name in {
         "target", ".cache", ".lean", ".lake", "cache", "caches",
-        ".elan", "toolchains", ".rustup", "node_modules",
+        ".elan", "toolchains", ".rustup", "node_modules", "conecache",
     }:
         return "build_cache"
     if "image" in name or name in {"machines", "containers"}:

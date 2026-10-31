@@ -140,10 +140,11 @@ cleanup. Missing or unreadable node ledgers or snapshots never grant deletion
 permission.
 
 When reconstructible per-mission build/toolchain trees (`.elan`, `.lake`,
-`target`, `toolchains`, `.rustup`, `node_modules`, and `.cache/{turbo-lean,mathlib,opencode,uv,pip,go-build}`)
-inside finished missions pin a worker's disk, inspect and reclaim only those reconstructible caches via
-`scripts/reclaim_worker_build_caches.py` (or fleet-wide from Core via
-`scripts/run_fleet_worker_cache_reclaim.py` and `deploy/systemd/sandboxed-worker-cache-reclaim.timer`;
+`target`, `toolchains`, `.rustup`, `node_modules`, `conecache`, `.cargo/{registry,git}`, and `.cache/{turbo-lean,mathlib,opencode,uv,pip,go-build}`)
+inside settled or idle missions pin a worker's disk, inspect and reclaim only those reconstructible caches via
+`scripts/reclaim_worker_build_caches.py` (or fleet-wide from Core every 2 hours via
+`scripts/run_fleet_worker_cache_reclaim.py` and `deploy/systemd/sandboxed-worker-cache-reclaim.timer`,
+which also covers `awaiting_user`/`paused` missions idle past `--idle-hours` and unindexed worker UUID directories whose `jobs.db` jobs settled past `--orphan-idle-hours`;
 dry-run by default; requires complete Core + `jobs.db` indexes, `/proc` / `lsof +D`
 open-descriptor verification, and single-device / nested-mount rejection via `dir_fd`
 before `--apply`, and never deletes mission source or `.git` repositories). To roll out `sandboxed-node` binary updates across
