@@ -78,7 +78,6 @@
 		86C9D56D2E0A4F576734B3F1 /* OrbCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 717FFF091D1EDB3F27D08712 /* OrbCore.swift */; };
 		89EDBE4F4CAD403AA092C7A3 /* OrbAgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 985657C4A8D7B5A23C05B9EC /* OrbAgentPicker.swift */; };
 		9050F9E09782A725609E8EA9 /* OrbUsageTelemetryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D55624F920B8E49AF5CBCB5 /* OrbUsageTelemetryTests.swift */; };
-		922EF6DD2004AF9515649B3D /* MathAssets in Resources */ = {isa = PBXBuildFile; fileRef = 1698950E343FC7A6715F842A /* MathAssets */; };
 		92AEB582A9DADA127E42E7F2 /* OrbLandscapeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69FF672EF49C0E0A57BD3732 /* OrbLandscapeUITests.swift */; };
 		93F4F963F2ABFF0E01D8D978 /* OrbClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D8E88BB09A731DE6517295 /* OrbClient.swift */; };
 		9AAFF8C53C135534547DC392 /* OrbSvg.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3CD1D35D37ACC8A7FC2EB5F /* OrbSvg.swift */; };
@@ -174,7 +173,6 @@
 		122884E6E640D975AC7E46F5 /* OrbTurnSummaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbTurnSummaryTests.swift; sourceTree = "<group>"; };
 		12549983596F9F58C1C2A71C /* OrbContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbContractTests.swift; sourceTree = "<group>"; };
 		166AAD5BA0748F10E432A05D /* OrbConnectionIssue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbConnectionIssue.swift; sourceTree = "<group>"; };
-		1698950E343FC7A6715F842A /* MathAssets */ = {isa = PBXFileReference; lastKnownFileType = folder; name = MathAssets; path = SandboxedDashboard/Orb/MathAssets; sourceTree = SOURCE_ROOT; };
 		1828D2FC9160FC8677E10502 /* NetworkResilienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkResilienceTests.swift; sourceTree = "<group>"; };
 		19DEFD6DEF4AA10F64C572BB /* OrbOrchestrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbOrchestrationTests.swift; sourceTree = "<group>"; };
 		1C19E1741AE5E4A19BDAAB98 /* SandboxedDashboard.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SandboxedDashboard.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -440,7 +438,6 @@
 		9402FD943158ED3148A81A0C = {
 			isa = PBXGroup;
 			children = (
-				1698950E343FC7A6715F842A /* MathAssets */,
 				A3CAF136E3C506E3EC83371A /* MermaidAssets */,
 				432570506AADD1D2CA8F2DD6 /* cabi */,
 				483C1FA7AD3A618854BB5B14 /* OrbLiveActivity */,
@@ -642,7 +639,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				3A706E457E3E27DA1B69E152 /* Assets.xcassets in Resources */,
-				922EF6DD2004AF9515649B3D /* MathAssets in Resources */,
 				01F13FF7C047C9E4F82C1CA8 /* MermaidAssets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -850,7 +846,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026103102;
+				CURRENT_PROJECT_VERSION = 2026103103;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -870,7 +866,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.29.0;
+				MARKETING_VERSION = 1.30.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1001,7 +997,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2026103102;
+				CURRENT_PROJECT_VERSION = 2026103103;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_PREVIEWS = YES;
@@ -1015,7 +1011,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 1.29.0;
+				MARKETING_VERSION = 1.30.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

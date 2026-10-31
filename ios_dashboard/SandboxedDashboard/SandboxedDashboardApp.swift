@@ -69,7 +69,6 @@ private struct OrbTestTypeSize: ViewModifier {
         OrbNativeMarkdownView.trimCaches()
         OrbRemoteLog.trimCache()
         OrbImageLoader.trimCache()
-        OrbWebViewPool.shared.drain()
     }
     static func observeWarnings() {
         NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { _ in

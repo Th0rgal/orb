@@ -302,8 +302,6 @@ struct OrbConversation: View {
                     }
                     await refresh()
                     scrollToBottomOnOpen(scroll: scroll)
-                    // Off the open path: building web views before the first frame delayed the composer.
-                    OrbWebViewPool.shared.warmUp(count: 2)
                     if contextItems.isEmpty && !effectiveProjectSlug.isEmpty {
                         contextItems = await OrbContextTagging.loadItems(for: effectiveProjectSlug)
                     }

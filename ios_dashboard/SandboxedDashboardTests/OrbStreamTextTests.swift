@@ -29,6 +29,7 @@ final class OrbStreamTextTests: XCTestCase {
         docs.append(Self.longReply(sections: 6))
         docs.append("Prix : 3 € | 4 €\nligne | deux\n\n| a | b |\n|---|---|\n| é | 😀 |\n\n```\n\n```\n\ndone")
         docs.append("text\n\n  \n   indented after a whitespace line\n\n> q\n\n---\n\n1. x\n\n")
+        docs.append("Intro\n\n$$\n\\frac{a}{b}\n$$\n\nAfter $$x^2$$\n\n")
         for doc in docs {
             for stride in [1, 3, 7] {
                 var shown = ""
@@ -143,17 +144,17 @@ final class OrbStreamTextTests: XCTestCase {
         XCTAssertEqual(closedBlocks, OrbNativeMarkdownView.parseBlocks(acc))
     }
 
-    /// Streaming height estimates do not evict settled `OrbRichHeightCache` entries.
-    func testStreamingDoesNotEvictRichHeightCache() {
-        let settled = "Settled math reply: $$E = mc^2$$"
-        OrbRichHeightCache.set(142, for: settled, .large)
-        XCTAssertEqual(OrbRichHeightCache.get(settled, .large), 142)
+    /// Streaming math prefixes do not evict settled `OrbMath.cache` entries.
+    func testStreamingDoesNotEvictMathCache() {
+        let settled = "E = mc^2"
+        _ = OrbMath.formatCached(settled, complete: true, streaming: false)
+        XCTAssertNotNil(OrbMath.cache.get(settled))
         for i in 0..<600 {
-            let prefix = "Streaming math $$x_\(i)$$"
-            _ = OrbRichHeightCache.get(prefix, .large, streaming: true)
-            OrbRichHeightCache.set(80 + CGFloat(i % 20), for: prefix, .large, streaming: true)
+            let prefix = "x_\(i) + \\frac{1}{\(i + 1)}"
+            _ = OrbMath.formatCached(prefix, complete: false, streaming: true)
+            _ = OrbMath.formatCached(prefix, complete: true, streaming: true)
         }
-        XCTAssertEqual(OrbRichHeightCache.get(settled, .large), 142)
+        XCTAssertNotNil(OrbMath.cache.get(settled))
     }
 
     /// The parse cache is a text-keyed LRU: same hits and recency order as the Lean model.

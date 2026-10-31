@@ -7,10 +7,12 @@ import WebKit
 /// so a transcript re-render or a recycled row never runs layout again.
 @MainActor
 final class OrbMermaidRenderer: NSObject, WKNavigationDelegate {
-    enum Result: Equatable {
+    enum Result: Equatable, Sendable {
         case svg(String, width: CGFloat, height: CGFloat)
         case failure(String)
     }
+
+    @MainActor private final class Gate { var resumed = false }
 
     static let shared = OrbMermaidRenderer()
     private var cache: [String: Result] = [:]
@@ -26,17 +28,32 @@ final class OrbMermaidRenderer: NSObject, WKNavigationDelegate {
         guard source.count <= 50_000 else { return .failure("Diagram source is too large") }
         await load()
         guard let web else { return .failure("The diagram renderer is unavailable") }
-        let result: Result
-        do {
-            let value = try await web.callAsyncJavaScript("return await window.orbRender(source)", arguments: ["source": source], contentWorld: .page)
-            let dict = value as? [String: Any] ?? [:]
-            if let svg = dict["svg"] as? String, let w = dict["width"] as? Double, let h = dict["height"] as? Double, w > 0, h > 0 {
-                result = .svg(svg, width: w, height: h)
-            } else {
-                result = .failure((dict["error"] as? String) ?? "Unknown syntax error")
+        let gate = Gate()
+        let result: Result = await withCheckedContinuation { cont in
+            let timer = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(6))
+                guard !gate.resumed else { return }
+                gate.resumed = true
+                cont.resume(returning: .failure("Diagram rendering timed out"))
             }
-        } catch {
-            result = .failure(error.localizedDescription)
+            Task { @MainActor in
+                let out: Result
+                do {
+                    let value = try await web.callAsyncJavaScript("return await window.orbRender(source)", arguments: ["source": source], contentWorld: .page)
+                    let dict = value as? [String: Any] ?? [:]
+                    if let svg = dict["svg"] as? String, let w = dict["width"] as? Double, let h = dict["height"] as? Double, w > 0, h > 0 {
+                        out = .svg(svg, width: w, height: h)
+                    } else {
+                        out = .failure((dict["error"] as? String) ?? "Unknown syntax error")
+                    }
+                } catch {
+                    out = .failure(error.localizedDescription)
+                }
+                timer.cancel()
+                guard !gate.resumed else { return }
+                gate.resumed = true
+                cont.resume(returning: out)
+            }
         }
         cache[source] = result
         order.append(source)
@@ -55,6 +72,12 @@ final class OrbMermaidRenderer: NSObject, WKNavigationDelegate {
             web = view
             if let url = Bundle.main.url(forResource: "renderer", withExtension: "html", subdirectory: "MermaidAssets") {
                 view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(8))
+                    guard let self, !self.ready else { return }
+                    self.web = nil
+                    self.finishLoading()
+                }
             } else {
                 ready = true
                 return
@@ -75,11 +98,19 @@ final class OrbMermaidRenderer: NSObject, WKNavigationDelegate {
     }
 
     nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        Task { @MainActor in self.finishLoading() }
+        Task { @MainActor in self.web = nil; self.finishLoading() }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Task { @MainActor in self.web = nil; self.finishLoading() }
     }
 
     nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        Task { @MainActor in self.ready = false; self.web = nil }
+        Task { @MainActor in
+            self.web = nil
+            self.finishLoading()
+            self.ready = false
+        }
     }
 
     private func finishLoading() {

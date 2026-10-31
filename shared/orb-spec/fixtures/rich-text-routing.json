@@ -3,52 +3,74 @@
     {
       "name": "plain",
       "source": "Hello world",
+      "rich": false,
       "web": false
     },
     {
       "name": "inline math",
       "source": "Inline $x^2$ only",
-      "web": true
+      "rich": true,
+      "web": false
     },
     {
       "name": "parenthesized math",
       "source": "Inline \\(x^2\\) only",
-      "web": true
+      "rich": true,
+      "web": false
     },
     {
       "name": "bracketed math",
       "source": "\\[x^2\\]",
-      "web": true
+      "rich": true,
+      "web": false
     },
     {
       "name": "display math",
       "source": "$$x^2$$",
-      "web": true
+      "rich": true,
+      "web": false
     },
     {
       "name": "currency",
       "source": "Costs $15 and $20",
+      "rich": false,
+      "web": false
+    },
+    {
+      "name": "currency decimals",
+      "source": "Boat VMs cost $0.072/hr and cap at $50",
+      "rich": false,
+      "web": false
+    },
+    {
+      "name": "escaped dollar",
+      "source": "Literal \\$100 and \\$200",
+      "rich": false,
       "web": false
     },
     {
       "name": "inline code",
       "source": "`$x^2$` and `\\(x\\)`",
+      "rich": false,
       "web": false
     },
     {
       "name": "fenced code",
       "source": "```text\n$x^2$\n```",
+      "rich": false,
       "web": false
     },
     {
       "name": "native table",
       "source": "| A | B |\n| --- | --- |\n| 1 | 2 |",
+      "rich": false,
       "web": false
     },
     {
       "name": "image",
       "source": "![chart](plot.png)",
-      "web": true
+      "rich": true,
+      "web": false
     }
   ]
 }

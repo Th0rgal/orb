@@ -1,126 +1,670 @@
 import SwiftUI
-import WebKit
+import ImageIO
 
-@MainActor
-enum OrbRichHeightCache {
-    private static var heights: [Int: CGFloat] = [:]
-    private static func key(_ source: String, _ size: DynamicTypeSize) -> Int {
-        var hasher = Hasher()
-        hasher.combine(source)
-        hasher.combine(size)
-        return hasher.finalize()
+// MARK: - Native LaTeX & Inline Markdown Parser (`OrbMath.kt` parity)
+
+enum OrbMath {
+    nonisolated static let maxDepth = 16
+    nonisolated static let maxSpanChars = 8192
+
+    struct Result: Equatable, Sendable {
+        let text: String
+        let valid: Bool
     }
-    static func estimate(_ source: String) -> CGFloat {
-        // Heuristic height estimate accounting for paragraphs, code blocks, and headings
-        var totalHeight: CGFloat = 0
-        var inCodeBlock = false
-        for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.hasPrefix("```") {
-                inCodeBlock.toggle()
-                totalHeight += 18
+
+    enum InlineToken: Equatable, Sendable {
+        case text(String)
+        case code(String)
+        case bold(String)
+        case italic(String)
+        case link(label: String, url: String, isSafe: Bool, isArtifact: Bool)
+        case image(alt: String, url: String)
+        case math(latex: String, display: Bool, complete: Bool)
+    }
+
+    @MainActor static let cache = OrbTextCache<Result>(capacity: 512)
+
+    nonisolated static func usesWebRenderer(_ source: String) -> Bool { false }
+
+    nonisolated static func isSafeHref(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("javascript:") || lower.hasPrefix("data:") || lower.hasPrefix("vbscript:") {
+            return false
+        }
+        return true
+    }
+
+    nonisolated static func isArtifactHref(_ raw: String) -> Bool {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix("file:///") ||
+            t.hasPrefix("sandbox:") ||
+            t.hasPrefix("/mnt/data/") ||
+            t.hasPrefix("/workspace/") ||
+            t.hasPrefix("/srv/") ||
+            t.hasPrefix("/Users/") ||
+            t.hasPrefix("/root/") ||
+            t.hasPrefix("/home/") ||
+            t.hasPrefix("/var/") ||
+            t.hasPrefix("/tmp/")
+    }
+
+    nonisolated static func containsMathOrMedia(_ source: String) -> Bool {
+        guard source.contains("$") || source.contains("\\(") || source.contains("\\[") || source.contains("![") else {
+            return false
+        }
+        var inFence = false
+        for rawLine in source.components(separatedBy: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                inFence.toggle()
                 continue
             }
-            if inCodeBlock {
-                totalHeight += 19
-            } else if line.hasPrefix("#") {
-                totalHeight += 32
-            } else if line.isEmpty {
-                totalHeight += 10
-            } else if line.trimmingCharacters(in: .whitespaces).hasPrefix("|") {
-                let wraps = max(1, (line.count + 25) / 26)
-                totalHeight += CGFloat(wraps) * 24 + 10
-            } else {
-                let wraps = max(1, (line.count + 46) / 48)
-                totalHeight += CGFloat(wraps) * 23
+            if inFence { continue }
+            for token in tokenizeInline(rawLine) {
+                switch token {
+                case .math, .image: return true
+                default: break
+                }
             }
         }
-        return min(4800, max(24, totalHeight))
+        return false
     }
-    static func get(_ source: String, _ size: DynamicTypeSize, streaming: Bool = false) -> CGFloat {
-        if !streaming, let cached = heights[key(source, size)] { return cached }
-        return estimate(source)
+
+    nonisolated static func admitsInlineDollarBody(_ inner: String) -> Bool {
+        guard !inner.isEmpty, inner.count <= maxSpanChars else { return false }
+        guard let first = inner.first, let last = inner.last, !first.isWhitespace, !last.isWhitespace else {
+            return false
+        }
+        if first.isNumber && inner.contains(where: \.isWhitespace) {
+            let mathOps: Set<Character> = ["\\", "^", "_", "{", "}", "=", "+", "-", "*", "/", "<", ">", "|"]
+            if !inner.contains(where: { mathOps.contains($0) }) {
+                return false
+            }
+        }
+        return true
     }
-    static func set(_ value: CGFloat, for source: String, _ size: DynamicTypeSize, streaming: Bool = false) {
-        guard !streaming else { return }
-        if heights.count > 512 { heights.removeAll(keepingCapacity: true) }
-        heights[key(source, size)] = value
+
+    nonisolated static func findClosingInlineDollar(_ chars: [Character], openIdx: Int) -> Int? {
+        let n = chars.count
+        guard openIdx >= 0, openIdx + 2 <= n, chars[openIdx] == "$" else { return nil }
+        if openIdx > 0 {
+            let prev = chars[openIdx - 1]
+            if prev == "\\" || prev == "$" || prev.isLetter || prev.isNumber { return nil }
+        }
+        let firstInner = chars[openIdx + 1]
+        if firstInner == "$" || firstInner.isWhitespace { return nil }
+
+        var i = openIdx + 1
+        while i < n && i - (openIdx + 1) <= maxSpanChars {
+            let ch = chars[i]
+            if ch == "\n" { return nil }
+            if ch == "\\" {
+                i += 2
+                continue
+            }
+            if ch == "$" {
+                let prev = chars[i - 1]
+                let next: Character = i + 1 < n ? chars[i + 1] : "\0"
+                if !prev.isWhitespace && next != "$" && !next.isNumber {
+                    let inner = String(chars[(openIdx + 1)..<i])
+                    return admitsInlineDollarBody(inner) ? i : nil
+                }
+            }
+            i += 1
+        }
+        return nil
     }
+
+    nonisolated static func tokenizeInline(_ raw: String, depth: Int = 0) -> [InlineToken] {
+        if raw.isEmpty { return [] }
+        if depth > 6 { return [.text(raw)] }
+        let chars = Array(raw)
+        let n = chars.count
+        var out: [InlineToken] = []
+        var plain = ""
+
+        func flushPlain() {
+            if !plain.isEmpty {
+                out.append(.text(plain))
+                plain.removeAll(keepingCapacity: true)
+            }
+        }
+
+        func findSub(_ needle: [Character], from start: Int) -> Int? {
+            let m = needle.count
+            guard m > 0, start + m <= n else { return nil }
+            var idx = start
+            while idx + m <= n {
+                var match = true
+                for k in 0..<m where chars[idx + k] != needle[k] {
+                    match = false
+                    break
+                }
+                if match { return idx }
+                idx += 1
+            }
+            return nil
+        }
+
+        var i = 0
+        while i < n {
+            let ch = chars[i]
+
+            if ch == "\\" && i + 1 < n && chars[i + 1] == "$" {
+                plain.append("$")
+                i += 2
+                continue
+            }
+
+            if ch == "`" {
+                var ticks = 1
+                while i + ticks < n && chars[i + ticks] == "`" { ticks += 1 }
+                let fence = Array(repeating: Character("`"), count: ticks)
+                if let end = findSub(fence, from: i + ticks) {
+                    flushPlain()
+                    out.append(.code(String(chars[(i + ticks)..<end])))
+                    i = end + ticks
+                    continue
+                }
+            }
+
+            if ch == "$" && i + 1 < n && chars[i + 1] == "$" {
+                if let close = findSub(["$", "$"], from: i + 2), close - (i + 2) <= maxSpanChars {
+                    flushPlain()
+                    out.append(.math(latex: String(chars[(i + 2)..<close]), display: true, complete: true))
+                    i = close + 2
+                    continue
+                }
+            }
+
+            if ch == "\\" && i + 1 < n && chars[i + 1] == "(" {
+                flushPlain()
+                if let close = findSub(["\\", ")"], from: i + 2), close - (i + 2) <= maxSpanChars {
+                    out.append(.math(latex: String(chars[(i + 2)..<close]), display: false, complete: true))
+                    i = close + 2
+                } else {
+                    let end = min(n, i + 2 + maxSpanChars)
+                    out.append(.math(latex: String(chars[(i + 2)..<end]), display: false, complete: false))
+                    i = n
+                }
+                continue
+            }
+
+            if ch == "\\" && i + 1 < n && chars[i + 1] == "[" {
+                flushPlain()
+                if let close = findSub(["\\", "]"], from: i + 2), close - (i + 2) <= maxSpanChars {
+                    out.append(.math(latex: String(chars[(i + 2)..<close]), display: true, complete: true))
+                    i = close + 2
+                } else {
+                    let end = min(n, i + 2 + maxSpanChars)
+                    out.append(.math(latex: String(chars[(i + 2)..<end]), display: true, complete: false))
+                    i = n
+                }
+                continue
+            }
+
+            if ch == "$", let close = findClosingInlineDollar(chars, openIdx: i) {
+                flushPlain()
+                out.append(.math(latex: String(chars[(i + 1)..<close]), display: false, complete: true))
+                i = close + 1
+                continue
+            }
+
+            if ch == "!" && i + 1 < n && chars[i + 1] == "[" {
+                if let closeBracket = findSub(["]"], from: i + 2),
+                   closeBracket + 1 < n && chars[closeBracket + 1] == "(",
+                   let closeParen = findSub([")"], from: closeBracket + 2) {
+                    let alt = String(chars[(i + 2)..<closeBracket])
+                    let url = String(chars[(closeBracket + 2)..<closeParen]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    flushPlain()
+                    out.append(.image(alt: alt, url: url))
+                    i = closeParen + 1
+                    continue
+                }
+            }
+
+            if ch == "[" {
+                if let closeBracket = findSub(["]"], from: i + 1),
+                   closeBracket > i,
+                   closeBracket + 1 < n && chars[closeBracket + 1] == "(",
+                   let closeParen = findSub([")"], from: closeBracket + 2) {
+                    let label = String(chars[(i + 1)..<closeBracket])
+                    let url = String(chars[(closeBracket + 2)..<closeParen]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    flushPlain()
+                    out.append(.link(label: label, url: url, isSafe: isSafeHref(url), isArtifact: isArtifactHref(url)))
+                    i = closeParen + 1
+                    continue
+                }
+            }
+
+            if ch == "*" && i + 1 < n && chars[i + 1] == "*" {
+                if let end = findSub(["*", "*"], from: i + 2), end > i + 2 {
+                    flushPlain()
+                    out.append(.bold(String(chars[(i + 2)..<end])))
+                    i = end + 2
+                    continue
+                }
+            }
+
+            if ch == "*" && i + 1 < n && !chars[i + 1].isWhitespace && chars[i + 1] != "*" {
+                if let end = findSub(["*"], from: i + 1), end > i + 1, !chars[end - 1].isWhitespace {
+                    flushPlain()
+                    out.append(.italic(String(chars[(i + 1)..<end])))
+                    i = end + 1
+                    continue
+                }
+            }
+
+            plain.append(ch)
+            i += 1
+        }
+        flushPlain()
+        return out
+    }
+
+    @MainActor static func formatCached(_ latex: String, complete: Bool = true, streaming: Bool = false) -> Result {
+        let trimmed = latex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !complete || trimmed.count > maxSpanChars {
+            return formatLatex(trimmed, complete: false)
+        }
+        if !streaming, let hit = cache.get(trimmed) {
+            return hit
+        }
+        let rendered = formatLatex(trimmed, complete: true)
+        if !streaming {
+            cache.put(trimmed, rendered)
+        }
+        return rendered
+    }
+
+    nonisolated static func formatLatex(_ latex: String, complete: Bool = true) -> Result {
+        let trimmed = latex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return Result(text: "", valid: complete) }
+        if !complete || trimmed.count > maxSpanChars {
+            var p = Parser(Array(trimmed.prefix(maxSpanChars)))
+            let partial = p.parseExpr(depth: 0)
+            let fallback = partial.isEmpty ? String(trimmed.prefix(256)) : partial
+            return Result(text: fallback, valid: false)
+        }
+        var parser = Parser(Array(trimmed))
+        let out = parser.parseExpr(depth: 0)
+        if parser.pos < parser.src.count {
+            parser.valid = false
+        }
+        return Result(text: out.isEmpty ? trimmed : out, valid: parser.valid)
+    }
+
+    private struct Parser {
+        let src: [Character]
+        var pos = 0
+        var valid = true
+
+        init(_ src: [Character]) { self.src = src }
+
+        mutating func parseExpr(depth: Int, stopAtBrace: Bool = false) -> String {
+            if depth > OrbMath.maxDepth {
+                valid = false
+                let rest = String(src[pos...])
+                pos = src.count
+                return rest
+            }
+            var out = ""
+            while pos < src.count {
+                let ch = src[pos]
+                if ch == "}" {
+                    if stopAtBrace {
+                        pos += 1
+                        return out.trimmingCharacters(in: .whitespaces)
+                    }
+                    valid = false
+                    pos += 1
+                    continue
+                }
+                if ch == "{" {
+                    pos += 1
+                    let inner = parseExpr(depth: depth + 1, stopAtBrace: true)
+                    out.append(inner)
+                    continue
+                }
+                if ch == "^" || ch == "_" {
+                    let isSup = ch == "^"
+                    pos += 1
+                    let arg = readScriptArg(depth: depth + 1)
+                    if arg.isEmpty {
+                        valid = false
+                        out.append(ch)
+                    } else {
+                        out.append(Self.formatScript(arg, isSup: isSup))
+                    }
+                    continue
+                }
+                if ch == "&" {
+                    pos += 1
+                    if out.last != " " && !out.isEmpty { out.append(" ") }
+                    continue
+                }
+                if ch == "~" {
+                    pos += 1
+                    out.append("\u{00A0}")
+                    continue
+                }
+                if ch == "\\" {
+                    pos += 1
+                    if pos >= src.count {
+                        valid = false
+                        out.append("\\")
+                        break
+                    }
+                    let next = src[pos]
+                    if !next.isLetter {
+                        pos += 1
+                        switch next {
+                        case "\\": out.append("\n")
+                        case ",", ";", ":", " ": out.append(" ")
+                        case "!": break
+                        case "|": out.append("‖")
+                        default: out.append(next)
+                        }
+                        continue
+                    }
+                    let start = pos
+                    while pos < src.count && src[pos].isLetter { pos += 1 }
+                    let cmd = String(src[start..<pos])
+                    handleCommand(cmd, depth: depth, out: &out)
+                    continue
+                }
+                if ch.isWhitespace {
+                    while pos < src.count && src[pos].isWhitespace { pos += 1 }
+                    if !out.isEmpty && out.last != " " && out.last != "\n" { out.append(" ") }
+                    continue
+                }
+                out.append(ch)
+                pos += 1
+            }
+            if stopAtBrace {
+                valid = false
+            }
+            return out.trimmingCharacters(in: .whitespaces)
+        }
+
+        private mutating func skipSpaces() {
+            while pos < src.count && src[pos].isWhitespace { pos += 1 }
+        }
+
+        private mutating func readMandatoryGroup(depth: Int) -> String? {
+            skipSpaces()
+            guard pos < src.count else {
+                valid = false
+                return nil
+            }
+            if src[pos] == "{" {
+                pos += 1
+                return parseExpr(depth: depth + 1, stopAtBrace: true)
+            }
+            if src[pos] == "\\" {
+                pos += 1
+                guard pos < src.count else {
+                    valid = false
+                    return nil
+                }
+                if !src[pos].isLetter {
+                    let c = src[pos]
+                    pos += 1
+                    return String(c)
+                }
+                let s = pos
+                while pos < src.count && src[pos].isLetter { pos += 1 }
+                var sub = ""
+                handleCommand(String(src[s..<pos]), depth: depth + 1, out: &sub)
+                return sub
+            }
+            let c = src[pos]
+            pos += 1
+            return String(c)
+        }
+
+        private mutating func readOptionalBracket(depth: Int) -> String? {
+            skipSpaces()
+            guard pos < src.count, src[pos] == "[" else { return nil }
+            var close = pos + 1
+            while close < src.count && src[close] != "]" { close += 1 }
+            guard close < src.count else {
+                valid = false
+                return nil
+            }
+            let slice = Array(src[(pos + 1)..<close])
+            pos = close + 1
+            if depth <= OrbMath.maxDepth {
+                var sub = Parser(slice)
+                return sub.parseExpr(depth: depth + 1)
+            }
+            return String(slice)
+        }
+
+        private mutating func readScriptArg(depth: Int) -> String {
+            skipSpaces()
+            guard pos < src.count else { return "" }
+            return readMandatoryGroup(depth: depth) ?? ""
+        }
+
+        private mutating func readRawBraceName() -> String? {
+            skipSpaces()
+            guard pos < src.count, src[pos] == "{" else {
+                valid = false
+                return nil
+            }
+            var close = pos + 1
+            while close < src.count && src[close] != "}" { close += 1 }
+            guard close < src.count else {
+                valid = false
+                pos = src.count
+                return nil
+            }
+            let name = String(src[(pos + 1)..<close]).trimmingCharacters(in: .whitespacesAndNewlines)
+            pos = close + 1
+            return name
+        }
+
+        private mutating func handleCommand(_ cmd: String, depth: Int, out: inout String) {
+            switch cmd {
+            case "frac", "dfrac", "tfrac":
+                let num = readMandatoryGroup(depth: depth + 1)
+                let den = readMandatoryGroup(depth: depth + 1)
+                guard let num, let den else {
+                    valid = false
+                    out.append("\\\(cmd)")
+                    if let num { out.append("{\(num)}") }
+                    return
+                }
+                out.append("\(Self.wrapCompound(num))/\(Self.wrapCompound(den))")
+            case "sqrt":
+                let root = readOptionalBracket(depth: depth + 1)
+                guard let arg = readMandatoryGroup(depth: depth + 1) else {
+                    valid = false
+                    out.append("\\sqrt")
+                    return
+                }
+                if let root, !root.isEmpty { out.append(Self.formatScript(root, isSup: true)) }
+                out.append("√")
+                if arg.count <= 2 && arg.allSatisfy({ $0.isLetter || $0.isNumber }) {
+                    out.append(arg)
+                } else {
+                    out.append("(\(arg))")
+                }
+            case "mathbb":
+                let arg = readMandatoryGroup(depth: depth + 1) ?? ""
+                for c in arg { out.append(OrbMath.blackboard[c] ?? String(c)) }
+            case "mathbf", "textbf", "boldsymbol", "bm", "mathrm", "textrm", "text", "operatorname", "mathit", "textit", "mathcal", "mathscr", "mathfrak", "texttt", "mathsf":
+                if let arg = readMandatoryGroup(depth: depth + 1) { out.append(arg) }
+            case "overline", "bar", "hat", "widehat", "tilde", "widetilde", "vec", "dot":
+                let arg = readMandatoryGroup(depth: depth + 1) ?? ""
+                let comb: String = switch cmd {
+                case "overline", "bar": "\u{0304}"
+                case "hat", "widehat": "\u{0302}"
+                case "tilde", "widetilde": "\u{0303}"
+                case "vec": "\u{20D7}"
+                default: "\u{0307}"
+                }
+                out.append(arg + comb)
+            case "href":
+                let url = readRawBraceName()
+                let label = readMandatoryGroup(depth: depth + 1)
+                if url == nil || label == nil { valid = false }
+                if let label { out.append(label) }
+            case "begin":
+                guard let env = readRawBraceName() else { return }
+                let endTag = Array("\\end{\(env)}")
+                var endIdx: Int?
+                var search = pos
+                while search + endTag.count <= src.count {
+                    if Array(src[search..<(search + endTag.count)]) == endTag {
+                        endIdx = search
+                        break
+                    }
+                    search += 1
+                }
+                guard let foundEnd = endIdx else {
+                    valid = false
+                    return
+                }
+                let bodySlice = Array(src[pos..<foundEnd])
+                pos = foundEnd + endTag.count
+                var sub = Parser(bodySlice)
+                if env == "array" {
+                    sub.skipSpaces()
+                    if sub.pos < sub.src.count && sub.src[sub.pos] == "{" {
+                        _ = sub.readRawBraceName()
+                    }
+                }
+                let rendered = sub.parseExpr(depth: depth + 1)
+                if !sub.valid { valid = false }
+                let (openD, closeD): (String, String) = switch env {
+                case "pmatrix": ("(", ")")
+                case "bmatrix": ("[", "]")
+                case "Bmatrix": ("{", "}")
+                case "vmatrix": ("|", "|")
+                case "Vmatrix": ("‖", "‖")
+                case "cases": ("{ ", "")
+                default: ("", "")
+                }
+                out.append(openD)
+                let sep = (env.hasPrefix("align") || env == "cases") ? "\n" : "; "
+                out.append(rendered.replacingOccurrences(of: "\n", with: sep))
+                out.append(closeD)
+            case "left", "right", "bigl", "bigr", "Bigl", "Bigr", "biggl", "biggr", "Biggl", "Biggr":
+                skipSpaces()
+                if pos < src.count && src[pos] == "." { pos += 1 }
+            case "quad":
+                out.append("  ")
+            case "qquad":
+                out.append("    ")
+            default:
+                if let sym = OrbMath.symbols[cmd] {
+                    if let prev = out.last, (prev.isLetter || prev.isNumber), let f = sym.first, f.isLetter {
+                        out.append(" ")
+                    }
+                    out.append(sym)
+                    if pos < src.count, (src[pos].isLetter || src[pos].isNumber), let l = sym.last, l.isLetter {
+                        out.append(" ")
+                    }
+                } else {
+                    out.append(cmd)
+                }
+            }
+        }
+
+        private static func wrapCompound(_ s: String) -> String {
+            let t = s.trimmingCharacters(in: .whitespaces)
+            let scriptChars: Set<Character> = ["₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉", "⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"]
+            if t.count <= 2 || t.allSatisfy({ $0.isLetter || $0.isNumber || scriptChars.contains($0) }) { return t }
+            if t.hasPrefix("(") && t.hasSuffix(")") { return t }
+            return "(\(t))"
+        }
+
+        private static func formatScript(_ arg: String, isSup: Bool) -> String {
+            let map = isSup ? OrbMath.superscripts : OrbMath.subscripts
+            if !arg.isEmpty && arg.allSatisfy({ map[$0] != nil }) {
+                return String(arg.compactMap { map[$0] })
+            }
+            return isSup ? "^(\(arg))" : "_(\(arg))"
+        }
+    }
+
+    nonisolated private static let blackboard: [Character: String] = [
+        "N": "ℕ", "Z": "ℤ", "Q": "ℚ", "R": "ℝ",
+        "C": "ℂ", "F": "𝔽", "P": "ℙ", "E": "𝔼", "1": "𝟙"
+    ]
+
+    nonisolated private static let superscripts: [Character: Character] = [
+        "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+        "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+        "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+        "n": "ⁿ", "i": "ⁱ", "T": "ᵀ"
+    ]
+
+    nonisolated private static let subscripts: [Character: Character] = [
+        "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+        "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+        "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+        "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ",
+        "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ",
+        "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ",
+        "v": "ᵥ", "x": "ₓ"
+    ]
+
+    nonisolated private static let symbols: [String: String] = [
+        "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ",
+        "epsilon": "ϵ", "varepsilon": "ε", "zeta": "ζ", "eta": "η",
+        "theta": "θ", "vartheta": "ϑ", "iota": "ι", "kappa": "κ",
+        "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
+        "pi": "π", "varpi": "ϖ", "rho": "ρ", "varrho": "ϱ",
+        "sigma": "σ", "varsigma": "ς", "tau": "τ", "upsilon": "υ",
+        "phi": "ϕ", "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+        "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ",
+        "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ",
+        "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+        "sum": "∑", "prod": "∏", "coprod": "∐",
+        "int": "∫", "iint": "∬", "iiint": "∭", "oint": "∮",
+        "infty": "∞", "partial": "∂", "nabla": "∇", "ell": "ℓ", "hbar": "ℏ",
+        "forall": "∀", "exists": "∃", "nexists": "∄",
+        "neg": "¬", "lnot": "¬", "land": "∧", "lor": "∨",
+        "in": "∈", "notin": "∉", "ni": "∋",
+        "subset": "⊂", "supset": "⊃", "subseteq": "⊆", "supseteq": "⊇",
+        "cup": "∪", "cap": "∩", "bigcup": "⋃", "bigcap": "⋂",
+        "emptyset": "∅", "varnothing": "∅",
+        "to": "→", "rightarrow": "→", "leftarrow": "←", "leftrightarrow": "↔",
+        "Rightarrow": "⇒", "Leftarrow": "⇐", "Leftrightarrow": "⇔",
+        "implies": "⇒", "iff": "⇔", "mapsto": "↦", "longmapsto": "⟼",
+        "uparrow": "↑", "downarrow": "↓",
+        "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥",
+        "ne": "≠", "neq": "≠", "approx": "≈", "equiv": "≡",
+        "sim": "∼", "simeq": "≃", "cong": "≅", "propto": "∝",
+        "prec": "≺", "succ": "≻", "preceq": "⪯", "succeq": "⪰",
+        "ll": "≪", "gg": "≫",
+        "pm": "±", "mp": "∓", "times": "×", "cdot": "·", "div": "÷",
+        "ast": "∗", "star": "⋆", "circ": "∘", "bullet": "∙",
+        "oplus": "⊕", "ominus": "⊖", "otimes": "⊗", "odot": "⊙",
+        "perp": "⊥", "parallel": "∥", "vdash": "⊢", "models": "⊨",
+        "lceil": "⌈", "rceil": "⌉", "lfloor": "⌊", "rfloor": "⌋",
+        "langle": "⟨", "rangle": "⟩",
+        "dots": "…", "ldots": "…", "cdots": "⋯", "vdots": "⋮", "ddots": "⋱",
+        "sin": "sin", "cos": "cos", "tan": "tan", "log": "log", "ln": "ln",
+        "exp": "exp", "min": "min", "max": "max", "sup": "sup", "inf": "inf",
+        "lim": "lim", "det": "det", "dim": "dim", "ker": "ker", "gcd": "gcd",
+        "mod": "mod", "pmod": "mod"
+    ]
 }
 
-/// Shared WKWebView pool that pre-loads `MathAssets` (`markdown-it` + `KaTeX`) so message rows
-/// never pay cold HTML/JS parse latency when scrolling into view.
-@MainActor
-final class OrbWebViewPool {
-    static let shared = OrbWebViewPool()
-    private var idle: [WKWebView] = []
-    private let maxIdle = 6
+// MARK: - Pure-SwiftUI Markdown, Math & Image Renderer (Zero WKWebView)
 
-    func warmUp(count: Int = 2) {
-        while idle.count < min(count, maxIdle) {
-            idle.append(createWebView())
-        }
-    }
-
-    /// Idle pooled views each keep a WebContent process alive.
-    func drain() { idle.removeAll() }
-
-    func acquire() -> WKWebView {
-        if let view = idle.popLast() {
-            return view
-        }
-        return createWebView()
-    }
-
-    func release(_ view: WKWebView) {
-        view.configuration.userContentController.removeScriptMessageHandler(forName: "orb")
-        view.navigationDelegate = nil
-        guard idle.count < maxIdle else {
-            view.stopLoading()
-            return
-        }
-        view.evaluateJavaScript("if(window.orbClear)window.orbClear();")
-        idle.append(view)
-    }
-
-    private func createWebView() -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
-        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 361, height: 48), configuration: config)
-        view.isOpaque = false
-        view.backgroundColor = .clear
-        view.scrollView.isScrollEnabled = false
-        view.scrollView.contentInsetAdjustmentBehavior = .never
-        view.accessibilityIdentifier = "rich-response"
-        if let root = Bundle.main.url(forResource: "MathAssets", withExtension: nil) {
-            view.loadHTMLString(Self.htmlTemplate(fontSize: 17), baseURL: root)
-        }
-        return view
-    }
-
-    static func htmlTemplate(fontSize size: CGFloat) -> String {
-        """
-        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' file:; style-src 'unsafe-inline' file:; font-src file:; img-src https:; connect-src 'none'; frame-src 'none'"><link rel="stylesheet" href="katex.min.css"><script src="markdown-it.min.js"></script><script src="katex.min.js"></script><script src="orb-renderer.js"></script><style>
-        :root{color-scheme:dark}#content{display:flow-root}body{margin:0;color:#e3e3e3;font: \(size)px/1.52 -apple-system,BlinkMacSystemFont,sans-serif;overflow-wrap:anywhere}p{margin:0 0 12px}p:last-child,ul:last-child,ol:last-child,blockquote:last-child,pre:last-child,table:last-child,.code-block:last-child{margin-bottom:0}h1,h2,h3,h4{line-height:1.25;margin:18px 0 8px;color:#f2f2f2}h1:first-child,h2:first-child,h3:first-child,h4:first-child{margin-top:0}h1{font-size:1.35em}h2{font-size:1.18em}h3{font-size:1.05em}h4{font-size:0.98em}a{color:#b8d5ef;text-decoration:underline}a.file-link{display:inline-flex;align-items:center;gap:4px;font:0.86em ui-monospace,SFMono-Regular,monospace;color:#d8e6f5;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);padding:1px 7px;border-radius:6px;text-decoration:none}pre{overflow-x:auto;white-space:pre;padding:12px 14px;margin:0}code{font:0.85em ui-monospace,SFMono-Regular,monospace;background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px}pre code{background:none;padding:0}blockquote{border-left:2px solid rgba(255,255,255,0.22);margin:10px 0;padding-left:12px;color:#a8a8a8}ul,ol{padding-left:22px;margin:0 0 12px}li>p{margin-bottom:4px}table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border-collapse:collapse;margin:12px 0;font-size:0.92em}th,td{border:1px solid rgba(255,255,255,0.12);padding:7px 10px;white-space:normal;overflow-wrap:break-word;word-break:normal;min-width:96px;vertical-align:top;text-align:left}th{background:rgba(255,255,255,0.05)}td{font-variant-numeric:tabular-nums}thead:not(:has(th:not(:empty))){display:none}img{max-width:100%;height:auto;border-radius:10px}.math-block{overflow-x:auto;margin:10px 0}.code-block{background:#161616;border:1px solid rgba(255,255,255,0.09);border-radius:10px;margin:10px 0;overflow:hidden}.copy-code,.artifact{color:#a0a0a0;background:none;border:0;padding:7px 12px;font:inherit}.copy-code{font-size:11.5px;border-bottom:1px solid rgba(255,255,255,0.06);width:100%;text-align:right;display:block}.copy-code.copied{color:#73c991}hr{border:0;border-top:1px solid rgba(255,255,255,0.1);margin:16px 0}.katex{font-size:1.05em}.katex-error{color:#d6a16a!important;white-space:pre-wrap}
-        </style></head><body><main id="content"></main><script>
-        const main=document.getElementById('content');
-        const report=()=>{if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.orb){const rectH=main.getBoundingClientRect().height;const h=Math.ceil(Math.max(rectH,main.scrollHeight||0,main.offsetHeight||0));if(h>0)window.webkit.messageHandlers.orb.postMessage({height:h+2});}};
-        window.orbReport=report;
-        window.orbClear=()=>{main.innerHTML='';};
-        window.orbUpdate=(source,size)=>{main.innerHTML=orbRender(source);document.body.style.fontSize=size+'px';report();requestAnimationFrame(report);setTimeout(report,40);setTimeout(report,180);setTimeout(report,500);};
-        new ResizeObserver(report).observe(main);window.addEventListener('resize',report);document.fonts.ready.then(report);window.addEventListener('load',report);
-        document.addEventListener('click',e=>{const copy=e.target.closest('.copy-code');if(copy){const code=copy.parentElement.querySelector('code');if(code){window.webkit.messageHandlers.orb.postMessage({copy:code.textContent});const prev=copy.textContent;copy.textContent='Copied ✓';copy.classList.add('copied');setTimeout(()=>{copy.textContent=prev;copy.classList.remove('copied');},1400);}return;}const artifact=e.target.closest('[data-artifact]');if(artifact){window.webkit.messageHandlers.orb.postMessage({artifact:artifact.dataset.artifact});return;}const a=e.target.closest('a');if(a){e.preventDefault();window.webkit.messageHandlers.orb.postMessage({link:a.getAttribute('href')});}});
-        </script></body></html>
-        """
-    }
-}
-
-/// Pure-SwiftUI block Markdown renderer (Option A candidate) for zero-WebKit-process rendering
-/// of standard prose, headings, lists, blockquotes, and copyable code fences.
 struct OrbNativeMarkdownView: View {
     let source: String
     /// A reply still arriving: parsed incrementally (`streamingBlocks`), not cached by content.
     var streaming = false
     var onArtifact: (String) -> Void = { _ in }
+    @Environment(\.orbFiles) private var files
     @State private var copiedBlockIndex: Int?
 
     enum Block: Equatable {
@@ -133,50 +677,13 @@ struct OrbNativeMarkdownView: View {
         case quote(String)
         /// `headers` all empty: a loose pipe table without a header row (hidden).
         case table(headers: [String], rows: [[String]], rightAligned: [Bool] = [])
+        case math(latex: String, complete: Bool)
+        case image(alt: String, url: String)
         case divider
     }
 
     static func requiresWebRenderer(_ source: String) -> Bool {
-        return containsLatexOrEmbeddedMediaOutsideCode(source)
-    }
-
-    private static func containsLatexOrEmbeddedMediaOutsideCode(_ source: String) -> Bool {
-        guard source.contains("$") || source.contains("\\(") || source.contains("\\[") || source.contains("![") || source.contains("<img") else {
-            return false
-        }
-        var inFence = false
-        for rawLine in source.split(separator: "\n", omittingEmptySubsequences: false) {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
-                inFence.toggle()
-                continue
-            }
-            if inFence { continue }
-            // Strip inline code spans `...`
-            var clean = ""
-            var inTick = false
-            for ch in rawLine {
-                if ch == "`" { inTick.toggle(); continue }
-                if !inTick { clean.append(ch) }
-            }
-            if clean.contains("$$") || clean.contains("\\(") || clean.contains("\\[") { return true }
-            if clean.contains("![") || clean.contains("<img ") { return true }
-            let parts = clean.split(separator: "$", omittingEmptySubsequences: false)
-            if parts.count < 3 { continue }
-            var idx = 1
-            while idx < parts.count - 1 {
-                let candidate = parts[idx]
-                if !candidate.isEmpty,
-                   candidate.count <= 120,
-                   candidate.first?.isWhitespace == false,
-                   candidate.last?.isWhitespace == false,
-                   (candidate.contains("\\") || candidate.contains("^") || candidate.contains("_") || candidate.contains("{") || candidate.contains("}")) {
-                    return true
-                }
-                idx += 2
-            }
-        }
-        return false
+        OrbMath.usesWebRenderer(source)
     }
 
     private static func isTableRow(_ trimmed: String) -> Bool {
@@ -184,10 +691,27 @@ struct OrbNativeMarkdownView: View {
     }
 
     private static func parseTableCells(_ trimmed: String) -> [String] {
-        let inner = trimmed.dropFirst().dropLast()
-        return inner.split(separator: "|", omittingEmptySubsequences: false).map {
-            $0.trimmingCharacters(in: .whitespaces)
+        let inner = Array(trimmed.dropFirst().dropLast())
+        var cells: [String] = []
+        var cur = ""
+        var i = 0
+        while i < inner.count {
+            if inner[i] == "\\" && i + 1 < inner.count && inner[i + 1] == "|" {
+                cur.append("|")
+                i += 2
+                continue
+            }
+            if inner[i] == "|" {
+                cells.append(cur.trimmingCharacters(in: .whitespaces))
+                cur.removeAll(keepingCapacity: true)
+                i += 1
+                continue
+            }
+            cur.append(inner[i])
+            i += 1
         }
+        cells.append(cur.trimmingCharacters(in: .whitespaces))
+        return cells
     }
 
     private static func isTableSeparator(_ cells: [String]) -> Bool {
@@ -195,6 +719,23 @@ struct OrbNativeMarkdownView: View {
             let stripped = cell.replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces)
             return stripped.isEmpty && cell.contains("-")
         }
+    }
+
+    private static func parseStandaloneImage(_ trimmed: String) -> (alt: String, url: String)? {
+        guard trimmed.hasPrefix("!["), trimmed.hasSuffix(")"),
+              let mid = trimmed.range(of: "](") else { return nil }
+        let altStart = trimmed.index(trimmed.startIndex, offsetBy: 2)
+        guard mid.lowerBound >= altStart else { return nil }
+        let alt = String(trimmed[altStart..<mid.lowerBound])
+        let urlEnd = trimmed.index(before: trimmed.endIndex)
+        guard mid.upperBound <= urlEnd else { return nil }
+        let url = String(trimmed[mid.upperBound..<urlEnd]).trimmingCharacters(in: .whitespaces)
+        guard !url.isEmpty, !url.contains(")"), !url.contains("\n") else { return nil }
+        return (alt, url)
+    }
+
+    private static func isDisplayMathStart(_ trimmed: String) -> Bool {
+        trimmed.hasPrefix("$$") || trimmed.hasPrefix("\\[")
     }
 
     static func parseBlocks(_ source: String) -> [Block] {
@@ -238,6 +779,46 @@ struct OrbNativeMarkdownView: View {
                     idx += 1
                     continue
                 }
+            }
+            if isDisplayMathStart(trimmed) {
+                let openDelim = trimmed.hasPrefix("$$") ? "$$" : "\\["
+                let closeDelim = openDelim == "$$" ? "$$" : "\\]"
+                let afterOpen = String(trimmed.dropFirst(openDelim.count))
+                if let closeRange = afterOpen.range(of: closeDelim) {
+                    let body = String(afterOpen[..<closeRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trailing = String(afterOpen[closeRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    blocks.append(.math(latex: body, complete: true))
+                    if !trailing.isEmpty {
+                        blocks.append(.paragraph(trailing))
+                    }
+                    idx += 1
+                    continue
+                }
+                var mathLines: [String] = []
+                if !afterOpen.isEmpty { mathLines.append(afterOpen) }
+                idx += 1
+                var closed = false
+                while idx < lines.count {
+                    let cur = lines[idx]
+                    let curTrim = cur.trimmingCharacters(in: .whitespaces)
+                    if curTrim.isEmpty || curTrim.hasPrefix("```") { break }
+                    if let closeRange = curTrim.range(of: closeDelim) {
+                        let before = String(curTrim[..<closeRange.lowerBound])
+                        if !before.isEmpty { mathLines.append(before) }
+                        closed = true
+                        idx += 1
+                        break
+                    }
+                    mathLines.append(cur)
+                    idx += 1
+                }
+                blocks.append(.math(latex: mathLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines), complete: closed))
+                continue
+            }
+            if let img = parseStandaloneImage(trimmed) {
+                blocks.append(.image(alt: img.alt, url: img.url))
+                idx += 1
+                continue
             }
             if isTableRow(trimmed) {
                 var rawRows: [[String]] = []
@@ -306,7 +887,15 @@ struct OrbNativeMarkdownView: View {
             while idx < lines.count {
                 let l = lines[idx]
                 let t = l.trimmingCharacters(in: .whitespaces)
-                if t.isEmpty || t.hasPrefix("```") || t.hasPrefix("#") || t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("> ") || isTableRow(t) {
+                if t.isEmpty ||
+                    t.hasPrefix("```") ||
+                    t.hasPrefix("#") ||
+                    t.hasPrefix("- ") ||
+                    t.hasPrefix("* ") ||
+                    t.hasPrefix("> ") ||
+                    isTableRow(t) ||
+                    isDisplayMathStart(t) ||
+                    parseStandaloneImage(t) != nil {
                     break
                 }
                 paraLines.append(l)
@@ -325,7 +914,11 @@ struct OrbNativeMarkdownView: View {
     @MainActor static let blockCache = OrbTextCache<[Block]>(capacity: 256)
     @MainActor private static let inlineCache = OrbTextCache<AttributedString>(capacity: 1024)
 
-    @MainActor static func trimCaches() { blockCache.removeAll(); inlineCache.removeAll() }
+    @MainActor static func trimCaches() {
+        blockCache.removeAll()
+        inlineCache.removeAll()
+        OrbMath.cache.removeAll()
+    }
 
     @MainActor static func cachedBlocks(_ source: String) -> [Block] {
         if let cached = blockCache.get(source) { return cached }
@@ -334,18 +927,112 @@ struct OrbNativeMarkdownView: View {
         return parsed
     }
 
-    @MainActor private static func cachedInline(_ raw: String) -> AttributedString? {
-        guard raw.count <= 4000 else { return nil }
-        if let cached = inlineCache.get(raw) { return cached }
-        guard let attr = try? AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
-            return nil
+    @MainActor static func inlineAttributed(_ raw: String, streaming: Bool = false) -> AttributedString {
+        if !streaming, raw.count <= 4000, let cached = inlineCache.get(raw) {
+            return cached
         }
-        inlineCache.put(raw, attr)
+        let attr = buildInlineAttributed(OrbMath.tokenizeInline(raw), streaming: streaming, depth: 0)
+        if !streaming, raw.count <= 4000 {
+            inlineCache.put(raw, attr)
+        }
         return attr
     }
 
+    private static let artifactScheme = "orb-artifact"
+
+    @MainActor private static func buildInlineAttributed(_ tokens: [OrbMath.InlineToken], streaming: Bool, depth: Int) -> AttributedString {
+        var result = AttributedString()
+        for token in tokens {
+            switch token {
+            case .text(let s):
+                result.append(AttributedString(s))
+            case .code(let code):
+                var span = AttributedString(code)
+                span.font = .system(.footnote, design: .monospaced)
+                span.foregroundColor = Color(white: 0.94)
+                span.backgroundColor = Color.white.opacity(0.08)
+                result.append(span)
+            case .bold(let inner):
+                var span = depth < 4 ? buildInlineAttributed(OrbMath.tokenizeInline(inner, depth: depth + 1), streaming: streaming, depth: depth + 1) : AttributedString(inner)
+                span.inlinePresentationIntent = .stronglyEmphasized
+                result.append(span)
+            case .italic(let inner):
+                var span = depth < 4 ? buildInlineAttributed(OrbMath.tokenizeInline(inner, depth: depth + 1), streaming: streaming, depth: depth + 1) : AttributedString(inner)
+                span.inlinePresentationIntent = .emphasized
+                result.append(span)
+            case .math(let latex, _, let complete):
+                let rendered = OrbMath.formatCached(latex, complete: complete, streaming: streaming)
+                var span = AttributedString(rendered.text)
+                if rendered.valid {
+                    span.font = .system(.body, design: .serif).italic()
+                    span.foregroundColor = Color(white: 0.96)
+                } else {
+                    span.font = .system(.footnote, design: .monospaced)
+                    span.foregroundColor = Color(red: 0.84, green: 0.63, blue: 0.42)
+                }
+                result.append(span)
+            case .link(let label, let url, let isSafe, let isArtifact):
+                guard isSafe else {
+                    result.append(AttributedString(label))
+                    continue
+                }
+                if isArtifact {
+                    let displayLabel = label.isEmpty ? OrbFileRefs.fileName(url) : label
+                    var span = AttributedString(displayLabel)
+                    span.font = .system(.footnote, design: .monospaced)
+                    span.foregroundColor = Color(red: 0.85, green: 0.90, blue: 0.96)
+                    span.backgroundColor = Color.white.opacity(0.07)
+                    if let encoded = encodeArtifactURL(url) {
+                        span.link = encoded
+                    }
+                    result.append(span)
+                } else if let target = URL(string: url),
+                          let scheme = target.scheme?.lowercased(),
+                          ["https", "http", "mailto"].contains(scheme),
+                          target.user == nil, target.password == nil {
+                    var span = depth < 4 ? buildInlineAttributed(OrbMath.tokenizeInline(label, depth: depth + 1), streaming: streaming, depth: depth + 1) : AttributedString(label)
+                    span.link = target
+                    span.foregroundColor = Color(red: 0.72, green: 0.84, blue: 0.94)
+                    span.underlineStyle = .single
+                    result.append(span)
+                } else {
+                    result.append(AttributedString(label))
+                }
+            case .image(let alt, let url):
+                let displayLabel = alt.isEmpty ? OrbFileRefs.fileName(url) : alt
+                if OrbMath.isSafeHref(url), let encoded = OrbMath.isArtifactHref(url) ? encodeArtifactURL(url) : URL(string: url) {
+                    var span = AttributedString("[\(displayLabel)]")
+                    span.link = encoded
+                    span.foregroundColor = Color(red: 0.72, green: 0.84, blue: 0.94)
+                    result.append(span)
+                } else {
+                    result.append(AttributedString(displayLabel))
+                }
+            }
+        }
+        return result
+    }
+
+    private static func encodeArtifactURL(_ raw: String) -> URL? {
+        var comps = URLComponents()
+        comps.scheme = artifactScheme
+        comps.host = "open"
+        comps.queryItems = [URLQueryItem(name: "ref", value: raw)]
+        return comps.url
+    }
+
+    fileprivate static func decodeArtifactURL(_ url: URL) -> String? {
+        if url.scheme == artifactScheme {
+            return URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "ref" })?.value
+        }
+        let str = url.absoluteString
+        if OrbMath.isArtifactHref(str) { return str }
+        return nil
+    }
+
     @State private var showFullSource = false
-    private static let maxInlineSourceChars = 14000
+    static let maxInlineSourceChars = 32_768
 
     var body: some View {
         let truncated = !showFullSource && source.count > Self.maxInlineSourceChars
@@ -392,17 +1079,17 @@ struct OrbNativeMarkdownView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 0) {
                             if headers.contains(where: { !$0.isEmpty }) {
-                            HStack(spacing: 0) {
-                                ForEach(Array(headers.enumerated()), id: \.offset) { hIdx, h in
-                                    inlineMarkdownText(h)
-                                        .font(.system(.footnote, weight: .semibold))
-                                        .foregroundStyle(Color.white)
-                                        .frame(minWidth: 100, maxWidth: 240, alignment: align(hIdx))
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 8)
+                                HStack(spacing: 0) {
+                                    ForEach(Array(headers.enumerated()), id: \.offset) { hIdx, h in
+                                        inlineMarkdownText(h)
+                                            .font(.system(.footnote, weight: .semibold))
+                                            .foregroundStyle(Color.white)
+                                            .frame(minWidth: 100, maxWidth: 240, alignment: align(hIdx))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 8)
+                                    }
                                 }
-                            }
-                            .background(Color.white.opacity(0.05))
+                                .background(Color.white.opacity(0.05))
                             }
                             ForEach(Array(rows.enumerated()), id: \.offset) { rIdx, row in
                                 if rIdx > 0 || headers.contains(where: { !$0.isEmpty }) {
@@ -424,6 +1111,24 @@ struct OrbNativeMarkdownView: View {
                         .background(Color(white: 0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.1)))
                     }
+                case .math(let latex, let complete):
+                    let rendered = OrbMath.formatCached(latex, complete: complete, streaming: streaming)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(rendered.text)
+                            .font(rendered.valid ? .system(.body, design: .serif).italic() : .system(.footnote, design: .monospaced))
+                            .foregroundStyle(rendered.valid ? Color(white: 0.95) : Color(red: 0.84, green: 0.63, blue: 0.42))
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(white: 0.082), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.white.opacity(0.09)))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(rendered.text)
+                    .accessibilityIdentifier("math.block")
+                case .image(let alt, let url):
+                    OrbMarkdownImageBlock(alt: alt, rawURL: url, files: files, onArtifact: onArtifact)
                 case .code(let lang, let code):
                     VStack(alignment: .leading, spacing: 0) {
                         HStack {
@@ -449,6 +1154,7 @@ struct OrbNativeMarkdownView: View {
                                     .fixedSize(horizontal: true, vertical: false)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("copy.code")
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
@@ -479,7 +1185,7 @@ struct OrbNativeMarkdownView: View {
                     HStack(spacing: 5) {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
                             .font(.system(size: 10, weight: .semibold))
-                        Text("Show full response (\(source.count / 1024) KB)")
+                        Text("Show full message (\(source.count / 1024) KB)")
                             .font(.caption.weight(.medium))
                     }
                     .foregroundStyle(OrbStyle.textSecondary)
@@ -492,20 +1198,97 @@ struct OrbNativeMarkdownView: View {
             }
         }
         .environment(\.openURL, OpenURLAction { url in
-            let str = url.absoluteString
-            if str.hasPrefix("file:///") || str.hasPrefix("sandbox:") || str.hasPrefix("/mnt/data/") {
-                onArtifact(str)
+            if let artifact = Self.decodeArtifactURL(url) {
+                onArtifact(artifact)
                 return .handled
+            }
+            guard let scheme = url.scheme?.lowercased(),
+                  ["https", "http", "mailto"].contains(scheme),
+                  url.user == nil, url.password == nil else {
+                return .discarded
             }
             return .systemAction
         })
     }
 
     private func inlineMarkdownText(_ raw: String) -> Text {
-        if let attr = Self.cachedInline(raw) {
-            return Text(attr)
+        Text(Self.inlineAttributed(raw, streaming: streaming))
+    }
+}
+
+private struct OrbMarkdownImageBlock: View {
+    let alt: String
+    let rawURL: String
+    let files: OrbFileContext?
+    let onArtifact: (String) -> Void
+    @State private var remoteImage: UIImage?
+
+    var body: some View {
+        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !OrbMath.isSafeHref(trimmed) {
+            Text(alt.isEmpty ? "[unsafe image]" : alt)
+                .font(.footnote)
+                .foregroundStyle(OrbStyle.textMuted)
+        } else if trimmed.lowercased().hasPrefix("https://"),
+                  let url = URL(string: trimmed),
+                  url.user == nil, url.password == nil {
+            Group {
+                if let remoteImage {
+                    Image(uiImage: remoteImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 420, maxHeight: 320, alignment: .leading)
+                        .clipShape(RoundedRectangle(cornerRadius: OrbStyle.panelRadius))
+                        .overlay(RoundedRectangle(cornerRadius: OrbStyle.panelRadius).stroke(OrbStyle.border))
+                } else {
+                    let label = alt.isEmpty ? (url.lastPathComponent.isEmpty ? "Image" : url.lastPathComponent) : alt
+                    OrbFileChip(ref: OrbFileRef(type: "image", path: trimmed, label: label)) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            }
+            .task(id: trimmed) {
+                remoteImage = await Self.fetchBoundedImage(url)
+            }
+        } else if trimmed.lowercased().hasPrefix("http://"),
+                  let url = URL(string: trimmed),
+                  url.user == nil, url.password == nil {
+            let label = alt.isEmpty ? trimmed : alt
+            OrbFileChip(ref: OrbFileRef(type: "image", path: trimmed, label: label)) {
+                UIApplication.shared.open(url)
+            }
+        } else {
+            let cleanPath: String = {
+                if trimmed.hasPrefix("sandbox:") { return String(trimmed.dropFirst("sandbox:".count)) }
+                if trimmed.hasPrefix("file://") { return String(trimmed.dropFirst("file://".count)) }
+                return trimmed
+            }()
+            let label = alt.isEmpty ? OrbFileRefs.fileName(cleanPath) : alt
+            let rawRef = OrbFileRef(type: "image", path: cleanPath, label: label)
+            let enriched = OrbFileRefs.enrich(rawRef, shared: files?.shared ?? [])
+            if !enriched.unavailable, (enriched.kind == .image || enriched.kind == .svg), let scope = files?.scope {
+                OrbInlineImage(ref: enriched, scope: scope) {
+                    onArtifact(trimmed)
+                    files?.open(enriched)
+                }
+            } else {
+                OrbFileChip(ref: enriched) {
+                    onArtifact(trimmed)
+                    files?.open(enriched)
+                }
+            }
         }
-        return Text(raw)
+    }
+
+    private static func fetchBoundedImage(_ url: URL) async -> UIImage? {
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 15
+        guard let (file, resp) = try? await URLSession.shared.download(for: req) else { return nil }
+        defer { try? FileManager.default.removeItem(at: file) }
+        guard (resp as? HTTPURLResponse)?.statusCode == 200,
+              let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size > 0, size <= OrbImageLoader.limit else { return nil }
+        return await Task.detached(priority: .utility) { OrbInlineImage.thumbnail(file) }.value
     }
 }
 
@@ -514,135 +1297,9 @@ struct OrbRichText: View {
     /// A reply still arriving (see `OrbNativeMarkdownView.streaming`).
     var streaming = false
     var onArtifact: (String) -> Void = { _ in }
-    /// Render standard Markdown natively in SwiftUI for instant 0ms layout and scroll-to-bottom;
-    /// only fall back to WKWebView when LaTeX math or HTML images are present.
-    @MainActor static var preferNativeWhenSimple = true
-    @State private var height: CGFloat?
-    @Environment(\.dynamicTypeSize) private var textSize
-    private var resolvedHeight: CGFloat {
-        height ?? OrbRichHeightCache.get(source, textSize, streaming: streaming)
-    }
+
     var body: some View {
-        if Self.preferNativeWhenSimple && !OrbNativeMarkdownView.requiresWebRenderer(source) {
-            OrbNativeMarkdownView(source: source, streaming: streaming, onArtifact: onArtifact)
-        } else {
-            RichWeb(source: source, streaming: streaming, height: Binding(
-                get: { resolvedHeight },
-                set: { height = $0 }
-            ), onArtifact: onArtifact, textSize: textSize)
-            .frame(height: max(24, resolvedHeight))
-        }
-    }
-    private struct RichWeb: UIViewRepresentable {
-        let source: String
-        let streaming: Bool
-        @Binding var height: CGFloat
-        let onArtifact: (String) -> Void
-        let textSize: DynamicTypeSize
-        func makeCoordinator() -> Coordinator { Coordinator(height: $height, onArtifact: onArtifact) }
-        func makeUIView(context: Context) -> WKWebView {
-            let view = OrbWebViewPool.shared.acquire()
-            view.configuration.userContentController.removeScriptMessageHandler(forName: "orb")
-            view.configuration.userContentController.add(context.coordinator, name: "orb")
-            view.navigationDelegate = context.coordinator
-            return view
-        }
-        func updateUIView(_ view: WKWebView, context: Context) {
-            context.coordinator.onArtifact = onArtifact
-            context.coordinator.streaming = streaming
-            guard context.coordinator.source != source || context.coordinator.textSize != textSize else {
-                if context.coordinator.ready {
-                    view.evaluateJavaScript("if(window.orbReport)window.orbReport();")
-                }
-                return
-            }
-            context.coordinator.source = source; context.coordinator.textSize = textSize
-            guard let root = Bundle.main.url(forResource: "MathAssets", withExtension: nil),
-                  let encoded = try? JSONEncoder().encode(OrbPipeTables.normalize(source)), let json = String(data: encoded, encoding: .utf8) else { return }
-            let safe = json.replacingOccurrences(of: "<", with: "\\u003c")
-            let category: UIContentSizeCategory = switch textSize {
-            case .xSmall: .extraSmall
-            case .small: .small
-            case .medium: .medium
-            case .large: .large
-            case .xLarge: .extraLarge
-            case .xxLarge: .extraExtraLarge
-            case .xxxLarge: .extraExtraExtraLarge
-            case .accessibility1: .accessibilityMedium
-            case .accessibility2: .accessibilityLarge
-            case .accessibility3: .accessibilityExtraLarge
-            case .accessibility4: .accessibilityExtraExtraLarge
-            case .accessibility5: .accessibilityExtraExtraExtraLarge
-            @unknown default: .large
-            }
-            let size = UIFont.preferredFont(forTextStyle: .body, compatibleWith: UITraitCollection(preferredContentSizeCategory: category)).pointSize
-            context.coordinator.updateScript = "orbUpdate(\(safe), \(size))"
-            if context.coordinator.ready {
-                view.evaluateJavaScript(context.coordinator.updateScript)
-                return
-            }
-            if view.isLoading {
-                context.coordinator.loading = true
-                return
-            }
-            // Check if the pooled WKWebView already loaded our template
-            view.evaluateJavaScript("typeof window.orbUpdate === 'function'") { result, _ in
-                if (result as? Bool) == true {
-                    context.coordinator.ready = true
-                    view.evaluateJavaScript(context.coordinator.updateScript)
-                    return
-                }
-                guard !context.coordinator.loading && !view.isLoading else { return }
-                context.coordinator.loading = true
-                view.loadHTMLString(OrbWebViewPool.htmlTemplate(fontSize: size), baseURL: root)
-            }
-        }
-        static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
-            OrbWebViewPool.shared.release(view)
-        }
-        final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
-            var source: String?
-            var textSize: DynamicTypeSize?
-            var streaming = false
-            var ready = false, loading = false
-            var updateScript = ""
-            var height: Binding<CGFloat>
-            var onArtifact: (String) -> Void
-            init(height: Binding<CGFloat>, onArtifact: @escaping (String) -> Void) { self.height = height; self.onArtifact = onArtifact }
-            func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-                ready = true
-                webView.evaluateJavaScript(updateScript)
-            }
-            func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-                ready = false
-                webView.reload()
-            }
-            func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-                guard let body = message.body as? [String: Any] else { return }
-                if let value = body["height"] as? Double, value.isFinite {
-                    let resolved = max(24, CGFloat(value))
-                    if let source, let textSize { OrbRichHeightCache.set(resolved, for: source, textSize, streaming: streaming) }
-                    if abs(height.wrappedValue - resolved) > 0.5 {
-                        height.wrappedValue = resolved
-                    }
-                }
-                if let copy = body["copy"] as? String {
-                    UIPasteboard.general.string = copy
-                    OrbHaptics.light()
-                }
-                if let artifact = body["artifact"] as? String { onArtifact(artifact) }
-                if let link = body["link"] as? String {
-                    if link.hasPrefix("sandbox:") || link.hasPrefix("/mnt/data/") || link.hasPrefix("file:///") || link.hasPrefix("/srv/") || link.hasPrefix("/Users/") || link.hasPrefix("/root/") || link.hasPrefix("/workspace/") || link.hasPrefix("/home/") || link.hasPrefix("/var/") || link.hasPrefix("/tmp/") {
-                        onArtifact(link)
-                        return
-                    }
-                    if let url = URL(string: link), ["https", "http", "mailto"].contains(url.scheme ?? ""), url.user == nil, url.password == nil { UIApplication.shared.open(url) }
-                }
-            }
-            func webView(_ view: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-                decisionHandler(action.navigationType == .other ? .allow : .cancel)
-            }
-        }
+        OrbNativeMarkdownView(source: source, streaming: streaming, onArtifact: onArtifact)
     }
 }
 
