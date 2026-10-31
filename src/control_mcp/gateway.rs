@@ -678,18 +678,27 @@ async fn authorize(
             let allowed_btw_parent = field == "mission_id"
                 && btw_parent_tool_allowed(&tool.definition.name)
                 && btw_associated_with_target(&store, &owner.project.tags, id).await;
-            // A conversation fork (`fork-of:<id>`) is a continuation of the same session on a
-            // new harness: read tools may inspect earlier versions in its fork chain and
-            // children launched by those versions, while control tools stay scoped to `own`.
+            // A conversation fork (`fork-of:<id>`, minted only by Core when transferring a
+            // conversation) continues the same coordinator session on a new harness:
+            // read tools may inspect earlier versions in its fork chain, and it retains
+            // child-mission read/control/supersede authority over workers spawned by earlier
+            // versions in `fork_chain`.
+            let fork_child = m
+                .parent_mission_id
+                .is_some_and(|parent| fork_chain.contains(&parent));
             let reads_fork_lineage = field == "mission_id"
                 && crate::api::mission_access::READ_TOOLS.contains(&tool.definition.name.as_str())
-                && (fork_chain.contains(&id)
-                    || m.parent_mission_id
-                        .is_some_and(|parent| fork_chain.contains(&parent)));
+                && (fork_chain.contains(&id) || fork_child);
+            let controls_fork_child = fork_child
+                && ((field == "mission_id"
+                    && crate::api::mission_access::CONTROL_TOOLS
+                        .contains(&tool.definition.name.as_str()))
+                    || field == "supersedes_mission_id");
             if id != own
                 && m.parent_mission_id != Some(own)
                 && !allowed_btw_parent
                 && !reads_fork_lineage
+                && !controls_fork_child
             {
                 // Device-signed grant approved by Thomas (request_mission_access):
                 // `read` opens READ_TOOLS (including read grants approved on earlier `fork-of:`

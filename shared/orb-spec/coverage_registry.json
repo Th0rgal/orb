@@ -538,7 +538,7 @@
           },
           {
             "path": "src/api/mission_access.rs",
-            "sha256": "27c61861046c9fbaa24fd3498ba5f2340fc9ff7f54795c1252cbcd780f522e5e"
+            "sha256": "09ec499afcbf7392cd811d65756d13de0cea10f35470c044f01ac9d7b6bc0a79"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
@@ -1762,7 +1762,7 @@
           },
           {
             "path": "src/api/control/dispatch_admission_tests.rs",
-            "sha256": "1bf3be1e429c99b4827f20f430c4691831622c2b7c250303d1bc02f8e0adc3ed"
+            "sha256": "5b7e8614d49c4886f52637061beaa7001b29c8db4d4ae952d0c9f82f1f100347"
           }
         ],
         "execution": {
@@ -2387,7 +2387,7 @@
           },
           {
             "path": "src/api/mission_store/mod.rs",
-            "sha256": "fd214a716f1df06b371212ba1289b6f6b2216f65440c46c9bf4d004bff2768b1"
+            "sha256": "7606e9394b93ff1accffbe63c1774cd7f1d64b2dbd4ac00c438fd3f18696dc0f"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
@@ -2489,7 +2489,7 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "e495e60af572c8677f071712a6f8f2c2a2b9394beb351b6612cd6e2906812509"
+            "sha256": "b42e9bff4d8a0056500cbabd78ce7b2baadf0e630509e818a9d553c5e53c6dc3"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",

@@ -3,6 +3,7 @@ import {
   approveItems,
   allBatch,
   denyItem,
+  getApprovalQueue,
   itemDetail,
   itemRequester,
   itemTitle,
@@ -141,6 +142,7 @@ function act(items: ApprovalItem[], approve: boolean) {
     } catch (e) {
       hide(items, false);
       syncApprovalQueue(pending(), openReview);
+      void getApprovalQueue().then(({ items: fresh }) => syncApprovalQueue(fresh, openReview)).catch(() => {});
       if (e instanceof ApprovalCancelled) return;
       notify({
         kind: "error",

@@ -1523,7 +1523,7 @@ impl SqliteMissionStore {
                     "SELECT session_id FROM mission_harness_sessions WHERE mission_id = ?1 AND backend = ?2",
                     params![id_str, target], |row| row.get::<_, String>(0),
                 ).optional().map_err(|e| e.to_string())?
-                    .or_else(|| (!matches!(target, "grok" | "antigravity" | "vibe")).then(|| session_id.clone()))
+                    .or_else(|| (!matches!(target, "grok" | "antigravity" | "vibe" | "opencode")).then(|| session_id.clone()))
             };
             let changed = conn
                 .execute(
