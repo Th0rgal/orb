@@ -1522,14 +1522,9 @@ fun OrbConversationPage(
             if (transcriptFollow.shouldFollow(hasAnchoredInitial)) {
                 scrollToAbsoluteBottom()
                 if (!hasAnchoredInitial) {
-                    // Settle tall rows (markdown, images) for a couple of frames before revealing.
-                    withFrameNanos { }
-                    scrollToAbsoluteBottom()
                     withFrameNanos { }
                     scrollToAbsoluteBottom()
                     hasAnchoredInitial = true
-                    delay(220)
-                    scrollToAbsoluteBottom()
                 }
             }
         }

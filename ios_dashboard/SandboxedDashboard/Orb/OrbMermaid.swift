@@ -55,6 +55,12 @@ final class OrbMermaidRenderer: NSObject, WKNavigationDelegate {
             web = view
             if let url = Bundle.main.url(forResource: "renderer", withExtension: "html", subdirectory: "MermaidAssets") {
                 view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(8))
+                    guard let self, !self.ready else { return }
+                    self.web = nil
+                    self.finishLoading()
+                }
             } else {
                 ready = true
                 return

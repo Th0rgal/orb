@@ -1,12 +1,18 @@
-# Native Markdown and math routing
+# Native Markdown, math, and image rendering
 
-Native iOS and Android render simple Markdown and pipe tables directly. LaTeX
-and embedded images route through the existing WebView renderer. The routing
-scanner ignores fenced and inline code and leaves ordinary currency native.
-`shared/orb-spec/fixtures/rich-text-routing.json` defines the same cases for both
-clients. Inline math must trigger this route on its own, without relying on a
-second display formula elsewhere in the message.
+Mobile iOS and Android render all transcript Markdown, pipe tables, LaTeX math
+(`$...$`, `$$...$$`, `\(...\)`, `\[...\]`), and Markdown images (`![alt](url)`)
+natively in SwiftUI and Jetpack Compose without mounting `WKWebView` or
+`android.webkit.WebView` inside conversation turns.
 
-The iOS inline detector was inadvertently narrowed in a1a7aade47 while addressing
-large-conversation memory use. Restoring the existing detector matches Android's
-unchanged scanner. This does not change parsing, the renderer pool or caches.
+`shared/orb-spec/fixtures/rich-text-routing.json` defines the shared test cases
+for both clients:
+- `web` is always `false`: no transcript turn routes to a WebView renderer.
+- `rich` records whether `OrbMath.containsMathOrMedia` detects admitted LaTeX
+  math or Markdown image syntax outside fenced and inline code spans while
+  keeping ordinary currency (`$15 and $20`, `$0.072/hr ... $50`, `\$100`) plain
+  prose.
+
+Both `OrbMath` implementations enforce identical resource bounds (`maxDepth = 16`,
+`maxSpanChars = 8192`) and degrade incomplete or malformed TeX to readable
+monospace spans without throwing.

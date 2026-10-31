@@ -26,7 +26,6 @@ xcodebuild -project ios_dashboard/SandboxedDashboard.xcodeproj \
   -only-testing:SandboxedDashboardTests/OrbContractTests \
   -only-testing:SandboxedDashboardTests/OrbRichTextTests \
   -only-testing:SandboxedDashboardUITests/OrbFlowUITests test
-node ios_dashboard/TestsSupport/test_rich_renderer.cjs
 ```
 
 `OrbFlowUITests.testMissionAccessApproveDenyAndRevoke` needs `orb_fixture_server.py --port 18790` (pending request acc-1, live grant acc-2; set `TEST_RUNNER_ORB_SHOT_DIR` to also write PNGs).
@@ -60,13 +59,11 @@ exclude local Mac missions, open context, edit Markdown, reopen a rich cloud
 conversation and open its image artifact and read its CSV artifact. The provider fixtures are test data,
 not evidence that a remote provider is healthy.
 
-`OrbRichTextTests` uses actual WKWebView and bundled fonts/scripts, not a mocked
-renderer. It checks inline/display/aligned math, currency, tables and escaped
-cells, nested lists, code copying, artifact callbacks, unsafe input, unfinished
-streaming content, document reuse, resizing, long responses and accessibility
-text size. XCTest UI attachments include screenshots; reviewed examples are kept in
-`screenshots/`. These are evidence, not pixel-diff baselines. MathML exists for assistive
-technology; this does not replace a manual VoiceOver pass on a device.
+`OrbRichTextTests` exercises the pure-SwiftUI native Markdown, `OrbMath` LaTeX, and image
+renderer (zero `WKWebView` instances in transcripts). It checks inline/display/aligned math,
+currency preservation, tables and escaped cells, code blocks, artifact links, unsafe input,
+unfinished streaming content, bounded recursion/length limits, and full `boost_ci.json`
+transcript replay.
 
 `fixtures/cloud-rich.md` is synthetic. `cursor-live.md` and `grok-live.md` are
 unmodified responses to bounded, dedicated test prompts on 2026-09-27. No user

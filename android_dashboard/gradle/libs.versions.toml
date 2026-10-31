@@ -8,7 +8,6 @@ lifecycle = "2.10.0"
 biometric = "1.1.0"
 fragment = "1.8.9"
 browser = "1.10.0"
-webkit = "1.12.1"
 okhttp = "4.12.0"
 serializationJson = "1.9.0"
 coroutines = "1.10.2"
@@ -35,7 +34,6 @@ androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lif
 androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
 androidx-fragment-ktx = { group = "androidx.fragment", name = "fragment-ktx", version.ref = "fragment" }
 androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "browser" }
-androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-sse = { group = "com.squareup.okhttp3", name = "okhttp-sse", version.ref = "okhttp" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serializationJson" }
