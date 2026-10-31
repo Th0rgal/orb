@@ -11,7 +11,7 @@ export interface InventoryRow { path: string; folder: boolean; state: "moved" | 
 /** `bytes` and `files` total everything moved by default, including rows a long listing left out. */
 export interface WorkspaceInventory { rows: InventoryRow[]; bytes: number; files: number; /** Git history and the archived conversation, which always travel. */ reserved?: { bytes: number; files: number }; truncated: boolean; protected: number; limits: { bytes: number; files: number } }
 export interface TransferAction {
-  id: string; mission_id: string; phase: string; source: Machine; destination: Machine;
+  id: string; mission_id: string; phase: string; light?: boolean; source: Machine; destination: Machine;
   backend: string; model?: string | null; effort?: string | null;
   source_root?: string | null; destination_root?: string | null;
   manifest?: Manifest | null; receipt?: { root: string; bytes: number; files: number; digest: string } | null;
@@ -95,7 +95,7 @@ export interface BulkCopyStatus { state: "running" | "done" | "failed"; bytes: n
  * the destination verify stays authoritative either way).
  */
 export async function bulkCopyTransfer(action: TransferAction, progress: (done: number, total: number) => void, cancelled: () => boolean = () => false, pollMs = 1000): Promise<boolean> {
-  if (action.source.kind === "client" || action.destination.kind !== "node") return false;
+  if (action.light || action.source.kind === "client" || action.destination.kind !== "node") return false;
   let failures = 0;
   for (let first = true; ; first = false) {
     if (cancelled()) throw new Error("Transfer cancelled before activation.");
@@ -167,7 +167,7 @@ export async function adoptTransferredWorkspace(action: TransferAction) {
 }
 export async function activateTransfer(action: TransferAction): Promise<Mission> {
   let clientSourceVerified: string | undefined;
-  if (action.source.kind === "client") {
+  if (action.source.kind === "client" && !action.light) {
     await transferFiles(action, "source", { op: "check_source" });
     clientSourceVerified = await machineIdentity();
   }

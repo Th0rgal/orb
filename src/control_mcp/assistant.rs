@@ -1614,7 +1614,7 @@ impl AssistantMcp {
                         "ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Initial lifetime; auto-extended while busy (within budget). Default 60."},
                         "image": {"type": "string", "description": "Optional image or snapshot override."},
                         "provisioning_mode": {"type": "string", "enum": ["worker", "raw"], "description": "Worker installs/enrolls Orb (default). Raw only rents the VM (Boat): use `exec_raw_managed_machine` for bounded guest ops."},
-                        "from_snapshot": {"type": "string", "description": "Start from one of your project's Boat snapshots (`list_managed_snapshots`) with repos, toolchains and caches ready."},
+                        "from_snapshot": {"type": "string", "description": "Optional Boat project snapshot (`list_managed_snapshots`), \"latest\" for the newest ready project snapshot, or \"light\"/\"none\" for the clean base image. Omitted defaults to light mode (clean base image, no snapshot files restored)."},
                         "reason": {"type": "string", "description": "Why you need it (shown to the operator and in the cost ledger)."}
                     }
                 }),
@@ -1844,7 +1844,7 @@ impl AssistantMcp {
                         "files": {"type": "array", "items": {"type": "string"}, "description": "Paths the consultant must read. Boat VMs (the default placement) start clean and see committed/PR/snapshot state only; pass remote_node_id=\"same\" when inspecting uncommitted local workspace files in place."},
                         "read_only": {"type": "boolean", "description": "Default true (writer=false, pr-readonly). false lets the consultant write."},
                         "remote_node_id": {"type": "string", "description": "Optional placement override: omit for Boat (\"auto-managed\", falling back to \"auto\" if Boat is disabled), pass \"auto-managed:<size>\" or \"auto\" or a registered node id, or pass \"same\" to share/fork the parent's uncommitted local workspace on the same machine."},
-                        "managed_from_snapshot": {"type": "string", "description": "Only with Boat (auto-managed): start the consultant's VM from this project snapshot (list_managed_snapshots), or \"none\" for the base image. When omitted, the newest ready project snapshot is selected automatically if one exists."},
+                        "managed_from_snapshot": {"type": "string", "description": "Only with Boat (auto-managed): optional warm project snapshot (`list_managed_snapshots`), \"latest\" for the newest ready project snapshot, or \"light\"/\"none\" for the clean base image. Omitted defaults to light mode (clean base image, no snapshot files restored)."},
                         "managed_ttl_minutes": {"type": "integer", "minimum": 5, "maximum": 720, "description": "Only with auto-managed: initial machine TTL in minutes (default 60, auto-extended while busy)."},
                         "title": {"type": "string"},
                         "project": {"type": "string", "description": "Defaults to the calling mission's project."},

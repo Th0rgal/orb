@@ -30,6 +30,7 @@ test("moves from the footer with an inventory and no automatic execution", async
   await expect(page.getByRole("menuitem", { name: /Core/ })).toBeDisabled();
   await page.getByRole("menuitem", { name: "Spark ›" }).click();
   await expect(page.getByRole("dialog", { name: "Change machine" })).toBeVisible();
+  await page.getByLabel("Transfer files").selectOption("workspace");
   await page.getByRole("button", { name: "Prepare transfer" }).click();
   const choose = page.getByRole("region", { name: "Choose what to move" });
   await expect(choose.getByText("93 B of 100 B")).toBeVisible();
@@ -120,6 +121,7 @@ test("transfers a queued remote mission with an unmaterialized workspace to Core
   await expect(page.getByRole("menuitem", { name: /old-agent/ })).toBeDisabled();
   await page.getByRole("menuitem", { name: "Core ›" }).click();
   await expect(page.getByText("old-agent → Core")).toBeVisible();
+  await page.getByLabel("Transfer files").selectOption("workspace");
   await page.getByRole("button", { name: "Stop and prepare" }).click();
   await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
   await expect(page.getByText("old-agent → Core")).toBeVisible();
@@ -129,4 +131,66 @@ test("transfers a queued remote mission with an unmaterialized workspace to Core
   await page.getByRole("button", { name: "Move to Core" }).click();
   await expect(page.getByRole("button", { name: "Change machine: Core" })).toBeVisible();
   expect(calls).toEqual(["prepare", "inventory", "select", "snapshot", "stage", "verify", "activate"]);
+});
+
+test("defaults to light mode and moves conversation with no workspace files transferred", async ({ page }) => {
+  const calls: string[] = [];
+  let prepareLight: unknown;
+  const action = {
+    id: "move-light",
+    mission_id: "test",
+    phase: "copying",
+    light: true,
+    source: { kind: "core" },
+    destination: { kind: "node", id: "spark" },
+    backend: "codex",
+    model: "model",
+    created_at: "",
+    manifest: { files: [], bytes: 0, excluded: [] },
+  };
+  await page.route("**/api/control/missions/test/machine-transfer", async route => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        json: {
+          version: 1,
+          features: ["links", "selection", "light", "bulk_copy"],
+          actions: [],
+          destinations: [
+            { machine: { kind: "core" }, label: "Core", available: true },
+            { machine: action.destination, label: "Spark", available: true, harnesses: ["codex"] },
+          ],
+        },
+      });
+      return;
+    }
+    const body = route.request().postDataJSON();
+    calls.push(body.op === "files" ? body.operation.op : body.op);
+    if (body.op === "prepare") {
+      prepareLight = body.light;
+      await route.fulfill({ json: action });
+    } else if (body.operation?.op === "stage") {
+      await route.fulfill({ json: { received: {}, sealed: true } });
+    } else if (body.operation?.op === "verify") {
+      action.phase = "verified";
+      await route.fulfill({ json: action });
+    } else if (body.op === "activate") {
+      action.phase = "activated";
+      await route.fulfill({ json: action });
+    } else {
+      await route.fulfill({ json: { ok: true } });
+    }
+  });
+  await page.route("**/api/control/missions/test", route =>
+    route.fulfill({ json: { id: "test", status: "awaiting_user", machine_transfer: action } }),
+  );
+
+  await page.goto("/tests/machine-transfer.html");
+  await page.getByRole("button", { name: "Change machine: Core" }).click();
+  await page.getByRole("menuitem", { name: "Spark ›" }).click();
+  await expect(page.getByLabel("Transfer files")).toHaveValue("light");
+  await expect(page.getByText("Moves the conversation only; no workspace files are transferred.")).toBeVisible();
+  await page.getByRole("button", { name: "Move to Spark" }).click();
+  await expect(page.getByRole("button", { name: "Change machine: Spark" })).toBeVisible();
+  expect(prepareLight).toBe(true);
+  expect(calls).toEqual(["prepare", "stage", "verify", "activate"]);
 });

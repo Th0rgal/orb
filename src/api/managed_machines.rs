@@ -173,14 +173,13 @@ pub(crate) async fn spawn(
 }
 
 /// Shared by spawn, fork and server-side `auto-managed` mission launches:
-/// tenant, budget pool, retry reservation, sibling reuse and warm snapshots.
+/// tenant, budget pool, retry reservation and sibling reuse.
 pub(crate) async fn spawn_for_inner(
     state: &Arc<AppState>,
     user: &crate::api::auth::AuthUser,
     mut req: SpawnRequest,
     project_fallback: Option<String>,
     dispatch_key: Option<&str>,
-    auto_snapshot: bool,
 ) -> Result<(crate::managed::ManagedMachine, bool), ManagedError> {
     // The owner's tenant comes from the authenticated caller, never the body.
     req.owner_user_id = Some(user.id.clone());
@@ -244,26 +243,12 @@ pub(crate) async fn spawn_for_inner(
         .map(str::to_ascii_lowercase)
         .or_else(|| m.default_provider().map(|p| p.name().to_string()))
         .unwrap_or_else(|| m.settings.provider.clone());
-    let explicit_snapshot = req
-        .from_snapshot
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let auto_snap = if auto_snapshot
-        && explicit_snapshot.is_none()
-        && req.fork_of.is_none()
-        && req.image.is_none()
-        && req.provisioning_mode.unwrap_or_default().is_worker()
-        && matches!(target_provider.as_str(), "boat" | "fake")
-    {
-        m.newest_ready_worker_snapshot(
-            req.owner_user_id.as_deref(),
-            req.snapshot_project.as_deref(),
-        )
-        .await
-    } else {
-        None
-    };
+    let explicit_snapshot = req.from_snapshot.as_deref().map(str::trim).filter(|s| {
+        !s.is_empty()
+            && !s.eq_ignore_ascii_case("none")
+            && !s.eq_ignore_ascii_case("base")
+            && !s.eq_ignore_ascii_case("light")
+    });
     if req.provisioning_mode.unwrap_or_default().is_worker()
         && req.reuse_idle == Some(true)
         && explicit_snapshot.is_none()
@@ -274,31 +259,12 @@ pub(crate) async fn spawn_for_inner(
             charged,
             ManagedManager::plan_for_provider(&m.settings, &target_provider, &req),
         ) {
-            if let Some(snap_img) = auto_snap.as_deref() {
-                if let Some(machine) = reuse_idle_sibling(
-                    &m,
-                    &store,
-                    &req,
-                    parent,
-                    &target_provider,
-                    spec.size,
-                    Some(snap_img),
-                )
-                .await
-                {
-                    return Ok((machine, true));
-                }
-            }
             if let Some(machine) =
-                reuse_idle_sibling(&m, &store, &req, parent, &target_provider, spec.size, None)
-                    .await
+                reuse_idle_sibling(&m, &store, &req, parent, &target_provider, spec.size).await
             {
                 return Ok((machine, true));
             }
         }
-    }
-    if explicit_snapshot.is_none() && auto_snap.is_some() {
-        req.from_snapshot = auto_snap;
     }
     let machine = m.spawn(req).await?;
     if let Some(key) = dispatch_key.map(str::trim).filter(|k| !k.is_empty()) {
@@ -313,7 +279,7 @@ async fn spawn_for(
     user: &crate::api::auth::AuthUser,
     req: SpawnRequest,
 ) -> Response {
-    match spawn_for_inner(state, user, req, None, None, false).await {
+    match spawn_for_inner(state, user, req, None, None).await {
         Ok((machine, true)) => {
             let mut body = serde_json::to_value(&machine).unwrap_or_default();
             body["reused"] = json!(true);
@@ -334,11 +300,8 @@ async fn reuse_idle_sibling(
     parent: uuid::Uuid,
     provider: &str,
     size: &str,
-    image_override: Option<&str>,
 ) -> Option<crate::managed::ManagedMachine> {
-    let image = if let Some(img) = image_override {
-        img.to_string()
-    } else if m
+    let image = if m
         .provider_for(provider)
         .is_some_and(|p| p.uses_cloud_init_bootstrap())
         && req.image.is_none()

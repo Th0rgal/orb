@@ -25,6 +25,8 @@ pub struct Transfer {
     pub key: String,
     pub revision: u64,
     pub phase: String,
+    #[serde(default)]
+    pub light: bool,
     pub source: Machine,
     pub destination: Machine,
     pub source_revision: String,

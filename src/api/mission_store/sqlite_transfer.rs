@@ -84,7 +84,7 @@ pub(super) async fn save(
         let mut c=conn.blocking_lock();let tx=c.transaction().map_err(error)?;let mid=action.mission_id.to_string();
         let existing:Option<String>=tx.query_row("SELECT data FROM machine_transfers WHERE mission_id=?1 AND request_key=?2",params![mid,action.key],|r|r.get(0)).optional().map_err(error)?;
         if expected.is_none(){
-            if let Some(data)=existing{let old:Transfer=serde_json::from_str(&data).map_err(error)?;if old.destination!=action.destination||old.backend!=action.backend||old.model!=action.model{return Err("Idempotency key already used for another destination".into());}return Ok(old);}
+            if let Some(data)=existing{let old:Transfer=serde_json::from_str(&data).map_err(error)?;if old.destination!=action.destination||old.backend!=action.backend||old.model!=action.model||old.light!=action.light{return Err("Idempotency key already used for another destination".into());}return Ok(old);}
             guard_start(&tx,action.mission_id)?;
             let (status,revision):(String,String)=tx.query_row("SELECT status,updated_at FROM missions WHERE id=?1",[&mid],|r|Ok((r.get(0)?,r.get(1)?))).map_err(error)?;
             if !matches!(status.as_str(),"awaiting_user"|"completed"|"failed"|"interrupted"|"paused"|"blocked"|"not_feasible"|"acknowledged") || revision!=action.source_revision{return Err("Mission changed or is running; stop it before moving".into());}
@@ -167,6 +167,7 @@ mod tests {
             key: Uuid::new_v4().to_string(),
             revision: 0,
             phase: "preparing".into(),
+            light: false,
             source: Machine::Core,
             destination: Machine::Client {
                 id: Uuid::new_v4().to_string(),

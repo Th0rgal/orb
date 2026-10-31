@@ -2215,7 +2215,6 @@ pub(in crate::api) async fn create_mission_inner(
             spawn_req,
             req.project.clone(),
             dispatch_tag.as_deref(),
-            true,
         )
         .await
         .map_err(|e| {

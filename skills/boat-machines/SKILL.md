@@ -51,7 +51,9 @@ Set up once, then start children from it:
    and `.lake` inside the repo.
 3. `snapshot_managed_machine(machine_id="large-a", name="lean-native-warm")`,
    then poll `list_managed_snapshots()` until `ready`.
-4. Children: `start_mission(remote_node_id="auto-managed:default",
+4. Children: Boat VMs boot in light mode (clean `orb-node-base`, no snapshot
+   files) by default unless you pass a snapshot explicitly:
+   `start_mission(remote_node_id="auto-managed:default",
    managed_from_snapshot="lean-native-warm", ...)` or
    `spawn_managed_machine(from_snapshot="lean-native-warm")`.
 

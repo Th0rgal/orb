@@ -37,11 +37,11 @@ it("opens with cached machines while validating fresh transfer state", async () 
   const ui=render(()=><ChangeMachine mission={mission} choices={choices} onClose={()=>{}} onMoved={()=>{}}/>);
   fireEvent.click(screen.getByRole("menuitem",{name:/Spark/}));
   expect(screen.getByText("Updating machines…")).toBeTruthy();
-  expect((screen.getByRole("button",{name:"Prepare transfer"}) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button",{name:"Move to Spark"}) as HTMLButtonElement).disabled).toBe(true);
   expect(prepare).not.toHaveBeenCalled();
   finish({version:1,actions:[],destinations:[{machine:{kind:"node",id:"spark"},label:"Spark",available:false,reason:"Machine unreachable"}]});
   await waitFor(()=>expect(screen.queryByText("Updating machines…")).toBeNull());
-  expect((screen.getByRole("button",{name:"Prepare transfer"}) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button",{name:"Move to Spark"}) as HTMLButtonElement).disabled).toBe(true);
 });
 it("shows only the administration entry when both DGX services exist",async()=>{
   vi.spyOn(transfers,"inspectTransfer").mockResolvedValue({version:1,actions:[],destinations:[
@@ -65,7 +65,8 @@ it.each(['ashur','babylon','nippur','uruk','nimrud','dgx-spark-admin','sepolia']
   expect(harness.value).toBe('claudecode');
   expect([...harness.options].some(o=>o.value==='claudecode'&&!o.disabled)).toBe(true);
   expect((document.body.querySelector('select[aria-label="Transfer model"]') as HTMLSelectElement).value).toBe('claude-opus-5-5');
-  expect((screen.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+  expect((document.body.querySelector('select[aria-label="Transfer files"]') as HTMLSelectElement).value).toBe('light');
+  expect((screen.getByRole('button',{name:`Move to ${label}`}) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("shares an in-flight preload and reads transfer state fresh on every open", async () => {
@@ -98,9 +99,9 @@ it('uses destination account models and rejects the source-only model', async()=
  expect(selected).toHaveBeenCalledWith(destination.machine);
  expect(screen.queryByRole('option',{name:'Core only'})).toBeNull();
  expect(screen.getByRole('option',{name:'Node only'})).toBeTruthy();
- expect((screen.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(true);
+ expect((screen.getByRole('button',{name:'Move to Node'}) as HTMLButtonElement).disabled).toBe(true);
  fireEvent.change(screen.getByLabelText('Transfer model'),{target:{value:'node-only'}});
- expect((screen.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+ expect((screen.getByRole('button',{name:'Move to Node'}) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it('selects the first destination model when changing harness', async()=>{
@@ -112,7 +113,7 @@ it('selects the first destination model when changing harness', async()=>{
  fireEvent.click(screen.getByRole('menuitem',{name:/Node/}));
  fireEvent.change(screen.getByLabelText('Transfer harness'),{target:{value:'antigravity'}});
  expect((screen.getByLabelText('Transfer model') as HTMLSelectElement).value).toBe('node-only');
- expect((screen.getByRole('button',{name:'Prepare transfer'}) as HTMLButtonElement).disabled).toBe(false);
+ expect((screen.getByRole('button',{name:'Move to Node'}) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("keeps old-agent → Core source label and completes an empty-workspace transfer after cancelling a queued remote job", async () => {
@@ -178,6 +179,7 @@ it("keeps old-agent → Core source label and completes an empty-workspace trans
   expect((screen.getByRole("menuitem", { name: /Core/ }) as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(screen.getByRole("menuitem", { name: /Core/ }));
   expect(screen.getByText("old-agent → Core")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Transfer files"), { target: { value: "workspace" } });
 
   fireEvent.click(screen.getByRole("button", { name: "Stop and prepare" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy());
@@ -207,4 +209,46 @@ it("uses server-inspected source placement when an auto-placed remote mission ha
   expect((screen.getByRole("menuitem", { name: /Core/ }) as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(screen.getByRole("menuitem", { name: /Core/ }));
   expect(screen.getByText("old-agent → Core")).toBeTruthy();
+});
+
+it("defaults to light mode and moves conversation in one click without scanning workspace files", async () => {
+  vi.spyOn(transfers, "inspectTransfer").mockResolvedValue({
+    version: 1,
+    features: ["links", "selection", "light", "bulk_copy"],
+    actions: [],
+    destinations: [
+      { machine: { kind: "core" }, label: "Core", available: true },
+      { machine: { kind: "node", id: "spark" }, label: "Spark", available: true, harnesses: ["codex"] },
+    ],
+  });
+  const lightAction: transfers.TransferAction = {
+    id: "light-1",
+    mission_id: "source",
+    phase: "copying",
+    light: true,
+    source: { kind: "core" },
+    destination: { kind: "node", id: "spark" },
+    backend: "codex",
+    model: "model",
+    created_at: "",
+    manifest: { bytes: 0, files: [], excluded: [] },
+  };
+  const prepare = vi.spyOn(transfers, "transferRequest").mockResolvedValue(lightAction as any);
+  const inventory = vi.spyOn(transfers, "inventoryTransfer");
+  vi.spyOn(transfers, "copyTransfer").mockResolvedValue(lightAction);
+  vi.spyOn(transfers, "verifyTransfer").mockResolvedValue({ ...lightAction, phase: "verified" });
+  const movedMission: Mission = { ...mission, machine_transfer: { ...lightAction, phase: "activated" } };
+  vi.spyOn(transfers, "activateTransfer").mockResolvedValue(movedMission);
+  const moved = vi.fn();
+  const closed = vi.fn();
+
+  render(() => <ChangeMachine mission={mission} choices={choices} onClose={closed} onMoved={moved} />);
+  await waitFor(() => expect(screen.getByRole("menuitem", { name: /Spark/ })).toBeTruthy());
+  fireEvent.click(screen.getByRole("menuitem", { name: /Spark/ }));
+  expect(screen.getByText(/no workspace files are transferred/i)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Move to Spark" }));
+  await waitFor(() => expect(moved).toHaveBeenCalledWith(movedMission));
+  expect(closed).toHaveBeenCalled();
+  expect(prepare).toHaveBeenCalledWith("source", expect.objectContaining({ op: "prepare", light: true }));
+  expect(inventory).not.toHaveBeenCalled();
 });
