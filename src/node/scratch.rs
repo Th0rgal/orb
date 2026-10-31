@@ -537,7 +537,7 @@ mod tests {
         // A crash after removal but before receipt acknowledgement is idempotent.
         let (gone, gone_path) = prepare(&store, temp.path(), mission, None).await.unwrap();
         retire(&store, gone.id, old_time).await.unwrap();
-        std::fs::remove_dir(&gone_path).unwrap();
+        std::fs::remove_dir_all(&gone_path).unwrap();
         sweep_at(&store, temp.path(), Utc::now()).await.unwrap();
         let remaining = store
             .with_conn(|conn| {
