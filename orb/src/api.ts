@@ -1,7 +1,7 @@
 import { nativeInvoke } from "./native";
 import { missionNode } from "./machines/nodes";
 import { harnessRank, isHarness } from "./harnesses";
-import { isArchivable, isReopenable } from "./missionStatus";
+import { isArchivable, isArchived, isReopenable } from "./missionStatus";
 import { swallow } from "./log";
 import { sharedRead, invalidateReads } from "./sharedReads";
 import { cacheReset } from "./pageCache";
@@ -1293,10 +1293,14 @@ export function listArchivedMissions(offset = 0): Promise<Mission[]> {
 /** Acknowledge an idle conversation, retaining its transcript and original location. */
 export async function archiveMission(id: string): Promise<void> {
   const version = connectionVersion();
-  const mission = await getMission(id);
+  const mission = await getMission(id, { fresh: true });
   if (connectionVersion() !== version) throw new Error("Connection changed. Try again.");
-  if (!isArchivable(mission.status)
-    || mission.execution?.state === "running") throw new Error("Wait for the mission to stop before archiving it.");
+  if (mission.execution?.state === "running") throw new Error("Wait for the mission to stop before archiving it.");
+  if (isArchived(mission.status)) {
+    await confirmCoreChange({ id, status: "acknowledged" });
+    return;
+  }
+  if (!isArchivable(mission.status)) throw new Error("Wait for the mission to stop before archiving it.");
   await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1308,10 +1312,14 @@ export async function archiveMission(id: string): Promise<void> {
 /** Reopen for manual follow-up without dispatching a runner or autoresuming work. */
 export async function reopenMission(id: string): Promise<void> {
   const version = connectionVersion();
-  const mission = await getMission(id);
+  const mission = await getMission(id, { fresh: true });
   if (connectionVersion() !== version) throw new Error("Connection changed. Try again.");
-  if (!isReopenable(mission.status)
-    || mission.execution?.state === "running") throw new Error("This mission is no longer finished. Refresh its status before reopening it.");
+  if (mission.execution?.state === "running") throw new Error("This mission is no longer finished. Refresh its status before reopening it.");
+  if (mission.status === "paused") {
+    await confirmCoreChange({ id, status: "paused" });
+    return;
+  }
+  if (!isReopenable(mission.status)) throw new Error("This mission is no longer finished. Refresh its status before reopening it.");
   await api(`/api/control/missions/${encodeURIComponent(id)}/status`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status: "paused" }),

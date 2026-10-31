@@ -19,11 +19,7 @@ export const LIVE_STATUSES = set(...RUNNING_STATUSES, ...QUEUED_STATUSES);
 /** In flight, or finished its turn with background work still running. */
 export const WORKING_STATUSES = set(...LIVE_STATUSES, "waiting_background");
 /** PATCH /settings can change the next-turn model. A live turn returns 409. */
-export const SETTINGS_IDLE_STATUSES = set("awaiting_user", "acknowledged", "interrupted", "failed", "paused", "blocked");
-/** Stopped and safe to archive (acknowledge). */
-export const ARCHIVABLE_STATUSES = set("awaiting_user", "blocked", "paused", "interrupted", "failed", "completed", "cancelled");
-/** Finished: reopening moves it back to paused for a manual follow-up. */
-export const REOPENABLE_STATUSES = set("completed", "failed", "interrupted", "acknowledged", "cancelled");
+export const SETTINGS_IDLE_STATUSES = set("awaiting_user", "acknowledged", "interrupted", "failed", "not_feasible", "paused", "blocked");
 /** Ended with an error the user should see. */
 export const FAILED_STATUSES = set("failed", "not_feasible", "error", "errored", "timed_out");
 /** The turn ended and the conversation waits for the user. */
@@ -32,6 +28,18 @@ export const READY_STATUSES = set("awaiting_user", "waiting_user", "waiting_for_
 export const DONE_STATUSES = set("completed", "succeeded");
 /** Archived: acknowledged by the user (or auto-archived by Core). */
 export const ARCHIVED_STATUSES = set("acknowledged", "archived");
+/** Stopped and safe to archive (acknowledge). */
+export const ARCHIVABLE_STATUSES = set(
+  ...[...READY_STATUSES].filter(s => !ARCHIVED_STATUSES.has(s)),
+  ...FAILED_STATUSES,
+  ...DONE_STATUSES,
+  "blocked",
+  "paused",
+  "interrupted",
+  "cancelled",
+);
+/** Finished: reopening moves it back to paused for a manual follow-up. */
+export const REOPENABLE_STATUSES = set(...DONE_STATUSES, ...FAILED_STATUSES, ...ARCHIVED_STATUSES, "interrupted", "cancelled");
 
 const has = (statuses: ReadonlySet<string>) => (status: Status) => !!status && statuses.has(status);
 

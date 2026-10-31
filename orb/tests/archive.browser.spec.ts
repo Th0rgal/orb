@@ -356,3 +356,48 @@ test('archiving the selected conversation deselects it without revealing the arc
  const after=await projects.getByRole('button',{name:/Long conversation 41\b/}).evaluate(el=>{let n=el.parentElement;while(n&&!(n.scrollHeight>n.clientHeight&&/(auto|scroll)/.test(getComputedStyle(n).overflowY)))n=n.parentElement;return n?n.scrollTop:-1;});
  expect(after).toBe(before);
 });
+
+test('archiving a parent succeeds without false stop error when Core cascades acknowledged to child missions',async({page})=>{
+ await page.addInitScript(()=>{localStorage.setItem('orb.apiUrl',location.origin);localStorage.setItem('orb.jwt','test');});
+ const missions:any[]=[
+  {id:'orb-2-lean',title:'Orb 2 Lean',status:'awaiting_user',project:'orb',tags:[]},
+  {id:'wave-1',title:'Wave 1 worker',status:'completed',project:'orb',parent_mission_id:'orb-2-lean',tags:[]},
+  {id:'wave-2',title:'Wave 2 worker',status:'interrupted',project:'orb',parent_mission_id:'orb-2-lean',tags:[]},
+  {id:'cb-worker',title:'Callback worker',status:'not_feasible',project:'orb',callback_parent_mission_id:'orb-2-lean',tags:[]},
+ ];
+ const statusWrites:string[]=[];
+ await page.route('**/api/**',async route=>{
+  const req=route.request(),url=new URL(req.url()),path=url.pathname,id=path.split('/')[4];
+  if(req.method()==='POST'&&path.endsWith('/status')){
+   const status=req.postDataJSON().status;
+   statusWrites.push(`${id}:${status}`);
+   const target=missions.find(m=>m.id===id);
+   if(target)target.status=status;
+   // Real Core cascades acknowledged to idle parent_mission_id descendants.
+   if(status==='acknowledged'){
+    for(const child of missions){
+     if(child.parent_mission_id===id&&child.status!=='acknowledged')child.status='acknowledged';
+    }
+   }
+   return route.fulfill({json:{}});
+  }
+  const json=path==='/api/projects'?{projects:[{slug:'orb',title:'Orb'}]}
+   :path==='/api/control/missions'?missions.filter(m=>(!url.searchParams.has('project')||m.project===url.searchParams.get('project'))&&(!url.searchParams.has('status')||m.status===url.searchParams.get('status')))
+   :path.startsWith('/api/control/missions/')&&path.split('/').length===5?missions.find(m=>m.id===id)??{}
+   :path.endsWith('/files')?{entries:[]}:path.endsWith('/controller')?{job:null,runs:[]}:path.endsWith('/crons')?{jobs:[]}:[];
+  await route.fulfill({json});
+ });
+ await page.goto('/');
+ const projects=page.getByRole('tree',{name:'Projects',exact:true});
+ await projects.getByRole('button',{name:'Orb',exact:true}).click();
+ const parentRow=projects.getByRole('button',{name:'Orb 2 Lean',exact:true});
+ await expect(parentRow).toBeVisible();
+ await parentRow.click({button:'right'});
+ await page.getByRole('menuitem',{name:'Archive',exact:true}).click();
+
+ await expect(parentRow).toHaveCount(0);
+ await expect(page.getByRole('dialog')).toHaveCount(0);
+ await expect.poll(()=>missions.every(m=>m.status==='acknowledged')).toBe(true);
+ // Cascaded parent_mission_id children skip redundant POSTs; callback-only child still archives.
+ expect(statusWrites).toEqual(['orb-2-lean:acknowledged','cb-worker:acknowledged']);
+});
