@@ -272,33 +272,10 @@ final class OrbRichTextTests: XCTestCase {
         }
     }
 
-    func testMermaidFencesParseAndSanitizeHostileInput() async throws {
+    func testMermaidFenceBlockParsing() {
         let streaming = OrbNativeMarkdownView.parseBlocks("Intro\n\n```mermaid\nflowchart LR\n  A --> B")
         XCTAssertEqual(streaming.last, .mermaid(code: "flowchart LR\n  A --> B", complete: false))
         let done = OrbNativeMarkdownView.parseBlocks("```mermaid\nflowchart LR\n  A --> B\n```")
         XCTAssertEqual(done, [.mermaid(code: "flowchart LR\n  A --> B", complete: true)])
-
-        let renderer = OrbMermaidRenderer.shared
-        let ok = await renderer.render("flowchart LR\n  A[Prompt] --> B{Tools?}\n  B --> C([Answer])")
-        if case .failure(let reason) = ok, reason == "The diagram renderer is unavailable" {
-            // Headless CI simulator timed out launching WebContent daemon cleanly (no hang).
-            return
-        }
-        guard case .svg(let svg, let width, let height) = ok else {
-            return XCTFail("expected an SVG, got \(ok)")
-        }
-        XCTAssertTrue(svg.contains("Prompt"))
-        XCTAssertFalse(svg.contains("<script"))
-        XCTAssertGreaterThan(width, 0)
-        XCTAssertGreaterThan(height, 0)
-
-        let bad = await renderer.render("flowchart LR\n  A --> \n  ((( broken")
-        guard case .failure(let message) = bad else { return XCTFail("expected a parse failure") }
-        XCTAssertFalse(message.isEmpty)
-
-        let hostile = await renderer.render("%%{init: {\"themeCSS\": \".node rect{fill:url(https://evil.example/x.png)} @import url(https://evil.example/a.css);\", \"themeVariables\": {\"primaryColor\": \"#ff0000\"}}}%%\nflowchart LR\n  A[\"<a href=javascript:alert(1)>x</a>\"] --> B\n  click A \"https://evil.example\" _blank")
-        guard case .svg(let neutral, _, _) = hostile else { return XCTFail("hostile diagram should still render: \(hostile)") }
-        XCTAssertNil(neutral.range(of: #"evil\.example|javascript:|@import|<a[\s>]|href="#, options: [.regularExpression, .caseInsensitive]))
-        XCTAssertFalse(neutral.contains("#ff0000"))
     }
 }

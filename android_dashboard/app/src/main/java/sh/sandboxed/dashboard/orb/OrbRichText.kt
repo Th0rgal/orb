@@ -429,7 +429,7 @@ private fun OrbMarkdownImageView(
     val rawRef = OrbFileRef(type = "image", path = cleanPath, label = label)
     val enriched = OrbFileRefs.enrich(rawRef, files?.shared ?: emptyList())
     val core = files?.core
-    if (!enriched.unavailable && (enriched.kind == OrbFileKind.Image || enriched.kind == OrbFileKind.Svg) && core != null && files != null) {
+    if (!enriched.unavailable && (enriched.kind == OrbFileKind.Image || enriched.kind == OrbFileKind.Svg) && core != null) {
         OrbInlineImage(core, enriched, files.scope) { files.open(enriched) }
     } else {
         OrbFileChip(enriched) { files?.open?.invoke(enriched) }

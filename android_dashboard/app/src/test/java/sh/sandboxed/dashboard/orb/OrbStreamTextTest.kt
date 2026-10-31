@@ -26,7 +26,7 @@ class OrbStreamTextTest {
         val docs = cases.map { it["doc"] as String } + longReply(6) +
             "Prix : 3 € | 4 €\n\n| a | b |\n|---|---|\n| é | 😀 |\n\n```\n\n```\n\ndone" +
             "text\n\n  \n   indented after a whitespace line\n\n> q\n\n---\n\n1. x\n\n" +
-            "Intro\n\n$$\n\\frac{a}{b}\n$$\n\nAfter $$x^2$$\n\n"
+            "Intro\n\n\$\$\n\\frac{a}{b}\n\$\$\n\nAfter \$\$x^2\$\$\n\n"
         for (doc in docs) for (stride in listOf(1, 3, 7)) {
             val blocks = OrbStreamBlocks()
             var end = 0
