@@ -61,5 +61,19 @@ relabeled.
 
 Physical device and native Apple execution remain blocked. Production rollout,
 full end-to-end host callers and independently accepted phase exits remain
-separate gates. The coverage registry is still **23 partial / 106 unconnected**;
-passing scalar conformance does not close those connections.
+separate gates. On current `master` (130 manifest entries after `#1488` added
+`orb_slot_bypass_step`), the coverage registry is **23 partial / 107 unconnected**
+(23 partial / 106 unconnected across the 129 entries at execution head
+`3c70e5ada`); passing scalar conformance does not close those connections.
+
+`scripts/run_p3_qualification.py` is the repo-owned local driver for a later
+checkout. It signs an Ed25519 consistency receipt (`assurance: Tested`,
+`kernel_proof: false`) binding both compared archive hashes and distinguishing
+`compared_backend` from the selected `backend` under rollback, compares the
+260-case scalar C ABI (`130 * 2`) with a LeanNative `probe_*` archive (supplied
+via `--leannative-archive` or compiled fresh via `--turbo-root`), and rolls
+back with `--rollback-stock` or `ORB_KERNEL_BACKEND=stock-c`. A local match is
+not phase acceptance, the historical 1044-case multi-target qualification,
+device qualification, or a compiler proof. CI runs the stock path only. The
+historical LeanNative archive above is external evidence, not a committed
+production artifact.

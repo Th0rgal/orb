@@ -122,6 +122,16 @@ class Generator(unittest.TestCase):
         self.assertIn("external fun leansysSelectIsa(", kt)
         self.assertIn("external fun leansysVerifyIsaSelection(", kt)
 
+    def test_leannative_shim_exports_all_manifest_symbols_and_quarantines_runtime(self):
+        data = manifest()
+        shim = gen.render_leannative_shim(data)
+        self.assertIn("void *__orb_leannative_unreachable_malloc(size_t n)", shim)
+        self.assertIn("void *__orb_leannative_unreachable_memcpy(void *d, const void *s, size_t n)", shim)
+        self.assertNotIn("probe_lp_orb_x2dspec_Orb_Kernel_accessStep___redArg", shim)
+        self.assertIn("probe_orb_access_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, 0)", shim)
+        defs = re.findall(r"^(?:uint8_t|uint32_t|uint64_t) (\w+)\(", shim, re.M)
+        self.assertEqual(defs, [f["name"] for f in data["functions"]])
+
 
 class Lint(unittest.TestCase):
     def rules(self, src, rel="x.kt"):

@@ -97,6 +97,14 @@ jobs:
         run: python3 -m unittest -v scripts/test_kernel_abi.py
       - name: Shared scalar conformance harness rejects malformed evidence
         run: python3 -m unittest -v scripts/test_shared_kernel_conformance.py
+      - name: P3 receipts and stock-C / LeanNative backend rollback
+        run: |
+          python3 -m pip install --disable-pip-version-check cryptography==41.0.7
+          python3 -m unittest -v scripts/test_p3_qualification.py
+          python3 scripts/run_p3_qualification.py \
+            --out audit-results/p3-stock \
+            --backend stock-c \
+            --rollback-stock
       - name: Native object and archive symbol checks with negative injections
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
