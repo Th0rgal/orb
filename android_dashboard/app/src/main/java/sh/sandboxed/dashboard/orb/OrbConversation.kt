@@ -255,25 +255,28 @@ object OrbTimelineBuilder {
             events.forEachIndexed { evIdx, ev ->
                 val type = (ev.str("type", "event_type", "kind") ?: "").lowercase()
                 val data = ev.dict("data") ?: ev.raw
+                val meta = ev.dict("metadata") ?: OrbJSON.dict(data["metadata"]) ?: emptyMap()
+                val queued = OrbJSON.bool(meta, "queued") == true || OrbJSON.bool(data, "queued") == true
                 val itemKey = "ev-$evIdx-${ev.id}"
                 when {
-                    type == "user_message" || type == "user" -> streamItems.add(OrbStreamItem.User(itemKey))
+                    (type == "user_message" || type == "user") && !queued -> streamItems.add(OrbStreamItem.User(itemKey))
                     type.contains("think") || type == "reasoning" -> streamItems.add(OrbStreamItem.Think(itemKey))
                     type.contains("tool_call") || type == "tool_use" || type == "tool" || type == "action" -> {
                         val name = OrbJSON.str(data, "name", "tool", "tool_name", "action") ?: ev.str("name", "tool", "tool_name")
                         if (name != null) streamItems.add(OrbStreamItem.Tool(itemKey, name))
                     }
-                    type == "assistant_message" -> {
+                    type == "assistant_message" || type == "assistant_message_canonical" -> {
                         val text = OrbJSON.str(data, "content", "text", "message") ?: ev.str("content", "text", "message") ?: ""
-                        if (OrbJSON.bool(data, "success") != false) {
+                        if (OrbJSON.bool(data, "success") != false && OrbJSON.bool(meta, "success") != false) {
                             streamItems.add(OrbStreamItem.Text(itemKey, text))
                             assistantTexts[itemKey] = text
                         }
                     }
-                    type == "tool_result" || type.contains("delta") -> Unit
+                    type == "tool_result" || type.contains("delta") || type == "text_op" -> Unit
                     else -> streamItems.add(OrbStreamItem.Other(itemKey))
                 }
                 when {
+                    (type == "user_message" || type == "user") && !queued -> pendingWork.clear()
                     type.contains("think") || type == "reasoning" -> {
                         val text = OrbJSON.str(data, "thinking", "content", "text", "summary")
                             ?: ev.str("thinking", "content", "text") ?: "Thinking…"
@@ -315,10 +318,17 @@ object OrbTimelineBuilder {
             deduplicatedMessages.add(msg)
         }
 
-        // Narration (text between one turn's tool calls) folds into the work, not the transcript.
+        // Narration (text between the active/last turn's tool calls) folds into the work, not the transcript.
+        val lastStreamUserIdx = streamItems.indexOfLast { it is OrbStreamItem.User }
+        val currentTurnStreamKeys = streamItems.subList(lastStreamUserIdx + 1, streamItems.size).mapTo(mutableSetOf()) { it.key }
         val narrationTexts = OrbNarration.narrationKeys(streamItems)
-            .mapNotNull { assistantTexts[it]?.trim() }.filter { it.isNotEmpty() }
+            .filter { it in currentTurnStreamKeys }
+            .mapNotNull { assistantTexts[it]?.trim() }
+            .filter { it.isNotEmpty() }
         val narrationSet = narrationTexts.toSet()
+        val lastUserMsgIdx = deduplicatedMessages.indexOfLast {
+            (it.str("role", "sender", "author") ?: "assistant").lowercase() in setOf("user", "operator", "human")
+        }
         var lastAssistantTurnIndex = -1
         if (deduplicatedMessages.isNotEmpty()) {
             deduplicatedMessages.forEachIndexed { idx, msg ->
@@ -334,13 +344,14 @@ object OrbTimelineBuilder {
                         }
                     }
                 } else if (role == "assistant" || role == "agent") {
-                    if (pendingWork.isEmpty()) {
+                    if (idx > lastUserMsgIdx && pendingWork.isEmpty()) {
                         val toolCalls = msg.rows("tool_calls")
                         toolCalls.forEach { tc ->
                             parseToolStep(tc, tc.raw)?.let { pendingWork.add(it) }
                         }
                     }
-                    if (text.isNotEmpty() && !OrbActivityCompaction.isPlaceholderTurn(text) && text.trim() !in narrationSet) {
+                    val foldedInCurrentTurn = idx > lastUserMsgIdx && narrationSet.isNotEmpty() && text.trim() in narrationSet
+                    if (text.isNotEmpty() && !OrbActivityCompaction.isPlaceholderTurn(text) && !foldedInCurrentTurn) {
                         lastAssistantTurnIndex = turns.size
                         turns.add(OrbTurn.Assistant("a-$idx-${msg.id}", text, ts))
                     }
@@ -353,7 +364,7 @@ object OrbTimelineBuilder {
             val fold = OrbTurn.WorkFold(
                 id = "work-fold-main",
                 steps = cappedWork,
-                isLive = isLive && !hasStreamingText,
+                isLive = isLive,
                 startedAt = startedAt,
                 narration = narrationTexts
             )
@@ -364,7 +375,7 @@ object OrbTimelineBuilder {
                 turns.add(fold)
             }
             pendingWork.clear()
-        } else if (isLive && !hasStreamingText && turns.none { it is OrbTurn.WorkFold && it.isLive }) {
+        } else if (isLive && turns.none { it is OrbTurn.WorkFold && it.isLive }) {
             turns.add(
                 OrbTurn.WorkFold(
                     id = "work-live-placeholder",
@@ -375,8 +386,12 @@ object OrbTimelineBuilder {
             )
         }
 
-        val storedAnswers = deduplicatedMessages.filter { (it.str("role", "sender", "author") ?: "assistant").lowercase() in setOf("assistant", "agent") }
-            .map { it.str("content", "text", "message") ?: "" }
+        val messagePairs = deduplicatedMessages.map { msg ->
+            val rawRole = (msg.str("role", "sender", "author") ?: "assistant").lowercase()
+            val normalizedRole = if (rawRole in setOf("user", "operator", "human")) "user" else "assistant"
+            normalizedRole to (msg.str("content", "text", "message") ?: "")
+        }
+        val storedAnswers = OrbSendFlow.currentTurnStoredAnswers(messagePairs, narrationSet)
         return Base(turns, storedAnswers)
     }
 
@@ -630,9 +645,49 @@ fun OrbConversationPage(
     }
 
     val historyLoadMutex = remember(missionId) { kotlinx.coroutines.sync.Mutex() }
+    var coalescedEventRefreshJob by remember(missionId) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+    fun mergeMissionEvents(existing: List<OrbRow>, incoming: List<OrbRow>): List<OrbRow> {
+        if (incoming.isEmpty()) return existing
+        val byKey = LinkedHashMap<Any, OrbRow>(existing.size + incoming.size)
+        for (row in existing + incoming) {
+            val key: Any = row.int("sequence", "seq") ?: row.id
+            byKey[key] = row
+        }
+        var sorted = byKey.values.sortedWith(compareBy { it.int("sequence", "seq") ?: Int.MAX_VALUE })
+        val latestDeltaSeq = sorted.lastOrNull { ev ->
+            val t = (ev.str("event_type", "type") ?: "").lowercase()
+            val eid = ev.str("event_id")
+            t == "text_delta" && (eid == null || eid == "text_delta_latest")
+        }?.int("sequence", "seq")
+        if (latestDeltaSeq != null) {
+            sorted = sorted.filterNot { ev ->
+                val t = (ev.str("event_type", "type") ?: "").lowercase()
+                val eid = ev.str("event_id")
+                val seq = ev.int("sequence", "seq") ?: Int.MAX_VALUE
+                t == "text_delta" && (eid == null || eid == "text_delta_latest") && seq < latestDeltaSeq
+            }
+        }
+        if (sorted.size > 600) {
+            val tailStartSeq = sorted[sorted.size - 400].int("sequence", "seq") ?: 0
+            val lastUserSeq = sorted.lastOrNull { ev ->
+                (ev.str("event_type", "type") ?: "").lowercase() == "user_message" && OrbJSON.bool(ev.dict("metadata"), "queued") != true
+            }?.int("sequence", "seq") ?: 0
+            sorted = sorted.filter { ev ->
+                val seq = ev.int("sequence", "seq") ?: Int.MAX_VALUE
+                val t = (ev.str("event_type", "type") ?: "").lowercase()
+                val tool = (ev.str("tool_name", "name", "tool") ?: "").lowercase()
+                seq >= tailStartSeq || (seq >= lastUserSeq && (t == "user_message" || tool in setOf("todowrite", "todo_write", "update_plan")))
+            }
+        }
+        return sorted
+    }
+
     suspend fun loadHistory(targetId: String) = historyLoadMutex.withLock {
         val account = OrbDisk.currentScope()
+        val streamEpochBefore = live.streamEpoch
         var anyFetchOk = false
+        var latestDetailForTarget: OrbRow? = null
         try {
             val idsToLoad = if (chainIds.size > 1) chainIds.takeLast(3) else listOf(targetId)
             val allMsgs = mutableListOf<OrbRow>()
@@ -676,17 +731,44 @@ fun OrbConversationPage(
                         } else {
                             allMissions.firstOrNull { it.id == cid }?.rows("history") ?: emptyList()
                         }
-                        val deltaEvs = eventsDef.await()
+                        val collectedEvs = eventsDef.await().toMutableList()
+                        if (lastSeq != null && lastSeq > 0 && collectedEvs.size >= 150) {
+                            var cursor = collectedEvs.lastOrNull()?.int("sequence", "seq") ?: lastSeq
+                            var fullPage = true
+                            for (page in 0 until 2) {
+                                val more = orbTry(OrbLog.Category.Network, "core.fetchRows") {
+                                    core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?limit=150&since_seq=$cursor", "events")
+                                }.getOrDefault(emptyList())
+                                if (more.isEmpty()) {
+                                    fullPage = false
+                                    break
+                                }
+                                collectedEvs.addAll(more)
+                                cursor = more.lastOrNull()?.int("sequence", "seq") ?: cursor
+                                if (more.size < 150) {
+                                    fullPage = false
+                                    break
+                                }
+                            }
+                            if (fullPage) {
+                                val tail = orbTry(OrbLog.Category.Network, "core.fetchRows") {
+                                    core.fetchRows("/api/control/missions/${core.encodeComponent(cid)}/events?limit=200", "events")
+                                }.getOrDefault(emptyList())
+                                if (tail.isNotEmpty()) collectedEvs.addAll(tail)
+                            }
+                        }
                         val mergedEvs = if (lastSeq != null && lastSeq > 0 && existingForCid.isNotEmpty()) {
-                            (existingForCid + deltaEvs).distinctBy { it.int("sequence", "seq") ?: it.id }
-                        } else if (deltaEvs.isNotEmpty()) {
-                            deltaEvs
+                            mergeMissionEvents(existingForCid, collectedEvs)
+                        } else if (collectedEvs.isNotEmpty()) {
+                            mergeMissionEvents(emptyList(), collectedEvs)
                         } else {
                             existingForCid
                         }
                         if (cid == targetId && detail != null) {
+                            val updatedRow = OrbRow(cid, detail)
+                            latestDetailForTarget = updatedRow
                             withContext(Dispatchers.Main) {
-                                currentMission = OrbRow(cid, detail)
+                                currentMission = updatedRow
                             }
                         }
                         Triple(cid, histRows, mergedEvs)
@@ -714,6 +796,10 @@ fun OrbConversationPage(
                 events = OrbReadCache.compactEvents(allEvs)
                 OrbReadCache.saveRows(eventsCacheKey, events)
             }
+            val effectiveMission = latestDetailForTarget ?: liveRow
+            val effectiveWorking = isSending || handoffActive || (effectiveMission != null && OrbMissionTree.isLive(effectiveMission))
+            val targetEvents = OrbConversationHistory.forMission(events, targetId).ifEmpty { events }
+            live.reconcileStored(targetEvents, working = effectiveWorking, streamAdvanced = live.streamEpoch != streamEpochBefore)
             liveRow?.let { OrbMissionUnreadStore.markSeen(it) }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
@@ -729,38 +815,61 @@ fun OrbConversationPage(
         }
     }
 
-    // Poll + SSE stream when missionId is active
-    DisposableEffect(missionId) {
-        var sse: EventSource? = null
-        if (missionId != null) {
-            sse = orbTry(OrbLog.Category.Network, "core.openSSE") {
+    fun scheduleCoalescedHistoryRefresh(targetId: String) {
+        if (coalescedEventRefreshJob?.isActive == true) return
+        coalescedEventRefreshJob = scope.launch(Dispatchers.Main) {
+            delay(450L)
+            coalescedEventRefreshJob = null
+            if (targetId == missionId) loadHistory(targetId)
+        }
+    }
+
+    // Live SSE stream when missionId is active (auto-reconnects if Core closes or idles the connection)
+    LaunchedEffect(missionId) {
+        val id = missionId ?: return@LaunchedEffect
+        while (isActive && id == missionId) {
+            val closed = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val sinceSuffix = events.lastOrNull()?.int("sequence", "seq")?.let { "&since_seq=$it" } ?: ""
+            val sse = orbTry(OrbLog.Category.Network, "core.openSSE") {
                 core.openSSE(
-                    path = "/api/control/stream?mission=${core.encodeComponent(missionId)}",
+                    path = "/api/control/stream?mission=${core.encodeComponent(id)}$sinceSuffix",
                     onEvent = { type, data ->
                         val parsed = OrbJSON.dict(OrbJSON.parse(data)) ?: return@openSSE
                         val eventMission = OrbJSON.str(parsed, "mission_id")
-                        if (eventMission != missionId) return@openSSE
+                        if (eventMission != id) return@openSSE
                         val evType = (type ?: OrbJSON.str(parsed, "type", "event_type") ?: "").lowercase()
                         when {
-                            evType == "text_delta" || evType == "delta" -> {
-                                val delta = OrbJSON.rawStr(parsed, "delta", "text", "content") ?: ""
-                                live.append(delta)
+                            evType == "text_delta" || evType == "delta" -> live.applyTextDelta(parsed)
+                            evType == "text_op" -> live.applyTextOp(parsed)
+                            evType == "user_message" -> {
+                                if (OrbJSON.bool(parsed, "queued") != true) live.resetTurn()
+                                scope.launch(Dispatchers.Main) { loadHistory(id) }
                             }
-                            evType == "assistant_message" || evType == "assistant_message_canonical" || evType == "mission_completed" || evType == "turn_complete" -> {
+                            evType in setOf("assistant_message", "assistant_message_canonical", "mission_status_changed", "mission_completed", "turn_complete") -> {
                                 scope.launch(Dispatchers.Main) {
-                                    live.clear()
-                                    loadHistory(missionId)
+                                    loadHistory(id)
                                     core.refreshMissionsQuietly()
                                 }
                             }
+                            evType in setOf("tool_call", "tool_result", "thinking") -> {
+                                scheduleCoalescedHistoryRefresh(id)
+                            }
                         }
-                    }
+                    },
+                    onClosed = { closed.complete(Unit) }
                 )
             }.getOrNull()
+            try {
+                if (sse != null) closed.await()
+            } finally {
+                sse?.cancel()
+            }
+            delay(2000L)
         }
-        onDispose {
-            sse?.cancel()
-        }
+    }
+
+    LaunchedEffect(isLive, historySettled) {
+        if (!isLive && historySettled) live.clear()
     }
 
     LaunchedEffect(missionId) {
@@ -770,7 +879,11 @@ fun OrbConversationPage(
         if (id != missionId) return@LaunchedEffect
         // An SSE response or optimistic send may have populated these during the read.
         if (messages.isEmpty() && cachedMessages.isNotEmpty()) messages = cachedMessages
-        if (events.isEmpty() && cachedEvents.isNotEmpty()) events = cachedEvents
+        if (events.isEmpty() && cachedEvents.isNotEmpty()) {
+            events = cachedEvents
+            val targetEvents = OrbConversationHistory.forMission(cachedEvents, id).ifEmpty { cachedEvents }
+            live.reconcileStored(targetEvents, working = isLive, streamAdvanced = false)
+        }
         OrbPresentation.remember(id)
         if (messages.isEmpty()) {
             val preview = OrbReadCache.loadRowsAsync("presentation_$id").ifEmpty {
@@ -1009,6 +1122,7 @@ fun OrbConversationPage(
 
                 // Optimistic user message: the exact text Core will store, so the
                 // copy that comes back in events replaces it instead of doubling it.
+                live.resetTurn()
                 val optimistic = OrbRow(
                     "local-${UUID.randomUUID()}",
                     mapOf(
@@ -1099,6 +1213,7 @@ fun OrbConversationPage(
         val row = followUps.row(queueId) ?: return
         if (row.sending) return
         val localId = "local-sendnow-$queueId"
+        live.resetTurn()
         followUps = followUps.hide(queueId)
         messages = messages + OrbRow(
             localId,

@@ -134,6 +134,21 @@ object OrbSendFlow {
     }
 
     /**
+     * Current turn's stored assistant messages (excluding narration already moved into the work fold),
+     * so previous turns' replies never suppress live streaming text on a follow-up turn.
+     */
+    fun currentTurnStoredAnswers(messages: List<Pair<String, String>>, narration: Set<String> = emptySet()): List<String> {
+        val lastUserIdx = messages.indexOfLast { it.first == "user" }
+        return messages.subList(lastUserIdx + 1, messages.size)
+            .mapNotNull { (role, content) ->
+                if (role != "assistant") return@mapNotNull null
+                val trimmed = content.trim()
+                if (trimmed.isEmpty() || trimmed in narration) null else content
+            }
+            .takeLast(3)
+    }
+
+    /**
      * Live streamed text that the stored history already contains is dropped,
      * so a reload never shows the assistant's words twice. When the stored text
      * is a prefix of what streamed, only the unseen tail stays live.
@@ -144,7 +159,7 @@ object OrbSendFlow {
         for (stored in storedAssistantTexts.asReversed().take(3)) {
             val s = stored.trim()
             if (s.isEmpty()) continue
-            if (s == l || s.contains(l)) return ""
+            if (s == l || s.startsWith(l)) return ""
             if (l.startsWith(s)) return l.removePrefix(s).trimStart()
         }
         return live

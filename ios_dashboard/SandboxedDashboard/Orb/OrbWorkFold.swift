@@ -103,6 +103,7 @@ struct OrbWorkModel: Equatable {
             let isLastEvent = idx == events.count - 1
             switch event.eventType {
             case "user_message":
+                guard (event.metadata["queued"]?.value as? Bool) != true else { continue }
                 // Like the desktop: the fold, counts and task list describe the
                 // current turn, not every turn loaded so far.
                 model = OrbWorkModel()
@@ -175,11 +176,12 @@ struct OrbWorkModel: Equatable {
                     status: .done
                 ))
 
-            case "assistant_message":
+            case "assistant_message", "assistant_message_canonical":
                 if narration.contains("seq-\(event.sequence)") {
                     model.notes.append(NoteItem(id: "note-\(event.sequence)", text: event.content, afterTools: model.tools.count))
                     continue
                 }
+                guard event.eventType == "assistant_message" else { continue }
                 // A failure after an answer still means the turn stopped.
                 let failed = event.metadata["success"]?.value as? Bool == false
                 let nonEmpty = !event.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -224,8 +226,9 @@ struct OrbWorkModel: Equatable {
     static func narrationItems(_ events: [StoredEvent]) -> [NarrationItem] {
         events.compactMap { event in
             switch event.eventType {
-            case "user_message": return .user
-            case "assistant_message":
+            case "user_message":
+                return (event.metadata["queued"]?.value as? Bool) == true ? .other : .user
+            case "assistant_message", "assistant_message_canonical":
                 if event.metadata["success"]?.value as? Bool == false { return .other }
                 return .text(key: "seq-\(event.sequence)", text: event.content, cumulative: false)
             case "thinking": return .think

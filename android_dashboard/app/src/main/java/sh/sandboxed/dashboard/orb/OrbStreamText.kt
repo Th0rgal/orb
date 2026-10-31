@@ -21,6 +21,287 @@ import kotlinx.coroutines.launch
  * [OrbStreamBlocks] only re-parses the open tail of a growing reply.
  */
 
+/**
+ * Pure reducer for the active turn's live intermediate text (`text_op` and `text_delta`),
+ * shared with `OrbTurnText` in `OrbStreamText.swift` and desktop `TranscriptReducer`.
+ */
+class OrbTurnText {
+    data class Bubble(
+        val id: String,
+        var text: String,
+        var revision: Int = -1,
+        var finalized: Boolean = false
+    )
+
+    data class StoredRow(
+        val sequence: Long,
+        val eventType: String,
+        val content: String,
+        val bubbleId: String?,
+        val queued: Boolean,
+        val success: Boolean,
+        val partial: Boolean
+    )
+
+    val bubbles = mutableListOf<Bubble>()
+    val storedCanonicalIds = mutableSetOf<String>()
+    var lastUserSequence: Long = -1L
+        private set
+    var streamEpoch: Int = 0
+        private set
+
+    val renderedText: String
+        get() = bubbles
+            .filter { it.id !in storedCanonicalIds && it.text.isNotEmpty() }
+            .joinToString("\n\n") { it.text }
+
+    fun clear() {
+        bubbles.clear()
+        storedCanonicalIds.clear()
+        lastUserSequence = -1L
+    }
+
+    fun resetTurn(userSequence: Long = -1L) {
+        bubbles.clear()
+        storedCanonicalIds.clear()
+        if (userSequence >= 0L) lastUserSequence = userSequence
+    }
+
+    fun applyTextDelta(data: OrbDict) {
+        streamEpoch++
+        val bubbleId = nonEmptyString(data["bubble_id"]) ?: "text_delta_latest"
+        val delta = data["delta"] as? String
+        val mode = data["mode"] as? String
+        val contentOrText = (data["content"] as? String) ?: (data["text"] as? String)
+        when {
+            delta != null -> appendBubble(bubbleId, delta)
+            mode == "delta" && contentOrText != null -> appendBubble(bubbleId, contentOrText)
+            contentOrText != null -> setBubble(bubbleId, contentOrText)
+        }
+    }
+
+    fun applyTextOp(data: OrbDict) {
+        streamEpoch++
+        val bubbleId = nonEmptyString(data["bubble_id"]) ?: "text_delta_latest"
+        if (bubbleId != "text_delta_latest" && bubbleId in storedCanonicalIds) return
+        val ops = OrbJSON.dictList(data["ops"])
+        if (ops.isNotEmpty()) {
+            applyOps(bubbleId, ops)
+            return
+        }
+        val op = data["op"] as? String
+        if (op != null) {
+            val content = data["content"] as? String ?: ""
+            when (op) {
+                "append" -> appendBubble(bubbleId, content)
+                "replace" -> setBubble(bubbleId, content)
+            }
+        }
+    }
+
+    fun reconcileStored(rows: List<StoredRow>, working: Boolean, streamAdvanced: Boolean = false) {
+        if (!working) {
+            clear()
+            return
+        }
+        val ordered = rows.sortedBy { it.sequence }
+        val lastUserIdx = ordered.indexOfLast { it.eventType == "user_message" && !it.queued }
+        val lastUserSeq = if (lastUserIdx >= 0) ordered[lastUserIdx].sequence else 0L
+        if (lastUserSequence >= 0L && lastUserSeq > lastUserSequence) {
+            bubbles.clear()
+            storedCanonicalIds.clear()
+        }
+        if (lastUserSeq > 0L || lastUserSequence < 0L) {
+            lastUserSequence = maxOf(lastUserSequence, lastUserSeq)
+        }
+
+        var turnEnded = false
+        var storedDelta: String? = null
+        val storedOpsOrder = mutableListOf<String>()
+        val storedOpsByBubble = mutableMapOf<String, MutableList<OrbDict>>()
+        val canonicalIds = mutableSetOf<String>()
+
+        for (row in ordered.subList(lastUserIdx + 1, ordered.size)) {
+            when (row.eventType) {
+                "text_delta" -> {
+                    storedDelta = row.content
+                    turnEnded = false
+                }
+                "text_op" -> {
+                    val bid = row.bubbleId ?: "text_delta_latest"
+                    val ops = parseOpsJson(row.content)
+                    if (ops.isNotEmpty()) {
+                        if (bid !in storedOpsByBubble) storedOpsOrder.add(bid)
+                        storedOpsByBubble.getOrPut(bid) { mutableListOf() }.addAll(ops)
+                    }
+                    turnEnded = false
+                }
+                "assistant_message_canonical" -> {
+                    val bid = row.bubbleId ?: "text_delta_latest"
+                    canonicalIds.add(bid)
+                    storedOpsByBubble.remove(bid)
+                }
+                "assistant_message" -> {
+                    if (!row.partial && row.success) {
+                        storedDelta = null
+                        storedOpsByBubble.clear()
+                        storedOpsOrder.clear()
+                        turnEnded = true
+                    }
+                }
+            }
+        }
+
+        storedCanonicalIds.clear()
+        storedCanonicalIds.addAll(canonicalIds)
+        bubbles.removeAll { it.id in canonicalIds && it.id != "text_delta_latest" }
+        if (turnEnded) {
+            bubbles.clear()
+            return
+        }
+
+        if (!storedDelta.isNullOrEmpty()) {
+            val current = bubbles.firstOrNull { it.id == "text_delta_latest" }?.text ?: ""
+            when {
+                current.isEmpty() -> setBubble("text_delta_latest", storedDelta)
+                current.startsWith(storedDelta) -> Unit // Live SSE stream is already ahead.
+                storedDelta.startsWith(current) || !streamAdvanced -> setBubble("text_delta_latest", storedDelta)
+            }
+        }
+
+        for (bid in storedOpsOrder) {
+            if (bid !in canonicalIds && bubbles.none { it.id == bid }) {
+                val ops = storedOpsByBubble[bid]
+                if (!ops.isNullOrEmpty()) applyOps(bid, ops)
+            }
+        }
+    }
+
+    fun applyOps(bubbleId: String, ops: List<OrbDict>) {
+        val existing = bubbles.firstOrNull { it.id == bubbleId }
+        val bubble = existing?.copy() ?: Bubble(id = bubbleId, text = "")
+        for (op in ops) {
+            when (op["type"] as? String ?: "") {
+                "snapshot" -> {
+                    val rev = intValue(op["revision"]) ?: return
+                    if (rev <= bubble.revision) return
+                    bubble.revision = rev
+                    bubble.text = op["text"] as? String ?: ""
+                    bubble.finalized = false
+                }
+                "insert" -> {
+                    val piece = op["text"] as? String ?: ""
+                    val pos = intValue(op["pos"])
+                    bubble.text = if (bubbleId == "text_delta_latest" && pos == 0) {
+                        piece
+                    } else {
+                        spliceScalars(bubble.text, pos, pos, piece)
+                    }
+                    bubble.finalized = false
+                }
+                "replace" -> {
+                    val piece = op["text"] as? String ?: ""
+                    val range = intList(op["range"])
+                    bubble.text = when {
+                        bubbleId == "text_delta_latest" && (range?.firstOrNull() ?: 0) == 0 -> piece
+                        range != null && range.size >= 2 -> spliceScalars(bubble.text, range[0], range[1], piece)
+                        else -> piece
+                    }
+                    bubble.finalized = false
+                }
+                "finalize" -> bubble.finalized = true
+            }
+        }
+        upsertBubble(bubble)
+    }
+
+    private fun appendBubble(id: String, delta: String) {
+        if (delta.isEmpty()) return
+        val existing = bubbles.firstOrNull { it.id == id }
+        val bubble = existing?.copy(text = existing.text + delta, finalized = false) ?: Bubble(id = id, text = delta)
+        upsertBubble(bubble)
+    }
+
+    private fun setBubble(id: String, text: String) {
+        val existing = bubbles.firstOrNull { it.id == id }
+        val bubble = existing?.copy(text = text, finalized = false) ?: Bubble(id = id, text = text)
+        upsertBubble(bubble)
+    }
+
+    private fun upsertBubble(bubble: Bubble) {
+        val idx = bubbles.indexOfFirst { it.id == bubble.id }
+        if (idx >= 0) {
+            if (bubble.text.isEmpty() && !bubble.finalized) bubbles.removeAt(idx)
+            else bubbles[idx] = bubble
+        } else if (bubble.text.isNotEmpty() || bubble.finalized) {
+            bubbles.add(bubble)
+        }
+    }
+
+    companion object {
+        fun rows(events: List<OrbRow>): List<StoredRow> = events.mapIndexed { idx, ev ->
+            val data = ev.dict("data") ?: ev.raw
+            val meta = ev.dict("metadata") ?: OrbJSON.dict(data["metadata"]) ?: emptyMap()
+            val bid = nonEmptyString(meta["bubble_id"])
+                ?: nonEmptyString(data["bubble_id"])
+                ?: nonEmptyString(ev.raw["event_id"])
+                ?: nonEmptyString(data["event_id"])
+            val seq = (ev.raw["sequence"] as? Number)?.toLong()
+                ?: (ev.raw["seq"] as? Number)?.toLong()
+                ?: ev.int("sequence", "seq")?.toLong()
+                ?: idx.toLong()
+            val type = (ev.str("event_type", "type", "kind") ?: "").lowercase()
+            val content = (ev.raw["content"] as? String)
+                ?: (data["content"] as? String)
+                ?: (data["text"] as? String)
+                ?: ""
+            val queued = OrbJSON.bool(meta, "queued") == true
+            val success = OrbJSON.bool(meta, "success") != false && OrbJSON.bool(data, "success") != false
+            val partial = OrbJSON.bool(meta, "partial") == true || OrbJSON.str(meta, "turn_end") == "partial"
+            StoredRow(seq, type, content, bid, queued, success, partial)
+        }
+
+        fun fromStoredEvents(events: List<OrbRow>, working: Boolean): String {
+            val turn = OrbTurnText()
+            turn.reconcileStored(rows(events), working = working)
+            return turn.renderedText
+        }
+
+        fun spliceScalars(text: String, start: Int?, end: Int?, replacement: String): String {
+            if (start == null) return text + replacement
+            val targetEnd = end ?: start
+            if (start >= text.length && targetEnd >= text.length) return text + replacement
+            val cps = text.codePoints().toArray()
+            val s = start.coerceIn(0, cps.size)
+            val e = targetEnd.coerceIn(s, cps.size)
+            if (s == cps.size && e == cps.size) return text + replacement
+            val prefix = if (s > 0) String(cps, 0, s) else ""
+            val suffix = if (e < cps.size) String(cps, e, cps.size - e) else ""
+            return prefix + replacement + suffix
+        }
+
+        private fun nonEmptyString(raw: Any?): String? = (raw as? String)?.takeIf { it.isNotEmpty() }
+
+        private fun intValue(raw: Any?): Int? = when (raw) {
+            is Int -> raw
+            is Long -> raw.toInt()
+            is Double -> if (raw.isFinite()) raw.toInt() else null
+            is Number -> raw.toInt()
+            is String -> raw.trim().toIntOrNull()
+            else -> null
+        }
+
+        private fun intList(raw: Any?): List<Int>? {
+            val list = raw as? List<*> ?: return null
+            val out = list.mapNotNull { intValue(it) }
+            return if (out.size == list.size) out else null
+        }
+
+        private fun parseOpsJson(content: String): List<OrbDict> =
+            if (content.isEmpty()) emptyList() else OrbJSON.dictList(OrbJSON.parse(content))
+    }
+}
+
 /** `Orb.Stream.Coalescer`: deltas collect in `pending`; a frame moves them to [text]. */
 class OrbLiveText(
     private val scope: CoroutineScope,
@@ -35,44 +316,141 @@ class OrbLiveText(
     val hasText by derivedStateOf { text.isNotEmpty() }
     private val pending = StringBuilder()
     private var flushJob: Job? = null
+    private val turn = OrbTurnText()
+
+    private var pendingReplace: String? = null
 
     /** Frames that changed [text] (the coalescer's render count). */
     var renders = 0
         private set
 
     /** Everything received, shown or not (the conservation law: `text + pending`). */
-    val received: String get() = synchronized(pending) { text + pending }
+    val received: String
+        get() = synchronized(pending) {
+            val base = pendingReplace ?: text
+            base + pending.toString()
+        }
+
+    /** Monotonic counter incremented on every live SSE/WS delta or op. */
+    val streamEpoch: Int get() = synchronized(pending) { turn.streamEpoch }
 
     /** Safe from any thread (the SSE reader): one Main dispatch per frame, not per delta. */
     fun append(delta: String) {
         if (delta.isEmpty()) return
         synchronized(pending) {
-            pending.append(delta)
-            if (flushJob != null) return
-            flushJob = scope.launch(frameDispatcher) {
-                delay(frameMs)
-                flush()
-            }
+            turn.applyTextDelta(mapOf("delta" to delta))
+            appendCoalescedLocked(delta)
+        }
+    }
+
+    fun replace(content: String) {
+        synchronized(pending) {
+            if (content.isEmpty()) turn.clear()
+            else turn.applyTextDelta(mapOf("content" to content))
+            scheduleReplaceLocked(content, immediate = true)
+        }
+    }
+
+    fun resetTurn(userSequence: Long = -1L) {
+        synchronized(pending) {
+            turn.resetTurn(userSequence)
+            scheduleReplaceLocked("", immediate = true)
+        }
+    }
+
+    fun applyTextDelta(data: OrbDict) {
+        synchronized(pending) {
+            turn.applyTextDelta(data)
+            syncWithTurnLocked(immediate = false)
+        }
+    }
+
+    fun applyTextOp(data: OrbDict) {
+        synchronized(pending) {
+            turn.applyTextOp(data)
+            syncWithTurnLocked(immediate = false)
+        }
+    }
+
+    fun reconcileStored(events: List<OrbRow>, working: Boolean, streamAdvanced: Boolean = false) {
+        synchronized(pending) {
+            val wasEmpty = (pendingReplace ?: text).isEmpty() && pending.isEmpty()
+            turn.reconcileStored(OrbTurnText.rows(events), working = working, streamAdvanced = streamAdvanced)
+            syncWithTurnLocked(immediate = wasEmpty)
         }
     }
 
     /** Moves pending text to [text] now (one render). */
     fun flush() {
-        val next = synchronized(pending) {
+        var replaceBase: String? = null
+        var delta: String? = null
+        synchronized(pending) {
             flushJob = null
-            if (pending.isEmpty()) return
-            pending.toString().also { pending.setLength(0) }
+            replaceBase = pendingReplace
+            pendingReplace = null
+            if (pending.isNotEmpty()) {
+                delta = pending.toString()
+                pending.setLength(0)
+            }
         }
-        text += next
-        renders++
+        val base = replaceBase
+        val tail = delta
+        if (base != null) {
+            val next = if (tail != null) base + tail else base
+            if (text != next) {
+                text = next
+                if (tail != null) renders++
+            }
+        } else if (tail != null) {
+            text += tail
+            renders++
+        }
     }
 
     fun clear() {
         synchronized(pending) {
+            turn.clear()
             flushJob?.cancel(); flushJob = null
+            pendingReplace = null
             pending.setLength(0)
         }
         text = ""
+    }
+
+    private fun syncWithTurnLocked(immediate: Boolean) {
+        val next = turn.renderedText
+        val current = (pendingReplace ?: text) + pending.toString()
+        if (next == current) return
+        if (next.isEmpty()) {
+            scheduleReplaceLocked("", immediate = true)
+            return
+        }
+        if (!immediate && next.startsWith(current)) {
+            appendCoalescedLocked(next.substring(current.length))
+        } else {
+            scheduleReplaceLocked(next, immediate = immediate)
+        }
+    }
+
+    private fun appendCoalescedLocked(delta: String) {
+        if (delta.isEmpty()) return
+        pending.append(delta)
+        if (flushJob != null) return
+        flushJob = scope.launch(frameDispatcher) {
+            delay(frameMs)
+            flush()
+        }
+    }
+
+    private fun scheduleReplaceLocked(content: String, immediate: Boolean) {
+        flushJob?.cancel()
+        flushJob = null
+        pendingReplace = content
+        pending.setLength(0)
+        flushJob = scope.launch(frameDispatcher) {
+            if (!immediate) delay(frameMs)
+            flush()
+        }
     }
 }
 
