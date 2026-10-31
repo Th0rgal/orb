@@ -9,7 +9,10 @@ and not authorization to replace production artifacts.
 - Turbo execution head: `e585ba96f58cb06414ce5e3216f3ffc0ce235300` (Stage 1D #280 merged).
 - LeanSys: `c089f3e31dbd36f2bde2219913d5b9c90da670be`.
 - All input checkouts clean; compiler executables clean-built from the Turbo head.
-- 129 manifest entries; 128 public exports (95 Orb + 33 LeanSys); 1044 cases.
+- 129 manifest entries; 128 public exports (95 Orb + 33 LeanSys); 1044 cases at
+  execution head `3c70e5ada` (current `master` has 130 manifest entries / 129
+  public exports after `#1488` added `orb_slot_bypass_step`; this historical
+  multi-target receipt has not been rerun on the 129-export surface).
 - Default and verified-kernel-only certificate checks report `verified: true`,
   but both retain effective `overallAssurance: Tested` for these frontend inputs.
   Do not promote that label to a kernel proof of the compiled program.

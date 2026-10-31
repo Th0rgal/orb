@@ -12,15 +12,16 @@ python3 scripts/build_orb_kernel_wasm.py \
   --receipt /path/to/new-build-receipt.json
 ```
 
-The manifest controls all 128 exported function names and ABI parameter/result
-types (127 public-prefix exports and one compiler helper). The builder rejects
-missing or extra function exports, wrong WASM types and all imports. Uint8 and
-Uint32 use WASM i32; Uint64 uses i64. A small metadata parser checks those ABI
-sections; a real Node WebAssembly engine validates and instantiates the complete
-module before publication. This division does not claim the parser is a full
-WASM validator or establish compiler correctness. The raw build receipt records
-commands, builder/loader/tool/source/manifest/artifact hashes, source revision,
-mode, output path, comparison/publication outcome and overall attempt status.
+The manifest controls all 130 exported function names and ABI parameter/result
+types on current `master` (129 public-prefix exports and one compiler helper;
+128 total when P2 first landed in `#1398`). The builder rejects missing or extra
+function exports, wrong WASM types and all imports. Uint8 and Uint32 use WASM
+i32; Uint64 uses i64. A small metadata parser checks those ABI sections; a real
+Node WebAssembly engine validates and instantiates the complete module before
+publication. This division does not claim the parser is a full WASM validator or
+establish compiler correctness. The raw build receipt records commands,
+builder/loader/tool/source/manifest/artifact hashes, source revision, mode,
+output path, comparison/publication outcome and overall attempt status.
 
 The output file is replaced by rename only after validation. A failed tool or
 validation preserves the previous artifact. This is single-file POSIX publication,
@@ -40,7 +41,7 @@ Those fixtures are not shared-kernel execution results.
 
 The shipped `orb/src/assets/orb_kernel.wasm` is built by this command. Rebuild it
 before running `python3 scripts/gen_kernel_bindings.py`; CI rebuilds in check mode
-against the shipped bytes. The generator emits `orbKernelAbi.ts` for all 113
+against the shipped bytes. The generator emits `orbKernelAbi.ts` for all 130
 manifest entries, recording the artifact SHA-256 and expected export arities.
 The runtime verifies that hash, rejects imports or export drift, validates and
 instantiates the complete module, then publishes its instance. A failed attempt
