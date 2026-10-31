@@ -1279,6 +1279,11 @@ fun OrbConversationPage(
     val turns = remember(allTurns, visibleTurnLimit) {
         if (allTurns.size > visibleTurnLimit) allTurns.takeLast(visibleTurnLimit) else allTurns
     }
+    DisposableEffect(missionId) {
+        missionId?.let { OrbCrashBreadcrumbs.enterConversation(it, turns.size) }
+        onDispose { OrbCrashBreadcrumbs.leaveConversation() }
+    }
+    LaunchedEffect(turns.size) { OrbCrashBreadcrumbs.updateTurnCount(turns.size) }
 
     val changedFiles = remember(baseTurns) { OrbTurnRecap.changedFiles(baseTurns.turns) }
 

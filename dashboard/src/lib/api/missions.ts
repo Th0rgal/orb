@@ -474,7 +474,7 @@ export async function loadMission(id: string): Promise<Mission | null> {
  * grace timer; subsequent calls are no-ops on the server. Returns the
  * updated mission so the caller can rerender the dot immediately.
  */
-export async function markMissionOpened(id: string): Promise<Mission | null> {
+export async function markMissionOpened(id: string): Promise<{ id: string; status: MissionStatus; first_viewed_at?: string | null } | null> {
   const res = await apiFetch(`/api/control/missions/${id}/opened`, {
     method: "POST",
   });

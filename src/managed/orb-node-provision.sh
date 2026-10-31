@@ -68,6 +68,7 @@ mkdir -p /etc/systemd/system/orb-node.service.d
 #    daemon (older snapshots / base images may hold a pre-cancellation_json
 #    jobs.db or run a pre-baked binary whose open() ignored SQLITE_BUSY).
 systemctl stop orb-node.service 2>/dev/null || true
+for g in kvm video render; do usermod -aG "$g" "$NODE_USER" >/dev/null 2>&1 || true; done
 install -d -m 0750 -o "$NODE_USER" -g "$NODE_USER" "$NODE_HOME" "$NODE_HOME/work"
 python3 - "$NODE_HOME/work/jobs.db" <<'PY'
 import sqlite3, sys

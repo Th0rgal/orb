@@ -934,6 +934,7 @@ class OrbCore private constructor(context: Context) {
 
     init {
         OrbDisk.init(context)
+        OrbCrashBreadcrumbs.install(context)
         OrbSharedInboxState.init(context)
         OrbKeychain.init(context)
         val savedBase = prefs.getString(BASE_URL_KEY, null) ?: ""

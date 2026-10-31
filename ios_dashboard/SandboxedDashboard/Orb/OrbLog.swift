@@ -7,7 +7,7 @@ enum Log {
     nonisolated static let subsystem = Bundle.main.bundleIdentifier ?? "md.thomas.openagent.dashboard"
 
     enum Category: String, CaseIterable, Sendable {
-        case network, cache, liveActivity, notifications, background, auth
+        case network, cache, liveActivity, notifications, background, auth, crash
     }
 
     nonisolated static let network = Logger(subsystem: subsystem, category: Category.network.rawValue)
@@ -16,6 +16,7 @@ enum Log {
     nonisolated static let notifications = Logger(subsystem: subsystem, category: Category.notifications.rawValue)
     nonisolated static let background = Logger(subsystem: subsystem, category: Category.background.rawValue)
     nonisolated static let auth = Logger(subsystem: subsystem, category: Category.auth.rawValue)
+    nonisolated static let crash = Logger(subsystem: subsystem, category: Category.crash.rawValue)
 
     nonisolated static func logger(_ category: Category) -> Logger {
         switch category {
@@ -25,6 +26,7 @@ enum Log {
         case .notifications: notifications
         case .background: background
         case .auth: auth
+        case .crash: crash
         }
     }
 
@@ -53,6 +55,59 @@ enum Log {
             Log.error(category, what, path: path, error)
             return nil
         }
+    }
+}
+
+/// Persisted structural crash breadcrumbs. Prompt and message text are never stored here.
+enum OrbCrashBreadcrumbs {
+    private final class InstallGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        func tryAcquire() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if done { return false }
+            done = true
+            return true
+        }
+    }
+    nonisolated private static let installGate = InstallGate()
+    nonisolated private static let lastKey = "orb.crash.last"
+    nonisolated private static let activeKey = "orb.crash.active"
+    nonisolated(unsafe) private static var previousHandler: (@convention(c) (NSException) -> Void)?
+    nonisolated static func install() {
+        guard installGate.tryAcquire() else { return }
+        previousHandler = NSGetUncaughtExceptionHandler()
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { OrbCrashBreadcrumbs.drainPendingIntoErrorRing() }
+        }
+        NSSetUncaughtExceptionHandler { exception in
+            let frame = exception.callStackSymbols.first
+            OrbCrashBreadcrumbs.recordCrash(reason: exception.name.rawValue, topFrame: frame, memoryMB: nil)
+            OrbCrashBreadcrumbs.previousHandler?(exception)
+        }
+    }
+    nonisolated static func enterConversation(missionId: String, turnCount: Int) {
+        updateActive(["screen": "conversation", "missionId": missionId, "turnCount": turnCount])
+    }
+    nonisolated static func updateTurnCount(_ turnCount: Int) {
+        var active = UserDefaults.standard.dictionary(forKey: activeKey) ?? [:]; active["turnCount"] = turnCount; updateActive(active)
+    }
+    nonisolated static func leaveConversation() { updateActive(["screen": "unknown", "turnCount": 0]) }
+    nonisolated static func recordCrash(reason: String, topFrame: String?, memoryMB: Int?) {
+        var record = UserDefaults.standard.dictionary(forKey: activeKey) ?? [:]
+        record["reason"] = reason; record["topFrame"] = topFrame ?? ""; if let memoryMB { record["memoryMB"] = memoryMB } else { record.removeValue(forKey: "memoryMB") }
+        UserDefaults.standard.set(record, forKey: lastKey)
+    }
+    nonisolated private static func updateActive(_ active: [String: Any]) { UserDefaults.standard.set(active, forKey: activeKey) }
+    @MainActor static func drainPendingIntoErrorRing() {
+        guard let record = UserDefaults.standard.dictionary(forKey: lastKey) else { return }
+        UserDefaults.standard.removeObject(forKey: lastKey)
+        let reason = record["reason"] as? String ?? "crash"
+        let screen = record["screen"] as? String ?? "unknown"
+        let mission = record["missionId"] as? String ?? ""
+        let turns = record["turnCount"] as? Int ?? 0
+        ErrorRing.shared.record(category: .crash, path: "crash", status: nil, message: "reason=\(reason) screen=\(screen) missionId=\(mission) turnCount=\(turns)")
     }
 }
 

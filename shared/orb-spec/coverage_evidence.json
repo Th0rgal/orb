@@ -1444,11 +1444,11 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "2310e0f85d28f705f9e5423f6907e97de172bfe22ee0c67655f91078bd4f76bb"
+          "sha256": "22ab28a8683514280d58abfbb03a232ea5a2a84ac99d3bb89b78db9fbe316b53"
         },
         {
           "path": "src/managed/tests.rs",
-          "sha256": "49958e9d16476145e87cd3b2fe41ae00180b0d14a667def23d9d125c27c933c8"
+          "sha256": "bed21119536c45f452fc6f57a03cc4178fdd6035f7e4b2100d2c2d539d0a7f86"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
@@ -1664,11 +1664,11 @@
         },
         {
           "path": "src/managed/mod.rs",
-          "sha256": "2310e0f85d28f705f9e5423f6907e97de172bfe22ee0c67655f91078bd4f76bb"
+          "sha256": "22ab28a8683514280d58abfbb03a232ea5a2a84ac99d3bb89b78db9fbe316b53"
         },
         {
           "path": "src/managed/tests.rs",
-          "sha256": "49958e9d16476145e87cd3b2fe41ae00180b0d14a667def23d9d125c27c933c8"
+          "sha256": "bed21119536c45f452fc6f57a03cc4178fdd6035f7e4b2100d2c2d539d0a7f86"
         },
         {
           "path": "shared/orb-spec/evidence/mission-vm-limits-tests.log",

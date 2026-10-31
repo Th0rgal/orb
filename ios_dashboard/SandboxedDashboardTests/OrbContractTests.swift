@@ -2,6 +2,20 @@ import XCTest
 @testable import sandboxed_sh
 
 final class OrbContractTests: XCTestCase {
+    @MainActor func testCrashBreadcrumbsAreStructuralAndErrorRingIsBounded() {
+        ErrorRing.shared.clear()
+        OrbCrashBreadcrumbs.enterConversation(missionId: "mission-structural-id", turnCount: 2)
+        OrbCrashBreadcrumbs.recordCrash(reason: "NilMemoryCrash", topFrame: nil, memoryMB: nil)
+        OrbCrashBreadcrumbs.drainPendingIntoErrorRing()
+        XCTAssertTrue(ErrorRing.shared.entries.last?.message.contains("reason=NilMemoryCrash") == true)
+        OrbCrashBreadcrumbs.recordCrash(reason: "TestCrash", topFrame: "Frame", memoryMB: 12)
+        OrbCrashBreadcrumbs.drainPendingIntoErrorRing()
+        XCTAssertTrue(ErrorRing.shared.entries.last?.message.contains("missionId=mission-structural-id") == true)
+        XCTAssertFalse(ErrorRing.shared.entries.last?.message.contains("prompt") == true)
+        for n in 0...ErrorRing.capacity { ErrorRing.shared.record(category: .crash, path: "crash", status: nil, message: "structural-\(n)") }
+        XCTAssertEqual(ErrorRing.shared.entries.count, ErrorRing.capacity)
+    }
+
     @MainActor func testPresentationKeepsAnswerAndExcludesQueuedPromptsAndTools() {
         for type in ["assistant_message", "assistant_message_canonical"] {
             let value: OrbJSON = .object(["events": .array([
