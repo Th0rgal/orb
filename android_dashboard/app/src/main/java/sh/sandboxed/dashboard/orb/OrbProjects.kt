@@ -1235,6 +1235,9 @@ fun OrbProjectPage(
     var fetchedProjectMissions by remember(projectSlug) {
         mutableStateOf(OrbReadCache.readMemoryRows("project_missions_$projectSlug"))
     }
+    var loadedArchived by remember(projectSlug) {
+        mutableStateOf(false)
+    }
     var manifestFolders by remember(projectSlug) {
         val cachedManifest = OrbReadCache.loadDict("project_manifest_$projectSlug")
         val entries = OrbJSON.dict(cachedManifest?.get("entries"))
@@ -1245,12 +1248,12 @@ fun OrbProjectPage(
         mutableStateOf(initialDirs)
     }
 
-    suspend fun loadProjectData() {
+    suspend fun loadProjectData(includeArchived: Boolean = loadedArchived || filter == OrbProjectFilter.Archived) {
         val encoded = core.encodeComponent(projectSlug)
         kotlinx.coroutines.coroutineScope {
             val missionsTask = async {
                 orbTry(OrbLog.Category.Network, "/api/control/missions") {
-                    core.fetchRows("/api/control/missions?project=$encoded&all=true&limit=100&offset=0", null)
+                    core.projectMissions(projectSlug, includeArchived = includeArchived)
                 }.getOrNull()
             }
             val manifestTask = async {
@@ -1258,9 +1261,9 @@ fun OrbProjectPage(
                     core.fetchDict("/api/projects/$encoded/context/manifest")
                 }.getOrNull()
             }
-            val rows = missionsTask.await()
-            if (rows != null) {
-                val mobile = OrbMissionTree.filterMobile(rows)
+            val mobile = missionsTask.await()
+            if (mobile != null) {
+                if (includeArchived) loadedArchived = true
                 fetchedProjectMissions = mobile
                 OrbReadCache.saveRows("project_missions_$projectSlug", mobile)
                 for (m in mobile) {
@@ -1305,6 +1308,12 @@ fun OrbProjectPage(
         loadProjectData()
     }
 
+    LaunchedEffect(filter) {
+        if (filter == OrbProjectFilter.Archived && !loadedArchived) {
+            loadProjectData(includeArchived = true)
+        }
+    }
+
     val projectMissions = remember(liveProject, fetchedProjectMissions, missions, projects) {
         if (fetchedProjectMissions.isNotEmpty()) {
             fetchedProjectMissions
@@ -1314,12 +1323,13 @@ fun OrbProjectPage(
     }
 
     val filteredMissions = remember(projectMissions, filter, searchQuery) {
+        val byId = projectMissions.associateBy { it.id }
         val matchesFilter: (OrbRow) -> Boolean = { m ->
             val archived = OrbMissionTree.isArchived(m)
             val passState = when (filter) {
-                OrbProjectFilter.All -> !archived
-                OrbProjectFilter.Working -> !archived && OrbMissionTree.isLive(m)
-                OrbProjectFilter.NeedsAttention -> !archived && isNeedsAttention(m)
+                OrbProjectFilter.All -> !archived && !OrbMissionTree.isSupersededInTree(m, byId)
+                OrbProjectFilter.Working -> !archived && !OrbMissionTree.isSupersededInTree(m, byId) && OrbMissionTree.isLive(m)
+                OrbProjectFilter.NeedsAttention -> !archived && !OrbMissionTree.isSupersededInTree(m, byId) && isNeedsAttention(m)
                 OrbProjectFilter.Archived -> archived
             }
             if (!passState) {
@@ -1334,28 +1344,15 @@ fun OrbProjectPage(
         if (searchQuery.trim().isNotEmpty()) {
             projectMissions.filter(matchesFilter)
         } else {
-            // Retain parents of visible children (matching iOS OrbMissionTree.treeRows)
-            val byId = projectMissions.associateBy { it.id }
-            val retained = projectMissions.filter(matchesFilter).map { it.id }.toMutableSet()
-            for (m in projectMissions) {
-                if (!matchesFilter(m)) continue
-                val seen = mutableSetOf(m.id)
-                var parent = OrbMissionTree.parentId(m)
-                while (parent != null && seen.add(parent)) {
-                    val row = byId[parent] ?: break
-                    retained.add(parent)
-                    parent = OrbMissionTree.parentId(row)
-                }
-            }
-            projectMissions.filter { it.id in retained }
+            OrbMissionTree.treeRows(projectMissions, matchesFilter)
         }
     }
 
-    val nestedRoots = remember(filteredMissions, searchQuery) {
+    val nestedRoots = remember(filteredMissions, searchQuery, projectSlug) {
         if (searchQuery.trim().isNotEmpty()) {
             filteredMissions.map { OrbNestedMission(it, emptyList(), 0) }
         } else {
-            OrbMissionTree.nest(filteredMissions)
+            OrbMissionTree.nest(filteredMissions, placeholder = OrbMissionTree.placeholderParent(projectSlug))
         }
     }
 
@@ -1866,7 +1863,8 @@ fun OrbProjectPage(
                             onDelete = {
                                 contextMenuMission = null
                                 deleteMissionTarget = node.mission
-                            }
+                            },
+                            currentProjectSlug = projectSlug
                         )
                     }
 
@@ -2052,7 +2050,8 @@ fun OrbProjectPage(
                                         contextMenuMission = null
                                         deleteMissionTarget = node.mission
                                     },
-                                    extraIndentDp = 16
+                                    extraIndentDp = 16,
+                                    currentProjectSlug = projectSlug
                                 )
                             }
                         }
@@ -2453,7 +2452,8 @@ private fun OrbMissionListItem(
     onArchive: () -> Unit,
     onPause: () -> Unit,
     onDelete: () -> Unit,
-    extraIndentDp: Int = 0
+    extraIndentDp: Int = 0,
+    currentProjectSlug: String = ""
 ) {
     val mission = node.mission
     val isLive = OrbMissionTree.isLive(mission)
@@ -2468,9 +2468,17 @@ private fun OrbMissionListItem(
     }
     val relTime = OrbJSON.relative(mission.str("updated_at", "completed_at", "started_at", "created_at"))
     val indentDp = (minOf(48, node.depth * 18) + extraIndentDp).dp
-    val backendRaw = mission.str("backend", "harness", "backend_id") ?: "claudecode"
-    val stateRaw = (mission.str("status", "state") ?: "completed").lowercase()
-    val subtitle = "${serviceName(backendRaw)} · ${statusLabel(stateRaw)}"
+    val isPlaceholder = OrbMissionTree.isPlaceholder(mission)
+    val backendRaw = mission.str("backend", "harness", "backend_id") ?: if (isPlaceholder) "" else "claudecode"
+    val stateRaw = (mission.str("status", "state") ?: if (isPlaceholder) "unknown" else "completed").lowercase()
+    val serviceLabel = if (backendRaw.isEmpty()) "" else serviceName(backendRaw)
+    val stateLabel = if (stateRaw == "unknown" || stateRaw.isEmpty()) "" else statusLabel(stateRaw)
+    val subtitle = if (isPlaceholder && serviceLabel.isEmpty() && stateLabel.isEmpty()) {
+        val sourceProj = mission.str("project")?.takeIf { it.isNotEmpty() && it != currentProjectSlug }
+        sourceProj ?: "Parent conversation"
+    } else {
+        listOf(serviceLabel, stateLabel).filter { it.isNotEmpty() }.joinToString(" · ")
+    }
 
     Box {
         Column(modifier = Modifier.padding(start = indentDp)) {

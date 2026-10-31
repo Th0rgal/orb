@@ -77,16 +77,18 @@ struct OrbRow: Identifiable, Hashable, Sendable {
         id = value[project ? "slug" : "id"].text
         // Forks share the conversation's name; older forks were titled "… · fork".
         let title = value["title"].text
-        name = title.isEmpty ? id : (title.hasSuffix(" · fork") ? String(title.dropLast(7)) : title)
+        let placeholder = value["orb_placeholder"].flag
+        name = title.isEmpty ? (placeholder ? "Parent mission" : id) : (title.hasSuffix(" · fork") ? String(title.dropLast(7)) : title)
         state = value["status"].text
         folder = value["tags"].items.map(\.text).first(where: { $0.hasPrefix("orb-folder:") }).map { String($0.dropFirst(11)) } ?? ""
         backend = value["backend"].text
         cloud = value["backend"].text.hasPrefix("cloud_") || value["execution_kind"].text == "cloud" || value["tags"].items.contains(where: { $0.text.hasPrefix("cloud:") }) || value["cloud"] != .null
         updatedAt = value["updated_at"].text.isEmpty ? value["created_at"].text : value["updated_at"].text
-        if !project {
+        if !project && !placeholder {
             OrbHierarchy.observe(self)
         }
     }
+    var isPlaceholder: Bool { raw["orb_placeholder"].flag }
     /// The conversation this one was forked from (a `fork-of:` tag, or an older fork stored as a child).
     var forkSource: String? {
         if let tag = raw["tags"].items.map(\.text).first(where: { $0.hasPrefix("fork-of:") }) { return String(tag.dropFirst(8)) }
@@ -126,18 +128,88 @@ struct OrbRow: Identifiable, Hashable, Sendable {
 /// Parent links and `/btw` subtree markers remembered across payloads, so a partial
 /// answer cannot un-nest a child or surface a `/btw` worker as a conversation.
 enum OrbHierarchy {
+    struct Seen: Equatable, Sendable {
+        var title: String?
+        var project: String?
+        var status: String?
+        var backend: String?
+    }
+    private struct CachedAncestor {
+        let row: OrbRow
+        let fetchedAt: Date
+    }
+    static let ancestorTTLSeconds: TimeInterval = 60
+
     private static let lock = NSLock()
     nonisolated(unsafe) private static var parents: [String: String] = [:]
     nonisolated(unsafe) private static var btwIDs: Set<String> = []
+    nonisolated(unsafe) private static var seenFacts: [String: Seen] = [:]
+    nonisolated(unsafe) private static var ancestors: [String: CachedAncestor] = [:]
+    nonisolated(unsafe) private static var goneIDs: Set<String> = []
+
     static func observe(_ row: OrbRow) {
-        guard !row.id.isEmpty else { return }
+        guard !row.id.isEmpty, !row.isPlaceholder else { return }
         let parent = row.payloadParentID
         let directBtw = row.hasDirectBtwTag
-        guard parent != nil || directBtw else { return }
+        let rawTitle = row.raw["title"].text
+        let rawProject = row.raw["project"].text
+        let rawStatus = row.state
+        let rawBackend = row.backend
         lock.lock()
+        goneIDs.remove(row.id)
         if let parent { parents[row.id] = parent }
         if directBtw { btwIDs.insert(row.id) }
+        var seen = seenFacts[row.id] ?? Seen()
+        if !rawTitle.isEmpty { seen.title = rawTitle }
+        if case .string = row.raw["project"] { seen.project = rawProject }
+        if !rawStatus.isEmpty && rawStatus != "unknown" { seen.status = rawStatus }
+        if !rawBackend.isEmpty { seen.backend = rawBackend }
+        seenFacts[row.id] = seen
         lock.unlock()
+    }
+    static func seen(_ id: String) -> Seen? {
+        lock.lock(); defer { lock.unlock() }
+        return seenFacts[id]
+    }
+    static func cachedAncestor(_ id: String, now: Date = Date(), allowStale: Bool = false) -> OrbRow? {
+        lock.lock(); defer { lock.unlock() }
+        guard let entry = ancestors[id] else { return nil }
+        if allowStale || now.timeIntervalSince(entry.fetchedAt) < ancestorTTLSeconds {
+            return entry.row
+        }
+        return nil
+    }
+    static func storeAncestor(_ row: OrbRow, now: Date = Date()) {
+        guard !row.id.isEmpty else { return }
+        observe(row)
+        lock.lock()
+        ancestors[row.id] = CachedAncestor(row: row, fetchedAt: now)
+        goneIDs.remove(row.id)
+        lock.unlock()
+    }
+    static func markGone(_ id: String) {
+        guard !id.isEmpty else { return }
+        lock.lock()
+        ancestors.removeValue(forKey: id)
+        goneIDs.insert(id)
+        lock.unlock()
+    }
+    static func isGone(_ id: String) -> Bool {
+        if isBtwID(id) { return true }
+        lock.lock(); defer { lock.unlock() }
+        return goneIDs.contains(id)
+    }
+    private static func isBtwID(_ id: String) -> Bool {
+        guard !id.isEmpty else { return false }
+        lock.lock(); defer { lock.unlock() }
+        if btwIDs.contains(id) { return true }
+        var seen: Set<String> = [id]
+        var cursor = parents[id]
+        while let current = cursor, seen.count < 16, seen.insert(current).inserted {
+            if btwIDs.contains(current) { return true }
+            cursor = parents[current]
+        }
+        return false
     }
     static func remember(_ id: String, parent: String) {
         guard !id.isEmpty else { return }
@@ -172,6 +244,9 @@ enum OrbHierarchy {
         lock.lock()
         parents.removeAll()
         btwIDs.removeAll()
+        seenFacts.removeAll()
+        ancestors.removeAll()
+        goneIDs.removeAll()
         lock.unlock()
     }
 }
@@ -215,18 +290,168 @@ enum OrbMissionTree {
     }
 
     private static let forkSettleMs: Int64 = 15_000
+    static let recentOpenSeconds: TimeInterval = 7 * 24 * 60 * 60
+    private static let liveOpenStates: Set<String> = [
+        "active", "running", "pending", "queued", "awaiting_user", "resuming", "starting", "waiting_background"
+    ]
+    private static let recentOpenStates: Set<String> = [
+        "interrupted", "failed", "paused", "blocked"
+    ]
 
     private static func epochMs(_ raw: String) -> Int64 {
         guard !raw.isEmpty, let date = OrbStyle.parseDate(raw) else { return 0 }
         return Int64((date.timeIntervalSince1970 * 1000.0).rounded())
     }
 
+    static func hasSupersededTag(_ mission: OrbRow) -> Bool {
+        mission.raw["tags"].items.map(\.text).contains {
+            $0 == "superseded" || $0.hasPrefix("superseded_by:") || $0.hasPrefix("superseded-by:")
+        }
+    }
+
+    static func isSuperseded(_ mission: OrbRow) -> Bool {
+        if mission.active { return false }
+        return hasSupersededTag(mission)
+    }
+
+    /// True when a mission or any of its ancestors is superseded and this mission is not actively running.
+    static func isSupersededInTree(_ mission: OrbRow, byID: [String: OrbRow]) -> Bool {
+        if mission.active { return false }
+        if isSuperseded(mission) { return true }
+        var seen: Set<String> = [mission.id]
+        var parent = mission.parentMissionID
+        while let p = parent, !seen.contains(p) {
+            seen.insert(p)
+            guard let row = byID[p] else { break }
+            if isSuperseded(row) { return true }
+            parent = row.parentMissionID
+        }
+        return false
+    }
+
+    /// Open missions older than the history page (`sidebar-hierarchy.md` M2):
+    /// live ones always; stopped ones within 7 days; children only when live or their parent is listed.
+    static func openBeyondPage(_ history: [OrbRow], extra: [OrbRow], now: Date = Date()) -> [OrbRow] {
+        for row in history { OrbHierarchy.observe(row) }
+        for row in extra { OrbHierarchy.observe(row) }
+        let listed = Set(history.map(\.id))
+        let nowMs = Int64((now.timeIntervalSince1970 * 1000.0).rounded())
+        let recentWindowMs = Int64(recentOpenSeconds * 1000.0)
+        let wanted = extra.filter { m in
+            guard !listed.contains(m.id), m.mobile else { return false }
+            let status = m.state.lowercased()
+            if liveOpenStates.contains(status) { return true }
+            if recentOpenStates.contains(status) {
+                let ts = epochMs(m.updatedAt)
+                return ts > 0 && nowMs - ts <= recentWindowMs
+            }
+            return false
+        }
+        let ids = listed.union(wanted.map(\.id))
+        return wanted.filter { m in
+            guard let p = m.parentMissionID else { return true }
+            return liveOpenStates.contains(m.state.lowercased()) || ids.contains(p)
+        }
+    }
+
+    /// Parents referenced by loaded rows that the rows do not contain.
+    static func missingParentIDs(_ rows: [OrbRow]) -> [String] {
+        let ids = Set(rows.map(\.id))
+        var missing: [String] = []
+        var seen: Set<String> = []
+        for row in rows {
+            if let parent = row.parentMissionID, !ids.contains(parent), seen.insert(parent).inserted {
+                missing.append(parent)
+            }
+        }
+        return missing
+    }
+
+    /// Fetch missing ancestors up to `maxDepth` and place each fetched ancestor right before its first descendant.
+    static func withAncestors(
+        _ rows: [OrbRow],
+        maxDepth: Int = 8,
+        fetchByID: @Sendable (String) async -> OrbRow?
+    ) async -> [OrbRow] {
+        var known: [String: OrbRow] = [:]
+        for row in rows where known[row.id] == nil { known[row.id] = row }
+        var knownOrder = rows
+        var fetched: [String: OrbRow] = [:]
+        var tried: Set<String> = []
+        for _ in 0..<maxDepth {
+            let wanted = missingParentIDs(knownOrder).filter { !tried.contains($0) }
+            if wanted.isEmpty { break }
+            tried.formUnion(wanted)
+            let results = await withTaskGroup(of: OrbRow?.self, returning: [OrbRow].self) { group in
+                for id in wanted {
+                    group.addTask { await fetchByID(id) }
+                }
+                var collected: [OrbRow] = []
+                for await item in group {
+                    if let item { collected.append(item) }
+                }
+                return collected
+            }
+            let byFetchedID = Dictionary(uniqueKeysWithValues: results.map { ($0.id, $0) })
+            for id in wanted {
+                if let row = byFetchedID[id], known[row.id] == nil {
+                    known[row.id] = row
+                    knownOrder.append(row)
+                    fetched[row.id] = row
+                }
+            }
+        }
+        if fetched.isEmpty { return rows }
+        var out: [OrbRow] = []
+        var placed: Set<String> = []
+        func place(_ row: OrbRow, seen: inout Set<String>) {
+            if let parent = row.parentMissionID,
+               let anc = fetched[parent],
+               !placed.contains(parent),
+               !seen.contains(parent) {
+                seen.insert(parent)
+                place(anc, seen: &seen)
+            }
+            if placed.insert(row.id).inserted {
+                out.append(row)
+            }
+        }
+        for row in rows {
+            var seen: Set<String> = [row.id]
+            place(row, seen: &seen)
+        }
+        return out
+    }
+
+    /// Stand-in row for a parent that is not in the loaded rows (cross-project, or transient fetch error).
+    /// Returns `nil` only when Core confirmed the parent is gone (404) or in a `/btw` subtree.
+    static func placeholderParent(_ projectSlug: String) -> (String, OrbRow) -> OrbRow? {
+        { parentID, child in
+            if OrbHierarchy.isGone(parentID) { return nil }
+            let known = OrbHierarchy.seen(parentID)
+            let folderTags = child.raw["tags"].items.filter { $0.text.hasPrefix("orb-folder:") }
+            var dict: [String: OrbJSON] = [
+                "id": .string(parentID),
+                "title": known?.title.map(OrbJSON.string) ?? .null,
+                "status": .string(known?.status ?? "unknown"),
+                "project": .string(known?.project ?? projectSlug),
+                "tags": .array(folderTags),
+                "history": .array([]),
+                "created_at": child.raw["created_at"],
+                "updated_at": .string(child.updatedAt),
+                "orb_placeholder": .bool(true),
+            ]
+            if let backend = known?.backend, !backend.isEmpty {
+                dict["backend"] = .string(backend)
+            }
+            return OrbRow(.object(dict))
+        }
+    }
+
     private static func isRetiredVersion(_ mission: OrbRow) -> Bool {
         let lower = mission.state.lowercased()
         if lower == "acknowledged" || lower == "archived" { return true }
-        return mission.raw["tags"].items.map(\.text).contains {
-            $0 == "superseded" || $0.hasPrefix("superseded_by:") || $0.hasPrefix("superseded-by:") || $0.lowercased() == "orb-archived"
-        }
+        return hasSupersededTag(mission) || mission.raw["tags"].items.contains { $0.text.lowercased() == "orb-archived" }
     }
 
     /// Maps each listed fork to its conversation's leader using the normative
@@ -288,8 +513,10 @@ enum OrbMissionTree {
 
     /// Roots keep the order of the list, and so do the children of each mission.
     /// The most recently active version of a forked conversation leads; earlier
-    /// versions are listed inside it after its launched work.
-    static func nest(_ missions: [OrbRow]) -> [OrbNestedMission] {
+    /// versions are listed inside it after its launched work. When `placeholder`
+    /// is provided, a child whose parent is missing from `missions` is held under
+    /// a stand-in parent row unless `placeholder` returns `nil` (parent confirmed gone).
+    static func nest(_ missions: [OrbRow], placeholder: ((String, OrbRow) -> OrbRow?)? = nil) -> [OrbNestedMission] {
         var byID: [String: OrbRow] = [:]
         for mission in missions where byID[mission.id] == nil {
             byID[mission.id] = mission
@@ -297,6 +524,7 @@ enum OrbMissionTree {
         let leaders = forkLeaders(missions)
         var versionsByLeader: [String: [OrbRow]] = [:]
         var childrenByParent: [String: [OrbRow]] = [:]
+        var placeholders: [String: OrbRow] = [:]
         var roots: [OrbRow] = []
         for mission in missions {
             if let leader = leaders[mission.id], leader.id != mission.id {
@@ -305,11 +533,22 @@ enum OrbMissionTree {
             }
             // A leading fork takes the place of the conversation it continues.
             let place = leaders[mission.id].flatMap { leader in missions.first { leaders[$0.id]?.id == leader.id && $0.forkSource == nil } } ?? mission
-            if let parentID = place.parentMissionID,
+            let parentID = place.parentMissionID
+            if let parentID,
                let parent = byID[parentID],
                parent.id != mission.id,
                !reaches(byID: byID, from: parent, target: mission.id) {
                 childrenByParent[parentID, default: []].append(mission)
+            } else if let parentID, parentID != mission.id, byID[parentID] == nil, let placeholder {
+                if let existing = placeholders[parentID] {
+                    childrenByParent[existing.id, default: []].append(mission)
+                } else if let standIn = placeholder(parentID, place) {
+                    placeholders[parentID] = standIn
+                    roots.append(standIn)
+                    childrenByParent[standIn.id, default: []].append(mission)
+                } else {
+                    roots.append(mission)
+                }
             } else {
                 roots.append(mission)
             }

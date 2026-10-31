@@ -442,4 +442,231 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbInboxModel.classify(row: partialWorker, interaction: nil, includeAutonomous: true), .hidden)
         OrbHierarchy.reset()
     }
+
+    func testOpenBeyondPageWithAncestorsPlaceholdersAndSupersededParity() async {
+        OrbHierarchy.reset()
+        let now = Date(timeIntervalSince1970: 1_793_451_600) // 2026-10-31T13:00:00Z
+
+        // 1. M2 (`openBeyondPage`): live roots/children always kept; stopped roots kept < 7d; stale or unlisted-parent stopped children dropped.
+        let page0 = [
+            OrbRow(.object([
+                "id": .string("listed-root"),
+                "title": .string("Recent root"),
+                "status": .string("completed"),
+                "updated_at": .string("2026-10-31T12:55:00Z")
+            ]))
+        ]
+        let openPool = [
+            OrbRow(.object([
+                "id": .string("9409f9a9"),
+                "title": .string("evm.fast (claude takeover)"),
+                "status": .string("active"),
+                "updated_at": .string("2026-09-25T10:00:00Z") // > 30d old, still live -> kept
+            ])),
+            OrbRow(.object([
+                "id": .string("recent-stopped"),
+                "title": .string("Recent interrupted"),
+                "status": .string("interrupted"),
+                "updated_at": .string("2026-10-29T12:00:00Z") // 2d old -> kept
+            ])),
+            OrbRow(.object([
+                "id": .string("stale-stopped"),
+                "title": .string("Old interrupted"),
+                "status": .string("interrupted"),
+                "updated_at": .string("2026-10-01T12:00:00Z") // 30d old -> dropped
+            ])),
+            OrbRow(.object([
+                "id": .string("stale-child-unlisted"),
+                "title": .string("Orphan interrupted worker"),
+                "status": .string("interrupted"),
+                "parent_mission_id": .string("completed-off-page"),
+                "updated_at": .string("2026-10-30T12:00:00Z") // parent not listed & child not live -> dropped
+            ])),
+            OrbRow(.object([
+                "id": .string("recent-child-listed"),
+                "title": .string("Stopped worker of live root"),
+                "status": .string("interrupted"),
+                "parent_mission_id": .string("9409f9a9"),
+                "updated_at": .string("2026-10-30T12:00:00Z") // parent 9409f9a9 is kept -> kept
+            ])),
+            OrbRow(.object([
+                "id": .string("live-child-unlisted"),
+                "title": .string("Live worker of paged-out completed root"),
+                "status": .string("waiting_background"),
+                "parent_mission_id": .string("completed-off-page"),
+                "updated_at": .string("2026-10-10T12:00:00Z") // child is live -> kept so withAncestors fetches parent
+            ])),
+            OrbRow(.object([
+                "id": .string("btw-live"),
+                "title": .string("evm.fast · btw"),
+                "status": .string("active"),
+                "tags": .array([.string("btw-parent:9409f9a9")]),
+                "updated_at": .string("2026-10-31T12:59:00Z") // /btw -> dropped
+            ]))
+        ]
+        let beyond = OrbMissionTree.openBeyondPage(page0, extra: openPool, now: now)
+        XCTAssertEqual(beyond.map(\.id), ["9409f9a9", "recent-stopped", "recent-child-listed", "live-child-unlisted"])
+
+        // 2. Multi-hop `withAncestors` + cross-project placeholder + cross-project `/btw` exclusion (Assistant incident replay).
+        OrbHierarchy.reset()
+        let initialRows = [
+            OrbRow(.object([
+                "id": .string("gc-312-a"),
+                "title": .string("Re-review PR #312 @1445a50 (P0-4)"),
+                "status": .string("active"),
+                "project": .string("assistant"),
+                "parent_mission_id": .string("6ce45940"),
+                "updated_at": .string("2026-10-31T12:58:00Z")
+            ])),
+            OrbRow(.object([
+                "id": .string("gc-312-b"),
+                "title": .string("Re-review PR #312 @1445a50 (P0-4)"),
+                "status": .string("active"),
+                "project": .string("assistant"),
+                "parent_mission_id": .string("75a05dbd"),
+                "updated_at": .string("2026-10-31T12:57:00Z")
+            ])),
+            OrbRow(.object([
+                "id": .string("w-pr303"),
+                "title": .string("PR #303 r2: drop worktree"),
+                "status": .string("active"),
+                "project": .string("assistant"),
+                "parent_mission_id": .string("4c6242f6"),
+                "updated_at": .string("2026-10-31T12:56:00Z")
+            ])),
+            OrbRow(.object([
+                "id": .string("cross-kid"),
+                "title": .string("GuestInv spec review r5"),
+                "status": .string("active"),
+                "project": .string("assistant"),
+                "parent_mission_id": .string("9409f9a9"),
+                "updated_at": .string("2026-10-31T12:55:00Z")
+            ])),
+            OrbRow(.object([
+                "id": .string("btw-kid"),
+                "title": .string("Unstamped /btw worker"),
+                "status": .string("active"),
+                "project": .string("assistant"),
+                "parent_mission_id": .string("paged-btw"),
+                "updated_at": .string("2026-10-31T12:54:00Z")
+            ]))
+        ]
+        let remoteAncestors: [String: OrbJSON] = [
+            "6ce45940": .object([
+                "id": .string("6ce45940"),
+                "title": .string("turbo-lean WS3"),
+                "status": .string("completed"),
+                "project": .string("assistant"),
+                "parent_mission_id": .string("9f559751"),
+                "updated_at": .string("2026-10-31T10:00:00Z")
+            ]),
+            "75a05dbd": .object([
+                "id": .string("75a05dbd"),
+                "title": .string("turbo-lean WS2"),
+                "status": .string("completed"),
+                "project": .string("assistant"),
+                "parent_mission_id": .string("9f559751"),
+                "updated_at": .string("2026-10-31T09:50:00Z")
+            ]),
+            "9f559751": .object([
+                "id": .string("9f559751"),
+                "title": .string("turbo-lean improvements"),
+                "status": .string("completed"),
+                "project": .string("assistant"),
+                "updated_at": .string("2026-10-31T12:42:00Z")
+            ]),
+            "4c6242f6": .object([
+                "id": .string("4c6242f6"),
+                "title": .string("improve turbo-lean for clifv"),
+                "status": .string("completed"),
+                "project": .string("assistant"),
+                "updated_at": .string("2026-10-31T08:00:00Z")
+            ]),
+            "9409f9a9": .object([
+                "id": .string("9409f9a9"),
+                "title": .string("evm.fast (claude takeover)"),
+                "status": .string("active"),
+                "backend": .string("claudecode"),
+                "project": .string("verity-core"),
+                "updated_at": .string("2026-10-30T08:00:00Z")
+            ]),
+            "paged-btw": .object([
+                "id": .string("paged-btw"),
+                "title": .string("evm.fast · btw"),
+                "status": .string("active"),
+                "project": .string("verity-core"),
+                "tags": .array([.string("btw-parent:9409f9a9")]),
+                "updated_at": .string("2026-10-31T12:50:00Z")
+            ])
+        ]
+        let ownIDs = Set(initialRows.map(\.id))
+        let withAnc = await OrbMissionTree.withAncestors(initialRows) { id in
+            remoteAncestors[id].map { OrbRow($0) }
+        }
+        let scoped = withAnc.filter { ownIDs.contains($0.id) || $0.raw["project"].text == "assistant" }
+        let mobile = OrbMissionTree.filterMobile(scoped)
+        XCTAssertFalse(mobile.contains { $0.id == "btw-kid" })
+        let nested = OrbMissionTree.nest(mobile, placeholder: OrbMissionTree.placeholderParent("assistant"))
+        XCTAssertEqual(nested.map(\.id), ["9f559751", "4c6242f6", "9409f9a9"])
+        XCTAssertEqual(OrbMissionTree.countNested(nested[0]), 4)
+        XCTAssertEqual(OrbMissionTree.countNested(nested[0], matches: \.active), 2)
+        XCTAssertEqual(nested[0].children.map(\.id), ["6ce45940", "75a05dbd"])
+        XCTAssertEqual(nested[0].children[0].children.map(\.id), ["gc-312-a"])
+        XCTAssertEqual(nested[1].children.map(\.id), ["w-pr303"])
+        // Cross-project parent `9409f9a9` is rendered as a placeholder carrying seen title/backend/status/project.
+        XCTAssertTrue(nested[2].mission.isPlaceholder)
+        XCTAssertEqual(nested[2].mission.title, "evm.fast (claude takeover)")
+        XCTAssertEqual(nested[2].mission.backend, "claudecode")
+        XCTAssertEqual(nested[2].mission.state, "active")
+        XCTAssertEqual(nested[2].mission.raw["project"].text, "verity-core")
+        XCTAssertEqual(nested[2].children.map(\.id), ["cross-kid"])
+
+        // 3. Transiently unfetched parent uses "Parent mission" placeholder; confirmed 404 (`markGone`) lets child stand at root.
+        let transientOrphan = OrbRow(.object([
+            "id": .string("orphan-transient"),
+            "title": .string("Worker waiting on slow parent"),
+            "status": .string("active"),
+            "parent_mission_id": .string("parent-slow"),
+            "updated_at": .string("2026-10-31T12:59:00Z")
+        ]))
+        let held = OrbMissionTree.nest([transientOrphan], placeholder: OrbMissionTree.placeholderParent("assistant"))
+        XCTAssertEqual(held.map(\.id), ["parent-slow"])
+        XCTAssertTrue(held[0].mission.isPlaceholder)
+        XCTAssertEqual(held[0].mission.title, "Parent mission")
+        XCTAssertEqual(held[0].children.map(\.id), ["orphan-transient"])
+
+        OrbHierarchy.markGone("parent-404")
+        let confirmedOrphan = OrbRow(.object([
+            "id": .string("orphan-404"),
+            "title": .string("Worker whose parent was deleted"),
+            "status": .string("active"),
+            "parent_mission_id": .string("parent-404"),
+            "updated_at": .string("2026-10-31T12:59:00Z")
+        ]))
+        let released = OrbMissionTree.nest([confirmedOrphan], placeholder: OrbMissionTree.placeholderParent("assistant"))
+        XCTAssertEqual(released.map(\.id), ["orphan-404"])
+        XCTAssertFalse(released[0].mission.isPlaceholder)
+
+        // 4. `isSupersededInTree`: hides non-live superseded missions and descendants, never live missions.
+        let supParent = OrbRow(.object([
+            "id": .string("sup-p"),
+            "status": .string("completed"),
+            "tags": .array([.string("superseded_by:new-p")])
+        ]))
+        let supChild = OrbRow(.object([
+            "id": .string("sup-c"),
+            "status": .string("completed"),
+            "parent_mission_id": .string("sup-p")
+        ]))
+        let liveSup = OrbRow(.object([
+            "id": .string("sup-live"),
+            "status": .string("active"),
+            "tags": .array([.string("superseded")])
+        ]))
+        let supMap = [supParent.id: supParent, supChild.id: supChild, liveSup.id: liveSup]
+        XCTAssertTrue(OrbMissionTree.isSupersededInTree(supParent, byID: supMap))
+        XCTAssertTrue(OrbMissionTree.isSupersededInTree(supChild, byID: supMap))
+        XCTAssertFalse(OrbMissionTree.isSupersededInTree(liveSup, byID: supMap))
+        OrbHierarchy.reset()
+    }
 }

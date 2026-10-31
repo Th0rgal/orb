@@ -1289,6 +1289,7 @@ object OrbInboxModel {
         val firstUser = history.firstOrNull { OrbJSON.str(it, "role") == "user" }
             ?.let { OrbJSON.str(it, "content") } ?: ""
         if (firstUser.isNotEmpty()) return clipToSentence(firstUser, 54)
+        if (mission.bool("orb_placeholder") == true) return "Parent mission"
         return "Untitled conversation"
     }
 

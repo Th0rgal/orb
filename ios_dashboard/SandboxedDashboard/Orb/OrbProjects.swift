@@ -338,7 +338,7 @@ struct OrbArchiveProjectGroup: Identifiable, Equatable {
             }
             guard !filteredRows.isEmpty else { continue }
             let roots = trimmedSearch.isEmpty
-                ? OrbMissionTree.nest(filteredRows)
+                ? OrbMissionTree.nest(filteredRows, placeholder: OrbMissionTree.placeholderParent(slug))
                 : filteredRows.map { OrbNestedMission(mission: $0) }
             groups.append(OrbArchiveProjectGroup(slug: slug, label: label, roots: roots, totalCount: filteredRows.count))
         }
@@ -1337,23 +1337,27 @@ struct OrbProjectPage: View {
     private let moveClipboard = OrbMoveClipboard.shared
     private let api = OrbCore.shared
     private let appearance = OrbProjectAppearance.shared
-    private func matchesFilter(_ row: OrbRow) -> Bool {
+    private func matchesFilter(_ row: OrbRow, byID: [String: OrbRow]) -> Bool {
         (search.isEmpty || row.name.localizedCaseInsensitiveContains(search) || OrbStyle.displayTitle(row.name).localizedCaseInsensitiveContains(search)) &&
-        (filter == "Archived" ? row.state == "acknowledged" : row.state != "acknowledged") &&
+        (filter == "Archived"
+            ? row.state == "acknowledged"
+            : (row.state != "acknowledged" && !OrbMissionTree.isSupersededInTree(row, byID: byID))) &&
         (filter != "Working" || row.active) &&
         (filter != "Needs attention" || row.missionState.map { $0.isProblem || $0 == .interrupted } == true)
     }
     private var visible: [OrbRow] {
+        var byID: [String: OrbRow] = [:]
+        for m in missions where byID[m.id] == nil { byID[m.id] = m }
         if !search.isEmpty {
-            return missions.filter(matchesFilter)
+            return missions.filter { matchesFilter($0, byID: byID) }
         }
-        return OrbMissionTree.treeRows(missions, visible: matchesFilter)
+        return OrbMissionTree.treeRows(missions) { matchesFilter($0, byID: byID) }
     }
     private var nestedRoots: [OrbNestedMission] {
         if !search.isEmpty {
             return visible.map { OrbNestedMission(mission: $0) }
         }
-        return OrbMissionTree.nest(visible)
+        return OrbMissionTree.nest(visible, placeholder: OrbMissionTree.placeholderParent(project.id))
     }
     private struct FlattenedMissionRow: Identifiable {
         let node: OrbNestedMission
@@ -1690,7 +1694,16 @@ struct OrbProjectPage: View {
                                     .fixedSize(horizontal: true, vertical: false)
                             }
                         }
-                        Text("\(OrbStyle.serviceName(row.backend)) · \(OrbStyle.statusLabel(row.state))")
+                        let serviceLabel = OrbStyle.serviceName(row.backend)
+                        let statusLabel = row.state == "unknown" ? "" : OrbStyle.statusLabel(row.state)
+                        let subtitleText: String = {
+                            if row.isPlaceholder && serviceLabel.isEmpty && statusLabel.isEmpty {
+                                let sourceProj = row.raw["project"].text
+                                return (!sourceProj.isEmpty && sourceProj != project.id) ? sourceProj : "Parent conversation"
+                            }
+                            return [serviceLabel, statusLabel].filter { !$0.isEmpty }.joined(separator: " · ")
+                        }()
+                        Text(subtitleText)
                             .font(.caption)
                             .foregroundStyle(row.active ? OrbStyle.textSecondary : OrbStyle.textMuted)
                             .orbAdaptiveLineLimit(1, accessibility: 2)

@@ -709,22 +709,82 @@ final class OrbCore {
 
     nonisolated static func escape(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters: unreservedCharacters) ?? "" }
 
-    func missions(_ project: String, includeArchived: Bool = false) async throws -> [OrbRow] {
-        var rows: [OrbRow] = [], offset = 0
-        while true {
-            let page = try await call("/api/control/missions?project=\(Self.escape(project))&all=true&limit=100&offset=\(offset)").items
-            for raw in page {
-                let mid = raw["id"].text
-                if !mid.isEmpty {
-                    OrbReadCache.seedMemory("mission:\(mid)", value: raw)
-                }
+    private func fetchAncestor(_ id: String) async -> OrbRow? {
+        if let cached = OrbHierarchy.cachedAncestor(id) { return cached }
+        do {
+            let raw = try await call("/api/control/missions/\(Self.escape(id))")
+            let mid = raw["id"].text
+            if !mid.isEmpty {
+                OrbReadCache.seedMemory("mission:\(mid)", value: raw)
             }
-            let fresh = page.map { OrbRow($0) }.filter { row in !rows.contains(where: { $0.id == row.id }) }
-            rows += fresh
-            if !includeArchived || page.count < 100 || fresh.isEmpty { break }
-            offset += page.count
+            let row = OrbRow(raw)
+            OrbHierarchy.storeAncestor(row)
+            return row
+        } catch let http as OrbHTTPError where http.status == 404 {
+            OrbHierarchy.markGone(id)
+            return nil
+        } catch {
+            return OrbHierarchy.cachedAncestor(id, allowStale: true)
         }
-        return rows.filter(\.mobile)
+    }
+
+    /// A project's recent history plus open missions beyond the page (`openBeyondPage`, M2)
+    /// and any paged-out ancestors (`withAncestors`), matching desktop `listProjectMissions`.
+    func missions(_ project: String, includeArchived: Bool = false) async throws -> [OrbRow] {
+        let escaped = Self.escape(project)
+        var history: [OrbRow] = []
+        var liveRows: [OrbRow] = []
+        if includeArchived {
+            var offset = 0
+            while true {
+                let page = try await call("/api/control/missions?project=\(escaped)&all=true&limit=100&offset=\(offset)").items
+                for raw in page {
+                    let mid = raw["id"].text
+                    if !mid.isEmpty { OrbReadCache.seedMemory("mission:\(mid)", value: raw) }
+                }
+                let fresh = page.map { OrbRow($0) }.filter { row in !history.contains(where: { $0.id == row.id }) }
+                history += fresh
+                if page.count < 100 || fresh.isEmpty { break }
+                offset += page.count
+            }
+        } else {
+            async let historyPage = call("/api/control/missions?project=\(escaped)&all=true&limit=100&offset=0")
+            async let firstLivePage = call("/api/control/missions?project=\(escaped)&limit=200")
+            let (rawHistory, rawFirstLive) = try await (historyPage, firstLivePage)
+            for raw in rawHistory.items + rawFirstLive.items {
+                let mid = raw["id"].text
+                if !mid.isEmpty { OrbReadCache.seedMemory("mission:\(mid)", value: raw) }
+            }
+            history = rawHistory.items.map { OrbRow($0) }
+            var livePages: [[OrbJSON]] = [rawFirstLive.items]
+            var offset = 200
+            while livePages.last?.count == 200 && offset < 1000 {
+                let next = try await call("/api/control/missions?project=\(escaped)&limit=200&offset=\(offset)").items
+                for raw in next {
+                    let mid = raw["id"].text
+                    if !mid.isEmpty { OrbReadCache.seedMemory("mission:\(mid)", value: raw) }
+                }
+                livePages.append(next)
+                offset += 200
+            }
+            liveRows = livePages.flatMap { $0 }.map { OrbRow($0) }
+        }
+
+        var byID: [String: OrbRow] = [:]
+        var merged: [OrbRow] = []
+        let beyond = includeArchived ? [] : OrbMissionTree.openBeyondPage(history, extra: liveRows)
+        for row in history + beyond where byID[row.id] == nil {
+            byID[row.id] = row
+            merged.append(row)
+        }
+        merged.sort { $0.updatedAt > $1.updatedAt }
+
+        let ownIDs = Set(merged.map(\.id))
+        let withParents = await OrbMissionTree.withAncestors(merged) { [weak self] id in
+            await self?.fetchAncestor(id)
+        }
+        let scoped = withParents.filter { ownIDs.contains($0.id) || $0.raw["project"].text == project }
+        return OrbMissionTree.filterMobile(scoped)
     }
 
     private func get<T: Decodable>(_ path: String, authenticated: Bool = true) async throws -> T {

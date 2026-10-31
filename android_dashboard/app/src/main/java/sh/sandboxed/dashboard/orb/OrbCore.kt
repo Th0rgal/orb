@@ -282,10 +282,29 @@ object OrbMissionTree {
     /** Forks share the conversation's name. */
     fun forkTitle(title: String): String = title.removeSuffix(LEGACY_FORK_SUFFIX)
 
+    data class Seen(
+        val title: String? = null,
+        val project: String? = null,
+        val status: String? = null,
+        val backend: String? = null
+    )
+
+    private data class CachedAncestor(val row: OrbRow, val fetchedAtMs: Long)
+
+    const val ANCESTOR_TTL_MS = 60_000L
+    const val RECENT_OPEN_MS = 7L * 24 * 60 * 60 * 1000
+    private val LIVE_OPEN_STATES = setOf(
+        "active", "running", "pending", "queued", "awaiting_user", "resuming", "starting", "waiting_background"
+    )
+    private val RECENT_OPEN_STATES = setOf("interrupted", "failed", "paused", "blocked")
+
     /** Parent links and `/btw` subtree markers are sticky (docs/specs/sidebar-hierarchy.md):
      * a payload that omits the link never moves a known child to the root or leaks a `/btw` worker. */
     private val knownParents = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val knownBtw = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val seenFacts = java.util.concurrent.ConcurrentHashMap<String, Seen>()
+    private val ancestorCache = java.util.concurrent.ConcurrentHashMap<String, CachedAncestor>()
+    private val goneIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** Explicit re-parent (null detaches): the only way a remembered parent changes. */
     fun reparent(id: String, parent: String?) {
@@ -296,16 +315,63 @@ object OrbMissionTree {
     fun resetHierarchy() {
         knownParents.clear()
         knownBtw.clear()
+        seenFacts.clear()
+        ancestorCache.clear()
+        goneIds.clear()
     }
 
     private fun hasDirectBtwTag(mission: OrbRow): Boolean =
         OrbJSON.strList(mission.raw, "tags").any { it.startsWith("btw-parent:") || it == "btw-subagent" }
 
+    fun isPlaceholder(mission: OrbRow): Boolean = mission.bool("orb_placeholder") == true
+
     fun observe(mission: OrbRow) {
+        if (isPlaceholder(mission)) return
         val id = mission.str("id") ?: mission.id
         if (id.isEmpty()) return
+        goneIds.remove(id)
         payloadParentId(mission)?.let { knownParents[id] = it }
         if (hasDirectBtwTag(mission)) knownBtw.add(id)
+        val rawTitle = mission.str("title")
+        val hasProjectKey = mission.raw.containsKey("project") && mission.raw["project"] is String
+        val rawProject = if (hasProjectKey) (mission.raw["project"] as String).trim() else null
+        val rawStatus = mission.str("status", "state")?.takeIf { it != "unknown" }
+        val rawBackend = mission.str("backend")
+        seenFacts.compute(id) { _, prev ->
+            val cur = prev ?: Seen()
+            Seen(
+                title = rawTitle ?: cur.title,
+                project = rawProject ?: cur.project,
+                status = rawStatus ?: cur.status,
+                backend = rawBackend ?: cur.backend
+            )
+        }
+    }
+
+    fun seen(id: String): Seen? = seenFacts[id]
+
+    fun cachedAncestor(id: String, nowMs: Long = System.currentTimeMillis(), allowStale: Boolean = false): OrbRow? {
+        val entry = ancestorCache[id] ?: return null
+        return if (allowStale || nowMs - entry.fetchedAtMs < ANCESTOR_TTL_MS) entry.row else null
+    }
+
+    fun storeAncestor(row: OrbRow, nowMs: Long = System.currentTimeMillis()) {
+        if (row.id.isEmpty()) return
+        observe(row)
+        ancestorCache[row.id] = CachedAncestor(row, nowMs)
+        goneIds.remove(row.id)
+    }
+
+    fun markGone(id: String) {
+        if (id.isEmpty()) return
+        ancestorCache.remove(id)
+        goneIds.add(id)
+    }
+
+    fun isGone(id: String): Boolean {
+        if (id.isEmpty()) return false
+        if (isBtwMission(OrbRow(id, mapOf("id" to id)))) return true
+        return goneIds.contains(id)
     }
 
     /** True for `/btw` side-question forks (`btw-parent:*`), `btw-subagent` workers, and every descendant in their subtrees. */
@@ -398,10 +464,187 @@ object OrbMissionTree {
         return null
     }
 
-    fun nest(missions: List<OrbRow>): List<OrbNestedMission> {
+    private fun reaches(byId: Map<String, OrbRow>, from: OrbRow, target: String): Boolean {
+        val seen = mutableSetOf<String>()
+        var current: OrbRow? = from
+        while (current != null && seen.add(current.id)) {
+            if (current.id == target) return true
+            current = parentId(current)?.let { byId[it] }
+        }
+        return false
+    }
+
+    /** Keep archived/completed parents as context for visible child workers without restoring all archived missions. */
+    fun treeRows(missions: List<OrbRow>, visible: (OrbRow) -> Boolean): List<OrbRow> {
+        val byId = LinkedHashMap<String, OrbRow>(missions.size)
+        for (m in missions) byId.putIfAbsent(m.id, m)
+        val retained = missions.filter(visible).mapTo(mutableSetOf()) { it.id }
+        for (m in missions) {
+            if (!visible(m)) continue
+            val seen = mutableSetOf(m.id)
+            var parent = parentId(m)
+            while (parent != null && seen.add(parent)) {
+                val row = byId[parent] ?: break
+                retained.add(parent)
+                parent = parentId(row)
+            }
+        }
+        return missions.filter { it.id in retained }
+    }
+
+    fun isSuperseded(mission: OrbRow): Boolean {
+        if (isLive(mission)) return false
+        return hasSupersededTag(mission)
+    }
+
+    /** True when a mission or any of its ancestors is superseded and this mission is not actively running. */
+    fun isSupersededInTree(mission: OrbRow, byId: Map<String, OrbRow>): Boolean {
+        if (isLive(mission)) return false
+        if (isSuperseded(mission)) return true
+        val seen = mutableSetOf(mission.id)
+        var parent = parentId(mission)
+        while (parent != null && seen.add(parent)) {
+            val row = byId[parent] ?: break
+            if (isSuperseded(row)) return true
+            parent = parentId(row)
+        }
+        return false
+    }
+
+    /** Open missions older than the history page (`sidebar-hierarchy.md` M2):
+     * live ones always; stopped ones within 7 days; children only when live or their parent is listed. */
+    fun openBeyondPage(history: List<OrbRow>, extra: List<OrbRow>, nowMs: Long = System.currentTimeMillis()): List<OrbRow> {
+        for (m in history) observe(m)
+        for (m in extra) observe(m)
+        val byId = LinkedHashMap<String, OrbRow>(history.size + extra.size)
+        for (m in history) byId.putIfAbsent(m.id, m)
+        for (m in extra) byId.putIfAbsent(m.id, m)
+        val listed = history.mapTo(mutableSetOf()) { it.id }
+        val wanted = extra.filter { m ->
+            if (m.id in listed || isBtwMission(m, byId)) return@filter false
+            val status = (m.str("status", "state") ?: "").lowercase()
+            if (status in LIVE_OPEN_STATES) return@filter true
+            if (status in RECENT_OPEN_STATES) {
+                val ts = activityMs(m)
+                return@filter ts > 0L && nowMs - ts <= RECENT_OPEN_MS
+            }
+            false
+        }
+        val ids = HashSet<String>(listed.size + wanted.size).apply {
+            addAll(listed)
+            for (m in wanted) add(m.id)
+        }
+        return wanted.filter { m ->
+            val p = parentId(m) ?: return@filter true
+            val status = (m.str("status", "state") ?: "").lowercase()
+            status in LIVE_OPEN_STATES || p in ids
+        }
+    }
+
+    /** Parents referenced by loaded rows that the rows do not contain. */
+    fun missingParentIds(rows: List<OrbRow>): List<String> {
+        val ids = rows.mapTo(mutableSetOf()) { it.id }
+        val missing = LinkedHashSet<String>()
+        for (row in rows) {
+            val p = parentId(row)
+            if (p != null && p !in ids) missing.add(p)
+        }
+        return missing.toList()
+    }
+
+    /** Fetch missing ancestors up to [maxDepth] and place each fetched ancestor right before its first descendant. */
+    suspend fun withAncestors(
+        rows: List<OrbRow>,
+        maxDepth: Int = 8,
+        fetchById: suspend (String) -> OrbRow?
+    ): List<OrbRow> {
+        val known = LinkedHashMap<String, OrbRow>(rows.size)
+        for (row in rows) {
+            observe(row)
+            known.putIfAbsent(row.id, row)
+        }
+        val fetched = LinkedHashMap<String, OrbRow>()
+        val tried = mutableSetOf<String>()
+        for (depth in 0 until maxDepth) {
+            val wanted = missingParentIds(known.values.toList()).filter { it !in tried }
+            if (wanted.isEmpty()) break
+            tried.addAll(wanted)
+            val results = coroutineScope {
+                wanted.map { id ->
+                    async {
+                        try {
+                            fetchById(id)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }
+                }.awaitAll()
+            }
+            for (row in results) {
+                if (row != null) {
+                    observe(row)
+                    if (!known.containsKey(row.id)) {
+                        known[row.id] = row
+                        fetched[row.id] = row
+                    }
+                }
+            }
+        }
+        if (fetched.isEmpty()) return rows
+        val out = ArrayList<OrbRow>(rows.size + fetched.size)
+        val placed = mutableSetOf<String>()
+        fun place(row: OrbRow, seen: MutableSet<String>) {
+            val parent = parentId(row)
+            val anc = if (parent != null) fetched[parent] else null
+            if (parent != null && anc != null && parent !in placed && seen.add(parent)) {
+                place(anc, seen)
+            }
+            if (placed.add(row.id)) {
+                out.add(row)
+            }
+        }
+        for (row in rows) {
+            place(row, mutableSetOf(row.id))
+        }
+        return out
+    }
+
+    /** Stand-in row for a parent that is not in the loaded rows (cross-project, or transient fetch error).
+     * Returns null only when Core confirmed the parent is gone (404) or in a `/btw` subtree. */
+    fun placeholderParent(projectSlug: String): (String, OrbRow) -> OrbRow? = { parentId, child ->
+        if (isGone(parentId)) {
+            null
+        } else {
+            val known = seen(parentId)
+            val folderTags = OrbJSON.strList(child.raw, "tags").filter { it.startsWith("orb-folder:") }
+            val dict = LinkedHashMap<String, Any?>().apply {
+                put("id", parentId)
+                put("title", known?.title)
+                put("status", known?.status ?: "unknown")
+                put("project", known?.project ?: projectSlug)
+                put("tags", folderTags)
+                put("history", emptyList<OrbDict>())
+                put("created_at", child.str("created_at"))
+                put("updated_at", activity(child))
+                put("orb_placeholder", true)
+                if (!known?.backend.isNullOrEmpty()) {
+                    put("backend", known?.backend)
+                }
+            }
+            OrbRow(parentId, dict)
+        }
+    }
+
+    fun nest(
+        missions: List<OrbRow>,
+        placeholder: ((String, OrbRow) -> OrbRow?)? = null
+    ): List<OrbNestedMission> {
         val deduped = OrbContinuation.collapse(missions)
         val byId = deduped.associateBy { it.id }
         val childrenByParent = mutableMapOf<String, MutableList<OrbRow>>()
+        val placeholders = mutableMapOf<String, OrbRow>()
         val roots = mutableListOf<OrbRow>()
         val leaders = forkLeaders(deduped)
         val versionsByLeader = mutableMapOf<String, MutableList<OrbRow>>()
@@ -415,8 +658,23 @@ object OrbMissionTree {
             // A leading fork takes the place of the conversation it continues.
             val place = leader?.let { l -> deduped.firstOrNull { leaders[it.id]?.id == l.id && forkSource(it) == null } } ?: mission
             val parent = parentId(place)
-            if (parent != null && parent != mission.id && byId.containsKey(parent)) {
+            val parentRow = if (parent != null) byId[parent] else null
+            if (parent != null && parentRow != null && parent != mission.id && !reaches(byId, parentRow, mission.id)) {
                 childrenByParent.getOrPut(parent) { mutableListOf() }.add(mission)
+            } else if (parent != null && parent != mission.id && parentRow == null && placeholder != null) {
+                val existing = placeholders[parent]
+                if (existing != null) {
+                    childrenByParent.getOrPut(existing.id) { mutableListOf() }.add(mission)
+                } else {
+                    val standIn = placeholder(parent, place)
+                    if (standIn != null) {
+                        placeholders[parent] = standIn
+                        roots.add(standIn)
+                        childrenByParent.getOrPut(standIn.id) { mutableListOf() }.add(mission)
+                    } else {
+                        roots.add(mission)
+                    }
+                }
             } else {
                 roots.add(mission)
             }
@@ -425,7 +683,9 @@ object OrbMissionTree {
         fun build(row: OrbRow, depth: Int, visited: Set<String>): OrbNestedMission {
             if (visited.contains(row.id)) return OrbNestedMission(row, emptyList(), depth)
             val nextVisited = visited + row.id
-            val kids = (childrenByParent[row.id] ?: emptyList()).map { build(it, depth + 1, nextVisited) }
+            val kids = (childrenByParent[row.id] ?: emptyList())
+                .filterNot { it.id in nextVisited }
+                .map { build(it, depth + 1, nextVisited) }
             val versions = (versionsByLeader[row.id] ?: emptyList())
                 .sortedByDescending { activity(it) }
                 .map { build(it, depth + 1, nextVisited).copy(version = true) }
@@ -1400,6 +1660,73 @@ class OrbCore private constructor(context: Context) {
     suspend fun fetchDict(path: String): OrbDict {
         val res = request(path)
         return OrbJSON.dict(res) ?: emptyMap()
+    }
+
+    private suspend fun fetchAncestor(id: String): OrbRow? {
+        OrbMissionTree.cachedAncestor(id)?.let { return it }
+        return try {
+            val raw = fetchDict("/api/control/missions/${encodeComponent(id)}")
+            if (raw.isEmpty()) return null
+            val row = OrbRow(raw, id)
+            val hist = row.rows("history")
+            if (hist.isNotEmpty()) {
+                OrbReadCache.saveRowsMemoryOnly("mission_msgs_${row.id}", hist)
+            }
+            OrbMissionTree.storeAncestor(row)
+            row
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: OrbError) {
+            if (e.status == 404) {
+                OrbMissionTree.markGone(id)
+                null
+            } else {
+                OrbMissionTree.cachedAncestor(id, allowStale = true)
+            }
+        } catch (_: Throwable) {
+            OrbMissionTree.cachedAncestor(id, allowStale = true)
+        }
+    }
+
+    /** A project's recent history plus open missions beyond the page (`openBeyondPage`, M2)
+     * and any paged-out ancestors (`withAncestors`), matching desktop `listProjectMissions` and iOS `missions`. */
+    suspend fun projectMissions(projectSlug: String, includeArchived: Boolean = false): List<OrbRow> = coroutineScope {
+        val encoded = encodeComponent(projectSlug)
+        val history = ArrayList<OrbRow>()
+        val liveRows = ArrayList<OrbRow>()
+        if (includeArchived) {
+            var offset = 0
+            while (true) {
+                val page = fetchRows("/api/control/missions?project=$encoded&all=true&limit=100&offset=$offset", null)
+                val existingIds = history.mapTo(mutableSetOf()) { it.id }
+                val fresh = page.filter { it.id !in existingIds }
+                history.addAll(fresh)
+                if (page.size < 100 || fresh.isEmpty()) break
+                offset += page.size
+            }
+        } else {
+            val historyDeferred = async { fetchRows("/api/control/missions?project=$encoded&all=true&limit=100&offset=0", null) }
+            val firstLiveDeferred = async { fetchRows("/api/control/missions?project=$encoded&limit=200", null) }
+            history.addAll(historyDeferred.await())
+            val livePages = mutableListOf(firstLiveDeferred.await())
+            var offset = 200
+            while (livePages.last().size == 200 && offset < 1000) {
+                livePages.add(fetchRows("/api/control/missions?project=$encoded&limit=200&offset=$offset", null))
+                offset += 200
+            }
+            for (page in livePages) liveRows.addAll(page)
+        }
+
+        val byId = LinkedHashMap<String, OrbRow>()
+        val beyond = if (includeArchived) emptyList() else OrbMissionTree.openBeyondPage(history, liveRows)
+        for (row in history + beyond) byId.putIfAbsent(row.id, row)
+        val merged = byId.values.sortedByDescending {
+            OrbJSON.dateEpochMs(it.str("updated_at", "created_at")) ?: 0L
+        }
+        val ownIds = merged.mapTo(mutableSetOf()) { it.id }
+        val withParents = OrbMissionTree.withAncestors(merged) { fetchAncestor(it) }
+        val scoped = withParents.filter { it.id in ownIds || (it.str("project", "project_slug") ?: "") == projectSlug }
+        OrbMissionTree.filterMobile(scoped)
     }
 
     suspend fun fetchRows(path: String, key: String?): List<OrbRow> {
