@@ -74,6 +74,13 @@ if [ "$local_only_heavy" -eq 1 ] && [ "${SANDBOXED_REMOTE_LAKE_VERIFY:-0}" = "1"
   local_only_heavy=0
 fi
 
+emit_turbo_lean_advisory() {
+  if [ "${SANDBOXED_ALLOW_RAW_LAKE:-0}" = "1" ]; then
+    return 0
+  fi
+  printf '[sandboxed lake shim] warning: raw `lake %s` duplicates multi-GiB .lake/.olean artifacts per worktree and risks filling storage.\n[sandboxed lake shim] use `turbo-lean` instead (shares CAS across worktrees):\n  - full/target build: `turbo-lean build` (or `turbo-lean build --project-dir <dir>`)\n  - single-file proof check: `turbo-lean check <path/to/File.lean>`\n  (set SANDBOXED_ALLOW_RAW_LAKE=1 only if raw Lake is strictly required.)\n' "${1:-build}" >&2
+}
+
 if [ "$local_only_heavy" -eq 1 ]; then
   if [ "$policy" = "remote_required" ] && [ "${SANDBOXED_ALLOW_LOCAL_LEAN:-0}" != "1" ]; then
     echo "sandboxed lake shim: remote_required verification needs the expanded sandboxed-node Lake protocol; local execution is blocked" >&2
@@ -84,10 +91,14 @@ if [ "$local_only_heavy" -eq 1 ]; then
   elif [ "$policy" = "remote_preferred" ]; then
     echo "sandboxed lake shim: remote verification is not enabled for this fleet; using the local Lean slot" >&2
   fi
+  emit_turbo_lean_advisory "${1:-check}"
   exec lean-slot "$real_lake" "$@"
 fi
 
 if [ "$remote_heavy" -eq 0 ] || [ "$policy" = "local_allowed" ]; then
+  if [ "$remote_heavy" -eq 1 ]; then
+    emit_turbo_lean_advisory "${1:-build}"
+  fi
   exec "$real_lake" "$@"
 fi
 

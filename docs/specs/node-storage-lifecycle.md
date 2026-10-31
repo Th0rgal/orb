@@ -25,8 +25,10 @@ Remote `RawCommand` and synchronous lease commands also wire `ELAN_HOME`
 (`<work-root>/caches/elan`), `TURBO_LEAN_HOME` (`<work-root>/caches/turbo-lean`),
 and an advisory `<work-root>/caches/bin/lake` shim before applying payload `env`
 overrides so multi-agent Lean turns share one toolchain/CAS store per host and
-emit stderr guidance on unshared `lake build` calls while transparently passing
-through `lake setup-file`, `lake env`, and `lake exe`.
+emit actionable `turbo-lean build` / `turbo-lean check` stderr guidance on unshared
+`lake build|check|test` calls while transparently passing through `lake setup-file`,
+`lake env`, and `lake exe`. Core's local/container `scripts/lake` shim emits the same
+advisory when `SANDBOXED_COMPUTE_POLICY=local_allowed` falls through to local Lake.
 
 The node persists a receipt in jobs.db before executing: unique execution ID,
 mission/job attribution, parent and directory device/inode identity. Filesystem

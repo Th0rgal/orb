@@ -77,6 +77,19 @@ delete_old_tree_contents "$opencode_cache" "$cache_days"
 delete_old_tree_contents "$hermes_home/workspace/.quarantine" "$cache_days"
 delete_old_tree_contents "$hermes_home/backups/staging" "$backup_days"
 
+bin_dir="${SANDBOXED_BIN_DIR:-/usr/local/bin}"
+if [[ -d "$bin_dir" ]]; then
+  if [[ "$mode" == "--apply" ]]; then
+    find "$bin_dir" -xdev -maxdepth 1 -type f \
+      \( -name "sandboxed-node.bak-*" -o -name "sandboxed-node.before-*" -o -name "sandboxed-node.pre-*" -o -name "sandboxed-node.prev-*" \) \
+      -mtime "+$backup_days" -print -delete
+  else
+    find "$bin_dir" -xdev -maxdepth 1 -type f \
+      \( -name "sandboxed-node.bak-*" -o -name "sandboxed-node.before-*" -o -name "sandboxed-node.pre-*" -o -name "sandboxed-node.prev-*" \) \
+      -mtime "+$backup_days" -print
+  fi
+fi
+
 if [[ "$mode" == "--apply" ]] && command -v journalctl >/dev/null 2>&1; then
   journalctl "--vacuum-size=$journal_max"
 fi

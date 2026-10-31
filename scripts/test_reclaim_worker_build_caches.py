@@ -253,11 +253,16 @@ class ReclaimWorkerBuildCachesTest(unittest.TestCase):
             fx = self._setup_fixture(root)
             done_dir = fx["node"] / fx["done"]
 
-            # .cache/turbo-lean and .cache/mathlib inside settled mission are reclaimed
+            # .cache/turbo-lean, .cache/mathlib, .cargo/registry, and conecache inside settled mission are reclaimed
             (done_dir / ".cache" / "turbo-lean").mkdir(parents=True)
             (done_dir / ".cache" / "turbo-lean" / "cas.db").write_bytes(b"c" * 512)
             (done_dir / ".cache" / "mathlib").mkdir(parents=True)
             (done_dir / ".cache" / "mathlib" / "blob").write_bytes(b"m" * 512)
+            (done_dir / ".cargo" / "registry").mkdir(parents=True)
+            (done_dir / ".cargo" / "registry" / "crate").write_bytes(b"r" * 512)
+            (done_dir / ".cargo" / "config.toml").write_text("[net]\n")
+            (done_dir / "conecache").mkdir(parents=True)
+            (done_dir / "conecache" / "cone.bin").write_bytes(b"k" * 512)
             # Non-cache sibling under .cache (e.g. custom auth/state) stays untouched
             (done_dir / ".cache" / "custom-keep").mkdir(parents=True)
             (done_dir / ".cache" / "custom-keep" / "note.txt").write_text("keep")
@@ -278,12 +283,75 @@ class ReclaimWorkerBuildCachesTest(unittest.TestCase):
             self.assertTrue(ok)
             self.assertFalse((done_dir / ".cache" / "turbo-lean").exists())
             self.assertFalse((done_dir / ".cache" / "mathlib").exists())
+            self.assertFalse((done_dir / ".cargo" / "registry").exists())
+            self.assertTrue((done_dir / ".cargo" / "config.toml").exists())
+            self.assertFalse((done_dir / "conecache").exists())
             self.assertTrue((done_dir / ".cache" / "custom-keep" / "note.txt").exists())
             self.assertTrue((done_dir / "turbo-lean" / "Cargo.toml").exists())
             self.assertTrue((done_dir / "toolchains" / "README.md").exists())
             reclaimed_kinds = {r["cache_kind"] for r in records if r.get("action") == "reclaimed"}
             self.assertIn("turbo-lean", reclaimed_kinds)
             self.assertIn("mathlib", reclaimed_kinds)
+            self.assertIn("registry", reclaimed_kinds)
+            self.assertIn("conecache", reclaimed_kinds)
+
+    def test_idle_non_terminal_and_settled_orphan_caches_reclaimed_safely(self):
+        import datetime as dt
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fx = self._setup_fixture(root)
+            now = dt.datetime(2026, 1, 2, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+            # Add a recent awaiting_user mission (updated 30m ago -> must be protected)
+            # and a settled job row for unknown/orphan mission (finished >24h ago -> eligible when orphan_idle_hours=6)
+            m_recent_await = "88888888-8888-8888-8888-888888888888"
+            conn = sqlite3.connect(fx["missions"] / "missions-prod.db")
+            conn.execute(
+                "INSERT INTO missions VALUES (?, ?, ?, ?)",
+                (m_recent_await, "awaiting_user", "2026-01-02T11:30:00Z", "ws-8"),
+            )
+            conn.commit()
+            conn.close()
+
+            rdir = fx["node"] / m_recent_await
+            (rdir / "repo" / ".lake").mkdir(parents=True)
+            (rdir / "repo" / ".lake" / "build.olean").write_bytes(b"o" * 256)
+            (rdir / "Main.lean").write_text("-- recent")
+
+            jconn = sqlite3.connect(fx["node"] / "jobs.db")
+            jconn.execute(
+                "INSERT INTO jobs VALUES (?, ?, ?)",
+                (fx["unknown"], "succeeded", "2026-01-01T02:00:00Z"),
+            )
+            jconn.commit()
+            jconn.close()
+
+            records, ok = reclaim.reclaim_worker_caches(
+                node_work_dir=fx["node"],
+                missions_dir=fx["missions"],
+                apply=True,
+                idle_hours=3.0,
+                orphan_idle_hours=6.0,
+                now_override=now,
+                open_file_probe=lambda _: ("clear", ""),
+            )
+            self.assertTrue(ok)
+
+            # Idle paused mission (updated >24h ago) & settled orphan had caches reclaimed, while source/.git stayed intact
+            for reclaimed_id in (fx["paused"], fx["unknown"]):
+                mdir = fx["node"] / reclaimed_id
+                self.assertFalse((mdir / ".elan").exists(), reclaimed_id)
+                self.assertFalse((mdir / "repo" / ".lake").exists(), reclaimed_id)
+                self.assertTrue((mdir / "Main.lean").exists(), reclaimed_id)
+                self.assertTrue((mdir / ".git" / "HEAD").exists(), reclaimed_id)
+
+            # Active mission and recently-updated awaiting_user mission remain untouched
+            self.assertTrue((fx["node"] / fx["active"] / "repo" / ".lake").exists())
+            self.assertTrue((rdir / "repo" / ".lake").exists())
+            statuses = {r.get("mission_status") for r in records if r.get("action") == "reclaimed"}
+            self.assertIn("paused", statuses)
+            self.assertIn("orphan_settled_jobs", statuses)
 
     def test_proc_open_file_probe_detects_fd_and_maps(self):
         with tempfile.TemporaryDirectory() as temp:

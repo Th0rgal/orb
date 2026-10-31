@@ -57,6 +57,18 @@ def parse_args() -> argparse.Namespace:
         help="Audit JSONL log path on each host.",
     )
     parser.add_argument(
+        "--idle-hours",
+        type=float,
+        default=3.0,
+        help="Reclaim reconstructible caches inside awaiting_user/paused missions idle >= N hours (negative to disable).",
+    )
+    parser.add_argument(
+        "--orphan-idle-hours",
+        type=float,
+        default=6.0,
+        help="Reclaim reconstructible caches inside worker UUID dirs absent from Core whose jobs settled >= N hours ago (negative to disable).",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Delete reconstructible caches inside settled/idle worker roots (default: dry-run).",
@@ -92,6 +104,11 @@ def main() -> int:
         overall_ok = True
         for host, work_dir, extra_globs in DEFAULT_TARGETS:
             mode_flag = "--apply" if args.apply else "--dry-run"
+            idle_cli: list[str] = []
+            if args.idle_hours is not None and args.idle_hours >= 0:
+                idle_cli.extend(["--idle-hours", str(args.idle_hours)])
+            if args.orphan_idle_hours is not None and args.orphan_idle_hours >= 0:
+                idle_cli.extend(["--orphan-idle-hours", str(args.orphan_idle_hours)])
             if host == "agent-core":
                 if not Path(work_dir).is_dir():
                     continue
@@ -105,6 +122,7 @@ def main() -> int:
                     str(snap_path),
                     "--audit-log",
                     args.audit_log,
+                    *idle_cli,
                 ]
                 for glob_pat in extra_globs:
                     cmd.extend(["--extra-step-glob", glob_pat])
@@ -140,7 +158,9 @@ def main() -> int:
                     overall_ok = False
                     continue
 
-                extra_flags = " ".join(f"--extra-step-glob '{g}'" for g in extra_globs)
+                extra_flags = " ".join(
+                    [*(f"'{tok}'" for tok in idle_cli), *(f"--extra-step-glob '{g}'" for g in extra_globs)]
+                )
                 remote_sh = (
                     "if [ $(id -u) -ne 0 ]; then S='sudo -n'; else S=''; fi; "
                     "if [ ! -d " + repr(work_dir) + " ]; then rm -f /tmp/missions-snapshot-*.jsonl /tmp/storage_inventory.py /tmp/reclaim_worker_build_caches.py; exit 0; fi; "

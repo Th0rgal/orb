@@ -329,8 +329,8 @@ pub async fn run_lease_command(
 
 const LAKE_ADVISORY_WRAPPER: &str = r#"#!/bin/sh
 # Installed by sandboxed-node in <work-root>/caches/bin/lake so mission shells
-# steer agents toward turbo-lean on top-level `lake build` while transparently
-# delegating `lake setup-file`, `lake env`, `lake exe`, etc.
+# steer agents toward turbo-lean on heavy `lake build|check|test` commands
+# while transparently delegating `lake setup-file`, `lake env`, `lake exe`, etc.
 self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 real_lake=""
 if [ -n "${ELAN_HOME:-}" ] && [ -x "${ELAN_HOME}/bin/lake" ]; then
@@ -358,8 +358,21 @@ if [ -z "$real_lake" ]; then
   printf 'sandboxed-node: lake binary not found in ELAN_HOME or PATH\n' >&2
   exit 127
 fi
-if [ "${1:-}" = "build" ] && [ "${SANDBOXED_ALLOW_RAW_LAKE:-0}" != "1" ] && [ "${SANDBOXED_REMOTE_EXECUTION:-0}" != "1" ]; then
-  printf '[sandboxed-node] warning: raw `lake build` duplicates gigabytes of .olean artifacts per worktree; prefer `turbo-lean build` / `turbo-lean check` (set SANDBOXED_ALLOW_RAW_LAKE=1 only when required).\n' >&2
+heavy_lake=0
+case "${1:-}" in
+  build|check|test) heavy_lake=1 ;;
+  env)
+    case "${2:-}" in
+      lake)
+        case "${3:-}" in
+          build|check|test) heavy_lake=1 ;;
+        esac
+        ;;
+    esac
+    ;;
+esac
+if [ "$heavy_lake" -eq 1 ] && [ "${SANDBOXED_ALLOW_RAW_LAKE:-0}" != "1" ] && [ "${SANDBOXED_REMOTE_EXECUTION:-0}" != "1" ]; then
+  printf '[sandboxed-node] warning: raw `lake %s` duplicates multi-GiB .lake/.olean artifacts per worktree and risks filling node storage.\n[sandboxed-node] use `turbo-lean` instead (reuses the host shared CAS in TURBO_LEAN_HOME):\n  - full/target build: `turbo-lean build` (or `turbo-lean build --project-dir <dir>`)\n  - single-file proof check: `turbo-lean check <path/to/File.lean>`\n  (set SANDBOXED_ALLOW_RAW_LAKE=1 only if raw Lake is strictly required.)\n' "${1:-build}" >&2
 fi
 exec "$real_lake" "$@"
 "#;
@@ -609,7 +622,7 @@ mod tests {
 
         let (code, stdout, stderr) = crate::node::runner::run_captured_command(
             raw_command_with_work_root(
-                "printf '%s|%s|%s|' \"$ELAN_HOME\" \"$TURBO_LEAN_HOME\" \"${RUSTUP_HOME:-unset}\"; lake setup-file Foo.lean; printf '|'; lake build",
+                "printf '%s|%s|%s|' \"$ELAN_HOME\" \"$TURBO_LEAN_HOME\" \"${RUSTUP_HOME:-unset}\"; lake setup-file Foo.lean; printf '|'; lake build; printf '|'; lake check",
                 &mission_dir,
                 Some(work_root.path()),
                 None,
@@ -624,19 +637,21 @@ mod tests {
         assert_eq!(
             stdout,
             format!(
-                "{}|{}|unset|real-lake:setup-file Foo.lean|real-lake:build",
+                "{}|{}|unset|real-lake:setup-file Foo.lean|real-lake:build|real-lake:check",
                 expected_elan.display(),
                 expected_tl.display()
             )
         );
         assert!(
-            stderr.contains("prefer `turbo-lean build`"),
-            "expected advisory warning on lake build, got: {stderr:?}"
+            stderr.contains("use `turbo-lean` instead")
+                && stderr.contains("turbo-lean build")
+                && stderr.contains("turbo-lean check"),
+            "expected actionable turbo-lean warning on lake build/check, got: {stderr:?}"
         );
         assert_eq!(
-            stderr.matches("prefer `turbo-lean build`").count(),
-            1,
-            "lake setup-file must stay silent on stderr: {stderr:?}"
+            stderr.matches("use `turbo-lean` instead").count(),
+            2,
+            "lake setup-file must stay silent while build and check warn: {stderr:?}"
         );
 
         // Opt-out via SANDBOXED_ALLOW_RAW_LAKE=1 suppresses the stderr warning,
