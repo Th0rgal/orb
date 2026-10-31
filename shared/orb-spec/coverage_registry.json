@@ -1757,7 +1757,7 @@
           },
           {
             "path": "src/api/control/dispatch_admission_tests.rs",
-            "sha256": "a5c1bec334dd138706e2cae4e7f21ab164edbdf0e9d4d85a8b40121fdfaec66b"
+            "sha256": "16725e312ce474ce4744965bd8883e2c6817f4d894a1ec854918d8db9ddb8ea1"
           }
         ],
         "execution": {
@@ -2901,7 +2901,7 @@
           },
           {
             "path": "src/managed/tests.rs",
-            "sha256": "efdc25806fa7757d7dbc87d37a4d0b38419dbea1ceddcb9413ede9ed57313e72"
+            "sha256": "49958e9d16476145e87cd3b2fe41ae00180b0d14a667def23d9d125c27c933c8"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
@@ -3764,7 +3764,7 @@
           },
           {
             "path": "src/managed/tests.rs",
-            "sha256": "efdc25806fa7757d7dbc87d37a4d0b38419dbea1ceddcb9413ede9ed57313e72"
+            "sha256": "49958e9d16476145e87cd3b2fe41ae00180b0d14a667def23d9d125c27c933c8"
           },
           {
             "path": "shared/orb-spec/evidence/mission-vm-limits-tests.log",
