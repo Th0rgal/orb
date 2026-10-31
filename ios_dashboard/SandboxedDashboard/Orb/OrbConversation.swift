@@ -68,6 +68,7 @@ struct OrbConversation: View {
     @State var transferring = false
     @State var transferRequested = false
     @State var cloning = false
+    @State var forcingSlot = false
     @State var forkedMission: String?
     @State var sideQuestion: OrbSideQuestionRequest?
     /// Shared file being previewed from a chip, and the Files tab.
@@ -124,6 +125,31 @@ struct OrbConversation: View {
     /// which the live text is deduplicated against.
     var storedAnswers: [String] { OrbSendFlow.currentTurnStoredAnswers(history, narration: workModel.narrationTexts) }
 
+    static func slotWaitInfo(_ mission: OrbJSON) -> (label: String, canForce: Bool)? {
+        let job = mission["remote_job"]
+        let jobEnded = job["phase"].text == "finished"
+            || !job["finished_at"].text.isEmpty
+            || !job["terminal_reason"].text.isEmpty
+        if job != .null && !jobEnded && job["node_state"].text == "queued" {
+            let node = job["node_id"].text.isEmpty ? mission["remote_node_id"].text : job["node_id"].text
+            let label = node.isEmpty ? "Waiting for a free slot…" : "Waiting for a free slot on \(node)…"
+            return (label, !job["forced"].flag)
+        }
+        let status = mission["status"].text.lowercased()
+        let wait = mission["queue_wait"]
+        if (status == "pending" || status == "queued") && wait["reason"].text == "waiting_for_slot" {
+            let maxSlots = Int(wait["slots_max"].doubleValue ?? 0)
+            let usedSlots = Int(wait["slots_used"].doubleValue ?? Double(maxSlots))
+            let label = maxSlots > 0 ? "Waiting for a free slot (\(usedSlots)/\(maxSlots) in use)…" : "Waiting for a free slot…"
+            return (label, true)
+        }
+        return nil
+    }
+
+    var canForceSlot: Bool {
+        !isCloud && id != nil && (Self.slotWaitInfo(mission)?.canForce ?? false)
+    }
+
     func baseStepLabel() -> String {
         let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
         let provider = ["cursor_cloud": "Cursor Cloud", "grok_bot": "Grok Bot", "hermes": "Hermes"][execution["selection"]["provider"].text] ?? "the service"
@@ -136,6 +162,7 @@ struct OrbConversation: View {
             }
         }
         if handoffActive { return "Sending…" }
+        if let wait = Self.slotWaitInfo(mission) { return wait.label }
         if let label = OrbPresentation.activity(id), !label.isEmpty { return label }
         return live.hasText ? "Writing…" : (mission["presentation_activity"].text.isEmpty ? "Working…" : mission["presentation_activity"].text)
     }

@@ -29,6 +29,9 @@ pub const SCOPE_MISSION_EXECUTE: &str = "mission:execute";
 /// Lease scope for submitting async jobs (`POST /jobs`).
 pub const SCOPE_JOB_SUBMIT: &str = "job:submit";
 
+/// Lease scope for operator force-start of a queued job (`POST /jobs/:id/force`).
+pub const SCOPE_JOB_FORCE: &str = "job:force";
+
 fn default_protocol_version() -> u32 {
     // Nodes predating heartbeat v2 don't send the field at all.
     1
@@ -76,6 +79,9 @@ pub struct NodeHeartbeat {
     /// Subset of active/queued jobs using the independent side-question lane.
     #[serde(default)]
     pub side_jobs: u32,
+    /// Subset of active jobs running on the operator force-bypass permit.
+    #[serde(default)]
+    pub forced_jobs: u32,
     /// Prewarmed toolchains cached on the node (empty until S3).
     #[serde(default)]
     pub cached_toolchains: Vec<String>,
@@ -432,6 +438,22 @@ pub struct SubmitJobResponse {
     pub state: String,
 }
 
+/// Body of `POST /jobs/:id/force` on the node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForceJobRequest {
+    pub mission_id: Uuid,
+    pub lease_token: String,
+}
+
+/// Body of `POST /jobs/:id/force` response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForceJobResponse {
+    pub job_id: Uuid,
+    pub state: String,
+    #[serde(default)]
+    pub forced: bool,
+}
+
 /// Durable cause recorded before a stop signal is delivered. Old nodes omit it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobCancellation {
@@ -462,6 +484,9 @@ pub struct NodeJobStatus {
     /// commands and for pre-artifact nodes).
     #[serde(default)]
     pub artifacts: Vec<ArtifactEntry>,
+    /// True while this job holds the operator force-bypass permit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub forced: bool,
 }
 
 /// Body of `GET /jobs/:id/log?offset=N`: a bounded byte range of the job's
@@ -974,6 +999,7 @@ mod tests {
             active_jobs: 1,
             queued_jobs: 2,
             side_jobs: 0,
+            forced_jobs: 0,
             cached_toolchains: vec![],
             source_bundle_capacity: None,
             min_free_disk_bytes: Some(30 << 30),
@@ -1015,5 +1041,6 @@ pub fn missing_job_cancelled(mission_id: Uuid, job_id: Uuid) -> NodeJobStatus {
         error: Some("job not found on node".to_string()),
         log_tail: None,
         artifacts: Vec::new(),
+        forced: false,
     }
 }

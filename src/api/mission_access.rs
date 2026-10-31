@@ -735,6 +735,74 @@ impl MissionAccess {
         touched.len()
     }
 
+    /// Expire pending requests for `owner` whose target mission does not exist
+    /// in `missions` (for example legacy zero-padded prefix rows) or whose
+    /// requesting mission has been archived (`Acknowledged`), so unapprovable
+    /// or retired requests never linger in the device approval queue.
+    pub async fn expire_stale_for_store(
+        &self,
+        missions: &Arc<dyn crate::api::mission_store::MissionStore>,
+        owner: &str,
+    ) -> usize {
+        use crate::api::control::MissionStatus;
+        let candidates: Vec<(Uuid, Uuid, Option<Uuid>)> = {
+            let data = self.data.lock().await;
+            data.requests
+                .iter()
+                .filter(|r| r.owner == owner && r.state.is_pending())
+                .map(|r| (r.id, r.target_mission_id, r.requester_mission_id))
+                .collect()
+        };
+        if candidates.is_empty() {
+            return 0;
+        }
+        let mut stale: Vec<(Uuid, &'static str)> = Vec::new();
+        for (req_id, target_id, requester_mid) in candidates {
+            match missions.get_mission(target_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    stale.push((req_id, "target_missing"));
+                    continue;
+                }
+                Err(_) => continue,
+            }
+            if let Some(rmid) = requester_mid {
+                if let Ok(Some(req_m)) = missions.get_mission(rmid).await {
+                    if req_m.status == MissionStatus::Acknowledged {
+                        stale.push((req_id, "requester_archived"));
+                    }
+                }
+            }
+        }
+        if stale.is_empty() {
+            return 0;
+        }
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        let mut touched = Vec::new();
+        for (req_id, reason) in stale {
+            if let Some(r) = data
+                .requests
+                .iter_mut()
+                .find(|r| r.id == req_id && r.owner == owner && r.state.is_pending())
+            {
+                r.state = ApprovalState::Expired;
+                r.decided_at = Some(now);
+                touched.push((r.clone(), reason));
+            }
+        }
+        if touched.is_empty() {
+            return 0;
+        }
+        for (r, reason) in &touched {
+            data.log(r, "expired", Some((*reason).to_string()), now);
+        }
+        self.save(&data).await;
+        drop(data);
+        self.changed.notify_waiters();
+        touched.len()
+    }
+
     /// Wait view used by `GET /api/mcp/requests/mission_access/:id/wait`.
     pub async fn wait_for_requester(
         &self,
@@ -856,11 +924,12 @@ pub async fn handle_tool(
             Ok(json!({ "requests": list.iter().map(agent_view).collect::<Vec<_>>() }))
         }
         "request_mission_access" => {
-            let target = args
+            let raw_target = args
                 .get("target_mission_id")
                 .and_then(Value::as_str)
-                .and_then(|s| Uuid::parse_str(s.trim()).ok())
-                .ok_or("target_mission_id must be a full mission UUID")?;
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or("target_mission_id is required")?;
             match args.get("scope").and_then(Value::as_str).unwrap_or("read") {
                 "read" => {}
                 _ => {
@@ -885,10 +954,8 @@ pub async fn handle_tool(
             };
             // The mission store is per user: another tenant's mission is not found.
             let missions = state.control.get_or_spawn(&user).await.mission_store;
-            // A missing target gets the same pending reply as an existing one,
-            // so the tool cannot probe which missions exist. Such a request can
-            // never be approved (the approver must own the target) and times out.
-            let target_mission = missions.get_mission(target).await.ok().flatten();
+            let target_mission = resolve_target_mission_for_request(&missions, raw_target).await?;
+            let target = target_mission.id;
             let requester_title = if let Some(own) = p.mission_id {
                 let requester = missions
                     .get_mission(own)
@@ -896,14 +963,25 @@ pub async fn handle_tool(
                     .ok()
                     .flatten()
                     .ok_or("Mission no longer exists")?;
-                if target == own
+                let fork_chain = crate::control_mcp::gateway::fork_lineage(&missions, own).await;
+                if fork_chain.contains(&target)
                     || target_mission
-                        .as_ref()
-                        .is_some_and(|m| m.parent_mission_id == Some(own))
+                        .parent_mission_id
+                        .is_some_and(|parent| fork_chain.contains(&parent))
                 {
                     return Ok(
                         json!({"status":"already_in_scope","message":"This mission is already in your scope; read it directly."}),
                     );
+                }
+                for anc in &fork_chain {
+                    let anc_subject = approval_flow::RequesterSubject::mission(*anc);
+                    if let Some(grant_id) = access.read_grant(&p.sub, &anc_subject, target).await {
+                        if let Some(existing) = access.get(&p.sub, grant_id).await {
+                            let mut out = agent_view(&existing);
+                            out["message"] = json!(decision_note(&existing));
+                            return Ok(out);
+                        }
+                    }
                 }
                 requester.title
             } else {
@@ -916,7 +994,7 @@ pub async fn handle_tool(
                     requester: subject,
                     requester_title,
                     target,
-                    target_title: target_mission.and_then(|m| m.title),
+                    target_title: target_mission.title,
                     reason,
                     ttl_hours: args.get("ttl_hours").and_then(Value::as_i64),
                 })
@@ -937,6 +1015,61 @@ pub async fn handle_tool(
     }
 }
 
+/// Extract a leading hex prefix when an LLM zero-padded a short 8-char prefix
+/// into a 36-char UUID (e.g. `2148a266-0000-0000-0000-000000000000` -> `2148a266`).
+fn zero_padded_uuid_prefix(canonical_lower: &str) -> Option<&str> {
+    let head = canonical_lower.strip_suffix("-0000-0000-0000-000000000000")?;
+    (head.len() == 8 && head.chars().any(|c| c != '0')).then_some(head)
+}
+
+async fn resolve_target_mission_for_request(
+    missions: &Arc<dyn crate::api::mission_store::MissionStore>,
+    raw: &str,
+) -> Result<crate::api::mission_store::Mission, String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    let prefix = if let Ok(id) = Uuid::parse_str(&normalized) {
+        if let Some(m) = missions
+            .get_mission(id)
+            .await
+            .map_err(|_| "Mission store unavailable".to_string())?
+        {
+            return Ok(m);
+        }
+        let canonical = id.to_string();
+        match zero_padded_uuid_prefix(&canonical) {
+            Some(head) => head.to_string(),
+            None => {
+                return Err(format!(
+                    "Target mission {id} was not found; pass an existing mission UUID from list_missions."
+                ));
+            }
+        }
+    } else {
+        if normalized.len() < 4
+            || !normalized
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '-')
+        {
+            return Err(
+                "target_mission_id must be a mission UUID or at least 4 hex characters of one"
+                    .into(),
+            );
+        }
+        normalized
+    };
+    let candidates = missions
+        .find_missions_by_id_prefix(&prefix, 11)
+        .await
+        .map_err(|_| "Mission store unavailable".to_string())?;
+    match candidates.len() {
+        0 => Err(format!("No mission matches '{raw}'")),
+        1 => Ok(candidates.into_iter().next().expect("single candidate")),
+        _ => Err(format!(
+            "Mission prefix '{prefix}' is ambiguous; pass the full 36-character mission UUID."
+        )),
+    }
+}
+
 pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
     use crate::control_mcp::ToolDefinition;
     vec![
@@ -950,7 +1083,7 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
                           sending messages, cancel, resume and placement stay denied."
                 .into(),
             input_schema: json!({"type":"object","required":["target_mission_id","reason"],"properties":{
-                "target_mission_id":{"type":"string","format":"uuid","description":"Full UUID of the mission to read."},
+                "target_mission_id":{"type":"string","minLength":4,"maxLength":64,"description":"Full UUID (or unambiguous >=4-char hex prefix) of the mission to read."},
                 "scope":{"type":"string","enum":["read"],"default":"read"},
                 "reason":{"type":"string","minLength":1,"maxLength":500,"description":"Why you need it; shown to Thomas."},
                 "ttl_hours":{"type":"integer","minimum":1,"maximum":MAX_TTL_HOURS,"description":"How long you need it (default 24)."}
@@ -1070,7 +1203,10 @@ async fn list(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
 ) -> Json<Value> {
-    Json(store(&state).snapshot(&user.id).await)
+    let missions = state.control.get_or_spawn(&user).await.mission_store;
+    let access = store(&state);
+    access.expire_stale_for_store(&missions, &user.id).await;
+    Json(access.snapshot(&user.id).await)
 }
 
 #[derive(Debug, Default, Deserialize)]

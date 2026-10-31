@@ -400,6 +400,8 @@ struct OrbWorkFold: View {
     let headline: (action: String, detail: String)
     let elapsed: String
     let accessibilityStatus: String
+    var onForceSlot: (() -> Void)? = nil
+    var forceSlotPending = false
     var identifier = "agent-working"
     @State private var expanded = false
     @State private var expandedItemIDs: Set<String> = []
@@ -459,6 +461,23 @@ struct OrbWorkFold: View {
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
+                        }
+                        if let onForceSlot {
+                            Button {
+                                OrbHaptics.selection()
+                                onForceSlot()
+                            } label: {
+                                Text(forceSlotPending ? "Starting…" : "Run now")
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Color.white.opacity(0.08), in: Capsule())
+                                    .overlay(Capsule().stroke(OrbStyle.borderStrong, lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(forceSlotPending)
+                            .accessibilityIdentifier("force-slot-run-now")
                         }
                         Spacer(minLength: 6)
                         Text(elapsed)

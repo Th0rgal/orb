@@ -1958,7 +1958,7 @@ pub(super) async fn control_actor_loop(
                                 if let Some(tid) = effective_target {
                                     if !target_is_main && (main_is_running || force_parallel) {
                                         // Check capacity
-                                        let parallel_running = parallel_runners.values().filter(|r| r.is_running()).count();
+                                        let parallel_running = parallel_runners.values().filter(|r| r.counts_toward_slot_limit()).count();
                                         let total_running = parallel_running + if main_is_running { 1 } else { 0 };
                                         let max_parallel = crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
 
@@ -3337,7 +3337,7 @@ pub(super) async fn control_actor_loop(
                                 tracing::info!("StartParallel requested for mission {}", mission_id);
 
                                 // Count currently running parallel missions
-                                let parallel_running = parallel_runners.values().filter(|r| r.is_running()).count();
+                                let parallel_running = parallel_runners.values().filter(|r| r.counts_toward_slot_limit()).count();
                                 let main_running = if running.is_some() { 1 } else { 0 };
                                 let total_running = parallel_running + main_running;
                                 let max_parallel = crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
@@ -3461,6 +3461,485 @@ pub(super) async fn control_actor_loop(
                                         mission_id
                                     )));
                                 }
+                            }
+                            ControlCommand::ForceMissionSlot { mission_id, respond } => {
+                                let _purge_file = match dispatch_admission::durable_lock(&config).await {
+                                    Ok(guard) => guard,
+                                    Err(error) => {
+                                        let _ = respond.send(Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error)));
+                                        continue;
+                                    }
+                                };
+                                if let Some(state) = control_hub.admission_state.get().and_then(std::sync::Weak::upgrade) {
+                                    if let Err(error) = super::workspace_purge::revoke_store_locked(&state, &mission_store, mission_id).await {
+                                        let _ = respond.send(Err((axum::http::StatusCode::CONFLICT, error)));
+                                        continue;
+                                    }
+                                }
+                                if (running.is_some() && running_mission_id == Some(mission_id))
+                                    || parallel_runners.get(&mission_id).is_some_and(|r| r.is_running())
+                                {
+                                    let _ = respond.send(Ok(()));
+                                    continue;
+                                }
+                                let mission = match mission_store.get_mission(mission_id).await {
+                                    Ok(Some(mission)) => mission,
+                                    Ok(None) => {
+                                        let _ = respond.send(Err((
+                                            axum::http::StatusCode::NOT_FOUND,
+                                            format!("Mission {mission_id} not found"),
+                                        )));
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        let _ = respond.send(Err((
+                                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                            format!("Failed to load mission {mission_id}: {error}"),
+                                        )));
+                                        continue;
+                                    }
+                                };
+                                if mission.status == MissionStatus::Paused {
+                                    let _ = respond.send(Err((
+                                        axum::http::StatusCode::CONFLICT,
+                                        format!("Mission {mission_id} is paused; resume it before starting"),
+                                    )));
+                                    continue;
+                                }
+                                match mission_store.get_active_mission_run(mission_id).await {
+                                    Ok(Some(_)) => {
+                                        let _ = respond.send(Ok(()));
+                                        continue;
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        let _ = respond.send(Err((
+                                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                            format!("Cannot inspect mission run lease: {error}"),
+                                        )));
+                                        continue;
+                                    }
+                                }
+
+                                let has_queued_runner_work = parallel_runners
+                                    .get(&mission_id)
+                                    .is_some_and(|r| r.inflight_message().is_some() || !r.queue.is_empty())
+                                    || queue.iter().any(|entry| entry.3 == Some(mission_id));
+                                let deferred_goal = if !has_queued_runner_work && mission.status == MissionStatus::Pending {
+                                    match mission_store.get_deferred_goal(mission_id).await {
+                                        Ok(goal) => goal.filter(|g| !g.trim().is_empty()),
+                                        Err(error) => {
+                                            let _ = respond.send(Err((
+                                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                                format!("Failed to read deferred goal for mission {mission_id}: {error}"),
+                                            )));
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+                                let is_waiting_slot = has_queued_runner_work || deferred_goal.is_some();
+
+                                let regular_running = (parallel_runners
+                                    .values()
+                                    .filter(|r| r.counts_toward_slot_limit())
+                                    .count()
+                                    + usize::from(running.is_some())) as u32;
+                                let max_parallel = crate::settings::max_parallel_missions_cached_or(
+                                    config.max_parallel_missions,
+                                );
+                                let forced_running = parallel_runners
+                                    .values()
+                                    .filter(|r| r.is_running() && r.forced_slot)
+                                    .count() as u32;
+                                let gate = crate::orb_spec::slot_bypass_step(crate::orb_spec::SlotBypassInput {
+                                    is_operator_force: true,
+                                    is_agent_caller: false,
+                                    is_waiting_slot,
+                                    regular_running,
+                                    regular_max: max_parallel as u32,
+                                    forced_running,
+                                    forced_max: 1,
+                                });
+                                if !gate.admitted {
+                                    let err = match gate.decision {
+                                        crate::orb_spec::SlotBypassDecision::RejectNotWaiting => (
+                                            axum::http::StatusCode::CONFLICT,
+                                            "Mission is not waiting for a runner slot".to_string(),
+                                        ),
+                                        crate::orb_spec::SlotBypassDecision::RejectCapacity => (
+                                            axum::http::StatusCode::CONFLICT,
+                                            "Force-start slot is already in use; wait for the active forced mission to finish".to_string(),
+                                        ),
+                                        _ => (
+                                            axum::http::StatusCode::FORBIDDEN,
+                                            "Force-start rejected by admission gate".to_string(),
+                                        ),
+                                    };
+                                    let _ = respond.send(Err(err));
+                                    continue;
+                                }
+                                let use_forced_slot = matches!(
+                                    gate.decision,
+                                    crate::orb_spec::SlotBypassDecision::AdmitForcedBypass
+                                );
+                                scheduler_inflight.remove(&mission_id);
+
+                                if has_queued_runner_work {
+                                    if let std::collections::hash_map::Entry::Vacant(slot) = parallel_runners.entry(mission_id) {
+                                        let mut runner = super::super::mission_runner::MissionRunner::new(
+                                            mission_id,
+                                            mission.workspace_id,
+                                            mission.agent.clone(),
+                                            Some(mission.backend.clone()),
+                                            mission.session_id.clone(),
+                                            mission.config_profile.clone(),
+                                            model_for_dispatch(&mission_store, &mission).await,
+                                            mission.model_effort.clone(),
+                                            mission.fast_mode,
+                                            mission.service_tier,
+                                        );
+                                        runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
+                                        runner.working_directory = mission.working_directory.clone();
+                                        runner.user = control_hub.identities.read().await.get(&session_user_id).cloned();
+                                        runner.history.extend(
+                                            mission.history.iter().map(|entry| (entry.role.clone(), entry.content.clone())),
+                                        );
+                                        slot.insert(runner);
+                                    }
+                                    {
+                                        let runner = parallel_runners.get_mut(&mission_id).expect("parallel runner present");
+                                        if runner.cancellation_requested() {
+                                            let _ = respond.send(Err((
+                                                axum::http::StatusCode::CONFLICT,
+                                                format!("Mission {mission_id} is stopping"),
+                                            )));
+                                            continue;
+                                        }
+                                        queue.retain(|entry| {
+                                            if entry.3 == Some(mission_id) {
+                                                runner.queue_message(entry.0, entry.1.clone(), entry.2.clone(), entry.4.clone());
+                                                false
+                                            } else {
+                                                true
+                                            }
+                                        });
+                                    }
+                                    let prepared = {
+                                        let runner = parallel_runners.get_mut(&mission_id).expect("parallel runner present");
+                                        if runner
+                                            .inflight_message()
+                                            .or_else(|| runner.queue.front())
+                                            .is_some_and(|m| host_followup_source(m.source.as_deref()))
+                                        {
+                                            match prepare_host_parallel_followup(
+                                                &control_hub,
+                                                &mission_store,
+                                                &events_tx,
+                                                runner,
+                                                &format!("control:{session_user_id}"),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Some(prev)) => Ok(Some(prev)),
+                                                Ok(None) => Err("Mission is not ready to start".to_string()),
+                                                Err(e) => Err(e),
+                                            }
+                                        } else {
+                                            let next_content = runner
+                                                .inflight_message()
+                                                .or_else(|| runner.queue.front())
+                                                .map(|m| m.content.clone())
+                                                .unwrap_or_default();
+                                            if let Err(error) = activate_mission_for_message(
+                                                &control_hub,
+                                                &mission_store,
+                                                &events_tx,
+                                                &mission,
+                                                &next_content,
+                                            )
+                                            .await
+                                            {
+                                                Err(error)
+                                            } else {
+                                                if runner.inflight_message().is_none() {
+                                                    runner.take_next_message_for_start();
+                                                }
+                                                runner
+                                                    .acquire_durable_run(&mission_store, &format!("control:{session_user_id}"))
+                                                    .await
+                                                    .map(|()| None)
+                                            }
+                                        }
+                                    };
+                                    match prepared {
+                                        Ok(rollback_ctx) => {
+                                            if let Err(error) = persist_control_queue_if_changed(
+                                                &mission_store,
+                                                &session_user_id,
+                                                &queue,
+                                                &parallel_runners,
+                                                &recovered_consumed_user_messages,
+                                                &mut last_persisted_queue,
+                                            )
+                                            .await
+                                            {
+                                                if let Some(runner) = parallel_runners.get_mut(&mission_id) {
+                                                    runner.finish_durable_run(&mission_store, Some("force_slot_persist_failed")).await;
+                                                    if let Some((prev, prev_goal)) = rollback_ctx {
+                                                        let _ = rollback_host_parallel_followup(
+                                                            &mission_store,
+                                                            &events_tx,
+                                                            runner,
+                                                            &prev,
+                                                            prev_goal,
+                                                        )
+                                                        .await;
+                                                    }
+                                                }
+                                                let _ = respond.send(Err((
+                                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                                    format!("Failed to persist forced parallel delivery: {error}"),
+                                                )));
+                                                continue;
+                                            }
+                                            let runner = parallel_runners.get_mut(&mission_id).expect("parallel runner present");
+                                            runner.forced_slot = use_forced_slot;
+                                            let started = runner.start_next(
+                                                config.clone(),
+                                                Arc::clone(&root_agent),
+                                                Arc::clone(&mcp),
+                                                Arc::clone(&workspaces),
+                                                library.clone(),
+                                                events_tx.clone(),
+                                                Arc::clone(&tool_hub),
+                                                Arc::clone(&status),
+                                                mission_cmd_tx.clone(),
+                                                Arc::new(RwLock::new(Some(mission_id))),
+                                                secrets.clone(),
+                                            );
+                                            if started {
+                                                let mut slot_holders: Vec<Uuid> = parallel_runners
+                                                    .iter()
+                                                    .filter(|(_, r)| r.counts_toward_slot_limit())
+                                                    .map(|(id, _)| *id)
+                                                    .collect();
+                                                if running.is_some() {
+                                                    slot_holders.extend(running_mission_id);
+                                                }
+                                                *dispatch_capacity.write().await = Some(
+                                                    super::dispatch_capacity::DispatchCapacity::new(
+                                                        max_parallel,
+                                                        slot_holders,
+                                                    ),
+                                                );
+                                                tracing::info!(
+                                                    mission_id = %mission_id,
+                                                    forced_slot = use_forced_slot,
+                                                    "Force-started queued parallel runner"
+                                                );
+                                                let _ = respond.send(Ok(()));
+                                            } else {
+                                                runner.forced_slot = false;
+                                                runner.finish_durable_run(&mission_store, Some("force_slot_start_failed")).await;
+                                                let _ = respond.send(Err((
+                                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                                    "Failed to start mission execution".to_string(),
+                                                )));
+                                            }
+                                        }
+                                        Err(error) => {
+                                            let _ = respond.send(Err((axum::http::StatusCode::CONFLICT, error)));
+                                        }
+                                    }
+                                    continue;
+                                }
+
+                                let raw_goal = deferred_goal.expect("checked is_waiting_slot above");
+                                let (mut prompt_content, deferred_parts) = deferred_messages::decode(&raw_goal);
+                                if let Some(canonical) = canonical_goal_message(&prompt_content) {
+                                    prompt_content = canonical;
+                                }
+                                match maybe_begin_grok_goal(
+                                    &mission_store,
+                                    &events_tx,
+                                    Some(mission_id),
+                                    &prompt_content,
+                                )
+                                .await
+                                {
+                                    GrokGoalKickoff::Passthrough => {}
+                                    GrokGoalKickoff::Rewritten { prompt } => {
+                                        prompt_content = prompt;
+                                    }
+                                    GrokGoalKickoff::Rejected { reason } => {
+                                        let _ = respond.send(Err((axum::http::StatusCode::CONFLICT, reason)));
+                                        continue;
+                                    }
+                                }
+                                let content = deferred_messages::wrap(&prompt_content, deferred_parts);
+                                let msg_id = Uuid::new_v4();
+                                let msg_source = Some("scheduler".to_string());
+
+                                if let Err(error) = activate_mission_for_message(
+                                    &control_hub,
+                                    &mission_store,
+                                    &events_tx,
+                                    &mission,
+                                    &content,
+                                )
+                                .await
+                                {
+                                    let _ = respond.send(Err((
+                                        axum::http::StatusCode::CONFLICT,
+                                        format!("Cannot activate mission {mission_id}: {error}"),
+                                    )));
+                                    continue;
+                                }
+
+                                let mut runner = super::super::mission_runner::MissionRunner::new(
+                                    mission_id,
+                                    mission.workspace_id,
+                                    mission.agent.clone(),
+                                    Some(mission.backend.clone()),
+                                    mission.session_id.clone(),
+                                    mission.config_profile.clone(),
+                                    model_for_dispatch(&mission_store, &mission).await,
+                                    mission.model_effort.clone(),
+                                    mission.fast_mode,
+                                    mission.service_tier,
+                                );
+                                runner.pr_readonly = mission.project.tags.iter().any(|tag| tag == "pr-readonly");
+                                runner.forced_slot = use_forced_slot;
+                                runner.working_directory = mission.working_directory.clone();
+                                runner.user = control_hub.identities.read().await.get(&session_user_id).cloned();
+                                for entry in &mission.history {
+                                    runner.history.push((entry.role.clone(), entry.content.clone()));
+                                }
+                                runner.queue_message(msg_id, content, None, msg_source);
+                                if runner.take_next_message_for_start().is_none() {
+                                    let _ = respond.send(Err((
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        format!("mission {mission_id} delivery disappeared before persistence"),
+                                    )));
+                                    continue;
+                                }
+                                parallel_runners.insert(mission_id, runner);
+                                if let Err(error) = persist_control_queue_if_changed(
+                                    &mission_store,
+                                    &session_user_id,
+                                    &queue,
+                                    &parallel_runners,
+                                    &recovered_consumed_user_messages,
+                                    &mut last_persisted_queue,
+                                )
+                                .await
+                                {
+                                    parallel_runners.remove(&mission_id);
+                                    let _ = restore_mission_after_failed_run_acquisition(&mission_store, &events_tx, &mission).await;
+                                    let _ = mission_store.set_deferred_goal(mission_id, Some(raw_goal)).await;
+                                    let _ = respond.send(Err((
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        format!("failed to persist forced parallel delivery: {error}"),
+                                    )));
+                                    continue;
+                                }
+                                let acquire_res = parallel_runners
+                                    .get_mut(&mission_id)
+                                    .expect("parallel runner inserted above")
+                                    .acquire_durable_run(&mission_store, &format!("control:{session_user_id}"))
+                                    .await;
+                                if let Err(error) = acquire_res {
+                                    parallel_runners.remove(&mission_id);
+                                    let _ = restore_mission_after_failed_run_acquisition(&mission_store, &events_tx, &mission).await;
+                                    let _ = mission_store.set_deferred_goal(mission_id, Some(raw_goal)).await;
+                                    let _ = persist_control_queue_if_changed(
+                                        &mission_store,
+                                        &session_user_id,
+                                        &queue,
+                                        &parallel_runners,
+                                        &recovered_consumed_user_messages,
+                                        &mut last_persisted_queue,
+                                    )
+                                    .await;
+                                    let _ = respond.send(Err((
+                                        axum::http::StatusCode::CONFLICT,
+                                        format!("Mission run lease rejected: {error}"),
+                                    )));
+                                    continue;
+                                }
+                                if let Err(error) = persist_control_queue_if_changed(
+                                    &mission_store,
+                                    &session_user_id,
+                                    &queue,
+                                    &parallel_runners,
+                                    &recovered_consumed_user_messages,
+                                    &mut last_persisted_queue,
+                                )
+                                .await
+                                {
+                                    if let Some(runner) = parallel_runners.get_mut(&mission_id) {
+                                        runner
+                                            .finish_durable_run(&mission_store, Some("consumed_snapshot_persist_failed"))
+                                            .await;
+                                    }
+                                    parallel_runners.remove(&mission_id);
+                                    let _ = restore_mission_after_failed_run_acquisition(&mission_store, &events_tx, &mission).await;
+                                    let _ = mission_store.set_deferred_goal(mission_id, Some(raw_goal)).await;
+                                    let _ = respond.send(Err((
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        format!("failed to persist consumed forced delivery: {error}"),
+                                    )));
+                                    continue;
+                                }
+                                let runner = parallel_runners
+                                    .get_mut(&mission_id)
+                                    .expect("parallel runner persisted above");
+                                let started = runner.start_next(
+                                    config.clone(),
+                                    Arc::clone(&root_agent),
+                                    Arc::clone(&mcp),
+                                    Arc::clone(&workspaces),
+                                    library.clone(),
+                                    events_tx.clone(),
+                                    Arc::clone(&tool_hub),
+                                    Arc::clone(&status),
+                                    mission_cmd_tx.clone(),
+                                    Arc::new(RwLock::new(Some(mission_id))),
+                                    secrets.clone(),
+                                );
+                                if !started {
+                                    runner.finish_durable_run(&mission_store, Some("force_slot_start_failed")).await;
+                                    parallel_runners.remove(&mission_id);
+                                    let _ = restore_mission_after_failed_run_acquisition(&mission_store, &events_tx, &mission).await;
+                                    let _ = mission_store.set_deferred_goal(mission_id, Some(raw_goal)).await;
+                                    let _ = respond.send(Err((
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        "Failed to start mission execution".to_string(),
+                                    )));
+                                    continue;
+                                }
+                                let mut slot_holders: Vec<Uuid> = parallel_runners
+                                    .iter()
+                                    .filter(|(_, r)| r.counts_toward_slot_limit())
+                                    .map(|(id, _)| *id)
+                                    .collect();
+                                if running.is_some() {
+                                    slot_holders.extend(running_mission_id);
+                                }
+                                *dispatch_capacity.write().await = Some(
+                                    super::dispatch_capacity::DispatchCapacity::new(
+                                        max_parallel,
+                                        slot_holders,
+                                    ),
+                                );
+                                tracing::info!(
+                                    mission_id = %mission_id,
+                                    forced_slot = use_forced_slot,
+                                    "Force-started scheduled mission via operator slot bypass"
+                                );
+                                let _ = respond.send(Ok(()));
                             }
                             ControlCommand::CancelMission { mission_id, min_idle, keep_remote_queue, respond } => {
                                 // Race-protect background cancels (watchdog, stale-cleanup):
@@ -4063,7 +4542,7 @@ pub(super) async fn control_actor_loop(
 
                                             let parallel_running = parallel_runners
                                                 .values()
-                                                .filter(|runner| runner.is_running())
+                                                .filter(|runner| runner.counts_toward_slot_limit())
                                                 .count();
                                             let total_running = parallel_running + 1;
                                             let max_parallel =
@@ -5832,7 +6311,7 @@ pub(super) async fn control_actor_loop(
 
                             let mut ready = Vec::new();
                             let max_parallel = crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
-                            let occupied = parallel_runners.values().filter(|runner| runner.is_running()).count() + usize::from(running.is_some());
+                            let occupied = parallel_runners.values().filter(|runner| runner.counts_toward_slot_limit()).count() + usize::from(running.is_some());
                             let available = max_parallel.saturating_sub(occupied);
                             for (mid, runner) in parallel_runners.iter_mut() {
                                 if ready.len() >= available { break; }
@@ -6364,7 +6843,7 @@ pub(super) async fn control_actor_loop(
                                 running_ids,
                                 running_count: parallel_runners
                                     .values()
-                                    .filter(|r| r.is_running())
+                                    .filter(|r| r.counts_toward_slot_limit())
                                     .count(),
                                 main_running: running.is_some(),
                             };
@@ -6454,7 +6933,7 @@ pub(super) async fn control_actor_loop(
                                     //    missions stall behind a busy main runner.
                                     let parallel_running = parallel_runners
                                         .values()
-                                        .filter(|r| r.is_running())
+                                        .filter(|r| r.counts_toward_slot_limit())
                                         .count();
                                     let total_running =
                                         parallel_running + if running.is_some() { 1 } else { 0 };
@@ -6463,7 +6942,7 @@ pub(super) async fn control_actor_loop(
                                     );
                                     let mut slot_holders: Vec<Uuid> = parallel_runners
                                         .iter()
-                                        .filter(|(_, r)| r.is_running())
+                                        .filter(|(_, r)| r.counts_toward_slot_limit())
                                         .map(|(id, _)| *id)
                                         .collect();
                                     if running.is_some() {

@@ -162,6 +162,31 @@ once and rolls back via `orb:mission-archive-failed` only on server failure.
 `superseded` tag, and `parent` has not been forked forward by a conversation
 fork (`fork-of:<parent.id>`).
 
+**W2. Forking a conversation retires pre-fork reminders and carries forward read
+lineage.** When Core creates a conversation fork (`POST /api/control/missions/:id/fork`
+without `side_question`, stamping the Core-reserved `fork-of:<id>` and
+`fork-workspace:<id>` tags):
+- Core fences wakeups and cancels scheduled continuations and `agent_finished`
+  goal-loop automations on the replaced version `id` immediately
+  (`continuations::stop_for_mission`), even when `id` had already finished its
+  turn (`Completed`) before the fork or before the client archives `id`.
+- `automation_scheduler` and `continuations::deliver` drop any pre-fork
+  `__wakeup_source` reminder or non-manual scheduled delivery whose automation
+  or execution was created before a descendant `fork-of:<mission.id>` version
+  (`drop_for_forked`), while still allowing new reminders created if the
+  operator deliberately reopens and resumes the earlier version later.
+- `fork-of:*` and `fork-workspace:*` are Core-reserved lineage tags (preserved
+  across metadata updates and rejected from MCP `tags` arguments). A mission
+  version may read earlier versions in its `fork-of:` chain, children launched
+  by earlier versions in that chain, and read grants (`AccessScope::Read`)
+  approved for earlier versions in that chain.
+- `request_mission_access` resolves unambiguous ≥4-char hex prefixes (including
+  zero-padded prefix UUIDs such as `2148a266-0000-0000-0000-000000000000`) to
+  the real mission UUID, rejects unknown targets instead of queueing
+  unapprovable phantom cards, and auto-expires pending `mission_access`
+  requests whose target no longer exists or whose requesting mission has been
+  archived (`Acknowledged`).
+
 **M1. A failed, empty or partial answer never removes rows.** A row leaves the
 list only through:
 

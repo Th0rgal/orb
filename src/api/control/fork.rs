@@ -512,6 +512,10 @@ pub async fn fork_mission(
         if let Err(error) = accept_side_launch(&state.config.working_dir, child_id) {
             tracing::warn!(%child_id, %error, "side launch accepted; receipt promotion pending reconciliation");
         }
+    } else if let Err(error) =
+        continuations::drop_for_forked(&control.mission_store, id, None).await
+    {
+        tracing::warn!(source_mission = %id, %error, "fork accepted; failed to stop pre-fork reminders on source mission");
     }
     Ok(response)
 }

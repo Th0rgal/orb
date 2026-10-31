@@ -845,6 +845,7 @@ fn remote_build_dispatch_outcome(
         error: status.error.clone(),
         started_at,
         finished_at: terminal.then(chrono::Utc::now),
+        forced: status.forced,
     }
 }
 
@@ -1447,6 +1448,7 @@ async fn submit_remote_build(
             error,
             started_at,
             finished_at: terminal.then(chrono::Utc::now),
+            forced: false,
         }
     };
     state
@@ -1650,6 +1652,7 @@ fn remote_build_status_from_receipt(
         error: None,
         log_tail: Some("reused durable terminal receipt".to_string()),
         artifacts: receipt.artifacts,
+        forced: false,
     };
     RemoteBuildStatusResponse {
         status,
@@ -1861,6 +1864,7 @@ mod tests {
             error: None,
             log_tail: None,
             artifacts: Vec::new(),
+            forced: false,
         }
     }
 

@@ -127,4 +127,42 @@ class OrbSendFlowTest {
         assertEquals("new text", OrbSendFlow.dedupeLiveText("new text", listOf("older reply")))
         assertEquals("", OrbSendFlow.dedupeLiveText("  ", listOf()))
     }
+
+    @Test fun slotWaitInfoDetectsRemoteAndCoreSlotQueues() {
+        val remoteQueued = OrbRow(
+            OrbJSON.dict(
+                OrbJSON.parse(
+                    """{"id":"m1","status":"running","remote_job":{"node_id":"nippur","node_state":"queued","phase":"node_queued"}}"""
+                )
+            )!!
+        )
+        assertEquals(OrbSlotWaitInfo("Waiting for a free slot on nippur…", canForce = true), orbSlotWaitInfo(remoteQueued))
+
+        val remoteForced = OrbRow(
+            OrbJSON.dict(
+                OrbJSON.parse(
+                    """{"id":"m1","status":"running","remote_job":{"node_id":"nippur","node_state":"queued","forced":true}}"""
+                )
+            )!!
+        )
+        assertEquals(OrbSlotWaitInfo("Waiting for a free slot on nippur…", canForce = false), orbSlotWaitInfo(remoteForced))
+
+        val remoteEnded = OrbRow(
+            OrbJSON.dict(
+                OrbJSON.parse(
+                    """{"id":"m1","status":"completed","remote_job":{"node_id":"nippur","node_state":"queued","finished_at":"2026-10-31T00:00:00Z"}}"""
+                )
+            )!!
+        )
+        org.junit.Assert.assertNull(orbSlotWaitInfo(remoteEnded))
+
+        val coreQueued = OrbRow(
+            OrbJSON.dict(
+                OrbJSON.parse(
+                    """{"id":"m2","status":"pending","queue_wait":{"reason":"waiting_for_slot","slots_used":4,"slots_max":4}}"""
+                )
+            )!!
+        )
+        assertEquals(OrbSlotWaitInfo("Waiting for a free slot (4/4 in use)…", canForce = true), orbSlotWaitInfo(coreQueued))
+    }
 }
