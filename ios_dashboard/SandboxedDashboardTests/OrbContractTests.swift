@@ -615,7 +615,7 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(nested[1].children.map(\.id), ["w-pr303"])
         // Cross-project parent `9409f9a9` is rendered as a placeholder carrying seen title/backend/status/project.
         XCTAssertTrue(nested[2].mission.isPlaceholder)
-        XCTAssertEqual(nested[2].mission.title, "evm.fast (claude takeover)")
+        XCTAssertEqual(nested[2].mission.name, "evm.fast (claude takeover)")
         XCTAssertEqual(nested[2].mission.backend, "claudecode")
         XCTAssertEqual(nested[2].mission.state, "active")
         XCTAssertEqual(nested[2].mission.raw["project"].text, "verity-core")
@@ -632,7 +632,7 @@ final class OrbContractTests: XCTestCase {
         let held = OrbMissionTree.nest([transientOrphan], placeholder: OrbMissionTree.placeholderParent("assistant"))
         XCTAssertEqual(held.map(\.id), ["parent-slow"])
         XCTAssertTrue(held[0].mission.isPlaceholder)
-        XCTAssertEqual(held[0].mission.title, "Parent mission")
+        XCTAssertEqual(held[0].mission.name, "Parent mission")
         XCTAssertEqual(held[0].children.map(\.id), ["orphan-transient"])
 
         OrbHierarchy.markGone("parent-404")
