@@ -313,7 +313,7 @@ pub async fn run_lease_command(
         request.mission_id,
         None,
         crate::node::runner::run_captured_command(
-            raw_command(&request.command, &mission_dir, None),
+            raw_command_with_work_root(&request.command, &mission_dir, Some(&work_root), None),
             max_secs,
         ),
     )
@@ -327,13 +327,118 @@ pub async fn run_lease_command(
     })
 }
 
+const LAKE_ADVISORY_WRAPPER: &str = r#"#!/bin/sh
+# Installed by sandboxed-node in <work-root>/caches/bin/lake so mission shells
+# steer agents toward turbo-lean on top-level `lake build` while transparently
+# delegating `lake setup-file`, `lake env`, `lake exe`, etc.
+self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+real_lake=""
+if [ -n "${ELAN_HOME:-}" ] && [ -x "${ELAN_HOME}/bin/lake" ]; then
+  cand_dir=$(CDPATH='' cd -- "$(dirname -- "${ELAN_HOME}/bin/lake")" 2>/dev/null && pwd -P || true)
+  if [ "$cand_dir" != "$self_dir" ]; then
+    real_lake="${ELAN_HOME}/bin/lake"
+  fi
+fi
+if [ -z "$real_lake" ]; then
+  old_ifs=$IFS
+  IFS=':'
+  for dir in ${PATH:-/usr/local/bin:/usr/bin:/bin}; do
+    [ -n "$dir" ] || continue
+    if [ -x "$dir/lake" ]; then
+      cand_dir=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P || true)
+      if [ "$cand_dir" != "$self_dir" ]; then
+        real_lake="$dir/lake"
+        break
+      fi
+    fi
+  done
+  IFS=$old_ifs
+fi
+if [ -z "$real_lake" ]; then
+  printf 'sandboxed-node: lake binary not found in ELAN_HOME or PATH\n' >&2
+  exit 127
+fi
+if [ "${1:-}" = "build" ] && [ "${SANDBOXED_ALLOW_RAW_LAKE:-0}" != "1" ] && [ "${SANDBOXED_REMOTE_EXECUTION:-0}" != "1" ]; then
+  printf '[sandboxed-node] warning: raw `lake build` duplicates gigabytes of .olean artifacts per worktree; prefer `turbo-lean build` / `turbo-lean check` (set SANDBOXED_ALLOW_RAW_LAKE=1 only when required).\n' >&2
+fi
+exec "$real_lake" "$@"
+"#;
+
+/// Prepare `<work-root>/caches/{elan,turbo-lean,bin}` and install the advisory
+/// `lake` wrapper so remote mission turns share one toolchain/CAS store per
+/// host instead of duplicating `.elan` and `.lake` across mission worktrees.
+pub(crate) fn prepare_shared_mission_caches(
+    work_root: &std::path::Path,
+) -> std::io::Result<Vec<(String, String)>> {
+    let caches = work_root.join("caches");
+    let elan = caches.join("elan");
+    let turbo_lean = caches.join("turbo-lean");
+    let bin = caches.join("bin");
+    std::fs::create_dir_all(&elan)?;
+    std::fs::create_dir_all(&turbo_lean)?;
+    std::fs::create_dir_all(&bin)?;
+
+    let lake_shim = bin.join("lake");
+    let needs_write = match std::fs::read(&lake_shim) {
+        Ok(existing) => existing != LAKE_ADVISORY_WRAPPER.as_bytes(),
+        Err(_) => true,
+    };
+    if needs_write {
+        let tmp = bin.join(format!(".lake.tmp.{}", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&tmp, LAKE_ADVISORY_WRAPPER.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        }
+        std::fs::rename(&tmp, &lake_shim)?;
+    }
+
+    let base_path =
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+    let mut path_entries = vec![bin.display().to_string()];
+    let rustup = caches.join("rustup");
+    let cargo = caches.join("cargo");
+    let has_shared_rustup =
+        rustup.join("toolchains").is_dir() || cargo.join("bin/rustup").is_file();
+    if has_shared_rustup && cargo.join("bin").is_dir() {
+        path_entries.push(cargo.join("bin").display().to_string());
+    }
+    path_entries.push(elan.join("bin").display().to_string());
+    path_entries.push(base_path);
+
+    let mut envs = vec![
+        ("ELAN_HOME".to_string(), elan.display().to_string()),
+        (
+            "TURBO_LEAN_HOME".to_string(),
+            turbo_lean.display().to_string(),
+        ),
+        ("PATH".to_string(), path_entries.join(":")),
+    ];
+    if has_shared_rustup {
+        envs.push(("RUSTUP_HOME".to_string(), rustup.display().to_string()));
+        envs.push(("CARGO_HOME".to_string(), cargo.display().to_string()));
+    }
+    Ok(envs)
+}
+
 /// Construct a raw command without inheriting the node service environment.
 /// The service bearer/signing tokens must never be visible to repository or
 /// mission code. Explicit payload env is added back after a minimal runtime
 /// baseline.
+#[cfg(test)]
 pub(crate) fn raw_command(
     command: &str,
     cwd: &std::path::Path,
+    env: Option<&std::collections::HashMap<String, String>>,
+) -> Command {
+    raw_command_with_work_root(command, cwd, None, env)
+}
+
+pub(crate) fn raw_command_with_work_root(
+    command: &str,
+    cwd: &std::path::Path,
+    work_root: Option<&std::path::Path>,
     env: Option<&std::collections::HashMap<String, String>>,
 ) -> Command {
     let mut cmd = Command::new("bash");
@@ -347,6 +452,20 @@ pub(crate) fn raw_command(
         )
         .env("HOME", cwd)
         .env("LANG", "C.UTF-8");
+    if let Some(root) = work_root {
+        match prepare_shared_mission_caches(root) {
+            Ok(cache_envs) => {
+                cmd.envs(cache_envs);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    work_root = %root.display(),
+                    %error,
+                    "failed to prepare shared mission caches; continuing with baseline env"
+                );
+            }
+        }
+    }
     if let Some(env) = env {
         cmd.envs(env);
     }
@@ -468,9 +587,86 @@ mod tests {
             .unwrap()
             .path();
         assert_eq!(std::fs::read(scratch.join("probe")).unwrap(), b"scratch");
+        assert!(scratch.join("opencode").is_dir());
         assert_eq!(result.exit_code, Some(7));
         assert_eq!(result.stdout, "out");
         assert_eq!(result.stderr, "err");
+    }
+
+    #[tokio::test]
+    async fn raw_command_with_work_root_wires_shared_lean_caches_and_advisory_lake_shim() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let work_root = tempfile::tempdir().unwrap();
+        let mission_dir = work_root.path().join("mission-a");
+        std::fs::create_dir_all(&mission_dir).unwrap();
+
+        let fake_elan_bin = work_root.path().join("caches/elan/bin");
+        std::fs::create_dir_all(&fake_elan_bin).unwrap();
+        let fake_lake = fake_elan_bin.join("lake");
+        std::fs::write(&fake_lake, "#!/bin/sh\nprintf 'real-lake:%s' \"$*\"\n").unwrap();
+        std::fs::set_permissions(&fake_lake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (code, stdout, stderr) = crate::node::runner::run_captured_command(
+            raw_command_with_work_root(
+                "printf '%s|%s|%s|' \"$ELAN_HOME\" \"$TURBO_LEAN_HOME\" \"${RUSTUP_HOME:-unset}\"; lake setup-file Foo.lean; printf '|'; lake build",
+                &mission_dir,
+                Some(work_root.path()),
+                None,
+            ),
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, Some(0));
+        let expected_elan = work_root.path().join("caches/elan");
+        let expected_tl = work_root.path().join("caches/turbo-lean");
+        assert_eq!(
+            stdout,
+            format!(
+                "{}|{}|unset|real-lake:setup-file Foo.lean|real-lake:build",
+                expected_elan.display(),
+                expected_tl.display()
+            )
+        );
+        assert!(
+            stderr.contains("prefer `turbo-lean build`"),
+            "expected advisory warning on lake build, got: {stderr:?}"
+        );
+        assert_eq!(
+            stderr.matches("prefer `turbo-lean build`").count(),
+            1,
+            "lake setup-file must stay silent on stderr: {stderr:?}"
+        );
+
+        // Opt-out via SANDBOXED_ALLOW_RAW_LAKE=1 suppresses the stderr warning,
+        // and shared RUSTUP_HOME/CARGO_HOME activate once toolchains exist.
+        std::fs::create_dir_all(work_root.path().join("caches/rustup/toolchains")).unwrap();
+        let mut override_env = std::collections::HashMap::new();
+        override_env.insert("SANDBOXED_ALLOW_RAW_LAKE".to_string(), "1".to_string());
+        let (code2, stdout2, stderr2) = crate::node::runner::run_captured_command(
+            raw_command_with_work_root(
+                "printf '%s|' \"${RUSTUP_HOME:-unset}\"; lake build",
+                &mission_dir,
+                Some(work_root.path()),
+                Some(&override_env),
+            ),
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code2, Some(0));
+        assert_eq!(
+            stdout2,
+            format!(
+                "{}|real-lake:build",
+                work_root.path().join("caches/rustup").display()
+            )
+        );
+        assert!(
+            stderr2.is_empty(),
+            "expected empty stderr with opt-out, got: {stderr2:?}"
+        );
     }
 
     #[tokio::test]

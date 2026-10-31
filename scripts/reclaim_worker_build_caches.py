@@ -16,6 +16,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -25,6 +26,7 @@ import storage_inventory as inv  # noqa: E402
 
 SETTLED_NODE_JOB_STATES = {"succeeded", "failed", "cancelled", "retired", "completed", "lost"}
 ELIGIBLE_CORE_STATUSES = inv.TERMINAL | {"acknowledged"}
+NESTED_DOT_CACHE_NAMES = {"turbo-lean", "mathlib", "opencode", "uv", "pip", "go-build"}
 
 
 def _unescape_mountinfo_path(raw):
@@ -199,12 +201,121 @@ def default_open_file_probe(directory, timeout=15):
     return "clear", ""
 
 
-def find_reclaimable_subdirs(mission_dir, allowed_names=inv.RECLAIMABLE_WORKER_CACHES, mountpoints=frozenset()):
+def _snapshot_proc_open_paths(proc_root="/proc"):
+    """Scan ``/proc/<pid>/{cwd,exe,fd,maps}`` and return sorted open paths or ``None``."""
+    proc_path = Path(proc_root)
+    if not proc_path.is_dir():
+        return None
+    open_paths = set()
+    try:
+        entries = list(os.scandir(proc_path))
+    except OSError:
+        return None
+
+    saw_pid = False
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        saw_pid = True
+        pid_dir = proc_path / entry.name
+        for link_name in ("cwd", "exe"):
+            try:
+                target = os.readlink(pid_dir / link_name)
+                if target.startswith("/"):
+                    open_paths.add(os.path.normpath(target.removesuffix(" (deleted)")))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except PermissionError:
+                return None
+            except OSError:
+                continue
+        fd_dir = pid_dir / "fd"
+        try:
+            with os.scandir(fd_dir) as fd_it:
+                for fd_entry in fd_it:
+                    try:
+                        target = os.readlink(fd_entry.path)
+                        if target.startswith("/"):
+                            open_paths.add(os.path.normpath(target.removesuffix(" (deleted)")))
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+                    except PermissionError:
+                        return None
+                    except OSError:
+                        continue
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError:
+            return None
+        except OSError:
+            return None
+
+        maps_file = pid_dir / "maps"
+        try:
+            for line in maps_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = line.split(None, 5)
+                if len(parts) == 6 and parts[5].startswith("/"):
+                    open_paths.add(os.path.normpath(parts[5].removesuffix(" (deleted)")))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError:
+            return None
+        except OSError:
+            return None
+
+    if not saw_pid:
+        return None
+    return sorted(open_paths)
+
+
+def build_proc_open_file_probe(proc_root="/proc", ttl_secs=1.0, fallback_probe=default_open_file_probe):
+    """Build a fresh O(processes) Linux ``/proc`` open-path probe (1s TTL).
+
+    ``lsof +D <dir>`` recursively stats every file inside ``<dir>`` before
+    checking ``/proc``, taking minutes across hundreds of Lean ``.lake`` trees.
+    When running as root on Linux, snapshotting ``cwd``, ``exe``, ``fd/*``, and
+    ``maps`` across ``/proc/<pid>`` inspects the exact same kernel descriptors in
+    ~50 ms while refreshing every ``ttl_secs`` so resumed missions cannot race a
+    long reclamation run.  Any permission error falls back to ``fallback_probe``.
+    """
+    initial = _snapshot_proc_open_paths(proc_root)
+    if initial is None:
+        return None
+    state = {"paths": initial, "at": time.monotonic()}
+
+    def _probe(directory):
+        now = time.monotonic()
+        if now - state["at"] >= ttl_secs:
+            refreshed = _snapshot_proc_open_paths(proc_root)
+            if refreshed is None:
+                return fallback_probe(directory)
+            state["paths"] = refreshed
+            state["at"] = now
+        norm_dir = os.path.normpath(os.path.abspath(str(directory)))
+        real_dir = os.path.normpath(os.path.realpath(str(directory)))
+        for prefix in {norm_dir, real_dir}:
+            slash = prefix + "/"
+            for op in state["paths"]:
+                if op == prefix or op.startswith(slash):
+                    return "open", f"open descriptor/mmap at {op}"
+        return "clear", ""
+
+    return _probe
+
+
+def find_reclaimable_subdirs(
+    mission_dir,
+    allowed_names=inv.RECLAIMABLE_WORKER_CACHES,
+    nested_dot_cache_names=NESTED_DOT_CACHE_NAMES,
+    mountpoints=frozenset(),
+):
     """Yield non-overlapping reconstructible cache subdirectories on the same device."""
     root_path = Path(mission_dir)
     root_dev = root_path.lstat().st_dev
     allowed = {name.lower() for name in allowed_names}
+    nested_cache = {name.lower() for name in nested_dot_cache_names}
     for current, dirs, _ in os.walk(root_path, followlinks=False):
+        parent_is_dot_cache = Path(current).name.lower() == ".cache"
         kept = []
         for name in sorted(dirs):
             candidate = Path(current, name)
@@ -214,7 +325,13 @@ def find_reclaimable_subdirs(mission_dir, allowed_names=inv.RECLAIMABLE_WORKER_C
                 continue
             if not stat.S_ISDIR(meta.st_mode) or is_mount_boundary(candidate, meta, root_dev, mountpoints):
                 continue
-            if name.lower() in allowed:
+            lower_name = name.lower()
+            is_reclaimable = lower_name in allowed or (
+                parent_is_dot_cache and lower_name in nested_cache
+            )
+            # Never treat a Git checkout or bare repository as a build cache,
+            # even if a directory happens to share a cache basename.
+            if is_reclaimable and not (candidate / ".git").exists():
                 yield candidate
             else:
                 kept.append(name)
@@ -463,6 +580,7 @@ def main(argv=None):
     mode.add_argument("--apply", action="store_true", help="Delete eligible reconstructible cache directories")
     args = parser.parse_args(argv)
 
+    probe = build_proc_open_file_probe() or default_open_file_probe
     records, ok = reclaim_worker_caches(
         node_work_dir=args.node_work_dir,
         missions_dir=args.missions_dir,
@@ -470,6 +588,7 @@ def main(argv=None):
         apply=args.apply,
         terminal_only=args.terminal_only,
         extra_step_globs=args.extra_step_glob,
+        open_file_probe=probe,
     )
     output = "".join(json.dumps(r, sort_keys=True) + "\n" for r in records)
     sys.stdout.write(output)
