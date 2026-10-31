@@ -148,13 +148,13 @@ final class OrbStreamTextTests: XCTestCase {
     func testStreamingDoesNotEvictMathCache() {
         let settled = "E = mc^2"
         _ = OrbMath.formatCached(settled, complete: true, streaming: false)
-        XCTAssertNotNil(OrbMath.cache.get("1:\(settled)"))
+        XCTAssertNotNil(OrbMath.cache.get(settled))
         for i in 0..<600 {
             let prefix = "x_\(i) + \\frac{1}{\(i + 1)}"
             _ = OrbMath.formatCached(prefix, complete: false, streaming: true)
             _ = OrbMath.formatCached(prefix, complete: true, streaming: true)
         }
-        XCTAssertNotNil(OrbMath.cache.get("1:\(settled)"))
+        XCTAssertNotNil(OrbMath.cache.get(settled))
     }
 
     /// The parse cache is a text-keyed LRU: same hits and recency order as the Lean model.

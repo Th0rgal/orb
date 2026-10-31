@@ -179,7 +179,7 @@ final class OrbRichTextTests: XCTestCase {
         let huge = String(repeating: "x + ", count: 3000)
         let hugeRes = OrbMath.formatLatex(huge, complete: true)
         XCTAssertFalse(hugeRes.valid)
-        XCTAssertLessThanOrEqual(hugeRes.text.count, 260)
+        XCTAssertLessThanOrEqual(hugeRes.text.count, OrbMath.maxSpanChars)
     }
 
     func testBoostCiTranscriptReplaysNativelyWithUniqueTurnKeysAndZeroWebViews() throws {

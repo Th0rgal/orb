@@ -84,15 +84,15 @@ class OrbRichTextRoutingTest {
         val huge = "x + ".repeat(3000)
         val hugeRes = OrbMath.formatLatex(huge, complete = true)
         assertFalse(hugeRes.valid)
-        assertTrue(hugeRes.text.length <= 260)
+        assertTrue(hugeRes.text.length <= OrbMath.MAX_SPAN_CHARS)
 
         // Streaming math prefixes must not evict settled math cache entries.
         OrbMath.formatCached("E = mc^2", complete = true, streaming = false)
-        assertTrue(OrbMath.cache.get("1:E = mc^2") != null)
+        assertTrue(OrbMath.cache.get("E = mc^2") != null)
         for (i in 0 until 600) {
             OrbMath.formatCached("x_$i + \\frac{1}{${i + 1}}", complete = false, streaming = true)
             OrbMath.formatCached("x_$i + \\frac{1}{${i + 1}}", complete = true, streaming = true)
         }
-        assertTrue(OrbMath.cache.get("1:E = mc^2") != null)
+        assertTrue(OrbMath.cache.get("E = mc^2") != null)
     }
 }
