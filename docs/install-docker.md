@@ -19,6 +19,39 @@ docker compose up -d
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
+### Use a prebuilt image
+
+After a successful upstream `master` push, CI publishes the tested **linux/amd64**
+image to `ghcr.io/th0rgal/orb:sha-<full-commit-sha>`. Find the exact tag in the
+**Publish tested Docker image** job summary or the repository's Packages page.
+There is no rolling `latest` tag. Other architectures currently require a local
+build or Docker's amd64 emulation.
+
+In your checkout's `docker-compose.yml`, replace `build: .` with the published tag:
+
+```yaml
+    image: ghcr.io/th0rgal/orb:sha-<full-commit-sha>
+```
+
+Keep the existing ports, volumes, and `.env` configuration, then run:
+
+```bash
+docker compose pull
+docker compose up -d --no-build
+```
+
+For updates, select a newer published tag and repeat these commands. For an exact
+image pin, use its registry digest (`ghcr.io/th0rgal/orb@sha256:...`); rerunning CI
+for a commit can replace its tag because the image includes external CLI installs.
+
+**Maintainer setup:** the first publication requires GitHub Actions package-write
+access. After the first push, make the `orb` container package public in its package
+settings so users can pull anonymously. If the package already exists, grant this
+repository Actions access to it. See GitHub's
+[package permissions and visibility guide](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
+Until the first successful publication and visibility setup, use the source-build
+Quick Start above. PRs, forks, scheduled runs, and release-branch pushes do not publish.
+
 ## Configuration
 
 ### Essential environment variables
