@@ -18501,7 +18501,8 @@ async fn fork_lineage_inherits_read_scope_resolves_zero_padded_prefixes_and_expi
     };
 
     // 1. `v2` can read `v1`, `v1`'s child `child`, and `v1`'s approved grant `reviewed` directly,
-    //    while control tools on `child` / `reviewed` stay denied.
+    //    control/supersede `v1`'s child `child`, while control tools on `v1` itself and on
+    //    `v1`'s read-only grant `reviewed` stay denied.
     for readable in [v1.id, child.id, reviewed.id] {
         let Json(res) = call(
             State(h.state.clone()),
@@ -18514,16 +18515,38 @@ async fn fork_lineage_inherits_read_scope_resolves_zero_padded_prefixes_and_expi
         .await;
         assert_eq!(res["ok"], true, "v2 must read {readable}: {res}");
     }
-    let Json(denied_control) = call(
+    let Json(allowed_child_control) = call(
         State(h.state.clone()),
         Extension(v2_principal.clone()),
         Json(Call {
             name: "cancel_mission".into(),
-            arguments: json!({ "mission_id": child.id }),
+            arguments: json!({
+                "mission_id": child.id,
+                "idempotency_key": "v2-cancel-v1-child",
+            }),
         }),
     )
     .await;
-    assert_eq!(denied_control["ok"], false);
+    assert_eq!(
+        allowed_child_control["ok"], true,
+        "v2 must control v1's child {child:?}: {allowed_child_control}"
+    );
+    for denied in [v1.id, reviewed.id] {
+        let Json(denied_control) = call(
+            State(h.state.clone()),
+            Extension(v2_principal.clone()),
+            Json(Call {
+                name: "cancel_mission".into(),
+                arguments: json!({
+                    "mission_id": denied,
+                    "idempotency_key": format!("v2-deny-{denied}"),
+                }),
+            }),
+        )
+        .await;
+        assert_eq!(denied_control["ok"], false, "must deny control on {denied}");
+        assert_eq!(denied_control["error"]["code"], "forbidden");
+    }
 
     // 2. Calling `request_mission_access` with a zero-padded 8-char prefix UUID
     //    (`<8hex>-0000-0000-0000-000000000000`) resolves to the real mission instead of creating
@@ -18634,4 +18657,210 @@ async fn fork_lineage_inherits_read_scope_resolves_zero_padded_prefixes_and_expi
             .state,
         crate::api::approval_flow::ApprovalState::Expired
     );
+}
+
+#[tokio::test]
+async fn remote_claude_switches_in_place_to_opencode_and_supersedes_pr_writer_cleanly() {
+    let fixture = spawn_fixture_node(
+        "claude-to-opencode-fixture",
+        "CLAUDE_TO_OPENCODE_FIXTURE_TOKEN",
+        "running",
+    )
+    .await;
+    std::env::set_var("SANDBOXED_PUBLIC_URL", "http://127.0.0.1:9");
+    let h = Harness::with_nodes(vec![fixture.node.clone()]).await;
+    {
+        let mut reg = h.state.backend_registry.write().await;
+        reg.register(Arc::new(
+            crate::backend::claudecode::ClaudeCodeBackend::new(),
+        ));
+        reg.register(Arc::new(crate::backend::opencode::OpenCodeBackend::new(
+            "http://127.0.0.1:9".into(),
+            None,
+            false,
+        )));
+    }
+
+    // 1. Launch remote Claude coordinator on the fixture node and complete turn 1.
+    let response = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(&json!({
+            "title": "Coordinator takeover",
+            "prompt": "Coordinate wave8 verification",
+            "project": "verity-core",
+            "backend": "claudecode",
+            "model_override": "claude-opus-5-5",
+            "remote_node_id": "claude-to-opencode-fixture",
+            "idempotency_key": "claude-to-opencode-create"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value = response.json().await.unwrap();
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+    let store = h.control.mission_store.clone();
+
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Wave 8 round 7 ready\"}\n"
+            .into();
+    fixture.set_state("succeeded");
+    wait_until("Claude first turn completes", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
+    })
+    .await;
+    wait_until("Claude first ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+
+    // 2. Switch settings in-place to OpenCode + builtin/smart (resume=false), then continue!
+    let _ = update_mission_settings(
+        State(h.state.clone()),
+        Extension(h.user.clone()),
+        Path(id),
+        Json(
+            serde_json::from_value(json!({
+                "backend": "opencode",
+                "model_override": "builtin/smart",
+                "model_effort": "",
+                "resume": false
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let switched = store.get_mission(id).await.unwrap().unwrap();
+    assert_eq!(switched.backend, "opencode");
+    assert_eq!(switched.session_id, None);
+
+    fixture.log.lock().unwrap().clear();
+    fixture.set_state("running");
+    let resume_res = h
+        .request(
+            false,
+            id,
+            json!({ "content": "Re-arm schedule_wakeup now" }),
+        )
+        .await;
+    assert_eq!(
+        resume_res.status(),
+        StatusCode::OK,
+        "{}",
+        resume_res.text().await.unwrap()
+    );
+    let submissions = fixture.submissions.lock().unwrap().clone();
+    assert_eq!(submissions.len(), 2);
+    let oc_cmd = submissions[1]["payload"]["command"].as_str().unwrap();
+    assert!(
+        oc_cmd.contains("opencode run --format json --thinking"),
+        "{oc_cmd}"
+    );
+    assert!(
+        !oc_cmd.contains("--session"),
+        "fresh OpenCode turn must not pass --session: {oc_cmd}"
+    );
+    let oc_env = &submissions[1]["payload"]["env"];
+    let staged_prompt = oc_env["SANDBOXED_PROMPT_PART_0"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        staged_prompt.contains("Wave 8 round 7 ready")
+            && staged_prompt.contains("Re-arm schedule_wakeup now"),
+        "fresh OpenCode turn must carry recovery history + new prompt: {staged_prompt}"
+    );
+
+    // Emit native OpenCode `ses_...` session id and verify it persists onto `id`.
+    *fixture.log.lock().unwrap() =
+        "{\"type\":\"text\",\"sessionID\":\"ses_migrated123\",\"part\":{\"text\":\"Reminder armed\"}}\n"
+            .into();
+    fixture.set_state("succeeded");
+    wait_until("OpenCode turn completes", 20, || async {
+        store.get_mission(id).await.unwrap().unwrap().status == MissionStatus::Completed
+    })
+    .await;
+    wait_until("OpenCode ledger settles", 10, || async {
+        crate::remote_node::job_ledger::load(&h.state.config.working_dir)
+            .await
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    assert_eq!(
+        store
+            .get_mission(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("ses_migrated123")
+    );
+
+    // 3. Verify `start_mission` with `supersedes_mission_id` cleanly replaces a stopped
+    //    PR writer (`AwaitingUser`) on the same GitHub PR without 409 conflict!
+    let prior_writer = store
+        .create_mission(
+            Some("PR #313 attempt 1"),
+            None,
+            None,
+            Some("builtin/smart"),
+            None,
+            Some("opencode"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            prior_writer.id,
+            MissionProjectPatch {
+                project: Some(Some("verity-core".into())),
+                github_pr: Some(Some("Th0rgal/turbo-lean#313".into())),
+                tags: Some(vec!["pr-writer".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_status(prior_writer.id, MissionStatus::AwaitingUser)
+        .await
+        .unwrap();
+
+    fixture.log.lock().unwrap().clear();
+    fixture.set_state("running");
+    let takeover_res = h
+        .state
+        .http_client
+        .post(format!("{}/missions", h.url))
+        .json(&json!({
+            "title": "PR #313 takeover",
+            "prompt": "Fix and push PR #313",
+            "project": "verity-core",
+            "github_pr": "Th0rgal/turbo-lean#313",
+            "writer": true,
+            "supersedes_mission_id": prior_writer.id,
+            "backend": "opencode",
+            "model_override": "builtin/smart",
+            "remote_node_id": "claude-to-opencode-fixture",
+            "idempotency_key": "pr-313-supersede-takeover"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        takeover_res.status(),
+        StatusCode::OK,
+        "{}",
+        takeover_res.text().await.unwrap()
+    );
+    let absorbed = store.get_mission(prior_writer.id).await.unwrap().unwrap();
+    assert_eq!(absorbed.status, MissionStatus::Acknowledged);
 }

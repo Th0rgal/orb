@@ -3570,7 +3570,29 @@ async fn continue_inner(
         native_session = stream.session_id;
     }
     let session_id = native_session.filter(|s| !s.trim().is_empty());
-    if session_id.is_none() && !transferred {
+    let opencode_switched_history =
+        if session_id.is_none() && !transferred && mission.backend == "opencode" {
+            let events = store
+                .get_events(
+                    mission_id,
+                    Some(&["user_message", "assistant_message"]),
+                    None,
+                    None,
+                )
+                .await
+                .map_err(internal)?;
+            events
+                .iter()
+                .any(|event| {
+                    event.event_type == "assistant_message"
+                        && !event.content.trim().is_empty()
+                        && event.metadata["success"] != serde_json::json!(false)
+                })
+                .then_some(events)
+        } else {
+            None
+        };
+    if session_id.is_none() && !transferred && opencode_switched_history.is_none() {
         return Err((
             StatusCode::CONFLICT,
             format!("{REMOTE_RESUME_REQUIRES_REPLACEMENT}: mission {mission_id} has no recorded native session; create a remote replacement with supersedes_mission_id={mission_id}"),
@@ -3592,10 +3614,14 @@ async fn continue_inner(
         }
     });
     let history_prompt = prompt.clone();
-    let prompt =
+    let prompt = if let Some(events) = opencode_switched_history.as_deref() {
+        super::fork::recovery_prompt(mission.id, mission.title.as_deref(), events, &prompt)
+            .unwrap_or(prompt)
+    } else {
         super::machine_transfer::context(&store, mission_id, prompt, session_id.as_deref())
             .await
-            .map_err(internal)?;
+            .map_err(internal)?
+    };
     // Generated resumes are transport instructions, not a new user objective.
     // Parsing them used to append the entire resume envelope on every retry.
     if let Some(objective) = content.as_deref().and_then(super::parse_goal_objective) {

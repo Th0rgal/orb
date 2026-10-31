@@ -6145,7 +6145,8 @@ fn select_harness_session(
         sessions.insert(mission.backend.clone(), id.clone());
     }
     sessions.get(target).cloned().or_else(|| {
-        (!matches!(target, "grok" | "antigravity" | "vibe")).then(|| allocated_id.to_string())
+        (!matches!(target, "grok" | "antigravity" | "vibe" | "opencode"))
+            .then(|| allocated_id.to_string())
     })
 }
 

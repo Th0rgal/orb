@@ -265,6 +265,10 @@ impl Snapshot {
         })
     }
 
+    pub(super) fn has_unresolved_execution(&self, id: Uuid) -> bool {
+        self.unresolved.contains(&id)
+    }
+
     pub(super) fn unresolved_pr_writer(
         &self,
         pr: &str,

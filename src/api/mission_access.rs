@@ -1336,13 +1336,20 @@ async fn approve(
 ) -> Result<Json<AccessRequest>, ApiError> {
     let id = parse_id(&id)?;
     let access = store(&state);
+    let missions = state.control.get_or_spawn(&user).await.mission_store;
+    let _ = access.expire_stale_for_store(&missions, &user.id).await;
     let pending = access
         .get(&user.id, id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Request not found".to_string()))?;
+    if !pending.state.is_pending() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("Request {id} is no longer pending; nothing was approved"),
+        ));
+    }
     // Only the owner of the target mission decides: it must still exist in
     // the approver's own mission store.
-    let missions = state.control.get_or_spawn(&user).await.mission_store;
     if !matches!(
         missions.get_mission(pending.target_mission_id).await,
         Ok(Some(_))

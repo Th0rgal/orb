@@ -2094,14 +2094,74 @@ pub(in crate::api) async fn create_mission_inner(
     }
 
     let control = control_for_user(&state, &user).await;
+    // Helper: check whether an explicit `supersedes_mission_id` in the caller's
+    // own store/project has no live execution (after settling any destroyed/gone
+    // managed VM handles) so a replacement writer can cleanly inherit its PR lease.
+    let supersedes_stopped_pr_holder = |target_project: Option<&str>| {
+        let state = Arc::clone(&state);
+        let control = control.clone();
+        let prior_id = req.supersedes_mission_id;
+        let target_project = target_project
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        async move {
+            let Some(prior_id) = prior_id else {
+                return Ok::<Option<Uuid>, String>(None);
+            };
+            let _ = super::remote_jobs::release_jobs_on_gone_nodes(
+                &state.config.working_dir,
+                control.mission_store.as_ref(),
+                prior_id,
+            )
+            .await?;
+            let Some(prior) = control.mission_store.get_mission(prior_id).await? else {
+                return Ok(None);
+            };
+            let same_project = match (
+                prior.project.project.as_deref().map(str::trim),
+                target_project.as_deref(),
+            ) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                (None, _) => true,
+                (Some(_), None) => false,
+            };
+            if !same_project
+                || matches!(
+                    prior.status,
+                    MissionStatus::Pending
+                        | MissionStatus::Active
+                        | MissionStatus::WaitingBackground
+                )
+            {
+                return Ok(None);
+            }
+            if control
+                .mission_store
+                .get_active_mission_run(prior_id)
+                .await?
+                .is_some()
+            {
+                return Ok(None);
+            }
+            let unresolved = execution_ownership::snapshot(&state.control)
+                .await?
+                .has_unresolved_execution(prior_id);
+            Ok((!unresolved).then_some(prior_id))
+        }
+    };
     if request_needs_writer_lease {
         let _guard = acquire_durable_pr_writer_lock(&state.control)
             .await
             .map_err(internal_error)?;
         if let Some(github_pr) = req.github_pr.as_deref() {
-            if let Some(existing) = find_existing_pr_writer_global(&state.control, github_pr, None)
+            let superseded_holder = supersedes_stopped_pr_holder(req.project.as_deref())
                 .await
-                .map_err(internal_error)?
+                .map_err(internal_error)?;
+            if let Some(existing) =
+                find_existing_pr_writer_global(&state.control, github_pr, superseded_holder)
+                    .await
+                    .map_err(internal_error)?
             {
                 return Err((
                     StatusCode::CONFLICT,
@@ -2446,10 +2506,14 @@ pub(in crate::api) async fn create_mission_inner(
         };
         if let (Some(github_pr), Some(_guard)) = (req.github_pr.as_deref(), pr_writer_guard.as_ref())
         {
+            let superseded_holder = supersedes_stopped_pr_holder(req.project.as_deref())
+                .await
+                .map_err(internal_error)?;
             if let Some(existing) =
                 find_existing_pr_writer_global(&state.control, github_pr, Some(mission.id))
                     .await
                     .map_err(internal_error)?
+                    .filter(|existing| Some(existing.id) != superseded_holder)
             {
                 let reason = "pr_writer_lease_conflict";
                 control
