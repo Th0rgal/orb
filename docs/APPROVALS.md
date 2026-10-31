@@ -3,7 +3,7 @@
 Missions and external MCP sessions (local Mac IDE harnesses, `sandboxed-mcp`
 CLI, CI, webhooks) ask for things only the user may grant: secret access
 (Bitwarden read, write, delete, move), privileged access on a host (`ops_read`,
-`service_deploy`, `root_exec`) and read access to another mission. These are
+`service_deploy`, `root_exec`) and read or control access to another mission. These are
 three stores (`secret_broker.rs`, `privilege_broker.rs`, `mission_access.rs`)
 with one subject identity (`RequesterSubject` in `src/api/approval_flow.rs`)
 and one approval model on top (`src/api/approval_queue.rs`).
@@ -18,7 +18,7 @@ Every pending request is an `ApprovalItem`:
 | `id` | the request id in its store |
 | `requester_mission_id`, `requester_title` | mission id and title when raised by a mission (`null` for external sessions) |
 | `requester_subject`, `requester_label` | structured `RequesterSubject` (`mission` or `external_session`) and display label (`External · <host> (<label>)` or `External · <label>`) |
-| `tier` | what it does: `ops_read` / `service_deploy` / `root_exec`, `read` / `write` / `delete` / `move`, `read_mission` |
+| `tier` | what it does: `ops_read` / `service_deploy` / `root_exec`, `read` / `write` / `delete` / `move`, `read_mission` / `control_mission` |
 | `target` | where: a host, a secret or project, a mission id |
 | `risk` | `routine`, `elevated` or `critical` (table in `shared/orb-spec/fixtures/approvals.json`) |
 | `digest` | domain-separated SHA-256 over every field that changes what approving grants: `orb-approval-v1` for missions (`{kind}\n{id}\n{mission_id}…`) and `orb-approval-v2` for external sessions (`{kind}\n{id}\n{canonical_subject}…`, pinning `session_id`, `client_kind`, and `SHA-256(trimmed_label + "\n" + trimmed_host)[:16]`). Not the reason. |

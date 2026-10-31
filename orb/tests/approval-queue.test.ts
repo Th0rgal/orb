@@ -102,4 +102,11 @@ describe('approval queue',()=>{
   expect(itemRequester(ext)).toBe('External · macbook-air (claude-code)');
   expect(signingReason([ext])).toBe('Read OPENAI_API_KEY for External · macbook-air (claude-code)');
  });
+ it('maps control-scoped mission access requests to control_mission labels and signing text',()=>{
+  const ctrl=legacyItem('mission_access',{id:'a2',state:'pending',scope:'control',requester_mission_id:'m2',requester_title:'Fleet health',target_mission_id:'t1',target_title:'Disk cleanup',reason:'queue step 2',ttl_hours:12,created_at:'2026-10-31T10:00:00Z'});
+  expect(ctrl.tier).toBe('control_mission');
+  expect(ctrl.risk).toBe('elevated');
+  expect(itemTitle(ctrl)).toBe('Control Disk cleanup');
+  expect(itemDetail(ctrl)).toBe('Allows messages, answers, cancel and resume · 12 h');
+ });
 });

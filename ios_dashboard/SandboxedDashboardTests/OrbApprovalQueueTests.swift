@@ -163,4 +163,24 @@ final class OrbApprovalQueueTests: XCTestCase {
         XCTAssertEqual(OrbApprovalQueue.signingReason([ext]), "Read OPENAI_API_KEY for External · macbook-air (claude-code)")
         XCTAssertEqual(OrbMissionAccessMonitor.subjectKey(raw), "session:c4d5e6f7-0000-4000-8000-000000000099")
     }
+
+    func testControlMissionLegacyItemLabelsAndTier() throws {
+        let raw = try json([
+            "id": "a2",
+            "state": "pending",
+            "scope": "control",
+            "requester_mission_id": "m2",
+            "requester_title": "Fleet health",
+            "target_mission_id": "t1",
+            "target_title": "Disk cleanup",
+            "reason": "queue follow-up",
+            "ttl_hours": 12,
+            "created_at": "2026-10-31T10:00:00Z",
+        ])
+        let ctrl = OrbApprovalQueue.legacyItem(kind: "mission_access", raw)
+        XCTAssertEqual(ctrl["tier"].text, "control_mission")
+        XCTAssertEqual(ctrl["risk"].text, "elevated")
+        XCTAssertEqual(OrbApprovalQueue.title(ctrl), "Control Disk cleanup")
+        XCTAssertEqual(OrbApprovalQueue.detail(ctrl), "Allows messages, answers, cancel and resume · 12 h")
+    }
 }

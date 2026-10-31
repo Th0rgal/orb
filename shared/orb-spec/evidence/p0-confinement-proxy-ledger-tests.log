@@ -2,36 +2,37 @@
 running 1 test
 test shadow::tests::phase5_privd_command_and_ssh_identity_confinement_replays ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
 
 
 running 1 test
 test api::privilege_broker::tests::phase5_privd_command_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3684 filtered out; finished in 0.03s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.09s
 
 
 running 1 test
 test api::control::remote_jobs::boot_leftover_tests::phase5_ssh_identity_and_codex_confinement_rejects_attack_vectors_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3684 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.00s
 
 
-running 12 tests
+running 13 tests
 test api::mission_access::tests::a_revoke_that_cannot_be_saved_changes_nothing ... ok
 test api::mission_access::tests::agent_sees_nothing_of_the_target_before_a_live_grant ... ok
 test api::mission_access::tests::an_approved_grant_never_allows_control ... ok
 test api::mission_access::tests::approve_all_is_all_or_nothing_and_owner_scoped ... ok
+test api::mission_access::tests::control_grant_allows_control_and_read_tools_only_after_approval ... ok
 test api::mission_access::tests::denied_and_revoked_grant_nothing ... ok
 test api::mission_access::tests::grants_and_pending_requests_expire ... ok
 test api::mission_access::tests::other_tenants_cannot_see_decide_or_use ... ok
 test api::mission_access::tests::pending_requests_per_mission_are_capped ... ok
 test api::mission_access::tests::read_allowed_only_after_approval ... ok
-test api::mission_access::tests::scope_hint_points_reads_to_the_tool_and_refuses_control ... ok
+test api::mission_access::tests::scope_hint_points_reads_and_control_to_the_tool_and_refuses_placement ... ok
 test api::mission_access::tests::state_survives_restart ... ok
 test api::mission_access::tests::ttl_is_clamped_and_self_requests_refused ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 3673 filtered out; finished in 0.07s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 3644 filtered out; finished in 0.08s
 
 
 running 21 tests
@@ -57,23 +58,23 @@ test remote_node::job_ledger::tests::submission_sequence_breaks_equal_timestamp_
 test remote_node::job_ledger::tests::tentative_handles_round_trip ... ok
 test remote_node::job_ledger::tests::terminal_tentative_handle_never_becomes_validation_receipt ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3664 filtered out; finished in 5.73s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3636 filtered out; finished in 0.24s
 
 
 running 1 test
 test api::proxy::latency_tests::keepalives_fill_long_pauses_between_events_only ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3684 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.01s
 
 
 running 1 test
 test api::proxy::latency_tests::stall_before_output_is_rerouted_transparently ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3684 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.02s
 
 
 running 1 test
 test api::proxy::latency_tests::stall_after_output_is_surfaced_not_retried ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3684 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3656 filtered out; finished in 0.02s
 

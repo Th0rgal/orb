@@ -27,7 +27,9 @@ final class OrbApprovalQueue {
         let r = i["request"]
         switch i["kind"].text {
         case "privilege": return OrbPrivilegeAccessMonitor.title(r)
-        case "mission_access": return "Read \(OrbMissionAccessMonitor.mission(r["target_title"].text, r["target_mission_id"].text))"
+        case "mission_access":
+            let verb = (i["tier"].text == "control_mission" || r["scope"].text == "control") ? "Control" : "Read"
+            return "\(verb) \(OrbMissionAccessMonitor.mission(r["target_title"].text, r["target_mission_id"].text))"
         default:
             let verb = secretVerb[i["tier"].text] ?? "Read"
             if !r["key"].text.isEmpty { return "\(verb) \(r["key"].text)" }
@@ -56,7 +58,11 @@ final class OrbApprovalQueue {
             default: return ""
             }
         case "privilege": return "Allows \(OrbPrivilegeAccessMonitor.unlocks(r)) · \(OrbPrivilegeAccessMonitor.lifetime(r))"
-        case "mission_access": return "Read only · \(Int(r["ttl_hours"].doubleValue ?? 0)) h · no messages, cancel or resume"
+        case "mission_access":
+            let hrs = Int(r["ttl_hours"].doubleValue ?? 0)
+            return (i["tier"].text == "control_mission" || r["scope"].text == "control")
+                ? "Allows messages, answers, cancel and resume · \(hrs) h"
+                : "Read only · \(hrs) h · no messages, cancel or resume"
         default: return ""
         }
     }
@@ -153,7 +159,7 @@ final class OrbApprovalQueue {
     /// A per-kind request as a queue item, for a Core without the queue. No
     /// digest: approved through the kind's own signed route.
     static func legacyItem(kind: String, _ r: OrbJSON) -> OrbJSON {
-        let tier = kind == "privilege" ? r["scope"].text : kind == "secret" ? r["kind"].text : "read_mission"
+        let tier = kind == "privilege" ? r["scope"].text : kind == "secret" ? r["kind"].text : (r["scope"].text == "control" ? "control_mission" : "read_mission")
         let target = kind == "privilege" ? r["target_host"].text
             : kind == "mission_access" ? r["target_mission_id"].text
             : [r["key"].text, r["project_id"].text, "*"].first { !$0.isEmpty } ?? "*"

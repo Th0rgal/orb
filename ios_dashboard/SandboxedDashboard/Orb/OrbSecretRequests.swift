@@ -480,7 +480,7 @@ final class OrbMissionAccessMonitor {
             announced.insert(r["id"].text)
             let content = UNMutableNotificationContent()
             content.title = "Mission access request"
-            content.body = "\(Self.requester(r)) wants to read \(Self.target(r)): \(r["reason"].text)"
+            content.body = "\(Self.requester(r)) wants to \(r["scope"].text == "control" ? "control" : "read") \(Self.target(r)): \(r["reason"].text)"
             content.threadIdentifier = "orb.mission-access"
             content.userInfo = ["orb_mission_access": r["id"].text]
             let request = UNNotificationRequest(identifier: "orb.mission-access.\(r["id"].text)", content: content, trigger: nil)
@@ -506,7 +506,7 @@ struct OrbMissionAccessList: View {
                     ForEach(Self.lifetimes, id: \.0) { Text($0.1).tag($0.0) }
                 }
             } footer: {
-                Text("A grant lets one mission read another (events, messages, shared files). It never allows sending messages, cancel, resume or placement.")
+                Text("A grant lets one mission read or control another outside its tree. Grants require \(OrbBiometric.name), expire, and can be revoked.")
             }
             Section("Pending") {
                 if monitor.pending.isEmpty { Text("No pending requests.").foregroundStyle(.secondary) }
@@ -533,12 +533,13 @@ struct OrbMissionAccessList: View {
     }
 
     private func pendingRow(_ r: OrbJSON) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let isControl = r["scope"].text == "control"
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("READ")
+                Text(isControl ? "CONTROL" : "READ")
                     .font(.system(.caption2, weight: .bold))
                     .padding(.horizontal, 5).padding(.vertical, 2)
-                    .background(OrbStyle.success.opacity(0.22), in: RoundedRectangle(cornerRadius: 4))
+                    .background((isControl ? OrbStyle.warning : OrbStyle.success).opacity(0.22), in: RoundedRectangle(cornerRadius: 4))
                 Text(OrbMissionAccessMonitor.target(r)).font(.subheadline.weight(.medium))
             }
             Text("asked by \(OrbMissionAccessMonitor.requester(r)) · \(OrbStyle.relativeTime(r["created_at"].text))").font(.caption).foregroundStyle(.secondary)
@@ -547,7 +548,7 @@ struct OrbMissionAccessList: View {
                 Button {
                     act(r, approve: true)
                 } label: {
-                    Label("Allow read", systemImage: OrbBiometric.symbolName)
+                    Label(isControl ? "Allow control" : "Allow read", systemImage: OrbBiometric.symbolName)
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.borderedProminent)
@@ -575,7 +576,7 @@ struct OrbMissionAccessList: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(OrbMissionAccessMonitor.requester(g)) → \(OrbMissionAccessMonitor.target(g))").font(.subheadline)
-                Text("Read only · \(Self.left(g["expires_at"].text))").font(.caption).foregroundStyle(.secondary)
+                Text("\(g["scope"].text == "control" ? "Control" : "Read only") · \(Self.left(g["expires_at"].text))").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             Button("Revoke", role: .destructive) { revoke(g) }
@@ -589,7 +590,7 @@ struct OrbMissionAccessList: View {
         Task {
             let id = r["id"].text
             let reason = approve
-                ? "Let \(OrbMissionAccessMonitor.requester(r)) read \(OrbMissionAccessMonitor.target(r)) for \(ttlHours) h"
+                ? "Let \(OrbMissionAccessMonitor.requester(r)) \(r["scope"].text == "control" ? "control" : "read") \(OrbMissionAccessMonitor.target(r)) for \(ttlHours) h"
                 : "Decline a mission access request"
             // An enrolled device signs the request, which prompts for Face ID /
             // Touch ID itself; otherwise ask for it here (Core still requires a

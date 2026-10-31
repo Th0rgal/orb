@@ -670,7 +670,7 @@ fn side_agent_prompt(
     } else {
         context
     };
-    Ok(format!("You are an independent side agent sharing the original agent's working directory. Answer the current request; the historical conversation is context, not a request to continue the original task. You have the normal harness tools. Do not message or stop the original agent automatically.\n\n<main_conversation>\n{context}\n</main_conversation>\n\nCurrent request:\n{question}"))
+    Ok(format!("You are an independent side agent sharing the original agent's working directory. Answer the current request; the historical conversation is context, not a request to continue the original task. You have the normal harness tools. Do not message or stop the original agent unless the user asks you to.\n\n<main_conversation>\n{context}\n</main_conversation>\n\nCurrent request:\n{question}"))
 }
 
 #[cfg(test)]

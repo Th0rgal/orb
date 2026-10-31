@@ -275,7 +275,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "6de8665358fa1a5fcd17cd929a4b883e118fd9cfc21f2f9f2e9b70124f64a58c"
+            "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
           }
         ],
         "execution": {
@@ -350,7 +350,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "6de8665358fa1a5fcd17cd929a4b883e118fd9cfc21f2f9f2e9b70124f64a58c"
+            "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
           }
         ],
         "execution": {
@@ -485,7 +485,7 @@
       ],
       "evidence": {
         "status": "partial",
-        "claim": "Local cross-mission access tests verify zero target-title or existence oracle disclosure prior to live owner approval, read-only tool gating, and immediate hiding upon revocation.",
+        "claim": "Local cross-mission access tests verify zero target-title or existence oracle disclosure prior to live owner approval, scope-matched read/control tool gating (never allowing placement or settings mutation), and immediate hiding upon revocation.",
         "links": [
           {
             "kind": "theorem",
@@ -516,6 +516,11 @@
             "kind": "host_test",
             "path": "src/api/mission_access.rs",
             "symbol": "read_allowed_only_after_approval"
+          },
+          {
+            "kind": "host_test",
+            "path": "src/api/mission_access.rs",
+            "symbol": "control_grant_allows_control_and_read_tools_only_after_approval"
           }
         ],
         "sources": [
@@ -533,11 +538,11 @@
           },
           {
             "path": "src/api/mission_access.rs",
-            "sha256": "669410c64355487e467d6df2b1c894cca152cdcf7b9274cb27b79166294df977"
+            "sha256": "57f5db05f481237ecae49acfd77137e70b249be0aa75f64146df42a2c46d0704"
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "6de8665358fa1a5fcd17cd929a4b883e118fd9cfc21f2f9f2e9b70124f64a58c"
+            "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
           }
         ],
         "execution": {
@@ -739,7 +744,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "6de8665358fa1a5fcd17cd929a4b883e118fd9cfc21f2f9f2e9b70124f64a58c"
+            "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
           }
         ],
         "execution": {
@@ -1745,7 +1750,7 @@
           },
           {
             "path": "src/api/control/fork.rs",
-            "sha256": "c82c0b759bc90032518d10f976be1944d6a690286e5c184215e1caae351b1f85"
+            "sha256": "d8da0db0e0d1f72119816fdffc6b357bea1c89dea43c587fbc3989072efa48d6"
           },
           {
             "path": "src/api/control/remote_jobs.rs",
@@ -1753,11 +1758,11 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-            "sha256": "b2d0a9df3824dd157eb8075327f3cfb1f6a813e349f3ddc0460a57c31a4004d8"
+            "sha256": "137b29f40f4b57abafb76b2bbdb14a8c25609fb37ea8c90d172061ee99fdfa96"
           },
           {
             "path": "src/api/control/dispatch_admission_tests.rs",
-            "sha256": "16725e312ce474ce4744965bd8883e2c6817f4d894a1ec854918d8db9ddb8ea1"
+            "sha256": "3c4de2944c59d4d1ac50d2615d5209a4915c1279b61b5b2520ada2b35852d139"
           }
         ],
         "execution": {
@@ -1837,11 +1842,11 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-            "sha256": "688d47552006447d3df52d947cdfaec7bed3041082fd9d72f693a18a67a264db"
+            "sha256": "5f24dc285ccf267dff01e0e97dd0e498a9314639ed97c9c1c5626d1f32e1cdd8"
           },
           {
             "path": "src/api/control/fork.rs",
-            "sha256": "c82c0b759bc90032518d10f976be1944d6a690286e5c184215e1caae351b1f85"
+            "sha256": "d8da0db0e0d1f72119816fdffc6b357bea1c89dea43c587fbc3989072efa48d6"
           }
         ],
         "execution": {
@@ -1926,7 +1931,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "6de8665358fa1a5fcd17cd929a4b883e118fd9cfc21f2f9f2e9b70124f64a58c"
+            "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
           }
         ],
         "execution": {
@@ -2010,7 +2015,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-            "sha256": "6de8665358fa1a5fcd17cd929a4b883e118fd9cfc21f2f9f2e9b70124f64a58c"
+            "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
           }
         ],
         "execution": {

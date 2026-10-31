@@ -16078,6 +16078,7 @@ async fn external_mcp_session_lifecycle_allowlist_revocation_cascade_bunker_and_
             requester_title: None,
             target: target_mission.id,
             target_title: target_mission.title.clone(),
+            scope: crate::api::mission_access::AccessScope::Read,
             reason: "audit mission logs from local Mac".into(),
             ttl_hours: Some(1),
         })
@@ -16235,6 +16236,7 @@ async fn external_mcp_session_lifecycle_allowlist_revocation_cascade_bunker_and_
                     requester_title: None,
                     target: target_mission.id,
                     target_title: target_mission.title.clone(),
+                    scope: crate::api::mission_access::AccessScope::Read,
                     reason: "post-unbunker check".into(),
                     ttl_hours: Some(1),
                 })
@@ -16440,6 +16442,7 @@ async fn external_mcp_session_gates_missionless_issuance_and_approval_liveness()
             requester_title: None,
             target: target_mission.id,
             target_title: target_mission.title.clone(),
+            scope: crate::api::mission_access::AccessScope::Read,
             reason: "inspect target".into(),
             ttl_hours: Some(24),
         })
