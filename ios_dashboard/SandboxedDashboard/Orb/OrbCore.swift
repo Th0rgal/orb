@@ -371,7 +371,7 @@ enum OrbMissionTree {
     static func withAncestors(
         _ rows: [OrbRow],
         maxDepth: Int = 8,
-        fetchByID: @Sendable (String) async -> OrbRow?
+        fetchByID: @escaping @Sendable (String) async -> OrbRow?
     ) async -> [OrbRow] {
         var known: [String: OrbRow] = [:]
         for row in rows where known[row.id] == nil { known[row.id] = row }

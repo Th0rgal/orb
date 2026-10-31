@@ -50,8 +50,13 @@ class OrbMissionTreeTest {
         val tree = OrbMissionTree.nest(listOf(
             m("a", "parent_mission_id" to "b"),
             m("b", "parent_mission_id" to "a"),
+            m("self", "parent_mission_id" to "self"),
         ))
-        assertEquals(0, tree.size) // both have a listed parent, so neither is a root
+        fun all(nodes: List<OrbNestedMission>): List<String> =
+            nodes.flatMap { listOf(it.id) + all(it.children) }
+        // Matches desktop `orb/tests/mission-tree.test.ts` & iOS: a link that would close a loop stays at the top so no mission vanishes.
+        assertEquals(listOf("a", "b", "self"), all(tree).sorted())
+        assertTrue("self" in tree.map { it.id })
     }
 
     @Test
