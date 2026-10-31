@@ -160,7 +160,44 @@ def _restore_db_ownership(db_path, owner_uid_gid):
                 pass
 
 
-def default_runtime_busy_probe(unit_name="sandboxed-node", env_file="/etc/sandboxed-node.env"):
+def _normalize_service_unit_name(unit_name):
+    name = str(unit_name).strip()
+    return name[:-len(".service")] if name.endswith(".service") else name
+
+
+def _discover_unit_env_files(unit_name):
+    """Return EnvironmentFiles paths configured on a systemd unit, falling back to /etc/<unit>.env."""
+    norm = _normalize_service_unit_name(unit_name)
+    res = subprocess.run(
+        ["systemctl", "show", "--property=EnvironmentFiles", "--value", unit_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    paths = []
+    if res.returncode == 0 and res.stdout.strip():
+        for line in res.stdout.splitlines():
+            # systemd formats entries as `/etc/foo.env (ignore_errors=no)` or `-/etc/foo.env (...)`
+            token = line.strip().split(" (", 1)[0].strip()
+            if token.startswith("-"):
+                token = token[1:].strip()
+            if token:
+                paths.append(token)
+    if not paths:
+        paths.append(f"/etc/{norm}.env")
+    return paths
+
+
+def _load_unit_env_files(unit_name, env_file=None):
+    values = {}
+    candidates = [env_file] if env_file else _discover_unit_env_files(unit_name)
+    for candidate in candidates:
+        if candidate:
+            values.update(_parse_simple_env_file(candidate))
+    return values
+
+
+def default_runtime_busy_probe(unit_name="sandboxed-node", env_file=None):
     """Count live transient scopes, child processes, or in-memory leases/jobs."""
     busy = 0
     scope_res = subprocess.run(
@@ -187,7 +224,7 @@ def default_runtime_busy_probe(unit_name="sandboxed-node", env_file="/etc/sandbo
             busy += len([ln for ln in child_res.stdout.splitlines() if ln.strip()])
 
     active_res = subprocess.run(["systemctl", "is-active", "--quiet", unit_name], check=False)
-    env_vars = _parse_simple_env_file(env_file)
+    env_vars = _load_unit_env_files(unit_name, env_file=env_file)
     env_vars.update(proc_env)
     token = env_vars.get("SANDBOXED_NODE_TOKEN")
     if active_res.returncode == 0 and token:
@@ -217,7 +254,7 @@ def default_runtime_busy_probe(unit_name="sandboxed-node", env_file="/etc/sandbo
     return busy
 
 
-def _discover_live_work_dir(unit_name="sandboxed-node", env_file="/etc/sandboxed-node.env"):
+def _discover_live_work_dir(unit_name="sandboxed-node", env_file=None):
     """Discover the running worker's SANDBOXED_NODE_WORK_DIR when observable."""
     pid_res = subprocess.run(
         ["systemctl", "show", "--property=MainPID", "--value", unit_name],
@@ -229,19 +266,75 @@ def _discover_live_work_dir(unit_name="sandboxed-node", env_file="/etc/sandboxed
     if pid_res.returncode == 0 and main_pid.isdigit() and int(main_pid) > 0:
         proc_env = _read_proc_environ(main_pid)
         if proc_env:
-            env_vars = _parse_simple_env_file(env_file)
+            env_vars = _load_unit_env_files(unit_name, env_file=env_file)
             env_vars.update(proc_env)
             return env_vars.get("SANDBOXED_NODE_WORK_DIR") or "/var/lib/sandboxed-node/work"
-    env_vars = _parse_simple_env_file(env_file)
+    env_vars = _load_unit_env_files(unit_name, env_file=env_file)
     if "SANDBOXED_NODE_WORK_DIR" in env_vars and env_vars["SANDBOXED_NODE_WORK_DIR"]:
         return env_vars["SANDBOXED_NODE_WORK_DIR"]
     return None
 
 
+def _discover_sibling_units(binary_path="/usr/local/bin/sandboxed-node", primary_unit="sandboxed-node"):
+    """Discover additional active worker units on the same host sharing ``binary_path``.
+
+    Hosts such as DGX Spark run both ``sandboxed-node.service`` and
+    ``sandboxed-node-admin.service`` backed by ``/usr/local/bin/sandboxed-node``.
+    Replacing the shared binary without fencing and restarting sibling units
+    leaves them executing ``/usr/local/bin/sandboxed-node (deleted)``.
+    """
+    primary_norm = _normalize_service_unit_name(primary_unit)
+    res = subprocess.run(
+        [
+            "systemctl",
+            "list-units",
+            "--type=service",
+            "--state=active",
+            "--plain",
+            "--no-legend",
+            "sandboxed-node*.service",
+            "orb-node*.service",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode != 0 or not res.stdout.strip():
+        return []
+    target_real = os.path.realpath(str(binary_path))
+    siblings = []
+    for raw in res.stdout.splitlines():
+        cols = raw.split()
+        if not cols:
+            continue
+        candidate = _normalize_service_unit_name(cols[0])
+        if not candidate or candidate == primary_norm or candidate in siblings:
+            continue
+        show_res = subprocess.run(
+            ["systemctl", "show", "--property=ExecStart", "--value", candidate],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if show_res.returncode != 0:
+            continue
+        matched = False
+        for part in show_res.stdout.replace("{", " ").replace("}", " ").split(";"):
+            key, sep, val = part.strip().partition("=")
+            if sep and key.strip() == "path":
+                exec_path = val.strip()
+                if exec_path == str(binary_path) or os.path.realpath(exec_path) == target_real:
+                    matched = True
+                    break
+        if matched:
+            siblings.append(candidate)
+    return siblings
+
+
 def _resolve_worker_ledger(
     db_path=None,
     unit_name="sandboxed-node",
-    env_file="/etc/sandboxed-node.env",
+    env_file=None,
     live_work_dir_probe=None,
 ):
     """Resolve and cross-check the worker's SQLite job ledger path (fail-closed)."""
@@ -281,6 +374,51 @@ def _count_active_db_jobs(conn):
     )
 
 
+def _build_worker_unit_targets(
+    db_path=None,
+    binary_path="/usr/local/bin/sandboxed-node",
+    unit_name="sandboxed-node",
+    runtime_busy_probe=None,
+    live_work_dir_probe=None,
+    sibling_units_probe=None,
+):
+    """Return ordered list of (unit_name, ledger_path, busy_probe_fn) sharing ``binary_path``."""
+    primary_busy = runtime_busy_probe or (lambda: default_runtime_busy_probe(unit_name))
+    primary_db = _resolve_worker_ledger(
+        db_path=db_path,
+        unit_name=unit_name,
+        live_work_dir_probe=live_work_dir_probe,
+    )
+    targets = [(unit_name, primary_db, primary_busy)]
+    seen_ledgers = {os.path.realpath(str(primary_db))}
+
+    discover_siblings = sibling_units_probe
+    if discover_siblings is None and runtime_busy_probe is None and live_work_dir_probe is None:
+        discover_siblings = lambda: _discover_sibling_units(binary_path=binary_path, primary_unit=unit_name)
+    for sib in (discover_siblings() if discover_siblings else []):
+        if isinstance(sib, tuple):
+            sib_unit, sib_db_hint = sib[0], sib[1]
+            sib_busy = sib[2] if len(sib) > 2 and sib[2] is not None else (
+                lambda u=sib_unit: default_runtime_busy_probe(u)
+            )
+            sib_db = _resolve_worker_ledger(
+                db_path=sib_db_hint,
+                unit_name=sib_unit,
+                live_work_dir_probe=(lambda p=str(Path(sib_db_hint).parent): p) if sib_db_hint else None,
+            )
+        else:
+            sib_unit = str(sib)
+            sib_busy = lambda u=sib_unit: default_runtime_busy_probe(u)
+            sib_db = _resolve_worker_ledger(db_path=None, unit_name=sib_unit)
+        real_sib_db = os.path.realpath(str(sib_db))
+        if real_sib_db in seen_ledgers:
+            targets.append((sib_unit, None, sib_busy))
+        else:
+            seen_ledgers.add(real_sib_db)
+            targets.append((sib_unit, sib_db, sib_busy))
+    return targets
+
+
 def probe_worker_state(
     db_path=None,
     binary_path="/usr/local/bin/sandboxed-node",
@@ -289,27 +427,35 @@ def probe_worker_state(
     service_ctl=None,
     runtime_busy_probe=None,
     live_work_dir_probe=None,
+    sibling_units_probe=None,
 ):
     """Return dict with keys staged, running, healthy, quarantined."""
     ctl = service_ctl or SystemdServiceCtl()
-    busy_probe = runtime_busy_probe or (lambda: default_runtime_busy_probe(unit_name))
-    resolved_db = _resolve_worker_ledger(
+    targets = _build_worker_unit_targets(
         db_path=db_path,
+        binary_path=binary_path,
         unit_name=unit_name,
+        runtime_busy_probe=runtime_busy_probe,
         live_work_dir_probe=live_work_dir_probe,
+        sibling_units_probe=sibling_units_probe,
     )
     staged_path = Path(binary_path + staged_suffix)
     failed_path = Path(binary_path + staged_suffix + ".failed")
     staged = staged_path.exists()
     quarantined = (not staged) and failed_path.exists()
-    healthy = bool(ctl.is_active(unit_name))
+    healthy = all(bool(ctl.is_active(u)) for (u, _db, _bp) in targets)
 
-    con = sqlite3.connect(_sqlite_uri(resolved_db, "ro"), uri=True, timeout=5.0)
-    try:
-        db_running = _count_active_db_jobs(con)
-    finally:
-        con.close()
-    runtime_running = int(busy_probe()) if staged else 0
+    db_running = 0
+    runtime_running = 0
+    for _u, target_db, target_busy in targets:
+        if target_db is not None:
+            con = sqlite3.connect(_sqlite_uri(target_db, "ro"), uri=True, timeout=5.0)
+            try:
+                db_running += _count_active_db_jobs(con)
+            finally:
+                con.close()
+        if staged:
+            runtime_running += int(target_busy())
     return {
         "staged": staged,
         "running": max(db_running, runtime_running),
@@ -328,24 +474,29 @@ def perform_fenced_upgrade(
     service_ctl=None,
     runtime_busy_probe=None,
     live_work_dir_probe=None,
+    sibling_units_probe=None,
 ):
     """Drain-verified, write-fenced atomic worker upgrade with automatic rollback.
 
     Acquires an exclusive SQLite ``BEGIN IMMEDIATE`` transaction on ``jobs.db``
-    *before* the final zero-job / zero-lease check and holds that lock across
-    ``systemctl stop`` and the atomic binary installation.  Because
-    ``sandboxed-node`` persists every ``POST /jobs`` admission (``JobStore::create``)
-    and ``POST /execute`` scratch receipt (``scratch::prepare``) into ``jobs.db``
-    before enqueueing or spawning work — and opens ``jobs.db`` on startup before
-    binding its TCP listener — no job can be accepted in the post-check window
-    and marked ``lost`` on restart.
+    for the primary worker unit and any sibling worker units sharing
+    ``binary_path`` *before* the final zero-job / zero-lease check and holds
+    those locks across ``systemctl stop`` and the atomic binary installation.
+    Because ``sandboxed-node`` persists every ``POST /jobs`` admission
+    (``JobStore::create``) and ``POST /execute`` scratch receipt
+    (``scratch::prepare``) into ``jobs.db`` before enqueueing or spawning work —
+    and opens ``jobs.db`` on startup before binding its TCP listener — no job
+    can be accepted in the post-check window and marked ``lost`` on restart, and
+    no sibling worker is left executing a ``(deleted)`` binary.
     """
     ctl = service_ctl or SystemdServiceCtl()
-    busy_probe = runtime_busy_probe or (lambda: default_runtime_busy_probe(unit_name))
-    resolved_db = _resolve_worker_ledger(
+    targets = _build_worker_unit_targets(
         db_path=db_path,
+        binary_path=binary_path,
         unit_name=unit_name,
+        runtime_busy_probe=runtime_busy_probe,
         live_work_dir_probe=live_work_dir_probe,
+        sibling_units_probe=sibling_units_probe,
     )
 
     bin_path = Path(binary_path)
@@ -358,44 +509,74 @@ def perform_fenced_upgrade(
     if not staged_path.is_file():
         raise RuntimeError(f"staged binary does not exist: {staged_path}")
 
-    # 1. Unlocked pre-check on verified existing ledger so busy nodes never contend on jobs.db
-    ro_con = sqlite3.connect(_sqlite_uri(resolved_db, "ro"), uri=True, timeout=5.0)
-    try:
-        c1 = _count_active_db_jobs(ro_con)
-    finally:
-        ro_con.close()
-    c1 = max(c1, int(busy_probe()))
+    # 1. Unlocked pre-check on verified existing ledgers so busy nodes never contend on jobs.db
+    db_c1 = 0
+    rt_c1 = 0
+    for _u, target_db, target_busy in targets:
+        if target_db is not None:
+            ro_con = sqlite3.connect(_sqlite_uri(target_db, "ro"), uri=True, timeout=5.0)
+            try:
+                db_c1 += _count_active_db_jobs(ro_con)
+            finally:
+                ro_con.close()
+        rt_c1 += int(target_busy())
+    c1 = max(db_c1, rt_c1)
     if c1 != 0:
         return f"BUSY:{c1}"
 
     if verify_delay_secs > 0:
         time.sleep(verify_delay_secs)
 
-    # 2. Acquire worker-side admission fence BEFORE final zero-work verification
+    # 2. Acquire worker-side admission fences BEFORE final zero-work verification
     #    (?mode=rw refuses to create a missing DB file; schema is re-verified inside the lock)
-    owner_uid_gid = None
-    try:
-        st = resolved_db.lstat()
-        owner_uid_gid = (st.st_uid, st.st_gid)
-    except OSError as error:
-        raise RuntimeError(f"cannot stat node ledger {resolved_db}: {error}") from error
-
-    fence_con = sqlite3.connect(_sqlite_uri(resolved_db, "rw"), uri=True, timeout=2.0, isolation_level=None)
-    fence_held = False
-    try:
+    ledger_owners = []
+    for _u, target_db, _bp in targets:
+        if target_db is None:
+            continue
         try:
-            fence_con.execute("BEGIN IMMEDIATE")
-            fence_held = True
-        except sqlite3.OperationalError:
-            return "BUSY:db_locked"
+            st = target_db.lstat()
+            ledger_owners.append((target_db, (st.st_uid, st.st_gid)))
+        except OSError as error:
+            raise RuntimeError(f"cannot stat node ledger {target_db}: {error}") from error
 
-        c2 = max(_count_active_db_jobs(fence_con), int(busy_probe()))
+    fences = []
+    try:
+        for target_db, owner_uid_gid in ledger_owners:
+            con = sqlite3.connect(_sqlite_uri(target_db, "rw"), uri=True, timeout=2.0, isolation_level=None)
+            fences.append([target_db, owner_uid_gid, con, False])
+            try:
+                con.execute("BEGIN IMMEDIATE")
+                fences[-1][3] = True
+            except sqlite3.OperationalError:
+                return "BUSY:db_locked"
+
+        db_c2 = sum(_count_active_db_jobs(entry[2]) for entry in fences)
+        rt_c2 = sum(int(target_busy()) for (_u, _db, target_busy) in targets)
+        c2 = max(db_c2, rt_c2)
         if c2 != 0:
             return f"BUSY:{c2}"
 
-        # Stop outgoing worker while admission fence is held so its listener closes
+        # Stop outgoing worker(s) while admission fences are held so listeners close
         # before any blocked submit_job/execute caller can commit to jobs.db.
-        ctl.stop(unit_name)
+        stopped_units = []
+        try:
+            for target_unit, _db, _bp in targets:
+                ctl.stop(target_unit)
+                stopped_units.append(target_unit)
+        except Exception as stop_err:
+            for entry in reversed(fences):
+                if entry[3]:
+                    try:
+                        entry[2].execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    entry[3] = False
+                entry[2].close()
+                _restore_db_ownership(entry[0], entry[1])
+            fences.clear()
+            for u in stopped_units:
+                ctl.start_best_effort(u)
+            raise RuntimeError(f"failed stopping worker service before binary swap: {stop_err}") from stop_err
 
         # Copy staged binary via temporary path so staged_path (.new) is preserved
         # until post-start activation and health checks succeed.
@@ -408,36 +589,47 @@ def perform_fenced_upgrade(
             replaced_binary = True
         except Exception as swap_err:
             installing_path.unlink(missing_ok=True)
-            fence_con.execute("ROLLBACK")
-            fence_held = False
-            fence_con.close()
-            _restore_db_ownership(resolved_db, owner_uid_gid)
+            for entry in reversed(fences):
+                if entry[3]:
+                    entry[2].execute("ROLLBACK")
+                    entry[3] = False
+                entry[2].close()
+                _restore_db_ownership(entry[0], entry[1])
+            fences.clear()
             if replaced_binary and backup_path.is_file():
                 shutil.copy2(backup_path, restoring_path)
                 os.chmod(restoring_path, 0o755)
                 os.replace(restoring_path, bin_path)
                 restoring_path.unlink(missing_ok=True)
-            ctl.start_best_effort(unit_name)
+            for target_unit, _db, _bp in targets:
+                ctl.start_best_effort(target_unit)
             raise RuntimeError(f"binary swap failed; restored previous service: {swap_err}") from swap_err
 
-        # Release SQLite write fence right before starting the new process so its
+        # Release SQLite write fences right before starting the new process(es) so
         # startup JobStore::open / recover_on_start succeeds without contention.
-        fence_con.execute("ROLLBACK")
-        fence_held = False
+        for entry in reversed(fences):
+            if entry[3]:
+                entry[2].execute("ROLLBACK")
+                entry[3] = False
     finally:
-        if fence_held:
+        for entry in reversed(fences):
+            if entry[3]:
+                try:
+                    entry[2].execute("ROLLBACK")
+                except Exception:
+                    pass
             try:
-                fence_con.execute("ROLLBACK")
+                entry[2].close()
             except Exception:
                 pass
-        fence_con.close()
-        _restore_db_ownership(resolved_db, owner_uid_gid)
+            _restore_db_ownership(entry[0], entry[1])
 
-    # 3. Activate new binary and verify health; roll back and quarantine on failure
+    # 3. Activate new binary and verify health across all units; roll back and quarantine on failure
     try:
-        ctl.start(unit_name)
-        if not ctl.is_active(unit_name):
-            raise RuntimeError(f"{unit_name} failed post-start is-active check")
+        for target_unit, _db, _bp in targets:
+            ctl.start(target_unit)
+            if not ctl.is_active(target_unit):
+                raise RuntimeError(f"{target_unit} failed post-start is-active check")
     except Exception as act_err:
         try:
             if backup_path.is_file():
@@ -451,7 +643,8 @@ def perform_fenced_upgrade(
                 os.replace(staged_path, failed_path)
         except OSError:
             pass
-        ctl.restart_best_effort(unit_name)
+        for target_unit, _db, _bp in targets:
+            ctl.restart_best_effort(target_unit)
         raise RuntimeError(
             f"activation failed; rolled back to {backup_path} and quarantined {failed_path}: {act_err}"
         ) from act_err
@@ -470,11 +663,16 @@ def _remote_worker_prelude():
         inspect.getsource(_parse_simple_env_file),
         inspect.getsource(_read_proc_environ),
         inspect.getsource(_restore_db_ownership),
+        inspect.getsource(_normalize_service_unit_name),
+        inspect.getsource(_discover_unit_env_files),
+        inspect.getsource(_load_unit_env_files),
         inspect.getsource(default_runtime_busy_probe),
         inspect.getsource(_discover_live_work_dir),
+        inspect.getsource(_discover_sibling_units),
         inspect.getsource(_resolve_worker_ledger),
         inspect.getsource(_sqlite_uri),
         inspect.getsource(_count_active_db_jobs),
+        inspect.getsource(_build_worker_unit_targets),
         inspect.getsource(probe_worker_state),
         inspect.getsource(perform_fenced_upgrade),
     ]

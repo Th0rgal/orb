@@ -1595,6 +1595,76 @@ fn job_cpu_scope_properties_validate_weight_and_quota() {
     );
 }
 
+#[cfg(any(test, target_os = "linux"))]
+/// Resolve a runnable `sandboxed-node` executable path for the clear-env
+/// systemd scope trampoline, even when `/usr/local/bin/sandboxed-node` was
+/// atomically replaced on disk while a sibling worker unit was still running
+/// (which causes Linux `/proc/self/exe` / `std::env::current_exe()` to return
+/// `<path> (deleted)`).
+fn resolve_scope_trampoline_exe(
+    current: std::io::Result<PathBuf>,
+    argv0: Option<&std::ffi::OsStr>,
+) -> std::io::Result<PathBuf> {
+    if let Ok(exe) = &current {
+        if exe.is_file() {
+            return Ok(exe.clone());
+        }
+        if let Some(stripped) = exe
+            .to_str()
+            .and_then(|raw| raw.strip_suffix(" (deleted)"))
+            .map(PathBuf::from)
+            .filter(|candidate| candidate.is_absolute() && candidate.is_file())
+        {
+            return Ok(stripped);
+        }
+    }
+    if let Some(candidate) = argv0
+        .map(PathBuf::from)
+        .filter(|candidate| candidate.is_absolute() && candidate.is_file())
+    {
+        return Ok(candidate);
+    }
+    current
+}
+
+#[cfg(test)]
+#[test]
+fn scope_trampoline_resolves_replaced_executable_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let live_bin = temp.path().join("sandboxed-node");
+    std::fs::write(&live_bin, b"#!/bin/sh\n").expect("write live binary");
+
+    assert_eq!(
+        resolve_scope_trampoline_exe(Ok(live_bin.clone()), None).expect("live exe"),
+        live_bin
+    );
+
+    let deleted_exe = PathBuf::from(format!("{} (deleted)", live_bin.display()));
+    assert_eq!(
+        resolve_scope_trampoline_exe(Ok(deleted_exe), None).expect("replaced exe"),
+        live_bin
+    );
+
+    let missing_deleted = PathBuf::from(format!(
+        "{} (deleted)",
+        temp.path().join("other-node").display()
+    ));
+    assert_eq!(
+        resolve_scope_trampoline_exe(Ok(missing_deleted.clone()), Some(live_bin.as_os_str()))
+            .expect("argv0 fallback"),
+        live_bin
+    );
+
+    assert_eq!(
+        resolve_scope_trampoline_exe(
+            Ok(missing_deleted.clone()),
+            Some(std::ffi::OsStr::new("sandboxed-node")),
+        )
+        .expect("preserves original path when no fallback file exists"),
+        missing_deleted
+    );
+}
+
 #[cfg(target_os = "linux")]
 fn systemd_scope_command(
     cmd: tokio::process::Command,
@@ -1659,7 +1729,10 @@ fn systemd_scope_command(
         // the environment at the payload boundary and add back only the
         // command's explicitly configured entries.
         scoped
-            .arg(std::env::current_exe()?)
+            .arg(resolve_scope_trampoline_exe(
+                std::env::current_exe(),
+                std::env::args_os().next().as_deref(),
+            )?)
             .arg("--sandboxed-scope-exec-cleared-env");
         for (key, value) in &env {
             if let Some(value) = value {

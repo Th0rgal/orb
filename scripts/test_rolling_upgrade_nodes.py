@@ -509,6 +509,130 @@ class RollingUpgradeNodesTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_sibling_worker_units_sharing_binary_are_fenced_and_restarted_together(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary_dir = root / "primary"
+            admin_dir = root / "admin"
+            primary_dir.mkdir()
+            admin_dir.mkdir()
+            primary_db = primary_dir / "jobs.db"
+            admin_db = admin_dir / "jobs.db"
+            for db in (primary_db, admin_db):
+                con = sqlite3.connect(db)
+                con.execute("PRAGMA journal_mode=WAL")
+                con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+                con.commit()
+                con.close()
+
+            bin_path = root / "sandboxed-node"
+            staged_path = root / "sandboxed-node.new"
+            bin_path.write_text("v1")
+            staged_path.write_text("v2")
+
+            # Active job on sibling unit (sandboxed-node-admin) blocks both probe and upgrade
+            con = sqlite3.connect(admin_db)
+            con.execute("INSERT INTO jobs VALUES ('admin-job-1', 'running')")
+            con.commit()
+            con.close()
+
+            actions = []
+
+            class MultiUnitCtl:
+                def __init__(self, fail_sibling_start=False):
+                    self.fail_sibling_start = fail_sibling_start
+                    self.active = {"sandboxed-node": True, "sandboxed-node-admin": True}
+
+                def is_active(self, unit):
+                    return self.active.get(unit, False)
+
+                def stop(self, unit):
+                    actions.append(f"stop:{unit}")
+                    self.active[unit] = False
+
+                def start(self, unit):
+                    actions.append(f"start:{unit}:{bin_path.read_text()}")
+                    if self.fail_sibling_start and unit == "sandboxed-node-admin":
+                        raise RuntimeError("admin unit failed to start")
+                    self.active[unit] = True
+
+                def start_best_effort(self, unit):
+                    actions.append(f"start_best_effort:{unit}")
+                    self.active[unit] = True
+
+                def restart_best_effort(self, unit):
+                    actions.append(f"restart_rollback:{unit}:{bin_path.read_text()}")
+                    self.active[unit] = True
+
+            sibling_probe = lambda: [("sandboxed-node-admin", str(admin_db), lambda: 0)]
+            ctl = MultiUnitCtl()
+            probe_busy = roll.probe_worker_state(
+                db_path=str(primary_db),
+                binary_path=str(bin_path),
+                service_ctl=ctl,
+                runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(primary_dir),
+                sibling_units_probe=sibling_probe,
+            )
+            self.assertEqual(probe_busy, {"staged": True, "running": 1, "healthy": True, "quarantined": False})
+
+            busy_res = roll.perform_fenced_upgrade(
+                db_path=str(primary_db),
+                binary_path=str(bin_path),
+                verify_delay_secs=0.0,
+                service_ctl=ctl,
+                runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(primary_dir),
+                sibling_units_probe=sibling_probe,
+            )
+            self.assertEqual(busy_res, "BUSY:1")
+            self.assertEqual(actions, [])
+
+            # Settle sibling job -> upgrade stops and restarts BOTH units cleanly
+            con = sqlite3.connect(admin_db)
+            con.execute("UPDATE jobs SET state = 'succeeded'")
+            con.commit()
+            con.close()
+
+            ok_res = roll.perform_fenced_upgrade(
+                db_path=str(primary_db),
+                binary_path=str(bin_path),
+                verify_delay_secs=0.0,
+                service_ctl=ctl,
+                runtime_busy_probe=lambda: 0,
+                live_work_dir_probe=lambda: str(primary_dir),
+                sibling_units_probe=sibling_probe,
+            )
+            self.assertEqual(ok_res, "UPGRADED")
+            self.assertEqual(
+                actions,
+                [
+                    "stop:sandboxed-node",
+                    "stop:sandboxed-node-admin",
+                    "start:sandboxed-node:v2",
+                    "start:sandboxed-node-admin:v2",
+                ],
+            )
+            self.assertEqual(bin_path.read_text(), "v2")
+
+            # Sibling start failure rolls back binary and restarts BOTH units on previous binary
+            actions.clear()
+            staged_path.write_text("v3-bad")
+            fail_ctl = MultiUnitCtl(fail_sibling_start=True)
+            with self.assertRaises(RuntimeError):
+                roll.perform_fenced_upgrade(
+                    db_path=str(primary_db),
+                    binary_path=str(bin_path),
+                    verify_delay_secs=0.0,
+                    service_ctl=fail_ctl,
+                    runtime_busy_probe=lambda: 0,
+                    live_work_dir_probe=lambda: str(primary_dir),
+                    sibling_units_probe=sibling_probe,
+                )
+            self.assertEqual(bin_path.read_text(), "v2")
+            self.assertIn("restart_rollback:sandboxed-node:v2", actions)
+            self.assertIn("restart_rollback:sandboxed-node-admin:v2", actions)
+
 
 if __name__ == "__main__":
     unittest.main()
