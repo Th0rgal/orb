@@ -10,6 +10,281 @@ import SwiftUI
 /// - `OrbStreamCommit` finds the committed Markdown prefix, so the block parser only
 ///   re-parses the open tail of a growing reply.
 
+/// Pure reducer for the active turn's live intermediate text (`text_op` and `text_delta`),
+/// shared with `OrbTurnText` in `OrbStreamText.kt` and desktop `TranscriptReducer`.
+struct OrbTurnText: Equatable {
+    struct Bubble: Equatable {
+        var id: String
+        var text: String
+        var revision: Int = -1
+        var finalized: Bool = false
+    }
+
+    struct StoredRow {
+        var sequence: Int64
+        var eventType: String
+        var content: String
+        var bubbleId: String?
+        var queued: Bool
+        var success: Bool
+        var partial: Bool
+    }
+
+    private(set) var bubbles: [Bubble] = []
+    private(set) var storedCanonicalIDs: Set<String> = []
+    private(set) var lastUserSequence: Int64 = -1
+    private(set) var streamEpoch: Int = 0
+
+    var renderedText: String {
+        let parts = bubbles.compactMap { b -> String? in
+            guard !storedCanonicalIDs.contains(b.id), !b.text.isEmpty else { return nil }
+            return b.text
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
+    mutating func clear() {
+        bubbles.removeAll()
+        storedCanonicalIDs.removeAll()
+        lastUserSequence = -1
+    }
+
+    mutating func resetTurn(userSequence: Int64 = -1) {
+        bubbles.removeAll()
+        storedCanonicalIDs.removeAll()
+        if userSequence >= 0 { lastUserSequence = userSequence }
+    }
+
+    mutating func applyTextDelta(_ data: [String: Any]) {
+        streamEpoch &+= 1
+        let bubbleID = Self.nonEmptyString(data["bubble_id"]) ?? "text_delta_latest"
+        if let delta = data["delta"] as? String {
+            appendBubble(id: bubbleID, delta: delta)
+        } else if (data["mode"] as? String) == "delta",
+                  let chunk = (data["content"] as? String) ?? (data["text"] as? String) {
+            appendBubble(id: bubbleID, delta: chunk)
+        } else if let snapshot = (data["content"] as? String) ?? (data["text"] as? String) {
+            setBubble(id: bubbleID, text: snapshot)
+        }
+    }
+
+    mutating func applyTextOp(_ data: [String: Any]) {
+        streamEpoch &+= 1
+        let bubbleID = Self.nonEmptyString(data["bubble_id"]) ?? "text_delta_latest"
+        if bubbleID != "text_delta_latest", storedCanonicalIDs.contains(bubbleID) { return }
+        if let ops = data["ops"] as? [[String: Any]] {
+            applyOps(bubbleID: bubbleID, ops: ops)
+        } else if let op = data["op"] as? String {
+            let content = data["content"] as? String ?? ""
+            if op == "append" { appendBubble(id: bubbleID, delta: content) }
+            else if op == "replace" { setBubble(id: bubbleID, text: content) }
+        }
+    }
+
+    mutating func reconcileStored(_ rows: [StoredRow], working: Bool, streamAdvanced: Bool = false) {
+        guard working else { clear(); return }
+        let ordered = rows.sorted { $0.sequence < $1.sequence }
+        let lastUserIdx = ordered.lastIndex(where: { $0.eventType == "user_message" && !$0.queued }) ?? -1
+        let lastUserSeq: Int64 = lastUserIdx >= 0 ? ordered[lastUserIdx].sequence : 0
+        if lastUserSequence >= 0 && lastUserSeq > lastUserSequence {
+            bubbles.removeAll()
+            storedCanonicalIDs.removeAll()
+        }
+        if lastUserSeq > 0 || lastUserSequence < 0 {
+            lastUserSequence = max(lastUserSequence, lastUserSeq)
+        }
+
+        var turnEnded = false
+        var storedDelta: String?
+        var storedOpsOrder: [String] = []
+        var storedOpsByBubble: [String: [[String: Any]]] = [:]
+        var canonicalIDs: Set<String> = []
+
+        for row in ordered[(lastUserIdx + 1)...] {
+            switch row.eventType {
+            case "text_delta":
+                storedDelta = row.content
+                turnEnded = false
+            case "text_op":
+                let bid = row.bubbleId ?? "text_delta_latest"
+                let ops = Self.parseOpsJSON(row.content)
+                if !ops.isEmpty {
+                    if storedOpsByBubble[bid] == nil { storedOpsOrder.append(bid) }
+                    storedOpsByBubble[bid, default: []].append(contentsOf: ops)
+                }
+                turnEnded = false
+            case "assistant_message_canonical":
+                let bid = row.bubbleId ?? "text_delta_latest"
+                canonicalIDs.insert(bid)
+                storedOpsByBubble.removeValue(forKey: bid)
+            case "assistant_message":
+                if !row.partial && row.success {
+                    storedDelta = nil
+                    storedOpsByBubble.removeAll()
+                    storedOpsOrder.removeAll()
+                    turnEnded = true
+                }
+            default:
+                break
+            }
+        }
+
+        storedCanonicalIDs = canonicalIDs
+        bubbles.removeAll { canonicalIDs.contains($0.id) && $0.id != "text_delta_latest" }
+        if turnEnded {
+            bubbles.removeAll()
+            return
+        }
+
+        if let stored = storedDelta, !stored.isEmpty {
+            let current = bubbles.first(where: { $0.id == "text_delta_latest" })?.text ?? ""
+            if current.isEmpty {
+                setBubble(id: "text_delta_latest", text: stored)
+            } else if current.hasPrefix(stored) {
+                // Live SSE stream is already ahead of this stored snapshot.
+            } else if stored.hasPrefix(current) || !streamAdvanced {
+                setBubble(id: "text_delta_latest", text: stored)
+            }
+        }
+
+        for bid in storedOpsOrder where !canonicalIDs.contains(bid) {
+            if !bubbles.contains(where: { $0.id == bid }), let ops = storedOpsByBubble[bid] {
+                applyOps(bubbleID: bid, ops: ops)
+            }
+        }
+    }
+
+    static func rows(from events: [StoredEvent]) -> [StoredRow] {
+        events.map { e in
+            let metaBubble = e.metadata["bubble_id"]?.value as? String
+            let bid = Self.nonEmptyString(metaBubble) ?? Self.nonEmptyString(e.eventId)
+            let queued = (e.metadata["queued"]?.value as? Bool) == true
+            let success = (e.metadata["success"]?.value as? Bool) != false
+            let partial = (e.metadata["partial"]?.value as? Bool) == true || (e.metadata["turn_end"]?.value as? String) == "partial"
+            return StoredRow(sequence: e.sequence, eventType: e.eventType, content: e.content, bubbleId: bid, queued: queued, success: success, partial: partial)
+        }
+    }
+
+    static func fromStoredEvents(_ events: [StoredEvent], working: Bool) -> String {
+        var turn = OrbTurnText()
+        turn.reconcileStored(rows(from: events), working: working)
+        return turn.renderedText
+    }
+
+    mutating func applyOps(bubbleID: String, ops: [[String: Any]]) {
+        var bubble = bubbles.first(where: { $0.id == bubbleID }) ?? Bubble(id: bubbleID, text: "")
+        for op in ops {
+            switch (op["type"] as? String) ?? "" {
+            case "snapshot":
+                guard let rev = Self.intValue(op["revision"]), rev > bubble.revision else { return }
+                bubble.revision = rev
+                bubble.text = (op["text"] as? String) ?? ""
+                bubble.finalized = false
+            case "insert":
+                let piece = (op["text"] as? String) ?? ""
+                let pos = Self.intValue(op["pos"])
+                if bubbleID == "text_delta_latest" && pos == 0 {
+                    bubble.text = piece
+                } else {
+                    bubble.text = Self.spliceScalars(bubble.text, start: pos, end: pos, replacement: piece)
+                }
+                bubble.finalized = false
+            case "replace":
+                let piece = (op["text"] as? String) ?? ""
+                let range = Self.intList(op["range"])
+                if bubbleID == "text_delta_latest" && (range?.first ?? 0) == 0 {
+                    bubble.text = piece
+                } else if let range, range.count >= 2 {
+                    bubble.text = Self.spliceScalars(bubble.text, start: range[0], end: range[1], replacement: piece)
+                } else {
+                    bubble.text = piece
+                }
+                bubble.finalized = false
+            case "finalize":
+                bubble.finalized = true
+            default:
+                break
+            }
+        }
+        upsertBubble(bubble)
+    }
+
+    private mutating func appendBubble(id: String, delta: String) {
+        guard !delta.isEmpty else { return }
+        var bubble = bubbles.first(where: { $0.id == id }) ?? Bubble(id: id, text: "")
+        bubble.text += delta
+        bubble.finalized = false
+        upsertBubble(bubble)
+    }
+
+    private mutating func setBubble(id: String, text: String) {
+        var bubble = bubbles.first(where: { $0.id == id }) ?? Bubble(id: id, text: "")
+        bubble.text = text
+        bubble.finalized = false
+        upsertBubble(bubble)
+    }
+
+    private mutating func upsertBubble(_ bubble: Bubble) {
+        if let idx = bubbles.firstIndex(where: { $0.id == bubble.id }) {
+            if bubble.text.isEmpty && !bubble.finalized {
+                bubbles.remove(at: idx)
+            } else {
+                bubbles[idx] = bubble
+            }
+        } else if !bubble.text.isEmpty || bubble.finalized {
+            bubbles.append(bubble)
+        }
+    }
+
+    static func spliceScalars(_ text: String, start: Int?, end: Int?, replacement: String) -> String {
+        guard let start else { return text + replacement }
+        let targetEnd = end ?? start
+        if start >= text.utf16.count && targetEnd >= text.utf16.count {
+            return text + replacement
+        }
+        let scalars = Array(text.unicodeScalars)
+        let s = max(0, min(start, scalars.count))
+        let e = max(s, min(targetEnd, scalars.count))
+        if s == scalars.count && e == scalars.count {
+            return text + replacement
+        }
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(scalars.count - (e - s) + replacement.unicodeScalars.count)
+        out.append(contentsOf: scalars[..<s])
+        out.append(contentsOf: replacement.unicodeScalars)
+        out.append(contentsOf: scalars[e...])
+        return String(out)
+    }
+
+    private static func nonEmptyString(_ raw: Any?) -> String? {
+        guard let s = raw as? String, !s.isEmpty else { return nil }
+        return s
+    }
+
+    private static func intValue(_ raw: Any?) -> Int? {
+        if let n = raw as? Int { return n }
+        if let n = raw as? Int64 { return Int(n) }
+        if let n = raw as? Double, n.isFinite { return Int(n) }
+        if let n = raw as? NSNumber { return n.intValue }
+        return nil
+    }
+
+    private static func intList(_ raw: Any?) -> [Int]? {
+        if let ints = raw as? [Int] { return ints }
+        if let any = raw as? [Any] {
+            let parsed = any.compactMap { intValue($0) }
+            return parsed.count == any.count ? parsed : nil
+        }
+        return nil
+    }
+
+    private static func parseOpsJSON(_ content: String) -> [[String: Any]] {
+        guard !content.isEmpty, let data = content.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return parsed
+    }
+}
+
 /// `Orb.Stream.Coalescer`: deltas collect in `pending`; a frame moves them to `text`.
 /// At most one observable change per frame, nothing lost, an idle frame changes nothing.
 @MainActor @Observable
@@ -21,6 +296,7 @@ final class OrbLiveText {
     private(set) var hasText = false
     @ObservationIgnored private var pending = ""
     @ObservationIgnored private var flushTask: Task<Void, Never>?
+    @ObservationIgnored private var turn = OrbTurnText()
     /// One display frame at 60 Hz.
     @ObservationIgnored var frame: Duration = .milliseconds(16)
 
@@ -28,23 +304,47 @@ final class OrbLiveText {
     @ObservationIgnored private(set) var renders = 0
     /// Everything received, shown or not (the conservation law: `text + pending`).
     var received: String { text + pending }
+    /// Monotonic counter incremented on every live SSE/WS delta or op.
+    var streamEpoch: Int { turn.streamEpoch }
 
     func append(_ delta: String) {
         guard !delta.isEmpty else { return }
-        pending += delta
-        if !hasText { hasText = true }
-        scheduleFrame()
+        turn.applyTextDelta(["delta": delta])
+        appendCoalesced(delta)
     }
 
     /// `text_op` replace: the new text wins over anything pending.
     func replace(_ content: String) {
-        pending = ""
-        flushTask?.cancel(); flushTask = nil
-        if text != content { text = content }
-        if hasText != !content.isEmpty { hasText = !content.isEmpty }
+        if content.isEmpty {
+            turn.clear()
+        } else {
+            turn.applyTextDelta(["content": content])
+        }
+        replaceImmediate(content)
     }
 
     func clear() { replace("") }
+
+    func resetTurn(userSequence: Int64 = -1) {
+        turn.resetTurn(userSequence: userSequence)
+        replaceImmediate("")
+    }
+
+    func applyTextDelta(_ data: [String: Any]) {
+        turn.applyTextDelta(data)
+        syncWithTurn(immediate: false)
+    }
+
+    func applyTextOp(_ data: [String: Any]) {
+        turn.applyTextOp(data)
+        syncWithTurn(immediate: false)
+    }
+
+    func reconcileStored(_ events: [StoredEvent], working: Bool, streamAdvanced: Bool = false) {
+        let wasEmpty = received.isEmpty
+        turn.reconcileStored(OrbTurnText.rows(from: events), working: working, streamAdvanced: streamAdvanced)
+        syncWithTurn(immediate: wasEmpty)
+    }
 
     /// Moves pending text to `text` now (one render), e.g. before reading it.
     func flush() {
@@ -53,6 +353,35 @@ final class OrbLiveText {
         text += pending
         pending = ""
         renders += 1
+    }
+
+    private func syncWithTurn(immediate: Bool) {
+        let next = turn.renderedText
+        let current = received
+        if next == current { return }
+        if next.isEmpty {
+            replaceImmediate("")
+            return
+        }
+        if !immediate && next.hasPrefix(current) {
+            appendCoalesced(String(next.dropFirst(current.count)))
+        } else {
+            replaceImmediate(next)
+        }
+    }
+
+    private func appendCoalesced(_ delta: String) {
+        guard !delta.isEmpty else { return }
+        pending += delta
+        if !hasText { hasText = true }
+        scheduleFrame()
+    }
+
+    private func replaceImmediate(_ content: String) {
+        pending = ""
+        flushTask?.cancel(); flushTask = nil
+        if text != content { text = content }
+        if hasText != !content.isEmpty { hasText = !content.isEmpty }
     }
 
     private func scheduleFrame() {

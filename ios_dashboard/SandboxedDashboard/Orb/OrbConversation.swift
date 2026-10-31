@@ -120,8 +120,9 @@ struct OrbConversation: View {
         OrbTranscriptModel.computeHistory(isCloud: isCloud, turns: turns, mission: mission, events: events, optimisticPrompt: optimisticPrompt)
     }
 
-    /// The last stored assistant texts, which the live text is deduplicated against.
-    var storedAnswers: [String] { Array(history.lazy.filter { $0.1 == "assistant" }.suffix(3).map(\.2)) }
+    /// Current turn's stored assistant answers (excluding narration already in the work fold),
+    /// which the live text is deduplicated against.
+    var storedAnswers: [String] { OrbSendFlow.currentTurnStoredAnswers(history, narration: workModel.narrationTexts) }
 
     func baseStepLabel() -> String {
         let turn = turns.first { Self.workingPhases.contains($0["phase"].text) }
@@ -257,6 +258,7 @@ struct OrbConversation: View {
                         if !cachedEvents.isEmpty {
                             events = cachedEvents
                             rebuildWorkModel()
+                            live.reconcileStored(events, working: working, streamAdvanced: false)
                         }
                         rebuildHistory()
                         scrollToBottomOnOpen(scroll: scroll)
@@ -394,7 +396,10 @@ struct OrbConversation: View {
             .padding(.vertical, 10)
         }
         .onChange(of: working) { _, now in
-            if !now { OrbWorkClock.stop("local:\(id ?? "")") }
+            if !now {
+                OrbWorkClock.stop("local:\(id ?? "")")
+                live.clear()
+            }
             rebuildWorkModel()
         }
         .onChange(of: history.last?.0) { _, _ in

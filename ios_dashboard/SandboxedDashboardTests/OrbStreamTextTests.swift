@@ -222,6 +222,109 @@ final class OrbStreamTextTests: XCTestCase {
         XCTAssertLessThanOrEqual(screen, 3, "the screen renders on hasText changes only (\(screen))")
     }
 
+    /// Shared cross-client intermediate live-turn text fixtures (`shared/orb-spec/fixtures/live-turn-text.json`).
+    func testLiveTurnTextSharedFixtures() throws {
+        let fixture = try OrbSpec.json("fixtures/live-turn-text.json")
+        let streamCases = try XCTUnwrap(fixture["streamCases"] as? [[String: Any]])
+        XCTAssertFalse(streamCases.isEmpty)
+        for c in streamCases {
+            let name = try XCTUnwrap(c["name"] as? String)
+            let expected = try XCTUnwrap(c["expected"] as? String)
+            let events = try XCTUnwrap(c["events"] as? [[String: Any]])
+            var turn = OrbTurnText()
+            let live = OrbLiveText()
+            live.frame = .seconds(3600)
+            for ev in events {
+                let t = (ev["type"] as? String) ?? ""
+                if t == "text_op" {
+                    turn.applyTextOp(ev)
+                    live.applyTextOp(ev)
+                } else if t == "text_delta" {
+                    turn.applyTextDelta(ev)
+                    live.applyTextDelta(ev)
+                }
+            }
+            live.flush()
+            XCTAssertEqual(turn.renderedText, expected, name)
+            XCTAssertEqual(live.text, expected, "\(name) (OrbLiveText)")
+        }
+
+        let storedCases = try XCTUnwrap(fixture["storedCases"] as? [[String: Any]])
+        XCTAssertFalse(storedCases.isEmpty)
+        for c in storedCases {
+            let name = try XCTUnwrap(c["name"] as? String)
+            let working = try XCTUnwrap(c["working"] as? Bool)
+            let expected = try XCTUnwrap(c["expected"] as? String)
+            let rawEvents = try XCTUnwrap(c["events"] as? [[String: Any]])
+            let stored: [StoredEvent] = rawEvents.enumerated().map { idx, item in
+                let seq = Int64((item["sequence"] as? Int) ?? idx)
+                let metaDict = (item["metadata"] as? [String: Any]) ?? [:]
+                let meta = metaDict.mapValues { AnyCodable($0) }
+                return StoredEvent(
+                    id: seq,
+                    missionId: "m",
+                    sequence: seq,
+                    eventType: (item["event_type"] as? String) ?? "",
+                    timestamp: "",
+                    eventId: item["event_id"] as? String,
+                    toolCallId: item["tool_call_id"] as? String,
+                    toolName: item["tool_name"] as? String,
+                    content: (item["content"] as? String) ?? "",
+                    metadata: meta
+                )
+            }
+            let live = OrbLiveText()
+            live.reconcileStored(stored, working: working)
+            live.flush()
+            XCTAssertEqual(live.text, expected, name)
+        }
+
+        let dedupeCases = try XCTUnwrap(fixture["dedupeCases"] as? [[String: Any]])
+        XCTAssertFalse(dedupeCases.isEmpty)
+        for c in dedupeCases {
+            let name = try XCTUnwrap(c["name"] as? String)
+            let expected = try XCTUnwrap(c["expected"] as? String)
+            let liveText = try XCTUnwrap(c["live"] as? String)
+            let narration = Set((c["narration"] as? [String]) ?? [])
+            let rawHistory = try XCTUnwrap(c["history"] as? [[String: String]])
+            let history = rawHistory.enumerated().map { idx, row in
+                ("row-\(idx)", row["role"] ?? "assistant", row["content"] ?? "")
+            }
+            let storedAnswers = OrbSendFlow.currentTurnStoredAnswers(history, narration: narration)
+            XCTAssertEqual(OrbSendFlow.dedupeLiveText(liveText, stored: storedAnswers), expected, name)
+        }
+    }
+
+    /// Rapid SSE `text_op` replace frames that grow by appending coalesce into one render per frame,
+    /// and a stale stored `text_delta_latest` poll never rolls back newer live SSE deltas.
+    func testTextOpCoalescesAndNeverRollsBackOnStalePoll() async throws {
+        let live = OrbLiveText()
+        live.frame = .seconds(3600)
+        var acc = ""
+        for i in 0..<50 {
+            let prevLen = acc.unicodeScalars.count
+            acc += "step \(i)\n"
+            if prevLen == 0 {
+                live.applyTextOp(["bubble_id": "text_delta_latest", "ops": [["type": "insert", "pos": 0, "text": acc]]])
+            } else {
+                live.applyTextOp(["bubble_id": "text_delta_latest", "ops": [["type": "replace", "range": [0, prevLen], "text": acc]]])
+            }
+        }
+        XCTAssertEqual(live.received, acc)
+        live.flush()
+        XCTAssertEqual(live.text, acc)
+        XCTAssertEqual(live.renders, 1, "50 cumulative text_op replace frames render once")
+
+        let stalePrefix = String(acc.prefix(24))
+        let staleEvents = [
+            StoredEvent(id: 1, missionId: "m", sequence: 1, eventType: "user_message", timestamp: "", eventId: nil, toolCallId: nil, toolName: nil, content: "go", metadata: [:]),
+            StoredEvent(id: 2, missionId: "m", sequence: 2, eventType: "text_delta", timestamp: "", eventId: "text_delta_latest", toolCallId: nil, toolName: nil, content: stalePrefix, metadata: [:]),
+        ]
+        live.reconcileStored(staleEvents, working: true, streamAdvanced: true)
+        live.flush()
+        XCTAssertEqual(live.text, acc, "stale stored text_delta_latest never truncates newer SSE text")
+    }
+
     static func chunks(_ doc: String) -> [Substring] {
         var out: [Substring] = []; var rest = Substring(doc)
         while !rest.isEmpty { out.append(rest.prefix(4)); rest = rest.dropFirst(4) }

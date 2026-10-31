@@ -168,12 +168,23 @@ fun OrbSideAgentSheet(
                     continue
                 }
                 mission = detail
+                val statusLower = (detail.str("status") ?: "").lowercase()
+                val isTerminal = statusLower in terminalStatuses
                 val last = detail.rows("history").lastOrNull {
                     (it.str("role") ?: "").lowercase() in setOf("assistant", "agent")
                 }
-                last?.str("content", "text")?.let { answer = it }
+                val historyAnswer = last?.str("content", "text")
+                if (!historyAnswer.isNullOrEmpty()) {
+                    answer = historyAnswer
+                } else if (!isTerminal) {
+                    val evs = runCatching {
+                        core.fetchRows("/api/control/missions/${core.encodeComponent(id)}/events?limit=80", "events")
+                    }.getOrDefault(emptyList())
+                    val inFlight = OrbTurnText.fromStoredEvents(evs, working = true).trim()
+                    if (inFlight.isNotEmpty()) answer = inFlight
+                }
                 error = null
-                if ((detail.str("status") ?: "").lowercase() in terminalStatuses) break
+                if (isTerminal) break
             } catch (e: Throwable) {
                 error = e.message
             }

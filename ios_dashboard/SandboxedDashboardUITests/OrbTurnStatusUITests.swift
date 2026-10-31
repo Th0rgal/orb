@@ -29,6 +29,8 @@ final class OrbTurnStatusUITests: XCTestCase {
         // The fixture's turn started 95 s before the request: never "3 s".
         let clock = app.staticTexts.matching(NSPredicate(format: "label MATCHES '^[1-9] min [0-9]{2} s$'")).firstMatch
         XCTAssertTrue(clock.waitForExistence(timeout: 5), "elapsed time must come from the turn start")
+        let narration = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Checking App.swift first'")).firstMatch
+        XCTAssertTrue(narration.waitForExistence(timeout: 5), "in-flight intermediate narration from text_delta_latest must render during the working turn")
         capture(app, "turn-working-status")
     }
 

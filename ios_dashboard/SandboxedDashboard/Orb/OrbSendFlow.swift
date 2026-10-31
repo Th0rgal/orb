@@ -217,6 +217,18 @@ enum OrbSendFlow {
         return .fallback
     }
 
+    /// Current turn's stored assistant messages (excluding narration already moved into the work fold),
+    /// so previous turns' replies never suppress live streaming text on a follow-up turn.
+    static func currentTurnStoredAnswers(_ rows: [(String, String, String)], narration: Set<String> = []) -> [String] {
+        let lastUserIdx = rows.lastIndex(where: { $0.1 == "user" }) ?? -1
+        return Array(rows[(lastUserIdx + 1)...].lazy.compactMap { row -> String? in
+            guard row.1 == "assistant" else { return nil }
+            let trimmed = row.2.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !narration.contains(trimmed) else { return nil }
+            return row.2
+        }.suffix(3))
+    }
+
     /// Live streamed text that stored history already holds is dropped, so a
     /// reload never shows the assistant's words twice; when stored text is a
     /// prefix of the live text, only the unseen tail stays live.
@@ -226,7 +238,7 @@ enum OrbSendFlow {
         for s in stored.reversed().prefix(3) {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { continue }
-            if t == l || t.contains(l) { return "" }
+            if t == l || t.hasPrefix(l) { return "" }
             if l.hasPrefix(t) { return String(l.dropFirst(t.count)).trimmingCharacters(in: .whitespacesAndNewlines) }
         }
         return live

@@ -40,15 +40,72 @@ extension OrbConversation {
         events = unique.values.sorted { $0.sequence < $1.sequence }
     }
 
+    /// Merges newly fetched events with existing events, keeping the newest row per sequence,
+    /// deduplicating mutable `text_delta_latest` rows to the highest sequence, and bounding memory.
+    static func mergeStoredEvents(existing: [StoredEvent], incoming: [StoredEvent]) -> [StoredEvent] {
+        guard !incoming.isEmpty else { return existing }
+        let unique = Dictionary((existing + incoming).map { ($0.sequence, $0) }, uniquingKeysWith: { _, new in new })
+        var sorted = unique.values.sorted { $0.sequence < $1.sequence }
+        if let latestDeltaSeq = sorted.last(where: { $0.eventType == "text_delta" && ($0.eventId == nil || $0.eventId?.isEmpty == true || $0.eventId == "text_delta_latest") })?.sequence {
+            sorted.removeAll { $0.eventType == "text_delta" && ($0.eventId == nil || $0.eventId?.isEmpty == true || $0.eventId == "text_delta_latest") && $0.sequence < latestDeltaSeq }
+        }
+        if sorted.count > 600 {
+            let tailStartSeq = sorted[sorted.count - 400].sequence
+            let lastUserSeq = sorted.last(where: { $0.eventType == "user_message" && ($0.metadata["queued"]?.value as? Bool) != true })?.sequence ?? 0
+            sorted = sorted.filter { e in
+                e.sequence >= tailStartSeq || (e.sequence >= lastUserSeq && (e.eventType == "user_message" || OrbWorkModel.isTaskListTool(e.toolName)))
+            }
+        }
+        return sorted
+    }
+
+    /// Catches up `events` to `X-Max-Sequence`. Note that `GET .../events?limit=150&since_seq=X`
+    /// returns the oldest 150 rows strictly after `X`, whereas omitting `since_seq` returns the
+    /// newest rows at the tail. When a reopened conversation lags by hundreds of tool events,
+    /// bridge small gaps or jump to the tail so the live tool status and `text_delta_latest` are current.
+    func fetchCaughtUpEvents(id: String, existing: [StoredEvent], initialBatch: MissionEventsResult? = nil) async -> [StoredEvent]? {
+        let firstBatch: MissionEventsResult?
+        if let initialBatch {
+            firstBatch = initialBatch
+        } else {
+            firstBatch = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: existing.last?.sequence)
+        }
+        guard let batch = firstBatch, id == self.id, !Task.isCancelled else { return nil }
+        var collected = batch.events
+        if existing.last?.sequence != nil {
+            let maxSeq = batch.maxSequence ?? 0
+            var cursor = collected.last?.sequence ?? existing.last?.sequence ?? 0
+            if cursor < maxSeq {
+                if maxSeq - cursor <= 300 {
+                    for _ in 0..<2 where cursor < maxSeq {
+                        guard let more = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: cursor),
+                              !more.events.isEmpty, id == self.id, !Task.isCancelled else { break }
+                        collected.append(contentsOf: more.events)
+                        cursor = more.events.last?.sequence ?? cursor
+                    }
+                }
+                if cursor < maxSeq,
+                   let tail = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 200, sinceSeq: nil),
+                   !tail.events.isEmpty, id == self.id, !Task.isCancelled {
+                    collected.append(contentsOf: tail.events)
+                }
+            }
+        }
+        guard !collected.isEmpty || existing.isEmpty else { return nil }
+        return Self.mergeStoredEvents(existing: existing, incoming: collected)
+    }
+
     func refreshEvents() async {
         guard let id, !refreshing, !isCloud else { return }
-        guard let batch = try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: events.last?.sequence),
-              !batch.events.isEmpty, id == self.id else { return }
-        let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
-        events = unique.values.sorted { $0.sequence < $1.sequence }
+        let epoch = live.streamEpoch
+        guard let merged = await fetchCaughtUpEvents(id: id, existing: events),
+              !merged.isEmpty, id == self.id else { return }
+        events = merged
+        await hydrateTurnStart(id)
         OrbReadCache.saveEvents(id, events: events)
         rebuildWorkModel()
         rebuildHistory()
+        live.reconcileStored(events, working: working, streamAdvanced: live.streamEpoch != epoch)
     }
 
     /// Refreshes are coalesced, never dropped: a forced refresh requested while one
@@ -74,6 +131,7 @@ extension OrbConversation {
             let account = api.endpoint + (api.authToken ?? "")
             let knownCloud = mission != .null && OrbRow(mission).cloud
             let sinceSeq = events.last?.sequence
+            let streamEpochBefore = live.streamEpoch
             async let valueTask = OrbReadCache.conversation(id, force: force)
             async let batchTask = knownCloud ? nil : (try? await OrbCore.shared.getMissionEventsWithMeta(id: id, limit: 150, sinceSeq: sinceSeq))
             let savedHistory = mission["history"].items
@@ -113,18 +171,29 @@ extension OrbConversation {
                 } catch let e as OrbHTTPError where e.status == 404 { selection.backend = value["backend"].text; selection.model = value["model_override"].text }
             } else if OrbRow(value).cloud { execution = try await OrbReadCache.cloud(id, force: force) }
             if !OrbRow(value).cloud {
+                selection.backend = value["backend"].text
+                selection.node = OrbContinuation.remoteNodeID(for: value) == "core" ? value["remote_node_id"].text : OrbContinuation.remoteNodeID(for: value)
+                if selection.model.isEmpty { selection.model = value["model_override"].text; selection.serviceTier = OrbCodexSpeed.of(value) }
+                if let batch = await batchTask,
+                   let merged = await fetchCaughtUpEvents(id: id, existing: events, initialBatch: batch) {
+                    events = merged
+                    await hydrateTurnStart(id)
+                    OrbReadCache.saveEvents(id, events: events)
+                    rebuildWorkModel()
+                }
+                live.reconcileStored(events, working: working, streamAdvanced: live.streamEpoch != streamEpochBefore)
                 if stream == nil && phase == .active {
                     let token = UUID()
                     streamToken = token
                     let inner = OrbCore.shared.streamControl(missionId: id, sinceSeq: events.last?.sequence, preferWebSocket: false) { type, data in
                         if type == "fido_sign_request" { FidoApprovalState.shared.handleSignRequest(data); return }
-                        if type == "text_delta", let delta = data["delta"] as? String ?? data["content"] as? String {
-                            live.append(delta)
+                        if type == "text_delta" {
+                            live.applyTextDelta(data)
                         } else if type == "text_op" {
-                            let op = data["op"] as? String ?? ""
-                            let content = data["content"] as? String ?? ""
-                            if op == "append" { live.append(content) }
-                            else if op == "replace" { live.replace(content) }
+                            live.applyTextOp(data)
+                        }
+                        if type == "user_message", (data["queued"] as? Bool) != true {
+                            live.resetTurn()
                         }
                         if ["assistant_message", "assistant_message_canonical", "mission_status_changed", "user_message"].contains(type) {
                             Task { await refresh(force: true) }
@@ -142,17 +211,6 @@ extension OrbConversation {
                         stream = nil
                         if phase == .active { await refresh(force: true) }
                     }
-                }
-                if !working { live.clear() }
-                selection.backend = value["backend"].text
-                selection.node = OrbContinuation.remoteNodeID(for: value) == "core" ? value["remote_node_id"].text : OrbContinuation.remoteNodeID(for: value)
-                if selection.model.isEmpty { selection.model = value["model_override"].text; selection.serviceTier = OrbCodexSpeed.of(value) }
-                if let batch = await batchTask, (!batch.events.isEmpty || events.isEmpty) {
-                    let unique = Dictionary((events + batch.events).map { ($0.sequence, $0) }, uniquingKeysWith: { old, _ in old })
-                    events = unique.values.sorted { $0.sequence < $1.sequence }
-                    await hydrateTurnStart(id)
-                    OrbReadCache.saveEvents(id, events: events)
-                    rebuildWorkModel()
                 }
                 let queueResp = await queueTask
                 if queueResp != .null {
@@ -310,6 +368,7 @@ extension OrbConversation {
                         followUps = followUps.enqueue(clientID, prompt, lastSequence: events.last?.sequence)
                         text = ""
                     } else {
+                        live.resetTurn()
                         optimisticPrompt = prompt
                         localTurnStart = Date()
                         text = ""
@@ -521,6 +580,7 @@ extension OrbConversation {
         let started = OrbHandoff(id: queueID, at: Date())
         withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
             followUps = followUps.hide(queueID)
+            live.resetTurn()
             optimisticPrompt = row.content.trimmingCharacters(in: .whitespacesAndNewlines)
             handoff = started
             handoffTracker.reset()

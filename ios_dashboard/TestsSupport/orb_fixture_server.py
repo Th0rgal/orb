@@ -288,6 +288,8 @@ def agent_events(mid):
     add('tool_call',json.dumps({'file_path':'/repo/ios/View.swift','content':'import SwiftUI\n'}),'Write','w1')
     add('tool_result','ok','Write','w1')
     add('tool_call',json.dumps({'command':'xcodebuild build -scheme App'}),'Bash','b1')
+    if mid=='agent-work':
+        rows.append(dict(id=len(rows)+1, mission_id=mid, sequence=len(rows)+1, event_type='text_delta', timestamp=iso(started), event_id='text_delta_latest', tool_call_id=None, tool_name=None, content='Checking App.swift first, then running xcodebuild to verify the fix.', metadata={}))
     if mid=='agent-done':
         add('tool_result','BUILD SUCCEEDED','Bash','b1'); add('assistant_message','The build is fixed and the PR is open.')
     return rows
@@ -388,7 +390,12 @@ class Handler(BaseHTTPRequestHandler):
                     if kind=='assistant_message':
                         # ~100 tokens/s for the long streamed answer (performance tests), slower otherwise.
                         pause=0.01 if e['content'].startswith(STREAM_LONG_HEAD) else 0.03
-                        for i in range(0,len(e['content']),4): emit('text_delta', {'delta':e['content'][i:i+4],'mission_id':mid}); time.sleep(pause)
+                        cur=''
+                        for i in range(0,len(e['content']),4):
+                            chunk=e['content'][i:i+4]
+                            emit('text_op', {'type':'text_op','bubble_id':'text_delta_latest','ops':[{'type':'insert','at':len(cur),'text':chunk}],'mission_id':mid})
+                            cur+=chunk
+                            time.sleep(pause)
                     emit(kind, {'mission_id':mid,'sequence':e['sequence'],'content':e['content'],'tool_call_id':e['tool_call_id'],'name':e['tool_name'],'result':e['content']})
                 if not rows: self.wfile.write(b': ping\n\n'); self.wfile.flush()
                 time.sleep(0.5)

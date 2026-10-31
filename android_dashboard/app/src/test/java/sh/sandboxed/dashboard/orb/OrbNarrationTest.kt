@@ -82,4 +82,28 @@ class OrbNarrationTest {
         assertTrue(fold.isLive)
         assertEquals("Aha! Look at that error.", OrbNarration.narrationLine(fold.narration.last()))
     }
+
+    @Test
+    fun liveTurnKeepsWorkFoldLiveAlongsideStreamingIntermediateMessagesAndResetsPerTurn() {
+        val events = listOf(
+            ev("1", "user_message", mapOf("content" to "Turn 1")),
+            ev("2", "tool_call", mapOf("name" to "Read", "input" to mapOf("file_path" to "old.rs"))),
+            ev("3", "assistant_message", mapOf("content" to "Checking the Blacksmith result and Hindsight page.")),
+            ev("4", "user_message", mapOf("content" to "Turn 2")),
+            ev("5", "tool_call", mapOf("name" to "Bash", "input" to mapOf("command" to "until grep -q 'original bad' /tmp/out; do sleep 5; done")))
+        )
+        val messages = listOf(
+            msg("m1", "user", "Turn 1"),
+            msg("m2", "assistant", "Checking the Blacksmith result and Hindsight page."),
+            msg("m3", "user", "Turn 2")
+        )
+        val streaming = "Checking the Blacksmith result\n\nConfirmed: running in the background."
+        val turns = OrbTimelineBuilder.build(messages, events, streaming, isLive = true, startedAt = "2026-10-31T04:00:00Z")
+        val fold = turns.filterIsInstance<OrbTurn.WorkFold>().single()
+        assertTrue("WorkFold stays live even while intermediate text streams below it", fold.isLive)
+        assertEquals("WorkFold resets on Turn 2 user_message", 1, fold.steps.size)
+        val streamedBubble = turns.filterIsInstance<OrbTurn.Assistant>().last()
+        assertTrue(streamedBubble.isStreaming)
+        assertEquals(streaming, streamedBubble.text)
+    }
 }

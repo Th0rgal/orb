@@ -1,0 +1,205 @@
+{
+  "streamCases": [
+    {
+      "name": "claude_opus_multi_step_intermediate_text_ops",
+      "events": [
+        {
+          "type": "text_op",
+          "bubble_id": "text_delta_latest",
+          "ops": [
+            {
+              "type": "insert",
+              "pos": 0,
+              "text": "Checking the Blacksmith result and the Hindsight page first, then the policy-check fix."
+            }
+          ]
+        },
+        {
+          "type": "text_op",
+          "bubble_id": "text_delta_latest",
+          "ops": [
+            {
+              "type": "replace",
+              "range": [0, 87],
+              "text": "Checking the Blacksmith result and the Hindsight page first, then the policy-check fix.\n\nThe end-to-end Blacksmith run finished at 03:44: **verified via the `ready` path, `verifySeconds` 594 s**."
+            }
+          ]
+        },
+        {
+          "type": "text_op",
+          "bubble_id": "text_delta_latest",
+          "ops": [
+            {
+              "type": "replace",
+              "range": [0, 195],
+              "text": "Checking the Blacksmith result and the Hindsight page first, then the policy-check fix.\n\nThe end-to-end Blacksmith run finished at 03:44: **verified via the `ready` path, `verifySeconds` 594 s**.\n\nConfirmed: the upload's allowed paths are evm.fast's editable paths. I'll finish the answer once the comparison completes."
+            }
+          ]
+        }
+      ],
+      "expected": "Checking the Blacksmith result and the Hindsight page first, then the policy-check fix.\n\nThe end-to-end Blacksmith run finished at 03:44: **verified via the `ready` path, `verifySeconds` 594 s**.\n\nConfirmed: the upload's allowed paths are evm.fast's editable paths. I'll finish the answer once the comparison completes."
+    },
+    {
+      "name": "unicode_scalar_insert_and_replace",
+      "events": [
+        {
+          "type": "text_op",
+          "bubble_id": "step:emoji",
+          "ops": [
+            {
+              "type": "insert",
+              "pos": 0,
+              "text": "Prix : 3 € 😀 fin"
+            }
+          ]
+        },
+        {
+          "type": "text_op",
+          "bubble_id": "step:emoji",
+          "ops": [
+            {
+              "type": "replace",
+              "range": [12, 16],
+              "text": " — vérifié"
+            }
+          ]
+        }
+      ],
+      "expected": "Prix : 3 € 😀 — vérifié"
+    },
+    {
+      "name": "native_snapshot_revision_monotonicity",
+      "events": [
+        {
+          "type": "text_op",
+          "bubble_id": "antigravity:conv:turn:1",
+          "ops": [
+            {
+              "type": "snapshot",
+              "text": "Step 1 complete.",
+              "revision": 2
+            }
+          ]
+        },
+        {
+          "type": "text_op",
+          "bubble_id": "antigravity:conv:turn:1",
+          "ops": [
+            {
+              "type": "snapshot",
+              "text": "Step 1",
+              "revision": 1
+            }
+          ]
+        },
+        {
+          "type": "text_op",
+          "bubble_id": "antigravity:conv:turn:2",
+          "ops": [
+            {
+              "type": "snapshot",
+              "text": "Step 2 streaming…",
+              "revision": 1
+            }
+          ]
+        }
+      ],
+      "expected": "Step 1 complete.\n\nStep 2 streaming…"
+    }
+  ],
+  "storedCases": [
+    {
+      "name": "reopen_mid_turn_hydrates_text_delta_latest",
+      "working": true,
+      "events": [
+        { "sequence": 10, "event_type": "user_message", "content": "Still open" },
+        { "sequence": 11, "event_type": "tool_call", "tool_name": "Bash", "content": "{\"command\":\"ls\"}" },
+        { "sequence": 12, "event_type": "tool_result", "tool_name": "Bash", "content": "ok" },
+        {
+          "sequence": 13,
+          "event_type": "text_delta",
+          "event_id": "text_delta_latest",
+          "content": "Checking the Blacksmith result first.\n\nNow checking the wrapper verdict in the background:"
+        },
+        { "sequence": 14, "event_type": "tool_call", "tool_name": "Bash", "content": "{\"command\":\"until grep -q 'original bad' /tmp/out; do sleep 5; done\"}" }
+      ],
+      "expected": "Checking the Blacksmith result first.\n\nNow checking the wrapper verdict in the background:"
+    },
+    {
+      "name": "stale_text_delta_from_previous_turn_is_ignored",
+      "working": true,
+      "events": [
+        { "sequence": 5, "event_type": "user_message", "content": "Turn 1" },
+        { "sequence": 6, "event_type": "text_delta", "event_id": "text_delta_latest", "content": "Old turn intermediate text" },
+        { "sequence": 7, "event_type": "assistant_message", "content": "Old turn final answer" },
+        { "sequence": 8, "event_type": "user_message", "content": "Turn 2" },
+        { "sequence": 9, "event_type": "tool_call", "tool_name": "Bash", "content": "{\"command\":\"make\"}" }
+      ],
+      "expected": ""
+    },
+    {
+      "name": "terminal_assistant_message_clears_stored_text_delta",
+      "working": true,
+      "events": [
+        { "sequence": 10, "event_type": "user_message", "content": "Run checks" },
+        { "sequence": 11, "event_type": "text_delta", "event_id": "text_delta_latest", "content": "Checking…\n\nAll green." },
+        { "sequence": 12, "event_type": "assistant_message", "content": "Checking…\n\nAll green." }
+      ],
+      "expected": ""
+    },
+    {
+      "name": "stored_canonical_drops_finalized_native_bubble_and_keeps_open_text_op",
+      "working": true,
+      "events": [
+        { "sequence": 1, "event_type": "user_message", "content": "Inspect" },
+        {
+          "sequence": 2,
+          "event_type": "assistant_message_canonical",
+          "event_id": "antigravity:1",
+          "content": "First step stored.",
+          "metadata": { "bubble_id": "antigravity:1", "revision": 2 }
+        },
+        {
+          "sequence": 3,
+          "event_type": "text_op",
+          "content": "[{\"type\":\"snapshot\",\"text\":\"Second step in flight…\",\"revision\":1}]",
+          "metadata": { "bubble_id": "antigravity:2" }
+        }
+      ],
+      "expected": "Second step in flight…"
+    }
+  ],
+  "dedupeCases": [
+    {
+      "name": "previous_turn_reply_never_suppresses_new_turn_prefix",
+      "history": [
+        { "role": "user", "content": "First prompt" },
+        { "role": "assistant", "content": "Checking the Blacksmith result and Hindsight page. Everything passed." },
+        { "role": "user", "content": "Second prompt" }
+      ],
+      "narration": [],
+      "live": "Checking the Blacksmith",
+      "expected": "Checking the Blacksmith"
+    },
+    {
+      "name": "interior_word_in_current_turn_does_not_suppress_live_tail",
+      "history": [
+        { "role": "user", "content": "Prompt" },
+        { "role": "assistant", "content": "Inspected the result file." }
+      ],
+      "narration": [],
+      "live": "result",
+      "expected": "result"
+    },
+    {
+      "name": "folded_narration_in_current_turn_does_not_suppress_live_stream",
+      "history": [
+        { "role": "user", "content": "Prompt" },
+        { "role": "assistant", "content": "Checking the build logs." }
+      ],
+      "narration": ["Checking the build logs."],
+      "live": "Checking",
+      "expected": "Checking"
+    }
+  ]
+}

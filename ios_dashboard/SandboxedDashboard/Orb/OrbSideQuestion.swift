@@ -176,8 +176,17 @@ enum OrbBtwThreads {
             }
         }
         if active && !question.isEmpty {
-            // Like the desktop, the live draft is the latest text, not the stored final.
-            let live = sideAnswer(texts)
+            // Like the desktop, the live draft includes in-flight text_delta / text_op
+            // when the turn has not written a terminal assistant_message yet.
+            var liveTexts = texts
+            if final == nil {
+                let inFlight = OrbTurnText.fromStoredEvents(Array(ordered[start...]), working: true)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !inFlight.isEmpty, !synthetic(inFlight), liveTexts.last != inFlight {
+                    liveTexts.append(inFlight)
+                }
+            }
+            let live = sideAnswer(liveTexts)
             return (turns, OpenTurn(id: "btw:\(missionID):\(seq)", question: question, at: at, events: Array(ordered[start...]), answer: live.answer, narration: live.narration))
         }
         if !question.isEmpty { flush() }

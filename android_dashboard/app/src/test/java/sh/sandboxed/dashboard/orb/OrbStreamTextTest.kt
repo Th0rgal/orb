@@ -83,6 +83,106 @@ class OrbStreamTextTest {
         assertEquals(parseMdBlocks(cleanRichText(acc.toString(), streaming = false)), closedBlocks)
     }
 
+    /** Shared cross-client intermediate live-turn text fixtures (`shared/orb-spec/fixtures/live-turn-text.json`). */
+    @Test
+    fun liveTurnTextSharedFixtures() {
+        val fixture = OrbSpec.dict("fixtures/live-turn-text.json")
+        val streamCases = OrbJSON.dictList(fixture["streamCases"])
+        check(streamCases.isNotEmpty())
+        for (c in streamCases) {
+            val name = c["name"] as String
+            val expected = c["expected"] as String
+            val events = OrbJSON.dictList(c["events"])
+            val turn = OrbTurnText()
+            val live = OrbLiveText(
+                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
+                frameMs = 3_600_000L,
+                frameDispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+            )
+            for (ev in events) {
+                when (ev["type"] as? String) {
+                    "text_op" -> {
+                        turn.applyTextOp(ev)
+                        live.applyTextOp(ev)
+                    }
+                    "text_delta" -> {
+                        turn.applyTextDelta(ev)
+                        live.applyTextDelta(ev)
+                    }
+                }
+            }
+            live.flush()
+            assertEquals(name, expected, turn.renderedText)
+            assertEquals("$name (OrbLiveText)", expected, live.text)
+        }
+
+        val storedCases = OrbJSON.dictList(fixture["storedCases"])
+        check(storedCases.isNotEmpty())
+        for (c in storedCases) {
+            val name = c["name"] as String
+            val working = c["working"] as Boolean
+            val expected = c["expected"] as String
+            val rawEvents = OrbJSON.dictList(c["events"]).mapIndexed { idx, item ->
+                OrbRow("ev-$idx", item)
+            }
+            val live = OrbLiveText(
+                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
+                frameMs = 3_600_000L,
+                frameDispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+            )
+            live.reconcileStored(rawEvents, working = working)
+            live.flush()
+            assertEquals(name, expected, live.text)
+        }
+
+        val dedupeCases = OrbJSON.dictList(fixture["dedupeCases"])
+        check(dedupeCases.isNotEmpty())
+        for (c in dedupeCases) {
+            val name = c["name"] as String
+            val expected = c["expected"] as String
+            val liveText = c["live"] as String
+            val narration = (c["narration"] as? List<*>)?.mapNotNull { it as? String }?.toSet() ?: emptySet()
+            val history = OrbJSON.dictList(c["history"]).map { row ->
+                (row["role"] as? String ?: "assistant") to (row["content"] as? String ?: "")
+            }
+            val storedAnswers = OrbSendFlow.currentTurnStoredAnswers(history, narration)
+            assertEquals(name, expected, OrbSendFlow.dedupeLiveText(liveText, storedAnswers))
+        }
+    }
+
+    @Test
+    fun textOpCoalescesAndNeverRollsBackOnStalePoll() {
+        val live = OrbLiveText(
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
+            frameMs = 3_600_000L,
+            frameDispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+        )
+        val acc = StringBuilder()
+        for (i in 0 until 50) {
+            val prevLen = acc.toString().codePoints().count().toInt()
+            acc.append("step $i\n")
+            val text = acc.toString()
+            if (prevLen == 0) {
+                live.applyTextOp(mapOf("bubble_id" to "text_delta_latest", "ops" to listOf(mapOf("type" to "insert", "pos" to 0, "text" to text))))
+            } else {
+                live.applyTextOp(mapOf("bubble_id" to "text_delta_latest", "ops" to listOf(mapOf("type" to "replace", "range" to listOf(0, prevLen), "text" to text))))
+            }
+        }
+        val full = acc.toString()
+        assertEquals(full, live.received)
+        live.flush()
+        assertEquals(full, live.text)
+
+        val stalePrefix = full.take(24)
+        val staleEvents = listOf(
+            OrbRow("1", mapOf("sequence" to 1, "event_type" to "user_message", "content" to "go")),
+            OrbRow("2", mapOf("sequence" to 2, "event_type" to "text_delta", "event_id" to "text_delta_latest", "content" to stalePrefix))
+        )
+        live.reconcileStored(staleEvents, working = true, streamAdvanced = true)
+        live.flush()
+        assertEquals(full, live.text)
+    }
+
     private fun longReply(sections: Int): String = buildString {
         append("STREAM_LONG_OK: here is the full report.")
         for (k in 0 until sections) {

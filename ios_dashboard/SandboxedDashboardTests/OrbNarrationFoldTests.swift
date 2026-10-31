@@ -47,4 +47,22 @@ final class OrbNarrationFoldTests: XCTestCase {
     func testNarrationLineClampsToOnePlainLine() {
         XCTAssertEqual(OrbWorkModel.narrationLine("**HOLD ON!**  Look at\n`nm` output:\n```\nU x\n```"), "HOLD ON! Look at nm output:")
     }
+
+    func testCanonicalNarrationFoldsBetweenToolsDuringLiveTurn() {
+        let canonical = StoredEvent(id: 10, missionId: "m", sequence: 10, eventType: "assistant_message_canonical", timestamp: "2026-10-22T12:00:00Z", eventId: "step:1", toolCallId: nil, toolName: nil, content: "Inspecting the Blacksmith runner.", metadata: ["bubble_id": AnyCodable("step:1"), "revision": AnyCodable(1)])
+        let events = [event("user_message", "check")] + call("1") + [canonical] + call("2", done: false)
+        let model = OrbWorkModel.build(from: events, working: true)
+        XCTAssertEqual(model.notes.map(\.text), ["Inspecting the Blacksmith runner."])
+    }
+
+    func testMergeStoredEventsDeduplicatesMutableTextDeltaLatestToHighestSequence() {
+        let user = event("user_message", "check")
+        let oldDelta = StoredEvent(id: 2, missionId: "m", sequence: 12, eventType: "text_delta", timestamp: "", eventId: "text_delta_latest", toolCallId: nil, toolName: nil, content: "Step 1", metadata: [:])
+        let newDelta = StoredEvent(id: 2, missionId: "m", sequence: 28, eventType: "text_delta", timestamp: "", eventId: "text_delta_latest", toolCallId: nil, toolName: nil, content: "Step 1\n\nStep 2", metadata: [:])
+        let merged = OrbConversation.mergeStoredEvents(existing: [user, oldDelta], incoming: [newDelta])
+        let deltas = merged.filter { $0.eventType == "text_delta" }
+        XCTAssertEqual(deltas.count, 1)
+        XCTAssertEqual(deltas.first?.sequence, 28)
+        XCTAssertEqual(deltas.first?.content, "Step 1\n\nStep 2")
+    }
 }
