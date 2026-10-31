@@ -23,7 +23,7 @@ if ! jq -e '
   exit 1
 fi
 
-for surface in api web ios; do
+for surface in api web orb ios android; do
   supported_count="$(jq -r --arg s "${surface}" '
     [.capabilities[] | select(.[$s].status == "supported")] | length
   ' "${MATRIX_FILE}")"
@@ -88,7 +88,7 @@ while IFS=$'\t' read -r cap_id surface status; do
 done < <(jq -r '
   .capabilities[]
   | .id as $id
-  | ["api", "web", "ios"][] as $s
+  | ["api", "web", "orb", "ios", "android"][] as $s
   | [$id, $s, (.[$s].status // "")]
   | @tsv
 ' "${MATRIX_FILE}")

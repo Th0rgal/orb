@@ -80,6 +80,11 @@
       "name": "empty cells",
       "input": "name | note | n\nfoo |  | 1\nbar | x | 2",
       "output": "| name | note | n |\n| --- | --- | ---: |\n| foo |  | 1 |\n| bar | x | 2 |"
+    },
+    {
+      "name": "CRLF loose pipe rows align numeric columns",
+      "input": "a | b | c\r\nx | 1 | 2\r\nThat is all.",
+      "output": "| a | b | c |\n| --- | ---: | ---: |\n| x | 1 | 2 |\n\nThat is all."
     }
   ]
 }

@@ -66,11 +66,19 @@ jobs:
           lean -DwarningAsError=true -DautoImplicit=false Orb/Stream.lean \
             -o .lake/build/lib/lean/Orb/Stream.olean \
             -i .lake/build/lib/lean/Orb/Stream.ilean
+          lean -DwarningAsError=true -DautoImplicit=false Orb/Transcript.lean \
+            -o .lake/build/lib/lean/Orb/Transcript.olean \
+            -i .lake/build/lib/lean/Orb/Transcript.ilean
       - name: Scroll policy fixtures match Lean (Orb.Scroll)
         run: |
           set -euo pipefail
           out=$(LEAN_PATH="lean/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --run scripts/gen_scroll_fixtures.lean)
           diff <(printf '%s\n' "$out") shared/orb-spec/fixtures/scroll-policy.json
+      - name: Transcript gate fixtures match Lean (Orb.Transcript)
+        run: |
+          set -euo pipefail
+          out=$(LEAN_PATH="lean/.lake/build/lib/lean:$(lean --print-prefix)/lib/lean" lean --run scripts/gen_transcript_fixtures.lean)
+          diff <(printf '%s\n' "$out") shared/orb-spec/fixtures/transcript-gates.json
       - name: Streaming commit fixtures match Lean (Orb.Stream)
         run: |
           set -euo pipefail
@@ -190,6 +198,8 @@ jobs:
           python3 scripts/check_spec_audit.py audit-results/stateful-mutant-audit.json
           .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Stream.lean > audit-results/stream-audit.json
           python3 scripts/check_spec_audit.py audit-results/stream-audit.json
+          .tools/turbo-lean/target/debug/turbo-lean --json audit-spec lean/Orb/Transcript.lean > audit-results/transcript-audit.json
+          python3 scripts/check_spec_audit.py audit-results/transcript-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
