@@ -51,7 +51,7 @@ export function riskOf(kind: ApprovalKind, tier: string, request: Record<string,
 /** A per-kind request as a queue item, for a Core without the queue. */
 export function legacyItem(kind: ApprovalKind, r: PrivilegeRequest | SecretAccessRequest | MissionAccessRequest): ApprovalItem {
   const request = r as unknown as Record<string, unknown>;
-  const tier = kind === "privilege" ? str(request.scope) : kind === "secret" ? str(request.kind) : "read_mission";
+  const tier = kind === "privilege" ? str(request.scope) : kind === "secret" ? str(request.kind) : str(request.scope) === "control" ? "control_mission" : "read_mission";
   const target = kind === "privilege" ? str(request.target_host) : kind === "mission_access" ? str(request.target_mission_id) : str(request.key) || str(request.project_id) || "*";
   const missionId = str(request.requester_mission_id) || str(request.mission_id);
   const subject = ((request.requester_subject ?? request.requester) ?? null) as RequesterSubject | null;
@@ -102,7 +102,10 @@ const str = (v: unknown) => (typeof v === "string" ? v : "");
 export function itemTitle(i: Pick<ApprovalItem, "kind" | "tier" | "request">): string {
   const r = i.request;
   if (i.kind === "privilege") return requestTitle({ scope: str(r.scope) as PrivilegeScope, target_host: str(r.target_host) });
-  if (i.kind === "mission_access") return `Read ${missionLabel(str(r.target_title) || null, str(r.target_mission_id))}`;
+  if (i.kind === "mission_access") {
+    const verb = i.tier === "control_mission" || str(r.scope) === "control" ? "Control" : "Read";
+    return `${verb} ${missionLabel(str(r.target_title) || null, str(r.target_mission_id))}`;
+  }
   const verb = SECRET_VERB[i.tier] ?? "Read";
   if (r.key) return `${verb} ${str(r.key)}`;
   return r.all_projects ? `${verb} every secret project` : `${verb} a whole secret project`;
@@ -128,7 +131,12 @@ export function itemDetail(i: Pick<ApprovalItem, "kind" | "tier" | "request">, p
     const p = { scope: str(r.scope) as PrivilegeScope, allowed_unit: str(r.allowed_unit) || null, session_scoped: r.session_scoped === true, ttl_minutes: Number(r.ttl_minutes) || 0 };
     return `Allows ${scopeUnlocks(p)} · ${lifetimeLabel(p)}`;
   }
-  if (i.kind === "mission_access") return `Read only · ${Number(r.ttl_hours) || 0} h · no messages, cancel or resume`;
+  if (i.kind === "mission_access") {
+    const hrs = Number(r.ttl_hours) || 0;
+    return i.tier === "control_mission" || str(r.scope) === "control"
+      ? `Allows messages, answers, cancel and resume · ${hrs} h`
+      : `Read only · ${hrs} h · no messages, cancel or resume`;
+  }
   return "";
 }
 

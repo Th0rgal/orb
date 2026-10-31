@@ -10,13 +10,75 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Read-only tools a /btw side agent may call on its parent mission.
-fn btw_parent_read_allowed(tool: &str, owner_tags: &[String], target: Uuid) -> bool {
-    BTW_PARENT_READS.contains(&tool)
-        && owner_tags
-            .iter()
-            .any(|t| *t == format!("btw-parent:{target}"))
+/// Tools a `/btw` side agent may call by default on its associated parent
+/// conversation (including its `fork-of:` lineage chain): read tools plus
+/// direct conversation control tools (`send_message_to_mission`,
+/// `answer_mission_question`, `cancel_mission`, `resume_mission`, `ask_mission`).
+fn btw_parent_tool_allowed(tool: &str) -> bool {
+    crate::api::mission_access::READ_TOOLS.contains(&tool)
+        || crate::api::mission_access::CONTROL_TOOLS.contains(&tool)
 }
+
+fn direct_btw_parent_ids(owner_tags: &[String]) -> Vec<Uuid> {
+    owner_tags
+        .iter()
+        .filter_map(|t| t.strip_prefix("btw-parent:"))
+        .filter_map(|raw| Uuid::parse_str(raw.trim()).ok())
+        .collect()
+}
+
+fn fork_parent_id(tags: &[String]) -> Option<Uuid> {
+    tags.iter()
+        .filter_map(|t| t.strip_prefix("fork-of:"))
+        .find_map(|raw| Uuid::parse_str(raw.trim()).ok())
+}
+
+async fn fork_lineage(
+    store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    start: Uuid,
+) -> Vec<Uuid> {
+    let mut chain = vec![start];
+    let mut cur = start;
+    for _ in 0..32 {
+        match store.get_mission(cur).await {
+            Ok(Some(m)) => match fork_parent_id(&m.project.tags) {
+                Some(prev) if !chain.contains(&prev) => {
+                    chain.push(prev);
+                    cur = prev;
+                }
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    chain
+}
+
+/// Whether `owner_tags` carries a Core-minted `btw-parent:<id>` whose
+/// conversation (`<id>` or any mission sharing its `fork-of:` lineage chain)
+/// is `target`.
+pub(crate) async fn btw_associated_with_target(
+    store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    owner_tags: &[String],
+    target: Uuid,
+) -> bool {
+    let parents = direct_btw_parent_ids(owner_tags);
+    if parents.is_empty() {
+        return false;
+    }
+    if parents.contains(&target) {
+        return true;
+    }
+    let target_chain = fork_lineage(store, target).await;
+    for parent in parents {
+        let parent_chain = fork_lineage(store, parent).await;
+        if parent_chain.iter().any(|id| target_chain.contains(id)) {
+            return true;
+        }
+    }
+    false
+}
+
 fn sets_reserved_btw_tag(args: &Value) -> bool {
     args.get("tags")
         .and_then(Value::as_array)
@@ -26,12 +88,6 @@ fn sets_reserved_btw_tag(args: &Value) -> bool {
                 .any(crate::api::mission_horizon::is_reserved_btw_tag)
         })
 }
-const BTW_PARENT_READS: &[&str] = &[
-    "get_mission",
-    "get_mission_events",
-    "get_mission_health",
-    "list_mission_shared_files",
-];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Principal {
@@ -326,6 +382,7 @@ fn external_executor_allows(name: &str) -> bool {
         || crate::api::privilege_broker::TOOL_NAMES.contains(&name)
         || crate::api::mission_access::TOOL_NAMES.contains(&name)
         || crate::api::mission_access::READ_TOOLS.contains(&name)
+        || crate::api::mission_access::CONTROL_TOOLS.contains(&name)
         || matches!(
             name,
             "get_capabilities"
@@ -454,7 +511,7 @@ async fn authorize(
             username: p.username.clone(),
         };
         let store = state.control.get_or_spawn(&user).await.mission_store;
-        if let Some(id) = p.mission_id {
+        let owner_tags = if let Some(id) = p.mission_id {
             let mission = store
                 .get_mission(id)
                 .await
@@ -465,7 +522,10 @@ async fn authorize(
                     "Session mission moved outside its project scope",
                 ));
             }
-        }
+            Some(mission.project.tags)
+        } else {
+            None
+        };
         for field in ["mission_id", "supersedes_mission_id"] {
             if let Some(raw) = args.get(field).and_then(Value::as_str) {
                 let id = Uuid::parse_str(raw)
@@ -476,12 +536,27 @@ async fn authorize(
                     .map_err(|_| ToolError::denied("Mission unavailable"))?
                     .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
                 if mission.project.project.as_deref() != Some(project) {
-                    // An approved read grant crosses projects for read tools
-                    // only. Executors are audited by the tree check below.
-                    match granted_read(state, p, &tool.definition.name, id).await {
+                    let allowed_btw_parent = field == "mission_id"
+                        && btw_parent_tool_allowed(&tool.definition.name)
+                        && match owner_tags.as_deref() {
+                            Some(tags) => btw_associated_with_target(&store, tags, id).await,
+                            None => false,
+                        };
+                    if allowed_btw_parent {
+                        continue;
+                    }
+                    // An approved mission-access grant crosses projects for
+                    // tools covered by its scope. Executors are audited by the
+                    // tree check below.
+                    let grant = if field == "mission_id" {
+                        granted_access(state, p, &tool.definition.name, id).await
+                    } else {
+                        None
+                    };
+                    match grant {
                         Some(grant) => {
                             if p.role != Role::Executor {
-                                record_granted_read(state, p, grant, &tool.definition.name).await;
+                                record_granted_access(state, p, grant, &tool.definition.name).await;
                             }
                         }
                         None => {
@@ -510,7 +585,7 @@ async fn authorize(
             }
         }
     }
-    // `btw-parent:` grants read access to another mission (see BTW_PARENT_READS); only Core's
+    // `btw-parent:` grants default access to the associated parent conversation; only Core's
     // /btw launch may set it, never an agent through MCP.
     if sets_reserved_btw_tag(args) {
         return Err(ToolError::denied("The btw-parent tag is reserved"));
@@ -546,9 +621,14 @@ async fn authorize(
                     .await
                     .map_err(|_| ToolError::denied("Mission unavailable"))?
                     .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
-                match granted_read(state, p, &tool.definition.name, id).await {
+                let grant = if field == "mission_id" {
+                    granted_access(state, p, &tool.definition.name, id).await
+                } else {
+                    None
+                };
+                match grant {
                     Some(grant) => {
-                        record_granted_read(state, p, grant, &tool.definition.name).await;
+                        record_granted_access(state, p, grant, &tool.definition.name).await;
                     }
                     None => {
                         return Err(ToolError::denied(&crate::api::mission_access::scope_hint(
@@ -582,17 +662,22 @@ async fn authorize(
                 .await
                 .map_err(|_| ToolError::denied("Mission unavailable"))?
                 .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
-            // A /btw side agent may read (never act on) the conversation it was asked about:
-            // Core tags it `btw-parent:<id>` at creation, and side agents read the parent
-            // through get_mission_events instead of receiving a full uploaded archive.
-            let reads_btw_parent =
-                btw_parent_read_allowed(&tool.definition.name, &owner.project.tags, id);
-            if id != own && m.parent_mission_id != Some(own) && !reads_btw_parent {
-                // Read-only grant approved by Thomas (request_mission_access).
-                // Only READ_TOOLS consult it; control tools stay denied.
-                match granted_read(state, p, &tool.definition.name, id).await {
+            // A /btw side agent (`btw-parent:<id>`, minted only by Core) may read and control
+            // its associated parent conversation (including its `fork-of:` lineage chain) by default.
+            let allowed_btw_parent = field == "mission_id"
+                && btw_parent_tool_allowed(&tool.definition.name)
+                && btw_associated_with_target(&store, &owner.project.tags, id).await;
+            if id != own && m.parent_mission_id != Some(own) && !allowed_btw_parent {
+                // Device-signed grant approved by Thomas (request_mission_access):
+                // `read` opens READ_TOOLS; `control` opens READ_TOOLS and CONTROL_TOOLS.
+                let grant = if field == "mission_id" {
+                    granted_access(state, p, &tool.definition.name, id).await
+                } else {
+                    None
+                };
+                match grant {
                     Some(grant) => {
-                        record_granted_read(state, p, grant, &tool.definition.name).await
+                        record_granted_access(state, p, grant, &tool.definition.name).await
                     }
                     None => {
                         return Err(ToolError::denied(&crate::api::mission_access::scope_hint(
@@ -903,8 +988,8 @@ fn child_backend_for_gateway(
     owner.backend.clone()
 }
 
-/// Live read grant of the calling subject on `target`, for read-only tools.
-async fn granted_read(
+/// Live grant of the calling subject on `target` that covers `tool`.
+async fn granted_access(
     state: &Arc<AppState>,
     p: &Principal,
     tool: &str,
@@ -915,7 +1000,7 @@ async fn granted_read(
         .await
 }
 
-async fn record_granted_read(state: &Arc<AppState>, p: &Principal, grant: Uuid, tool: &str) {
+async fn record_granted_access(state: &Arc<AppState>, p: &Principal, grant: Uuid, tool: &str) {
     crate::api::mission_access::store(state)
         .record_read(&p.sub, grant, tool)
         .await;
@@ -2154,26 +2239,82 @@ mod tests {
         assert!(cloud.contains("got `remote_node_id`"), "{cloud}");
         assert!(cloud.contains("backend=opencode"), "{cloud}");
     }
-    #[test]
-    fn btw_side_agent_reads_only_its_parent_and_cannot_mint_the_tag() {
-        let parent = Uuid::new_v4();
-        let tags = vec![format!("btw-parent:{parent}")];
-        assert!(btw_parent_read_allowed("get_mission_events", &tags, parent));
-        assert!(btw_parent_read_allowed("get_mission", &tags, parent));
-        assert!(!btw_parent_read_allowed(
-            "send_message_to_mission",
-            &tags,
-            parent
-        ));
-        assert!(!btw_parent_read_allowed("cancel_mission", &tags, parent));
-        assert!(!btw_parent_read_allowed(
+    #[tokio::test]
+    async fn btw_side_agent_controls_its_parent_chain_and_cannot_mint_the_tag() {
+        use crate::api::mission_store::{InMemoryMissionStore, MissionProjectPatch, MissionStore};
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let root = store
+            .create_mission(Some("Root"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let forked = store
+            .create_mission(Some("Forked"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                forked.id,
+                MissionProjectPatch {
+                    tags: Some(vec![format!("fork-of:{}", root.id)]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let sibling_fork = store
+            .create_mission(Some("Sibling"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+        store
+            .update_mission_project(
+                sibling_fork.id,
+                MissionProjectPatch {
+                    tags: Some(vec![format!("fork-of:{}", root.id)]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let unrelated = store
+            .create_mission(Some("Other"), None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let tags = vec![format!("btw-parent:{}", forked.id)];
+        // Read and control tools are authorized for the parent and its fork-of lineage chain.
+        for tool in [
             "get_mission_events",
-            &tags,
-            Uuid::new_v4()
-        ));
-        assert!(!btw_parent_read_allowed("get_mission_events", &[], parent));
+            "get_mission",
+            "get_mission_diagnostics",
+            "get_cloud_execution",
+            "send_message_to_mission",
+            "answer_mission_question",
+            "cancel_mission",
+            "resume_mission",
+            "ask_mission",
+        ] {
+            assert!(btw_parent_tool_allowed(tool), "{tool}");
+        }
+        // Child/job placement and settings changes are never granted by btw-parent.
+        for tool in [
+            "start_mission",
+            "start_workspace_job",
+            "update_mission_settings",
+        ] {
+            assert!(!btw_parent_tool_allowed(tool), "{tool}");
+        }
+        assert!(btw_associated_with_target(&store, &tags, forked.id).await);
+        assert!(btw_associated_with_target(&store, &tags, root.id).await);
+        assert!(btw_associated_with_target(&store, &tags, sibling_fork.id).await);
+        assert!(!btw_associated_with_target(&store, &tags, unrelated.id).await);
+        assert!(!btw_associated_with_target(&store, &[], forked.id).await);
+
+        // Also works when /btw was started on root and conversation later forked forward.
+        let root_btw_tags = vec![format!("btw-parent:{}", root.id)];
+        assert!(btw_associated_with_target(&store, &root_btw_tags, forked.id).await);
+
         assert!(sets_reserved_btw_tag(
-            &json!({"tags": ["x", format!("btw-parent:{parent}")]})
+            &json!({"tags": ["x", format!("btw-parent:{}", root.id)]})
         ));
         assert!(sets_reserved_btw_tag(&json!({"tags": ["btw-subagent"]})));
         assert!(!sets_reserved_btw_tag(
@@ -2283,7 +2424,10 @@ mod tests {
     #[test]
     fn external_executor_read_tools_align_with_mission_access_grants() {
         assert!(external_executor_allows("get_cloud_execution"));
+        assert!(external_executor_allows("get_mission_diagnostics"));
+        assert!(external_executor_allows("send_message_to_mission"));
         assert!(crate::api::mission_access::READ_TOOLS.contains(&"get_cloud_execution"));
+        assert!(crate::api::mission_access::CONTROL_TOOLS.contains(&"send_message_to_mission"));
     }
 }
 

@@ -50,7 +50,7 @@ pub struct ApprovalItem {
     pub requester_subject: RequesterSubject,
     pub requester_label: Option<String>,
     /// Kind-specific action: `ops_read` / `service_deploy` / `root_exec`,
-    /// `read` / `write` / `delete` / `move`, or `read_mission`.
+    /// `read` / `write` / `delete` / `move`, or `read_mission` / `control_mission`.
     pub tier: String,
     /// What it applies to: a host, a secret or project, or a mission id.
     pub target: String,
@@ -204,13 +204,17 @@ impl ApprovalItem {
     }
 
     pub fn mission_access(r: &AccessRequest) -> Self {
+        let tier = match r.scope {
+            super::mission_access::AccessScope::Read => "read_mission",
+            super::mission_access::AccessScope::Control => "control_mission",
+        };
         Self::new(
             ApprovalKind::MissionAccess,
             r.id,
             r.subject(),
             r.requester_title.clone(),
             r.requester_label.clone(),
-            "read_mission",
+            tier,
             r.target_mission_id.to_string(),
             ApprovalRisk::Elevated,
             &r.reason,
@@ -597,7 +601,9 @@ mod tests {
                 _ => ApprovalItem::mission_access(
                     &serde_json::from_value(json!({
                         "id": Uuid::new_v4(), "owner": "thomas", "requester_mission_id": Uuid::new_v4(),
-                        "target_mission_id": Uuid::new_v4(), "scope": "read", "reason": "r",
+                        "target_mission_id": Uuid::new_v4(),
+                        "scope": if tier == "control_mission" { "control" } else { "read" },
+                        "reason": "r",
                         "ttl_hours": 4, "state": "pending", "created_at": Utc::now(),
                     }))
                     .unwrap(),

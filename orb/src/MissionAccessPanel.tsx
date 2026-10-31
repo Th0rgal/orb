@@ -73,7 +73,7 @@ export function MissionAccessPanel(p: { onError: (message: string) => void; init
       <div class="bw-section-head">
         <h3>Mission access grants</h3>
         <span class="s-row-desc">
-          Missions can ask to read another mission (events, messages, shared files). Grants are read-only, never allow messages, cancel or resume, and expire.
+          Missions can ask to read or control another mission outside their tree. Grants require Touch ID, expire, and can be revoked.
         </span>
       </div>
       <Show when={pending().length > 0} fallback={<div class="bw-empty-line">No mission is waiting for access.</div>}>
@@ -81,12 +81,13 @@ export function MissionAccessPanel(p: { onError: (message: string) => void; init
           <For each={pending()}>
             {(r) => {
               const [ttl, setTtl] = createSignal(r.ttl_hours || 24);
+              const isControl = () => r.scope === "control";
               return (
                 <div class="secret-row bw-request-row">
-                  <span class="secret-kind" title="Read" aria-label="Read"><EyeIcon /></span>
+                  <span class="secret-kind" title={isControl() ? "Control" : "Read"} aria-label={isControl() ? "Control" : "Read"}><EyeIcon /></span>
                   <div class="bw-request-body">
                     <div class="bw-request-line">
-                      <strong class="secret-row-key">Read {target(r)}</strong>
+                      <strong class="secret-row-key">{isControl() ? "Control" : "Read"} {target(r)}</strong>
                       <span class="bw-request-meta">{who(r)} · {since(r.created_at)}</span>
                     </div>
                     <span class="secret-row-reason" title={r.reason}>{r.reason}</span>
@@ -96,7 +97,7 @@ export function MissionAccessPanel(p: { onError: (message: string) => void; init
                   </Select>
                   <button class="s-btn" disabled={!!busy()} onClick={() => void run(r.id, () => denyMissionAccess(r))}>Deny</button>
                   <button class="s-btn primary bw-request-ok" disabled={!!busy()} onClick={() => void run(r.id, () => approveMissionAccess(r, ttl()))}>
-                    <FingerprintIcon size={14} />Allow read
+                    <FingerprintIcon size={14} />{isControl() ? "Allow control" : "Allow read"}
                   </button>
                 </div>
               );
@@ -111,7 +112,7 @@ export function MissionAccessPanel(p: { onError: (message: string) => void; init
             <div class="s-row" data-testid="mission-access-grant">
               <div class="s-row-text">
                 <div class="s-row-title">{who(g)} → {target(g)}</div>
-                <div class="s-row-desc">Read only · {until(g.expires_at, now())}</div>
+                <div class="s-row-desc">{g.scope === "control" ? "Control" : "Read only"} · {until(g.expires_at, now())}</div>
               </div>
               <div class="s-row-ctrl">
                 <button class="s-btn" disabled={!!busy()} onClick={() => void run(g.id, () => revokeMissionAccess(g.id))}>Revoke</button>

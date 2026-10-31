@@ -1,13 +1,13 @@
-//! Mission access requests: a mission asks to read another mission it did not
-//! start and that is not in its tree.
+//! Mission access requests: a mission asks to read or control another mission
+//! it did not start and that is not in its tree.
 //!
 //! `request_mission_access` opens a pending request; Thomas approves it on an
 //! enrolled device (Touch ID / Face ID signature, always required, see
-//! [`super::approvals::always_signed`]). An approved request is the grant: it
-//! lets the requester call the read-only tools in [`READ_TOOLS`] on the
-//! target until it expires (default 24 h) or is revoked. A grant never
-//! allows control (messages, cancel, resume, placement): the gateway only
-//! consults it for [`READ_TOOLS`].
+//! [`super::approvals::always_signed`]). An approved request is the grant:
+//! `scope="read"` opens [`READ_TOOLS`], and `scope="control"` opens both
+//! [`READ_TOOLS`] and [`CONTROL_TOOLS`] on the target until it expires
+//! (default 24 h) or is revoked. Child/job placement and settings changes on
+//! another mission are never granted.
 //!
 //! Requests carry the owner (the MCP session's / dashboard user's id); every
 //! lookup is filtered by owner, so a grant never crosses tenants and only the
@@ -50,22 +50,58 @@ const MAX_PENDING_PER_MISSION: usize = 5;
 const AUDIT_LIMIT: usize = 2000;
 const HISTORY_LIMIT: usize = 500;
 
-/// The only tools a grant opens. All read-only: mission record, events
-/// (messages), health, shared file listing, and cloud execution receipts.
+/// Read-only tools a `read` (or `control`) grant opens: mission record, events
+/// (messages), health, diagnostics, shared file listing, and cloud execution receipts.
 pub const READ_TOOLS: &[&str] = &[
     "get_mission",
     "get_mission_events",
     "get_mission_health",
+    "get_mission_diagnostics",
     "list_mission_shared_files",
     "get_cloud_execution",
 ];
 
+/// Direct conversation control tools a `control` grant (or an associated
+/// `/btw` side session) additionally opens on the target mission. Never
+/// includes child/job placement (`start_mission`, `start_workspace_job`) or
+/// settings mutation (`update_mission_settings`).
+pub const CONTROL_TOOLS: &[&str] = &[
+    "send_message_to_mission",
+    "answer_mission_question",
+    "cancel_mission",
+    "resume_mission",
+    "ask_mission",
+];
+
 pub const TOOL_NAMES: [&str; 2] = ["request_mission_access", "list_mission_access"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessScope {
+    #[default]
     Read,
+    Control,
+}
+
+impl AccessScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Control => "control",
+        }
+    }
+
+    /// Whether an existing grant/request of `self` already covers `requested`.
+    pub fn covers(self, requested: Self) -> bool {
+        matches!(
+            (self, requested),
+            (Self::Control, _) | (Self::Read, Self::Read)
+        )
+    }
+
+    pub fn allows_tool(self, tool: &str) -> bool {
+        READ_TOOLS.contains(&tool) || (self == Self::Control && CONTROL_TOOLS.contains(&tool))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +122,7 @@ pub struct AccessRequest {
     pub target_mission_id: Uuid,
     #[serde(default)]
     pub target_title: Option<String>,
+    #[serde(default)]
     pub scope: AccessScope,
     pub reason: String,
     /// Lifetime the mission asked for; Thomas may change it when approving.
@@ -240,6 +277,7 @@ pub struct NewRequest {
     pub requester_title: Option<String>,
     pub target: Uuid,
     pub target_title: Option<String>,
+    pub scope: AccessScope,
     pub reason: String,
     pub ttl_hours: Option<i64>,
 }
@@ -288,6 +326,7 @@ impl MissionAccess {
             r.owner == new.owner
                 && r.subject().same_actor(&new.requester)
                 && r.target_mission_id == new.target
+                && r.scope.covers(new.scope)
                 && (r.state.is_pending() || r.live_grant(now))
         }) {
             let out = existing.clone();
@@ -319,7 +358,7 @@ impl MissionAccess {
             requester_title: new.requester_title,
             target_mission_id: new.target,
             target_title: new.target_title,
-            scope: AccessScope::Read,
+            scope: new.scope,
             reason: new.reason,
             ttl_hours: clamp_ttl(new.ttl_hours),
             state: ApprovalState::Pending,
@@ -581,7 +620,7 @@ impl MissionAccess {
             .await
     }
 
-    /// The live read grant of `requester` on `target`, if any.
+    /// The live read (or control) grant of `requester` on `target`, if any.
     pub async fn read_grant(
         &self,
         owner: &str,
@@ -592,18 +631,20 @@ impl MissionAccess {
         let data = self.data.lock().await;
         data.requests
             .iter()
+            .rev()
             .find(|r| {
                 r.owner == owner
                     && r.subject().same_actor(requester)
                     && r.target_mission_id == target
-                    && r.scope == AccessScope::Read
+                    && r.scope.covers(AccessScope::Read)
                     && r.live_grant(now)
             })
             .map(|r| r.id)
     }
 
-    /// The grant that lets `requester` call `tool` on `target`: only the
-    /// read-only [`READ_TOOLS`] ever consult a grant.
+    /// The grant that lets `requester` call `tool` on `target`: `read` grants
+    /// open [`READ_TOOLS`], `control` grants open [`READ_TOOLS`] and
+    /// [`CONTROL_TOOLS`], and placement/settings tools never consult a grant.
     pub async fn grant_for_tool(
         &self,
         owner: &str,
@@ -611,23 +652,48 @@ impl MissionAccess {
         target: Uuid,
         tool: &str,
     ) -> Option<Uuid> {
-        let is_read_tool = READ_TOOLS.contains(&tool);
-        if !crate::orb_spec::access_step(crate::orb_spec::AccessStepInput {
-            same_owner: true,
-            is_self_or_child: false,
-            is_read_tool,
-            grant_approved: true,
-            grant_unexpired: true,
-            target_exists: true,
-        })
-        .allow_tool
-        {
+        let grantable = READ_TOOLS.contains(&tool) || CONTROL_TOOLS.contains(&tool);
+        if !grantable {
+            let _ = crate::orb_spec::access_step(crate::orb_spec::AccessStepInput {
+                same_owner: true,
+                is_self_or_child: false,
+                is_read_tool: false,
+                grant_approved: true,
+                grant_unexpired: true,
+                target_exists: true,
+            });
             return None;
         }
-        self.read_grant(owner, requester, target).await
+        let now = Utc::now();
+        let data = self.data.lock().await;
+        let matched = data
+            .requests
+            .iter()
+            .rev()
+            .find(|r| {
+                r.owner == owner
+                    && r.subject().same_actor(requester)
+                    && r.target_mission_id == target
+                    && r.live_grant(now)
+                    && r.scope.allows_tool(tool)
+            })
+            .map(|r| r.id);
+        let verdict = crate::orb_spec::access_step(crate::orb_spec::AccessStepInput {
+            same_owner: true,
+            is_self_or_child: false,
+            is_read_tool: matched.is_some(),
+            grant_approved: matched.is_some(),
+            grant_unexpired: matched.is_some(),
+            target_exists: true,
+        });
+        if verdict.allow_tool {
+            matched
+        } else {
+            None
+        }
     }
 
-    /// Audit one read made through a grant.
+    /// Audit one read or control call made through a grant.
     pub async fn record_read(&self, owner: &str, grant: Uuid, tool: &str) {
         let now = Utc::now();
         let mut data = self.data.lock().await;
@@ -639,7 +705,12 @@ impl MissionAccess {
         else {
             return;
         };
-        data.log(&r, "read", Some(tool.to_string()), now);
+        let action = if CONTROL_TOOLS.contains(&tool) {
+            "control"
+        } else {
+            "read"
+        };
+        data.log(&r, action, Some(tool.to_string()), now);
         self.save(&data).await;
     }
 
@@ -778,6 +849,18 @@ fn agent_view(r: &AccessRequest) -> Value {
         grant_unexpired: live,
         target_exists: r.target_title.is_some(),
     });
+    let allowed_tools: Vec<&str> = if access_verdict.allow_tool {
+        match r.scope {
+            AccessScope::Read => READ_TOOLS.to_vec(),
+            AccessScope::Control => READ_TOOLS
+                .iter()
+                .chain(CONTROL_TOOLS.iter())
+                .copied()
+                .collect(),
+        }
+    } else {
+        Vec::new()
+    };
     json!({
         "request_id": r.id,
         "target_mission_id": r.target_mission_id,
@@ -787,18 +870,27 @@ fn agent_view(r: &AccessRequest) -> Value {
         "reason": r.reason,
         "created_at": r.created_at,
         "expires_at": r.expires_at,
-        "allowed_tools": if access_verdict.allow_tool { json!(READ_TOOLS) } else { json!([]) },
+        "allowed_tools": allowed_tools,
     })
 }
 
 fn decision_note(r: &AccessRequest) -> String {
     match r.state {
-        ApprovalState::Approved => format!(
-            "Approved: you may read mission {} with {} until {}. Read only: messages, cancel, resume and placement stay denied.",
-            r.target_mission_id,
-            READ_TOOLS.join(", "),
-            r.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default()
-        ),
+        ApprovalState::Approved => match r.scope {
+            AccessScope::Read => format!(
+                "Approved: you may read mission {} with {} until {}. Read only: messages, cancel, resume and placement stay denied.",
+                r.target_mission_id,
+                READ_TOOLS.join(", "),
+                r.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default()
+            ),
+            AccessScope::Control => format!(
+                "Approved: you may read and control mission {} with {}, {} until {}. Placement and settings changes stay denied.",
+                r.target_mission_id,
+                READ_TOOLS.join(", "),
+                CONTROL_TOOLS.join(", "),
+                r.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default()
+            ),
+        },
         ApprovalState::Pending => format!(
             "Waiting for Thomas to approve on his device. You will get a message when he decides; or call list_mission_access later (request {}). Pending requests are denied after {PENDING_TTL_HOURS} h.",
             r.id
@@ -809,18 +901,26 @@ fn decision_note(r: &AccessRequest) -> String {
     }
 }
 
-/// Error text the gateway returns when a mission reads outside its scope.
+/// Error text the gateway returns when a mission accesses another mission outside its scope.
 pub fn scope_hint(tool: &str, target: Uuid) -> String {
     if READ_TOOLS.contains(&tool) {
         format!(
             "Mission is outside this session's scope. To read it, ask Thomas with \
-             request_mission_access(target_mission_id=\"{target}\", reason=\"why you need it\"); \
-             once approved, {} work on it (read-only).",
+             request_mission_access(target_mission_id=\"{target}\", scope=\"read\", reason=\"why you need it\"); \
+             once approved with Touch ID / Face ID, {} work on it.",
             READ_TOOLS.join(", ")
         )
+    } else if CONTROL_TOOLS.contains(&tool) {
+        format!(
+            "Mission is outside this session's scope. To message, answer, cancel or resume it, ask Thomas with \
+             request_mission_access(target_mission_id=\"{target}\", scope=\"control\", reason=\"why you need it\"); \
+             once approved with Touch ID / Face ID, {} and read tools work on it.",
+            CONTROL_TOOLS.join(", ")
+        )
     } else {
-        "Mission is outside this session's scope. Access grants (request_mission_access) are \
-         read-only and never allow messages, cancel, resume or placement on another mission."
+        "Mission is outside this session's scope. Access grants (request_mission_access) support \
+         scope=\"read\" and scope=\"control\" (messages, answers, cancel, resume) and never allow \
+         placement or settings changes on another mission."
             .to_string()
     }
 }
@@ -861,15 +961,11 @@ pub async fn handle_tool(
                 .and_then(Value::as_str)
                 .and_then(|s| Uuid::parse_str(s.trim()).ok())
                 .ok_or("target_mission_id must be a full mission UUID")?;
-            match args.get("scope").and_then(Value::as_str).unwrap_or("read") {
-                "read" => {}
-                _ => {
-                    return Err(
-                        "Only scope=\"read\" exists; control of another mission is never granted"
-                            .into(),
-                    )
-                }
-            }
+            let scope = match args.get("scope").and_then(Value::as_str).unwrap_or("read") {
+                "read" => AccessScope::Read,
+                "control" => AccessScope::Control,
+                _ => return Err("scope must be \"read\" or \"control\"".into()),
+            };
             let reason = args
                 .get("reason")
                 .and_then(Value::as_str)
@@ -900,9 +996,15 @@ pub async fn handle_tool(
                     || target_mission
                         .as_ref()
                         .is_some_and(|m| m.parent_mission_id == Some(own))
+                    || crate::control_mcp::gateway::btw_associated_with_target(
+                        &missions,
+                        &requester.project.tags,
+                        target,
+                    )
+                    .await
                 {
                     return Ok(
-                        json!({"status":"already_in_scope","message":"This mission is already in your scope; read it directly."}),
+                        json!({"status":"already_in_scope","message":"This mission is already in your scope; you can read and control it directly."}),
                     );
                 }
                 requester.title
@@ -917,6 +1019,7 @@ pub async fn handle_tool(
                     requester_title,
                     target,
                     target_title: target_mission.and_then(|m| m.title),
+                    scope,
                     reason,
                     ttl_hours: args.get("ttl_hours").and_then(Value::as_i64),
                 })
@@ -942,16 +1045,17 @@ pub fn tool_definitions() -> Vec<crate::control_mcp::ToolDefinition> {
     vec![
         ToolDefinition {
             name: "request_mission_access".into(),
-            description: "Ask Thomas for read-only access to another mission that you did not start and that is not in your tree \
-                          (when get_mission / get_mission_events answer \"outside this session's scope\"). He approves on his device \
+            description: "Ask Thomas for access to another mission that you did not start and that is not in your tree \
+                          (when mission tools answer \"outside this session's scope\"). He approves on his device \
                           with Touch ID / Face ID. Waits up to 20 s, then returns `pending`; you get a message when he decides, \
-                          or call list_mission_access. Once approved (default 24 h), get_mission, get_mission_events, \
-                          get_mission_health, list_mission_shared_files and get_cloud_execution work on that mission. Never grants control: \
-                          sending messages, cancel, resume and placement stay denied."
+                          or call list_mission_access. `scope=\"read\"` (default) opens get_mission, get_mission_events, \
+                          get_mission_health, get_mission_diagnostics, list_mission_shared_files and get_cloud_execution; \
+                          `scope=\"control\"` additionally opens send_message_to_mission, answer_mission_question, \
+                          cancel_mission, resume_mission and ask_mission. Never grants child/job placement or settings changes."
                 .into(),
             input_schema: json!({"type":"object","required":["target_mission_id","reason"],"properties":{
-                "target_mission_id":{"type":"string","format":"uuid","description":"Full UUID of the mission to read."},
-                "scope":{"type":"string","enum":["read"],"default":"read"},
+                "target_mission_id":{"type":"string","format":"uuid","description":"Full UUID of the target mission."},
+                "scope":{"type":"string","enum":["read","control"],"default":"read","description":"\"read\" for mission/events/health/files, or \"control\" to also send messages, answer questions, cancel or resume."},
                 "reason":{"type":"string","minLength":1,"maxLength":500,"description":"Why you need it; shown to Thomas."},
                 "ttl_hours":{"type":"integer","minimum":1,"maximum":MAX_TTL_HOURS,"description":"How long you need it (default 24)."}
             },"additionalProperties":false}),
@@ -1015,8 +1119,9 @@ pub(crate) async fn notify_requester(state: &Arc<AppState>, r: &AccessRequest) {
         return;
     }
     let content = format!(
-        "[mission-access] Request {} to read mission {} ({}): {}",
+        "[mission-access] Request {} to {} mission {} ({}): {}",
         r.id,
+        r.scope.as_str(),
         r.target_mission_id,
         r.state_label(),
         decision_note(r)
@@ -1154,14 +1259,26 @@ pub async fn describe_for_approval(
         .target_title
         .clone()
         .unwrap_or_else(|| format!("mission {}", &r.target_mission_id.to_string()[..8]));
-    Ok(match action {
-        "approve" => format!(
+    let hrs = clamp_ttl(ttl.or(Some(r.ttl_hours)));
+    Ok(match (action, r.scope) {
+        ("approve", AccessScope::Control) => format!(
+            "Let {} CONTROL (message, cancel, resume) {} for {} h",
+            who,
+            super::approvals::quoted(&target),
+            hrs
+        ),
+        ("approve", AccessScope::Read) => format!(
             "Let {} READ (not control) {} for {} h",
             who,
             super::approvals::quoted(&target),
-            clamp_ttl(ttl.or(Some(r.ttl_hours)))
+            hrs
         ),
-        _ => format!(
+        (_, AccessScope::Control) => format!(
+            "Decline: {} wants to control {}",
+            who,
+            super::approvals::quoted(&target)
+        ),
+        (_, AccessScope::Read) => format!(
             "Decline: {} wants to read {}",
             who,
             super::approvals::quoted(&target)
@@ -1190,6 +1307,7 @@ mod tests {
             requester_title: Some("requester".into()),
             target,
             target_title: Some("target".into()),
+            scope: AccessScope::Read,
             reason: "compare results".into(),
             ttl_hours: None,
         }
@@ -1425,12 +1543,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn control_grant_allows_control_and_read_tools_only_after_approval() {
+        let s = temp();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        // A live read grant does not satisfy a control request; requesting control opens a new pending request.
+        let read_req = s.request(new("thomas", a, b)).await.unwrap();
+        s.approve("thomas", read_req.id, None).await.unwrap();
+        assert_eq!(
+            s.grant_for_tool("thomas", &subj(a), b, "send_message_to_mission")
+                .await,
+            None
+        );
+        let mut ctrl = new("thomas", a, b);
+        ctrl.scope = AccessScope::Control;
+        let ctrl_req = s.request(ctrl.clone()).await.unwrap();
+        assert_ne!(ctrl_req.id, read_req.id);
+        assert_eq!(ctrl_req.scope, AccessScope::Control);
+        assert!(agent_view(&ctrl_req)["target_title"].is_null());
+        assert_eq!(
+            s.grant_for_tool("thomas", &subj(a), b, "send_message_to_mission")
+                .await,
+            None
+        );
+
+        let approved_ctrl = s.approve("thomas", ctrl_req.id, None).await.unwrap();
+        assert_eq!(agent_view(&approved_ctrl)["target_title"], "target");
+        for tool in READ_TOOLS.iter().chain(CONTROL_TOOLS.iter()) {
+            assert_eq!(
+                s.grant_for_tool("thomas", &subj(a), b, tool).await,
+                Some(ctrl_req.id),
+                "{tool}"
+            );
+        }
+        // Control covers read: asking for read or control now returns the live control grant.
+        assert_eq!(
+            s.request(new("thomas", a, b)).await.unwrap().id,
+            ctrl_req.id
+        );
+        assert_eq!(s.request(ctrl).await.unwrap().id, ctrl_req.id);
+        // Placement and settings mutation remain denied even with a control grant.
+        for tool in [
+            "start_mission",
+            "update_mission_settings",
+            "start_workspace_job",
+        ] {
+            assert_eq!(
+                s.grant_for_tool("thomas", &subj(a), b, tool).await,
+                None,
+                "{tool} allowed"
+            );
+        }
+        // Revoking the control grant immediately blocks control again.
+        s.revoke("thomas", ctrl_req.id).await.unwrap();
+        assert_eq!(
+            s.grant_for_tool("thomas", &subj(a), b, "send_message_to_mission")
+                .await,
+            None
+        );
+    }
+
     #[test]
-    fn scope_hint_points_reads_to_the_tool_and_refuses_control() {
+    fn scope_hint_points_reads_and_control_to_the_tool_and_refuses_placement() {
         let t = Uuid::new_v4();
-        assert!(scope_hint("get_mission_events", t).contains("request_mission_access"));
+        assert!(scope_hint("get_mission_events", t).contains("scope=\"read\""));
         assert!(scope_hint("get_cloud_execution", t).contains("request_mission_access"));
-        assert!(scope_hint("cancel_mission", t).contains("never allow"));
+        assert!(scope_hint("send_message_to_mission", t).contains("scope=\"control\""));
+        assert!(scope_hint("cancel_mission", t).contains("scope=\"control\""));
+        assert!(scope_hint("start_mission", t).contains("never allow"));
         assert!(!READ_TOOLS.iter().any(|t| matches!(
             *t,
             "send_message_to_mission" | "cancel_mission" | "resume_mission" | "start_mission"

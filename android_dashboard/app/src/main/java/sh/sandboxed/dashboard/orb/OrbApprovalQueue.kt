@@ -114,7 +114,10 @@ object OrbApprovalQueue {
         val r = request(i)
         return when (i["kind"]) {
             "privilege" -> OrbPrivilegeAccess.title(r)
-            "mission_access" -> "Read ${mission(str(r, "target_title"), str(r, "target_mission_id"))}"
+            "mission_access" -> {
+                val verb = if (i["tier"] == "control_mission" || str(r, "scope") == "control") "Control" else "Read"
+                "$verb ${mission(str(r, "target_title"), str(r, "target_mission_id"))}"
+            }
             else -> {
                 val verb = secretVerb[i["tier"]] ?: "Read"
                 when {
@@ -137,7 +140,13 @@ object OrbApprovalQueue {
         fun project(k: String) = str(r, k).let { if (it.isEmpty()) "" else projectName(it) }
         return when (i["kind"]) {
             "privilege" -> "Allows ${OrbPrivilegeAccess.unlocks(r)} · ${OrbPrivilegeAccess.lifetime(r)}"
-            "mission_access" -> "Read only · ${(r["ttl_hours"] as? Number)?.toInt() ?: 0} h · no messages, cancel or resume"
+            "mission_access" -> {
+                val hrs = (r["ttl_hours"] as? Number)?.toInt() ?: 0
+                if (i["tier"] == "control_mission" || str(r, "scope") == "control")
+                    "Allows messages, answers, cancel and resume · $hrs h"
+                else
+                    "Read only · $hrs h · no messages, cancel or resume"
+            }
             else -> {
                 val from = project("project_id").ifEmpty { "unknown project" }
                 when (i["tier"]) {
@@ -214,7 +223,11 @@ object OrbApprovalQueue {
 
     /** A per-kind request as a queue item, for a Core without the queue. No digest: approved through the kind's own signed route. */
     fun legacyItem(kind: String, r: Map<String, Any?>): Map<String, Any?> {
-        val tier = when (kind) { "privilege" -> str(r, "scope"); "secret" -> str(r, "kind"); else -> "read_mission" }
+        val tier = when (kind) {
+            "privilege" -> str(r, "scope")
+            "secret" -> str(r, "kind")
+            else -> if (str(r, "scope") == "control") "control_mission" else "read_mission"
+        }
         val target = when (kind) {
             "privilege" -> str(r, "target_host")
             "mission_access" -> str(r, "target_mission_id")

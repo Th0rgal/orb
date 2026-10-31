@@ -2,10 +2,11 @@ import { api } from "./api";
 import { signedApi } from "./deviceApproval";
 
 /**
- * Mission access requests: a mission asks to read another mission outside its
- * tree. Approving needs this device's Touch ID signature (Core always
- * requires it); grants are read-only, expire, and can be revoked.
+ * Mission access requests: a mission asks to read or control another mission
+ * outside its tree. Approving needs this device's Touch ID signature (Core
+ * always requires it); grants expire and can be revoked.
  */
+export type AccessScope = "read" | "control";
 export type AccessState = "pending" | "approved" | "denied" | "expired" | "revoked";
 export type ExternalClientKind = "local_mcp" | "cli" | "ci" | "webhook";
 
@@ -27,7 +28,7 @@ export interface MissionAccessRequest {
   requester_title?: string | null;
   target_mission_id: string;
   target_title?: string | null;
-  scope: "read";
+  scope: AccessScope;
   reason: string;
   ttl_hours: number;
   state: AccessState;
@@ -130,7 +131,7 @@ export const approveMissionAccess = (r: MissionAccessRequest, ttlHours?: number)
     "POST",
     `/api/mission-access/${encodeURIComponent(r.id)}/approve`,
     { ttl_hours: ttlHours ?? r.ttl_hours },
-    `let ${actorLabel(r)} read ${missionLabel(r.target_title, r.target_mission_id)}`,
+    `let ${actorLabel(r)} ${r.scope === "control" ? "control" : "read"} ${missionLabel(r.target_title, r.target_mission_id)}`,
   ));
 
 export const denyMissionAccess = (r: MissionAccessRequest) =>

@@ -133,4 +133,24 @@ class OrbApprovalQueueTest {
         assertEquals("Read OPENAI_API_KEY for External · macbook-air (claude-code)", OrbApprovalQueue.signingReason(listOf(ext)))
         assertEquals("session:c4d5e6f7-0000-4000-8000-000000000099", OrbApprovalQueue.subjectKey(raw))
     }
+
+    @Test fun controlMissionLegacyItemLabelsAndTier() {
+        val raw = mapOf(
+            "id" to "a2",
+            "state" to "pending",
+            "scope" to "control",
+            "requester_mission_id" to "m2",
+            "requester_title" to "Fleet health",
+            "target_mission_id" to "t1",
+            "target_title" to "Disk cleanup",
+            "reason" to "queue follow-up",
+            "ttl_hours" to 12.0,
+            "created_at" to "2026-10-31T10:00:00Z",
+        )
+        val ctrl = OrbApprovalQueue.legacyItem("mission_access", raw)
+        assertEquals("control_mission", ctrl["tier"])
+        assertEquals("elevated", ctrl["risk"])
+        assertEquals("Control Disk cleanup", OrbApprovalQueue.title(ctrl))
+        assertEquals("Allows messages, answers, cancel and resume · 12 h", OrbApprovalQueue.detail(ctrl))
+    }
 }

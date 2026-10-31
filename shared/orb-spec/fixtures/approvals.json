@@ -166,6 +166,11 @@
       "kind": "mission_access",
       "tier": "read_mission",
       "risk": "elevated"
+    },
+    {
+      "kind": "mission_access",
+      "tier": "control_mission",
+      "risk": "elevated"
     }
   ],
   "labels": [
@@ -399,6 +404,25 @@
       "title": "Read-only ops on dgx-spark",
       "requester": "External \u00b7 sandboxed-mcp",
       "detail": "Allows logs, status and disk checks as root; no changes \u00b7 for this session (max 1 h)"
+    },
+    {
+      "item": {
+        "kind": "mission_access",
+        "tier": "control_mission",
+        "target": "5e6f7a8b-0000-4000-8000-000000000003",
+        "risk": "elevated",
+        "requester_title": "Fleet health",
+        "requester_mission_id": "7c1d2e3f-0000-4000-8000-000000000001",
+        "request": {
+          "scope": "control",
+          "target_title": "Disk cleanup",
+          "target_mission_id": "5e6f7a8b-0000-4000-8000-000000000003",
+          "ttl_hours": 12
+        }
+      },
+      "title": "Control Disk cleanup",
+      "requester": "Fleet health",
+      "detail": "Allows messages, answers, cancel and resume \u00b7 12 h"
     }
   ],
   "summaries": [
