@@ -86,29 +86,27 @@ it('groups CI waits and preserves unrelated work and action details',()=>{
  expect(isCiWait({...task,label:'Build CI binaries'})).toBe(false);
 });
 
-it('keeps Antigravity progress visible between tools and replays reported usage',()=>{
+it('ignores status-only snapshots so the transcript working row owns idle progress',()=>{
  const status:LocalActivity={id:'antigravity:status',kind:'status',label:'Working…',done:false,failed:false,started_at:Date.now()-5000,updated_at:Date.now(),thinking_tokens:42,detail:'Displayed thought summaries are read from this native conversation when available.'};
  const [items,setItems]=createSignal<LocalActivity[]>([status]);
  const [running,setRunning]=createSignal(true);
  render(()=><AgentActivity items={items()} running={running()}/>);
- expect(screen.getByText('Working…')).toBeTruthy();
- expect(screen.getByText(/42 thinking tokens reported/)).toBeTruthy();
- expect(screen.getByText('Waiting for thought summaries').title).toContain('Displayed thought summaries');
+ expect(screen.queryByRole('region',{name:'Agent activity'})).toBeNull();
+ expect(screen.queryByText('Working…')).toBeNull();
+ expect(screen.queryByText(/Waiting for thought summaries/)).toBeNull();
  setItems([status,{id:'tool',label:'Run command',done:false,failed:false}]);
  expect(screen.getByText('Run command')).toBeTruthy();
  setItems([status,{id:'tool',label:'Run command',done:true,failed:false}]);
- expect(screen.getByText('Working…')).toBeTruthy();
+ expect(screen.queryByText('Working…')).toBeNull();
  setRunning(false);
  expect(screen.queryByText('Working…')).toBeNull();
- expect(screen.queryByText(/Last event/)).toBeNull();
- expect(screen.getByText(/42 thinking tokens reported/)).toBeTruthy();
 });
 
-it('shows native thought summaries in activity without mixing them into response text',()=>{
+it('shows native thought summaries in activity without extra status lines',()=>{
  const status:LocalActivity={id:'antigravity:status',kind:'status',label:'Working…',done:false,failed:false};
  const thought:LocalActivity={id:'antigravity:thought:session:10',kind:'thinking',label:'Thinking',done:true,failed:false,detail:'Checking the build before submitting.'};
  render(()=> <AgentActivity running={true} items={[status,thought]}/>);
- expect(screen.getByText('Thought summaries available in Activity')).toBeTruthy();
+ expect(screen.queryByText(/Thought summaries available in Activity/)).toBeNull();
  fireEvent.click(document.querySelector('.agent-history-toggle')!);
  fireEvent.click(screen.getByRole('button',{name:/Thinking/}));
  expect(screen.getByText('Checking the build before submitting.')).toBeTruthy();

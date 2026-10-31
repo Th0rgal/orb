@@ -78,12 +78,12 @@ test('CI waits show one collapsed group with the original actions inside',async(
   await expect(input).not.toBeVisible();
  });
 
-test('Antigravity remains visible between tools with usage and capability feedback',async({page})=>{
+test('Antigravity status snapshots do not add duplicate working or thought-summary lines',async({page})=>{
  await page.goto('/tests/agent-activity.html?antigravity');
- await expect(page.locator('.agent-history-toggle')).toContainText('Working…');
- await expect(page.getByText('Waiting for thought summaries')).toHaveAttribute('title',/Displayed thought summaries/);
- await expect(page.getByText(/1,033 thinking tokens reported/)).toBeVisible();
- await expect(page.getByText(/Last event/)).toBeVisible();
+ await expect(page.locator('.agent-history-toggle')).toContainText('1 action');
+ await expect(page.getByText('Working…')).toHaveCount(0);
+ await expect(page.getByText(/thought summaries/i)).toHaveCount(0);
+ await expect(page.getByText(/Last event/)).toHaveCount(0);
  await page.locator('.agent-history-toggle').click();
  await expect(page.getByText('Run command')).toBeVisible();
  await page.setViewportSize({width:390,height:844});
