@@ -319,6 +319,9 @@ struct OrbConversation: View {
                         return true
                     }
                 }
+                .onAppear { if let missionID { OrbCrashBreadcrumbs.enterConversation(missionId: missionID, turnCount: turns.count) } }
+                .onChange(of: turns.count) { _, count in OrbCrashBreadcrumbs.updateTurnCount(count) }
+                .onDisappear { OrbCrashBreadcrumbs.leaveConversation() }
                 .onChange(of: text) { _, value in
                     // Absorb typed `/goal ` or `/plan ` prefix into the mode pill when supported.
                     if supportsMode && mode == "Message" {

@@ -9,7 +9,7 @@ import Observation
 @Observable
 final class OrbCore {
     static let shared = OrbCore()
-    nonisolated init() {}
+    nonisolated init() { OrbCrashBreadcrumbs.install() }
 
     nonisolated static let defaultBaseURL: String = {
         let raw = Bundle.main.object(forInfoDictionaryKey: "SandboxedDefaultAPIBaseURL") as? String

@@ -2989,6 +2989,12 @@ fn cloud_bootstrap_script_configures_user_bus_and_harnesses_within_onstart_budge
     );
     assert!(script.contains("dbus-user-session"));
     assert!(script.contains("loginctl enable-linger orbnode"));
+    assert!(script.contains(
+        "for g in sudo adm admin wheel docker lxd; do q gpasswd -d orbnode \"$g\" || :; done"
+    ));
+    assert!(
+        script.contains("for g in kvm video render; do q usermod -aG \"$g\" orbnode || :; done")
+    );
     assert!(script.contains("XDG_RUNTIME_DIR=/run/user/${UID_N}"));
     assert!(script.contains("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${UID_N}/bus"));
     assert!(script.contains("orb_fetch sandboxed-node \"$B/sandboxed-node\" 0755"));

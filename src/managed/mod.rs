@@ -5737,7 +5737,7 @@ fi
 q id -u user || useradd -m -s /bin/bash user || :
 q id -u orbnode || useradd -r -m -d "$H" -s /bin/bash orbnode || :
 for g in sudo adm admin wheel docker lxd; do q gpasswd -d orbnode "$g" || :; done
-for g in video render; do q usermod -aG "$g" orbnode || :; done
+for g in kvm video render; do q usermod -aG "$g" orbnode || :; done
 rm -f /etc/sudoers.d/orbnode
 install -d -m 0755 "$B" "$S" /opt/sandboxed-tools
 install -d -m 0750 -o orbnode -g orbnode "$H" "$H/work" "$H/work/caches"

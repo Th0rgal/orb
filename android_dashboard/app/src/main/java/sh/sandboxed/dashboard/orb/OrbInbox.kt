@@ -106,6 +106,8 @@ object OrbSharedInboxState {
     var applying = false
     private fun account() = inboxAccountScope(OrbCore.shared.baseURL, OrbCore.shared.token)
     private var persistence: SharedPreferences? = null
+    private var fallbackClientId: String = UUID.randomUUID().toString()
+    private var fallbackMutationSequence: Long = 0L
     fun init(context: Context) { persistence = context.applicationContext.getSharedPreferences("orb_inbox_outbox", Context.MODE_PRIVATE) }
     private fun diskKey() = java.security.MessageDigest.getInstance("SHA-256").digest(scope.toByteArray()).joinToString("") { "%02x".format(it) }
     private fun persistOutbox() { persistence?.edit()?.putString(diskKey(), OrbJSON.stringify(outbox))?.commit() }
@@ -135,10 +137,10 @@ object OrbSharedInboxState {
         val fields = (input as? Map<*, *>)?.entries?.associate { it.key.toString() to it.value }?.toMutableMap()
         fields?.remove("mutationAt")
         if (fields != null && (!fields.containsKey("clientId") || !fields.containsKey("mutationSeq"))) {
-            val disk = checkNotNull(persistence)
-            val client = disk.getString("client_id", null) ?: UUID.randomUUID().toString()
-            val sequence = disk.getLong("mutation_sequence", 0) + 1
-            disk.edit().putString("client_id", client).putLong("mutation_sequence", sequence).commit()
+            val disk = persistence
+            val client = disk?.getString("client_id", null) ?: fallbackClientId
+            val sequence = if (disk != null) disk.getLong("mutation_sequence", 0) + 1 else ++fallbackMutationSequence
+            disk?.edit()?.putString("client_id", client)?.putLong("mutation_sequence", sequence)?.commit()
             val entry = if (path.startsWith("seen/")) "seen:" + java.net.URLDecoder.decode(path.removePrefix("seen/"), "UTF-8") else path
             fields["clientId"] = client; fields["mutationSeq"] = sequence; fields["expectedVersion"] = revisions[entry] ?: 0L
         }

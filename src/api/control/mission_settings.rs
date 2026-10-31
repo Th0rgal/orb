@@ -1999,11 +1999,18 @@ pub async fn load_mission(
 /// the "opened" dot. The dashboard and iOS clients call this from their
 /// mission-detail entry points; the periodic ack-promotion tick uses the
 /// timestamp to decide when to move the mission to `Acknowledged`.
+#[derive(Debug, Serialize)]
+pub struct MarkMissionOpenedResponse {
+    pub id: Uuid,
+    pub status: MissionStatus,
+    pub first_viewed_at: Option<String>,
+}
+
 pub async fn mark_mission_opened(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Mission>, (StatusCode, String)> {
+) -> Result<Json<MarkMissionOpenedResponse>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     let now = chrono::Utc::now().to_rfc3339();
     let newly_set = control
@@ -2013,7 +2020,7 @@ pub async fn mark_mission_opened(
         .map_err(internal_error)?;
     let mission = control
         .mission_store
-        .get_mission(id)
+        .get_mission_metadata(id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Mission {} not found", id)))?;
@@ -2026,7 +2033,11 @@ pub async fn mark_mission_opened(
             summary: None,
         });
     }
-    Ok(Json(mission))
+    Ok(Json(MarkMissionOpenedResponse {
+        id: mission.id,
+        status: mission.status,
+        first_viewed_at: mission.first_viewed_at,
+    }))
 }
 
 /// Set mission status (completed/failed).
@@ -2676,5 +2687,20 @@ mod subtree_move_tests {
                 .as_deref(),
             Some("existing-pr-holder")
         );
+    }
+    #[test]
+    fn mark_mission_opened_response_is_metadata_only() {
+        let response = MarkMissionOpenedResponse {
+            id: Uuid::nil(),
+            status: MissionStatus::Active,
+            first_viewed_at: Some("2026-01-01T00:00:00Z".into()),
+        };
+        let value = serde_json::to_value(response).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 3);
+        assert!(object.contains_key("id"));
+        assert!(object.contains_key("status"));
+        assert!(object.contains_key("first_viewed_at"));
+        assert!(!object.contains_key("history"));
     }
 }
