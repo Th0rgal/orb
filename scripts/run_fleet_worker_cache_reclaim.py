@@ -30,7 +30,7 @@ DEFAULT_TARGETS = [
     ]),
     ("nimrud", "/var/lib/sandboxed-node", []),
     ("dgx-spark", "/var/lib/sandboxed-node", []),
-    ("agent-core", "/var/lib/sandboxed-node", []),
+    ("agent-core", "/var/lib/sandboxed-node/work", []),
 ]
 
 
