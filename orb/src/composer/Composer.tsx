@@ -416,9 +416,10 @@ export function Composer(p: {
   const harnessTarget = createMemo(() => p.uploadTarget);
   const projectSlug = createMemo(() => p.projectSlug);
   createEffect(() => {
+    if (p.sideQuestion) return;
     const target = harnessTarget();
     if (target === "local") void refreshLocalAgents(false);
-    else if (target) void refreshNodeAntigravityModels(target);
+    else if (target && target !== "side") void refreshNodeAntigravityModels(target);
   });
   const modes = createMemo(() => p.textOnly || p.imagesOnly || p.sideQuestion ? [] : [...composerModes(backend(), p.uploadTarget === "local" ? !!localInstalled().find(h=>h.id===backend())?.plan_supported : !!p.uploadTarget && !!harnessChoices(p.uploadTarget).find(h=>h.backend.id===backend())?.backend.native_plan), ...(p.onBtw ? [{id:"btw" as const, section:"Modes" as const,label:"Side question",title:"Ask without interrupting the agent"}] : [])]);
   const slash = createMemo(() => {
@@ -781,7 +782,7 @@ export function Composer(p: {
               // Discover newly installed CLIs without recreating the composer.
               if (opening && p.harnessIds) void refreshLocalAgents(false);
               if (opening && isConnected()) void refreshHarnessChoices();
-              if (opening && p.uploadTarget) void refreshNodeAntigravityModels(p.uploadTarget);
+              if (opening && p.uploadTarget !== "local" && p.uploadTarget !== "side") void refreshNodeAntigravityModels(p.uploadTarget ?? "core");
             }}>
               {choice()?.backend.name ?? "Harness"} <Ic.ChevronDown size={12} />
             </button>

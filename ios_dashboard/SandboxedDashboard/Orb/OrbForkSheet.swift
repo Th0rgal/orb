@@ -151,7 +151,8 @@ struct OrbForkSheet: View {
         do {
             let catalog = try await OrbReadCache.agentCatalog()
             let response = catalog["backends"]
-            backends = response.items.isEmpty ? response["backends"].items : response.items
+            let rawBackends = response.items.isEmpty ? response["backends"].items : response.items
+            backends = rawBackends.filter { $0.selfID != "gemini" }
             modelsMap = catalog["models"]["backends"]
             if backend.isEmpty {
                 backend = mission["backend"].text.isEmpty ? (backends.first?.selfID ?? "") : mission["backend"].text

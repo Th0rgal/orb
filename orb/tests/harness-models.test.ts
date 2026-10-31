@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../src/api";
+import * as api from "../src/api";
 import { destinationHarnessChoices } from "../src/harness-models";
-const core = [{ backend: {id:"antigravity",name:"Antigravity"}, models:[{value:"core-only",label:"Core model"}] }];
+import { refreshNodeAntigravityModels } from "../src/harnessPick";
+const core = [{ backend: {id:"antigravity",name:"Google Antigravity"}, models:[{value:"agy-model",label:"Google Antigravity — Gemini 4 Carbon"}] }];
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 describe("destination account models", () => {
   it("offers installed local Vibe without a Core Mistral account or catalog entry", () => {
     const choices = destinationHarnessChoices([], "local", [], true);
@@ -10,18 +14,35 @@ describe("destination account models", () => {
     expect(destinationHarnessChoices([], "local", [], false)).toEqual([]);
     expect(destinationHarnessChoices(choices, "local", [], true)).toEqual(choices);
   });
-  it("does not substitute the Core account for a local or node account", () => {
-    for (const machine of ["local", "old-agent", "core"]) {
-      expect(destinationHarnessChoices(core, machine, [["agy-demo","Gemini 4 Argon"]])[0].models.map(m=>m.value)).toEqual(["agy-demo"]);
-      expect(destinationHarnessChoices(core, machine, [])).toEqual([]);
+  it("never substitutes the Core Antigravity account on this computer", () => {
+    expect(destinationHarnessChoices(core, "local", [["agy-demo","Gemini 4 Argon"]])[0].models.map(m=>m.value)).toEqual(["agy-demo"]);
+    expect(destinationHarnessChoices(core, "local", [])).toEqual([]);
+  });
+  it("keeps Core's connected Antigravity catalog on Core and fleet nodes until machine discovery resolves", () => {
+    for (const machine of ["core", "nimrud"]) {
+      const pending = destinationHarnessChoices(core, machine, []);
+      expect(pending[0].backend).toEqual({ id: "antigravity", name: "Antigravity CLI", native_plan: true });
+      expect(pending[0].models.map(m => m.value)).toEqual(["agy-model"]);
+      expect(destinationHarnessChoices(core, machine, [["agy-demo", "Gemini 4 Argon"]])[0].models.map(m => m.value)).toEqual(["agy-demo"]);
     }
   });
-  it("keeps other harnesses available while native discovery is pending", () => {
+  it("sorts Antigravity in composer harness order alongside other harnesses", () => {
     const codex = {backend:{id:"codex",name:"Codex"},models:[{value:"model",label:"Model"}]};
-    expect(destinationHarnessChoices([...core,codex],"core",[])).toEqual([codex]);
+    const vibe = {backend:{id:"vibe",name:"Mistral Vibe"},models:[{value:"mistral/devstral",label:"Devstral"}]};
+    expect(destinationHarnessChoices([...core,codex,vibe],"core",[]).map(c=>c.backend.id)).toEqual(["codex","antigravity","vibe"]);
   });
   it("supports a node-only installation without Core having the CLI", () => {
     expect(destinationHarnessChoices([],"old-agent",[["agy-demo","Gemini 4 Argon"]])[0].backend.id).toBe("antigravity");
+  });
+  it("skips side-question pseudo-targets and does not retry permanent 404 node lookups", async () => {
+    vi.useFakeTimers();
+    const spy = vi.spyOn(api, "listNodeAntigravityModels").mockRejectedValue(new ApiError(404, "Unknown node"));
+    await refreshNodeAntigravityModels("side");
+    expect(spy).not.toHaveBeenCalled();
+    await refreshNodeAntigravityModels("retired-node");
+    expect(spy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 
