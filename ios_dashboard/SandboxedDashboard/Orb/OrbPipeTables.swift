@@ -5,7 +5,7 @@ import Foundation
 /// shared/orb-spec/fixtures/loose-pipe-tables.json.
 enum OrbPipeTables {
     static func isNumericCell(_ cell: String) -> Bool {
-        let t = cell.trimmingCharacters(in: .whitespaces)
+        let t = cell.trimmingCharacters(in: .whitespacesAndNewlines)
         let matches = t.range(of: "^[+\\-\u{2212}]?[$€£]?[0-9][0-9\u{00a0}\u{202f} ,.']*%?$", options: .regularExpression) != nil
         let hasDigit = t.contains { $0 >= "0" && $0 <= "9" }
         return OrbKernel.numericCellAdmitted(
@@ -21,7 +21,7 @@ enum OrbPipeTables {
     /// The cells of a loose row, or nil when the line is not one.
     static func cells(_ line: String) -> [String]? {
         if line.hasPrefix("    ") || line.hasPrefix("\t") { return nil }
-        let t = line.trimmingCharacters(in: .whitespaces)
+        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if !t.contains("|") || t.hasPrefix("|") { return nil }
         if t.range(of: "^(#|>|[-*+]\\s|[0-9]+[.)]\\s)", options: .regularExpression) != nil { return nil }
         let chars = Array(t)
@@ -33,11 +33,11 @@ enum OrbPipeTables {
             if c == "`" { inCode.toggle() } else if c == "|" {
                 if inCode { return nil }
                 if !isSpace(i > 0 ? chars[i - 1] : nil) || !isSpace(i + 1 < chars.count ? chars[i + 1] : nil) { return nil }
-                out.append(String(chars[start..<i]).trimmingCharacters(in: .whitespaces))
+                out.append(String(chars[start..<i]).trimmingCharacters(in: .whitespacesAndNewlines))
                 start = i + 1
             }
         }
-        out.append(String(chars[start...]).trimmingCharacters(in: .whitespaces))
+        out.append(String(chars[start...]).trimmingCharacters(in: .whitespacesAndNewlines))
         return out.count >= 3 && !inCode ? out : nil
     }
 
@@ -124,7 +124,7 @@ enum OrbPipeTables {
         let bufLen = src.utf16.count
         func admitted(_ k: Int, _ cells: [String], sepCols: Int) -> Bool {
             let lead = lines[k].prefix(while: { $0 == " " || $0 == "\t" }).utf16.count
-            let rowLen = lines[k].trimmingCharacters(in: .whitespaces).utf16.count
+            let rowLen = lines[k].trimmingCharacters(in: .whitespacesAndNewlines).utf16.count
             return OrbKernel.gfmPipeRowAdmitted(rowOff: starts[k] + lead, rowLen: rowLen, bufLen: bufLen, colCount: cells.count, sepCols: sepCols)
         }
         var out: [String] = []
@@ -149,15 +149,125 @@ enum OrbPipeTables {
                 out.append(contentsOf: lines[i..<j]); i = j; continue
             }
             if j == lines.count - 1 && lines[j].contains(" |") {
-                let t = lines[j].trimmingCharacters(in: .whitespaces)
-                let partial = t.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+                let t = lines[j].trimmingCharacters(in: .whitespacesAndNewlines)
+                let partial = t.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 if partial.count < first.count && !t.hasPrefix("|") { rows.append(partial); j += 1 }
             }
-            if let last = out.last, !last.trimmingCharacters(in: .whitespaces).isEmpty { out.append("") }
+            if let last = out.last, !last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append("") }
             out.append(contentsOf: gfm(rows))
-            if j < lines.count && !lines[j].trimmingCharacters(in: .whitespaces).isEmpty { out.append("") }
+            if j < lines.count && !lines[j].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append("") }
             i = j
         }
         return out.joined(separator: "\n")
+    }
+}
+
+/// Verified cross-client transcript safety gates (`lean/Orb/Transcript.lean`,
+/// checked against `shared/orb-spec/fixtures/transcript-gates.json`).
+enum OrbTranscriptGates {
+    nonisolated static let maxLatexSpanChars = 8192
+
+    struct CandidateKey: Hashable, Sendable {
+        let tag: Int
+        let item: Int
+    }
+
+    struct TurnKey: Equatable, Hashable, Sendable {
+        let tag: Int
+        let item: Int
+        let gen: Int
+    }
+
+    nonisolated static func allocTurnKeys(_ candidates: [CandidateKey]) -> [TurnKey] {
+        var seen = Set<CandidateKey>()
+        var nextGen = 1
+        var out: [TurnKey] = []
+        out.reserveCapacity(candidates.count)
+        for c in candidates {
+            if seen.contains(c) {
+                out.append(TurnKey(tag: c.tag, item: c.item, gen: nextGen))
+                nextGen += 1
+            } else {
+                seen.insert(c)
+                out.append(TurnKey(tag: c.tag, item: c.item, gen: 0))
+            }
+        }
+        return out
+    }
+
+    /// Ensures strictly unique, non-empty row IDs (`ForEach` / `LazyColumn` safety)
+    /// while leaving already-distinct non-empty IDs untouched (`gen == 0`).
+    nonisolated static func ensureUniqueIds(_ candidates: [String]) -> [String] {
+        var seen = Set<String>()
+        var nextGen = 1
+        var out: [String] = []
+        out.reserveCapacity(candidates.count)
+        for raw in candidates {
+            if !raw.isEmpty && !seen.contains(raw) {
+                seen.insert(raw)
+                out.append(raw)
+            } else {
+                let base = raw.isEmpty ? "turn" : raw
+                while seen.contains("\(base)#\(nextGen)") {
+                    nextGen += 1
+                }
+                let fresh = "\(base)#\(nextGen)"
+                nextGen += 1
+                seen.insert(fresh)
+                out.append(fresh)
+            }
+        }
+        return out
+    }
+
+    nonisolated static func ensureUniqueRows(_ rows: [(String, String, String)]) -> [(String, String, String)] {
+        let uniqueIds = ensureUniqueIds(rows.map(\.0))
+        return zip(uniqueIds, rows).map { id, row in (id, row.1, row.2) }
+    }
+
+    nonisolated static func latexSpanAdmitted(
+        len: Int,
+        prevBlocked: Bool,
+        nextDigit: Bool,
+        leadSpace: Bool,
+        trailSpace: Bool,
+        hasNewline: Bool,
+        firstDigit: Bool,
+        internalSpace: Bool,
+        hasMathOp: Bool
+    ) -> Bool {
+        len > 0 &&
+            len <= maxLatexSpanChars &&
+            !prevBlocked &&
+            !nextDigit &&
+            !leadSpace &&
+            !trailSpace &&
+            !hasNewline &&
+            !(firstDigit && internalSpace && !hasMathOp)
+    }
+
+    nonisolated static func visibleTurnCount(
+        total: Int,
+        baseLimit: Int,
+        expandedSteps: Int,
+        stepSize: Int
+    ) -> Int {
+        let cap = max(0, baseLimit) + max(0, expandedSteps) * max(0, stepSize)
+        return min(max(0, total), cap)
+    }
+
+    nonisolated static func hiddenTurnCount(
+        total: Int,
+        baseLimit: Int,
+        expandedSteps: Int,
+        stepSize: Int
+    ) -> Int {
+        max(0, total) - visibleTurnCount(total: total, baseLimit: baseLimit, expandedSteps: expandedSteps, stepSize: stepSize)
+    }
+
+    nonisolated static func admitMount(active: Int, cap: Int) -> (admitted: Bool, nextActive: Int) {
+        let a = max(0, active)
+        let c = max(0, cap)
+        return a < c ? (true, a + 1) : (false, a)
     }
 }

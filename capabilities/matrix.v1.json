@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "updated_at": "2026-02-20",
+  "updated_at": "2026-10-31",
   "capabilities": [
     {
       "id": "mission_history",
-      "description": "Mission history is persisted by the backend and consumed by web and iOS clients.",
+      "description": "Mission history is persisted by the backend and consumed across web, Orb desktop, iOS, and Android clients.",
       "api": {
         "status": "supported",
         "evidence": [
@@ -23,6 +23,15 @@
           }
         ]
       },
+      "orb": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "orb/src/transcriptModel.ts",
+            "pattern": "export function buildTranscript(events: StreamEvent[]): StreamItem[] {"
+          }
+        ]
+      },
       "ios": {
         "status": "supported",
         "evidence": [
@@ -31,11 +40,20 @@
             "pattern": "for (offset, element) in OrbConversationHistory.visible(OrbConversationHistory.merge(mission[\"history\"].items, events: events)).enumerated() {"
           }
         ]
+      },
+      "android": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbConversationHistory.kt",
+            "pattern": "object OrbConversationHistory {"
+          }
+        ]
       }
     },
     {
       "id": "thinking_stream",
-      "description": "Thinking events are exposed by the API and rendered on web and iOS.",
+      "description": "Thinking events are exposed by the API and rendered across web, Orb desktop, iOS, and Android.",
       "api": {
         "status": "supported",
         "evidence": [
@@ -54,6 +72,15 @@
           }
         ]
       },
+      "orb": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "orb/src/transcriptModel.ts",
+            "pattern": "case \"thinking\": {"
+          }
+        ]
+      },
       "ios": {
         "status": "supported",
         "evidence": [
@@ -62,11 +89,20 @@
             "pattern": "case \"thinking\":"
           }
         ]
+      },
+      "android": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbConversation.kt",
+            "pattern": "Thinking,"
+          }
+        ]
       }
     },
     {
       "id": "automations",
-      "description": "Mission automations APIs are available and consumed on web and iOS.",
+      "description": "Mission automations APIs are available and consumed on web and Orb desktop.",
       "api": {
         "status": "supported",
         "evidence": [
@@ -85,14 +121,27 @@
           }
         ]
       },
+      "orb": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "orb/src/AutomaticReminder.tsx",
+            "pattern": "/api/control/missions/${encodeURIComponent(mission)}/automations"
+          }
+        ]
+      },
       "ios": {
         "status": "deferred",
-        "note": "The Orb iOS UI has no automations screen; the legacy Control tab that had one was removed (#1155)."
+        "note": "The Orb iOS UI has no dedicated automations management screen; wakeup reminders surface inline in missions."
+      },
+      "android": {
+        "status": "deferred",
+        "note": "The Orb Android UI has no dedicated automations management screen; wakeup reminders surface inline in missions."
       }
     },
     {
       "id": "routing_controls",
-      "description": "Model routing controls are available in API and web dashboard.",
+      "description": "Model routing and fallback chain controls are available across API, web, Orb desktop, iOS, and Android.",
       "api": {
         "status": "supported",
         "evidence": [
@@ -111,14 +160,37 @@
           }
         ]
       },
+      "orb": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "orb/src/routingApi.ts",
+            "pattern": "const root = \"/api/model-routing\";"
+          }
+        ]
+      },
       "ios": {
-        "status": "deferred",
-        "note": "No iOS routing controls shipped yet; defer explicitly until iOS parity work lands."
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbAdminSettings.swift",
+            "pattern": "/api/model-routing/chains"
+          }
+        ]
+      },
+      "android": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbAdminSettings.kt",
+            "pattern": "/api/model-routing/chains"
+          }
+        ]
       }
     },
     {
       "id": "cost_display",
-      "description": "Cost telemetry is exposed by API and displayed on web and iOS clients.",
+      "description": "Cost telemetry is exposed by API and displayed on web and Orb desktop clients.",
       "api": {
         "status": "supported",
         "evidence": [
@@ -137,9 +209,79 @@
           }
         ]
       },
+      "orb": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "orb/src/App.tsx",
+            "pattern": "UsageSettings"
+          }
+        ]
+      },
       "ios": {
         "status": "deferred",
-        "note": "The Orb iOS UI does not show per-message cost; the legacy Control tab that did was removed (#1155)."
+        "note": "The Orb iOS UI does not show per-message cost; account usage surfaces in OrbUsageSettings."
+      },
+      "android": {
+        "status": "deferred",
+        "note": "The Orb Android UI does not show per-message cost; account usage surfaces in OrbUsageSettings."
+      }
+    },
+    {
+      "id": "native_rich_transcript",
+      "description": "Conversation transcripts render Markdown, loose pipe tables, LaTeX math, and images natively without embedded WebViews on mobile, backed by formal Orb.Transcript gates.",
+      "api": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "src/api/control/mission_settings.rs",
+            "pattern": "pub async fn mark_mission_opened("
+          }
+        ]
+      },
+      "web": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "dashboard/src/app/control/control-client.tsx",
+            "pattern": "LazyMarkdownContent"
+          }
+        ]
+      },
+      "orb": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "orb/src/transcriptGates.ts",
+            "pattern": "export function allocTurnKeys("
+          }
+        ]
+      },
+      "ios": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbRichText.swift",
+            "pattern": "enum OrbMath {"
+          },
+          {
+            "path": "ios_dashboard/SandboxedDashboard/Orb/OrbPipeTables.swift",
+            "pattern": "enum OrbTranscriptGates {"
+          }
+        ]
+      },
+      "android": {
+        "status": "supported",
+        "evidence": [
+          {
+            "path": "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbRichText.kt",
+            "pattern": "fun OrbRichText("
+          },
+          {
+            "path": "android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbTranscriptGates.kt",
+            "pattern": "object OrbTranscriptGates {"
+          }
+        ]
       }
     }
   ]
