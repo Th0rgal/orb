@@ -2164,22 +2164,6 @@ impl ModelChainStore {
                     migrated = true;
                     tracing::info!("Reordered builtin/smart to lead with MiniMax");
                 }
-                // 2026-08-06: append Meta Muse as a tail fallback to already-
-                // persisted chains. Appending (never inserting) preserves the
-                // operator's configured priority — prod runs a kimi-first
-                // custom order that the stock migrations deliberately skip.
-                if !chain
-                    .entries
-                    .iter()
-                    .any(|entry| entry.provider_id == "muse")
-                {
-                    chain.entries.push(ChainEntry {
-                        provider_id: "muse".to_string(),
-                        model_id: MUSE_DEFAULT_MODEL.to_string(),
-                    });
-                    migrated = true;
-                    tracing::info!("Appended muse/{MUSE_DEFAULT_MODEL} to builtin/smart");
-                }
                 if migrated {
                     chain.updated_at = now;
                     changed = true;
@@ -3740,15 +3724,43 @@ mod tests {
                 // glm-5.1 is migrated to glm-5.3 by ensure_default_chain.
                 ("zai".to_string(), "glm-5.3".to_string()),
                 ("cerebras".to_string(), "zai-glm-4.7".to_string()),
-                // The 2026-08-06 migration appends Meta Muse as a tail
-                // fallback to persisted chains, never reordering them.
-                ("muse".to_string(), MUSE_DEFAULT_MODEL.to_string()),
             ]
         );
 
         let custom = store.get("user/custom").await.unwrap();
         assert_eq!(custom.entries.len(), 1);
         assert_eq!(custom.entries[0].model_id, "gpt-oss-120b");
+    }
+
+    #[tokio::test]
+    async fn ensure_defaults_does_not_reappend_removed_muse_to_builtin_smart() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("chains.json");
+
+        let store = ModelChainStore::new(path.clone()).await;
+        let mut smart = store.get("builtin/smart").await.unwrap();
+        assert!(smart.entries.iter().any(|e| e.provider_id == "muse"));
+
+        smart.entries.retain(|e| e.provider_id != "muse");
+        store.upsert(smart).await;
+        assert!(!store
+            .get("builtin/smart")
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.provider_id == "muse"));
+
+        let reloaded = ModelChainStore::new(path).await;
+        std::mem::forget(tmp);
+        let smart_after_restart = reloaded.get("builtin/smart").await.unwrap();
+        assert!(
+            !smart_after_restart
+                .entries
+                .iter()
+                .any(|e| e.provider_id == "muse"),
+            "ensure_default_chain must not resurrect an operator-removed muse entry"
+        );
     }
 
     #[tokio::test]
