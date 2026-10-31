@@ -78,8 +78,12 @@ class Receipts(unittest.TestCase):
         payload = {
             "schema": p3_receipts.SCHEMA,
             "backend": "stock-c",
+            "compared_backend": "stock-c",
             "rollback": False,
             "artifact_sha256": "ab" * 32,
+            "stock_artifact_sha256": "ab" * 32,
+            "compared_artifact_sha256": "ab" * 32,
+            "leannative_artifact_sha256": None,
             "cases": 260,
             "mismatches": 0,
             "corpus_sha256": "cd" * 32,
@@ -109,6 +113,16 @@ class Receipts(unittest.TestCase):
             {**payload, "phase_acceptance": True},
             {**payload, "coverage": "COMPLETE"},
             {**payload, "backend": "unknown"},
+            {**payload, "compared_backend": "unknown"},
+            {**payload, "compared_backend": "leannative"},
+            {**payload, "leannative_artifact_sha256": "ef" * 32},
+            {**payload, "artifact_sha256": "ef" * 32},
+            {
+                **payload,
+                "compared_backend": "leannative",
+                "compared_artifact_sha256": "ef" * 32,
+                "leannative_artifact_sha256": "12" * 32,
+            },
         ):
             with self.assertRaises(ValueError):
                 p3_receipts.sign_receipt(bad_payload, private)
@@ -138,11 +152,16 @@ class Receipts(unittest.TestCase):
             verified = p3_receipts.verify_receipt(receipt, pub)
             self.assertEqual(report["status"], "EXECUTED_LOCAL")
             self.assertEqual(report["backend"], "leannative")
+            self.assertEqual(report["compared_backend"], "leannative")
             self.assertEqual(report["cases"], 2 * len(functions))
             self.assertEqual(report["mismatches"], [])
             self.assertFalse(report["phase_acceptance"])
             self.assertEqual(report["coverage"], {"partial": 23, "unconnected": 107, "acceptance": "INCOMPLETE"})
             self.assertEqual(verified["backend"], "leannative")
+            self.assertEqual(verified["compared_backend"], "leannative")
+            self.assertEqual(verified["artifact_sha256"], verified["leannative_artifact_sha256"])
+            self.assertEqual(verified["compared_artifact_sha256"], verified["leannative_artifact_sha256"])
+            self.assertNotEqual(verified["stock_artifact_sha256"], verified["leannative_artifact_sha256"])
             self.assertEqual((out_ok / "p3-receipt.key").stat().st_mode & 0o777, 0o600)
 
             stock_lib = ctypes.CDLL(out_ok / "stock.so")
@@ -171,8 +190,21 @@ class Receipts(unittest.TestCase):
             ])
             self.assertEqual(rc_rb, 0)
             rb_report = json.loads((out_rb / "p3-report.json").read_text())
+            rb_receipt = json.loads((out_rb / "p3-receipt.json").read_text())
+            rb_pub = p3_receipts.load_public(out_rb / "p3-receipt.pub")
+            rb_verified = p3_receipts.verify_receipt(rb_receipt, rb_pub)
             self.assertEqual(rb_report["backend"], "stock-c")
+            self.assertEqual(rb_report["compared_backend"], "leannative")
             self.assertTrue(rb_report["rollback"])
+            self.assertEqual(rb_verified["backend"], "stock-c")
+            self.assertEqual(rb_verified["compared_backend"], "leannative")
+            self.assertEqual(rb_verified["artifact_sha256"], rb_verified["stock_artifact_sha256"])
+            self.assertEqual(rb_verified["compared_artifact_sha256"], rb_verified["leannative_artifact_sha256"])
+            self.assertEqual(
+                rb_verified["leannative_artifact_sha256"],
+                p3.archive_sha256(out_rb / "liborb_spec_cabi_leannative.a"),
+            )
+            self.assertNotEqual(rb_verified["stock_artifact_sha256"], rb_verified["leannative_artifact_sha256"])
 
             (root / "bad").mkdir()
             bad_archive = make_synthetic_leannative_archive(root / "bad", functions, corrupt_access=True)

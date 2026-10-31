@@ -48,11 +48,36 @@ def public_pem(private):
     return private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
 
 
+def _is_sha256_hex(value):
+    return isinstance(value, str) and len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
+
+
 def validate_payload_honesty(payload):
     if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
         raise ValueError("receipt payload schema rejected")
     if payload.get("backend") not in BACKENDS:
         raise ValueError("receipt payload backend rejected")
+    compared_backend = payload.get("compared_backend")
+    if compared_backend not in BACKENDS:
+        raise ValueError("receipt payload compared_backend rejected")
+    if not _is_sha256_hex(payload.get("artifact_sha256")):
+        raise ValueError("receipt payload artifact_sha256 rejected")
+    if not _is_sha256_hex(payload.get("stock_artifact_sha256")):
+        raise ValueError("receipt payload stock_artifact_sha256 rejected")
+    compared_sha = payload.get("compared_artifact_sha256")
+    if not _is_sha256_hex(compared_sha):
+        raise ValueError("receipt payload compared_artifact_sha256 rejected")
+    leannative_sha = payload.get("leannative_artifact_sha256")
+    if compared_backend == "leannative":
+        if not _is_sha256_hex(leannative_sha) or compared_sha != leannative_sha:
+            raise ValueError("receipt payload leannative_artifact_sha256 mismatch")
+    elif leannative_sha is not None or compared_sha != payload.get("stock_artifact_sha256"):
+        raise ValueError("receipt payload stock comparison artifact mismatch")
+    expected_selected_sha = (
+        leannative_sha if payload.get("backend") == "leannative" else payload.get("stock_artifact_sha256")
+    )
+    if payload.get("artifact_sha256") != expected_selected_sha:
+        raise ValueError("receipt payload selected artifact_sha256 mismatch")
     if payload.get("phase_acceptance") is not False:
         raise ValueError("receipt payload cannot claim phase acceptance")
     if payload.get("coverage") != "INCOMPLETE":

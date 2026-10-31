@@ -299,12 +299,30 @@ def select_backend(requested, built):
     return requested
 
 
-def receipt_payload(backend, cases, mismatches, artifact, rollback):
+def archive_sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def receipt_payload(
+    backend,
+    compared_backend,
+    cases,
+    mismatches,
+    artifact,
+    stock_artifact,
+    compared_artifact,
+    leannative_artifact,
+    rollback,
+):
     return {
         "schema": SCHEMA,
         "backend": backend,
+        "compared_backend": compared_backend,
         "rollback": bool(rollback),
-        "artifact_sha256": hashlib.sha256(Path(artifact).read_bytes()).hexdigest(),
+        "artifact_sha256": archive_sha256(artifact),
+        "stock_artifact_sha256": archive_sha256(stock_artifact),
+        "compared_artifact_sha256": archive_sha256(compared_artifact),
+        "leannative_artifact_sha256": archive_sha256(leannative_artifact) if leannative_artifact else None,
         "cases": len(cases),
         "mismatches": len(mismatches),
         "corpus_sha256": canonical_hash(cases),
@@ -358,17 +376,37 @@ def main(argv=None):
     chosen = "stock-c" if args.rollback_stock else select_backend(args.backend, built)
     library, artifact = built[chosen]
     if "leannative" in built:
-        mismatches = compare(functions, stock, built["leannative"][0], cases)
+        compared_backend = "leannative"
+        compared_library, compared_artifact = built["leannative"]
+        leannative_artifact = compared_artifact
     else:
-        mismatches = compare(functions, stock, library, cases)
-    payload = receipt_payload(chosen, cases, mismatches, artifact, args.rollback_stock)
+        compared_backend = chosen
+        compared_library, compared_artifact = library, artifact
+        leannative_artifact = None
+    mismatches = compare(functions, stock, compared_library, cases)
+    payload = receipt_payload(
+        chosen,
+        compared_backend,
+        cases,
+        mismatches,
+        artifact,
+        stock_archive,
+        compared_artifact,
+        leannative_artifact,
+        args.rollback_stock,
+    )
     receipt = sign_receipt(payload, private)
     verify_receipt(receipt, private.public_key())
     (out_dir / "p3-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     report = {
         "status": "FAIL" if mismatches else "EXECUTED_LOCAL",
         "backend": chosen,
+        "compared_backend": compared_backend,
         "rollback": bool(args.rollback_stock),
+        "artifact_sha256": payload["artifact_sha256"],
+        "stock_artifact_sha256": payload["stock_artifact_sha256"],
+        "compared_artifact_sha256": payload["compared_artifact_sha256"],
+        "leannative_artifact_sha256": payload["leannative_artifact_sha256"],
         "cases": len(cases),
         "mismatches": mismatches,
         "phase_acceptance": False,
