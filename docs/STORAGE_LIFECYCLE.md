@@ -140,12 +140,13 @@ cleanup. Missing or unreadable node ledgers or snapshots never grant deletion
 permission.
 
 When reconstructible per-mission build/toolchain trees (`.elan`, `.lake`,
-`target`, `toolchains`, `.rustup`, `node_modules`) inside finished missions pin a
-worker's disk, inspect and reclaim only those reconstructible caches via
-`scripts/reclaim_worker_build_caches.py` (dry-run by default; requires complete
-Core + `jobs.db` indexes, `lsof +D` open-descriptor verification, and single-device
-/ nested-mount rejection via `dir_fd` before `--apply`, and never deletes mission
-source or `.git` repositories). To roll out `sandboxed-node` binary updates across
+`target`, `toolchains`, `.rustup`, `node_modules`, and `.cache/{turbo-lean,mathlib,opencode,uv,pip,go-build}`)
+inside finished missions pin a worker's disk, inspect and reclaim only those reconstructible caches via
+`scripts/reclaim_worker_build_caches.py` (or fleet-wide from Core via
+`scripts/run_fleet_worker_cache_reclaim.py` and `deploy/systemd/sandboxed-worker-cache-reclaim.timer`;
+dry-run by default; requires complete Core + `jobs.db` indexes, `/proc` / `lsof +D`
+open-descriptor verification, and single-device / nested-mount rejection via `dir_fd`
+before `--apply`, and never deletes mission source or `.git` repositories). To roll out `sandboxed-node` binary updates across
 busy workers without retiring in-flight turns, stage `.new` binaries and run
 `scripts/rolling_upgrade_nodes.py` to cordon in capacity-bounded waves, fence
 worker job/lease admission via an exclusive `BEGIN IMMEDIATE` lock on `jobs.db`

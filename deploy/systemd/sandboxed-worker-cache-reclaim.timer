@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily reclamation of reconstructible build caches on settled worker missions
+
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=12h
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

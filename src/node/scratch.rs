@@ -36,7 +36,8 @@ pub(crate) fn configure(command: &mut tokio::process::Command) {
         command
             .env("TMPDIR", &execution.directory)
             .env("TMP", &execution.directory)
-            .env("TEMP", &execution.directory);
+            .env("TEMP", &execution.directory)
+            .env("OPENCODE_TMPDIR", execution.directory.join("opencode"));
     });
 }
 
@@ -80,6 +81,9 @@ async fn prepare(
     let id = Uuid::new_v4();
     let path = parent.join(id.to_string());
     std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(path.join("opencode"))?;
     let directory_identity = identity(&path)?;
     let receipt = Receipt {
         id,
@@ -533,7 +537,7 @@ mod tests {
         // A crash after removal but before receipt acknowledgement is idempotent.
         let (gone, gone_path) = prepare(&store, temp.path(), mission, None).await.unwrap();
         retire(&store, gone.id, old_time).await.unwrap();
-        std::fs::remove_dir(&gone_path).unwrap();
+        std::fs::remove_dir_all(&gone_path).unwrap();
         sweep_at(&store, temp.path(), Utc::now()).await.unwrap();
         let remaining = store
             .with_conn(|conn| {

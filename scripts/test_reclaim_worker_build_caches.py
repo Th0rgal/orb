@@ -247,6 +247,72 @@ class ReclaimWorkerBuildCachesTest(unittest.TestCase):
                     )
             self.assertTrue((mounted_in_lake / "precious.txt").exists())
 
+    def test_nested_dot_cache_reclaimed_while_git_repos_with_cache_names_preserved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fx = self._setup_fixture(root)
+            done_dir = fx["node"] / fx["done"]
+
+            # .cache/turbo-lean and .cache/mathlib inside settled mission are reclaimed
+            (done_dir / ".cache" / "turbo-lean").mkdir(parents=True)
+            (done_dir / ".cache" / "turbo-lean" / "cas.db").write_bytes(b"c" * 512)
+            (done_dir / ".cache" / "mathlib").mkdir(parents=True)
+            (done_dir / ".cache" / "mathlib" / "blob").write_bytes(b"m" * 512)
+            # Non-cache sibling under .cache (e.g. custom auth/state) stays untouched
+            (done_dir / ".cache" / "custom-keep").mkdir(parents=True)
+            (done_dir / ".cache" / "custom-keep" / "note.txt").write_text("keep")
+
+            # A git checkout named 'turbo-lean' or 'toolchains' must NEVER be deleted
+            (done_dir / "turbo-lean" / ".git").mkdir(parents=True)
+            (done_dir / "turbo-lean" / "Cargo.toml").write_text("[package]\nname='turbo-lean'\n")
+            (done_dir / "toolchains" / ".git").mkdir(parents=True)
+            (done_dir / "toolchains" / "README.md").write_text("repo")
+
+            records, ok = reclaim.reclaim_worker_caches(
+                node_work_dir=fx["node"],
+                missions_dir=fx["missions"],
+                apply=True,
+                terminal_only=True,
+                open_file_probe=lambda _: ("clear", ""),
+            )
+            self.assertTrue(ok)
+            self.assertFalse((done_dir / ".cache" / "turbo-lean").exists())
+            self.assertFalse((done_dir / ".cache" / "mathlib").exists())
+            self.assertTrue((done_dir / ".cache" / "custom-keep" / "note.txt").exists())
+            self.assertTrue((done_dir / "turbo-lean" / "Cargo.toml").exists())
+            self.assertTrue((done_dir / "toolchains" / "README.md").exists())
+            reclaimed_kinds = {r["cache_kind"] for r in records if r.get("action") == "reclaimed"}
+            self.assertIn("turbo-lean", reclaimed_kinds)
+            self.assertIn("mathlib", reclaimed_kinds)
+
+    def test_proc_open_file_probe_detects_fd_and_maps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake_proc = root / "proc"
+            pid_dir = fake_proc / "1234"
+            (pid_dir / "fd").mkdir(parents=True)
+            busy_dir = root / "node" / "busy-mission"
+            idle_dir = root / "node" / "idle-mission"
+            busy_file = busy_dir / "repo" / "Main.lean"
+            mmap_file = root / "node" / "mmap-mission" / ".lake" / "mod.olean"
+            busy_file.parent.mkdir(parents=True)
+            mmap_file.parent.mkdir(parents=True)
+            idle_dir.mkdir(parents=True)
+            busy_file.write_text("-- busy")
+            mmap_file.write_bytes(b"o" * 64)
+
+            (pid_dir / "cwd").symlink_to(idle_dir.parent)
+            (pid_dir / "fd" / "3").symlink_to(busy_file)
+            (pid_dir / "maps").write_text(
+                f"7f0000000000-7f0000001000 r--p 00000000 08:01 42 {mmap_file}\n"
+            )
+
+            probe = reclaim.build_proc_open_file_probe(proc_root=fake_proc, ttl_secs=60.0)
+            self.assertIsNotNone(probe)
+            self.assertEqual(probe(busy_dir)[0], "open")
+            self.assertEqual(probe(mmap_file.parent.parent)[0], "open")
+            self.assertEqual(probe(idle_dir), ("clear", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,10 +15,18 @@ remote placements; this change does not weaken its authorization contract.
 ## Owned scratch
 
 Every new asynchronous job and synchronous lease receives a unique directory under
-`<work-root>/.scratch/`. TMPDIR, TMP and TEMP point there for all supervised commands
-(including Lean's subprocesses). They are runner-owned environment keys. Hard-coded
+`<work-root>/.scratch/`. TMPDIR, TMP, TEMP and `OPENCODE_TMPDIR` (`<scratch>/opencode`)
+point there for all supervised commands (including OpenCode's git/clone scratch and
+Lean's subprocesses). They are runner-owned environment keys. Hard-coded
 /tmp paths cannot be redirected by environment variables and remain legacy,
 unmanaged storage. Persistent outputs must be written to the mission workspace.
+
+Remote `RawCommand` and synchronous lease commands also wire `ELAN_HOME`
+(`<work-root>/caches/elan`), `TURBO_LEAN_HOME` (`<work-root>/caches/turbo-lean`),
+and an advisory `<work-root>/caches/bin/lake` shim before applying payload `env`
+overrides so multi-agent Lean turns share one toolchain/CAS store per host and
+emit stderr guidance on unshared `lake build` calls while transparently passing
+through `lake setup-file`, `lake env`, and `lake exe`.
 
 The node persists a receipt in jobs.db before executing: unique execution ID,
 mission/job attribution, parent and directory device/inode identity. Filesystem

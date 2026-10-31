@@ -1,0 +1,14 @@
+[Unit]
+Description=Reclaim reconstructible build caches inside settled worker mission directories
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/sandboxed-sh/run_fleet_worker_cache_reclaim.py --apply
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

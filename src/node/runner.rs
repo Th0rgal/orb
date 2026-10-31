@@ -1022,7 +1022,12 @@ impl JobRunner {
                     .prepare_workspace(managed_auth, &mission_dir)
                     .map_err(anyhow::Error::msg)?;
 
-                let mut cmd = crate::remote_node::raw_command(command, &mission_dir, env.as_ref());
+                let mut cmd = crate::remote_node::raw_command_with_work_root(
+                    command,
+                    &mission_dir,
+                    Some(&self.work_root),
+                    env.as_ref(),
+                );
                 // Applied last: the payload env cannot redirect a managed
                 // profile to a mission-controlled path.
                 cmd.envs(managed_env);
