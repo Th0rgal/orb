@@ -110,6 +110,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
  const [loadedKey,setLoadedKey]=createSignal('');
  let ready:Promise<void>=Promise.resolve();
  let reconnectSession:(sideId:string)=>Promise<void>=async sideId=>{await p.onOpenSession?.(sideId);};
+ let watchActiveSession:((agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>void)|undefined;
  createEffect(on(key,current=>{
   abort?.abort();queuedEdit.finish(true);
   setLoadedKey('');setBusy(false);setHistory([]);setError('');setQueue([]);setQueueToast('');
@@ -126,10 +127,13 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    setPendingQueued(prev=>prev.filter(item=>item.id!==id));
    if(handoffId()===id)setHandoffId(undefined);
   };
-  const watchActive=(agent:NonNullable<ReturnType<typeof btwSession>>)=>{
+  const watchActive=(agent:NonNullable<ReturnType<typeof btwSession>>,initialAttachments?:SideAttachment[])=>{
    refreshSideSession(missionId,agent);
-   const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setError('');setNotSent(false);
+   abort?.abort();
+   const controller=new AbortController();abort=controller;setBusy(true);setQuestion(agent.question);setAnswer('');setNarration([]);setError('');setNotSent(false);
+   if(initialAttachments)setPendingAttachments(initialAttachments);
    let currentQuestion=agent.question;
+   let currentAttachments=initialAttachments;
    void watchBtw(missionId,controller.signal,event=>{
     if(stale||controller.signal.aborted)return;
     if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
@@ -138,12 +142,13 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     if(event.type==='turn'){
      if(event.completed){
       const doneTurn=event.completed;
-      setHistory(rows=>rows.some(row=>row.answer.trim()===doneTurn.answer.trim()&&row.question.trim()===doneTurn.question.trim())?rows:appendTurn(rows,{id:turnId(),question:doneTurn.question,answer:doneTurn.answer,...(doneTurn.narration?.length?{narration:doneTurn.narration}:{})}));
+      setHistory(rows=>rows.some(row=>row.answer.trim()===doneTurn.answer.trim()&&row.question.trim()===doneTurn.question.trim())?rows:appendTurn(rows,{id:turnId(),question:doneTurn.question,answer:doneTurn.answer,...(doneTurn.narration?.length?{narration:doneTurn.narration}:{}),...(currentAttachments?.length?{attachments:currentAttachments}:{})}));
      }
      currentQuestion=event.question;
+     currentAttachments=undefined;
      markDelivered(event.messageId);
      setTurnId((event.messageId as ReturnType<typeof crypto.randomUUID>)??crypto.randomUUID());
-     setQuestion(event.question);setAnswer('');setNarration([]);setError('');setNotSent(false);
+     setQuestion(event.question);setAnswer('');setNarration([]);setError('');setNotSent(false);setPendingAttachments([]);
      setRunStatus('Starting side agent…');
      refreshSideSession(missionId);
     }
@@ -151,8 +156,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      // A restored session can name an older question than the answer Core
      // finished; never pair them, and let Core's history settle the turn.
      const narrated=event.narration?.length?{narration:event.narration}:{};
-     setHistory(rows=>rows.some(row=>row.answer.trim()===event.answer.trim())?rows:appendTurn(rows,{id:turnId(),question:currentQuestion,answer:event.answer,...narrated}));
-     setBusy(false);setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());resync?.();
+     const attached=currentAttachments?.length?{attachments:currentAttachments}:{};
+     setHistory(rows=>rows.some(row=>row.answer.trim()===event.answer.trim()&&row.question.trim()===currentQuestion.trim())?rows:appendTurn(rows,{id:turnId(),question:currentQuestion,answer:event.answer,...narrated,...attached}));
+     setBusy(false);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setPendingAttachments([]);setTurnId(crypto.randomUUID());resync?.();
      if(remoteQueuedIds().length){setTimeout(()=>{if(!stale)resync?.();},350);}
      queueMicrotask(sendNext);}
    }).catch(e=>{
@@ -167,6 +173,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     setError(e instanceof Error?e.message:String(e));setBusy(false);
    });
   };
+  watchActiveSession=watchActive;
   reconnectSession=async(sideId:string)=>{
    if(p.onOpenSession){await p.onOpenSession(sideId);return;}
    const unsent=question().trim();
@@ -375,21 +382,9 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
     }else{
      // The running turn finished right before Core admitted our message, so Core started this turn immediately.
      setDeliveredQueuedIds(rows=>rows.includes(res.id)?rows:[...rows,res.id]);
-     const active=refreshSideSession(missionId)??{id:res.missionId,question:text,harness:btwConfig().harness,model:btwConfig().model,local:false,active:true,baseline:0};
+     const active={...(refreshSideSession(missionId)??{id:res.missionId,question:text,harness:btwConfig().harness,model:btwConfig().model,local:false,active:true,baseline:0}),question:text,active:true};
      setTurnId(res.id as ReturnType<typeof crypto.randomUUID>);
-     setBusy(true);setQuestion(text);setAnswer('');setNarration([]);setError('');setNotSent(false);
-     const current=selected,controller=new AbortController();abort?.abort();abort=controller;
-     void watchBtw(missionId,controller.signal,event=>{
-      if(current!==key()||controller.signal.aborted)return;
-      if(event.type==='start'){setModel(event.model);setRunStatus('Starting side agent…');}
-      if(event.type==='status')setRunStatus(event.text);
-      if(event.type==='snapshot'){setAnswer(event.text);setNarration(event.narration??[]);}
-      if(event.type==='done'){
-       setAnswer(event.answer);setNarration(event.narration??[]);
-       setHistory(rows=>appendTurn(rows,{id:res.id,question:active.question||text,answer:event.answer,...(event.narration?.length?{narration:event.narration}:{}),attachments}));
-       setBusy(false);setRunStatus('');setQuestion('');setAnswer('');setNarration([]);setTurnId(crypto.randomUUID());
-      }
-     }).catch(err=>{if(current===key()&&!controller.signal.aborted){setError(err instanceof Error?err.message:String(err));setBusy(false);}});
+     watchActiveSession?.(active,attachments);
     }
    }
    return true;

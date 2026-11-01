@@ -11,7 +11,7 @@ import {sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
 import {forkSource} from './missionTree';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
 import {enqueueLocalMessage,queuedLocalMessages} from './localMessageQueue';
-import {extractBtwUserQuestion as extractBtwQuestion,replaceBtwUserQuestion as replaceBtwQuestion} from './messagePresentation';
+import {extractBtwAttachmentPaths,extractBtwUserQuestion as extractBtwQuestion,replaceBtwUserQuestion as replaceBtwQuestion} from './messagePresentation';
 import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
 const [agentItems,setAgentItems]=createSignal<Record<string,StreamItem[]>>({});
@@ -513,7 +513,10 @@ export async function queueBtwFollowUp(
  const local=s.local||(machine?machine.kind==='client':source.tags?.includes('placement:client')??false);
  const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
  const destination=local?'local':node??'core';
- const paths=await upload(attachments,destination);
+ const uploadedPaths=await upload(attachments,destination);
+ const existingLocal=local&&replace?queuedLocalMessages(s.id).find(row=>row.id===clientMessageId):undefined;
+ const preservedPaths=existingLocal?extractBtwAttachmentPaths(existingLocal.request.prompt):[];
+ const paths=[...new Set([...preservedPaths,...uploadedPaths])];
  s=syncSessionCursors(parent,s);
  // Base every queued follow-up on the latest delivered/running turn cursor (never an
  // undelivered predecessor in the queue) so deleting or promoting any queued row via
@@ -536,8 +539,10 @@ export async function queueBtwFollowUp(
   const bin=(await localAgentForLaunch(s.harness||config.harness))?.path??'';
   if(!binding)throw new Error('Open this conversation on the computer that owns its workspace.');
   if(!bin)throw new Error(`${s.harness||config.harness} is not installed. Configure it in Settings → Agents → Local agents.`);
+  const newImagePaths=uploadedPaths.filter((_,i)=>attachments[i]?.media_type.startsWith('image/'));
+  const imagePaths=[...new Set([...(existingLocal?.request.imagePaths??[]),...newImagePaths])];
   await enqueueLocalMessage(
-   {id:s.id,harness:s.harness||config.harness,bin,cwd:binding.cwd,model:s.model||config.model,prompt,sessionId:sideBinding?.sessionId,sharedCwdWith:parent,imagePaths:paths.filter((_,i)=>attachments[i]?.media_type.startsWith('image/'))},
+   {id:s.id,harness:s.harness||config.harness,bin,cwd:binding.cwd,model:s.model||config.model,prompt,sessionId:sideBinding?.sessionId,sharedCwdWith:parent,imagePaths},
    question,
    {id:clientMessageId,waiting:true,replace},
   );

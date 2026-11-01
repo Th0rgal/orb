@@ -12,6 +12,18 @@ export function extractBtwUserQuestion(content: string): string {
   return raw.replace(BTW_ATTACHMENT_TRAILER, "").trim();
 }
 
+export function extractBtwAttachmentPaths(content: string): string[] {
+  const idx = content.lastIndexOf(BTW_REQUEST_MARKER);
+  const body = idx >= 0 ? content.slice(idx + BTW_REQUEST_MARKER.length) : content;
+  const attachMatch = BTW_ATTACHMENT_TRAILER.exec(body);
+  if (!attachMatch) return [];
+  return attachMatch[0]
+    .trim()
+    .split("\n")
+    .map(line => line.replace(/^Attachment:\s*/, "").trim())
+    .filter(Boolean);
+}
+
 /** Replace only the user's question inside a wrapped `/btw` prompt so in-place
  * queue edits preserve `<main_conversation_update>` and `Attachment:` lines. */
 export function replaceBtwUserQuestion(content: string, nextQuestion: string): string {

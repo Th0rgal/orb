@@ -415,3 +415,36 @@ it('deduplicates already-answered legacy saved.queue items on mount and retains 
   });
  }finally{spy.mockRestore();}
 });
+
+it('handles live turn transitions when an immediately-admitted follow-up queues another turn',async()=>{
+ queueFollowUpMock.enabled=true;
+ queueFollowUpMock.fn
+  .mockResolvedValueOnce({id:'turn-2-id',missionId:'side-race-1',prompt:'Wrapped\n\nCurrent request:\nSecond question\n',queued:false,local:false})
+  .mockResolvedValueOnce({id:'turn-3-id',missionId:'side-race-1',prompt:'Wrapped\n\nCurrent request:\nThird question\n',queued:true,local:false});
+ let emitWatch:((event:any)=>void)|undefined;
+ watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(resolve=>{
+  emitWatch=(event:any)=>{receive(event);if(event.type==='done')resolve();};
+  receive({type:'start',model:'opencode · builtin/smart'});
+ });
+ let controller!:ReadableStreamDefaultController<Uint8Array>;
+ vi.stubGlobal('fetch',vi.fn(async(url:string)=>{
+  if(String(url).includes('/api/control/queue'))return Response.json([]);
+  return new Response(new ReadableStream({start(c){controller=c;}}));
+ }));
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="admit-race-test" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('First question');
+ controller.enqueue(new TextEncoder().encode('event: btw\ndata: {"type":"delta","text":"Working…"}\n\n'));
+ // Submit second question while busy -> Core admits immediately (queued: false) because Turn 1 just ended:
+ await handle.ask('Second question');
+ await waitFor(()=>expect(emitWatch).toBeTypeOf('function'));
+ // Queue third question while Turn 2 is running:
+ await handle.ask('Third question');
+ expect((await screen.findByLabelText('Queued messages')).textContent).toContain('Third question');
+ // Core finishes Turn 2 and starts Turn 3:
+ emitWatch!({type:'turn',question:'Third question',messageId:'turn-3-id',completed:{question:'Second question',answer:'Second turn answer.'}});
+ expect(await screen.findByText('Second turn answer.')).toBeTruthy();
+ await waitFor(()=>expect(screen.queryByLabelText('Queued messages')).toBeNull());
+ emitWatch!({type:'done',answer:'Third turn answer.'});
+ expect(await screen.findByText('Third turn answer.')).toBeTruthy();
+});

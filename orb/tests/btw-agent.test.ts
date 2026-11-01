@@ -915,3 +915,28 @@ it('transitions watchBtw from Turn 1 to dequeued Turn 2, merges concurrent queue
   expect(btwSession('handoff-parent')?.queuedCursors).toBeUndefined();
  }finally{abort.abort();await watching.catch(()=>{});vi.useRealTimers();}
 });
+
+it('preserves existing Attachment trailer and imagePaths when editing a local queued /btw question in place',async()=>{
+ const draftsStore=new Map<string,unknown>();
+ const draftsMod=await import('../src/composerDrafts');
+ const readSpy=vi.spyOn(draftsMod,'readSideThread').mockImplementation(async(k:string)=>structuredClone(draftsStore.get(k)) as any);
+ const saveSpy=vi.spyOn(draftsMod,'saveSideThread').mockImplementation(async(k:string,v:unknown)=>{draftsStore.set(k,structuredClone(v));});
+ const {queuedLocalMessages}=await import('../src/localMessageQueue');
+ const {queueBtwFollowUp}=await import('../src/btwAgent');
+ const uploadsMod=await import('../src/uploads');
+ const uploadSpy=vi.spyOn(uploadsMod,'transferFile').mockResolvedValue({path:'/tmp/staged/diagram.png',name:'diagram.png'} as any);
+ Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_name:string,fn:()=>Promise<unknown>)=>fn()}});
+ vi.mocked(localBinding).mockImplementation(id=>id==='local-parent'||id==='local-side'?{cwd:'/work/local',harness:'opencode',bin:'/bin/opencode',sessionId:'sess-1'}:undefined);
+ localStorage.setItem('agent:'+sideQuestionKey('local-parent'),JSON.stringify({id:'local-side',question:'Initial?',harness:'opencode',model:'builtin/smart',local:true,active:true,baseline:0,conversationCursor:{sequence:3,visibleHash:'h3'}}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:['placement:client','btw-parent:local-parent'],title:null,created_at:'',updated_at:''} as any));
+ try{
+  const msgId='22222222-3333-4444-8555-666666666666' as ReturnType<typeof crypto.randomUUID>;
+  await queueBtwFollowUp('local-parent','Inspect this screenshot','ctx',[], [{name:'diagram.png',media_type:'image/png',data_base64:btoa('png')}],msgId,false);
+  expect(queuedLocalMessages('local-side')[0]?.request.imagePaths).toEqual(['/tmp/staged/diagram.png']);
+  expect(queuedLocalMessages('local-side')[0]?.request.prompt).toContain('Attachment: /tmp/staged/diagram.png');
+  // Edit only the question text without re-uploading attachments:
+  const edited=await queueBtwFollowUp('local-parent','Inspect the updated screenshot caption','ctx',[], [],msgId,true);
+  expect(edited.prompt).toContain('Current request:\nInspect the updated screenshot caption\nAttachment: /tmp/staged/diagram.png');
+  expect(queuedLocalMessages('local-side')[0]?.request.imagePaths).toEqual(['/tmp/staged/diagram.png']);
+ }finally{uploadSpy.mockRestore();readSpy.mockRestore();saveSpy.mockRestore();}
+});
