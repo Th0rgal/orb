@@ -118,9 +118,9 @@ Codex is executed **per workspace** using the Codex CLI/app-server driver:
   driver can route through goal APIs instead of a plain turn.
 
 Model overrides must be exact IDs supported by the authenticated account.
-`gpt-5.5-sol`, for example, is not a valid Codex/ChatGPT model and is rejected
-when the mission is created instead of failing after dispatch. Use
-`gpt-5.6-terra` with `model_effort=medium` when the Terra lane is intended;
+`gpt-6-terra` and `gpt-5.5-sol`, for example, are not valid Codex/ChatGPT models
+and are rejected when the mission is created instead of failing after dispatch.
+Use `gpt-6.1-terra` with `model_effort=medium` when the Terra lane is intended;
 Core does not silently substitute a different model.
 
 ## Antigravity and Grok harnesses

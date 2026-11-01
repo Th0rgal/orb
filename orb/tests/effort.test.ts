@@ -41,9 +41,9 @@ describe("effort options come from the core's own gate", () => {
     expect(Object.keys(EFFORT_BY_HARNESS).sort()).toEqual(Object.keys(core).sort());
   });
 
-  it("never offers 'ultra', which the help string names but the gate rejects", () => {
-    // supported_model_efforts_for_backend lists it for codex; the gate does not
-    // accept it, so offering it would produce a 400 on create.
+  it("never offers 'ultra', which the Codex/OpenAI Responses gate rejects", () => {
+    // normalize_model_effort_for_backend and /v1/responses cap Codex at 'max',
+    // so offering 'ultra' would produce a 400 on create.
     expect(EFFORT_LADDER).not.toContain("ultra");
     expect(normalizeEffort("ultra", "codex")).toBeNull();
   });

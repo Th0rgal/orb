@@ -54,7 +54,7 @@ This guide walks you through connecting **Orb** (macOS and iOS) to your **Core**
    - **Cloud agent**: Connects to **Hermes**, **Grok Bot**, or **Cursor Cloud**.
 3. Choose the **Harness** and **Model Override**:
    - **Claude Code (`claudecode`)**: Raw model ID (e.g., `claude-opus-5-5`, `claude-sonnet-4-20250514`)
-   - **Codex (`codex`)**: Raw model ID (e.g., `gpt-5.6-terra`, `gpt-5.5`) plus optional **Cyber Access** (`Standard`, `Daybreak`, `Automatic`)
+   - **Codex (`codex`)**: Raw model ID (e.g., `gpt-6.1-sol`, `gpt-6.1-terra`) plus optional **Cyber Access** (`Standard`, `Daybreak`, `Automatic`)
    - **Antigravity (`antigravity`)**: Exact model ID discovered by `agy models` in the target execution environment
    - **OpenCode (`opencode`)**: `provider/model` or router chain (`builtin/smart`, `xai/grok-4.5`)
    - **Grok (`grok`)**: Canonical CLI model ID (e.g., `grok-4.5`)

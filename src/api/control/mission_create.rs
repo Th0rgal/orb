@@ -223,7 +223,7 @@ pub(super) fn supported_model_efforts_for_backend(backend: Option<&str>) -> &'st
     match backend {
         Some("antigravity") => "low, medium, high",
         Some("claudecode") => "low, medium, high, xhigh, max",
-        Some("codex") => "low, medium, high, xhigh, max, ultra",
+        Some("codex") => "low, medium, high, xhigh, max",
         _ => "none",
     }
 }
@@ -312,6 +312,9 @@ pub(super) fn normalize_model_override_for_backend(
     if backend == Some("codex") && trimmed == "gpt-6" {
         return Some("gpt-6-astra".to_string());
     }
+    if backend == Some("codex") && trimmed == "gpt-6.1" {
+        return Some("gpt-6.1-sol".to_string());
+    }
     if backend != Some("opencode") {
         if let Some((_, model_id)) = trimmed.split_once('/') {
             if backend == Some("codex") && model_id == "gpt-5.6" {
@@ -319,6 +322,9 @@ pub(super) fn normalize_model_override_for_backend(
             }
             if backend == Some("codex") && model_id == "gpt-6" {
                 return Some("gpt-6-astra".to_string());
+            }
+            if backend == Some("codex") && model_id == "gpt-6.1" {
+                return Some("gpt-6.1-sol".to_string());
             }
             return Some(model_id.to_string());
         }
@@ -3214,5 +3220,32 @@ pub(crate) fn managed_auth_precheck(
             managed_backend_auth_precheck("antigravity", manager, user_id)
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_normalization_and_fast_mode_cover_gpt_6_1_family() {
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "gpt-6.1"),
+            Some("gpt-6.1-sol".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "openai/gpt-6.1"),
+            Some("gpt-6.1-sol".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "codex/gpt-6.1-terra"),
+            Some("gpt-6.1-terra".to_string())
+        );
+        assert!(validate_fast_mode("codex", Some("gpt-6.1-terra"), true).is_ok());
+        assert!(validate_fast_mode("codex", Some("gpt-6.1-sol"), true).is_ok());
+        assert_eq!(
+            supported_model_efforts_for_backend(Some("codex")),
+            "low, medium, high, xhigh, max"
+        );
     }
 }

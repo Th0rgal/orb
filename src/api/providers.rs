@@ -84,6 +84,8 @@ const OPENROUTER_SEED_MODEL_IDS: &[&str] = &[
     "anthropic/claude-opus-5",
     "anthropic/claude-sonnet-4.6",
     "google/gemini-3.1-pro-preview",
+    "openai/gpt-6.1-sol",
+    "openai/gpt-6.1-terra",
     "openai/gpt-6-astra",
     "openai/gpt-5.6",
     "openai/gpt-5.6-sol",
@@ -2744,6 +2746,12 @@ pub async fn validate_model_override(
     match backend {
         "opencode" => {
             if let Some((provider_id, model_id)) = model_override.split_once('/') {
+                if provider_id == "openai" && matches!(model_id, "gpt-6-terra" | "gpt-6.0-terra") {
+                    return Err(format!(
+                        "Model '{}' does not exist in the OpenAI catalog (OpenAI shipped 'gpt-6.1-terra', not 'gpt-6-terra'). Pass model_override='openai/gpt-6.1-terra'.",
+                        model_id
+                    ));
+                }
                 // Check if this is a known provider with a model catalog
                 if let Some(provider) = providers.iter().find(|p| p.id == provider_id) {
                     // Only validate if the provider has a non-empty model list.
@@ -2914,13 +2922,20 @@ pub async fn validate_model_override(
     }
 }
 
-fn reject_known_unsupported_codex_model(model_id: &str) -> Result<(), String> {
+pub(crate) fn reject_known_unsupported_codex_model(model_id: &str) -> Result<(), String> {
     if let Some(error) = crate::cyber_access::retired_alias_error(model_id) {
         return Err(error);
     }
-    if model_id == "gpt-5.5-sol" {
+    let bare = model_id.rsplit('/').next().unwrap_or(model_id);
+    if matches!(bare, "gpt-6-terra" | "gpt-6.0-terra") {
+        return Err(format!(
+            "Model '{}' does not exist in the OpenAI/Codex catalog (OpenAI shipped 'gpt-6.1-terra', not 'gpt-6-terra'). Use 'gpt-6.1-terra' (recommended with model_effort='medium') or select an account-supported model explicitly.",
+            model_id
+        ));
+    }
+    if bare == "gpt-5.5-sol" {
         return Err(
-            "Model 'gpt-5.5-sol' is not supported by Codex with ChatGPT authentication. Use 'gpt-5.6-terra' (recommended with model_effort='medium') or select an account-supported model explicitly."
+            "Model 'gpt-5.5-sol' is not supported by Codex with ChatGPT authentication. Use 'gpt-6.1-terra' (recommended with model_effort='medium') or select an account-supported model explicitly."
                 .to_string(),
         );
     }
@@ -2928,13 +2943,16 @@ fn reject_known_unsupported_codex_model(model_id: &str) -> Result<(), String> {
 }
 
 fn is_codex_backend_model_id(model_id: &str) -> bool {
-    (crate::model_selection::is_versioned_text_model(model_id, "gpt") && model_id != "gpt-5.5-sol")
+    (crate::model_selection::is_versioned_text_model(model_id, "gpt")
+        && !matches!(model_id, "gpt-5.5-sol" | "gpt-6-terra" | "gpt-6.0-terra"))
         || model_id.contains("codex")
         || matches!(
             model_id,
             "gpt-6.1-sol"
                 | "gpt-6.1-terra"
                 | "gpt-6-astra"
+                | "gpt-6-sol"
+                | "gpt-6-luna"
                 | "gpt-6"
                 | "gpt-5.5"
                 | "gpt-5.6"
@@ -3517,7 +3535,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         for id in [
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
             "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -3532,7 +3554,7 @@ mod tests {
             assert!(ids.contains(&id), "missing OpenAI model {id}");
         }
 
-        for invalid_id in ["sol", "terra", "luna"] {
+        for invalid_id in ["sol", "terra", "luna", "gpt-6-terra", "gpt-6.0-terra"] {
             assert!(
                 !ids.contains(&invalid_id),
                 "bare/non-API slug should not be exposed: {invalid_id}"
@@ -3553,8 +3575,21 @@ mod tests {
     fn rejects_invented_gpt_55_sol_variant_before_dispatch() {
         let error = reject_known_unsupported_codex_model("gpt-5.5-sol")
             .expect_err("invented model variant must be rejected");
-        assert!(error.contains("gpt-5.6-terra"));
+        assert!(error.contains("gpt-6.1-terra"), "{error}");
+        assert!(reject_known_unsupported_codex_model("gpt-6.1-terra").is_ok());
         assert!(reject_known_unsupported_codex_model("gpt-5.6-terra").is_ok());
+    }
+
+    #[test]
+    fn rejects_nonexistent_gpt_6_terra_before_dispatch() {
+        for variant in ["gpt-6-terra", "gpt-6.0-terra", "openai/gpt-6-terra"] {
+            let error = reject_known_unsupported_codex_model(variant)
+                .expect_err("non-existent gpt-6-terra variant must be rejected");
+            assert!(error.contains("gpt-6.1-terra"), "{error}");
+        }
+        assert!(!is_codex_backend_model_id("gpt-6-terra"));
+        assert!(!is_codex_backend_model_id("gpt-6.0-terra"));
+        assert!(is_codex_backend_model_id("gpt-6.1-terra"));
     }
 
     #[test]
