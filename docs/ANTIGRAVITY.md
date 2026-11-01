@@ -69,7 +69,8 @@ successful mission. Follow-ups use the stored `--conversation` ID, never the
 CLI's most-recent conversation. Per-step token usage avoids counting the native
 result's lifetime usage again on continuation.
 
-Project skills use `.agents/skills`. The MCP supervisor temporarily merges its
+Project skills use `.agents/skills`; user-level global skills use
+`~/.gemini/config/skills`. The MCP supervisor temporarily merges its
 scoped server into `.agents/mcp_config.json`, holds an exclusive checkout lock,
 and restores the original configuration on normal exit or handled cancellation.
 User-defined servers are preserved. Concurrent runs need separate worktrees.

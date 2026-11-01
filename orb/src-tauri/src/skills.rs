@@ -14,7 +14,7 @@
 //! user-level harness directories:
 //! - Claude Code: `~/.claude/skills`
 //! - Codex: `~/.codex/skills`
-//! - Antigravity & Codex: `~/.agents/skills`
+//! - Antigravity: `~/.gemini/config/skills`
 //! - OpenCode: `~/.config/opencode/skills`
 //! - Grok: `~/.grok/skills`
 //! - Mistral Vibe: `~/.vibe/skills`
@@ -32,6 +32,7 @@ use std::process::Command;
 
 const ORB_MANAGED_MARKER: &str = ".managed-by-orb-skills";
 const LEGACY_MANAGED_MARKER: &str = ".managed-by-agent-skills-repo";
+const RETIRED_ANTIGRAVITY_GLOBAL_REL: &str = ".agents/skills";
 const IDENTITY_SKILL: &str = "development-identity";
 
 const HARNESS_TARGETS: &[(&str, &str, &str, &str)] = &[
@@ -45,7 +46,7 @@ const HARNESS_TARGETS: &[(&str, &str, &str, &str)] = &[
     (
         "antigravity",
         "Antigravity",
-        ".agents/skills",
+        ".gemini/config/skills",
         ".agents/skills",
     ),
     (
@@ -1222,6 +1223,32 @@ pub fn sync_local_skills_in(
         }
     }
 
+    if prune {
+        // Retire Orb-managed copies from the former `~/.agents/skills` target (which
+        // Antigravity never scanned globally) while preserving any unmanaged entries.
+        let retired_root = home.join(RETIRED_ANTIGRAVITY_GLOBAL_REL);
+        if let Ok(entries) = fs::read_dir(&retired_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if is_symlink(&path) || !path.is_dir() || !is_managed_skill_dir(&path) {
+                    continue;
+                }
+                if fs::remove_dir_all(&path).is_ok() {
+                    pruned.push(format!("~/{RETIRED_ANTIGRAVITY_GLOBAL_REL}/{name}"));
+                }
+            }
+            if fs::read_dir(&retired_root)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false)
+            {
+                let _ = fs::remove_dir(&retired_root);
+            }
+        }
+    }
+
     let report = inspect_local_skills_in(home, &request.library_skills)?;
     Ok(SyncSkillsResult {
         synced_skills: catalog.desired.len(),
@@ -1678,5 +1705,46 @@ mod tests {
                 .unwrap()
                 .contains("# Library")
         );
+    }
+
+    #[test]
+    fn antigravity_syncs_to_gemini_config_skills_and_prunes_retired_agents_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        let retired_managed = home.join(".agents/skills/orb-basics");
+        write_skill(&retired_managed, "---\nname: orb-basics\n---\n# Old\n");
+        fs::write(
+            retired_managed.join(ORB_MANAGED_MARKER),
+            "managed-by-orb-skills\n",
+        )
+        .unwrap();
+
+        let user_custom = home.join(".agents/skills/user-custom");
+        write_skill(&user_custom, "---\nname: user-custom\n---\n# Custom\n");
+
+        let library = vec![lib(
+            "orb-basics",
+            "---\nname: orb-basics\nmetadata:\n  sandboxed:\n    audience: [local]\n---\n# Basics\n",
+        )];
+
+        let res = sync_local_skills_in(home, request(library, true)).unwrap();
+        assert!(home
+            .join(".gemini/config/skills/orb-basics/SKILL.md")
+            .is_file());
+        let agy = res
+            .report
+            .harnesses
+            .iter()
+            .find(|h| h.id == "antigravity")
+            .unwrap();
+        assert_eq!(agy.global_rel, "~/.gemini/config/skills");
+        assert_eq!(agy.project_rel, ".agents/skills");
+        assert_eq!(agy.synced_count, 1);
+        assert!(res
+            .pruned
+            .contains(&"~/.agents/skills/orb-basics".to_string()));
+        assert!(!retired_managed.exists());
+        assert!(user_custom.join("SKILL.md").is_file());
     }
 }
