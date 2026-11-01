@@ -268,6 +268,20 @@ final class OrbContractTests: XCTestCase {
         XCTAssertEqual(OrbSelection.firstAvailableNodeID(nodes), "babylon")
     }
 
+    func testAutoNodeSelectionMatchesSharedFixture() throws {
+        let data = try Data(contentsOf: OrbSpec.url("fixtures/auto-node-selection.json"))
+        let spec = try JSONDecoder().decode(OrbJSON.self, from: data)
+        XCTAssertEqual(OrbSelection.minAutoNodeMemBytes, spec["minMemBytes"].number)
+        XCTAssertEqual(OrbSelection.minAutoNodeDiskBytes, spec["minDiskBytes"].number)
+        for testCase in spec["cases"].items {
+            let name = testCase["name"].text
+            let backend = testCase["backend"].text
+            let expected: String? = testCase["expected"] == .null ? nil : testCase["expected"].text
+            let actual = OrbSelection.firstAvailableNodeID(testCase["nodes"].items, backend: backend)
+            XCTAssertEqual(actual, expected, name)
+        }
+    }
+
     func testLatestForkLeadsAndEarlierVersionsFoldInside() {
         let original = OrbRow(.object(["id": .string("ev"), "title": .string("EV Bench"), "backend": .string("claudecode"), "updated_at": .string("2026-10-14T10:00:00Z")]))
         let fork = OrbRow(.object(["id": .string("ev-fork"), "title": .string("EV Bench · fork"), "parent_mission_id": .string("ev"), "backend": .string("codex"), "updated_at": .string("2026-10-14T12:00:00Z")]))

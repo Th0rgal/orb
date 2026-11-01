@@ -179,3 +179,11 @@ it("keeps the last remote node between two jobs instead of showing the host work
   expect(missionDestination(mission({id:"between-jobs",status:"active",workspace_name:"host",remote_job:null}))).toBe(running);
   expect(missionDestination(mission({id:"never-remote",workspace_name:"host"}))).toBe("host");
 });
+it("refuses launches onto a node quarantined for the selected harness while allowing unaffected harnesses", () => {
+  const cap: RemoteLaunchCapability = { typed: true, harnesses: ["antigravity", "codex"], raw_command: true, proxy_url_configured: true };
+  const f = fleet(cap, { nodes: [{ ...node, id: "nimrud", quarantined_harnesses: ["antigravity"] }] });
+  const msg = remoteLaunchPreflight(f, "nimrud", { backend: "antigravity", model: "agy-model" }, id => id === "antigravity" ? "Antigravity" : id);
+  expect(msg).toContain("Antigravity is temporarily unavailable");
+  expect(msg).toContain("draft is kept");
+  expect(remoteLaunchPreflight(f, "nimrud", { backend: "codex", model: "gpt-6" })).toBeNull();
+});

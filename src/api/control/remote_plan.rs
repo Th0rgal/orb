@@ -145,6 +145,18 @@ pub(crate) enum RemoteHarnessPlan {
 }
 
 impl RemoteHarnessPlan {
+    pub(crate) fn backend_id(&self) -> Option<&'static str> {
+        match self {
+            RemoteHarnessPlan::Vibe { .. } => Some("vibe"),
+            RemoteHarnessPlan::Antigravity { .. } => Some("antigravity"),
+            RemoteHarnessPlan::Codex { .. } => Some("codex"),
+            RemoteHarnessPlan::Grok { .. } => Some("grok"),
+            RemoteHarnessPlan::ClaudeCode { .. } => Some("claudecode"),
+            RemoteHarnessPlan::OpenCode { .. } => Some("opencode"),
+            RemoteHarnessPlan::Raw { .. } => None,
+        }
+    }
+
     pub(crate) fn uses_core_proxy(&self) -> bool {
         matches!(
             self,

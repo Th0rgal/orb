@@ -538,6 +538,7 @@ fun OrbConversationPage(
     val backends by core.backends.collectAsState()
     val backendModels by core.backendModels.collectAsState()
     val workspaces by core.workspaces.collectAsState()
+    val nodes by core.nodes.collectAsState()
     val providers by core.providers.collectAsState()
     val repositories by core.repositories.collectAsState()
 
@@ -610,6 +611,25 @@ fun OrbConversationPage(
                 ?: project.str("workspace_id", "default_workspace_id")
                 ?: ""
         )
+    }
+    var selectedNodeId by remember(currentMission?.id, project.id) {
+        mutableStateOf(
+            currentMission?.str("remote_node_id")
+                ?: project.str("remote_node_id")
+                ?: ""
+        )
+    }
+    var nodePinnedByUser by remember(currentMission?.id, project.id) {
+        mutableStateOf(
+            !currentMission?.str("remote_node_id").isNullOrEmpty() ||
+                !project.str("remote_node_id").isNullOrEmpty()
+        )
+    }
+    LaunchedEffect(currentMission?.id, nodes, selectedBackend, selectedWorkspaceId, nodePinnedByUser) {
+        val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
+        if (currentMission == null && !isCloudService && selectedWorkspaceId.isEmpty() && !nodePinnedByUser) {
+            selectedNodeId = OrbComputePlacement.firstAvailableNodeId(nodes, backend = selectedBackend) ?: "core"
+        }
     }
     val fileScope = remember(missionId, selectedWorkspaceId) { OrbFileScope(missionId, selectedWorkspaceId.takeIf { it.isNotEmpty() }) }
     var selectedAccount by remember(currentMission?.id) {
@@ -1194,6 +1214,10 @@ fun OrbConversationPage(
                     )
                     if (selectedModel.isNotEmpty()) body["model_override"] = selectedModel
                     if (selectedWorkspaceId.isNotEmpty()) body["workspace_id"] = selectedWorkspaceId
+                    val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
+                    if (!isCloudService && selectedWorkspaceId.isEmpty() && selectedNodeId.isNotEmpty() && selectedNodeId != "core") {
+                        body["remote_node_id"] = selectedNodeId
+                    }
                     if (selectedAccount.isNotEmpty()) body["account_id"] = selectedAccount
                     if (selectedRepo.isNotEmpty()) body["repo"] = selectedRepo
                     if (selectedGitRef.isNotEmpty()) body["git_ref"] = selectedGitRef
@@ -2543,6 +2567,18 @@ fun OrbConversationPage(
                                     ?.str("name", "title", "slug")
                                     ?.replace(Regex("-[0-9a-f]{8}$"), "")
                             }
+                            val selectedMachineLabel = remember(selectedWorkspaceName, selectedNodeId, nodes, selectedBackend) {
+                                val isCloudService = selectedBackend in setOf("cursor_cloud", "grok_bot", "hermes")
+                                when {
+                                    isCloudService -> null
+                                    !selectedWorkspaceName.isNullOrEmpty() -> selectedWorkspaceName
+                                    selectedNodeId.isNotEmpty() && selectedNodeId != "core" ->
+                                        nodes.firstOrNull { (it.str("id") ?: it.id) == selectedNodeId }
+                                            ?.str("name", "id") ?: selectedNodeId
+                                    selectedNodeId == "core" -> "Core"
+                                    else -> null
+                                }
+                            }
                             Row(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(OrbStyle.controlRadius))
@@ -2563,9 +2599,9 @@ fun OrbConversationPage(
                                             append(" · ")
                                             append(selectedModel.substringAfterLast('/'))
                                         }
-                                        if (!selectedWorkspaceName.isNullOrEmpty()) {
+                                        if (!selectedMachineLabel.isNullOrEmpty()) {
                                             append(" · ")
-                                            append(selectedWorkspaceName)
+                                            append(selectedMachineLabel)
                                         }
                                     },
                                     color = OrbStyle.textSecondary,
@@ -2689,6 +2725,7 @@ fun OrbConversationPage(
             backends = backends,
             backendModels = backendModels,
             workspaces = workspaces,
+            nodes = nodes,
             providers = providers,
             repositories = repositories,
             selectedBackend = selectedBackend,
@@ -2696,7 +2733,19 @@ fun OrbConversationPage(
             selectedModel = selectedModel,
             onSelectModel = { selectedModel = it },
             selectedWorkspaceId = selectedWorkspaceId,
-            onSelectWorkspaceId = { selectedWorkspaceId = it },
+            onSelectWorkspaceId = {
+                selectedWorkspaceId = it
+                if (it.isNotEmpty()) {
+                    selectedNodeId = ""
+                    nodePinnedByUser = false
+                }
+            },
+            selectedNodeId = selectedNodeId,
+            onSelectNodeId = {
+                selectedNodeId = it
+                nodePinnedByUser = true
+                selectedWorkspaceId = ""
+            },
             selectedAccount = selectedAccount,
             onSelectAccount = { selectedAccount = it },
             selectedRepo = selectedRepo,
@@ -3320,6 +3369,7 @@ fun OrbAgentPickerSheet(
     backends: List<OrbRow>,
     backendModels: OrbDict = emptyMap(),
     workspaces: List<OrbRow>,
+    nodes: List<OrbRow> = emptyList(),
     providers: List<OrbRow>,
     repositories: List<OrbRow>,
     selectedBackend: String,
@@ -3328,6 +3378,8 @@ fun OrbAgentPickerSheet(
     onSelectModel: (String) -> Unit,
     selectedWorkspaceId: String,
     onSelectWorkspaceId: (String) -> Unit,
+    selectedNodeId: String = "",
+    onSelectNodeId: (String) -> Unit = {},
     selectedAccount: String,
     onSelectAccount: (String) -> Unit,
     selectedRepo: String,
@@ -3351,6 +3403,9 @@ fun OrbAgentPickerSheet(
     }
     val modelChoices = remember(selectedBackend, backendModels) {
         OrbAgentCatalog.modelsForBackend(selectedBackend, backendModels)
+    }
+    val sortedNodes = remember(nodes) {
+        OrbComputePlacement.sortedComputeNodes(nodes)
     }
 
     ModalBottomSheet(
@@ -3437,7 +3492,7 @@ fun OrbAgentPickerSheet(
             }
 
             // Machine / Workspace
-            if (!existing && !isCloudService && workspaces.isNotEmpty()) {
+            if (!existing && !isCloudService && (sortedNodes.isNotEmpty() || workspaces.isNotEmpty())) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         text = "MACHINE / WORKSPACE",
@@ -3453,6 +3508,85 @@ fun OrbAgentPickerSheet(
                             .background(OrbStyle.surface)
                             .border(1.dp, OrbStyle.border, RoundedCornerShape(14.dp))
                     ) {
+                        if (sortedNodes.isNotEmpty()) {
+                            val coreSelected = selectedWorkspaceId.isEmpty() && (selectedNodeId == "core" || selectedNodeId.isEmpty())
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .orbPressClickable { if (!locked) onSelectNodeId("core") }
+                                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Core",
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "host",
+                                        color = OrbStyle.textMuted,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (coreSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = OrbStyle.border)
+                            sortedNodes.take(10).forEachIndexed { idx, node ->
+                                val nid = node.str("id") ?: node.id
+                                val nName = node.str("name")?.takeIf { it.isNotEmpty() } ?: nid
+                                val nStatus = node.str("status") ?: "online"
+                                val selected = selectedWorkspaceId.isEmpty() && selectedNodeId == nid
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .orbPressClickable { if (!locked) onSelectNodeId(nid) }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = nName,
+                                            color = Color.White,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "remote · $nStatus",
+                                            color = OrbStyle.textMuted,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (selected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                                if (idx < minOf(sortedNodes.size, 10) - 1 || workspaces.isNotEmpty()) {
+                                    HorizontalDivider(color = OrbStyle.border)
+                                }
+                            }
+                        }
                         workspaces.take(10).forEachIndexed { idx, ws ->
                             val wid = ws.str("id") ?: ws.id
                             val wName = ws.str("name", "title", "slug") ?: wid.take(8)
@@ -3461,7 +3595,7 @@ fun OrbAgentPickerSheet(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .orbPressClickable { onSelectWorkspaceId(wid) }
+                                    .orbPressClickable { if (!locked) onSelectWorkspaceId(wid) }
                                     .padding(horizontal = 14.dp, vertical = 11.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {

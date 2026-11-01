@@ -489,17 +489,22 @@ export default function App() {
     const nodes = preferSparkAdministration([...fleetNodes()], node => node.id);
     return [...byLeastLoaded(nodes.filter(usableNode), node => node.id), ...nodes.filter(node => !usableNode(node))];
   });
+  const currentAutoBackend = () => harnessPick()?.backend ?? harnessChoices()[0]?.backend.id;
   const canAutoSelectRemote = () => {
     const rl = remoteLaunch();
     if (rl.state !== "ready" || !rl.capability?.typed) return false;
-    const backend = harnessPick()?.backend ?? harnessChoices()[0]?.backend.id;
+    const backend = currentAutoBackend();
     return !backend || remoteHarnessSupport(rl.capability, backend) === "supported";
   };
-  const firstNodeId = createMemo(() => (canAutoSelectRemote() ? firstAvailableNodeId(sortedNodes()) : null));
+  const firstNodeId = createMemo(() => (canAutoSelectRemote() ? firstAvailableNodeId(sortedNodes(), currentAutoBackend()) : null));
   createEffect(() => {
     if (!isConnected() || explicitMachine() || creating() || launchPreview()) return;
     const first = firstNodeId();
-    if (first && newMachine() !== first) setNewMachine(first);
+    if (first) {
+      if (newMachine() !== first) setNewMachine(first);
+    } else if (remoteLaunch().state === "ready" && newMachine() !== "core" && newMachine() !== "local") {
+      setNewMachine("core");
+    }
   });
   const machineLabel = () => {
     if (isConnected()) {

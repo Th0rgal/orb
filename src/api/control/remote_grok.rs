@@ -149,6 +149,13 @@ pub(crate) async fn require_node_managed_auth(
     node_id: &str,
     plan: &RemoteHarnessPlan,
 ) -> Result<(), String> {
+    if let Some(backend) = plan.backend_id() {
+        if let Some(reason) = state.fleet.harness_quarantine_reason(node_id, backend) {
+            return Err(format!(
+                "REMOTE_HARNESS_UNAVAILABLE: remote node '{node_id}' is temporarily quarantined for '{backend}': {reason}"
+            ));
+        }
+    }
     if matches!(plan, RemoteHarnessPlan::Vibe { .. }) {
         let unavailable = format!("REMOTE_HARNESS_UNAVAILABLE: remote node '{node_id}' is not ready for Mistral Vibe; install vibe-acp and Python 3.9+ as the node execution user");
         let capabilities = super::machine_transfer::node_transfer_capabilities(state, node_id)
@@ -1533,6 +1540,9 @@ pub(crate) struct TerminalVerdict {
     /// classification reads this rather than the whole report, whose
     /// diagnostics quote arbitrary output.
     pub(crate) cli_error: Option<String>,
+    /// Node-specific provider rejection reason when this job failed before
+    /// generating any tokens due to an unsupported egress IP or region.
+    pub(crate) quarantine_reason: Option<String>,
 }
 
 pub(crate) struct NativeGrokObserver {
@@ -1631,6 +1641,10 @@ pub(crate) fn partial_turn_message(
 }
 
 impl NativeGrokObserver {
+    pub(crate) fn backend(&self) -> &str {
+        self.mission.backend.as_str()
+    }
+
     /// Streamed assistant text of this job when it was stopped mid-turn.
     /// Antigravity keeps its own native bubbles, which are already durable.
     pub(crate) fn partial_turn_message(&self) -> Option<AgentEvent> {
@@ -2567,9 +2581,14 @@ impl NativeGrokObserver {
         } else {
             String::new()
         };
-        let failure = super::remote_failure::classify(
-            self.stream.error.as_deref().unwrap_or(&startup_evidence),
-        );
+        let raw_failure = if !startup_evidence.is_empty() && exited_before_output {
+            startup_evidence.as_str()
+        } else {
+            self.stream.error.as_deref().unwrap_or(&startup_evidence)
+        };
+        let failure = super::remote_failure::classify(raw_failure);
+        let location_unsupported = super::remote_failure::is_node_location_unsupported(raw_failure)
+            || super::remote_failure::is_node_location_unsupported(&startup_evidence);
         let success = (succeeded || scheduled_end)
             && self
                 .stream
@@ -2664,6 +2683,9 @@ impl NativeGrokObserver {
                         report.push_str(&format!("\n{}", failure.summary));
                     } else {
                         report.push_str(&format!("\nCLI error: {error}"));
+                        if location_unsupported {
+                            report.push_str(&format!("\n{}", failure.summary));
+                        }
                     }
                 }
             }
@@ -2736,11 +2758,17 @@ impl NativeGrokObserver {
             }
         }
 
+        let quarantine_reason = (!success
+            && location_unsupported
+            && self.usage().map_or(0, |usage| usage.output_tokens) == 0)
+            .then(|| failure.summary.clone());
+
         TerminalVerdict {
             success,
             content,
             status_reason,
             cli_error: self.stream.error.clone(),
+            quarantine_reason,
         }
     }
 }
@@ -4764,6 +4792,61 @@ mod tests {
         let verdict = observer.verdict(&status, "node").await;
         assert!(!verdict.success);
         assert_eq!(verdict.status_reason, "remote_configuration");
+    }
+
+    #[tokio::test]
+    async fn antigravity_stderr_location_rejection_before_json_events_quarantines_node() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "startup-geo")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(
+                Some("geo"),
+                None,
+                None,
+                None,
+                None,
+                Some("antigravity"),
+                None,
+            )
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "nimrud", mission.id, job)
+            .await
+            .unwrap();
+        observer
+            .stream
+            .feed("Error: User location is not supported for the API use.\n");
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id": job,
+            "mission_id": mission.id,
+            "state": "failed",
+            "exit_code": 1,
+            "error": "command exited with Some(1)",
+            "created_at": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        let verdict = observer.verdict(&status, "nimrud").await;
+        assert!(!verdict.success);
+        assert_eq!(verdict.status_reason, "remote_configuration");
+        assert!(
+            verdict
+                .quarantine_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("egress IP")),
+            "expected quarantine reason on stderr location rejection, got {:?}",
+            verdict.quarantine_reason
+        );
+        assert!(verdict.content.contains("egress IP"));
     }
 
     #[test]

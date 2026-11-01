@@ -2032,11 +2032,16 @@ pub(in crate::api) async fn create_mission_inner(
             // Raw remote commands default to no label requirements; the
             // lean_build path (`POST /api/remote-build`) defaults to ["lean"].
             let requirements = req.remote_requirements.clone().unwrap_or_default();
+            let auto_harness = remote_plan
+                .as_ref()
+                .and_then(RemoteHarnessPlan::backend_id)
+                .or(backend.as_deref());
             let resolved =
-                match state
-                    .fleet
-                    .place_auto(&state.config.remote_nodes, &requirements)
-                {
+                match state.fleet.place_auto_for_harness(
+                    &state.config.remote_nodes,
+                    &requirements,
+                    auto_harness,
+                ) {
                     Ok(resolved) => resolved,
                     Err(initial_err) => {
                         // The periodic monitor may be disabled, or this request
@@ -2066,7 +2071,11 @@ pub(in crate::api) async fn create_mission_inner(
                         .await;
                         state
                             .fleet
-                            .place_auto(&state.config.remote_nodes, &requirements)
+                            .place_auto_for_harness(
+                                &state.config.remote_nodes,
+                                &requirements,
+                                auto_harness,
+                            )
                             .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?
                     }
                 };

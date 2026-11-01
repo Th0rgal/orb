@@ -1906,6 +1906,7 @@ async fn list_remote_nodes(
         let cached = state.fleet.get(&node.id);
         let mut view = crate::remote_node::RemoteNodeView::from_cache(node, cached.as_ref());
         view.cordoned = state.fleet.is_cordoned(&node.id);
+        view.quarantined_harnesses = state.fleet.quarantined_harnesses_for(&node.id);
         nodes.push(view);
     }
     // The Spark offload lane is separate from the remote-node fleet; expose

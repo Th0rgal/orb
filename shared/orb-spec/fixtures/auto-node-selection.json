@@ -1,0 +1,184 @@
+{
+  "minMemBytes": 8589934592,
+  "minDiskBytes": 21474836480,
+  "cases": [
+    {
+      "name": "excludes small label even when idle and main nodes are busy (incident 4a2512c8)",
+      "backend": "antigravity",
+      "nodes": [
+        {
+          "id": "nimrud",
+          "status": "online",
+          "cordoned": false,
+          "labels": ["small"],
+          "active_jobs": 0,
+          "mem_available_bytes": 1503238553,
+          "disk_available_bytes": 11811160064
+        },
+        {
+          "id": "babylon",
+          "status": "online",
+          "cordoned": true,
+          "labels": ["lean"],
+          "active_jobs": 0,
+          "mem_available_bytes": 64424509440,
+          "disk_available_bytes": 107374182400
+        },
+        {
+          "id": "ashur",
+          "status": "online",
+          "cordoned": false,
+          "labels": ["lean"],
+          "active_jobs": 1,
+          "mem_available_bytes": 32212254720,
+          "disk_available_bytes": 107374182400
+        }
+      ],
+      "expected": "ashur"
+    },
+    {
+      "name": "excludes nodes below 8 GiB free memory or 20 GiB free disk even without small label",
+      "backend": "codex",
+      "nodes": [
+        {
+          "id": "low-ram",
+          "status": "online",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 0,
+          "mem_available_bytes": 4294967296,
+          "disk_available_bytes": 107374182400
+        },
+        {
+          "id": "low-disk",
+          "status": "online",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 0,
+          "mem_available_bytes": 34359738368,
+          "disk_available_bytes": 10737418240
+        },
+        {
+          "id": "uruk",
+          "status": "online",
+          "cordoned": false,
+          "labels": ["lean"],
+          "active_jobs": 0,
+          "mem_available_bytes": 25769803776,
+          "disk_available_bytes": 85899345920
+        }
+      ],
+      "expected": "uruk"
+    },
+    {
+      "name": "excludes disk_pressure_pinned, manual-only, managed, cordoned, and offline nodes",
+      "backend": "claudecode",
+      "nodes": [
+        {
+          "id": "dgx-spark-admin",
+          "status": "online",
+          "cordoned": false,
+          "labels": ["administration", "manual-only"],
+          "active_jobs": 0,
+          "mem_available_bytes": 128849018880,
+          "disk_available_bytes": 536870912000
+        },
+        {
+          "id": "managed-abc",
+          "status": "online",
+          "cordoned": false,
+          "labels": ["managed"],
+          "active_jobs": 0,
+          "mem_available_bytes": 34359738368,
+          "disk_available_bytes": 107374182400
+        },
+        {
+          "id": "pinned",
+          "status": "online",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 0,
+          "disk_pressure_pinned": true,
+          "mem_available_bytes": 34359738368,
+          "disk_available_bytes": 42949672960
+        },
+        {
+          "id": "offline-node",
+          "status": "offline",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 0,
+          "mem_available_bytes": 68719476736,
+          "disk_available_bytes": 214748364800
+        }
+      ],
+      "expected": null
+    },
+    {
+      "name": "skips node quarantined for the requested backend",
+      "backend": "antigravity",
+      "nodes": [
+        {
+          "id": "geo-blocked",
+          "status": "online",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 0,
+          "mem_available_bytes": 68719476736,
+          "disk_available_bytes": 214748364800,
+          "quarantined_harnesses": ["antigravity"]
+        },
+        {
+          "id": "ashur",
+          "status": "online",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 1,
+          "mem_available_bytes": 34359738368,
+          "disk_available_bytes": 107374182400
+        }
+      ],
+      "expected": "ashur"
+    },
+    {
+      "name": "allows node quarantined for another backend when launching an unaffected backend",
+      "backend": "codex",
+      "nodes": [
+        {
+          "id": "geo-blocked",
+          "status": "online",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 0,
+          "mem_available_bytes": 68719476736,
+          "disk_available_bytes": 214748364800,
+          "quarantined_harnesses": ["antigravity"]
+        },
+        {
+          "id": "ashur",
+          "status": "online",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 1,
+          "mem_available_bytes": 34359738368,
+          "disk_available_bytes": 107374182400
+        }
+      ],
+      "expected": "geo-blocked"
+    },
+    {
+      "name": "accepts online nodes when telemetry fields are omitted",
+      "backend": "opencode",
+      "nodes": [
+        {
+          "id": "nippur",
+          "status": "online",
+          "cordoned": false,
+          "labels": [],
+          "active_jobs": 0
+        }
+      ],
+      "expected": "nippur"
+    }
+  ]
+}

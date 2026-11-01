@@ -61,7 +61,7 @@
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "4f02e0a76a6db040c4fc4946306370e157fa9d49a6d66ae2afb0e4f62c2a1ea2"
+          "sha256": "40a75fad630e4e5312980cf9bd113e86b48edc6ca9776c5662640d94902ccd55"
         },
         {
           "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
@@ -518,7 +518,7 @@
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "4f02e0a76a6db040c4fc4946306370e157fa9d49a6d66ae2afb0e4f62c2a1ea2"
+          "sha256": "40a75fad630e4e5312980cf9bd113e86b48edc6ca9776c5662640d94902ccd55"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
@@ -1104,7 +1104,7 @@
         },
         {
           "path": "src/api/control/remote_grok.rs",
-          "sha256": "b42e9bff4d8a0056500cbabd78ce7b2baadf0e630509e818a9d553c5e53c6dc3"
+          "sha256": "6119c5751cdf1bd53c394233f68aecd905054661aa8725e6e036b38f800c11ed"
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",

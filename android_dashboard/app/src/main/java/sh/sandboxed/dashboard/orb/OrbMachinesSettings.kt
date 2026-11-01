@@ -470,3 +470,65 @@ internal fun OrbMiniField(
         }
     }
 }
+
+/**
+ * Shared auto-schedulable compute node derivation (mirrors desktop
+ * `orb/src/machineLoad.tsx` and iOS `OrbSelection`).
+ */
+object OrbComputePlacement {
+    const val MIN_AUTO_NODE_MEM_BYTES: Long = 8L * 1024L * 1024L * 1024L
+    const val MIN_AUTO_NODE_DISK_BYTES: Long = 20L * 1024L * 1024L * 1024L
+
+    fun isUsableComputeNode(node: OrbDict): Boolean {
+        if (OrbJSON.str(node, "status") != "online" || node["cordoned"] == true) return false
+        val labels = (node["labels"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+        return "manual-only" !in labels
+    }
+
+    fun isAutoSchedulableNode(node: OrbDict, backend: String? = null): Boolean {
+        if (OrbJSON.str(node, "status") != "online" || node["cordoned"] == true || node["disk_pressure_pinned"] == true) return false
+        val labels = (node["labels"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+        if ("manual-only" in labels || "managed" in labels || "small" in labels) return false
+        val mem = (node["mem_available_bytes"] as? Number)?.toLong()
+        if (mem != null && mem < MIN_AUTO_NODE_MEM_BYTES) return false
+        val disk = (node["disk_available_bytes"] as? Number)?.toLong()
+        if (disk != null && disk < MIN_AUTO_NODE_DISK_BYTES) return false
+        if (!backend.isNullOrEmpty()) {
+            val quarantined = (node["quarantined_harnesses"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
+            if (backend in quarantined) return false
+        }
+        return true
+    }
+
+    fun sortedComputeNodes(rawNodes: List<OrbDict>): List<OrbDict> {
+        val hasSparkAdmin = rawNodes.any { OrbJSON.str(it, "id") == "dgx-spark-admin" && OrbJSON.str(it, "status") == "online" }
+        val filtered = if (hasSparkAdmin) rawNodes.filter { OrbJSON.str(it, "id") != "dgx-spark" } else rawNodes
+        return filtered.sortedWith(
+            Comparator { a, b ->
+                val aUsable = isUsableComputeNode(a)
+                val bUsable = isUsableComputeNode(b)
+                if (aUsable != bUsable) return@Comparator if (aUsable) -1 else 1
+                val aJobs = (a["active_jobs"] as? Number)?.toLong() ?: 0L
+                val bJobs = (b["active_jobs"] as? Number)?.toLong() ?: 0L
+                if (aJobs != bJobs) return@Comparator aJobs.compareTo(bJobs)
+                val aFree = (a["mem_available_bytes"] as? Number)?.toDouble() ?: -1.0
+                val bFree = (b["mem_available_bytes"] as? Number)?.toDouble() ?: -1.0
+                if (aFree != bFree) return@Comparator bFree.compareTo(aFree)
+                (OrbJSON.str(a, "id") ?: "").compareTo(OrbJSON.str(b, "id") ?: "")
+            }
+        )
+    }
+
+    fun firstAvailableNodeId(rawNodes: List<OrbDict>, backend: String? = null): String? {
+        val first = sortedComputeNodes(rawNodes).firstOrNull { isAutoSchedulableNode(it, backend) } ?: return null
+        return OrbJSON.str(first, "id")?.takeIf { it.isNotEmpty() }
+    }
+
+    @JvmName("sortedComputeNodeRows")
+    fun sortedComputeNodes(rows: List<OrbRow>): List<OrbRow> =
+        sortedComputeNodes(rows.map { it.raw }).map { OrbRow(it) }
+
+    @JvmName("firstAvailableNodeIdFromRows")
+    fun firstAvailableNodeId(rows: List<OrbRow>, backend: String? = null): String? =
+        firstAvailableNodeId(rows.map { it.raw }, backend)
+}

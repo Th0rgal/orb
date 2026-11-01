@@ -49,7 +49,7 @@ export function AntigravityProvider() {
       const result = await getRemoteNodes();
       if (disposed || request !== generation || version !== connectionVersion()) return;
       // Managed machines come and go; the setting below covers them as a group.
-      const nodes = (result.nodes ?? []).filter(node => !node.cordoned && node.status !== "offline" && !isManagedNode(node));
+      const nodes = (result.nodes ?? []).filter(node => !node.cordoned && node.status !== "offline" && !isManagedNode(node) && !node.quarantined_harnesses?.includes("antigravity"));
       setMachines(list => [...list, ...nodes.map(node => ({ id: node.id, label: node.display_name || node.id, phase: "loading" as const }))]);
       nodes.forEach(node => void check(request, version, node.id));
     } catch { /* Core alone still answers; Refresh retries the inventory. */ }
