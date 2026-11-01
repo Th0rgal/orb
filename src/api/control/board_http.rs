@@ -103,6 +103,17 @@ pub(super) fn validate_and_normalize_board_tasks(
             .model_override
             .as_deref()
             .and_then(|model| normalize_model_override_for_backend(Some(&t.backend), model));
+        if t.backend.eq_ignore_ascii_case("codex") {
+            if let Some(model) = t.model_override.as_deref() {
+                if let Err(err) = crate::api::providers::reject_known_unsupported_codex_model(model)
+                {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("task `{}`: {}", t.task_key, err),
+                    ));
+                }
+            }
+        }
         // Blank acceptance criteria must not count as an outcome contract:
         // `[" "]` would otherwise suppress spec_warnings, emit a blank bullet
         // in the worker contract, and declare the prompt advisory on retry.

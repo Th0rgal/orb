@@ -5052,6 +5052,14 @@ fn test_normalize_model_override_for_codex_maps_gpt_56_alias_to_sol() {
         normalize_model_override_for_backend(Some("codex"), "openai/gpt-6"),
         Some("gpt-6-astra".to_string())
     );
+    assert_eq!(
+        normalize_model_override_for_backend(Some("codex"), "gpt-6.1"),
+        Some("gpt-6.1-sol".to_string())
+    );
+    assert_eq!(
+        normalize_model_override_for_backend(Some("codex"), "openai/gpt-6.1"),
+        Some("gpt-6.1-sol".to_string())
+    );
     assert_eq!(resolve_codex_default_model(), "gpt-6.1-sol");
     assert_eq!(
         normalize_model_override_for_backend(Some("opencode"), "openai/gpt-5.6"),
@@ -5060,6 +5068,10 @@ fn test_normalize_model_override_for_codex_maps_gpt_56_alias_to_sol() {
     assert_eq!(
         normalize_model_override_for_backend(Some("codex"), "codex/gpt-5.6-terra"),
         Some("gpt-5.6-terra".to_string())
+    );
+    assert_eq!(
+        normalize_model_override_for_backend(Some("codex"), "codex/gpt-6.1-terra"),
+        Some("gpt-6.1-terra".to_string())
     );
 }
 
@@ -5113,12 +5125,21 @@ fn retired_gemini_board_task_is_rejected_at_registration() {
 fn board_upsert_normalizes_matching_native_model_backend_prefix() {
     let mut tasks = vec![board_task_with_backend_and_model(
         "codex",
-        "codex/gpt-5.6-terra",
+        "codex/gpt-6.1-terra",
     )];
 
     validate_and_normalize_board_tasks(&mut tasks).unwrap();
 
-    assert_eq!(tasks[0].model_override.as_deref(), Some("gpt-5.6-terra"));
+    assert_eq!(tasks[0].model_override.as_deref(), Some("gpt-6.1-terra"));
+}
+
+#[test]
+fn board_upsert_rejects_nonexistent_codex_terra_6_at_registration() {
+    let mut tasks = vec![board_task_with_backend_and_model("codex", "gpt-6-terra")];
+    let (status, error) = validate_and_normalize_board_tasks(&mut tasks).unwrap_err();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error.contains("task `model-check`"), "{error}");
+    assert!(error.contains("gpt-6.1-terra"), "{error}");
 }
 
 #[test]
@@ -5134,6 +5155,8 @@ fn test_native_backend_prefix_only_accepts_harness_qualifiers() {
 
 #[test]
 fn fast_mode_accepts_supported_codex_models_only() {
+    assert!(validate_fast_mode("codex", Some("gpt-6.1-terra"), true).is_ok());
+    assert!(validate_fast_mode("codex", Some("gpt-6.1-sol"), true).is_ok());
     assert!(validate_fast_mode("codex", Some("gpt-5.6-sol"), true).is_ok());
     assert!(validate_fast_mode("codex", Some("gpt-5.5"), true).is_ok());
     assert!(validate_fast_mode("codex", Some("gpt-5.4-mini"), true).is_ok());

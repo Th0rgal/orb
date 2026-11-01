@@ -534,7 +534,7 @@ impl OrchestratorMcp {
                                     "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "description": "Objective, testable conditions that define success — the weakest set that still guarantees the outcome. Delivered to the worker as the authoritative contract" },
                                     "verification_command": { "type": "string", "description": "Command whose success verifies the task; the worker must run it before DELIVERED" },
                                     "risk_class": { "type": "string", "description": "low | normal (default) | high. high = a failed attempt is never retried silently; it settles for your review" },
-                                    "model_override": { "type": "string", "description": "Exact account-supported model ID. For Codex Terra use gpt-5.6-terra with medium effort. Never invent variants such as gpt-5.5-sol." },
+                                    "model_override": { "type": "string", "description": "Exact account-supported model ID. For Codex Terra use gpt-6.1-terra with medium effort (default for Codex worker tasks; gpt-6-terra does not exist). Never invent variants such as gpt-6-terra or gpt-5.5-sol." },
                                     "model_effort": { "type": "string", "description": "low | medium | high | xhigh | max (codex)" },
                                     "working_directory": { "type": "string", "description": "Worker cwd; superseded by worktree.path if a worktree is given" },
                                     "depends_on": { "type": "array", "items": { "type": "string" }, "description": "task_keys that must settle successfully or be accepted first" },
@@ -633,7 +633,7 @@ impl OrchestratorMcp {
                         },
                         "model_override": {
                             "type": "string",
-                            "description": "Exact account-supported model ID. Must match the backend: Claude models (e.g. 'claude-opus-5') for claudecode, GPT models (e.g. 'gpt-5.6-terra', recommended with medium effort) for codex, Google models for antigravity, Grok models for grok, 'provider/model' format for opencode and 'mistral/model' for vibe. Never invent variants such as 'gpt-5.5-sol'. Codex on a remote node (remote_node_id, e.g. auto-managed:default / auto-managed:large) runs through the core proxy: pass model_override explicitly (e.g. gpt-6.1-sol); if omitted, the configured Codex default is used and recorded on the mission."
+                            "description": "Exact account-supported model ID. Must match the backend: Claude models (e.g. 'claude-opus-5') for claudecode, GPT models (e.g. 'gpt-6.1-terra', recommended with medium effort; 'gpt-6-terra' does not exist) for codex, Google models for antigravity, Grok models for grok, 'provider/model' format for opencode and 'mistral/model' for vibe. Never invent variants such as 'gpt-6-terra' or 'gpt-5.5-sol'. Codex on a remote node (remote_node_id, e.g. auto-managed:default / auto-managed:large) runs through the core proxy: pass model_override explicitly (e.g. gpt-6.1-sol or gpt-6.1-terra); if omitted, the configured Codex default is used and recorded on the mission."
                         },
                         "model_effort": {
                             "type": "string",
@@ -685,7 +685,7 @@ impl OrchestratorMcp {
                                 "properties": {
                                     "title": { "type": "string" },
                                     "backend": { "type": "string", "enum": ["claudecode", "codex", "opencode", "grok", "antigravity", "vibe"] },
-                                    "model_override": { "type": "string", "description": "Exact account-supported model ID. For Codex Terra use gpt-5.6-terra with medium effort; gpt-5.5-sol is unsupported." },
+                                    "model_override": { "type": "string", "description": "Exact account-supported model ID. For Codex Terra use gpt-6.1-terra with medium effort; gpt-6-terra and gpt-5.5-sol do not exist." },
                                     "model_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
                                     "agent": { "type": "string" },
                                     "config_profile": { "type": "string" },
