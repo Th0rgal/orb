@@ -1,10 +1,12 @@
 //! Live-resizable node admission (`SANDBOXED_NODE_CAPACITY`,
-//! `SANDBOXED_NODE_SIDE_CAPACITY`), disk floor (`SANDBOXED_NODE_MIN_FREE_GB`),
-//! and the env-file reload that drives them.
+//! `SANDBOXED_NODE_SIDE_CAPACITY`, `SANDBOXED_NODE_COORDINATOR_CAPACITY`),
+//! disk floor (`SANDBOXED_NODE_MIN_FREE_GB`), persistent operator override
+//! (`<work_root>/capacity_override.json`), and the env-file reload that drives them.
 //!
 //! A restart of `sandboxed-node` retires every running job, so capacity
-//! changes are applied in place instead: on `SIGHUP` (or when the env file's
-//! mtime changes) the node re-reads both capacities and resizes its pools.
+//! changes are applied in place instead: on `SIGHUP`, via `POST /capacity`, or
+//! when the env file's mtime changes, the node resizes its pools via the
+//! verified `orb_node_resize_step` kernel.
 //!
 //! * Grow: permits are added immediately (after cancelling any outstanding
 //!   shrink debt).
@@ -18,15 +20,22 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 /// Default env file written by node enrollment.
 pub const DEFAULT_ENV_FILE: &str = "/etc/sandboxed-node.env";
+/// Persistent runtime override written by live operator capacity updates.
+pub const CAPACITY_OVERRIDE_FILENAME: &str = "capacity_override.json";
 /// How often the env file mtime is polled when no `SIGHUP` arrives.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Maximum main-slot capacity accepted via live operator resize (`POST /capacity`).
+pub const MAX_NODE_CAPACITY: u32 = 256;
 /// Default side-question lane width when unset or out of range.
 pub const DEFAULT_SIDE_CAPACITY: usize = 2;
+/// Default coordinator / `schedule_wakeup` priority lane width (`1..=16`).
+pub const DEFAULT_COORDINATOR_CAPACITY: usize = 2;
 /// Default node free-disk floor in GiB (`SANDBOXED_NODE_MIN_FREE_GB`).
 pub const DEFAULT_MIN_FREE_GB: u64 = 10;
 
@@ -36,6 +45,8 @@ const UNSET_MIN_FREE_GB: u64 = u64::MAX;
 static CURRENT_CAPACITY: AtomicU32 = AtomicU32::new(0);
 /// Current side-question capacity, read by the per-job memory budget.
 static CURRENT_SIDE_CAPACITY: AtomicUsize = AtomicUsize::new(0);
+/// Current coordinator priority-lane capacity.
+static CURRENT_COORDINATOR_CAPACITY: AtomicUsize = AtomicUsize::new(0);
 /// Current free-disk floor in GiB (`u64::MAX` until published by `for_process`).
 static CURRENT_MIN_FREE_GB: AtomicU64 = AtomicU64::new(UNSET_MIN_FREE_GB);
 
@@ -56,6 +67,18 @@ pub fn current_side_capacity() -> usize {
     match CURRENT_SIDE_CAPACITY.load(Ordering::Acquire) {
         0 => parse_side_capacity(
             std::env::var("SANDBOXED_NODE_SIDE_CAPACITY")
+                .ok()
+                .as_deref(),
+        ),
+        n => n,
+    }
+}
+
+/// Live coordinator priority-lane capacity (`SANDBOXED_NODE_COORDINATOR_CAPACITY`, default 2).
+pub fn current_coordinator_capacity() -> usize {
+    match CURRENT_COORDINATOR_CAPACITY.load(Ordering::Acquire) {
+        0 => parse_coordinator_capacity(
+            std::env::var("SANDBOXED_NODE_COORDINATOR_CAPACITY")
                 .ok()
                 .as_deref(),
         ),
@@ -86,6 +109,10 @@ pub(crate) fn publish_capacities(capacity: u32, side: usize) {
     CURRENT_SIDE_CAPACITY.store(side.max(1), Ordering::Release);
 }
 
+fn publish_coordinator_capacity(coordinator: usize) {
+    CURRENT_COORDINATOR_CAPACITY.store(coordinator.max(1), Ordering::Release);
+}
+
 fn publish_min_free_gb(min_free_gb: u64) {
     CURRENT_MIN_FREE_GB.store(min_free_gb, Ordering::Release);
 }
@@ -111,6 +138,13 @@ pub fn parse_side_capacity(raw: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_SIDE_CAPACITY)
 }
 
+/// `SANDBOXED_NODE_COORDINATOR_CAPACITY`: 1..=16, default 2.
+pub fn parse_coordinator_capacity(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| (1..=16).contains(n))
+        .unwrap_or(DEFAULT_COORDINATOR_CAPACITY)
+}
+
 /// `SANDBOXED_NODE_MIN_FREE_GB`: unset → `Ok(None)`; otherwise a non-negative integer (`0` allowed).
 pub fn parse_min_free_gb(raw: Option<&str>) -> anyhow::Result<Option<u64>> {
     match raw {
@@ -121,12 +155,75 @@ pub fn parse_min_free_gb(raw: Option<&str>) -> anyhow::Result<Option<u64>> {
     }
 }
 
-/// Capacities parsed from an env file.
+/// Capacities parsed from an env file or live operator update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capacities {
     pub capacity: u32,
     pub side_capacity: usize,
+    pub coordinator_capacity: usize,
     pub min_free_gb: u64,
+}
+
+/// Persistent runtime override written under `<work_root>/capacity_override.json`
+/// when an operator updates capacity from Orb's `Machines` page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapacityOverride {
+    pub capacity: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_free_gb: Option<u64>,
+    pub updated_at: String,
+}
+
+/// Path to the persistent operator override file inside `work_root`.
+pub fn override_file_path(work_root: &Path) -> PathBuf {
+    work_root.join(CAPACITY_OVERRIDE_FILENAME)
+}
+
+/// Atomically persist `ov` to `<work_root>/capacity_override.json`.
+pub fn write_capacity_override(work_root: &Path, ov: &CapacityOverride) -> anyhow::Result<()> {
+    std::fs::create_dir_all(work_root)
+        .map_err(|e| anyhow::anyhow!("create {}: {e}", work_root.display()))?;
+    let path = override_file_path(work_root);
+    let tmp = work_root.join(format!(
+        ".{}.{}.tmp",
+        CAPACITY_OVERRIDE_FILENAME,
+        std::process::id()
+    ));
+    let mut bytes = serde_json::to_vec_pretty(ov)?;
+    bytes.push(b'\n');
+    std::fs::write(&tmp, &bytes).map_err(|e| anyhow::anyhow!("write {}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// Read `<work_root>/capacity_override.json` if present.
+pub fn read_capacity_override(path: &Path) -> anyhow::Result<Option<CapacityOverride>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => {
+            let parsed: CapacityOverride = serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+            if parsed.capacity == 0 || parsed.capacity > MAX_NODE_CAPACITY {
+                anyhow::bail!(
+                    "capacity override {} out of bounds (1..={})",
+                    parsed.capacity,
+                    MAX_NODE_CAPACITY
+                );
+            }
+            Ok(Some(parsed))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(anyhow::anyhow!("read {}: {err}", path.display())),
+    }
 }
 
 /// Minimal systemd `EnvironmentFile=` parser: `KEY=value` lines, optional
@@ -175,6 +272,9 @@ pub fn capacities_from_env_content(
         side_capacity: get("SANDBOXED_NODE_SIDE_CAPACITY")
             .map(|raw| parse_side_capacity(Some(raw)))
             .unwrap_or(fallback.side_capacity),
+        coordinator_capacity: get("SANDBOXED_NODE_COORDINATOR_CAPACITY")
+            .map(|raw| parse_coordinator_capacity(Some(raw)))
+            .unwrap_or(fallback.coordinator_capacity),
         min_free_gb: parse_min_free_gb(get("SANDBOXED_NODE_MIN_FREE_GB"))?
             .unwrap_or(fallback.min_free_gb),
     })
@@ -230,6 +330,11 @@ impl Admission {
         self.lock().capacity
     }
 
+    /// Outstanding shrink debt waiting for running jobs to release permits.
+    pub fn debt(&self) -> usize {
+        self.lock().debt
+    }
+
     /// Free slots under the current target (0 while a shrink is draining).
     pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
@@ -257,31 +362,62 @@ impl Admission {
         })
     }
 
-    /// Change the target size. Never interrupts a holder. Returns the
-    /// previous target.
+    /// Change the target size using the formally verified `orb_node_resize_step`
+    /// kernel. Never interrupts a holder. Returns the previous target.
     pub fn resize(&self, capacity: usize) -> usize {
+        let target = capacity.max(1);
         let mut state = self.lock();
         let previous = state.capacity;
-        if capacity > previous {
-            let grow = capacity - previous;
-            let cancelled = grow.min(state.debt);
-            state.debt -= cancelled;
-            self.semaphore.add_permits(grow - cancelled);
-        } else if capacity < previous {
-            let shrink = previous - capacity;
+        if target > previous {
+            let grow = target - previous;
+            let verdict = crate::orb_spec::node_resize_step(crate::orb_spec::NodeResizeInput {
+                is_operator_caller: true,
+                is_agent_caller: false,
+                is_static_node: true,
+                cur_cap: u32::try_from(previous).unwrap_or(u32::MAX),
+                cur_debt: u32::try_from(state.debt).unwrap_or(u32::MAX),
+                idle_permits: u32::try_from(self.semaphore.available_permits()).unwrap_or(u32::MAX),
+                target_cap: u32::try_from(target).unwrap_or(u32::MAX),
+                max_cap: u32::MAX,
+            });
+            let next_debt = if verdict.admitted {
+                verdict.next_debt as usize
+            } else {
+                state.debt.saturating_sub(grow)
+            };
+            let cancelled = state.debt.saturating_sub(next_debt);
+            state.debt = next_debt;
+            self.semaphore.add_permits(grow.saturating_sub(cancelled));
+        } else if target < previous {
+            let shrink = previous - target;
             let forgotten = self.semaphore.forget_permits(shrink);
-            state.debt += shrink - forgotten;
+            let verdict = crate::orb_spec::node_resize_step(crate::orb_spec::NodeResizeInput {
+                is_operator_caller: true,
+                is_agent_caller: false,
+                is_static_node: true,
+                cur_cap: u32::try_from(previous).unwrap_or(u32::MAX),
+                cur_debt: u32::try_from(state.debt).unwrap_or(u32::MAX),
+                idle_permits: u32::try_from(forgotten).unwrap_or(u32::MAX),
+                target_cap: u32::try_from(target).unwrap_or(u32::MAX),
+                max_cap: u32::MAX,
+            });
+            state.debt = if verdict.admitted {
+                verdict.next_debt as usize
+            } else {
+                state.debt + (shrink - forgotten)
+            };
         }
-        state.capacity = capacity;
+        state.capacity = target;
         previous
     }
 }
 
-/// Admission pools (`main`, `side`, and 1-slot operator `force`) and live free-disk floor of a node.
+/// Admission pools (`main`, `side`, `coordinator`, and 1-slot operator `force`) and live free-disk floor of a node.
 #[derive(Clone)]
 pub struct NodeCapacity {
     pub main: Arc<Admission>,
     pub side: Arc<Admission>,
+    pub coordinator: Arc<Admission>,
     pub force: Arc<Admission>,
     min_free_gb: Arc<AtomicU64>,
     /// Whether this is the process's own node (publishes the live values
@@ -301,6 +437,7 @@ impl NodeCapacity {
         Self {
             main,
             side,
+            coordinator: Admission::new(DEFAULT_COORDINATOR_CAPACITY),
             force: Admission::new(1),
             min_free_gb: Arc::new(AtomicU64::new(current_min_free_gb())),
             publish: false,
@@ -309,12 +446,15 @@ impl NodeCapacity {
 
     /// The running node's pools: also publishes process-wide live values.
     pub fn for_process(capacity: u32, side_capacity: usize) -> Self {
+        let coordinator_capacity = current_coordinator_capacity();
         let min_free_gb = current_min_free_gb();
         publish_capacities(capacity, side_capacity);
+        publish_coordinator_capacity(coordinator_capacity);
         publish_min_free_gb(min_free_gb);
         Self {
             main: Admission::new(capacity.max(1) as usize),
             side: Admission::new(side_capacity.max(1)),
+            coordinator: Admission::new(coordinator_capacity.max(1)),
             force: Admission::new(1),
             min_free_gb: Arc::new(AtomicU64::new(min_free_gb)),
             publish: true,
@@ -329,6 +469,10 @@ impl NodeCapacity {
         self.side.capacity()
     }
 
+    pub fn coordinator_capacity(&self) -> usize {
+        self.coordinator.capacity()
+    }
+
     pub fn min_free_gb(&self) -> u64 {
         self.min_free_gb.load(Ordering::Acquire)
     }
@@ -337,29 +481,48 @@ impl NodeCapacity {
         self.min_free_gb().saturating_mul(1 << 30)
     }
 
+    pub fn snapshot(&self) -> Capacities {
+        Capacities {
+            capacity: self.capacity(),
+            side_capacity: self.side_capacity(),
+            coordinator_capacity: self.coordinator_capacity(),
+            min_free_gb: self.min_free_gb(),
+        }
+    }
+
     /// Apply new capacities and disk floor. Returns whether anything changed.
     pub fn apply(&self, next: Capacities) -> bool {
         let capacity = next.capacity.max(1) as usize;
         let side = next.side_capacity.max(1);
+        let coordinator = next.coordinator_capacity.max(1);
         let old_main = self.main.resize(capacity);
         let old_side = self.side.resize(side);
+        let old_coord = self.coordinator.resize(coordinator);
         let old_min_free_gb = self.min_free_gb.swap(next.min_free_gb, Ordering::AcqRel);
         if self.publish {
             publish_capacities(next.capacity, side);
+            publish_coordinator_capacity(coordinator);
             publish_min_free_gb(next.min_free_gb);
             if old_min_free_gb != next.min_free_gb {
                 super::lean::notify_min_free_changed();
             }
         }
-        if old_main != capacity || old_side != side || old_min_free_gb != next.min_free_gb {
+        if old_main != capacity
+            || old_side != side
+            || old_coord != coordinator
+            || old_min_free_gb != next.min_free_gb
+        {
             tracing::info!(
                 capacity_from = old_main,
                 capacity_to = capacity,
                 side_capacity_from = old_side,
                 side_capacity_to = side,
+                coordinator_capacity_from = old_coord,
+                coordinator_capacity_to = coordinator,
                 min_free_gb_from = old_min_free_gb,
                 min_free_gb_to = next.min_free_gb,
                 main_in_use = self.main.in_use(),
+                coordinator_in_use = self.coordinator.in_use(),
                 "node capacity reloaded"
             );
             true
@@ -368,16 +531,81 @@ impl NodeCapacity {
         }
     }
 
+    /// Apply `<work_root>/capacity_override.json` on startup when present and at
+    /// least as recent as `env_path` (so operator UI edits survive restarts
+    /// while a newer `/etc/sandboxed-node.env` edit on disk still wins).
+    pub fn apply_startup_override(&self, work_root: &Path, env_path: &Path) -> bool {
+        let ov_path = override_file_path(work_root);
+        if !override_takes_precedence(&ov_path, env_path) {
+            return false;
+        }
+        match read_capacity_override(&ov_path) {
+            Ok(Some(ov)) => {
+                let mut next = self.snapshot();
+                next.capacity = ov.capacity;
+                if let Some(coord) = ov.coordinator_capacity {
+                    next.coordinator_capacity = coord.clamp(1, 16);
+                }
+                if let Some(side) = ov.side_capacity {
+                    next.side_capacity = side.clamp(1, 16);
+                }
+                if let Some(floor) = ov.min_free_gb {
+                    next.min_free_gb = floor;
+                }
+                self.apply(next)
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, path = %ov_path.display(), "ignoring invalid capacity override");
+                false
+            }
+        }
+    }
+
     /// Re-read `path` and apply it. Errors keep the running capacities.
     pub fn reload_from(&self, path: &Path) -> anyhow::Result<bool> {
+        self.reload_from_with_override(path, None)
+    }
+
+    /// Re-read `path` while respecting a newer persistent operator override file
+    /// (so `SIGHUP` or periodic env checks do not clobber live UI edits unless
+    /// `path` itself was edited more recently than `override_path`).
+    pub fn reload_from_with_override(
+        &self,
+        path: &Path,
+        override_path: Option<&Path>,
+    ) -> anyhow::Result<bool> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
-        let current = Capacities {
-            capacity: self.capacity(),
-            side_capacity: self.side_capacity(),
-            min_free_gb: self.min_free_gb(),
-        };
-        Ok(self.apply(capacities_from_env_content(&content, current)?))
+        let current = self.snapshot();
+        let mut parsed = capacities_from_env_content(&content, current)?;
+        if let Some(ov_path) = override_path {
+            if override_takes_precedence(ov_path, path) {
+                if let Ok(Some(ov)) = read_capacity_override(ov_path) {
+                    parsed.capacity = ov.capacity;
+                    if let Some(coord) = ov.coordinator_capacity {
+                        parsed.coordinator_capacity = coord.clamp(1, 16);
+                    }
+                    if let Some(side) = ov.side_capacity {
+                        parsed.side_capacity = side.clamp(1, 16);
+                    }
+                    if let Some(floor) = ov.min_free_gb {
+                        parsed.min_free_gb = floor;
+                    }
+                }
+            }
+        }
+        Ok(self.apply(parsed))
+    }
+}
+
+fn override_takes_precedence(override_path: &Path, env_path: &Path) -> bool {
+    let Some(ov_mtime) = mtime(override_path) else {
+        return false;
+    };
+    match mtime(env_path) {
+        Some(env_mtime) => ov_mtime > env_mtime,
+        None => true,
     }
 }
 
@@ -395,6 +623,16 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 /// Reload on `SIGHUP` and whenever the env file mtime changes (polled every
 /// [`POLL_INTERVAL`]).
 pub fn spawn_reload_watcher(capacity: NodeCapacity, path: PathBuf) {
+    spawn_reload_watcher_with_override(capacity, path, None);
+}
+
+/// Reload on `SIGHUP` and whenever the env file mtime changes, reconciling
+/// against an optional persistent operator override file.
+pub fn spawn_reload_watcher_with_override(
+    capacity: NodeCapacity,
+    path: PathBuf,
+    override_path: Option<PathBuf>,
+) {
     tokio::spawn(async move {
         let mut last_mtime = mtime(&path);
         #[cfg(unix)]
@@ -431,7 +669,7 @@ pub fn spawn_reload_watcher(capacity: NodeCapacity, path: PathBuf) {
                 continue;
             }
             last_mtime = current;
-            match capacity.reload_from(&path) {
+            match capacity.reload_from_with_override(&path, override_path.as_deref()) {
                 Ok(changed) => {
                     if forced && !changed {
                         tracing::info!(path = %path.display(), "reload: capacity unchanged");
@@ -452,18 +690,21 @@ mod tests {
     const FALLBACK: Capacities = Capacities {
         capacity: 7,
         side_capacity: 3,
+        coordinator_capacity: 2,
         min_free_gb: 30,
     };
 
     #[test]
     fn env_reparse_reads_capacities_and_disk_floor() {
         let content = "# node\nSANDBOXED_NODE_TOKEN=x\nexport SANDBOXED_NODE_CAPACITY=\"6\"\n\
-                       SANDBOXED_NODE_SIDE_CAPACITY='4'\nSANDBOXED_NODE_MIN_FREE_GB=80\n";
+                       SANDBOXED_NODE_SIDE_CAPACITY='4'\nSANDBOXED_NODE_COORDINATOR_CAPACITY=5\n\
+                       SANDBOXED_NODE_MIN_FREE_GB=80\n";
         assert_eq!(
             capacities_from_env_content(content, FALLBACK).unwrap(),
             Capacities {
                 capacity: 6,
                 side_capacity: 4,
+                coordinator_capacity: 5,
                 min_free_gb: 80,
             }
         );
@@ -473,6 +714,7 @@ mod tests {
             Capacities {
                 capacity: 7,
                 side_capacity: 3,
+                coordinator_capacity: 2,
                 min_free_gb: 0,
             }
         );
@@ -486,6 +728,7 @@ mod tests {
             Capacities {
                 capacity: 3,
                 side_capacity: 3,
+                coordinator_capacity: 2,
                 min_free_gb: 30,
             }
         );
@@ -495,6 +738,47 @@ mod tests {
         assert!(capacities_from_env_content("SANDBOXED_NODE_CAPACITY=lots\n", FALLBACK).is_err());
         assert!(capacities_from_env_content("SANDBOXED_NODE_MIN_FREE_GB=-5\n", FALLBACK).is_err());
         assert!(capacities_from_env_content("SANDBOXED_NODE_MIN_FREE_GB=bad\n", FALLBACK).is_err());
+    }
+
+    #[test]
+    fn runtime_override_persists_across_sighup_until_env_file_is_edited_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join("node.env");
+        let work_root = dir.path().join("work");
+        std::fs::write(&env_path, "SANDBOXED_NODE_CAPACITY=2\n").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+
+        write_capacity_override(
+            &work_root,
+            &CapacityOverride {
+                capacity: 8,
+                coordinator_capacity: Some(3),
+                side_capacity: None,
+                min_free_gb: None,
+                updated_at: "2026-11-01T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+
+        let cap = NodeCapacity::new(2, 2);
+        assert!(cap.apply_startup_override(&work_root, &env_path));
+        assert_eq!(cap.capacity(), 8);
+        assert_eq!(cap.coordinator_capacity(), 3);
+
+        // Simulated SIGHUP with untouched env_path must NOT revert the UI override.
+        let ov_path = override_file_path(&work_root);
+        assert!(!cap
+            .reload_from_with_override(&env_path, Some(&ov_path))
+            .unwrap());
+        assert_eq!(cap.capacity(), 8);
+
+        // Explicit later edit to /etc/sandboxed-node.env takes precedence again.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&env_path, "SANDBOXED_NODE_CAPACITY=5\n").unwrap();
+        assert!(cap
+            .reload_from_with_override(&env_path, Some(&ov_path))
+            .unwrap());
+        assert_eq!(cap.capacity(), 5);
     }
 
     #[test]

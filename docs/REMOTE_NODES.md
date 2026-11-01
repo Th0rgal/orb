@@ -253,13 +253,33 @@ behind capacity; defaults to four times `SANDBOXED_NODE_CAPACITY`).
 
 `systemctl restart sandboxed-node` retires every running job: on startup the
 node marks in-flight jobs `lost` and stops their leftover systemd scopes.
-Capacity and disk-floor changes therefore apply live instead. Edit
-`SANDBOXED_NODE_CAPACITY`, `SANDBOXED_NODE_SIDE_CAPACITY`, and/or
-`SANDBOXED_NODE_MIN_FREE_GB` in
-`/etc/sandboxed-node.env` (or `SANDBOXED_NODE_ENV_FILE`), then either wait up
-to 30 s (the node polls the file's mtime) or trigger it now with any of the
-following. There is deliberately no pid file: the work directory is writable
-by jobs, so systemd's `$MAINPID` is the only signal target.
+Capacity and disk-floor changes therefore apply live instead — either directly
+from Orb's **Machines** page (`POST /api/nodes/:name/capacity`, gated on both
+Core and `sandboxed-node` by the formal Lean 4 decision function
+`orb_node_resize_step`) or on the host via `/etc/sandboxed-node.env`:
+
+1. **From Orb (`Machines` page — Desktop, iOS, and Android):**
+   - Static fleet nodes display live slot utilization (`active / total active ·
+     queued`) and expose an inline **Job slot limit** control (`1..=256`).
+   - Saving calls `POST /api/nodes/:name/capacity` on Core, which mints a
+     short-lived `node:capacity` HMAC lease (`mission_id == Uuid::nil()`) and
+     calls `POST /capacity` on `sandboxed-node`. Autonomous agent/MCP callers
+     are denied by `orb_node_resize_step` (`ScopedAuthority`).
+   - `sandboxed-node` atomically persists the new limit to
+     `<work_root>/capacity_override.json`, resizes the live `Admission` pool,
+     and returns a fresh `NodeHeartbeat` that Core caches immediately.
+   - **Precedence across reloads and restarts:** `capacity_override.json` wins
+     across `SIGHUP`, 30 s mtime polling, and `sandboxed-node` restarts until
+     `/etc/sandboxed-node.env` is modified *after* the override file's mtime, so
+     periodic reloads never clobber an Orb UI edit while a newer host-side env
+     edit still takes effect.
+2. **From the host (`/etc/sandboxed-node.env`):**
+   - Edit `SANDBOXED_NODE_CAPACITY`, `SANDBOXED_NODE_COORDINATOR_CAPACITY`,
+     `SANDBOXED_NODE_SIDE_CAPACITY`, and/or `SANDBOXED_NODE_MIN_FREE_GB` in
+     `/etc/sandboxed-node.env` (or `SANDBOXED_NODE_ENV_FILE`), then either wait
+     up to 30 s (the node polls the file's mtime) or trigger it immediately.
+     There is deliberately no pid file: the work directory is writable by jobs,
+     so systemd's `$MAINPID` is the only signal target.
 
 ```bash
 sudo systemctl reload sandboxed-node        # needs ExecReload= above
@@ -267,24 +287,56 @@ sudo sandboxed-node reload                  # = systemctl reload sandboxed-node.
 sudo kill -HUP "$(systemctl show -p MainPID --value sandboxed-node)"
 ```
 
-- Grow: new permits are available immediately.
-- Shrink: running jobs keep their slots and are never interrupted; no new job
-  (or `/execute`) is admitted until the running count drops under the new
-  cap. Freed slots are retired as jobs finish.
-- Disk floor (`SANDBOXED_NODE_MIN_FREE_GB`): updates node-local admission and
+- **Grow:** idle permits cancel parked shrink debt first (`orb_node_resize_step`
+  `ConservedResource` law) and add any remainder to the live semaphore
+  immediately.
+- **Shrink:** running jobs keep their slots and are never interrupted; surplus
+  idle permits are retired immediately and any remaining deficit is parked as
+  monotone shrink debt (`Admission::debt`), absorbing permits as in-flight jobs
+  finish so no new job (or `/execute`) is admitted until the running count drops
+  under the new cap.
+- **Disk floor (`SANDBOXED_NODE_MIN_FREE_GB`):** updates node-local admission and
   wakes the cache GC controller immediately; the next `/heartbeat` advertises
   the new `min_free_disk_bytes`.
-- The next `/heartbeat` reports the new `capacity_total` and
-  `min_free_disk_bytes`; Core replaces its cached heartbeat on every poll, so
-  placement uses both within one heartbeat.
+- The next `/heartbeat` (and the synchronous `POST /capacity` response) reports
+  the new `capacity_total`, `coordinator_capacity`, and `min_free_disk_bytes`;
+  Core replaces its cached heartbeat immediately.
 - A key missing from the file keeps the running value; an invalid value is
   logged and ignored (the running values are kept). The default
   `SANDBOXED_NODE_MAX_QUEUED` (4x capacity) and the per-job memory budget
   follow the live capacity.
 
-Only the two capacities and `SANDBOXED_NODE_MIN_FREE_GB` reload. Any other env
-change (token, labels, bind, ...) still needs a restart, so wait for the node
-to be idle.
+Only the three capacities (`SANDBOXED_NODE_CAPACITY`,
+`SANDBOXED_NODE_COORDINATOR_CAPACITY`, `SANDBOXED_NODE_SIDE_CAPACITY`) and
+`SANDBOXED_NODE_MIN_FREE_GB` reload live. Any other env change (token, labels,
+bind, ...) still needs a restart, so wait for the node to be idle.
+
+### Coordinator & `schedule_wakeup` priority lane (`orb_node_lane_step`)
+
+Multi-hour child subagent/worker builds on a static host must never starve a
+root or mid-level coordinator turn (`schedule_wakeup` resume, interactive
+follow-up, or parent orchestrator) pinned to the same workspace/node:
+
+- `sandboxed-node` maintains a bounded `coordinator` semaphore
+  (`SANDBOXED_NODE_COORDINATOR_CAPACITY`, default `2`, clamped to `1..=16`)
+  alongside `main` (`SANDBOXED_NODE_CAPACITY`) and `side`
+  (`SANDBOXED_NODE_SIDE_CAPACITY`).
+- Every async `raw_command` dispatch is routed by the formal Lean 4 decision
+  function `orb_node_lane_step`:
+  - **Uncongested `main` preference:** when `main` has an idle permit,
+    coordinators acquire from `main` first (`AdmitMain`) so emergency
+    `coordinator` permits stay free.
+  - **Anti-starvation under saturation:** when `main` is full, eligible root or
+    mid-level coordinators (and `schedule_wakeup` resumes) acquire immediately
+    from `coordinator` (`AdmitCoordinator`) or race `main ∪ coordinator`
+    (`WaitMainOrCoordinator`) if all coordinator permits are also busy.
+  - **Worker & `/goal` isolation:** leaf child subagent workers
+    (`is_child_worker`) and native `/goal` loops (`native_goal`) are strictly
+    confined to `main` (`AdmitMain` / `WaitMainOnly`) and can never consume
+    `coordinator` or `side` permits.
+- Heartbeats report `priority_jobs` and `coordinator_capacity`; Core's
+  `select_node_auto` subtracts `priority_jobs` alongside `side_jobs` and
+  `forced_jobs` when computing occupied `main` slots.
 
 Why a restart still kills running jobs: jobs already run in their own
 `systemd-run --scope` units under the runner's user manager, so `KillMode=` on

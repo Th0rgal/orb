@@ -586,6 +586,7 @@ pub fn select_node_auto_with_estimated_disk_and_source(
             .saturating_add(heartbeat.queued_jobs)
             .saturating_sub(heartbeat.side_jobs)
             .saturating_sub(heartbeat.forced_jobs)
+            .saturating_sub(heartbeat.priority_jobs)
             .saturating_add(heartbeat.active_leases)
             .saturating_add(reservations.get(&node.id).copied().unwrap_or(0));
         if load >= heartbeat.capacity_total.saturating_mul(2) {
@@ -822,6 +823,10 @@ pub struct RemoteNodeView {
     pub queued_jobs: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forced_jobs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority_jobs: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator_capacity: Option<u32>,
     pub cpu_total: Option<u32>,
     pub mem_total_bytes: Option<u64>,
     pub mem_available_bytes: Option<u64>,
@@ -879,6 +884,8 @@ impl RemoteNodeView {
             active_jobs: heartbeat.map(|h| h.active_jobs),
             queued_jobs: heartbeat.map(|h| h.queued_jobs),
             forced_jobs: heartbeat.and_then(|h| (h.forced_jobs > 0).then_some(h.forced_jobs)),
+            priority_jobs: heartbeat.and_then(|h| (h.priority_jobs > 0).then_some(h.priority_jobs)),
+            coordinator_capacity: heartbeat.and_then(|h| h.coordinator_capacity),
             cpu_total: heartbeat.map(|h| h.cpu_total),
             mem_total_bytes: heartbeat.map(|h| h.mem_total_bytes),
             mem_available_bytes: heartbeat.map(|h| h.mem_available_bytes),

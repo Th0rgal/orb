@@ -226,4 +226,25 @@ final class OrbManagedMachinesTests: XCTestCase {
         var failed = boat1; failed.state = "failed"; failed.usd_per_hour = 0
         XCTAssertEqual(OrbManaged.providerGroupSummary([failed]), "1 machine")
     }
+
+    func testStaticNodeSlotSummaryAndCapacityBounds() {
+        let legacy: OrbJSON = .object(["id": .string("ashur"), "active_jobs": .number(2)])
+        XCTAssertEqual(OrbNodeCapacity.slotSummary(legacy), "2 active")
+
+        let idle: OrbJSON = .object(["id": .string("babylon"), "active_jobs": .number(3), "capacity_total": .number(6), "queued_jobs": .number(0)])
+        XCTAssertEqual(OrbNodeCapacity.slotSummary(idle), "3 / 6 active")
+
+        let queued: OrbJSON = .object(["id": .string("babylon"), "active_jobs": .number(6), "capacity_total": .number(6), "queued_jobs": .number(2)])
+        XCTAssertEqual(OrbNodeCapacity.slotSummary(queued), "6 / 6 active · 2 queued")
+
+        XCTAssertEqual(OrbNodeCapacity.parseDraft("1"), 1)
+        XCTAssertEqual(OrbNodeCapacity.parseDraft(" 8 "), 8)
+        XCTAssertEqual(OrbNodeCapacity.parseDraft("256"), 256)
+        XCTAssertNil(OrbNodeCapacity.parseDraft("0"))
+        XCTAssertNil(OrbNodeCapacity.parseDraft("257"))
+        XCTAssertNil(OrbNodeCapacity.parseDraft("-1"))
+
+        let updated = OrbNodeCapacity.applyOptimisticCapacity([queued], id: "babylon", capacity: 10)
+        XCTAssertEqual(OrbNodeCapacity.slotSummary(updated[0]), "6 / 10 active · 2 queued")
+    }
 }

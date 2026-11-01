@@ -98,6 +98,8 @@ fun OrbMachinesSettingsPage(
     var computersReady by remember { mutableStateOf(false) }
     var managedReloadKey by remember { mutableIntStateOf(0) }
     var managedEnabled by remember { mutableStateOf(false) }
+    var capacityDrafts by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var savingCapacityNodeId by remember { mutableStateOf<String?>(null) }
     val fleetNodes = remember(nodes, managedEnabled) {
         if (!managedEnabled) nodes
         else nodes.filterNot { node ->
@@ -143,6 +145,47 @@ fun OrbMachinesSettingsPage(
             } catch (e: Throwable) {
                 errorBanner = e.message
             } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun saveNodeCapacity(nodeId: String, rawDraft: String) {
+        if (busy) return
+        val parsed = OrbNodeCapacity.parseDraft(rawDraft)
+        if (parsed == null) {
+            errorBanner = "Job slot limit must be an integer between 1 and 256."
+            return
+        }
+        val prevNodes = nodes
+        nodes = OrbNodeCapacity.applyOptimisticCapacity(nodes, nodeId, parsed)
+        savingCapacityNodeId = nodeId
+        busy = true
+        errorBanner = null
+        scope.launch {
+            try {
+                val resp = core.request(
+                    path = "/api/nodes/${core.encodeComponent(nodeId)}/capacity",
+                    method = "POST",
+                    body = mapOf("capacity" to parsed)
+                )
+                val updated = OrbJSON.dict(resp)
+                if (updated != null) {
+                    val updatedRow = OrbRow(updated)
+                    val updatedId = updatedRow.str("id", "name") ?: nodeId
+                    nodes = nodes.map { row ->
+                        if ((row.str("id", "name") ?: row.id) == updatedId) updatedRow else row
+                    }
+                    capacityDrafts = capacityDrafts - nodeId
+                } else {
+                    loadMachines()
+                }
+                core.refreshAll()
+            } catch (e: Throwable) {
+                nodes = prevNodes
+                errorBanner = "Could not update slot limit: ${e.message ?: "Request failed"}"
+            } finally {
+                savingCapacityNodeId = null
                 busy = false
             }
         }
@@ -331,6 +374,17 @@ fun OrbMachinesSettingsPage(
                                                 fontSize = 12.sp
                                             )
                                         }
+                                        OrbNodeCapacity.slotSummary(node)?.let { slotSummary ->
+                                            Text(
+                                                text = slotSummary,
+                                                color = OrbStyle.textMuted,
+                                                fontSize = 11.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                modifier = Modifier.padding(end = 6.dp)
+                                            )
+                                        }
                                         Icon(
                                             imageVector = Icons.Default.ChevronRight,
                                             contentDescription = null,
@@ -340,7 +394,12 @@ fun OrbMachinesSettingsPage(
                                     }
 
                                     if (expanded) {
-                                        val activeJobs = node.int("active_jobs")?.toString() ?: "Unavailable"
+                                        val activeJobs = OrbNodeCapacity.slotSummary(node)
+                                            ?: node.int("active_jobs")?.toString()
+                                            ?: "Unavailable"
+                                        val nodeLabels = OrbManagedMachines.nodeLabels(node)
+                                        val isStaticNode = !OrbManagedMachines.isManagedNode(nodeId, nodeLabels)
+                                        val currentCap = node.int("capacity_total")
                                         val memStr = formatBytesGiB(
                                             node.double("mem_total_bytes"),
                                             node.double("mem_available_bytes")
@@ -361,6 +420,114 @@ fun OrbMachinesSettingsPage(
                                         ) {
                                             OrbKeyValueLine("Status", statusText)
                                             OrbKeyValueLine("Active jobs", activeJobs)
+                                            if (isStaticNode && currentCap != null) {
+                                                val draftRaw = capacityDrafts[nodeId] ?: currentCap.toString()
+                                                val parsedDraft = OrbNodeCapacity.parseDraft(draftRaw)
+                                                val isDirty = parsedDraft != null && parsedDraft != currentCap
+                                                val isSavingThis = savingCapacityNodeId == nodeId
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(
+                                                        text = "Job slot limit",
+                                                        color = Color.White,
+                                                        fontSize = 13.sp,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(28.dp)
+                                                            .clip(CircleShape)
+                                                            .background(OrbStyle.card)
+                                                            .border(1.dp, OrbStyle.border, CircleShape)
+                                                            .orbPressClickable {
+                                                                val base = parsedDraft ?: currentCap
+                                                                val next = (base - 1).coerceAtLeast(1)
+                                                                capacityDrafts = capacityDrafts + (nodeId to next.toString())
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Text(
+                                                            text = "−",
+                                                            color = Color.White,
+                                                            fontSize = 14.sp,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .width(52.dp)
+                                                            .clip(RoundedCornerShape(8.dp))
+                                                            .background(OrbStyle.card)
+                                                            .border(1.dp, OrbStyle.border, RoundedCornerShape(8.dp))
+                                                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        BasicTextField(
+                                                            value = draftRaw,
+                                                            onValueChange = { next ->
+                                                                capacityDrafts = capacityDrafts + (nodeId to next.filter { it.isDigit() }.take(3))
+                                                            },
+                                                            enabled = !isSavingThis,
+                                                            singleLine = true,
+                                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                                            textStyle = TextStyle(
+                                                                color = Color.White,
+                                                                fontSize = 13.sp,
+                                                                fontFamily = FontFamily.Monospace,
+                                                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                                            ),
+                                                            cursorBrush = SolidColor(Color.White),
+                                                            modifier = Modifier.fillMaxWidth()
+                                                        )
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(28.dp)
+                                                            .clip(CircleShape)
+                                                            .background(OrbStyle.card)
+                                                            .border(1.dp, OrbStyle.border, CircleShape)
+                                                            .orbPressClickable {
+                                                                val base = parsedDraft ?: currentCap
+                                                                val next = (base + 1).coerceAtMost(OrbNodeCapacity.MAX_CAPACITY)
+                                                                capacityDrafts = capacityDrafts + (nodeId to next.toString())
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Text(
+                                                            text = "+",
+                                                            color = Color.White,
+                                                            fontSize = 14.sp,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                    }
+                                                    if (isDirty || isSavingThis) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .clip(CircleShape)
+                                                                .background(OrbStyle.card)
+                                                                .border(1.dp, OrbStyle.border, CircleShape)
+                                                                .orbPressClickable {
+                                                                    if (!isSavingThis) saveNodeCapacity(nodeId, draftRaw)
+                                                                }
+                                                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = if (isSavingThis) "Saving…" else "Save",
+                                                                color = OrbStyle.inboxBlue,
+                                                                fontSize = 12.sp,
+                                                                fontWeight = FontWeight.Medium,
+                                                                maxLines = 1,
+                                                                softWrap = false
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             OrbKeyValueLine("Memory", memStr)
                                             OrbKeyValueLine("Disk", diskStr)
                                             if (cpuVal != null) {
@@ -467,6 +634,46 @@ internal fun OrbMiniField(
                 visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
                 modifier = Modifier.fillMaxWidth()
             )
+        }
+    }
+}
+
+object OrbNodeCapacity {
+    const val MAX_CAPACITY = 256
+
+    fun slotSummary(node: OrbRow): String? {
+        val active = node.int("active_jobs")
+        val total = node.int("capacity_total")
+        val queued = node.int("queued_jobs") ?: 0
+        val head = when {
+            active != null && total != null && total > 0 -> "$active / $total active"
+            active != null && active > 0 -> "$active active"
+            else -> null
+        }
+        return when {
+            head != null && queued > 0 -> "$head · $queued queued"
+            head != null -> head
+            queued > 0 -> "$queued queued"
+            else -> null
+        }
+    }
+
+    fun parseDraft(raw: String): Int? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty() || !trimmed.all { it.isDigit() }) return null
+        val n = trimmed.toIntOrNull() ?: return null
+        return if (n in 1..MAX_CAPACITY) n else null
+    }
+
+    fun applyOptimisticCapacity(nodes: List<OrbRow>, nodeId: String, capacity: Int): List<OrbRow> {
+        return nodes.map { row ->
+            val id = row.str("id", "name") ?: row.id
+            if (id != nodeId) return@map row
+            val active = (row.int("active_jobs") ?: 0).coerceAtLeast(0)
+            val updated = row.raw.toMutableMap()
+            updated["capacity_total"] = capacity
+            updated["capacity_available"] = (capacity - active).coerceAtLeast(0)
+            OrbRow(updated)
         }
     }
 }

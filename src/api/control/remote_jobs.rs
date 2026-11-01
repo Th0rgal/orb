@@ -720,6 +720,27 @@ pub(super) async fn submit_leased_remote_job(
         };
     }
     let side_question = fork::side_launch_receipt(&state.config.working_dir, mission.id)?.is_some();
+    let non_fork_parent = mission
+        .parent_mission_id
+        .filter(|&pid| !mission_settings::is_fork_of_parent(mission, pid));
+    let is_child_worker = if non_fork_parent.is_some() {
+        control
+            .mission_store
+            .get_child_missions(mission.id)
+            .await
+            .map(|children| children.is_empty())
+            .unwrap_or(true)
+    } else {
+        false
+    };
+    let native_goal = matches!(
+        plan,
+        RemoteHarnessPlan::Codex { .. } | RemoteHarnessPlan::Grok { .. }
+    ) && context_prompt.trim_start().starts_with("/goal");
+    let coordinator_priority = !side_question
+        && !native_goal
+        && !matches!(plan, RemoteHarnessPlan::Raw { .. })
+        && !is_child_worker;
     let request = crate::remote_node::SubmitJobRequest {
         job_id,
         mission_id: mission.id,
@@ -731,6 +752,9 @@ pub(super) async fn submit_leased_remote_job(
             companion_of: (!side_question).then(|| {
                 crate::api::durable_jobs::workspace_mission_id(&mission.project.tags, mission.id)
             }),
+            coordinator_priority,
+            is_child_worker,
+            native_goal,
             long_running,
             command: format!("{workspace_prefix}{}", execution.command),
             timeout_secs: None,

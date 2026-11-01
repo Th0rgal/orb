@@ -130,4 +130,6 @@ pub const EXPORTS: &[&str] = &[
     "orb_node_disk_admission_step",
     "orb_vm_cap_admit",
     "orb_slot_bypass_step",
+    "orb_node_resize_step",
+    "orb_node_lane_step",
 ];

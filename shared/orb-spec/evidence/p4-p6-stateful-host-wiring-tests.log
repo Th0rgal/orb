@@ -1,55 +1,483 @@
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 2 tests
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 test stateful_tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb)
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2227:10
+     |
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 22.00s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test orb_spec::tests::host_orb_wire_machine_patch_and_fd_bounds_gates_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3686 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
 
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2227:10
+     |
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.37s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3686 filtered out; finished in 0.54s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.05s
 
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2227:10
+     |
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3686 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
 
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2227:10
+     |
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::control_queue::native_schedule_pool_tests::outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3686 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
 
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2227:10
+     |
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3686 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
 
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2227:10
+     |
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::privilege_broker::tests::auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3686 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
 
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2227:10
+     |
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test managed::tests::resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3686 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
 
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:433:5
+    |
+432 |       return Err("Anchored workspace purge is unsupported on this platform".into());
+    |       ----------------------------------------------------------------------------- any code following this expression is unreachable
+433 | /     {
+434 | |         let conn = state
+435 | |             .projects
+436 | |             .connection
+...   |
+439 | |         require_no_accepted_actions(&conn)?;
+440 | |     }
+    | |_____^ unreachable statement
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable statement
+   --> src/api/control/workspace_purge.rs:627:5
+    |
+626 |     return Err("Anchored workspace purge is unsupported on this platform".into());
+    |     ----------------------------------------------------------------------------- any code following this expression is unreachable
+627 |     receipt.phase = Phase::Purged;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+
+warning: unused variable: `source`
+   --> src/api/control/workspace_purge.rs:405:5
+    |
+405 |     source: &FsPath,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_source`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scope_oom_killed` is never used
+    --> src/node/runner.rs:2227:10
+     |
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+     |          ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::tests::stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3686 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
 

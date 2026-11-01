@@ -32,6 +32,9 @@ pub const SCOPE_JOB_SUBMIT: &str = "job:submit";
 /// Lease scope for operator force-start of a queued job (`POST /jobs/:id/force`).
 pub const SCOPE_JOB_FORCE: &str = "job:force";
 
+/// Lease scope for live operator capacity updates (`POST /capacity`).
+pub const SCOPE_NODE_CAPACITY: &str = "node:capacity";
+
 fn default_protocol_version() -> u32 {
     // Nodes predating heartbeat v2 don't send the field at all.
     1
@@ -82,6 +85,12 @@ pub struct NodeHeartbeat {
     /// Subset of active jobs running on the operator force-bypass permit.
     #[serde(default)]
     pub forced_jobs: u32,
+    /// Subset of active jobs running on the bounded coordinator priority lane.
+    #[serde(default)]
+    pub priority_jobs: u32,
+    /// Configured coordinator priority-lane width (`SANDBOXED_NODE_COORDINATOR_CAPACITY`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_capacity: Option<u32>,
     /// Prewarmed toolchains cached on the node (empty until S3).
     #[serde(default)]
     pub cached_toolchains: Vec<String>,
@@ -361,6 +370,19 @@ pub enum JobPayload {
         /// behind its own jobs. Nodes that predate the field ignore it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         companion_of: Option<uuid::Uuid>,
+        /// Core-authorized root/mid-level coordinator or `schedule_wakeup`
+        /// resume turn. Eligible for the bounded `coordinator` priority lane
+        /// (`orb_node_lane_step`) when `main` is saturated so child subagent
+        /// workers on the same host cannot starve parent wakeups.
+        #[serde(default, skip_serializing_if = "is_false")]
+        coordinator_priority: bool,
+        /// Leaf child subagent worker mission (`parent_mission_id` set, not a
+        /// fork, and owns no children). Never admitted onto `coordinator` or `side`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_child_worker: bool,
+        /// Multi-hour native `/goal` harness run; bounded strictly to `main`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        native_goal: bool,
         /// Native goal owns its lifetime; cancellation and containment still apply.
         /// Requires protocol 5. Ordinary jobs remain bounded by the node ceiling.
         #[serde(default)]
@@ -452,6 +474,15 @@ pub struct ForceJobResponse {
     pub state: String,
     #[serde(default)]
     pub forced: bool,
+}
+
+/// Body of `POST /capacity` on `sandboxed-node`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateNodeCapacityRequest {
+    pub lease_token: String,
+    pub capacity: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_capacity: Option<u32>,
 }
 
 /// Durable cause recorded before a stop signal is delivered. Old nodes omit it.
@@ -814,6 +845,9 @@ mod tests {
         let payload = JobPayload::RawCommand {
             side_question: false,
             companion_of: None,
+            coordinator_priority: false,
+            is_child_worker: false,
+            native_goal: false,
             long_running: false,
             managed_auth: Vec::new(),
             command: "cargo test".to_string(),
@@ -842,6 +876,9 @@ mod tests {
             JobPayload::RawCommand {
                 side_question: false,
                 companion_of: None,
+                coordinator_priority: false,
+                is_child_worker: false,
+                native_goal: false,
                 long_running: false,
                 managed_auth: Vec::new(),
                 command: "true".to_string(),
@@ -1000,6 +1037,8 @@ mod tests {
             queued_jobs: 2,
             side_jobs: 0,
             forced_jobs: 0,
+            priority_jobs: 0,
+            coordinator_capacity: Some(2),
             cached_toolchains: vec![],
             source_bundle_capacity: None,
             min_free_disk_bytes: Some(30 << 30),

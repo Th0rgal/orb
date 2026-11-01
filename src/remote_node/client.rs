@@ -330,6 +330,37 @@ impl RemoteNodeClient {
             .await
             .map_err(|e| RemoteNodeError::Request(e.to_string()))
     }
+
+    /// Update live capacity on a static remote runner node (`POST /capacity`).
+    pub async fn update_capacity(
+        &self,
+        node: &RemoteNodeConfig,
+        shared_token: &str,
+        request: &crate::remote_node::protocol::UpdateNodeCapacityRequest,
+    ) -> Result<NodeHeartbeat, RemoteNodeError> {
+        let url = format!("{}/capacity", node.base_url);
+        let response = self
+            .http
+            .post(url)
+            .timeout(JOB_STATUS_TIMEOUT)
+            .bearer_auth(shared_token)
+            .json(request)
+            .send()
+            .await
+            .map_err(transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(RemoteNodeError::Rejected {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        response
+            .json::<NodeHeartbeat>()
+            .await
+            .map_err(|e| RemoteNodeError::Request(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -361,6 +392,8 @@ mod tests {
                 queued_jobs: 0,
                 side_jobs: 0,
                 forced_jobs: 0,
+                priority_jobs: 0,
+                coordinator_capacity: None,
                 cached_toolchains: vec![],
                 source_bundle_capacity: Some(crate::node::lean::source_bundle_capacity()),
                 min_free_disk_bytes: Some(10 << 30),
@@ -413,6 +446,9 @@ mod tests {
             payload: crate::remote_node::protocol::JobPayload::RawCommand {
                 side_question: false,
                 companion_of: None,
+                coordinator_priority: false,
+                is_child_worker: false,
+                native_goal: false,
                 long_running: false,
                 command: "true".to_string(),
                 timeout_secs: None,

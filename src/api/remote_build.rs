@@ -2503,6 +2503,9 @@ printf '%s' "$REMOTE_BUILD_TEST_HTTP_STATUS"
             payload: JobPayload::RawCommand {
                 side_question: false,
                 companion_of: None,
+                coordinator_priority: false,
+                is_child_worker: false,
+                native_goal: false,
                 long_running: false,
                 command: "true".into(),
                 timeout_secs: None,

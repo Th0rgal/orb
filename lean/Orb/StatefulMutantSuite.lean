@@ -414,4 +414,63 @@ theorem all_21_stateful_mutants_killed :
        (mutantStreamUnboundedOpenFenceTail ⟨16, 12, 12⟩ ⟨16, 12, 12, 40, 4, 8⟩).checkpoint) := by
   decide
 
+/-! ## Family 8: Live Node Capacity Resize & Coordinator Priority Lane Mutants -/
+
+/-- Mutant 8A (Shrink debt drop): forgets `debt` during a live shrink when `idlePermits == 0`,
+    falsely reporting extra free capacity while running holders are still active. -/
+def mutantNodeResizeDropShrinkDebt (s : NodeResizeState) (c : NodeResizeCheck) :
+    NodeResizeState :=
+  let c' := effectiveNodeResize s c
+  if nodeResizeMetaGate.gate c' then
+    ⟨c.targetCap, 0⟩
+  else s
+
+/-- Mutant 8B (Worker steals coordinator lane): omits `!(isChildWorker == 1)` when `Main` is
+    saturated (`mainRunning >= mainMax`), allowing subagent workers to exhaust `Coordinator`
+    reserve slots and starve root coordinator `schedule_wakeup` turns. -/
+def mutantNodeLaneWorkerStealsCoordinator (s : NodeLaneCheck) : UInt32 :=
+  if s.isSideQuestion == 1 then
+    if s.sideRunning < s.sideMax then 258 else 514
+  else if s.hasWorkspaceBg == 1 then
+    if s.coordRunning < s.coordMax then 260
+    else if s.mainRunning < s.mainMax then 257
+    else 515
+  else if s.isCoordinatorPriority == 1 && !(s.isLongRunning == 1) then
+    if s.mainRunning < s.mainMax then 257
+    else if s.coordRunning < s.coordMax then 259
+    else 515
+  else if s.mainRunning < s.mainMax then
+    257
+  else
+    513
+
+/-- Mutant 8C (Coordinator starved behind workers): routes coordinator/wakeup turns (`hasWorkspaceBg == 0`)
+    strictly to `Main` (`513` when `mainRunning >= mainMax`) instead of failing over to `Coordinator`. -/
+def mutantNodeLaneStarveCoordinatorWakeup (s : NodeLaneCheck) : UInt32 :=
+  if s.isSideQuestion == 1 then
+    if s.sideRunning < s.sideMax then 258 else 514
+  else if s.hasWorkspaceBg == 1 then
+    if s.coordRunning < s.coordMax then 260
+    else if s.mainRunning < s.mainMax then 257
+    else 515
+  else if s.mainRunning < s.mainMax then
+    257
+  else
+    513
+
+theorem kill_node_resize_drop_shrink_debt :
+    (mutantNodeResizeDropShrinkDebt ⟨10, 0⟩ ⟨1, 0, 1, 10, 0, 0, 6, 256⟩).debt ≠
+      (nodeResizeMachineStep ⟨10, 0⟩ ⟨1, 0, 1, 10, 0, 0, 6, 256⟩).1.debt := by
+  decide
+
+theorem kill_node_lane_worker_steals_coordinator :
+    mutantNodeLaneWorkerStealsCoordinator ⟨0, 1, 0, 1, 0, 10, 10, 0, 2, 0, 2⟩ ≠
+      nodeLaneStep 0 1 0 1 0 10 10 0 2 0 2 := by
+  decide
+
+theorem kill_node_lane_starve_coordinator_wakeup :
+    mutantNodeLaneStarveCoordinatorWakeup ⟨0, 1, 0, 0, 0, 10, 10, 0, 2, 0, 2⟩ ≠
+      nodeLaneStep 0 1 0 0 0 10 10 0 2 0 2 := by
+  decide
+
 end Orb.StatefulMutantSuite

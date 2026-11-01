@@ -337,17 +337,19 @@ class Harness(unittest.TestCase):
     def test_public_export_inventory_matches_current_manifest_and_rejects_drift(self):
         manifest = conformance.load_manifest(conformance.ORB / "shared/orb-spec/kernel_abi.json")
         functions = conformance.public_export_functions(manifest)
-        self.assertEqual(len(manifest["functions"]), 130)
-        self.assertEqual(len(functions), 129)
+        self.assertEqual(len(manifest["functions"]), 132)
+        self.assertEqual(len(functions), 131)
         self.assertIn("orb_slot_bypass_step", {f["name"] for f in functions})
+        self.assertIn("orb_node_resize_step", {f["name"] for f in functions})
+        self.assertIn("orb_node_lane_step", {f["name"] for f in functions})
         self.assertNotIn("lp_orb_x2dspec_Orb_Kernel_accessStep___redArg", {f["name"] for f in functions})
         shrunk = copy.deepcopy(manifest)
         shrunk["functions"] = [f for f in shrunk["functions"] if f["name"] != "orb_slot_bypass_step"]
         with self.assertRaises(ValueError):
             conformance.public_export_functions(shrunk)
         cases, witness_cases = conformance.build_corpus(functions)
-        self.assertEqual(len(functions) * 8, 1032)
-        self.assertEqual(len(cases), 1052)
+        self.assertEqual(len(functions) * 8, 1048)
+        self.assertEqual(len(cases), 1068)
         self.assertEqual(len(witness_cases), 21)
 
 

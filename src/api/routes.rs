@@ -907,6 +907,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .merge(super::mission_stats::routes())
         .route("/api/nodes/:name/cordon", post(cordon_remote_node))
         .route("/api/nodes/:name/uncordon", post(uncordon_remote_node))
+        .route(
+            "/api/nodes/:name/capacity",
+            post(update_remote_node_capacity),
+        )
         .route("/api/ai/usage/summary", get(get_ai_usage_summary))
         .route("/api/ai/proxy/health", get(get_ai_proxy_health))
         .route("/api/ai/proxy/timing", get(get_ai_proxy_timing))
@@ -2005,6 +2009,137 @@ fn set_remote_node_cordon(
         "cordoned": cordoned,
         "changed": changed,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateNodeCapacityApiRequest {
+    capacity: u32,
+    #[serde(default)]
+    coordinator_capacity: Option<u32>,
+}
+
+/// Live-resize the job slot limit on a static remote runner node (`POST /api/nodes/:name/capacity`)
+/// without restarting Orb, Core, or `sandboxed-node`.
+async fn update_remote_node_capacity(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(req): Json<UpdateNodeCapacityApiRequest>,
+) -> Result<Json<crate::remote_node::RemoteNodeView>, (StatusCode, String)> {
+    let static_node = state
+        .config
+        .remote_nodes
+        .nodes
+        .iter()
+        .find(|node| node.id == name)
+        .cloned();
+    let is_managed = crate::managed::node_configs()
+        .iter()
+        .any(|node| node.id == name);
+    if static_node.is_none() && !is_managed {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("unknown remote node '{name}'"),
+        ));
+    }
+    let cached = state.fleet.get(&name);
+    let cur_cap = cached
+        .as_ref()
+        .and_then(|c| c.last_heartbeat.as_ref().map(|h| h.capacity_total))
+        .unwrap_or(1)
+        .max(1);
+    let idle_permits = cached
+        .as_ref()
+        .and_then(|c| c.last_heartbeat.as_ref().map(|h| h.capacity_available))
+        .unwrap_or(0);
+    let verdict = crate::orb_spec::node_resize_step(crate::orb_spec::NodeResizeInput {
+        is_operator_caller: true,
+        is_agent_caller: false,
+        is_static_node: static_node.is_some(),
+        cur_cap,
+        cur_debt: 0,
+        idle_permits,
+        target_cap: req.capacity,
+        max_cap: crate::node::capacity::MAX_NODE_CAPACITY,
+    });
+    if !verdict.admitted {
+        let msg = match verdict.decision {
+            crate::orb_spec::NodeResizeDecision::RejectNonStaticNode => {
+                format!("managed cloud machine '{name}' has fixed VM sizing; only static fleet nodes support live slot resizing")
+            }
+            crate::orb_spec::NodeResizeDecision::RejectOutOfBounds => {
+                format!(
+                    "capacity {} is out of bounds (must be between 1 and {})",
+                    req.capacity,
+                    crate::node::capacity::MAX_NODE_CAPACITY
+                )
+            }
+            other => format!("capacity resize rejected ({other:?})"),
+        };
+        return Err((StatusCode::BAD_REQUEST, msg));
+    }
+    let Some(node) = static_node else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("managed cloud machine '{name}' does not support live slot resizing"),
+        ));
+    };
+    let shared_token = crate::remote_node::node_token(&node.token_env)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("remote node '{name}' has no token in {}", node.token_env),
+            )
+        })?;
+    let claims = crate::remote_node::LeaseClaims {
+        mission_id: uuid::Uuid::nil(),
+        node_id: node.id.clone(),
+        scope: crate::remote_node::SCOPE_NODE_CAPACITY.to_string(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).timestamp(),
+        job_id: None,
+    };
+    let lease_token = crate::remote_node::create_lease_token(&claims, &shared_token)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let client = crate::remote_node::RemoteNodeClient::default();
+    let heartbeat = client
+        .update_capacity(
+            &node,
+            &shared_token,
+            &crate::remote_node::UpdateNodeCapacityRequest {
+                lease_token,
+                capacity: req.capacity,
+                coordinator_capacity: req.coordinator_capacity,
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            crate::remote_node::RemoteNodeError::Rejected {
+                status: 404 | 405, ..
+            } => (
+                StatusCode::NOT_IMPLEMENTED,
+                format!(
+                    "Node '{name}' is running an older sandboxed-node binary without POST /capacity; upgrade sandboxed-node on '{name}' first"
+                ),
+            ),
+            crate::remote_node::RemoteNodeError::Rejected { status, body } => (
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                if body.trim().is_empty() {
+                    format!("Node '{name}' rejected capacity update (HTTP {status})")
+                } else {
+                    body
+                },
+            ),
+            other => (
+                StatusCode::BAD_GATEWAY,
+                format!("Cannot reach node '{name}' to update capacity: {other}"),
+            ),
+        })?;
+    state.fleet.record_heartbeat(&node.id, heartbeat);
+    let updated_cached = state.fleet.get(&node.id);
+    let mut view = crate::remote_node::RemoteNodeView::from_cache(&node, updated_cached.as_ref());
+    view.cordoned = state.fleet.is_cordoned(&node.id);
+    Ok(Json(view))
 }
 
 /// Optional query parameters for the stats endpoint.
