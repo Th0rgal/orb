@@ -816,7 +816,15 @@ Create `/etc/caddy/Caddyfile`:
 
 ```
 agent.yourdomain.com {
-    reverse_proxy localhost:3000
+    reverse_proxy localhost:3000 {
+        flush_interval -1
+    }
+
+    # Keep API event streams uncompressed, including on older Caddy versions.
+    @compressible {
+        not path /api/*
+    }
+    encode @compressible zstd gzip
 }
 ```
 
@@ -827,6 +835,11 @@ systemctl enable --now caddy
 ```
 
 Caddy will automatically obtain TLS certificates for your domain.
+
+API responses are excluded from compression by path so this also covers clients
+that do not send an `Accept: text/event-stream` header. Keep this exclusion if
+you add or change compression settings. See [streaming troubleshooting](#104-terminal-stuck-at-connecting)
+if the terminal or mission events do not connect.
 
 ### 10.2 Nginx (manual certificate setup)
 
@@ -878,6 +891,32 @@ Block direct access to port 3000 from the internet:
 iptables -A INPUT -p tcp --dport 3000 -s 127.0.0.1 -j ACCEPT
 iptables -A INPUT -p tcp --dport 3000 -j DROP
 ```
+
+### 10.4 Terminal stuck at connecting
+
+The terminal depends on the `/api/control/stream` server-sent events (SSE)
+connection. A proxy that buffers the stream can delay status events and leave
+the terminal showing "connecting". Older Caddy compression implementations can
+also delay SSE headers or events; gzip encoding itself is not inherently
+incompatible with SSE.
+
+In the browser's Network panel, inspect `/api/control/stream`: a successful
+authenticated request should return `Content-Type: text/event-stream` and
+receive events incrementally while the request remains open. A pending request
+is normal for SSE. Resolve HTTP authentication errors separately.
+
+For Caddy, use the API compression exclusion and `flush_interval -1` in the
+configuration above. Validate and reload after editing:
+
+```bash
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+systemctl reload caddy
+```
+
+For Nginx, keep `proxy_buffering off` and `proxy_cache off` as shown above. If
+compression is enabled globally, add `gzip off;` to the proxied location when
+diagnosing delayed events. Apply equivalent streaming exclusions at every
+proxy or CDN between the browser and Core, then reconnect the terminal.
 
 ---
 
