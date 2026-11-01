@@ -3630,6 +3630,12 @@ async fn discover_managed_providers_from_bitwarden(
     state: Arc<AppState>,
     manager: Arc<crate::managed::ManagedManager>,
 ) {
+    if !manager.allows_bitwarden_provider_discovery() {
+        tracing::debug!(
+            "Skipping Bitwarden managed-provider discovery (instance has not opted into managed compute)"
+        );
+        return;
+    }
     let Ok(summaries) = super::secret_broker::broker(&state)
         .list_all(&state, false)
         .await

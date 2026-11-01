@@ -2200,7 +2200,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -2289,7 +2289,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -2391,7 +2391,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -2493,7 +2493,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -2595,7 +2595,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -2697,7 +2697,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -2799,7 +2799,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -2902,15 +2902,15 @@
           },
           {
             "path": "src/managed/mod.rs",
-            "sha256": "f403b86478538fd4c41f05eb3073b542e750e1051326cbc24339d1d27e3f191b"
+            "sha256": "49e47df371362b325270bba59eb57be243c90b0418032ebfa5012ec94bcc5a79"
           },
           {
             "path": "src/managed/tests.rs",
-            "sha256": "a7d31aa007e6aca879127b4f8a06b96ea6e221571d4a206fd0288ed210929a59"
+            "sha256": "1e56bc8b28ce4cea0edd28b245a032ab324e5f8ab99182eb46e98a3934e37f26"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -3025,7 +3025,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -3599,7 +3599,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "68cd3bdfee7e4e4c6a54c1b2f197af01fce2034be6a4e377240e42e5ee31eadd"
+            "sha256": "aa5fb82569b22fe241b1e5663bf4fccc0c048ee2416b016b5bd4383194b233a5"
           }
         ],
         "execution": {
@@ -3765,15 +3765,15 @@
           },
           {
             "path": "src/managed/mod.rs",
-            "sha256": "f403b86478538fd4c41f05eb3073b542e750e1051326cbc24339d1d27e3f191b"
+            "sha256": "49e47df371362b325270bba59eb57be243c90b0418032ebfa5012ec94bcc5a79"
           },
           {
             "path": "src/managed/tests.rs",
-            "sha256": "a7d31aa007e6aca879127b4f8a06b96ea6e221571d4a206fd0288ed210929a59"
+            "sha256": "1e56bc8b28ce4cea0edd28b245a032ab324e5f8ab99182eb46e98a3934e37f26"
           },
           {
             "path": "shared/orb-spec/evidence/mission-vm-limits-tests.log",
-            "sha256": "8c18bb798688492a5fc366732ca96bfa437267355727534660aba0d04ed60f2a"
+            "sha256": "15c594ac181736710f371167821b81ddc4702417c57742de700885dca82465ab"
           }
         ],
         "execution": {
