@@ -77,8 +77,8 @@ function buildReport(): LocalSkillsReport {
       {
         id: "antigravity",
         name: "Antigravity",
-        global_rel: "~/.agents/skills",
-        global_path: "/Users/thomas/.agents/skills",
+        global_rel: "~/.gemini/config/skills",
+        global_path: "/Users/thomas/.gemini/config/skills",
         project_rel: ".agents/skills",
         exists: true,
         skill_count: synced ? 37 : 2,

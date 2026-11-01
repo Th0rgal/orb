@@ -78,16 +78,16 @@ const HARNESS_META: Record<
   },
   codex: {
     name: "Codex",
-    globalRel: "~/.codex/skills · ~/.agents/skills",
+    globalRel: "~/.codex/skills",
     projectRel: ".agents/skills",
     mechanism: "Scans .agents/skills from cwd to repo root plus ~/.codex/skills",
   },
   vibe: { name: "Mistral Vibe", globalRel: "~/.vibe/skills", projectRel: ".vibe/skills", mechanism: "Native Vibe skill discovery" },
   antigravity: {
     name: "Antigravity",
-    globalRel: "~/.agents/skills",
+    globalRel: "~/.gemini/config/skills",
     projectRel: ".agents/skills",
-    mechanism: "Workspace .agents/skills and global ~/.agents/skills",
+    mechanism: "Workspace .agents/skills and global ~/.gemini/config/skills",
   },
   opencode: {
     name: "OpenCode",
