@@ -31,7 +31,11 @@ function getHighlighterModule() {
       Highlighter,
       darkTheme,
       lightTheme,
-    }));
+    })).catch((error) => {
+      // A transient chunk download failure must not poison future mounts.
+      highlighterModulePromise = null;
+      throw error;
+    });
   }
   return highlighterModulePromise;
 }
@@ -56,9 +60,10 @@ export const LazyJsonHighlighter = memo(function LazyJsonHighlighter({
 
   useEffect(() => {
     let cancelled = false;
-    getHighlighterModule().then((mod) => {
-      if (!cancelled) setLoaded(mod);
-    });
+    getHighlighterModule().then(
+      (mod) => { if (!cancelled) setLoaded(mod); },
+      () => { /* Keep the readable plain-text fallback if loading fails. */ },
+    );
     return () => {
       cancelled = true;
     };
