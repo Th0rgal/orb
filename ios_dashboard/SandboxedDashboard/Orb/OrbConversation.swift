@@ -315,10 +315,10 @@ struct OrbConversation: View {
                         OrbMissionUnreadStore.shared.markRead(id: id, updatedAt: ts.isEmpty ? nil : ts, status: mission["status"].text, hasInteraction: !pendingQuestionEvents.isEmpty)
                     } else if !selection.cloud && selection.node.isEmpty {
                         if let cached = OrbReadCache.read("catalog:agent") {
-                            selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items) ?? "core"
+                            selection.node = OrbSelection.firstAvailableNodeID(cached["nodes"]["nodes"].items, backend: selection.backend) ?? "core"
                         }
                         if let catalog = try? await OrbReadCache.agentCatalog(), !selection.cloud && (selection.node.isEmpty || selection.node == "core") {
-                            selection.node = OrbSelection.firstAvailableNodeID(catalog["nodes"]["nodes"].items) ?? "core"
+                            selection.node = OrbSelection.firstAvailableNodeID(catalog["nodes"]["nodes"].items, backend: selection.backend) ?? "core"
                         }
                     }
                     let targetProject = effectiveProjectSlug

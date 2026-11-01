@@ -90,10 +90,22 @@ struct OrbSelection {
         if cloud && account.isEmpty || !cloud && backend.isEmpty { throw OrbHTTPError(status: 400, detail: "Choose an available agent and account.") }
         if provider == "cursor_cloud" && (repository.isEmpty || gitRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) { throw OrbHTTPError(status: 400, detail: "Choose a repository and Git reference for Cursor Cloud.") }
     }
+    static let minAutoNodeMemBytes: Double = 8.0 * 1024.0 * 1024.0 * 1024.0
+    static let minAutoNodeDiskBytes: Double = 20.0 * 1024.0 * 1024.0 * 1024.0
+
     static func isUsableComputeNode(_ node: OrbJSON) -> Bool {
         guard node["status"].text == "online", !node["cordoned"].flag else { return false }
         let labels = node["labels"].items.map(\.text)
         return !labels.contains("manual-only")
+    }
+    static func isAutoSchedulableNode(_ node: OrbJSON, backend: String? = nil) -> Bool {
+        guard node["status"].text == "online", !node["cordoned"].flag, !node["disk_pressure_pinned"].flag else { return false }
+        let labels = node["labels"].items.map(\.text)
+        if labels.contains("manual-only") || labels.contains("managed") || labels.contains("small") { return false }
+        if let mem = node["mem_available_bytes"].number, mem < minAutoNodeMemBytes { return false }
+        if let disk = node["disk_available_bytes"].number, disk < minAutoNodeDiskBytes { return false }
+        if let backend, !backend.isEmpty, node["quarantined_harnesses"].items.contains(where: { $0.text == backend }) { return false }
+        return true
     }
     static func sortedComputeNodes(_ rawNodes: [OrbJSON]) -> [OrbJSON] {
         let hasSparkAdmin = rawNodes.contains { $0["id"].text == "dgx-spark-admin" && $0["status"].text == "online" }
@@ -111,9 +123,9 @@ struct OrbSelection {
             return a["id"].text < b["id"].text
         }
     }
-    static func firstAvailableNodeID(_ rawNodes: [OrbJSON]) -> String? {
+    static func firstAvailableNodeID(_ rawNodes: [OrbJSON], backend: String? = nil) -> String? {
         let sorted = sortedComputeNodes(rawNodes)
-        guard let first = sorted.first(where: isUsableComputeNode) else { return nil }
+        guard let first = sorted.first(where: { isAutoSchedulableNode($0, backend: backend) }) else { return nil }
         let id = first["id"].text
         return id.isEmpty ? nil : id
     }
@@ -206,7 +218,7 @@ struct OrbAgentPicker: View {
         backends = rawBackends.filter { $0["id"].text != "gemini" }
         nodes = OrbSelection.sortedComputeNodes(catalog["nodes"]["nodes"].items)
         if !existing && selection.node.isEmpty {
-            selection.node = OrbSelection.firstAvailableNodeID(nodes) ?? "core"
+            selection.node = OrbSelection.firstAvailableNodeID(nodes, backend: selection.backend) ?? "core"
         }
         backendModelsMap = catalog["models"]["backends"]
         models = backendModelsMap[selection.backend].items

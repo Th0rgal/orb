@@ -1,6 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import { render } from "@solidjs/testing-library";
-import { MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, machineLoad, machineLoadTitle, recordFleet, recordLocalMemory, recordMissions } from "../src/machineLoad";
+import { MIN_AUTO_NODE_DISK_BYTES, MIN_AUTO_NODE_MEM_BYTES, MachineLoadBadge, byLeastLoaded, firstAvailableNodeId, machineLoad, machineLoadTitle, recordFleet, recordLocalMemory, recordMissions } from "../src/machineLoad";
+import autoNodeSelectionFixture from "../../shared/orb-spec/fixtures/auto-node-selection.json";
 
 const GiB = 1024 ** 3;
 const mission = (id: string, status: string, extra: Record<string, unknown> = {}) => ({ id, status, history: [], created_at: "", updated_at: "", backend: "claudecode", ...extra }) as any;
@@ -65,4 +66,19 @@ it("selects the first online uncordoned non-manual node from the sorted list", (
   ];
   expect(firstAvailableNodeId(nodes)).toBe("babylon");
   expect(firstAvailableNodeId([nodes[0], nodes[3]])).toBeUndefined();
+});
+
+it("matches shared auto-node-selection spec fixture", () => {
+  expect(MIN_AUTO_NODE_MEM_BYTES).toBe(autoNodeSelectionFixture.minMemBytes);
+  expect(MIN_AUTO_NODE_DISK_BYTES).toBe(autoNodeSelectionFixture.minDiskBytes);
+  for (const c of autoNodeSelectionFixture.cases) {
+    recordFleet(c.nodes as any);
+    const activeMissions = c.nodes.flatMap((n: any, idx: number) =>
+      Array.from({ length: n.active_jobs ?? 0 }, (_, j) =>
+        mission(`m-${idx}-${j}`, "running", { remote_node_id: n.id }),
+      ),
+    );
+    recordMissions(activeMissions);
+    expect(firstAvailableNodeId(c.nodes as any, c.backend) ?? null, c.name).toBe(c.expected);
+  }
 });
