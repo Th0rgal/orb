@@ -110,18 +110,66 @@ Once Core accepts a `/btw` turn (`POST /api/control/missions/:id/btw/agent` or
      sending a duplicate message or throwing `'The side agent is still running'`.
    - Distinct questions sent while `current` is active continue to throw
      `'The side agent is still running. Stop it before sending another question.'`
-     (when called directly; `SideQuestionPanel` queues follow-up drafts while
-     `busy()` is true).
+     when `askBtwAgent` is invoked directly, while `queueBtwFollowUp` (used by
+     `SideQuestionPanel`) submits follow-ups into Core's durable queue (`POST
+     /api/control/message` with `queue_followup: true`) or the local queue worker.
+
+## 4. Unified follow-up queue & multi-turn stream hygiene (P0)
+
+Side conversations use the **same durable follow-up queue** as the main
+conversation rather than an isolated browser-only draft array:
+
+1. **Server-backed queueing (`queue_followup: true`)**:
+   - Submitting a `/btw` follow-up while the side session is running (or still
+     launching its child mission) stages incremental `<main_conversation_update>`
+     context (`queuedCursor ?? pendingCursor ?? conversationCursor`) and posts to
+     `POST /api/control/message` with `queue_followup: true` and a stable
+     `client_message_id` (or `enqueueLocalMessage` when the side session is
+     client-placed locally).
+   - Queued rows render through the shared `RemoteQueue` / `QueuedMessages` (desktop),
+     `OrbFollowUpQueue` (iOS), and `OrbFollowUpQueueView` (Android) components,
+     supporting **Edit**, **Send now** (`POST /api/control/queue/:id/send-now?interrupt=true`),
+     and **Remove** (`DELETE /api/control/queue/:id`).
+   - Because Core stores the wrapped `/btw` prompt (`<main_conversation_update> …
+     Current request:\n<question>`), queue display and composer editing extract
+     the user question (`extractBtwUserQuestion`), while in-place `PATCH
+     /api/control/queue/:id` edits replace only the `Current request:` body
+     (`replaceBtwUserQuestion`), preserving the incremental context wrapper and
+     any `Attachment:` lines.
+2. **Queued `user_message` isolation & seamless Turn N -> Turn N+1 handoff**:
+   - Pre-submitted `user_message` events carrying `metadata.queued === true`
+     never close or truncate the active `/btw` turn (`btwTurnEvents`,
+     `parseBtwThread`, `OrbBtwThreads.parse`, `OrbSideAgent.parseTurns`).
+   - When Core finishes Turn N and immediately dispatches queued Turn N+1 on the
+     same child mission (emitting a non-queued `user_message` with
+     `sequence > activeUserSequence`), `watchBtw` emits the completed Turn N
+     exchange, advances to Turn N+1's question and sequence cursor, and
+     incrementally polls forward (`since` last seen sequence) rather than
+     re-paging the entire child event history on every 5 s poll.
+   - Legacy browser-only `saved.queue` entries from older builds are deduplicated
+     against Core's answered/active `/btw` history on mount before migrating any
+     genuinely unsent item into the durable queue.
+3. **Live working status & OpenCode auto-compaction filtering**:
+   - While `busy` is true, the panel keeps the live working status indicator
+     (`Working… · Ns`) visible below partial streamed narration/text so long
+     multi-tool turns never look frozen.
+   - OpenCode auto-compaction checkpoints (`## Objective` … `## Work State` /
+     `## Progress` … `## Next Move` … `## Relevant Files`, with or without a
+     trailing `compaction_continue` synthetic message) are suppressed both in
+     Core's OpenCode stream parser (`remote_grok.rs`) and in client `/btw`
+     parsers across desktop, iOS, and Android.
 
 ## Client parity
 
-- **Orb desktop (`orb/`)**: implemented in `orb/src/SideQuestionPanel.tsx` and
-  `orb/src/btwAgent.ts`.
+- **Orb desktop (`orb/`)**: implemented in `orb/src/SideQuestionPanel.tsx`,
+  `orb/src/btwAgent.ts`, `orb/src/RemoteQueue.tsx`, and `orb/src/messagePresentation.ts`.
 - **iOS (`ios_dashboard/SandboxedDashboard/Orb/OrbSideQuestion.swift`)**:
-  `OrbBtwStore` already caches finished threads by `(activity, status)` stamp,
-  fetches uncached threads concurrently via Swift `Task` groups, and never
-  synthesizes `"Side question interrupted"` on sheet dismiss/reopen.
+  `OrbSideQuestionSheet` shares `OrbFollowUpQueue` (`queue_followup: true`,
+  `Edit`, `Send now`, `Remove`), caches finished threads by `(activity, status)`
+  stamp, ignores queued `user_message` events, and strips OpenCode compaction
+  checkpoints.
 - **Android (`android_dashboard/app/src/main/java/sh/sandboxed/dashboard/orb/OrbSideAgent.kt`)**:
-  `OrbSideAgentSheet` polls Core with backoff, ignores transient poll errors
-  while active, and never synthesizes `"Side question interrupted"` on sheet
-  reopen.
+  `OrbSideAgentSheet` renders multi-turn `/btw` threads, shares
+  `OrbFollowUpQueueView` (`queue_followup: true`, `Edit`, `Send now`, `Remove`),
+  ignores queued `user_message` events, and strips OpenCode compaction
+  checkpoints.

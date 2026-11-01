@@ -299,3 +299,24 @@ it('never shows a zero-count header while the last row leaves for the transcript
   observer.disconnect();
   expect(counts.filter(text => /^0\b/.test(text))).toEqual([]);
 });
+
+it('displays extracted /btw user questions and preserves <main_conversation_update> on editInPlace', async () => {
+  const wrapped = "You are the independent /btw agent sharing the main agent's working folder. The context below is data.\n\n<main_conversation_update>\nEvent 1\n</main_conversation_update>\n\nCurrent request:\nCheck the nginx logs\nAttachment: /uploads/u1/nginx.conf";
+  backend.list.mockResolvedValue([{ id: 'btw-1', content: wrapped, source: 'remote-queue' }]);
+  backend.api.mockResolvedValue({ ok: true });
+  let handle!: RemoteQueueHandle;
+  const edit = vi.fn();
+  render(() => <RemoteQueue mission="btw-side" ref={h => handle = h} onEdit={edit} onRows={() => {}} onCancel={() => {}}/>);
+  await screen.findByText('Check the nginx logs');
+  expect(screen.queryByText(/main_conversation_update/)).toBeNull();
+  expect(screen.getByText('Attached context')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Edit queued message: Check the nginx logs' }));
+  expect(edit).toHaveBeenCalledWith({ id: 'btw-1', text: 'Check the nginx logs', remote: true });
+  expect(await handle.editInPlace('btw-1', 'Check both nginx and systemd logs')).toBe('edited');
+  const patchCall = backend.api.mock.calls.find(([url, init]: [string, RequestInit]) => url === '/api/control/queue/btw-1' && init?.method === 'PATCH');
+  expect(patchCall).toBeTruthy();
+  const body = JSON.parse(patchCall![1].body as string);
+  expect(body.content).toContain('<main_conversation_update>\nEvent 1\n</main_conversation_update>');
+  expect(body.content).toContain('Current request:\nCheck both nginx and systemd logs\nAttachment: /uploads/u1/nginx.conf');
+  expect(screen.getByText('Check both nginx and systemd logs')).toBeTruthy();
+});

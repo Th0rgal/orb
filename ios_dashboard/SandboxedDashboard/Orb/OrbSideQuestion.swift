@@ -92,17 +92,41 @@ enum OrbBtwThreads {
         return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Replace only the user's question inside a wrapped `/btw` prompt so in-place
+    /// queue edits preserve `<main_conversation_update>` and `Attachment:` lines.
+    static func replaceQuestion(_ content: String, with next: String) -> String {
+        let marker = "\nCurrent request:\n"
+        let trimmedNext = next.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let range = content.range(of: marker, options: .backwards) else {
+            let lines = content.components(separatedBy: "\n")
+            let attachments = Array(lines.reversed().prefix(while: { $0.hasPrefix("Attachment: ") || $0.trimmingCharacters(in: .whitespaces).isEmpty }).reversed())
+                .filter { $0.hasPrefix("Attachment: ") }
+            if attachments.isEmpty { return trimmedNext }
+            return ([trimmedNext] + attachments).joined(separator: "\n")
+        }
+        let prefix = String(content[..<range.upperBound])
+        let body = String(content[range.upperBound...])
+        let lines = body.components(separatedBy: "\n")
+        let attachments = Array(lines.reversed().prefix(while: { $0.hasPrefix("Attachment: ") || $0.trimmingCharacters(in: .whitespaces).isEmpty }).reversed())
+            .filter { $0.hasPrefix("Attachment: ") }
+        if attachments.isEmpty { return prefix + trimmedNext + "\n" }
+        return prefix + ([trimmedNext] + attachments).joined(separator: "\n")
+    }
+
     static func synthetic(_ text: String) -> Bool {
         text.range(of: #"^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} (?:on node '[^']+' )?(?:finished with(?:out assistant text| state)|reached state) "#, options: .regularExpression) != nil
             || text.hasPrefix("Native Codex goal stopped with status ")
     }
 
-    /// OpenCode auto-compaction writes a summary turn ("## Objective …") and a
-    /// synthetic "Continue if you have next steps…" prompt; older Core builds
-    /// stored both inside the side agent's answer.
+    /// OpenCode auto-compaction writes a summary turn ("## Objective …") and on
+    /// older builds a synthetic "Continue if you have next steps…" prompt; newer
+    /// builds emit the structured checkpoint (`## Objective` … `## Work State` …
+    /// `## Next Move` … `## Relevant Files`) without the synthetic footer.
     static func stripCompaction(_ text: String) -> String {
         let pattern = #"(?:^|\n)## Objective\n[\s\S]*?\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed\.[^\S\n]*(?:\n|$)"#
         var out = text.replacingOccurrences(of: pattern, with: "\n\n", options: .regularExpression)
+        let checkpoint = #"^\s*## Objective\r?\n[\s\S]*?\n## (?:Work State|Progress)\r?\n[\s\S]*?\n## Next Move\r?\n[\s\S]*?\n## Relevant Files(?:\r?\n[\s\S]*)?$"#
+        if out.range(of: checkpoint, options: .regularExpression) != nil { return "" }
         out = out.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -165,6 +189,7 @@ enum OrbBtwThreads {
         for (index, e) in ordered.enumerated() {
             switch e.eventType {
             case "user_message":
+                if (e.metadata["queued"]?.value as? Bool) == true { continue }
                 if !question.isEmpty { flush() }
                 question = Self.question(e.content); at = e.timestamp; seq = e.sequence; start = index + 1
             case "assistant_message", "assistant_message_canonical":
@@ -223,6 +248,7 @@ final class OrbBtwStore {
     private(set) var open: OrbBtwThreads.OpenTurn?
     /// The thread new questions continue (latest activity), and its mission.
     private(set) var bound: OrbJSON = .null
+    private(set) var boundDeliveredMessages: [OrbDeliveredMessage] = []
     private(set) var loaded = false
     private var eventCache: [String: (stamp: String, events: [StoredEvent])] = [:]
     private var refreshing: Task<Void, Error>?
@@ -301,6 +327,11 @@ final class OrbBtwStore {
         let nextOpen = opens[next["id"].text]
         if nextOpen != open { open = nextOpen }
         if next != bound { bound = next }
+        let boundEvents = fetched[next["id"].text] ?? []
+        boundDeliveredMessages = boundEvents.compactMap { e in
+            guard e.eventType == "user_message", (e.metadata["queued"]?.value as? Bool) != true else { return nil }
+            return OrbDeliveredMessage(id: e.eventId, content: OrbBtwThreads.question(e.content), sequence: e.sequence)
+        }
         if let id = boundID { UserDefaults.standard.set(id, forKey: OrbBtwConfig.sessionKey(parent)) }
         loaded = true
     }
@@ -315,6 +346,7 @@ struct OrbSideQuestionSheet: View {
     @State var question: String
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var store: OrbBtwStore
     @State private var dictation = OrbDictation()
     @State private var attachments: [OrbAttachment] = []
@@ -328,6 +360,10 @@ struct OrbSideQuestionSheet: View {
     @State private var askedAt: Date?
     @State private var autoAsked = false
     @State private var scroller = OrbTranscriptScroller()
+    @State private var followUps = OrbFollowUpQueue()
+    @State private var queueExpanded = true
+    @State private var editingQueuedID: String?
+    @State private var rawQueuedByID: [String: String] = [:]
 
     init(parentID: String, question: String) {
         self.parentID = parentID
@@ -345,7 +381,7 @@ struct OrbSideQuestionSheet: View {
            let at = OrbTurnSummary.parseDate(last.at), at >= askedAt.addingTimeInterval(-5) { return nil }
         return pending
     }
-    private var canSend: Bool { !busy && !running && pending == nil && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var canSend: Bool { !busy && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -483,26 +519,124 @@ struct OrbSideQuestionSheet: View {
         }
     }
 
+    private var queuedDrawer: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) { queueExpanded.toggle() }
+                OrbHaptics.selection()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(OrbStyle.textMuted)
+                        .rotationEffect(.degrees(queueExpanded ? 90 : 0))
+                    Text("\(followUps.count) Queued")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(OrbStyle.textSecondary)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if queueExpanded {
+                ForEach(followUps.rows) { row in
+                    queuedRow(row)
+                        .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .bottom)))
+                }
+            }
+            if editingQueuedID != nil {
+                HStack {
+                    Text("Editing queued side question").font(.caption2).foregroundStyle(OrbStyle.textSecondary)
+                    Spacer()
+                    Button("Cancel") { editingQueuedID = nil; question = "" }
+                        .font(.caption2.weight(.semibold))
+                        .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(OrbStyle.surface.opacity(0.95), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(OrbStyle.border))
+        .padding(.bottom, 6)
+        .animation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds), value: followUps.rows)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("btw.followUpQueue")
+    }
+
+    private func queuedRow(_ row: OrbQueuedRow) -> some View {
+        let editing = editingQueuedID == row.id
+        let enabled = !row.sending && editingQueuedID == nil
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 2) {
+                Text(row.content.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.caption)
+                    .foregroundStyle(editing ? OrbStyle.textMuted : .primary.opacity(0.9))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if editing {
+                    Text("Editing").font(.caption2).foregroundStyle(OrbStyle.textMuted).padding(.horizontal, 6)
+                } else {
+                    queueAction("pencil", label: "Edit queued side question", enabled: enabled) {
+                        editingQueuedID = row.id
+                        question = row.content
+                        focused = true
+                    }
+                    queueAction("arrow.up", label: "Send now", enabled: enabled) {
+                        OrbHaptics.light()
+                        Task { await sendQueuedNow(row.id) }
+                    }
+                    queueAction("trash", label: "Remove queued side question", enabled: !row.sending) {
+                        OrbHaptics.light()
+                        Task { await removeQueued(row.id) }
+                    }
+                }
+            }
+            if let error = row.queueError {
+                Text("Delivery paused · \(error)").font(.caption2).foregroundStyle(OrbStyle.warning).lineLimit(1)
+            }
+        }
+        .padding(.vertical, 1)
+        .opacity(row.sending ? 0.75 : 1)
+    }
+
+    private func queueAction(_ symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(enabled ? OrbStyle.textSecondary : OrbStyle.textMuted.opacity(0.4))
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+    }
+
     private var composer: some View {
-        OrbComposerBox(
-            placeholder: "Ask a side question",
-            text: $question,
-            focused: $focused,
-            dictation: dictation,
-            busy: busy,
-            canSend: canSend,
-            showStop: running,
-            fieldIdentifier: "btw.input",
-            sendIdentifier: "btw.send",
-            sendLabel: "Send side question",
-            stopLabel: "Stop side agent",
-            containerIdentifier: "btw-composer",
-            onSend: { Task { await ask() } },
-            onStop: { Task { await stop() } }
-        ) {
-            if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
-        } leading: {
-            OrbAttachments(files: $attachments, error: $error, showFiles: false)
+        VStack(spacing: 0) {
+            if followUps.count > 0 || editingQueuedID != nil { queuedDrawer }
+            OrbComposerBox(
+                placeholder: running ? "Queue a side question…" : "Ask a side question",
+                text: $question,
+                focused: $focused,
+                dictation: dictation,
+                busy: busy,
+                canSend: canSend,
+                showStop: running,
+                fieldIdentifier: "btw.input",
+                sendIdentifier: "btw.send",
+                sendLabel: running ? "Queue side question" : "Send side question",
+                stopLabel: "Stop side agent",
+                containerIdentifier: "btw-composer",
+                onSend: { Task { await ask() } },
+                onStop: { Task { await stop() } }
+            ) {
+                if !attachments.isEmpty { OrbAttachments(files: $attachments, error: $error, canAdd: false) }
+            } leading: {
+                OrbAttachments(files: $attachments, error: $error, showFiles: false)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.top, 6)
@@ -510,11 +644,34 @@ struct OrbSideQuestionSheet: View {
         .background(OrbStyle.background)
     }
 
+    private func refreshQueue() async {
+        guard let id = store.boundID else { return }
+        let fetchedAt = Date()
+        guard let response = try? await OrbCore.shared.call("/api/control/queue?mission_id=\(OrbCore.escape(id))") else {
+            let next = followUps.reconciled(with: store.boundDeliveredMessages)
+            if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
+            return
+        }
+        let parsed = OrbFollowUpQueue.parse(response.items, missionID: id)
+        var rawMap = rawQueuedByID
+        let displayRows = parsed.map { row -> OrbQueuedRow in
+            rawMap[row.id] = row.content
+            var copy = row
+            copy.content = OrbBtwThreads.question(row.content)
+            return copy
+        }
+        rawQueuedByID = rawMap
+        let lastSeq = store.boundDeliveredMessages.last?.sequence
+        let next = followUps.withServer(displayRows, fetchedAt: fetchedAt, lastSequence: lastSeq).reconciled(with: store.boundDeliveredMessages)
+        if next != followUps { withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = next } }
+    }
+
     private func follow() async {
         guard phase == .active else { return }
-        await Poller.run(every: { .seconds(waiting || busy ? 1.5 : 15) }) {
+        await Poller.run(every: { .seconds(waiting || busy || followUps.count > 0 ? 1.5 : 15) }) {
             do {
                 try await store.refresh()
+                await refreshQueue()
                 settlePending()
                 return true
             } catch is CancellationError { return true } catch {
@@ -531,16 +688,32 @@ struct OrbSideQuestionSheet: View {
     private func ask() async {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !busy, !text.isEmpty else { return }
+        if let editing = editingQueuedID {
+            await editQueued(editing, content: text)
+            return
+        }
         busy = true; defer { busy = false }
-        withAnimation(.snappy(duration: 0.18)) { pending = text; askedAt = Date(); question = "" }
+        let queueing = (running || followUps.count > 0) && store.boundID != nil && !freshSession
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
+            if queueing {
+                question = ""
+            } else {
+                pending = text; askedAt = Date(); question = ""
+            }
+        }
         let files = attachments
         attachments = []
         // One id per question: every resend after a dropped connection carries it,
         // so Core accepts the question at most once (desktop `askBtwAgent`).
         let messageID = UUID().uuidString
+        if queueing {
+            withAnimation(reduceMotion ? nil : .snappy(duration: 0.18)) {
+                followUps = followUps.enqueue(messageID, text, lastSequence: store.boundDeliveredMessages.last?.sequence)
+            }
+            OrbUsageTelemetry.shared.trackAction(.queue, surface: "btw")
+        }
         do {
             if !store.loaded { try await store.refresh() }
-            if running { throw OrbHTTPError(status: 409, detail: "The side agent is still running. Stop it before sending another question.") }
             let parent = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))")
             if parent["tags"].items.contains(where: { $0.text == "placement:client" }) {
                 throw OrbHTTPError(status: 409, detail: "This conversation runs on a computer. Ask side questions from Orb on that computer.")
@@ -553,11 +726,31 @@ struct OrbSideQuestionSheet: View {
                 guard !receipt["path"].text.isEmpty else { throw URLError(.cannotParseResponse) }
                 content += "\nAttachment: " + receipt["path"].text
             }
-            if let id = store.boundID, !freshSession, OrbBtwThreads.resumableStatuses.contains(store.boundStatus) {
-                _ = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object([
-                    "mission_id": .string(id), "content": .string(content), "client_message_id": .string(messageID),
+            if let id = store.boundID, !freshSession, (running || followUps.count > 0 || OrbBtwThreads.resumableStatuses.contains(store.boundStatus)) {
+                let shouldQueue = running || followUps.count > 0
+                let result = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object([
+                    "mission_id": .string(id),
+                    "content": .string(content),
+                    "client_message_id": .string(messageID),
+                    "queue_followup": .bool(true),
                 ])) }
-                store.sent(to: id)
+                let queuedNow = result["queued"] == .bool(true)
+                let receiptID = result["id"].text.isEmpty ? messageID : result["id"].text
+                rawQueuedByID[receiptID] = content
+                if queueing || queuedNow {
+                    pending = nil; askedAt = nil
+                    if receiptID == messageID {
+                        followUps = followUps.posted(messageID, queued: queuedNow)
+                    } else {
+                        followUps = followUps.postFailed(messageID)
+                        if queuedNow {
+                            followUps = followUps.enqueue(receiptID, text, lastSequence: store.boundDeliveredMessages.last?.sequence).posted(receiptID, queued: true)
+                        }
+                    }
+                    if !queuedNow { pending = text; askedAt = Date(); store.sent(to: id) }
+                } else if !shouldQueue {
+                    store.sent(to: id)
+                }
             } else {
                 let created = try await OrbSideSend.retrying { try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(parentID))/btw/agent", method: "POST", body: .object([
                     "backend": .string(OrbBtwConfig.harness), "model_override": .string(OrbBtwConfig.model), "model_effort": .null,
@@ -568,12 +761,104 @@ struct OrbSideQuestionSheet: View {
             }
             error = ""
             try? await store.refresh()
+            await refreshQueue()
         } catch let e as OrbHTTPError where [404, 405].contains(e.status) && store.boundID == nil {
+            if queueing { followUps = followUps.postFailed(messageID) }
             restore(text, files)
             error = "This backend does not support /btw side agents yet."
         } catch {
+            if queueing { followUps = followUps.postFailed(messageID) }
             restore(text, files)
             self.error = error.localizedDescription
+        }
+    }
+
+    private func removeQueued(_ queueID: String) async {
+        if editingQueuedID == queueID { editingQueuedID = nil; question = "" }
+        withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) { followUps = followUps.hide(queueID) }
+        do {
+            _ = try await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
+            await refreshQueue()
+        } catch let e as OrbHTTPError where e.status == 404 {
+            await refreshQueue()
+        } catch {
+            followUps = followUps.unhide(queueID)
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func editQueued(_ queueID: String, content: String) async {
+        guard let id = store.boundID else { return }
+        editingQueuedID = nil
+        question = ""
+        guard followUps.row(queueID) != nil else {
+            error = "This side question was already sent. Your edit was not applied."
+            return
+        }
+        followUps = followUps.edit(queueID, content)
+        let wireContent = rawQueuedByID[queueID].map { OrbBtwThreads.replaceQuestion($0, with: content) } ?? content
+        var status: Int? = nil
+        do {
+            _ = try await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "PATCH", body: .object(["content": .string(wireContent)]))
+            status = 200
+        } catch let e as OrbHTTPError { status = e.status } catch { status = nil }
+        switch OrbSendFlow.editOutcome(status: status) {
+        case .edited:
+            rawQueuedByID[queueID] = wireContent
+            followUps = followUps.editConfirmed(queueID, content)
+            OrbUsageTelemetry.shared.trackAction(.messageEdit, surface: "btw-queue")
+        case .unsupported:
+            followUps = followUps.editReverted(queueID).hide(queueID)
+            _ = try? await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
+            let clientID = UUID().uuidString
+            followUps = followUps.enqueue(clientID, content, lastSequence: store.boundDeliveredMessages.last?.sequence)
+            do {
+                let result = try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(wireContent), "client_message_id": .string(clientID), "queue_followup": .bool(true)]))
+                rawQueuedByID[clientID] = wireContent
+                followUps = followUps.posted(clientID, queued: result["queued"] == .bool(true))
+            } catch {
+                followUps = followUps.postFailed(clientID)
+                question = content
+                self.error = "Couldn’t save the edit. Your text is back in the composer."
+            }
+        case .alreadySent:
+            followUps = followUps.editReverted(queueID)
+            error = "This side question was already sent, so the edit was not applied."
+        case .failed:
+            followUps = followUps.editReverted(queueID)
+            error = "Couldn’t save the edit."
+        }
+        await refreshQueue()
+    }
+
+    private func sendQueuedNow(_ queueID: String) async {
+        guard let id = store.boundID, editingQueuedID == nil, let row = followUps.row(queueID), !row.sending else { return }
+        let wireContent = rawQueuedByID[queueID] ?? row.content
+        withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
+            followUps = followUps.hide(queueID)
+            pending = row.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            askedAt = Date()
+            scroller.scrollToBottom()
+        }
+        do {
+            let response = try await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))/send-now?interrupt=true", method: "POST")
+            switch OrbSendFlow.sendNowOutcome(response) {
+            case .live, .promoted:
+                store.sent(to: id)
+            case .fallback:
+                _ = try? await OrbCore.shared.call("/api/control/queue/\(OrbCore.escape(queueID))", method: "DELETE")
+                _ = try? await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))/cancel", method: "POST")
+                _ = try await OrbCore.shared.call("/api/control/message", method: "POST", body: .object(["mission_id": .string(id), "content": .string(wireContent), "client_message_id": .string(UUID().uuidString)]))
+                store.sent(to: id)
+            }
+            try? await store.refresh()
+            await refreshQueue()
+        } catch {
+            withAnimation(reduceMotion ? nil : .snappy(duration: OrbSendFlow.leaveSeconds)) {
+                followUps = followUps.unhide(queueID)
+                pending = nil; askedAt = nil
+            }
+            self.error = "Couldn’t send now. \(error.localizedDescription)"
         }
     }
 
@@ -586,7 +871,7 @@ struct OrbSideQuestionSheet: View {
 
     private func stop() async {
         guard let id = store.boundID else { return }
-        do { _ = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))/cancel", method: "POST"); try await store.refresh() }
+        do { _ = try await OrbCore.shared.call("/api/control/missions/\(OrbCore.escape(id))/cancel", method: "POST"); try await store.refresh(); await refreshQueue() }
         catch { self.error = error.localizedDescription }
     }
 }

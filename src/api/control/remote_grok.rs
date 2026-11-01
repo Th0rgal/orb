@@ -935,6 +935,31 @@ impl GrokStream {
         }
     }
 
+    /// True when an OpenCode assistant text part is an internal auto-compaction
+    /// checkpoint rather than user-facing prose. Older OpenCode builds followed
+    /// the checkpoint with a synthetic `compaction_continue` part; newer builds
+    /// omit `compaction_continue` before the next tool call, which previously
+    /// flushed the 10 KB checkpoint as a `NativeText` narration bubble.
+    fn is_opencode_compaction_summary(text: &str) -> bool {
+        let trimmed = text.trim_start();
+        if !trimmed.starts_with("## Objective\n") && !trimmed.starts_with("## Objective\r\n") {
+            return false;
+        }
+        let has_work_state = trimmed.contains("\n## Work State\n")
+            || trimmed.contains("\n## Work State\r\n")
+            || trimmed.contains("\n## Progress\n")
+            || trimmed.contains("\n## Progress\r\n");
+        let has_next_move =
+            trimmed.contains("\n## Next Move\n") || trimmed.contains("\n## Next Move\r\n");
+        let has_files = trimmed.contains("\n## Relevant Files\n")
+            || trimmed.contains("\n## Relevant Files\r\n")
+            || trimmed.ends_with("\n## Relevant Files");
+        (has_work_state && has_next_move && has_files)
+            || trimmed.contains(
+                "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+            )
+    }
+
     /// One finished OpenCode text part (`run --format json` emits each once,
     /// when it ends). Auto-compaction writes its summary as an assistant text
     /// part and then a synthetic `compaction_continue` user part; neither is
@@ -957,7 +982,7 @@ impl GrokStream {
             }
             return;
         }
-        if text.trim().is_empty() {
+        if text.trim().is_empty() || Self::is_opencode_compaction_summary(text) {
             return;
         }
         // Written before a tool call already seen: it introduces that call,
@@ -4525,6 +4550,50 @@ mod tests {
             stream.final_text(),
             "Voici le détail exact des **3 contre-exemples**.\n\nEverything has been explained."
         );
+    }
+
+    /// /btw 12582ec3 seq 294 & 307: newer OpenCode builds emit the structured
+    /// auto-compaction checkpoint (`## Objective` ... `## Work State` ...
+    /// `## Next Move` ... `## Relevant Files`) followed directly by a tool call
+    /// without a `compaction_continue` synthetic part.
+    #[test]
+    fn opencode_compaction_checkpoint_without_continue_part_is_suppressed() {
+        let mut stream = GrokStream::default();
+        let mut updates = Vec::new();
+        let checkpoint = concat!(
+            "## Objective\n",
+            "Answer the operator's /btw question.\n\n",
+            "## Important Details\n",
+            "- Inspect remote node state.\n\n",
+            "## Work State\n",
+            "### Completed\n- Checked logs.\n",
+            "### Active\n- Verifying config.\n",
+            "### Blocked\n- None.\n\n",
+            "## Next Move\n",
+            "Run one final check and reply concisely.\n\n",
+            "## Relevant Files\n",
+            "- `src/main.rs`: entry point"
+        );
+        for v in [
+            serde_json::json!({"type":"text","sessionID":"ses_c","part":{"id":"prt_1","messageID":"m1","text":"Checking the deployment logs."}}),
+            serde_json::json!({"type":"tool_use","sessionID":"ses_c","part":{"id":"prt_2","messageID":"m1","callID":"call_0","tool":"bash","state":{"status":"completed"}}}),
+            serde_json::json!({"type":"text","sessionID":"ses_c","part":{"id":"prt_3","messageID":"m2","text":checkpoint}}),
+            serde_json::json!({"type":"step_finish","sessionID":"ses_c","part":{"messageID":"m2","reason":"stop"}}),
+            serde_json::json!({"type":"tool_use","sessionID":"ses_c","part":{"id":"prt_4","messageID":"m3","callID":"call_1","tool":"bash","state":{"status":"completed"}}}),
+            serde_json::json!({"type":"text","sessionID":"ses_c","part":{"id":"prt_5","messageID":"m3","text":"All checks passed."}}),
+            serde_json::json!({"type":"step_finish","sessionID":"ses_c","part":{"messageID":"m3","reason":"stop"}}),
+        ] {
+            updates.extend(stream.feed(&format!("{v}\n")));
+        }
+        assert_eq!(stream.final_text(), "All checks passed.");
+        assert!(!stream.text.contains("## Objective"));
+        assert!(!updates.iter().any(|u| matches!(
+            u,
+            StreamUpdate::NativeText(v)
+                if v["ops"][0]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("## Objective"))
+        )));
     }
 
     /// Test mission f2a93461 (gemini-4-argon): the bash part prt_b427a was

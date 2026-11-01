@@ -2,7 +2,7 @@ import { pollWhileVisible } from "./poll";
 import { swallow } from "./log";
 import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { ErrorToast } from "./toast";
-import { messagePresentation } from "./messagePresentation";
+import { isBtwWrappedPrompt, messagePresentation, replaceBtwUserQuestion } from "./messagePresentation";
 import { api, ApiError, connectionVersion, listQueuedMessages, type QueuedMessage } from "./api";
 import * as Ic from "./icons";
 
@@ -35,6 +35,8 @@ export function RemoteQueue(p: {
   onSendImmediate?: (ordered: {id: string; content: string; attached?: boolean}[], liveInjected?: {id: string; content: string; attached?: boolean}[]) => Promise<void>;
   onRows: (ids: string[]) => void;
   onCancel: (id: string) => void;
+  /** Called only when a queued message is explicitly removed (`DELETE`), not when promoted via `Send now`. */
+  onRemove?: (id: string) => void;
   /** Withdraw a message shown optimistically as sent, when it was not delivered live. */
   onRetract?: (id: string) => void;
   /** Core took a Send now: injected into the running turn (`live`), or
@@ -123,12 +125,14 @@ export function RemoteQueue(p: {
       await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
       p.onRows(rows().map(row => row.id));
+      p.onRemove?.(id);
       p.onCancel(id);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/\b404\b/.test(msg)) {
         if (!destroyed && version === connectionVersion() && mission === p.mission) {
           p.onRows(rows().map(row => row.id));
+          p.onRemove?.(id);
           p.onCancel(id);
         }
         return;
@@ -184,7 +188,7 @@ export function RemoteQueue(p: {
       const ordered = [target, ...list.filter(r => r.id !== target.id)];
       const payload = ordered.map(r => {
         const presented = messagePresentation(r.content);
-        return { id: r.id, content: presented.text, attached: r.attached || presented.attached || undefined };
+        return { id: r.id, content: isBtwWrappedPrompt(r.content) ? r.content : presented.text, attached: r.attached || presented.attached || undefined };
       });
       await Promise.allSettled(ordered.map(r => api(`/api/control/queue/${encodeURIComponent(r.id)}`, { method: "DELETE" })));
       if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
@@ -227,12 +231,15 @@ export function RemoteQueue(p: {
       for (const r of tail) deletedIds.add(r.id);
       setRows(previous => previous.filter(row => !tail.some(t => t.id === row.id)));
       p.onRows(rows().map(row => row.id));
-      for (const r of tail) p.onCancel(r.id);
+      for (const r of tail) {
+        p.onRemove?.(r.id);
+        p.onCancel(r.id);
+      }
       const ok = await sendReplaced();
       if (!ok) return false;
       if (after.length && replayAfter) await replayAfter(after.map(r => {
         const presented = messagePresentation(r.content);
-        return { content: presented.text, attached: r.attached || presented.attached || undefined };
+        return { content: isBtwWrappedPrompt(r.content) ? r.content : presented.text, attached: r.attached || presented.attached || undefined };
       }));
       return true;
     } catch (e) {
@@ -248,25 +255,28 @@ export function RemoteQueue(p: {
       setError("This message was already sent. Your edit was not applied.");
       return "failed";
     }
-    // Attached context lives in the stored content: the resend path rebuilds it.
-    if (target.attached || messagePresentation(target.content).attached) return "unsupported";
+    const wrappedBtw = isBtwWrappedPrompt(target.content);
+    // Attached context lives in the stored content: the resend path rebuilds it
+    // unless this is a /btw wrapper where `replaceBtwUserQuestion` keeps Attachment: lines intact.
+    if (!wrappedBtw && (target.attached || messagePresentation(target.content).attached)) return "unsupported";
+    const nextContent = wrappedBtw ? replaceBtwUserQuestion(target.content, content) : content;
     const version = connectionVersion(), mission = p.mission;
     const previous = edits()[id];
     setError("");
-    setEdits(all => ({ ...all, [id]: content }));
+    setEdits(all => ({ ...all, [id]: nextContent }));
     const revert = () => setEdits(all => {
       const next = { ...all };
       if (previous == null) delete next[id]; else next[id] = previous;
       return next;
     });
     try {
-      await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }) });
+      await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: nextContent }) });
       if (destroyed || version !== connectionVersion() || mission !== p.mission) return "edited";
       batch(() => {
         revision++;
-        setRows(list => list.map(row => row.id === id ? { ...row, content } : row));
+        setRows(list => list.map(row => row.id === id ? { ...row, content: nextContent } : row));
         // The confirmed transcript copy (queued user item) follows the edit too.
-        p.onEdited?.(id, content);
+        p.onEdited?.(id, nextContent);
         setEdits(all => { const next = { ...all }; delete next[id]; return next; });
       });
       return "edited";

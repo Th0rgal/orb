@@ -825,3 +825,118 @@ it('memoizes completed /btw threads across polls and discovers newest active thr
  expect(second.history.map(h=>h.question)).toEqual(['Q0','Q1','Q2','Q3','Q4','Q5']);
  expect(second.activeSession).toMatchObject({id:'live-634505a6',active:true});
 });
+
+it('strips newer OpenCode compaction checkpoints without a compaction_continue footer',async()=>{
+ const {sideAnswer,stripCompactionSummary}=await import('../src/btwAgent');
+ const checkpoint='## Objective\nAnswer the side question.\n\n## Important Details\n- Node babylon.\n\n## Work State\n### Completed\n- Checked logs.\n### Active\n- Verifying.\n### Blocked\n- None.\n\n## Next Move\nSummarize findings.\n\n## Relevant Files\n- `src/main.rs`';
+ expect(stripCompactionSummary(checkpoint)).toBe('');
+ expect(sideAnswer([checkpoint,'Final verified answer.'],'Final verified answer.')).toEqual({answer:'Final verified answer.',narration:[]});
+});
+
+it('ignores metadata.queued user_message events in btwTurnEvents and parseBtwThread',async()=>{
+ const {reconcileBtwServerHistory}=await import('../src/btwAgent');
+ const {getMissionEvents}=await import('../src/stream');
+ const rows=[
+  {id:1,sequence:10,event_type:'user_message',content:'Header\n\nCurrent request:\nActive turn question',timestamp:'2026-11-01T00:00:01Z'},
+  {id:2,sequence:11,event_type:'assistant_message_canonical',content:'Working through step 1.',timestamp:'2026-11-01T00:00:02Z'},
+  {id:3,sequence:12,event_type:'user_message',content:'Header\n\nCurrent request:\nPre-submitted follow-up',timestamp:'2026-11-01T00:00:03Z',metadata:{queued:true}},
+  {id:4,sequence:13,event_type:'assistant_message',content:'Active turn final answer.',timestamp:'2026-11-01T00:00:04Z'},
+ ] as any;
+ expect(btwTurnEvents(rows,{baseline:0}).map(e=>e.sequence)).toEqual([11,12,13]);
+ vi.mocked(api).mockImplementation(async(path:string)=>path.startsWith('/api/control/missions?tag=')?[{id:'q-side',status:'active',created_at:'2026-11-01T00:00:00Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:q-parent'],history:[],title:null,updated_at:''}] as any:[] as any);
+ vi.mocked(getMissionEvents).mockResolvedValue(rows);
+ const reconciled=await reconcileBtwServerHistory('q-parent',[]);
+ expect(reconciled.activeSession?.question).toBe('Active turn question');
+ expect(reconciled.history).toEqual([]);
+});
+
+it('bases every queued follow-up on delivered context so deleting or promoting a predecessor keeps remaining prompts complete',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {queueBtwFollowUp,dropBtwQueuedCursor,replaceBtwUserQuestion}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('q-parent'),JSON.stringify({id:'q-side',question:'First?',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,conversationCursor:{sequence:5,visibleHash:'h5'}}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:id==='q-side'?['btw-parent:q-parent']:[],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(prepareBtwContext)
+  .mockResolvedValueOnce({context:'delta 5->8',cursor:{sequence:8,visibleHash:'h8'}})
+  .mockResolvedValueOnce({context:'delta 5->12',cursor:{sequence:12,visibleHash:'h12'}});
+ vi.mocked(sendMissionMessage)
+  .mockResolvedValueOnce({id:'msg-1',queued:true} as any)
+  .mockResolvedValueOnce({id:'msg-2',queued:true} as any);
+ const first=await queueBtwFollowUp('q-parent','Follow-up one','ctx',[], [],'msg-1');
+ expect(first).toMatchObject({id:'msg-1',missionId:'q-side',queued:true,local:false});
+ expect(prepareBtwContext).toHaveBeenNthCalledWith(1,expect.anything(),'ctx','core',{sequence:5,visibleHash:'h5'},[],undefined);
+ expect(sendMissionMessage).toHaveBeenCalledWith('q-side',expect.stringContaining('Current request:\nFollow-up one'),undefined,'msg-1');
+ // Second follow-up also starts from delivered cursor {sequence:5}, so removing msg-1
+ // or promoting msg-2 via Send now delivers msg-2 with full 5->12 parent context intact.
+ const second=await queueBtwFollowUp('q-parent','Follow-up two','ctx',[], [],'msg-2');
+ expect(prepareBtwContext).toHaveBeenNthCalledWith(2,expect.anything(),'ctx','core',{sequence:5,visibleHash:'h5'},[],undefined);
+ expect(second.prompt).toContain('<main_conversation_update>\ndelta 5->12\n</main_conversation_update>');
+ dropBtwQueuedCursor('q-parent','msg-1');
+ expect(btwSession('q-parent')?.queuedCursors?.map(c=>c.id)).toEqual(['msg-2']);
+ const edited=replaceBtwUserQuestion(first.prompt,'Edited follow-up one');
+ expect(edited).toContain('<main_conversation_update>\ndelta 5->8\n</main_conversation_update>');
+ expect(edited).toContain('Current request:\nEdited follow-up one');
+ expect(edited).not.toContain('Follow-up one');
+});
+
+it('transitions watchBtw from Turn 1 to dequeued Turn 2, merges concurrent queuedCursors, and polls incrementally with since',async()=>{
+ vi.useFakeTimers();
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {getMissionEvents}=await import('../src/stream');
+ const {watchBtw,queueBtwFollowUp}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('handoff-parent'),JSON.stringify({id:'handoff-side',question:'First question',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,conversationCursor:{sequence:5,visibleHash:'h5'}}));
+ let poll=0;
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:poll<2?'active':'completed',history:[],tags:id==='handoff-side'?['btw-parent:handoff-parent']:[],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'delta 5->9',cursor:{sequence:9,visibleHash:'h9'}});
+ vi.mocked(sendMissionMessage).mockResolvedValueOnce({id:'msg-2',queued:true} as any);
+ const sinceArgs:(number|undefined)[]=[];
+ vi.mocked(getMissionEvents).mockImplementation(async(_id,opts)=>{
+  sinceArgs.push(opts?.since);
+  const step=poll++;
+  if(step===0)return [{id:1,sequence:1,event_type:'user_message',content:'Header\n\nCurrent request:\nFirst question',timestamp:'2026-11-01T00:00:01Z'}];
+  if(step===1)return [
+   {id:2,sequence:2,event_type:'assistant_message',content:'First answer.',timestamp:'2026-11-01T00:00:02Z'},
+   {id:3,sequence:3,event_type:'user_message',event_id:'msg-2',content:'Header\n\nCurrent request:\nSecond question',timestamp:'2026-11-01T00:00:03Z'},
+  ];
+  return [{id:4,sequence:4,event_type:'assistant_message',content:'Second answer.',timestamp:'2026-11-01T00:00:04Z'}];
+ });
+ const received:any[]=[];
+ const abort=new AbortController();
+ const watching=watchBtw('handoff-parent',abort.signal,e=>received.push(e));
+ try{
+  await vi.advanceTimersByTimeAsync(100);
+  // Queue msg-2 while watchBtw is already running with its initial session object.
+  await queueBtwFollowUp('handoff-parent','Second question','ctx',[],[],'msg-2');
+  await vi.advanceTimersByTimeAsync(11000);
+  await watching;
+  expect(sinceArgs).toEqual([undefined,1,3]);
+  expect(received).toContainEqual({type:'turn',question:'Second question',messageId:'msg-2',completed:{question:'First question',answer:'First answer.'}});
+  expect(received.at(-1)).toEqual({type:'done',answer:'Second answer.'});
+  expect(btwSession('handoff-parent')?.conversationCursor).toEqual({sequence:9,visibleHash:'h9'});
+  expect(btwSession('handoff-parent')?.queuedCursors).toBeUndefined();
+ }finally{abort.abort();await watching.catch(()=>{});vi.useRealTimers();}
+});
+
+it('preserves existing Attachment trailer and imagePaths when editing a local queued /btw question in place',async()=>{
+ const draftsStore=new Map<string,unknown>();
+ const draftsMod=await import('../src/composerDrafts');
+ const readSpy=vi.spyOn(draftsMod,'readSideThread').mockImplementation(async(k:string)=>structuredClone(draftsStore.get(k)) as any);
+ const saveSpy=vi.spyOn(draftsMod,'saveSideThread').mockImplementation(async(k:string,v:unknown)=>{draftsStore.set(k,structuredClone(v));});
+ const {queuedLocalMessages}=await import('../src/localMessageQueue');
+ const {queueBtwFollowUp}=await import('../src/btwAgent');
+ const uploadsMod=await import('../src/uploads');
+ const uploadSpy=vi.spyOn(uploadsMod,'transferFile').mockResolvedValue({path:'/tmp/staged/diagram.png',name:'diagram.png'} as any);
+ Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_name:string,fn:()=>Promise<unknown>)=>fn()}});
+ vi.mocked(localBinding).mockImplementation(id=>id==='local-parent'||id==='local-side'?{cwd:'/work/local',harness:'opencode',bin:'/bin/opencode',sessionId:'sess-1'}:undefined);
+ localStorage.setItem('agent:'+sideQuestionKey('local-parent'),JSON.stringify({id:'local-side',question:'Initial?',harness:'opencode',model:'builtin/smart',local:true,active:true,baseline:0,conversationCursor:{sequence:3,visibleHash:'h3'}}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:['placement:client','btw-parent:local-parent'],title:null,created_at:'',updated_at:''} as any));
+ try{
+  const msgId='22222222-3333-4444-8555-666666666666' as ReturnType<typeof crypto.randomUUID>;
+  await queueBtwFollowUp('local-parent','Inspect this screenshot','ctx',[], [{name:'diagram.png',media_type:'image/png',data_base64:btoa('png')}],msgId,false);
+  expect(queuedLocalMessages('local-side')[0]?.request.imagePaths).toEqual(['/tmp/staged/diagram.png']);
+  expect(queuedLocalMessages('local-side')[0]?.request.prompt).toContain('Attachment: /tmp/staged/diagram.png');
+  // Edit only the question text without re-uploading attachments:
+  const edited=await queueBtwFollowUp('local-parent','Inspect the updated screenshot caption','ctx',[], [],msgId,true);
+  expect(edited.prompt).toContain('Current request:\nInspect the updated screenshot caption\nAttachment: /tmp/staged/diagram.png');
+  expect(queuedLocalMessages('local-side')[0]?.request.imagePaths).toEqual(['/tmp/staged/diagram.png']);
+ }finally{uploadSpy.mockRestore();readSpy.mockRestore();saveSpy.mockRestore();}
+});
