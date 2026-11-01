@@ -36,6 +36,7 @@ pub struct SettingsResponse {
     pub sandboxed_repo_path: Option<String>,
     pub max_parallel_missions: Option<usize>,
     pub max_concurrent_tasks: Option<usize>,
+    pub google_max_concurrency: Option<usize>,
     pub auto_cleanup_enabled: Option<bool>,
     pub auto_cleanup_days: Option<u32>,
     pub auto_cleanup_stopped_days: Option<u32>,
@@ -52,6 +53,11 @@ impl From<Settings> for SettingsResponse {
             sandboxed_repo_path: settings.sandboxed_repo_path,
             max_parallel_missions: settings.max_parallel_missions,
             max_concurrent_tasks: settings.max_concurrent_tasks,
+            google_max_concurrency: Some(
+                settings
+                    .google_max_concurrency
+                    .unwrap_or_else(crate::settings::effective_google_max_concurrency),
+            ),
             auto_cleanup_enabled: settings.auto_cleanup_enabled,
             auto_cleanup_days: settings.auto_cleanup_days,
             auto_cleanup_stopped_days: settings.auto_cleanup_stopped_days,
@@ -74,6 +80,8 @@ pub struct UpdateSettingsRequest {
     pub max_parallel_missions: Option<usize>,
     #[serde(default)]
     pub max_concurrent_tasks: Option<usize>,
+    #[serde(default)]
+    pub google_max_concurrency: Option<usize>,
     #[serde(default)]
     pub auto_cleanup_enabled: Option<bool>,
     #[serde(default)]
@@ -224,6 +232,21 @@ async fn update_settings(
         new_settings.max_concurrent_tasks = Some(value);
         crate::settings::set_max_concurrent_tasks_cached(value);
     }
+    let mut google_concurrency_changed = false;
+    if let Some(value) = req.google_max_concurrency {
+        if !(1..=crate::settings::MAX_GOOGLE_ACCOUNT_CONCURRENCY).contains(&value) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "google_max_concurrency must be between 1 and {}",
+                    crate::settings::MAX_GOOGLE_ACCOUNT_CONCURRENCY
+                ),
+            ));
+        }
+        new_settings.google_max_concurrency = Some(value);
+        crate::settings::set_google_max_concurrency_cached(Some(value));
+        google_concurrency_changed = true;
+    }
     if let Some(value) = req.auto_cleanup_enabled {
         new_settings.auto_cleanup_enabled = Some(value);
     }
@@ -283,6 +306,10 @@ async fn update_settings(
         .update(new_settings.clone())
         .await
         .map_err(internal_error)?;
+
+    if google_concurrency_changed {
+        super::proxy::notify_google_concurrency_changed();
+    }
 
     // Apply the metadata override to the live summarizer client without a
     // restart (the assistant client re-resolves per turn; metadata is a
@@ -676,6 +703,8 @@ async fn restore_backup(
     if restored_files.iter().any(|f| f == "settings.json") {
         if let Err(e) = state.settings.reload().await {
             errors.push(format!("Failed to reload settings: {}", e));
+        } else {
+            super::proxy::notify_google_concurrency_changed();
         }
     }
 

@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -64,6 +65,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -211,12 +213,21 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
     var editingChain by remember { mutableStateOf<OrbRow?>(null) }
     var showEditor by remember { mutableStateOf(false) }
     var deletingChain by remember { mutableStateOf<OrbRow?>(null) }
+    var googleCapText by remember { mutableStateOf("10") }
+    var savedGoogleCap by remember { mutableIntStateOf(10) }
 
     suspend fun load() {
         try {
             chains = OrbJSON.dictList(core.request("/api/model-routing/chains")).map { OrbRow(it) }
             health = runCatching { OrbJSON.dictList(core.request("/api/model-routing/health")).map { OrbRow(it, (it["account_id"] as? String).orEmpty()) } }.getOrDefault(emptyList())
             events = runCatching { OrbJSON.dictList(core.request("/api/model-routing/events")).mapIndexed { i, d -> OrbRow(d, "ev-$i") } }.getOrDefault(emptyList())
+            runCatching { OrbJSON.dict(core.request("/api/settings")) }.getOrNull()?.let { s ->
+                val cap = (s["google_max_concurrency"] as? Number)?.toInt()
+                if (cap != null && cap >= 1) {
+                    savedGoogleCap = cap
+                    googleCapText = cap.toString()
+                }
+            }
             runCatching { core.fetchRows("/api/ai/providers", "providers") }.getOrNull()?.let { provs ->
                 providerLabels = provs.associate { p ->
                     val s = splitProviderDisplayName(p)
@@ -417,6 +428,65 @@ fun OrbRoutingSettingsPage(core: OrbCore, onBack: () -> Unit) {
                                 HorizontalDivider(color = OrbStyle.border, modifier = Modifier.padding(start = 16.dp))
                             }
                         }
+                    }
+                }
+
+                item {
+                    Text("ROUTER CONCURRENCY", color = OrbStyle.textMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp)
+                }
+
+                item {
+                    val googleCapDirty = googleCapText.trim().toIntOrNull() != savedGoogleCap
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(OrbStyle.surface)
+                            .border(1.dp, OrbStyle.border, RoundedCornerShape(16.dp))
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Google & Antigravity", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Text("Per-account in-flight cap (1–128)", color = OrbStyle.textMuted, fontSize = 12.sp)
+                            }
+                            OutlinedTextField(
+                                value = googleCapText,
+                                onValueChange = { googleCapText = it },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.width(76.dp)
+                            )
+                            TextButton(
+                                enabled = !busy && googleCapDirty,
+                                onClick = {
+                                    val parsed = googleCapText.trim().toIntOrNull()
+                                    if (parsed == null || parsed !in 1..128) {
+                                        error = "Per-account concurrency must be a whole number from 1 to 128."
+                                    } else {
+                                        runAct {
+                                            val updated = OrbJSON.dict(core.request("/api/settings", "PUT", body = mapOf("google_max_concurrency" to parsed)))
+                                            val resolved = (updated?.get("google_max_concurrency") as? Number)?.toInt() ?: parsed
+                                            savedGoogleCap = resolved
+                                            googleCapText = resolved.toString()
+                                            notice = "Updated Google & Antigravity per-account cap to $resolved."
+                                        }
+                                    }
+                                }
+                            ) {
+                                Text("Save", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                        Text(
+                            "Maximum concurrent requests per Google or Antigravity account before spilling to the next account or queueing. Applies immediately without redeploying.",
+                            color = OrbStyle.textMuted,
+                            fontSize = 11.sp
+                        )
                     }
                 }
 

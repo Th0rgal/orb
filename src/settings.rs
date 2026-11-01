@@ -15,6 +15,14 @@ static MAX_PARALLEL_MISSIONS_CACHED: AtomicUsize = AtomicUsize::new(0);
 /// Global cached max concurrent command tasks value.
 /// A value of 0 means "unset" and callers should fall back to their default.
 static MAX_CONCURRENT_TASKS_CACHED: AtomicUsize = AtomicUsize::new(0);
+/// Global cached per-account Google / Antigravity proxy concurrency limit.
+/// A value of 0 means "unset" and callers fall back to `PROXY_GOOGLE_MAX_CONCURRENCY` (default 10).
+static GOOGLE_MAX_CONCURRENCY_CACHED: AtomicUsize = AtomicUsize::new(0);
+
+/// Default per-account in-flight concurrency cap for Google and Antigravity proxy requests.
+pub const DEFAULT_GOOGLE_MAX_CONCURRENCY: usize = 10;
+/// Upper bound on configurable per-account Google and Antigravity proxy concurrency.
+pub const MAX_GOOGLE_ACCOUNT_CONCURRENCY: usize = 128;
 
 /// Default repo path for sandboxed.sh source (used for self-updates).
 pub const DEFAULT_SANDBOXED_REPO_PATH: &str = "/opt/sandboxed-sh/vaduz-v1";
@@ -152,6 +160,10 @@ pub struct Settings {
     /// When None, falls back to the MAX_CONCURRENT_TASKS env var (default: 5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_tasks: Option<usize>,
+    /// Maximum concurrent in-flight OrbRouter requests per Google or Antigravity account.
+    /// When None, falls back to `PROXY_GOOGLE_MAX_CONCURRENCY` (default: 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_max_concurrency: Option<usize>,
     /// Whether retention inventory reports old terminal mission directories.
     /// Retention never authorizes discard. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,6 +240,7 @@ impl SettingsStore {
         };
 
         set_harness_versions_cached(settings.harness_versions.as_ref());
+        set_google_max_concurrency_cached(settings.google_max_concurrency);
 
         Self {
             settings: RwLock::new(settings),
@@ -245,6 +258,11 @@ impl SettingsStore {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v >= 1);
+        let google_max_concurrency = std::env::var("PROXY_GOOGLE_MAX_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v >= 1)
+            .map(|v| v.min(MAX_GOOGLE_ACCOUNT_CONCURRENCY));
 
         Settings {
             library_remote: std::env::var("LIBRARY_REMOTE").ok().or_else(|| {
@@ -257,6 +275,7 @@ impl SettingsStore {
             auth: None,
             max_parallel_missions,
             max_concurrent_tasks,
+            google_max_concurrency,
             auto_cleanup_enabled: None,
             auto_cleanup_days: None,
             auto_cleanup_stopped_days: None,
@@ -432,6 +451,7 @@ impl SettingsStore {
     /// Update multiple settings at once.
     pub async fn update(&self, new_settings: Settings) -> Result<(), std::io::Error> {
         set_harness_versions_cached(new_settings.harness_versions.as_ref());
+        set_google_max_concurrency_cached(new_settings.google_max_concurrency);
         let mut settings = self.settings.write().await;
         *settings = new_settings;
         drop(settings);
@@ -454,6 +474,7 @@ impl SettingsStore {
             if let Some(limit) = settings.max_concurrent_tasks {
                 set_max_concurrent_tasks_cached(limit);
             }
+            set_google_max_concurrency_cached(settings.google_max_concurrency);
             set_harness_versions_cached(settings.harness_versions.as_ref());
             tracing::info!("Reloaded settings from {}", self.storage_path.display());
         }
@@ -495,6 +516,7 @@ impl SettingsStore {
             if let Some(limit) = settings.max_concurrent_tasks {
                 set_max_concurrent_tasks_cached(limit);
             }
+            set_google_max_concurrency_cached(settings.google_max_concurrency);
         }
     }
 }
@@ -536,6 +558,30 @@ pub fn max_concurrent_tasks_cached_or(default: usize) -> usize {
 /// Values less than 1 are normalized to 1.
 pub fn set_max_concurrent_tasks_cached(max_concurrent_tasks: usize) {
     MAX_CONCURRENT_TASKS_CACHED.store(max_concurrent_tasks.max(1), Ordering::Relaxed);
+}
+
+/// Effective per-account concurrency cap for Google and Antigravity proxy requests:
+/// runtime setting (`PUT /api/settings`) -> `PROXY_GOOGLE_MAX_CONCURRENCY` env var -> 10.
+pub fn effective_google_max_concurrency() -> usize {
+    let cached = GOOGLE_MAX_CONCURRENCY_CACHED.load(Ordering::Acquire);
+    if cached >= 1 {
+        return cached.min(MAX_GOOGLE_ACCOUNT_CONCURRENCY);
+    }
+    std::env::var("PROXY_GOOGLE_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .map(|n| n.min(MAX_GOOGLE_ACCOUNT_CONCURRENCY))
+        .unwrap_or(DEFAULT_GOOGLE_MAX_CONCURRENCY)
+}
+
+/// Update (or clear with `None`) the cached Google / Antigravity per-account concurrency cap.
+pub fn set_google_max_concurrency_cached(limit: Option<usize>) {
+    let raw = limit
+        .filter(|n| *n >= 1)
+        .map(|n| n.min(MAX_GOOGLE_ACCOUNT_CONCURRENCY))
+        .unwrap_or(0);
+    GOOGLE_MAX_CONCURRENCY_CACHED.store(raw, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -580,5 +626,32 @@ mod tests {
             };
             assert_eq!(pinned.effective_claude_code(), "9.9.9");
         }
+    }
+
+    #[tokio::test]
+    async fn google_max_concurrency_persists_and_defaults_to_ten() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(old.google_max_concurrency.is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path()).await;
+        if std::env::var("PROXY_GOOGLE_MAX_CONCURRENCY").is_err() {
+            assert_eq!(
+                effective_google_max_concurrency(),
+                DEFAULT_GOOGLE_MAX_CONCURRENCY
+            );
+            assert_eq!(DEFAULT_GOOGLE_MAX_CONCURRENCY, 10);
+        }
+
+        let mut updated = store.get().await;
+        updated.google_max_concurrency = Some(14);
+        store.update(updated).await.unwrap();
+        assert_eq!(effective_google_max_concurrency(), 14);
+
+        let reloaded = SettingsStore::new(dir.path()).await;
+        assert_eq!(reloaded.get().await.google_max_concurrency, Some(14));
+
+        // Reset global cache so parallel tests keep the default (10).
+        set_google_max_concurrency_cached(None);
     }
 }

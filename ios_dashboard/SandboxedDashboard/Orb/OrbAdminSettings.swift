@@ -17,12 +17,15 @@ struct OrbRoutingSettings: View {
     @State private var editing: OrbChainDraft?
     @State private var deleting: OrbJSON?
     @State private var busy = false
+    @State private var googleCapText = "10"
+    @State private var savedGoogleCap = 10
 
     var body: some View {
         List {
             OrbSettingsError(message: error)
             if !notice.isEmpty { Section { Text(notice).font(.footnote).textSelection(.enabled) } }
             chainsSection
+            concurrencySection
             healthSection
             eventsSection
         }
@@ -62,6 +65,41 @@ struct OrbRoutingSettings: View {
                 .swipeActions { Button("Delete", role: .destructive) { deleting = chain } }
             }
         } header: { Text("Fallback chains") } footer: { Text("Requests to a chain ID try each provider/model in order, skipping accounts in cooldown. Long-press a chain for actions.") }
+    }
+
+    private var googleCapDirty: Bool {
+        Int(googleCapText.trimmingCharacters(in: .whitespaces)) != savedGoogleCap
+    }
+
+    private var concurrencySection: some View {
+        Section {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Google & Antigravity")
+                        .font(.subheadline)
+                    Text("Per-account in-flight cap (1–128)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                TextField("10", text: $googleCapText)
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 64)
+                    .accessibilityLabel("Google and Antigravity per-account limit")
+                Button("Save") {
+                    Task { await saveGoogleConcurrency() }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(busy || !googleCapDirty)
+            }
+        } header: {
+            Text("Router concurrency")
+        } footer: {
+            Text("Maximum concurrent requests per Google or Antigravity account before spilling to the next account or queueing. Applies immediately without redeploying.")
+        }
     }
 
     @ViewBuilder private func chainMenu(_ chain: OrbJSON) -> some View {
@@ -175,9 +213,14 @@ struct OrbRoutingSettings: View {
             async let h = client.call("/api/model-routing/health")
             async let e = client.call("/api/model-routing/events")
             async let p = client.call("/api/ai/providers")
+            async let s = client.call("/api/settings")
             chains = try await c.items
             health = (try? await h.items) ?? []
             events = (try? await e.items) ?? []
+            if let settingsResp = try? await s, let cap = settingsResp["google_max_concurrency"].number.map(Int.init), cap >= 1 {
+                savedGoogleCap = cap
+                googleCapText = "\(cap)"
+            }
             if let provResp = try? await p {
                 let list = provResp["providers"] == .null ? provResp.items : provResp["providers"].items
                 var map: [String: String] = [:]
@@ -206,6 +249,20 @@ struct OrbRoutingSettings: View {
             "entries": .array(draft.entries.map { .object(["provider_id": .string($0.provider), "model_id": .string($0.model)]) }),
         ])
         await run { _ = try await client.call(draft.existing ? Self.path(draft.chainID) : "/api/model-routing/chains", method: draft.existing ? "PUT" : "POST", body: body) }
+    }
+
+    private func saveGoogleConcurrency() async {
+        guard let parsed = Int(googleCapText.trimmingCharacters(in: .whitespaces)), (1...128).contains(parsed) else {
+            error = "Per-account concurrency must be a whole number from 1 to 128."
+            return
+        }
+        await run {
+            let updated = try await client.call("/api/settings", method: "PUT", body: .object(["google_max_concurrency": .number(Double(parsed))]))
+            let resolved = updated["google_max_concurrency"].number.map(Int.init) ?? parsed
+            savedGoogleCap = resolved
+            googleCapText = "\(resolved)"
+            notice = "Updated Google & Antigravity per-account cap to \(resolved)."
+        }
     }
 
     private func test(_ id: String) async {

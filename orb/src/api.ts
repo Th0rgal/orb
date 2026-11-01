@@ -1444,6 +1444,8 @@ export interface GlobalSettings {
   /** Backend-wide mission concurrency. Distinct from a project's grant cap. */
   max_parallel_missions?: number | null;
   max_concurrent_tasks?: number | null;
+  /** Live per-account OrbRouter concurrency cap for Google & Antigravity accounts (1–128). */
+  google_max_concurrency?: number | null;
 }
 
 export async function getGlobalSettings(): Promise<GlobalSettings> {

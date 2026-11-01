@@ -468,17 +468,15 @@ static KIMI_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
         tokio::sync::Semaphore::new(n)
     });
 
-/// Per-account concurrency semaphores for Google Gemini accounts.
+/// Per-account concurrency limiters for Google Gemini & Antigravity accounts.
 /// Opening 15+ concurrent reasoning calls on one Google account causes upstream
-/// stalls/timeouts; capping each Google account (`PROXY_GOOGLE_MAX_CONCURRENCY`,
-/// default 10) keeps latency healthy, spills burst traffic onto the secondary
-/// Google account immediately, and queues excess callers cleanly in FIFO order.
+/// stalls/timeouts; capping each account (`google_max_concurrency` in global
+/// settings or `PROXY_GOOGLE_MAX_CONCURRENCY` env var, default 10) keeps latency
+/// healthy, spills burst traffic onto the secondary account immediately, and
+/// queues excess callers cleanly in FIFO order without needing a restart when
+/// the cap is adjusted at runtime.
 pub(crate) fn google_max_concurrency() -> usize {
-    std::env::var("PROXY_GOOGLE_MAX_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(10)
+    crate::settings::effective_google_max_concurrency()
 }
 
 fn proxy_queue_timeout(via_cloudflare: bool) -> std::time::Duration {
@@ -524,29 +522,205 @@ fn google_spillover_queue_timeout(
     std::time::Duration::from_millis(ms).min(full_queue_timeout)
 }
 
+#[derive(Default)]
+struct AccountGateState {
+    inflight: usize,
+    waiters: std::collections::VecDeque<tokio::sync::oneshot::Sender<OwnedAccountPermit>>,
+}
+
+/// Live-resizable FIFO concurrency gate for a single Google / Antigravity account.
+///
+/// Unlike a fixed-size `tokio::sync::Semaphore`, `GoogleAccountConcurrencyGate`
+/// reads the current runtime cap on every acquire/release and exposes
+/// [`notify_google_concurrency_changed`] so raising the cap via `PUT /api/settings`
+/// wakes queued callers immediately while lowering it lets active SSE streams
+/// finish naturally before admitting new work.
+pub(crate) struct GoogleAccountConcurrencyGate {
+    state: std::sync::Mutex<AccountGateState>,
+    #[cfg(test)]
+    limit_override: std::sync::atomic::AtomicUsize,
+}
+
+impl std::fmt::Debug for GoogleAccountConcurrencyGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        f.debug_struct("GoogleAccountConcurrencyGate")
+            .field("inflight", &state.inflight)
+            .field("waiters", &state.waiters.len())
+            .finish()
+    }
+}
+
+/// RAII permit holding one in-flight slot on a [`GoogleAccountConcurrencyGate`].
+///
+/// Sending `OwnedAccountPermit` directly across the waiter `oneshot` channel
+/// guarantees linear ownership: even if a raced `select_all` branch or
+/// `tokio::time::timeout` drops a `oneshot::Receiver` after a permit was sent,
+/// dropping the buffered `OwnedAccountPermit` immediately releases the slot and
+/// wakes the next FIFO waiter.
+#[derive(Debug)]
+pub(crate) struct OwnedAccountPermit {
+    gate: Option<Arc<GoogleAccountConcurrencyGate>>,
+}
+
+impl Drop for OwnedAccountPermit {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.release();
+        }
+    }
+}
+
+impl GoogleAccountConcurrencyGate {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(AccountGateState::default()),
+            #[cfg(test)]
+            limit_override: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn current_limit(&self) -> usize {
+        #[cfg(test)]
+        {
+            let v = self
+                .limit_override
+                .load(std::sync::atomic::Ordering::Acquire);
+            if v >= 1 {
+                return v;
+            }
+        }
+        google_max_concurrency()
+    }
+
+    #[cfg(test)]
+    fn set_test_limit(self: &Arc<Self>, limit: usize) {
+        self.limit_override
+            .store(limit, std::sync::atomic::Ordering::Release);
+        self.wake_waiters();
+    }
+
+    #[cfg(test)]
+    fn inflight_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inflight
+    }
+
+    pub(crate) fn try_acquire_owned(self: &Arc<Self>) -> Result<OwnedAccountPermit, ()> {
+        let limit = self.current_limit();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while state.waiters.front().is_some_and(|w| w.is_closed()) {
+            state.waiters.pop_front();
+        }
+        if state.waiters.is_empty() && state.inflight < limit {
+            state.inflight += 1;
+            Ok(OwnedAccountPermit {
+                gate: Some(Arc::clone(self)),
+            })
+        } else {
+            Err(())
+        }
+    }
+
+    pub(crate) async fn acquire_owned(self: Arc<Self>) -> Result<OwnedAccountPermit, ()> {
+        let rx = {
+            let limit = self.current_limit();
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            while state.waiters.front().is_some_and(|w| w.is_closed()) {
+                state.waiters.pop_front();
+            }
+            if state.waiters.is_empty() && state.inflight < limit {
+                state.inflight += 1;
+                return Ok(OwnedAccountPermit {
+                    gate: Some(Arc::clone(&self)),
+                });
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            state.waiters.push_back(tx);
+            rx
+        };
+        rx.await.map_err(|_| ())
+    }
+
+    fn wake_waiters(self: &Arc<Self>) {
+        loop {
+            let limit = self.current_limit();
+            let tx = {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                while state.waiters.front().is_some_and(|w| w.is_closed()) {
+                    state.waiters.pop_front();
+                }
+                if state.inflight >= limit {
+                    return;
+                }
+                let Some(tx) = state.waiters.pop_front() else {
+                    return;
+                };
+                state.inflight += 1;
+                tx
+            };
+            let permit = OwnedAccountPermit {
+                gate: Some(Arc::clone(self)),
+            };
+            if let Err(mut unconsumed) = tx.send(permit) {
+                unconsumed.gate = None;
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.inflight = state.inflight.saturating_sub(1);
+            }
+        }
+    }
+
+    fn release(self: &Arc<Self>) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.inflight = state.inflight.saturating_sub(1);
+        }
+        self.wake_waiters();
+    }
+}
+
 static GOOGLE_ACCOUNT_CONCURRENCY: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<uuid::Uuid, Arc<tokio::sync::Semaphore>>>,
+    std::sync::Mutex<HashMap<uuid::Uuid, Arc<GoogleAccountConcurrencyGate>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-pub(crate) fn google_account_semaphore(account_id: uuid::Uuid) -> Arc<tokio::sync::Semaphore> {
+pub(crate) fn google_account_semaphore(
+    account_id: uuid::Uuid,
+) -> Arc<GoogleAccountConcurrencyGate> {
     let mut map = GOOGLE_ACCOUNT_CONCURRENCY
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     Arc::clone(
         map.entry(account_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(google_max_concurrency()))),
+            .or_insert_with(|| Arc::new(GoogleAccountConcurrencyGate::new())),
     )
+}
+
+/// Re-evaluate all tracked Google / Antigravity account concurrency gates so an
+/// increased `google_max_concurrency` cap wakes FIFO waiters immediately.
+pub(crate) fn notify_google_concurrency_changed() {
+    let gates: Vec<Arc<GoogleAccountConcurrencyGate>> = {
+        let map = GOOGLE_ACCOUNT_CONCURRENCY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.values().cloned().collect()
+    };
+    for gate in gates {
+        gate.wake_waiters();
+    }
 }
 
 /// Hold `permit` for the lifetime of an SSE body stream so streaming calls
 /// occupy their per-account concurrency slot until completion or client drop.
-fn with_concurrency_permit<S>(
+fn with_concurrency_permit<S, P>(
     inner: S,
-    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: Option<P>,
 ) -> impl futures::Stream<Item = S::Item>
 where
     S: futures::Stream + Send + 'static,
     S::Item: Send + 'static,
+    P: Send + 'static,
 {
     async_stream::stream! {
         let _permit = permit;
@@ -562,11 +736,11 @@ where
 ///
 /// 1. Tries `try_acquire_owned()` in priority order (`entry_idx` first — e.g.
 ///    `GEMINI_API_KEY` #1, `thomas.marchand44@gmail.com` #2). If #1 has free
-///    capacity (`< 5` inflight), #1 wins immediately; if #1 is at `5/5` and #2
-///    has free capacity, #2 is rotated into `entry_idx` with 0ms wait.
-/// 2. If every healthy account in the group is at `5/5`, awaits the first
+///    capacity (`< cap` inflight), #1 wins immediately; if #1 is at `cap/cap`
+///    and #2 has free capacity, #2 is rotated into `entry_idx` with 0ms wait.
+/// 2. If every healthy account in the group is at `cap/cap`, awaits the first
 ///    account in the group to release a slot (bounded by `queue_timeout`),
-///    rotating the winner into `entry_idx`. Returns `Err(())` on queue timeout.
+///    rotating the winner into `entry_idx`. Returns `Err(waited)` on timeout.
 fn is_google_concurrency_sibling(
     head: &crate::provider_health::ResolvedEntry,
     other: &crate::provider_health::ResolvedEntry,
@@ -597,7 +771,7 @@ async fn acquire_google_group_permit(
     entry_idx: usize,
     queue_timeout: std::time::Duration,
     is_routable: impl Fn(&crate::provider_health::ResolvedEntry) -> bool,
-) -> Result<(tokio::sync::OwnedSemaphorePermit, std::time::Duration), std::time::Duration> {
+) -> Result<(OwnedAccountPermit, std::time::Duration), std::time::Duration> {
     let head = entries[entry_idx].clone();
     let mut group_end = entry_idx + 1;
     while group_end < entries.len() && is_google_concurrency_sibling(&head, &entries[group_end]) {
@@ -3708,8 +3882,9 @@ async fn chat_completions_routed(
         // For Google & Antigravity Carbon EAP, acquire a per-account concurrency
         // slot across the sibling account group (`GEMINI_API_KEY` first,
         // `thomas.marchand44@gmail.com` second). When #1 hits max concurrency
-        // (default 5), traffic spills immediately onto #2; when both are at 5/5,
-        // callers wait in FIFO order for whichever account frees a slot first.
+        // (default 10, hot-reloadable via `PUT /api/settings`), traffic spills
+        // immediately onto #2; when both are saturated, callers wait in FIFO
+        // order for whichever account frees a slot first.
         let initial_provider_type =
             ProviderType::from_id(&entries[entry_idx].provider_id).unwrap_or(ProviderType::Custom);
         let mut queue_waited = std::time::Duration::ZERO;
@@ -11499,6 +11674,137 @@ mod tests {
             google_spillover_queue_timeout(&without_fallback, 0, full, has_cred),
             full
         );
+    }
+
+    #[tokio::test]
+    async fn google_account_gate_resizes_live_and_never_leaks_on_cancel() {
+        if std::env::var("PROXY_GOOGLE_MAX_CONCURRENCY").is_err() {
+            assert_eq!(google_max_concurrency(), 10);
+        }
+
+        let account_a = uuid::Uuid::new_v4();
+        let account_b = uuid::Uuid::new_v4();
+        let gate_a = google_account_semaphore(account_a);
+        let gate_b = google_account_semaphore(account_b);
+        gate_a.set_test_limit(5);
+        gate_b.set_test_limit(5);
+
+        let make_entries = || {
+            vec![
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "google".into(),
+                    model_id: "gemini-4-carbon-eap".into(),
+                    account_id: account_a,
+                    api_key: Some("AIza-a".into()),
+                    has_oauth: false,
+                    base_url: None,
+                    subscription_key: None,
+                },
+                crate::provider_health::ResolvedEntry {
+                    provider_id: "antigravity".into(),
+                    model_id: "agy-model-high".into(),
+                    account_id: account_b,
+                    api_key: None,
+                    has_oauth: true,
+                    base_url: None,
+                    subscription_key: None,
+                },
+            ]
+        };
+
+        let has_cred =
+            |e: &crate::provider_health::ResolvedEntry| e.api_key.is_some() || e.has_oauth;
+
+        // Saturate both accounts at 5/5 (10 total).
+        let mut held = Vec::new();
+        for _ in 0..10 {
+            let mut entries = make_entries();
+            let (permit, waited) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                has_cred,
+            )
+            .await
+            .unwrap();
+            assert!(waited.is_zero());
+            held.push(permit);
+        }
+        assert_eq!(gate_a.inflight_count(), 5);
+        assert_eq!(gate_b.inflight_count(), 5);
+
+        // Queue 3 additional callers while both accounts are at 5/5.
+        let mut queued_handles = Vec::new();
+        for _ in 0..3 {
+            let mut entries = make_entries();
+            queued_handles.push(tokio::spawn(async move {
+                acquire_google_group_permit(
+                    &mut entries,
+                    0,
+                    std::time::Duration::from_secs(2),
+                    has_cred,
+                )
+                .await
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        for h in &queued_handles {
+            assert!(!h.is_finished());
+        }
+
+        // Expand live from 5 -> 10 per account without dropping held permits:
+        // all 3 queued callers wake immediately!
+        gate_a.set_test_limit(10);
+        gate_b.set_test_limit(10);
+        for h in queued_handles {
+            let (permit, _) = tokio::time::timeout(std::time::Duration::from_millis(200), h)
+                .await
+                .expect("queued caller should wake immediately on live cap increase")
+                .unwrap()
+                .unwrap();
+            held.push(permit);
+        }
+        assert_eq!(gate_a.inflight_count() + gate_b.inflight_count(), 13);
+
+        // Shrink live to 2 per account while 13 permits are still in flight:
+        // existing permits stay valid, and new callers block until inflight < 2.
+        gate_a.set_test_limit(2);
+        gate_b.set_test_limit(2);
+        assert!(gate_a.try_acquire_owned().is_err());
+        assert!(gate_b.try_acquire_owned().is_err());
+
+        // Timeout cancellation while saturated must never leak inflight slots.
+        let mut entries = make_entries();
+        let timed_out = acquire_google_group_permit(
+            &mut entries,
+            0,
+            std::time::Duration::from_millis(15),
+            has_cred,
+        )
+        .await;
+        assert!(timed_out.is_err());
+
+        drop(held);
+        assert_eq!(gate_a.inflight_count(), 0);
+        assert_eq!(gate_b.inflight_count(), 0);
+
+        // Verify all 2 + 2 = 4 slots are cleanly available after draining.
+        let mut post_shrink = Vec::new();
+        for _ in 0..4 {
+            let mut entries = make_entries();
+            let (p, waited) = acquire_google_group_permit(
+                &mut entries,
+                0,
+                std::time::Duration::from_secs(1),
+                has_cred,
+            )
+            .await
+            .unwrap();
+            assert!(waited.is_zero());
+            post_shrink.push(p);
+        }
+        assert!(gate_a.try_acquire_owned().is_err());
+        assert!(gate_b.try_acquire_owned().is_err());
     }
 
     #[test]
