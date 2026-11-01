@@ -81,6 +81,13 @@ pub fn status_after_probe(previous_misses: u32, probe_ok: bool) -> (RemoteNodeSt
     (status, misses)
 }
 
+/// Bounded cooldown after a pre-first-token node-specific provider rejection
+/// (such as an egress-IP / region `FAILED_PRECONDITION`) so subsequent turns
+/// do not keep landing on the affected `(node_id, harness)` pair.
+const NODE_HARNESS_QUARANTINE_TTL_SECS: i64 = 3600;
+
+type HarnessQuarantineMap = HashMap<(String, String), (DateTime<Utc>, String)>;
+
 /// Shared cache of node statuses and recent dispatch outcomes.
 ///
 /// Uses `std::sync::RwLock` (never held across `.await`) so synchronous
@@ -92,6 +99,10 @@ pub struct FleetMonitor {
     /// excluded from automatic placement until uncordoned. Persisted to
     /// `state_path` (see [`NodeStateFile`]) so a cordon survives restarts.
     cordoned: RwLock<std::collections::HashSet<String>>,
+    /// Temporary `(node_id, harness) -> (expires_at, reason)` quarantine
+    /// recorded when a provider rejects a node's egress IP or region before
+    /// generating any tokens.
+    quarantined_harnesses: RwLock<HarnessQuarantineMap>,
     /// Where the cordon set is persisted (`.sandboxed-sh/node_state.json`
     /// under the working dir). `None` in tests / until startup wiring runs.
     state_path: RwLock<Option<std::path::PathBuf>>,
@@ -116,8 +127,75 @@ impl FleetMonitor {
             statuses: RwLock::new(HashMap::new()),
             recent: RwLock::new(VecDeque::new()),
             cordoned: RwLock::new(std::collections::HashSet::new()),
+            quarantined_harnesses: RwLock::new(HashMap::new()),
             state_path: RwLock::new(None),
         }
+    }
+
+    /// Temporarily quarantine `(node_id, harness)` after a node-specific
+    /// provider rejection (e.g. egress IP / region refusal).
+    pub fn quarantine_harness(&self, node_id: &str, harness: &str, reason: impl Into<String>) {
+        self.quarantine_harness_until(
+            node_id,
+            harness,
+            Utc::now() + chrono::Duration::seconds(NODE_HARNESS_QUARANTINE_TTL_SECS),
+            reason,
+        );
+    }
+
+    pub fn quarantine_harness_until(
+        &self,
+        node_id: &str,
+        harness: &str,
+        expires_at: DateTime<Utc>,
+        reason: impl Into<String>,
+    ) {
+        let mut map = self
+            .quarantined_harnesses
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        map.insert(
+            (node_id.to_string(), harness.to_string()),
+            (expires_at, reason.into()),
+        );
+    }
+
+    /// Active quarantine reason for `(node_id, harness)`, if still unexpired.
+    pub fn harness_quarantine_reason(&self, node_id: &str, harness: &str) -> Option<String> {
+        let now = Utc::now();
+        let mut map = self
+            .quarantined_harnesses
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (expires_at, _)| *expires_at > now);
+        map.get(&(node_id.to_string(), harness.to_string()))
+            .map(|(_, reason)| reason.clone())
+    }
+
+    /// Sorted list of harnesses currently quarantined on `node_id`.
+    pub fn quarantined_harnesses_for(&self, node_id: &str) -> Vec<String> {
+        let now = Utc::now();
+        let mut map = self
+            .quarantined_harnesses
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (expires_at, _)| *expires_at > now);
+        let mut harnesses: Vec<String> = map
+            .keys()
+            .filter(|(id, _)| id == node_id)
+            .map(|(_, harness)| harness.clone())
+            .collect();
+        harnesses.sort();
+        harnesses
+    }
+
+    /// Clear any temporary harness quarantines on `node_id`.
+    pub fn clear_harness_quarantines(&self, node_id: &str) {
+        let mut map = self
+            .quarantined_harnesses
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        map.retain(|(id, _), _| id != node_id);
     }
 
     /// Load the persisted cordon set from `path` and remember the path for
@@ -144,8 +222,12 @@ impl FleetMonitor {
     }
 
     /// Cordon (`true`) or uncordon (`false`) a node and persist the set.
+    /// Uncordoning also clears any temporary harness quarantines on that node.
     /// Returns whether the set changed.
     pub fn set_cordoned(&self, node_id: &str, cordoned: bool) -> Result<bool, String> {
+        if !cordoned {
+            self.clear_harness_quarantines(node_id);
+        }
         let snapshot: Vec<String> = {
             let mut set = self.cordoned.write().unwrap_or_else(|e| e.into_inner());
             let changed = if cordoned {
@@ -556,6 +638,24 @@ pub fn select_node_auto_with_estimated_disk_and_source(
             reasons.push((node.id.clone(), format!("missing label '{missing}'")));
             continue;
         }
+        if labels.iter().any(|label| label == "manual-only")
+            && !requirements.iter().any(|req| req == "manual-only")
+        {
+            reasons.push((
+                node.id.clone(),
+                "reserved for manual selection ('manual-only' label)".to_string(),
+            ));
+            continue;
+        }
+        if labels.iter().any(|label| label == "small")
+            && !requirements.iter().any(|req| req == "small")
+        {
+            reasons.push((
+                node.id.clone(),
+                "undersized node ('small' label requires explicit selection)".to_string(),
+            ));
+            continue;
+        }
         let disk_reserved = disk_reservations.get(&node.id).copied().unwrap_or(0);
         let disk_verdict = match heartbeat.check_disk_admission(
             disk_reserved,
@@ -643,7 +743,34 @@ impl FleetMonitor {
         settings: &RemoteNodeSettings,
         requirements: &[String],
     ) -> Result<String, PlacementError> {
-        self.place_auto_with_reservations(settings, requirements, &HashMap::new())
+        self.place_auto_for_harness(settings, requirements, None)
+    }
+
+    /// Like [`Self::place_auto`], also skipping nodes temporarily quarantined
+    /// for `harness`.
+    pub fn place_auto_for_harness(
+        &self,
+        settings: &RemoteNodeSettings,
+        requirements: &[String],
+        harness: Option<&str>,
+    ) -> Result<String, PlacementError> {
+        let (nodes, mut excluded_reasons) =
+            self.partition_cordoned_and_quarantined(&settings.nodes, harness);
+        let statuses = self.statuses.read().unwrap_or_else(|e| e.into_inner());
+        select_node_auto_with_reservations(
+            &nodes,
+            &statuses,
+            requirements,
+            env_gb_bytes("REMOTE_NODE_MIN_DISK_GB", DEFAULT_MIN_DISK_GB),
+            env_gb_bytes("REMOTE_NODE_MIN_MEM_GB", DEFAULT_MIN_MEM_GB),
+            &HashMap::new(),
+        )
+        .map_err(|mut error| {
+            excluded_reasons.append(&mut error.reasons);
+            PlacementError {
+                reasons: excluded_reasons,
+            }
+        })
     }
 
     /// Like [`Self::place_auto`], with accepted jobs that may not have reached
@@ -678,12 +805,28 @@ impl FleetMonitor {
         &self,
         nodes: &[RemoteNodeConfig],
     ) -> (Vec<RemoteNodeConfig>, Vec<(String, String)>) {
-        let cordoned = self.cordoned.read().unwrap_or_else(|e| e.into_inner());
+        self.partition_cordoned_and_quarantined(nodes, None)
+    }
+
+    fn partition_cordoned_and_quarantined(
+        &self,
+        nodes: &[RemoteNodeConfig],
+        harness: Option<&str>,
+    ) -> (Vec<RemoteNodeConfig>, Vec<(String, String)>) {
+        let cordoned_snapshot: std::collections::HashSet<String> = self
+            .cordoned
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let mut placeable = Vec::new();
         let mut reasons = Vec::new();
         for node in nodes {
-            if cordoned.contains(&node.id) {
+            if cordoned_snapshot.contains(&node.id) {
                 reasons.push((node.id.clone(), "cordoned by operator".to_string()));
+            } else if let Some((h, reason)) =
+                harness.and_then(|h| self.harness_quarantine_reason(&node.id, h).map(|r| (h, r)))
+            {
+                reasons.push((node.id.clone(), format!("quarantined for '{h}': {reason}")));
             } else {
                 placeable.push(node.clone());
             }
@@ -839,6 +982,10 @@ pub struct RemoteNodeView {
     /// Operator-cordoned: still probed and listed, but excluded from
     /// automatic placement until uncordoned.
     pub cordoned: bool,
+    /// Harnesses temporarily quarantined on this node after a pre-first-token
+    /// provider region/egress rejection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined_harnesses: Vec<String>,
     /// Human name of a managed machine ("small-a"); `id` stays immutable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -894,6 +1041,7 @@ impl RemoteNodeView {
             last_seen: cached.and_then(|c| c.last_seen),
             error: cached.and_then(|c| c.last_error.clone()),
             cordoned: false,
+            quarantined_harnesses: Vec::new(),
             display_name: crate::managed::display_name(&config.id),
         }
     }
@@ -1837,5 +1985,91 @@ mod tests {
         let picked =
             select_node_auto(&nodes, &statuses, &["lean".to_string()], 20 * GIB, 8 * GIB).unwrap();
         assert_eq!(picked, "nippur");
+    }
+
+    #[test]
+    fn auto_placement_excludes_small_and_manual_only_labels_unless_explicitly_requested() {
+        let nodes = vec![
+            node_config("nimrud"),
+            node_config("dgx-spark-admin"),
+            node_config("ashur"),
+        ];
+        let mut statuses = HashMap::new();
+        // Even if nimrud and dgx-spark-admin are completely idle and ashur is busy,
+        // `small` and `manual-only` nodes must not be auto-selected by default.
+        statuses.insert(
+            "nimrud".to_string(),
+            cached_online("nimrud", &["small"], 100, 16, 1, 0, 0),
+        );
+        statuses.insert(
+            "dgx-spark-admin".to_string(),
+            cached_online("dgx-spark-admin", &["manual-only"], 100, 128, 4, 0, 0),
+        );
+        statuses.insert(
+            "ashur".to_string(),
+            cached_online("ashur", &["lean"], 100, 32, 2, 1, 0),
+        );
+
+        let picked = select_node_auto(&nodes, &statuses, &[], 20 * GIB, 8 * GIB).unwrap();
+        assert_eq!(picked, "ashur");
+
+        // Explicit label requirement opts in.
+        let picked_small =
+            select_node_auto(&nodes, &statuses, &["small".to_string()], 20 * GIB, 8 * GIB).unwrap();
+        assert_eq!(picked_small, "nimrud");
+    }
+
+    #[test]
+    fn harness_quarantine_skips_affected_node_for_that_harness_until_uncordoned_or_expired() {
+        let fleet = FleetMonitor::new();
+        let settings = RemoteNodeSettings {
+            enabled: true,
+            nodes: vec![node_config("nimrud"), node_config("ashur")],
+        };
+        fleet.record_heartbeat(
+            "nimrud",
+            cached_online("nimrud", &[], 100, 32, 2, 0, 0)
+                .last_heartbeat
+                .unwrap(),
+        );
+        fleet.record_heartbeat(
+            "ashur",
+            cached_online("ashur", &[], 100, 32, 2, 1, 0)
+                .last_heartbeat
+                .unwrap(),
+        );
+
+        fleet.quarantine_harness(
+            "nimrud",
+            "antigravity",
+            "User location is not supported for the API use",
+        );
+        assert_eq!(
+            fleet.quarantined_harnesses_for("nimrud"),
+            vec!["antigravity".to_string()]
+        );
+        // Antigravity skips nimrud and picks ashur.
+        assert_eq!(
+            fleet
+                .place_auto_for_harness(&settings, &[], Some("antigravity"))
+                .unwrap(),
+            "ashur"
+        );
+        // Unaffected harnesses still use idle nimrud.
+        assert_eq!(
+            fleet
+                .place_auto_for_harness(&settings, &[], Some("codex"))
+                .unwrap(),
+            "nimrud"
+        );
+        // Uncordoning clears temporary harness quarantines immediately.
+        fleet.set_cordoned("nimrud", false).unwrap();
+        assert!(fleet.quarantined_harnesses_for("nimrud").is_empty());
+        assert_eq!(
+            fleet
+                .place_auto_for_harness(&settings, &[], Some("antigravity"))
+                .unwrap(),
+            "nimrud"
+        );
     }
 }

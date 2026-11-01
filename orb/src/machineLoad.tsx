@@ -59,9 +59,34 @@ export function byLeastLoaded<T>(rows: T[], machine: (row: T) => string): T[] {
     .map(entry => entry.row);
 }
 
-/** First automatically schedulable compute node from the sorted list (online, uncordoned, non-manual). */
-export function firstAvailableNodeId(nodes: RemoteNodeView[]): string | undefined {
-  const usable = nodes.filter(node => node.status === "online" && !node.cordoned && !node.labels?.includes("manual-only") && !node.labels?.includes("managed"));
+export const MIN_AUTO_NODE_MEM_BYTES = 8 * 1024 ** 3;
+export const MIN_AUTO_NODE_DISK_BYTES = 20 * 1024 ** 3;
+
+export type AutoSchedulableNodeInput = {
+  id: string;
+  status?: string | null;
+  cordoned?: boolean | null;
+  labels?: string[] | null;
+  mem_available_bytes?: number | null;
+  disk_available_bytes?: number | null;
+  disk_pressure_pinned?: boolean | null;
+  quarantined_harnesses?: string[] | null;
+};
+
+/** Whether a compute node may be selected automatically without an explicit pin (mirrors Core `select_node_auto`). */
+export function isAutoSchedulableNode(node: AutoSchedulableNodeInput, backend?: string | null): boolean {
+  if (node.status !== "online" || node.cordoned || node.disk_pressure_pinned) return false;
+  const labels = node.labels ?? [];
+  if (labels.includes("manual-only") || labels.includes("managed") || labels.includes("small")) return false;
+  if (node.mem_available_bytes != null && node.mem_available_bytes < MIN_AUTO_NODE_MEM_BYTES) return false;
+  if (node.disk_available_bytes != null && node.disk_available_bytes < MIN_AUTO_NODE_DISK_BYTES) return false;
+  if (backend && node.quarantined_harnesses?.includes(backend)) return false;
+  return true;
+}
+
+/** First automatically schedulable compute node from the sorted list (online, uncordoned, roomy, non-manual). */
+export function firstAvailableNodeId(nodes: AutoSchedulableNodeInput[], backend?: string | null): string | undefined {
+  const usable = nodes.filter(node => isAutoSchedulableNode(node, backend));
   return byLeastLoaded(usable, node => node.id)[0]?.id;
 }
 

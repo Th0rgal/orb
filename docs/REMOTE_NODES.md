@@ -595,14 +595,23 @@ error.
 
 A node is eligible when all of the following hold:
 
-- cached status is `online`
+- cached status is `online` and the node is not operator-cordoned
 - its labels (heartbeat, falling back to static config) cover every
-  requirement
+  requirement, and do not include `manual-only` or `small` unless explicitly
+  requested in `remote_requirements`
+- the node is not temporarily quarantined for the requested harness
+  (`quarantined_harnesses` in `GET /api/remote-nodes`, recorded for 1h after a
+  pre-first-token provider region/egress rejection and cleared by `uncordon`)
 - effective disk after non-terminal reservations is at least the greater of
   `REMOTE_NODE_MIN_DISK_GB` (default 20) and the request's scratch estimate
   plus `REMOTE_NODE_DISK_EMERGENCY_GB` (default 10)
 - `mem_available` ≥ `REMOTE_NODE_MIN_MEM_GB` (default 8)
 - `active_jobs + queued_jobs + active_leases + core reservations < 2 * capacity_total`
+
+Orb desktop, iOS, and Android clients enforce the same auto-schedulable node
+predicate (`shared/orb-spec/fixtures/auto-node-selection.json`) when picking a
+default machine for an unpinned composer, falling back to `core` when no node
+qualifies.
 
 Eligible nodes are ranked by immediate capacity, specialization, and normalized
 utilization. Ordinary CPU/Lean jobs prefer non-GPU nodes while those nodes have

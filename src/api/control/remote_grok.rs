@@ -149,6 +149,13 @@ pub(crate) async fn require_node_managed_auth(
     node_id: &str,
     plan: &RemoteHarnessPlan,
 ) -> Result<(), String> {
+    if let Some(backend) = plan.backend_id() {
+        if let Some(reason) = state.fleet.harness_quarantine_reason(node_id, backend) {
+            return Err(format!(
+                "REMOTE_HARNESS_UNAVAILABLE: remote node '{node_id}' is temporarily quarantined for '{backend}': {reason}"
+            ));
+        }
+    }
     if matches!(plan, RemoteHarnessPlan::Vibe { .. }) {
         let unavailable = format!("REMOTE_HARNESS_UNAVAILABLE: remote node '{node_id}' is not ready for Mistral Vibe; install vibe-acp and Python 3.9+ as the node execution user");
         let capabilities = super::machine_transfer::node_transfer_capabilities(state, node_id)
@@ -1533,6 +1540,9 @@ pub(crate) struct TerminalVerdict {
     /// classification reads this rather than the whole report, whose
     /// diagnostics quote arbitrary output.
     pub(crate) cli_error: Option<String>,
+    /// Node-specific provider rejection reason when this job failed before
+    /// generating any tokens due to an unsupported egress IP or region.
+    pub(crate) quarantine_reason: Option<String>,
 }
 
 pub(crate) struct NativeGrokObserver {
@@ -1631,6 +1641,10 @@ pub(crate) fn partial_turn_message(
 }
 
 impl NativeGrokObserver {
+    pub(crate) fn backend(&self) -> &str {
+        self.mission.backend.as_str()
+    }
+
     /// Streamed assistant text of this job when it was stopped mid-turn.
     /// Antigravity keeps its own native bubbles, which are already durable.
     pub(crate) fn partial_turn_message(&self) -> Option<AgentEvent> {
@@ -2567,9 +2581,9 @@ impl NativeGrokObserver {
         } else {
             String::new()
         };
-        let failure = super::remote_failure::classify(
-            self.stream.error.as_deref().unwrap_or(&startup_evidence),
-        );
+        let raw_failure = self.stream.error.as_deref().unwrap_or(&startup_evidence);
+        let failure = super::remote_failure::classify(raw_failure);
+        let location_unsupported = super::remote_failure::is_node_location_unsupported(raw_failure);
         let success = (succeeded || scheduled_end)
             && self
                 .stream
@@ -2664,6 +2678,9 @@ impl NativeGrokObserver {
                         report.push_str(&format!("\n{}", failure.summary));
                     } else {
                         report.push_str(&format!("\nCLI error: {error}"));
+                        if location_unsupported {
+                            report.push_str(&format!("\n{}", failure.summary));
+                        }
                     }
                 }
             }
@@ -2736,11 +2753,17 @@ impl NativeGrokObserver {
             }
         }
 
+        let quarantine_reason = (!success
+            && location_unsupported
+            && self.usage().map_or(0, |usage| usage.output_tokens) == 0)
+            .then(|| failure.summary.clone());
+
         TerminalVerdict {
             success,
             content,
             status_reason,
             cli_error: self.stream.error.clone(),
+            quarantine_reason,
         }
     }
 }

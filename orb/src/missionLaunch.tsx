@@ -119,6 +119,9 @@ export function remoteLaunchPreflight(fleet: RemoteNodesResponse, nodeId: string
   const destination = nodeLabel(nodeId);
   const node = fleet.nodes?.find(n => n.id === nodeId);
   if (!fleet.enabled || !node || (node.cordoned && !isAdministrationNode(node)) || !["online","degraded"].includes(node.status)) return `${destination} is unavailable. Choose an available machine; your draft is kept.`;
+  if (node.quarantined_harnesses?.includes(pick.backend)) {
+    return `${harnessName(pick.backend)} is temporarily unavailable on ${destination} after a provider region or egress rejection. Choose Core or another machine; your draft is kept.`;
+  }
   const capability = fleet.remote_launch;
   if (!capability || capability.typed !== true) return TYPED_LAUNCH_UNSUPPORTED;
   const harnesses = Array.isArray(capability.harnesses) ? capability.harnesses : [];

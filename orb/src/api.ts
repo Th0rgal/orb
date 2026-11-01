@@ -231,6 +231,7 @@ export interface RemoteNodeView {
   mem_available_bytes?: number | null;
   disk_total_bytes?: number | null;
   disk_available_bytes?: number | null;
+  disk_pressure_pinned?: boolean;
   id: string;
   /** Human name for managed machines ("small-a"); `id` stays immutable. */
   display_name?: string | null;
@@ -246,6 +247,7 @@ export interface RemoteNodeView {
   last_seen: string | null;
   error: string | null;
   cordoned: boolean;
+  quarantined_harnesses?: string[];
 }
 
 /**

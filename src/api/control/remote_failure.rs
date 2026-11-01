@@ -54,8 +54,24 @@ pub(crate) fn is_proxy_stream_interruption(raw: &str) -> bool {
     lower.contains(PROXY_STREAM_STALL_CODE) || lower.contains("upstream_stream_error")
 }
 
+/// True when the upstream provider rejected the node's egress IP or region
+/// (for example Google's `FAILED_PRECONDITION (code 400): User location is not
+/// supported for the API use` over a mis-geolocated OVH IPv6 range).
+pub(crate) fn is_node_location_unsupported(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    [
+        "user location is not supported",
+        "unsupported country, region, or territory",
+        "not available in your country",
+        "not available in your region",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 pub(crate) fn classify(raw: &str) -> Failure {
     let lower = raw.to_ascii_lowercase();
+    let location_unsupported = is_node_location_unsupported(raw);
     let kind = if lower.contains("startup watchdog") || lower.contains("startup_watchdog") {
         FailureKind::StartupStall
     } else if ["cancelled by", "canceled by", "operator stop"]
@@ -86,21 +102,22 @@ pub(crate) fn classify(raw: &str) -> Failure {
     .any(|s| lower.contains(s))
     {
         FailureKind::Authentication
-    } else if [
-        "no such file or directory",
-        "cli is not installed",
-        "cli not installed",
-        "command not found",
-        "argument list too long",
-        "unknown model",
-        "model is not available",
-        "unsupported model",
-        "identity was not durably persisted",
-        "invalid agent",
-        "requires --effort",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
+    } else if location_unsupported
+        || [
+            "no such file or directory",
+            "cli is not installed",
+            "cli not installed",
+            "command not found",
+            "argument list too long",
+            "unknown model",
+            "model is not available",
+            "unsupported model",
+            "identity was not durably persisted",
+            "invalid agent",
+            "requires --effort",
+        ]
+        .iter()
+        .any(|s| lower.contains(s))
     {
         FailureKind::Configuration
     } else if crate::account_limits::is_usage_limit_message(raw) {
@@ -170,6 +187,7 @@ pub(crate) fn classify(raw: &str) -> Failure {
         FailureKind::Transport => "The inference connection failed temporarily.",
         FailureKind::Authentication => "Authentication failed. Reconnect the account or repair the node's scoped Core credentials before resuming.",
         FailureKind::ProviderPolicy => "The provider blocked the response. Review the request before resuming.",
+        FailureKind::Configuration if location_unsupported => "The provider rejected this node's egress IP or region. Choose Core or another machine, or route provider traffic over a supported egress IP on that node.",
         FailureKind::Configuration => "The node's CLI, model, or workspace configuration needs attention before resuming.",
         FailureKind::Quota => "The provider usage limit was reached.",
         FailureKind::Cancelled => "The run was stopped. Automatic recovery will not override that stop.",
@@ -270,5 +288,15 @@ mod tests {
         assert_eq!(classify(raw).kind, FailureKind::Transport);
         assert!(is_proxy_stream_interruption(raw));
         assert!(!is_proxy_stream_interruption("http 503"));
+    }
+
+    #[test]
+    fn provider_location_rejection_is_configuration_with_egress_guidance() {
+        // Exact error reported by mission 4a2512c8-c945-4090-a08a-43883221cd36 on nimrud.
+        let raw = "FAILED_PRECONDITION (code 400): User location is not supported for the API use.";
+        let failure = classify(raw);
+        assert_eq!(failure.kind, FailureKind::Configuration);
+        assert!(is_node_location_unsupported(raw));
+        assert!(failure.summary.contains("egress IP or region"));
     }
 }

@@ -2469,18 +2469,34 @@ pub(super) async fn poll_remote_job(
                             .unwrap_or_default(),
                         status.log_tail.as_deref().unwrap_or("(empty)"),
                     );
-                    let (success, mut content, mut status_reason, cli_error) =
-                        if let Some(observer) = grok.as_mut() {
-                            let verdict = observer.verdict(&status, &node.id).await;
-                            (
-                                verdict.success,
-                                verdict.content,
-                                verdict.status_reason,
-                                verdict.cli_error,
-                            )
-                        } else {
-                            (success, content, "remote_node_job", None)
-                        };
+                    let (success, mut content, mut status_reason, cli_error) = if let Some(
+                        observer,
+                    ) = grok.as_mut()
+                    {
+                        let verdict = observer.verdict(&status, &node.id).await;
+                        if let Some(reason) = verdict.quarantine_reason.as_deref() {
+                            let backend = observer.backend();
+                            if !backend.is_empty() {
+                                tracing::warn!(
+                                    %mission_id,
+                                    %job_id,
+                                    node = %node.id,
+                                    %backend,
+                                    %reason,
+                                    "quarantining remote node harness after pre-first-token provider region/egress rejection"
+                                );
+                                fleet.quarantine_harness(&node.id, backend, reason);
+                            }
+                        }
+                        (
+                            verdict.success,
+                            verdict.content,
+                            verdict.status_reason,
+                            verdict.cli_error,
+                        )
+                    } else {
+                        (success, content, "remote_node_job", None)
+                    };
                     // A job that failed on a usage limit is not a plain
                     // failure: the mission waits and the job is replayed once
                     // an account is available. A timeout or a missing node
