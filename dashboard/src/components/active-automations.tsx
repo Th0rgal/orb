@@ -42,7 +42,7 @@ const LIVE_STATUSES: ReadonlySet<MissionStatus> = new Set<MissionStatus>([
  * the kanban badges stay in sync.
  */
 export function ActiveAutomations({ missions, runningMissionIds }: ActiveAutomationsProps) {
-  const { data: automations = [], isLoading, mutate } = useSWR(
+  const { data: automations = [], isLoading, error, isValidating, mutate } = useSWR(
     'active-automations',
     listActiveAutomations,
     { refreshInterval: 5000, revalidateOnFocus: false, compare: stableJsonCompare },
@@ -234,12 +234,21 @@ export function ActiveAutomations({ missions, runningMissionIds }: ActiveAutomat
         </div>
       )}
 
+      {error && (
+        <div role="alert" className="py-2 text-[11px] text-destructive">
+          <p>Failed to load active automations.</p>
+          <button onClick={() => void mutate()} disabled={isValidating} className="mt-1 underline disabled:opacity-50">
+            Retry loading automations
+          </button>
+        </div>
+      )}
+
       {isLoading && rows.length === 0 ? (
         <div className="flex items-center gap-2 py-2 text-[11px] text-[rgb(var(--foreground)/0.4)]">
           <Loader className="h-3 w-3 animate-spin" /> Loading…
         </div>
       ) : rows.length === 0 ? (
-        <p className="py-2 text-[11px] text-[rgb(var(--foreground)/0.4)]">No active automations.</p>
+        !error && <p className="py-2 text-[11px] text-[rgb(var(--foreground)/0.4)]">No active automations.</p>
       ) : (
         <div className="-mr-1 flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto pr-1">
           {rows.map(({ automation, mission, stale }) => (
