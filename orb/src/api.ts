@@ -243,6 +243,8 @@ export interface RemoteNodeView {
   capacity_available: number | null;
   active_jobs: number | null;
   queued_jobs: number | null;
+  priority_jobs?: number | null;
+  coordinator_capacity?: number | null;
   last_seen: string | null;
   error: string | null;
   cordoned: boolean;
@@ -477,6 +479,15 @@ export function shortModelLabel(label: string): string {
 
 export async function getRemoteNodes(): Promise<RemoteNodesResponse> {
   return api("/api/remote-nodes");
+}
+
+/** Live-resize the job slot limit on a static remote runner node (`1..=256`) without restarting. */
+export async function updateRemoteNodeCapacity(name: string, capacity: number): Promise<RemoteNodeView> {
+  return api<RemoteNodeView>(`/api/nodes/${encodeURIComponent(name)}/capacity`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ capacity }),
+  });
 }
 
 /** A disabled account stays listed but is never chosen for a request. */

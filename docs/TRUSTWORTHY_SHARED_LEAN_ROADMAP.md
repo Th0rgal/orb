@@ -21,14 +21,15 @@ Node WASM MVP/SIMD128/shipped module, and Linux-loaded Android x86_64 JNI paths
 with zero mismatches (`QUALIFIED_WITH_HONEST_DEVICE_BLOCKERS`):
 [results and receipt hashes](P1_SHARED_KERNEL_CONFORMANCE.md),
 [P3 report](P3_TARGET_QUALIFICATION_REPORT.md). Later `#1488` added
-`orb_slot_bypass_step`, expanding the current manifest to **130 entries / 129
-public exports** (96 `orb_*` + 33 `leansys_*` + 1 compiler helper), and `#1490`
-added the repo-owned 260-case (`130 * 2`) Ed25519-signed local P3 consistency
+`orb_slot_bypass_step` and live node capacity / coordinator priority lane added
+`orb_node_resize_step` and `orb_node_lane_step`, expanding the current manifest to **132 entries / 131
+public exports** (98 `orb_*` + 33 `leansys_*` + 1 compiler helper), and `#1490`
+added the repo-owned 264-case (`132 * 2` on current manifest) Ed25519-signed local P3 consistency
 receipt and `ORB_KERNEL_BACKEND=stock-c` default rollback without retroactively
 relabeling the `3c70e5ada` multi-target run.
 
-That local evidence is not phase acceptance: **23 partial / 107 unconnected**
-coverage entries remain across the current 130-entry manifest (`acceptance:
+That local evidence is not phase acceptance: **23 partial / 109 unconnected**
+coverage entries remain across the current 132-entry manifest (`acceptance:
 INCOMPLETE`; 23 partial / 106 unconnected at `3c70e5ada`); physical iPhone 13
 mini and Pixel 8 stay `BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is
 `BLOCKED_HOST_UNREACHABLE`, iOS/macOS/Android-ARM64 remain
@@ -55,15 +56,14 @@ those checks.
 
 The coverage registry remains incomplete: 106 entries were unconnected and 23
 had explicit partial evidence in `shared/orb-spec/coverage_evidence.json` at the
-2026-10-28 handoff (on current `master`, after `#1488` added
-`orb_slot_bypass_step`, 107 entries are unconnected and 23 partial across 130
-manifest entries: 96 `orb_*` + 33 `leansys_*` + 1 compiler helper).
+2026-10-28 handoff (on current `master`, after `#1488` and live node capacity / coordinator lane exports, 109 entries are unconnected and 23 partial across 132
+manifest entries: 98 `orb_*` + 33 `leansys_*` + 1 compiler helper).
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.
 At that handoff its 129 manifest entries were 95 `orb_*` exports (`Orb.Kernel.*`), 33 `leansys_*`
 exports (`LeanSys.Spec.*`, verified against pinned `lean-sys` by `gen_orb_kernel_unboxed.py`),
 and the compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg` (`model: null`).
-Those 128 public exports covered all public Orb/LeanSys exports at that head (129 on
+Those 128 public exports covered all public Orb/LeanSys exports at that head (131 on
 current `master`); the helper
 remains inventoried separately rather than being counted as an extra public gate.
 Shadow observations now count missing host HOME poststates as unobserved,

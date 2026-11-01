@@ -310,4 +310,28 @@ class OrbManagedMachinesTest {
             OrbManagedMachines.providerGroupSummary(listOf(boat1.copy(state = "failed", usdPerHour = 0.0)))
         )
     }
+
+    @Test
+    fun staticNodeSlotSummaryAndCapacityBounds() {
+        val node = OrbRow(mapOf("id" to "babylon", "active_jobs" to 3, "capacity_total" to 6))
+        assertEquals("3 / 6 active", OrbNodeCapacity.slotSummary(node))
+        val queuedNode = OrbRow(mapOf("id" to "babylon", "active_jobs" to 6, "capacity_total" to 6, "queued_jobs" to 2))
+        assertEquals("6 / 6 active · 2 queued", OrbNodeCapacity.slotSummary(queuedNode))
+        val legacyNode = OrbRow(mapOf("id" to "spark", "active_jobs" to 2))
+        assertEquals("2 active", OrbNodeCapacity.slotSummary(legacyNode))
+        val idleNode = OrbRow(mapOf("id" to "spark", "active_jobs" to 0))
+        assertNull(OrbNodeCapacity.slotSummary(idleNode))
+
+        assertEquals(1, OrbNodeCapacity.parseDraft("1"))
+        assertEquals(256, OrbNodeCapacity.parseDraft(" 256 "))
+        assertNull(OrbNodeCapacity.parseDraft("0"))
+        assertNull(OrbNodeCapacity.parseDraft("257"))
+        assertNull(OrbNodeCapacity.parseDraft("-3"))
+        assertNull(OrbNodeCapacity.parseDraft("abc"))
+
+        val updated = OrbNodeCapacity.applyOptimisticCapacity(listOf(node, legacyNode), "babylon", 10)
+        assertEquals(10, updated[0].int("capacity_total"))
+        assertEquals(7, updated[0].int("capacity_available"))
+        assertNull(updated[1].int("capacity_total"))
+    }
 }

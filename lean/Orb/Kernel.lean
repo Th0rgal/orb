@@ -2405,4 +2405,89 @@ def slotBypassStep
   else
     512
 
+/--
+  Live static-node capacity resize & shrink-debt stepper (`orb_node_resize_step`).
+  Models operator-authorized live resizing of a node's concurrent job pool without restarting
+  `sandboxed-node` or interrupting running holders (`ConservedResource`, `ScopedAuthority`):
+
+  Return word layout (`UInt64`, zero horizontal counter packing):
+  - `lo32` (`UInt32`):
+    - `bit 8 (256)` = `admitted` (`1` iff admitted).
+    - `bit 10 (1024)` = `changed` (`1` iff `targetCap != curCap` on an admitted step).
+    - `1281` (`1 ||| 256 ||| 1024`): `Grow` (`targetCap > curCap`; cancels shrink debt first).
+    - `1282` (`2 ||| 256 ||| 1024`): `Shrink` (`targetCap < curCap`; forgets idle permits first and
+      parks any remaining shrink as `nextDebt` so zero running jobs are interrupted).
+    - `259` (`3 ||| 256`): `Unchanged` (`targetCap == curCap`).
+    - `513` (`1 ||| 512`): rejected — unauthorized caller (`isOperatorCaller != 1 || isAgentCaller == 1`).
+    - `514` (`2 ||| 512`): rejected — non-static / ephemeral node (`isStaticNode != 1`).
+    - `515` (`3 ||| 512`): rejected — target capacity out of bounds (`!(1 <= targetCap && targetCap <= maxCap)`).
+  - `hi32` (`UInt32`): `nextDebt` (single 32-bit counter; equals `curDebt` on rejection or `Unchanged`).
+-/
+@[inline, export orb_node_resize_step]
+def nodeResizeStep
+    (isOperatorCaller isAgentCaller isStaticNode : UInt8)
+    (curCap curDebt idlePermits targetCap maxCap : UInt32) : UInt64 :=
+  let authOk : Bool := isOperatorCaller == 1 && !(isAgentCaller == 1)
+  let staticOk : Bool := isStaticNode == 1
+  let boundsOk : Bool := 1 <= targetCap && targetCap <= maxCap
+  let lo32 : UInt32 :=
+    if !authOk then 513
+    else if !staticOk then 514
+    else if !boundsOk then 515
+    else if targetCap > curCap then 1281
+    else if targetCap < curCap then 1282
+    else 259
+  let nextDebt : UInt32 :=
+    if !(authOk && staticOk && boundsOk) then
+      curDebt
+    else if targetCap > curCap then
+      let grow : UInt32 := targetCap - curCap
+      if grow >= curDebt then 0 else curDebt - grow
+    else if targetCap < curCap then
+      let shrink : UInt32 := curCap - targetCap
+      let forgotten : UInt32 := if shrink <= idlePermits then shrink else idlePermits
+      satAdd32 curDebt (shrink - forgotten)
+    else
+      curDebt
+  lo32.toUInt64 ||| (nextDebt.toUInt64 <<< 32)
+
+/--
+  Multi-lane remote node job admission & coordinator anti-starvation gate (`orb_node_lane_step`).
+  Partitions node job execution across isolated admission pools (`Main`, `Side`, `Coordinator`) so
+  root coordinator turns, `schedule_wakeup` continuations, and companion turns for active workspace
+  background work never starve behind multi-hour worker waves on `Main`:
+
+  Return word layout (`UInt32`, zero horizontal counter packing):
+  - `bit 8 (256)` = `admitted` (`1` iff an immediate slot is available in the selected pool).
+  - `257` (`1 ||| 256`): `AdmitMain` (`Main` has capacity; uncongested coordinators prefer `Main` first
+    so emergency `Coordinator` slots stay free for worker-saturation bursts).
+  - `258` (`2 ||| 256`): `AdmitSide` (`isSideQuestion == 1` and `sideRunning < sideMax`).
+  - `259` (`3 ||| 256`): `AdmitCoordinator` (`Main` is saturated, caller is an eligible non-worker
+    non-long-running coordinator/wakeup turn, and `coordRunning < coordMax`).
+  - `260` (`4 ||| 256`): `AdmitCompanion` (`hasWorkspaceBg == 1` and `coordRunning < coordMax`).
+  - `513` (`1 ||| 512`): `WaitMainOnly` (worker / long-running / regular job waits strictly on `Main`,
+    never consuming `Side` or `Coordinator` slots).
+  - `514` (`2 ||| 512`): `WaitSideOnly` (`isSideQuestion == 1` with `sideRunning >= sideMax`).
+  - `515` (`3 ||| 512`): `WaitMainOrCoordinator` (both `Main` and `Coordinator` are temporarily full;
+    coordinator/companion turn races both pools).
+-/
+@[inline, export orb_node_lane_step]
+def nodeLaneStep
+    (isSideQuestion isCoordinatorPriority hasWorkspaceBg isChildWorker isLongRunning : UInt8)
+    (mainRunning mainMax sideRunning sideMax coordRunning coordMax : UInt32) : UInt32 :=
+  if isSideQuestion == 1 then
+    if sideRunning < sideMax then 258 else 514
+  else if hasWorkspaceBg == 1 then
+    if coordRunning < coordMax then 260
+    else if mainRunning < mainMax then 257
+    else 515
+  else if isCoordinatorPriority == 1 && !(isChildWorker == 1) && !(isLongRunning == 1) then
+    if mainRunning < mainMax then 257
+    else if coordRunning < coordMax then 259
+    else 515
+  else if mainRunning < mainMax then
+    257
+  else
+    513
+
 end Orb.Kernel

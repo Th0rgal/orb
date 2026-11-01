@@ -16,6 +16,8 @@ struct OrbMachinesSettings: View {
     @State private var managedBusy = false
     @State private var busyProvider: String?
     @State private var softwareReloadToken = 0
+    @State private var capacityDrafts: [String: Int] = [:]
+    @State private var savingCapacityNode: String?
     var body: some View {
         List {
             OrbSettingsError(message: fleetError)
@@ -51,31 +53,73 @@ struct OrbMachinesSettings: View {
                 if loading && fleetNodes.isEmpty { ProgressView() }
                 if fleetReady && fleetNodes.isEmpty { Text("No static fleet nodes registered.").foregroundStyle(.secondary) }
                 ForEach(fleetNodes, id: \.selfID) { node in
+                    let nodeID = node["id"].text
+                    let currentCap = max(1, Int(node["capacity_total"].number ?? 1))
+                    let draftCap = capacityDrafts[nodeID] ?? currentCap
                     DisclosureGroup {
                         LabeledContent("Status", value: node["status"].text)
-                        LabeledContent("Active jobs", value: node["active_jobs"].display.isEmpty ? "Unavailable" : node["active_jobs"].display)
+                        LabeledContent("Active jobs", value: OrbNodeCapacity.slotSummary(node) ?? "Unavailable")
                         resource("Memory", total: node["mem_total_bytes"], available: node["mem_available_bytes"])
                         resource("Disk", total: node["disk_total_bytes"], available: node["disk_available_bytes"])
                         let sample = node["resource_history"].items.last ?? .null
                         if let cpu = sample["cpu"].number { LabeledContent("CPU", value: "\(Int(cpu))%") }
                         else if let cores = node["cpu_total"].number { LabeledContent("CPU", value: "\(Int(cores)) cores") }
                         if let gpu = sample["gpu"].number { LabeledContent("GPU", value: "\(Int(gpu))%") }
+                        if !OrbManaged.isManagedNode(node), node["capacity_total"].number != nil {
+                            HStack(spacing: 10) {
+                                Text("Job slot limit")
+                                Spacer()
+                                Button {
+                                    capacityDrafts[nodeID] = max(1, draftCap - 1)
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(draftCap <= 1 || savingCapacityNode != nil)
+                                .accessibilityLabel("Decrease slot limit")
+                                Text("\(draftCap)")
+                                    .monospacedDigit()
+                                    .frame(minWidth: 28, alignment: .center)
+                                Button {
+                                    capacityDrafts[nodeID] = min(256, draftCap + 1)
+                                } label: {
+                                    Image(systemName: "plus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(draftCap >= 256 || savingCapacityNode != nil)
+                                .accessibilityLabel("Increase slot limit")
+                                if draftCap != currentCap {
+                                    Button(savingCapacityNode == nodeID ? "Saving…" : "Save") {
+                                        Task { await saveCapacity(node, target: draftCap) }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                    .disabled(savingCapacityNode != nil)
+                                }
+                            }
+                        }
                         Button(node["cordoned"].flag ? "Allow new jobs" : "Pause new jobs") { Task { await toggle(node) } }
                             .disabled(busy || !fleetReady)
                     } label: {
-                        VStack(alignment: .leading) {
-                            HStack(spacing: 6) {
-                                Text(OrbManaged.nodeTitle(node))
-                                if OrbManaged.isManagedNode(node) {
-                                    OrbManagedBadge()
-                                    if let p = OrbManaged.nodeProvider(node), p != "boat" {
-                                        Text(OrbManaged.providerLabel(p))
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(.tint)
+                        HStack {
+                            VStack(alignment: .leading) {
+                                HStack(spacing: 6) {
+                                    Text(OrbManaged.nodeTitle(node))
+                                    if OrbManaged.isManagedNode(node) {
+                                        OrbManagedBadge()
+                                        if let p = OrbManaged.nodeProvider(node), p != "boat" {
+                                            Text(OrbManaged.providerLabel(p))
+                                                .font(.caption2.weight(.semibold))
+                                                .foregroundStyle(.tint)
+                                        }
                                     }
                                 }
+                                Text(node["status"].text + (node["cordoned"].flag ? " · New jobs paused" : "")).font(.caption).foregroundStyle(.secondary)
                             }
-                            Text(node["status"].text + (node["cordoned"].flag ? " · New jobs paused" : "")).font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            if let summary = OrbNodeCapacity.slotSummary(node) {
+                                Text(summary).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                            }
                         }
                     }
                 }
@@ -167,6 +211,60 @@ struct OrbMachinesSettings: View {
             _ = try await client.call("/api/nodes/\(OrbCore.escape(node["id"].text))/\(node["cordoned"].flag ? "uncordon" : "cordon")", method: "POST")
             await load()
         } catch is CancellationError {} catch { fleetError = error.localizedDescription }
+    }
+    private func saveCapacity(_ node: OrbJSON, target: Int) async {
+        let id = node["id"].text
+        guard savingCapacityNode == nil, OrbNodeCapacity.parseDraft("\(target)") != nil else { return }
+        savingCapacityNode = id
+        defer { savingCapacityNode = nil }
+        let before = nodes
+        nodes = OrbNodeCapacity.applyOptimisticCapacity(nodes, id: id, capacity: target)
+        do {
+            let updated = try await client.call(
+                "/api/nodes/\(OrbCore.escape(id))/capacity",
+                method: "POST",
+                body: .object(["capacity": .number(Double(target))])
+            )
+            nodes = nodes.map { $0["id"].text == id ? updated : $0 }
+            capacityDrafts.removeValue(forKey: id)
+            fleetError = ""
+        } catch is CancellationError {
+            nodes = before
+        } catch {
+            nodes = before
+            fleetError = "Couldn’t update slot limit for \(id). \(error.localizedDescription)"
+        }
+    }
+}
+
+enum OrbNodeCapacity {
+    static func slotSummary(_ node: OrbJSON) -> String? {
+        guard let active = node["active_jobs"].number.map(Int.init) else { return nil }
+        let head: String
+        if let cap = node["capacity_total"].number.map(Int.init), cap > 0 {
+            head = "\(active) / \(cap) active"
+        } else {
+            head = "\(active) active"
+        }
+        if let queued = node["queued_jobs"].number.map(Int.init), queued > 0 {
+            return "\(head) · \(queued) queued"
+        }
+        return head
+    }
+
+    static func parseDraft(_ raw: String) -> Int? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.allSatisfy(\.isASCII), trimmed.allSatisfy(\.isNumber),
+              let value = Int(trimmed), (1...256).contains(value) else { return nil }
+        return value
+    }
+
+    static func applyOptimisticCapacity(_ nodes: [OrbJSON], id: String, capacity: Int) -> [OrbJSON] {
+        nodes.map { item in
+            guard item["id"].text == id, case .object(var dict) = item else { return item }
+            dict["capacity_total"] = .number(Double(capacity))
+            return .object(dict)
+        }
     }
 }
 

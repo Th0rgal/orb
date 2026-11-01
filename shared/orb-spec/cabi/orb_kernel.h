@@ -134,6 +134,8 @@ uint64_t orb_node_gc_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint
 uint64_t orb_node_disk_admission_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint8_t);
 uint32_t orb_vm_cap_admit(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 uint32_t orb_slot_bypass_step(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint64_t orb_node_resize_step(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+uint32_t orb_node_lane_step(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 #ifdef __cplusplus
 }
 #endif

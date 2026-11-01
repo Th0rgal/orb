@@ -12,8 +12,8 @@ python3 scripts/build_orb_kernel_wasm.py \
   --receipt /path/to/new-build-receipt.json
 ```
 
-The manifest controls all 130 exported function names and ABI parameter/result
-types on current `master` (129 public-prefix exports and one compiler helper;
+The manifest controls all 132 exported function names and ABI parameter/result
+types on current `master` (131 public-prefix exports and one compiler helper;
 128 total when P2 first landed in `#1398`). The builder rejects missing or extra
 function exports, wrong WASM types and all imports. Uint8 and Uint32 use WASM
 i32; Uint64 uses i64. A small metadata parser checks those ABI sections; a real

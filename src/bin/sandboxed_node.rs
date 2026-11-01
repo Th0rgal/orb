@@ -12,7 +12,8 @@ use sandboxed_sh::remote_node::{
     bearer_token, node_token_matches, parse_labels, run_lease_command, validate_lease_token,
     CancelJobResponse, ExecuteResponse, ForceJobRequest, ForceJobResponse, LeaseClaims,
     LeaseRequest, NodeHeartbeat, NodeJobStatus, RemoteNodeError, SubmitJobRequest,
-    SubmitJobResponse, NODE_PROTOCOL_VERSION, SCOPE_JOB_FORCE, SCOPE_JOB_SUBMIT,
+    SubmitJobResponse, UpdateNodeCapacityRequest, NODE_PROTOCOL_VERSION, SCOPE_JOB_FORCE,
+    SCOPE_JOB_SUBMIT, SCOPE_NODE_CAPACITY,
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -124,6 +125,8 @@ async fn main() -> anyhow::Result<()> {
         capacity_total,
         sandboxed_sh::node::capacity::current_side_capacity(),
     );
+    let env_file = sandboxed_sh::node::capacity::env_file_path();
+    capacity.apply_startup_override(&work_root, &env_file);
     let admission = Arc::clone(&capacity.main);
     // Managed auth: profiles raw jobs may request by name. The path is the
     // node's own configuration; payloads never carry it. Advertised in the
@@ -145,9 +148,13 @@ async fn main() -> anyhow::Result<()> {
     );
     // Hot capacity reload: SIGHUP (`sandboxed-node reload`, `systemctl
     // reload`) or an env-file mtime change. Running jobs are never touched.
-    let env_file = sandboxed_sh::node::capacity::env_file_path();
-    sandboxed_sh::node::capacity::spawn_reload_watcher(capacity, env_file.clone());
-    info!(env_file = %env_file.display(), "capacity reload: SIGHUP or env-file change");
+    let override_file = sandboxed_sh::node::capacity::override_file_path(&work_root);
+    sandboxed_sh::node::capacity::spawn_reload_watcher_with_override(
+        capacity,
+        env_file.clone(),
+        Some(override_file),
+    );
+    info!(env_file = %env_file.display(), "capacity reload: SIGHUP, POST /capacity, or env-file change");
 
     // Periodic disk GC for lean-build checkouts and lake cache slots
     // (SANDBOXED_NODE_MIN_FREE_GB, default 10).
@@ -171,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/project-context/prepare", post(prepare_project_context))
         .route("/heartbeat", get(heartbeat))
+        .route("/capacity", post(update_capacity))
         .route("/antigravity/models", get(antigravity_models))
         .route(
             "/managed-auth/antigravity",
@@ -399,20 +407,16 @@ fn host_resources(work_root: &Path) -> HostResources {
     }
 }
 
-async fn heartbeat(
-    State(state): State<Arc<NodeState>>,
-    headers: HeaderMap,
-) -> Result<Json<NodeHeartbeat>, (StatusCode, String)> {
-    check_auth(&headers, &state)?;
+fn heartbeat_snapshot(state: &NodeState) -> NodeHeartbeat {
     let active_leases = state.active_leases.load(Ordering::Acquire);
     let resources = host_resources(&state.work_root);
     let lean_runtime_ready = sandboxed_sh::node::lean_runtime_ready(&state.work_root);
     let labels = advertised_labels(&state.labels, lean_runtime_ready);
-    Ok(Json(NodeHeartbeat {
+    NodeHeartbeat {
         resource_history: sandboxed_sh::node::resource_history::snapshot(),
         node_id: state.node_id.clone(),
         online: true,
-        // Live target: a reload shows up in the very next heartbeat.
+        // Live target: a reload or POST /capacity shows up immediately.
         capacity_total: state.runner.capacity().capacity(),
         // This is only a monitoring snapshot; the shared semaphore above is
         // the atomic enforcement point.
@@ -430,13 +434,86 @@ async fn heartbeat(
         queued_jobs: state.runner.queued_count(),
         side_jobs: state.runner.side_job_count(),
         forced_jobs: state.runner.forced_job_count(),
+        priority_jobs: state.runner.priority_job_count(),
+        coordinator_capacity: Some(state.runner.capacity().coordinator_capacity() as u32),
         cached_toolchains: sandboxed_sh::node::cached_toolchains(&state.work_root),
         source_bundle_capacity: Some(sandboxed_sh::node::lean::source_bundle_capacity()),
         min_free_disk_bytes: Some(state.runner.capacity().min_free_bytes()),
         disk_pressure_pinned: sandboxed_sh::node::lean::disk_pressure_pinned(&state.work_root),
         lean_runtime_ready: Some(lean_runtime_ready),
         managed_auth: state.managed_auth.advertised(),
-    }))
+    }
+}
+
+async fn heartbeat(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+) -> Result<Json<NodeHeartbeat>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    Ok(Json(heartbeat_snapshot(&state)))
+}
+
+async fn update_capacity(
+    State(state): State<Arc<NodeState>>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateNodeCapacityRequest>,
+) -> Result<Json<NodeHeartbeat>, (StatusCode, String)> {
+    check_auth(&headers, &state)?;
+    let (claims, _) = validate_lease_any(&state, &request.lease_token, SCOPE_NODE_CAPACITY)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    if claims.mission_id != Uuid::nil() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "node:capacity lease must use nil mission_id".to_string(),
+        ));
+    }
+    let cap_pool = state.runner.capacity();
+    let verdict =
+        sandboxed_sh::orb_spec::node_resize_step(sandboxed_sh::orb_spec::NodeResizeInput {
+            is_operator_caller: true,
+            is_agent_caller: false,
+            is_static_node: true,
+            cur_cap: cap_pool.capacity(),
+            cur_debt: u32::try_from(cap_pool.main.debt()).unwrap_or(u32::MAX),
+            idle_permits: u32::try_from(cap_pool.main.available_permits()).unwrap_or(u32::MAX),
+            target_cap: request.capacity,
+            max_cap: sandboxed_sh::node::capacity::MAX_NODE_CAPACITY,
+        });
+    if !verdict.admitted {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Capacity {} rejected by orb_node_resize_step ({:?}); allowed range is 1..={}",
+                request.capacity,
+                verdict.decision,
+                sandboxed_sh::node::capacity::MAX_NODE_CAPACITY
+            ),
+        ));
+    }
+    if let Some(coord) = request.coordinator_capacity {
+        if !(1..=16).contains(&coord) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "coordinator_capacity must be in 1..=16".to_string(),
+            ));
+        }
+    }
+    let mut next = cap_pool.snapshot();
+    next.capacity = request.capacity;
+    if let Some(coord) = request.coordinator_capacity {
+        next.coordinator_capacity = coord as usize;
+    }
+    let ov = sandboxed_sh::node::capacity::CapacityOverride {
+        capacity: next.capacity,
+        coordinator_capacity: Some(next.coordinator_capacity),
+        side_capacity: None,
+        min_free_gb: None,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    sandboxed_sh::node::capacity::write_capacity_override(&state.work_root, &ov)
+        .map_err(internal_error)?;
+    cap_pool.apply(next);
+    Ok(Json(heartbeat_snapshot(&state)))
 }
 
 fn advertised_labels(configured: &[String], lean_runtime_ready: bool) -> Vec<String> {
@@ -1273,6 +1350,83 @@ mod tests {
         assert_eq!(idle.capacity_available, 1);
     }
 
+    #[tokio::test]
+    async fn update_capacity_requires_node_capacity_lease_enforces_bounds_and_persists_override() {
+        let work_root = tempfile::tempdir().expect("tempdir");
+        let state = test_state_with_capacity(work_root.path().to_path_buf(), 2).await;
+        let headers = auth_headers(&state.shared_token);
+
+        // Wrong lease scope (mission:execute) is rejected.
+        let wrong_scope = LeaseClaims {
+            mission_id: Uuid::nil(),
+            node_id: state.node_id.clone(),
+            scope: SCOPE_MISSION_EXECUTE.to_string(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).timestamp(),
+            job_id: None,
+        };
+        let rejected_scope = update_capacity(
+            State(state.clone()),
+            headers.clone(),
+            Json(UpdateNodeCapacityRequest {
+                lease_token: create_lease_token(&wrong_scope, &state.shared_token).expect("lease"),
+                capacity: 6,
+                coordinator_capacity: None,
+            }),
+        )
+        .await;
+        assert_eq!(rejected_scope.unwrap_err().0, StatusCode::BAD_REQUEST);
+
+        let valid_claims = LeaseClaims {
+            mission_id: Uuid::nil(),
+            node_id: state.node_id.clone(),
+            scope: SCOPE_NODE_CAPACITY.to_string(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).timestamp(),
+            job_id: None,
+        };
+        let valid_lease =
+            create_lease_token(&valid_claims, &state.shared_token).expect("valid lease");
+
+        // Out-of-bounds capacities (0 and 257) are rejected by orb_node_resize_step.
+        for bad_cap in [0u32, 257u32] {
+            let rejected = update_capacity(
+                State(state.clone()),
+                headers.clone(),
+                Json(UpdateNodeCapacityRequest {
+                    lease_token: valid_lease.clone(),
+                    capacity: bad_cap,
+                    coordinator_capacity: None,
+                }),
+            )
+            .await;
+            assert_eq!(rejected.unwrap_err().0, StatusCode::BAD_REQUEST);
+        }
+
+        // Valid live resize (2 -> 6) updates capacity immediately and writes capacity_override.json.
+        let hb = update_capacity(
+            State(state.clone()),
+            headers.clone(),
+            Json(UpdateNodeCapacityRequest {
+                lease_token: valid_lease,
+                capacity: 6,
+                coordinator_capacity: Some(3),
+            }),
+        )
+        .await
+        .expect("update_capacity ok")
+        .0;
+        assert_eq!(hb.capacity_total, 6);
+        assert_eq!(hb.capacity_available, 6);
+        assert_eq!(hb.coordinator_capacity, Some(3));
+
+        let persisted = sandboxed_sh::node::capacity::read_capacity_override(
+            &sandboxed_sh::node::capacity::override_file_path(work_root.path()),
+        )
+        .expect("read capacity_override.json")
+        .expect("capacity_override.json persisted");
+        assert_eq!(persisted.capacity, 6);
+        assert_eq!(persisted.coordinator_capacity, Some(3));
+    }
+
     #[test]
     fn reload_goes_through_systemd_and_takes_no_pid_input() {
         let argv =
@@ -1376,6 +1530,9 @@ mod tests {
                 payload: sandboxed_sh::remote_node::JobPayload::RawCommand {
                     side_question: false,
                     companion_of: None,
+                    coordinator_priority: false,
+                    is_child_worker: false,
+                    native_goal: false,
                     long_running: false,
                     command: "while [ ! -e release ]; do sleep 0.01; done".to_string(),
                     timeout_secs: Some(30),
@@ -1445,6 +1602,9 @@ mod tests {
         let payload = sandboxed_sh::remote_node::JobPayload::RawCommand {
             side_question: false,
             companion_of: None,
+            coordinator_priority: false,
+            is_child_worker: false,
+            native_goal: false,
             long_running: false,
             command: "echo job-ok".to_string(),
             timeout_secs: Some(30),

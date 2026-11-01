@@ -1,13 +1,30 @@
-    Finished `test` profile [unoptimized] target(s) in 0.22s
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 0.05s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 2 tests
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 test stateful_tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/mission-vm-limits)
+warning: function `check_fence_at_line_start` is never used
+    --> crates/orb-spec/src/lib.rs:5070:8
+     |
+5070 |     fn check_fence_at_line_start(buf: &[u8], mut p: usize) -> usize {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orb-spec` (lib) generated 1 warning
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -41,20 +58,20 @@ warning: unused variable: `source`
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `scope_oom_killed` is never used
-    --> src/node/runner.rs:1661:10
+    --> src/node/runner.rs:2227:10
      |
-1661 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
+2227 | async fn scope_oom_killed(_scope: Option<&SystemdScope>) -> bool {
      |          ^^^^^^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 1m 07s
+    Finished `test` profile [unoptimized] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 2 tests
 test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
 test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3650 filtered out; finished in 0.03s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3664 filtered out; finished in 0.02s
 

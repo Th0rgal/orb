@@ -90,6 +90,23 @@ export function managedFleetGroupSummary(nodes: readonly { status?: string | nul
   return active > 0 ? `${head} · ${active} active` : head;
 }
 
+/** Right-side slot badge for a fleet node row: "2 / 6 active · 1 queued", "2 active", or undefined. */
+export function formatNodeSlotBadge(node?: { active_jobs?: number | null; capacity_total?: number | null; queued_jobs?: number | null } | null): string | undefined {
+  if (!node || node.active_jobs == null) return undefined;
+  const head = node.capacity_total != null && node.capacity_total > 0
+    ? `${node.active_jobs} / ${node.capacity_total} active`
+    : `${node.active_jobs} active`;
+  return node.queued_jobs != null && node.queued_jobs > 0 ? `${head} · ${node.queued_jobs} queued` : head;
+}
+
+/** Validate a live static-node capacity draft (`1..=256`). */
+export function parseNodeCapacityDraft(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isInteger(value) && value >= 1 && value <= 256 ? value : null;
+}
+
 /** Group heading for managed fleet nodes: "Managed (boat.dev)", "Managed (Hetzner)", or "Managed cloud". */
 export function managedFleetLabel(nodes: readonly ({ id?: string; labels?: readonly string[] | null } | null | undefined)[]): string {
   const managed = nodes.filter(isManagedNode);

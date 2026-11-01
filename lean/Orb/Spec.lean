@@ -5991,4 +5991,296 @@ theorem slot_bypass_regular_admission_ignores_forced_workers
   unfold slotBypassStep
   rfl
 
+/-! ## Live Node Capacity Resize & Multi-Lane Coordinator Anti-Starvation Specs -/
+
+structure NodeResizeCheck where
+  isOperatorCaller : UInt8
+  isAgentCaller    : UInt8
+  isStaticNode     : UInt8
+  curCap           : UInt32
+  curDebt          : UInt32
+  idlePermits      : UInt32
+  targetCap        : UInt32
+  maxCap           : UInt32
+  deriving Repr, DecidableEq
+
+def NodeResizeCheck.Admissible (s : NodeResizeCheck) : Bool :=
+  (s.isOperatorCaller == 1) && !(s.isAgentCaller == 1) && (s.isStaticNode == 1) &&
+    decide (1 <= s.targetCap) && decide (s.targetCap <= s.maxCap)
+
+theorem nodeResize_admit_eq (s : NodeResizeCheck) :
+    (((nodeResizeStep
+        s.isOperatorCaller s.isAgentCaller s.isStaticNode
+        s.curCap s.curDebt s.idlePermits s.targetCap s.maxCap &&& 0xFFFFFFFF) &&& 256) != 0)
+      = s.Admissible := by
+  unfold NodeResizeCheck.Admissible nodeResizeStep
+  rw [pack32_lo]
+  cases ho : (s.isOperatorCaller == 1) <;>
+    cases ha : (s.isAgentCaller == 1) <;>
+    cases hs : (s.isStaticNode == 1) <;>
+    by_cases hlo : (1 : UInt32) <= s.targetCap <;>
+    by_cases hhi : s.targetCap <= s.maxCap <;>
+    by_cases hgt : s.targetCap > s.curCap <;>
+    by_cases hlt : s.targetCap < s.curCap <;>
+    (simp only [ho, ha, hs, hlo, hhi, hgt, hlt, decide_true, decide_false,
+      Bool.true_and, Bool.false_and, Bool.and_true, Bool.and_false,
+      Bool.not_true, Bool.not_false, ↓reduceIte]; decide)
+
+def nodeResizeMetaGate : MetaGateSpec NodeResizeCheck (fun s => NodeResizeCheck.Admissible s = true) where
+  gate s :=
+    ((nodeResizeStep
+      s.isOperatorCaller s.isAgentCaller s.isStaticNode
+      s.curCap s.curDebt s.idlePermits s.targetCap s.maxCap &&& 0xFFFFFFFF) &&& 256) != 0
+  sound s h := by rw [← nodeResize_admit_eq s]; exact h
+  complete s h := by rw [nodeResize_admit_eq s]; exact h
+  posWitness := ⟨1, 0, 1, 6, 0, 0, 10, 256⟩
+  negWitness := ⟨1, 1, 1, 6, 0, 0, 10, 256⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def nodeResizeScopedAuthority : ScopedAuthority NodeResizeCheck where
+  admit s := nodeResizeMetaGate.gate s
+  scopeValid s := (s.isOperatorCaller == 1) && !(s.isAgentCaller == 1) && (s.isStaticNode == 1)
+  sound s h := by
+    have hadm := nodeResizeMetaGate.sound s h
+    unfold NodeResizeCheck.Admissible at hadm
+    cases ho : (s.isOperatorCaller == 1) <;>
+      cases ha : (s.isAgentCaller == 1) <;>
+      cases hs : (s.isStaticNode == 1) <;>
+      simp_all
+
+def nodeResizeConservedResource : ConservedResource NodeResizeCheck where
+  admit s := nodeResizeMetaGate.gate s
+  withinBudget s := decide (1 <= s.targetCap) && decide (s.targetCap <= s.maxCap)
+  conserved s h := by
+    have hadm := nodeResizeMetaGate.sound s h
+    unfold NodeResizeCheck.Admissible at hadm
+    cases ho : (s.isOperatorCaller == 1) <;>
+      cases ha : (s.isAgentCaller == 1) <;>
+      cases hs : (s.isStaticNode == 1) <;>
+      simp_all
+
+structure NodeResizeState where
+  cap  : UInt32
+  debt : UInt32
+  deriving Repr, DecidableEq
+
+def effectiveNodeResize (s : NodeResizeState) (c : NodeResizeCheck) : NodeResizeCheck :=
+  { c with curCap := s.cap, curDebt := s.debt }
+
+def nodeResizeMachineStep (s : NodeResizeState) (c : NodeResizeCheck) :
+    NodeResizeState × List UInt32 :=
+  let c' := effectiveNodeResize s c
+  let w := nodeResizeStep
+    c'.isOperatorCaller c'.isAgentCaller c'.isStaticNode
+    c'.curCap c'.curDebt c'.idlePermits c'.targetCap c'.maxCap
+  let admit := nodeResizeMetaGate.gate c'
+  let nextCap := if admit then c.targetCap else s.cap
+  let nextDebt := if admit then (w >>> 32).toUInt32 else s.debt
+  (⟨nextCap, nextDebt⟩, if admit then [c.targetCap] else [])
+
+def nodeResizeMetaStepSpec :
+    MetaStepSpec NodeResizeState NodeResizeCheck UInt32 where
+  safety := {
+    step := nodeResizeMachineStep
+    authorized := fun s c eff =>
+      eff == c.targetCap && (effectiveNodeResize s c).Admissible
+    sound := fun s c eff h_in => by
+      dsimp [nodeResizeMachineStep] at h_in
+      split at h_in
+      · next h_emit =>
+        simp only [List.mem_singleton] at h_in
+        subst h_in
+        have h_adm := nodeResizeMetaGate.sound (effectiveNodeResize s c) h_emit
+        simp [h_adm]
+      · contradiction
+  }
+  liveness := {
+    init := ⟨6, 0⟩
+    step := nodeResizeMachineStep
+    progressRequired := fun s c => (effectiveNodeResize s c).Admissible
+    expectedEffect := fun c eff => eff == c.targetCap
+    live := fun s c h_req => by
+      have h_gate := nodeResizeMetaGate.complete (effectiveNodeResize s c) h_req
+      dsimp [nodeResizeMachineStep]
+      simp [h_gate]
+    traceEvents := [⟨1, 0, 1, 6, 0, 0, 4, 256⟩]
+    posEvent := ⟨1, 0, 1, 4, 2, 0, 10, 256⟩
+    negEvent := ⟨1, 1, 1, 4, 2, 0, 10, 256⟩
+    reachable_live := by decide
+  }
+  cost := {
+    step := nodeResizeMachineStep
+    cpuFuel := fun s c => 12 + ((nodeResizeMachineStep s c).2).length
+    inputBytes := fun _ => 24
+    outputBytes := fun s c => 8 + 4 * ((nodeResizeMachineStep s c).2).length
+    c0 := 14
+    c1 := 1
+    maxEffects := 1
+    maxOutBytes := 12
+    fuel_bound := fun s c => by
+      dsimp [nodeResizeMachineStep]
+      split <;> simp
+    eff_bound := fun s c => by
+      dsimp [nodeResizeMachineStep]
+      split <;> simp
+    out_bound := fun s c => by
+      dsimp [nodeResizeMachineStep]
+      split <;> simp
+  }
+  sameStep := ⟨rfl, rfl⟩
+
+/-- Live shrink parks un-reclaimable busy slots as `debt` without interrupting running jobs, and a
+    subsequent live grow cancels accumulated `debt` first so `inUse` stays invariant across
+    shrink-while-busy -> grow transitions. -/
+theorem node_resize_shrink_parks_debt_and_grow_cancels_debt :
+    let s0 : NodeResizeState := ⟨10, 0⟩
+    -- 10/10 busy (`idlePermits = 0`), operator shrinks target to 6 -> debt becomes 4, 10 jobs keep running.
+    let s1 := (nodeResizeMachineStep s0 ⟨1, 0, 1, 10, 0, 0, 6, 256⟩).1
+    -- Operator grows target from 6 to 8 -> cancels 2 debt (4 -> 2) before adding new idle permits.
+    let s2 := (nodeResizeMachineStep s1 ⟨1, 0, 1, 6, 4, 0, 8, 256⟩).1
+    -- Operator grows target from 8 to 12 -> cancels remaining 2 debt (2 -> 0) and opens 2 new slots.
+    let s3 := (nodeResizeMachineStep s2 ⟨1, 0, 1, 8, 2, 0, 12, 256⟩).1
+    s1.cap = 6 ∧ s1.debt = 4 ∧ s1.cap + s1.debt = 10 ∧
+    s2.cap = 8 ∧ s2.debt = 2 ∧ s2.cap + s2.debt = 10 ∧
+    s3.cap = 12 ∧ s3.debt = 0 := by
+  decide
+
+/-- Unauthorized agent callers (`isAgentCaller = 1`), non-static nodes (`isStaticNode = 0`), and
+    zero/overflow targets (`targetCap = 0` or `targetCap > maxCap`) fail closed and preserve `curDebt`. -/
+theorem node_resize_rejects_unauthorized_or_out_of_bounds
+    (curCap curDebt idle : UInt32) :
+    (nodeResizeStep 1 1 1 curCap curDebt idle 10 256 &&& 0xFFFFFFFF) = 513 ∧
+    (nodeResizeStep 1 1 1 curCap curDebt idle 10 256 >>> 32) = curDebt.toUInt64 ∧
+    (nodeResizeStep 1 0 0 curCap curDebt idle 10 256 &&& 0xFFFFFFFF) = 514 ∧
+    (nodeResizeStep 1 0 1 curCap curDebt idle 0 256 &&& 0xFFFFFFFF) = 515 ∧
+    (nodeResizeStep 1 0 1 curCap curDebt idle 300 256 &&& 0xFFFFFFFF) = 515 := by
+  have h0 : ¬ ((1 : UInt32) <= 0) := by decide
+  have hmax : ¬ ((300 : UInt32) <= 256) := by decide
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · simpa [nodeResizeStep] using pack32_lo 513 curDebt
+  · unfold nodeResizeStep
+    rw [pack32_hi]
+    simp
+  · simpa [nodeResizeStep] using pack32_lo 514 curDebt
+  · simpa [nodeResizeStep, h0] using pack32_lo 515 curDebt
+  · simpa [nodeResizeStep, hmax] using pack32_lo 515 curDebt
+
+structure NodeLaneCheck where
+  isSideQuestion        : UInt8
+  isCoordinatorPriority : UInt8
+  hasWorkspaceBg        : UInt8
+  isChildWorker         : UInt8
+  isLongRunning         : UInt8
+  mainRunning           : UInt32
+  mainMax               : UInt32
+  sideRunning           : UInt32
+  sideMax               : UInt32
+  coordRunning          : UInt32
+  coordMax              : UInt32
+  deriving Repr, DecidableEq
+
+def NodeLaneCheck.Admissible (s : NodeLaneCheck) : Bool :=
+  if s.isSideQuestion == 1 then
+    decide (s.sideRunning < s.sideMax)
+  else if s.hasWorkspaceBg == 1 then
+    decide (s.coordRunning < s.coordMax) || decide (s.mainRunning < s.mainMax)
+  else if s.isCoordinatorPriority == 1 && !(s.isChildWorker == 1) && !(s.isLongRunning == 1) then
+    decide (s.mainRunning < s.mainMax) || decide (s.coordRunning < s.coordMax)
+  else
+    decide (s.mainRunning < s.mainMax)
+
+def nodeLaneMetaGate : MetaGateSpec NodeLaneCheck (fun s => NodeLaneCheck.Admissible s = true) where
+  gate s :=
+    (nodeLaneStep
+      s.isSideQuestion s.isCoordinatorPriority s.hasWorkspaceBg s.isChildWorker s.isLongRunning
+      s.mainRunning s.mainMax s.sideRunning s.sideMax s.coordRunning s.coordMax &&& 256) != 0
+  sound s h := by
+    unfold NodeLaneCheck.Admissible
+    unfold nodeLaneStep at h
+    cases hsq : (s.isSideQuestion == 1) <;>
+      cases hbg : (s.hasWorkspaceBg == 1) <;>
+      cases hcp : (s.isCoordinatorPriority == 1) <;>
+      cases hcw : (s.isChildWorker == 1) <;>
+      cases hlr : (s.isLongRunning == 1) <;>
+      by_cases hm : s.mainRunning < s.mainMax <;>
+      by_cases hs : s.sideRunning < s.sideMax <;>
+      by_cases hc : s.coordRunning < s.coordMax <;>
+      (simp only [hsq, hbg, hcp, hcw, hlr, hm, hs, hc, decide_true, decide_false,
+        Bool.true_and, Bool.false_and, Bool.true_or, Bool.false_or,
+        Bool.not_true, Bool.not_false, ↓reduceIte] at h ⊢;
+       try (revert h; decide))
+  complete s h := by
+    unfold NodeLaneCheck.Admissible at h
+    unfold nodeLaneStep
+    cases hsq : (s.isSideQuestion == 1) <;>
+      cases hbg : (s.hasWorkspaceBg == 1) <;>
+      cases hcp : (s.isCoordinatorPriority == 1) <;>
+      cases hcw : (s.isChildWorker == 1) <;>
+      cases hlr : (s.isLongRunning == 1) <;>
+      by_cases hm : s.mainRunning < s.mainMax <;>
+      by_cases hs : s.sideRunning < s.sideMax <;>
+      by_cases hc : s.coordRunning < s.coordMax <;>
+      (simp only [hsq, hbg, hcp, hcw, hlr, hm, hs, hc, decide_true, decide_false,
+        Bool.true_and, Bool.false_and, Bool.true_or, Bool.false_or,
+        Bool.not_true, Bool.not_false, ↓reduceIte] at h ⊢;
+       try (revert h; decide))
+  posWitness := ⟨0, 1, 0, 0, 0, 10, 10, 0, 2, 0, 2⟩
+  negWitness := ⟨0, 1, 0, 1, 0, 10, 10, 0, 2, 0, 2⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def nodeLaneScopedAuthority : ScopedAuthority NodeLaneCheck where
+  admit s :=
+    nodeLaneStep
+      s.isSideQuestion s.isCoordinatorPriority s.hasWorkspaceBg s.isChildWorker s.isLongRunning
+      s.mainRunning s.mainMax s.sideRunning s.sideMax s.coordRunning s.coordMax == 259
+  scopeValid s :=
+    !(s.isSideQuestion == 1) && !(s.hasWorkspaceBg == 1) &&
+      (s.isCoordinatorPriority == 1) && !(s.isChildWorker == 1) && !(s.isLongRunning == 1)
+  sound s h := by
+    unfold nodeLaneStep at h
+    cases hsq : (s.isSideQuestion == 1) <;>
+      cases hbg : (s.hasWorkspaceBg == 1) <;>
+      cases hcp : (s.isCoordinatorPriority == 1) <;>
+      cases hcw : (s.isChildWorker == 1) <;>
+      cases hlr : (s.isLongRunning == 1) <;>
+      by_cases hm : s.mainRunning < s.mainMax <;>
+      by_cases hs : s.sideRunning < s.sideMax <;>
+      by_cases hc : s.coordRunning < s.coordMax <;>
+      (simp only [hsq, hbg, hcp, hcw, hlr, hm, hs, hc,
+        Bool.true_and, Bool.false_and, Bool.not_true, Bool.not_false, ↓reduceIte] at h ⊢;
+       try (revert h; decide))
+
+def nodeLaneConservedResource : ConservedResource NodeLaneCheck where
+  admit s := nodeLaneMetaGate.gate s
+  withinBudget s := NodeLaneCheck.Admissible s
+  conserved s h := nodeLaneMetaGate.sound s h
+
+/-- Anti-starvation guarantee: when `Main` is 100% saturated by running workers (`mainRunning = mainMax`),
+    an eligible root coordinator or `schedule_wakeup` turn (`isCoordinatorPriority = 1, isChildWorker = 0,
+    isLongRunning = 0`) is immediately admitted on the reserved `Coordinator` lane (`259`) whenever
+    `coordRunning < coordMax`, whereas child subagent workers (`isChildWorker = 1`) and `long_running`
+    native goals (`isLongRunning = 1`) are strictly queued on `Main` (`513`) and never consume `Coordinator`. -/
+theorem coordinator_wakeup_never_starved_by_saturated_workers
+    (mainMax sideRun sideMax coordRun coordMax : UInt32)
+    (h_coord : coordRun < coordMax) :
+    nodeLaneStep 0 1 0 0 0 mainMax mainMax sideRun sideMax coordRun coordMax = 259 ∧
+    nodeLaneStep 0 1 0 1 0 mainMax mainMax sideRun sideMax coordRun coordMax = 513 ∧
+    nodeLaneStep 0 1 0 0 1 mainMax mainMax sideRun sideMax coordRun coordMax = 513 ∧
+    nodeLaneStep 0 0 0 1 0 mainMax mainMax sideRun sideMax coordRun coordMax = 513 := by
+  unfold nodeLaneStep
+  have h_self : ¬ (mainMax < mainMax) := Nat.lt_irrefl mainMax.toNat
+  simp [h_coord, h_self]
+
+/-- Main-first preservation: whenever `Main` has spare capacity (`mainRunning < mainMax`), a coordinator
+    turn without active same-workspace background jobs (`hasWorkspaceBg = 0`) takes `Main` (`257`),
+    keeping all `coordMax` emergency coordinator slots free for worker-saturation bursts. -/
+theorem coordinator_prefers_main_when_uncongested
+    (mainRun mainMax sideRun sideMax coordRun coordMax : UInt32)
+    (h_main : mainRun < mainMax) :
+    nodeLaneStep 0 1 0 0 0 mainRun mainMax sideRun sideMax coordRun coordMax = 257 := by
+  unfold nodeLaneStep
+  simp [h_main]
+
 end Orb.Spec

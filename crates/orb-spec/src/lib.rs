@@ -788,6 +788,29 @@ unsafe extern "C" {
         forced_running: u32,
         forced_max: u32,
     ) -> u32;
+    fn orb_node_resize_step(
+        is_operator_caller: u8,
+        is_agent_caller: u8,
+        is_static_node: u8,
+        cur_cap: u32,
+        cur_debt: u32,
+        idle_permits: u32,
+        target_cap: u32,
+        max_cap: u32,
+    ) -> u64;
+    fn orb_node_lane_step(
+        is_side_question: u8,
+        is_coordinator_priority: u8,
+        has_workspace_bg: u8,
+        is_child_worker: u8,
+        is_long_running: u8,
+        main_running: u32,
+        main_max: u32,
+        side_running: u32,
+        side_max: u32,
+        coord_running: u32,
+        coord_max: u32,
+    ) -> u32;
     fn orb_verify_log_window(
         off: u64,
         req: u64,
@@ -2133,6 +2156,134 @@ pub fn slot_bypass_step(input: SlotBypassInput) -> SlotBypassVerdict {
         _ => SlotBypassDecision::RejectCapacity,
     };
     SlotBypassVerdict {
+        admitted: (raw & 256) != 0,
+        decision,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeResizeDecision {
+    Grow,
+    Shrink,
+    Unchanged,
+    RejectUnauthorizedCaller,
+    RejectNonStaticNode,
+    RejectOutOfBounds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeResizeInput {
+    pub is_operator_caller: bool,
+    pub is_agent_caller: bool,
+    pub is_static_node: bool,
+    pub cur_cap: u32,
+    pub cur_debt: u32,
+    pub idle_permits: u32,
+    pub target_cap: u32,
+    pub max_cap: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeResizeVerdict {
+    pub admitted: bool,
+    pub changed: bool,
+    pub decision: NodeResizeDecision,
+    pub next_debt: u32,
+    pub raw: u64,
+}
+
+pub fn node_resize_step(input: NodeResizeInput) -> NodeResizeVerdict {
+    let raw = unsafe {
+        orb_node_resize_step(
+            u8::from(input.is_operator_caller),
+            u8::from(input.is_agent_caller),
+            u8::from(input.is_static_node),
+            input.cur_cap,
+            input.cur_debt,
+            input.idle_permits,
+            input.target_cap,
+            input.max_cap,
+        )
+    };
+    let lo32 = (raw & 0xFFFF_FFFF) as u32;
+    let next_debt = (raw >> 32) as u32;
+    let decision = match lo32 {
+        1281 => NodeResizeDecision::Grow,
+        1282 => NodeResizeDecision::Shrink,
+        259 => NodeResizeDecision::Unchanged,
+        513 => NodeResizeDecision::RejectUnauthorizedCaller,
+        514 => NodeResizeDecision::RejectNonStaticNode,
+        _ => NodeResizeDecision::RejectOutOfBounds,
+    };
+    NodeResizeVerdict {
+        admitted: (lo32 & 256) != 0,
+        changed: (lo32 & 1024) != 0,
+        decision,
+        next_debt,
+        raw,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeLaneDecision {
+    AdmitMain,
+    AdmitSide,
+    AdmitCoordinator,
+    AdmitCompanion,
+    WaitMainOnly,
+    WaitSideOnly,
+    WaitMainOrCoordinator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeLaneInput {
+    pub is_side_question: bool,
+    pub is_coordinator_priority: bool,
+    pub has_workspace_bg: bool,
+    pub is_child_worker: bool,
+    pub is_long_running: bool,
+    pub main_running: u32,
+    pub main_max: u32,
+    pub side_running: u32,
+    pub side_max: u32,
+    pub coord_running: u32,
+    pub coord_max: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeLaneVerdict {
+    pub admitted: bool,
+    pub decision: NodeLaneDecision,
+    pub raw: u32,
+}
+
+pub fn node_lane_step(input: NodeLaneInput) -> NodeLaneVerdict {
+    let raw = unsafe {
+        orb_node_lane_step(
+            u8::from(input.is_side_question),
+            u8::from(input.is_coordinator_priority),
+            u8::from(input.has_workspace_bg),
+            u8::from(input.is_child_worker),
+            u8::from(input.is_long_running),
+            input.main_running,
+            input.main_max,
+            input.side_running,
+            input.side_max,
+            input.coord_running,
+            input.coord_max,
+        )
+    };
+    let decision = match raw {
+        257 => NodeLaneDecision::AdmitMain,
+        258 => NodeLaneDecision::AdmitSide,
+        259 => NodeLaneDecision::AdmitCoordinator,
+        260 => NodeLaneDecision::AdmitCompanion,
+        514 => NodeLaneDecision::WaitSideOnly,
+        515 => NodeLaneDecision::WaitMainOrCoordinator,
+        _ => NodeLaneDecision::WaitMainOnly,
+    };
+    NodeLaneVerdict {
         admitted: (raw & 256) != 0,
         decision,
         raw,
@@ -6023,6 +6174,35 @@ pub mod raw_cabi {
         unsafe { super::orb_slot_bypass_step(a0, a1, a2, a3, a4, a5, a6) }
     }
     #[inline]
+    pub fn orb_node_resize_step(
+        a0: u8,
+        a1: u8,
+        a2: u8,
+        a3: u32,
+        a4: u32,
+        a5: u32,
+        a6: u32,
+        a7: u32,
+    ) -> u64 {
+        unsafe { super::orb_node_resize_step(a0, a1, a2, a3, a4, a5, a6, a7) }
+    }
+    #[inline]
+    pub fn orb_node_lane_step(
+        a0: u8,
+        a1: u8,
+        a2: u8,
+        a3: u8,
+        a4: u8,
+        a5: u32,
+        a6: u32,
+        a7: u32,
+        a8: u32,
+        a9: u32,
+        a10: u32,
+    ) -> u32 {
+        unsafe { super::orb_node_lane_step(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) }
+    }
+    #[inline]
     pub fn orb_node_gc_step(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> u64 {
         unsafe { super::orb_node_gc_step(a0, a1, a2, a3, a4, a5, a6) }
     }
@@ -6910,6 +7090,29 @@ pub mod raw_cabi {
                 args[4] as u32,
                 args[5] as u32,
                 args[6] as u32,
+            ) as u64,
+            "orb_node_resize_step" if args.len() == 8 => orb_node_resize_step(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u32,
+                args[4] as u32,
+                args[5] as u32,
+                args[6] as u32,
+                args[7] as u32,
+            ),
+            "orb_node_lane_step" if args.len() == 11 => orb_node_lane_step(
+                args[0] as u8,
+                args[1] as u8,
+                args[2] as u8,
+                args[3] as u8,
+                args[4] as u8,
+                args[5] as u32,
+                args[6] as u32,
+                args[7] as u32,
+                args[8] as u32,
+                args[9] as u32,
+                args[10] as u32,
             ) as u64,
             "orb_node_gc_step" if args.len() == 7 => orb_node_gc_step(
                 args[0], args[1], args[2], args[3], args[4], args[5], args[6],
@@ -8549,7 +8752,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 129);
+        assert_eq!(count, 131);
     }
 }
 
@@ -9776,5 +9979,107 @@ mod stateful_tests {
         });
         assert!(reg_with_forced.admitted);
         assert_eq!(reg_with_forced.decision, SlotBypassDecision::AdmitRegular);
+    }
+
+    #[test]
+    fn node_resize_and_lane_steps_enforce_debt_conservation_and_coordinator_anti_starvation() {
+        // 1. Live shrink while 10/10 busy parks debt=4 without interrupting holders.
+        let shrink = node_resize_step(NodeResizeInput {
+            is_operator_caller: true,
+            is_agent_caller: false,
+            is_static_node: true,
+            cur_cap: 10,
+            cur_debt: 0,
+            idle_permits: 0,
+            target_cap: 6,
+            max_cap: 256,
+        });
+        assert!(shrink.admitted && shrink.changed);
+        assert_eq!(shrink.decision, NodeResizeDecision::Shrink);
+        assert_eq!(shrink.next_debt, 4);
+
+        // 2. Subsequent grow to 8 cancels 2 debt (4 -> 2) first.
+        let grow_partial = node_resize_step(NodeResizeInput {
+            is_operator_caller: true,
+            is_agent_caller: false,
+            is_static_node: true,
+            cur_cap: 6,
+            cur_debt: 4,
+            idle_permits: 0,
+            target_cap: 8,
+            max_cap: 256,
+        });
+        assert!(grow_partial.admitted && grow_partial.changed);
+        assert_eq!(grow_partial.decision, NodeResizeDecision::Grow);
+        assert_eq!(grow_partial.next_debt, 2);
+
+        // 3. Autonomous agent caller or out-of-bounds target is rejected.
+        let agent_rej = node_resize_step(NodeResizeInput {
+            is_operator_caller: true,
+            is_agent_caller: true,
+            is_static_node: true,
+            cur_cap: 6,
+            cur_debt: 2,
+            idle_permits: 0,
+            target_cap: 12,
+            max_cap: 256,
+        });
+        assert!(!agent_rej.admitted);
+        assert_eq!(
+            agent_rej.decision,
+            NodeResizeDecision::RejectUnauthorizedCaller
+        );
+        assert_eq!(agent_rej.next_debt, 2);
+
+        // 4. Coordinator / schedule_wakeup turn takes Coordinator lane when Main is saturated.
+        let coord_admit = node_lane_step(NodeLaneInput {
+            is_side_question: false,
+            is_coordinator_priority: true,
+            has_workspace_bg: false,
+            is_child_worker: false,
+            is_long_running: false,
+            main_running: 10,
+            main_max: 10,
+            side_running: 0,
+            side_max: 2,
+            coord_running: 0,
+            coord_max: 2,
+        });
+        assert!(coord_admit.admitted);
+        assert_eq!(coord_admit.decision, NodeLaneDecision::AdmitCoordinator);
+
+        // 5. Child subagent worker never steals Coordinator lane when Main is saturated.
+        let worker_wait = node_lane_step(NodeLaneInput {
+            is_side_question: false,
+            is_coordinator_priority: true,
+            has_workspace_bg: false,
+            is_child_worker: true,
+            is_long_running: false,
+            main_running: 10,
+            main_max: 10,
+            side_running: 0,
+            side_max: 2,
+            coord_running: 0,
+            coord_max: 2,
+        });
+        assert!(!worker_wait.admitted);
+        assert_eq!(worker_wait.decision, NodeLaneDecision::WaitMainOnly);
+
+        // 6. Uncongested coordinator prefers Main first so Coordinator reserve stays free.
+        let coord_main = node_lane_step(NodeLaneInput {
+            is_side_question: false,
+            is_coordinator_priority: true,
+            has_workspace_bg: false,
+            is_child_worker: false,
+            is_long_running: false,
+            main_running: 4,
+            main_max: 10,
+            side_running: 0,
+            side_max: 2,
+            coord_running: 0,
+            coord_max: 2,
+        });
+        assert!(coord_main.admitted);
+        assert_eq!(coord_main.decision, NodeLaneDecision::AdmitMain);
     }
 }

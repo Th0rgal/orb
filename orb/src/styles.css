@@ -2398,6 +2398,9 @@ select.orb-select-native:disabled { cursor: default; }
 .machine-expanded .machine-resource > span { gap: 6px; }
 .machine-expanded .machine-resource small { font-size: 11px; white-space: nowrap; }
 .machine-expanded .history-legend { flex-wrap: wrap; gap: 6px 10px; }
+.machine-capacity-editor { grid-column: 1 / -1; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--stroke-soft); }
+.machine-capacity-editor .s-row { margin: 0; padding: 0; }
+.machine-capacity-editor .error-notice { margin-top: 10px; }
 @media (max-width: 700px) {
   .machine-expanded { grid-template-columns: minmax(0, 1fr); }
 }

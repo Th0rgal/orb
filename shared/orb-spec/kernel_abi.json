@@ -3961,6 +3961,96 @@
         }
       ],
       "internal": true
+    },
+    {
+      "name": "orb_node_resize_step",
+      "ret": "uint64_t",
+      "params": [
+        {
+          "name": "isOperatorCaller",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isAgentCaller",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isStaticNode",
+          "type": "uint8_t"
+        },
+        {
+          "name": "curCap",
+          "type": "uint32_t"
+        },
+        {
+          "name": "curDebt",
+          "type": "uint32_t"
+        },
+        {
+          "name": "idlePermits",
+          "type": "uint32_t"
+        },
+        {
+          "name": "targetCap",
+          "type": "uint32_t"
+        },
+        {
+          "name": "maxCap",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true
+    },
+    {
+      "name": "orb_node_lane_step",
+      "ret": "uint32_t",
+      "params": [
+        {
+          "name": "isSideQuestion",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isCoordinatorPriority",
+          "type": "uint8_t"
+        },
+        {
+          "name": "hasWorkspaceBg",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isChildWorker",
+          "type": "uint8_t"
+        },
+        {
+          "name": "isLongRunning",
+          "type": "uint8_t"
+        },
+        {
+          "name": "mainRunning",
+          "type": "uint32_t"
+        },
+        {
+          "name": "mainMax",
+          "type": "uint32_t"
+        },
+        {
+          "name": "sideRunning",
+          "type": "uint32_t"
+        },
+        {
+          "name": "sideMax",
+          "type": "uint32_t"
+        },
+        {
+          "name": "coordRunning",
+          "type": "uint32_t"
+        },
+        {
+          "name": "coordMax",
+          "type": "uint32_t"
+        }
+      ],
+      "internal": true
     }
   ]
 }

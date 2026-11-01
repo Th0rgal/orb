@@ -376,6 +376,7 @@ pub struct JobRunner {
     cancels: Mutex<HashMap<Uuid, CancellationToken>>,
     side_jobs: Mutex<HashSet<Uuid>>,
     forced_jobs: Mutex<HashSet<Uuid>>,
+    priority_jobs: Mutex<HashSet<Uuid>>,
     force_waiters: Mutex<HashMap<Uuid, ForceWakeSender>>,
     /// Queued or running ordinary jobs per workspace mission. A companion
     /// turn is eligible only while its workspace has an entry here.
@@ -447,6 +448,7 @@ impl JobRunner {
             .filter(|value| *value > 0);
         let admission = Arc::clone(&capacity.main);
         let side_admission = Arc::clone(&capacity.side);
+        let coordinator_admission = Arc::clone(&capacity.coordinator);
         let (tx, mut rx) = mpsc::unbounded_channel::<QueuedJob>();
         let runner = Arc::new(Self {
             store,
@@ -458,6 +460,7 @@ impl JobRunner {
             cancels: Mutex::new(HashMap::new()),
             side_jobs: Mutex::new(HashSet::new()),
             forced_jobs: Mutex::new(HashSet::new()),
+            priority_jobs: Mutex::new(HashSet::new()),
             force_waiters: Mutex::new(HashMap::new()),
             background: Mutex::new(HashMap::new()),
             queued: AtomicU32::new(0),
@@ -478,34 +481,120 @@ impl JobRunner {
         // share a small bounded pool (SANDBOXED_NODE_SIDE_CAPACITY, default
         // 2), never an unbounded bypass of node admission. One slow /btw on
         // one mission must not block every other mission's side question.
-        // A mission that launched long background jobs must still be able to
-        // answer its operator. One extra permit, shared by all workspaces.
-        let companion_admission = super::capacity::Admission::new(1);
+        // Root/mid-level coordinators, `schedule_wakeup` resumes, and companion
+        // turns share the bounded `coordinator` priority lane
+        // (`SANDBOXED_NODE_COORDINATOR_CAPACITY`, default 2) governed by
+        // `orb_node_lane_step`: uncongested turns prefer `main` first so
+        // emergency coordinator slots stay idle, while saturated worker pools
+        // never starve coordinator wakeups.
+        #[derive(Clone, Copy)]
+        enum LanePlan {
+            SideOnly,
+            MainOnly,
+            CompanionFirst,
+            MainThenCoordinator,
+        }
         let dispatcher = Arc::clone(&runner);
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
                 let runner = Arc::clone(&dispatcher);
-                let (admission, background, allow_force) = match &job.payload {
+                let main_admission = Arc::clone(&admission);
+                let side_pool = Arc::clone(&side_admission);
+                let coord_pool = Arc::clone(&coordinator_admission);
+
+                let (
+                    is_side_question,
+                    is_coordinator_priority,
+                    has_workspace_bg,
+                    is_child_worker,
+                    is_long_running,
+                    track_bg,
+                ) = match &job.payload {
                     JobPayload::RawCommand {
-                        side_question: true,
+                        side_question,
+                        companion_of,
+                        coordinator_priority,
+                        is_child_worker,
+                        native_goal,
                         ..
-                    } => (Arc::clone(&side_admission), None, false),
-                    JobPayload::RawCommand {
-                        companion_of: Some(workspace),
-                        ..
-                    } if runner.has_background(*workspace) => {
-                        (Arc::clone(&companion_admission), None, false)
+                    } => {
+                        let ws_bg = companion_of
+                            .map(|ws| runner.has_background(ws))
+                            .unwrap_or(false);
+                        let track = !*side_question && companion_of.is_none();
+                        (
+                            *side_question,
+                            *coordinator_priority,
+                            ws_bg,
+                            *is_child_worker,
+                            *native_goal,
+                            track,
+                        )
                     }
-                    JobPayload::RawCommand {
-                        companion_of: Some(_),
-                        ..
-                    } => (Arc::clone(&admission), None, true),
-                    _ => (
-                        Arc::clone(&admission),
-                        Some(BackgroundGuard::new(&runner, job.mission_id)),
-                        true,
-                    ),
+                    JobPayload::LeanBuild { .. } => (false, false, false, false, false, true),
                 };
+
+                let main_max = runner.capacity.capacity();
+                let main_running = if main_admission.available_permits() > 0 {
+                    u32::try_from(main_admission.in_use())
+                        .unwrap_or(0)
+                        .min(main_max.saturating_sub(1))
+                } else {
+                    main_max
+                };
+                let side_max = u32::try_from(side_pool.capacity()).unwrap_or(1);
+                let side_running = if side_pool.available_permits() > 0 {
+                    u32::try_from(side_pool.in_use())
+                        .unwrap_or(0)
+                        .min(side_max.saturating_sub(1))
+                } else {
+                    side_max
+                };
+                let coord_max = u32::try_from(coord_pool.capacity()).unwrap_or(1);
+                let coord_running = if coord_pool.available_permits() > 0 {
+                    u32::try_from(coord_pool.in_use())
+                        .unwrap_or(0)
+                        .min(coord_max.saturating_sub(1))
+                } else {
+                    coord_max
+                };
+
+                let lane = crate::orb_spec::node_lane_step(crate::orb_spec::NodeLaneInput {
+                    is_side_question,
+                    is_coordinator_priority,
+                    has_workspace_bg,
+                    is_child_worker,
+                    is_long_running,
+                    main_running,
+                    main_max,
+                    side_running,
+                    side_max,
+                    coord_running,
+                    coord_max,
+                });
+
+                let (plan, allow_force) = match lane.decision {
+                    crate::orb_spec::NodeLaneDecision::AdmitSide
+                    | crate::orb_spec::NodeLaneDecision::WaitSideOnly => {
+                        (LanePlan::SideOnly, false)
+                    }
+                    crate::orb_spec::NodeLaneDecision::AdmitCompanion => {
+                        (LanePlan::CompanionFirst, false)
+                    }
+                    crate::orb_spec::NodeLaneDecision::AdmitCoordinator
+                    | crate::orb_spec::NodeLaneDecision::WaitMainOrCoordinator => {
+                        (LanePlan::MainThenCoordinator, true)
+                    }
+                    crate::orb_spec::NodeLaneDecision::AdmitMain => {
+                        if is_coordinator_priority && !is_child_worker && !is_long_running {
+                            (LanePlan::MainThenCoordinator, true)
+                        } else {
+                            (LanePlan::MainOnly, true)
+                        }
+                    }
+                    crate::orb_spec::NodeLaneDecision::WaitMainOnly => (LanePlan::MainOnly, true),
+                };
+                let background = track_bg.then(|| BackgroundGuard::new(&runner, job.mission_id));
                 let force_rx = if allow_force {
                     let (force_tx, force_rx) = tokio::sync::oneshot::channel();
                     dispatcher
@@ -519,13 +608,52 @@ impl JobRunner {
                 };
                 tokio::spawn(async move {
                     let _background = background;
-                    let (permit, forced_ack) = if let Some(force_rx) = force_rx {
+                    let acquire_lane = || async {
+                        match plan {
+                            LanePlan::SideOnly => side_pool
+                                .acquire_owned()
+                                .await
+                                .map(|permit| (permit, false)),
+                            LanePlan::MainOnly => main_admission
+                                .acquire_owned()
+                                .await
+                                .map(|permit| (permit, false)),
+                            LanePlan::CompanionFirst => {
+                                if let Ok(permit) = coord_pool.try_acquire_owned() {
+                                    Ok((permit, true))
+                                } else {
+                                    tokio::select! {
+                                        biased;
+                                        coord = coord_pool.acquire_owned() => coord.map(|p| (p, true)),
+                                        main = main_admission.acquire_owned() => main.map(|p| (p, false)),
+                                    }
+                                }
+                            }
+                            LanePlan::MainThenCoordinator => {
+                                // Uncongested preference (`coordinator_prefers_main_when_uncongested`):
+                                // take an idle `main` slot first so emergency coordinator permits remain free.
+                                if let Ok(permit) = main_admission.try_acquire_owned() {
+                                    Ok((permit, false))
+                                } else if let Ok(permit) = coord_pool.try_acquire_owned() {
+                                    Ok((permit, true))
+                                } else {
+                                    tokio::select! {
+                                        biased;
+                                        coord = coord_pool.acquire_owned() => coord.map(|p| (p, true)),
+                                        main = main_admission.acquire_owned() => main.map(|p| (p, false)),
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    let (permit, is_priority, forced_ack) = if let Some(force_rx) = force_rx {
                         tokio::select! {
                             biased;
                             forced = force_rx => match forced {
-                                Ok((permit, ack_tx)) => (permit, Some(ack_tx)),
-                                Err(_) => match admission.acquire_owned().await {
-                                    Ok(permit) => (permit, None),
+                                Ok((permit, ack_tx)) => (permit, false, Some(ack_tx)),
+                                Err(_) => match acquire_lane().await {
+                                    Ok((permit, is_priority)) => (permit, is_priority, None),
                                     Err(_) => {
                                         runner.queued.fetch_sub(1, Ordering::AcqRel);
                                         runner.drop_cancel_token(job.id);
@@ -533,14 +661,14 @@ impl JobRunner {
                                     }
                                 },
                             },
-                            acquired = admission.acquire_owned() => {
+                            acquired = acquire_lane() => {
                                 runner
                                     .force_waiters
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
                                     .remove(&job.id);
                                 match acquired {
-                                    Ok(permit) => (permit, None),
+                                    Ok((permit, is_priority)) => (permit, is_priority, None),
                                     Err(_) => {
                                         runner.queued.fetch_sub(1, Ordering::AcqRel);
                                         runner.drop_cancel_token(job.id);
@@ -550,8 +678,8 @@ impl JobRunner {
                             }
                         }
                     } else {
-                        match admission.acquire_owned().await {
-                            Ok(permit) => (permit, None),
+                        match acquire_lane().await {
+                            Ok((permit, is_priority)) => (permit, is_priority, None),
                             Err(_) => {
                                 runner.queued.fetch_sub(1, Ordering::AcqRel);
                                 runner.drop_cancel_token(job.id);
@@ -567,12 +695,26 @@ impl JobRunner {
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(job.id);
                     }
+                    if is_priority {
+                        runner
+                            .priority_jobs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(job.id);
+                    }
                     let claimed = match runner.store.mark_running_if_queued(job.id).await {
                         Ok(claimed) => claimed,
                         Err(err) => {
                             if is_forced {
                                 runner
                                     .forced_jobs
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .remove(&job.id);
+                            }
+                            if is_priority {
+                                runner
+                                    .priority_jobs
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
                                     .remove(&job.id);
@@ -594,6 +736,13 @@ impl JobRunner {
                                 .unwrap_or_else(|e| e.into_inner())
                                 .remove(&job.id);
                         }
+                        if is_priority {
+                            runner
+                                .priority_jobs
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&job.id);
+                        }
                         if let Some(ack_tx) = forced_ack {
                             let _ = ack_tx.send(false);
                         }
@@ -611,6 +760,13 @@ impl JobRunner {
                     if is_forced {
                         runner
                             .forced_jobs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&job_id);
+                    }
+                    if is_priority {
+                        runner
+                            .priority_jobs
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .remove(&job_id);
@@ -652,6 +808,13 @@ impl JobRunner {
 
     pub fn forced_job_count(&self) -> u32 {
         self.forced_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len() as u32
+    }
+
+    pub fn priority_job_count(&self) -> u32 {
+        self.priority_jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len() as u32
@@ -1264,6 +1427,9 @@ impl JobRunner {
                 managed_auth,
                 side_question,
                 companion_of: _,
+                coordinator_priority: _,
+                is_child_worker: _,
+                native_goal: _,
             } => {
                 // Resolve managed-auth profiles before anything runs; a
                 // profile this node cannot honour fails the job with a clear
@@ -2607,6 +2773,9 @@ mod tests {
         runner.submit(job_id, Uuid::new_v4(), JobPayload::RawCommand {
             side_question: false,
             companion_of: None,
+            coordinator_priority: false,
+            is_child_worker: false,
+            native_goal: false,
             long_running: false,
             // Compare physical paths: on macOS the temp dir lives under the
             // /var -> /private/var symlink, so `$PWD` (from getcwd) and the
@@ -2641,6 +2810,9 @@ mod tests {
                 JobPayload::RawCommand {
                     side_question: false,
                     companion_of: None,
+                    coordinator_priority: false,
+                    is_child_worker: false,
+                    native_goal: false,
                     long_running: false,
                     command: "echo hello-from-job && pwd && printf scratch > \"$TMPDIR/probe\" && test \"$TMPDIR\" = \"$TMP\" && test \"$TMPDIR\" = \"$TEMP\"".to_string(),
                     timeout_secs: Some(30),
@@ -2702,6 +2874,9 @@ mod tests {
                         command: "sleep 2; printf finished".into(),
                         side_question,
                         companion_of: None,
+                        coordinator_priority: false,
+                        is_child_worker: false,
+                        native_goal: false,
                         long_running,
                         timeout_secs,
                         env: None,
@@ -2736,6 +2911,9 @@ mod tests {
                 JobPayload::RawCommand {
                     side_question: false,
                     companion_of: None,
+                    coordinator_priority: false,
+                    is_child_worker: false,
+                    native_goal: false,
                     long_running: true,
                     command: "sleep 30".to_string(),
                     timeout_secs: None,
@@ -2768,6 +2946,9 @@ mod tests {
         JobPayload::RawCommand {
             side_question: false,
             companion_of: None,
+            coordinator_priority: false,
+            is_child_worker: false,
+            native_goal: false,
             long_running: true,
             command: command.to_string(),
             timeout_secs: None,
@@ -2921,6 +3102,9 @@ mod tests {
                     JobPayload::RawCommand {
                         side_question: false,
                         companion_of: None,
+                        coordinator_priority: false,
+                        is_child_worker: false,
+                        native_goal: false,
                         long_running: false,
                         command: "sleep 30".to_string(),
                         timeout_secs: None,
@@ -2981,6 +3165,9 @@ mod tests {
                 JobPayload::RawCommand {
                     side_question: false,
                     companion_of: None,
+                    coordinator_priority: false,
+                    is_child_worker: false,
+                    native_goal: false,
                     long_running: false,
                     command: "sleep 20".to_string(),
                     timeout_secs: Some(600),
@@ -3265,6 +3452,9 @@ mod tests {
             command: command.into(),
             side_question: false,
             companion_of,
+            coordinator_priority: false,
+            is_child_worker: false,
+            native_goal: false,
             long_running: false,
             timeout_secs: None,
             env: None,
@@ -3340,6 +3530,9 @@ mod tests {
                         command: command.into(),
                         side_question,
                         companion_of: None,
+                        coordinator_priority: false,
+                        is_child_worker: false,
+                        native_goal: false,
                         long_running: false,
                         timeout_secs: None,
                         env: None,
@@ -3377,6 +3570,9 @@ mod tests {
                     command: "true".into(),
                     side_question: true,
                     companion_of: None,
+                    coordinator_priority: false,
+                    is_child_worker: false,
+                    native_goal: false,
                     long_running: false,
                     timeout_secs: None,
                     env: None,
@@ -3431,6 +3627,9 @@ mod tests {
             command: "sleep 30".into(),
             side_question: false,
             companion_of: None,
+            coordinator_priority: false,
+            is_child_worker: false,
+            native_goal: false,
             long_running: false,
             timeout_secs: None,
             env: None,
@@ -3479,6 +3678,9 @@ mod tests {
                         command: cmd.into(),
                         side_question: false,
                         companion_of: None,
+                        coordinator_priority: false,
+                        is_child_worker: false,
+                        native_goal: false,
                         long_running: false,
                         timeout_secs: None,
                         env: None,
@@ -3561,6 +3763,110 @@ mod tests {
         drop(main_permit);
         assert!(runner.cancel(second).await.unwrap());
         let _ = wait_for_terminal(&store, second).await;
+    }
+
+    #[tokio::test]
+    async fn coordinator_wakeup_runs_immediately_while_child_workers_saturate_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path()).await.unwrap();
+        let runner = JobRunner::spawn_with_options(
+            store.clone(),
+            dir.path().into(),
+            30,
+            crate::node::capacity::NodeCapacity::new(2, 2),
+            super::super::managed_auth::ManagedAuth::default(),
+        );
+
+        let submit_raw = |id: Uuid,
+                          cmd: &str,
+                          coordinator_priority: bool,
+                          is_child_worker: bool,
+                          native_goal: bool| {
+            let runner = Arc::clone(&runner);
+            let cmd = cmd.to_string();
+            async move {
+                runner
+                    .submit(
+                        id,
+                        Uuid::new_v4(),
+                        JobPayload::RawCommand {
+                            command: cmd,
+                            side_question: false,
+                            companion_of: None,
+                            coordinator_priority,
+                            is_child_worker,
+                            native_goal,
+                            long_running: true,
+                            timeout_secs: None,
+                            env: None,
+                            managed_auth: vec![],
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+
+        // Two child workers fill `main` (capacity 2), and two more child workers + one native /goal wait behind them.
+        let w1 = Uuid::new_v4();
+        let w2 = Uuid::new_v4();
+        let w3 = Uuid::new_v4();
+        let goal_job = Uuid::new_v4();
+        submit_raw(w1, "sleep 30", false, true, false).await;
+        submit_raw(w2, "sleep 30", false, true, false).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.get(w1).await.unwrap().unwrap().state != JobState::Running
+                || store.get(w2).await.unwrap().unwrap().state != JobState::Running
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Even if a forged payload sets `coordinator_priority: true` alongside `is_child_worker: true` or `native_goal: true`,
+        // `orb_node_lane_step` confines both to `main` so they cannot steal coordinator slots.
+        submit_raw(w3, "true", true, true, false).await;
+        submit_raw(goal_job, "true", true, false, true).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            store.get(w3).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(
+            store.get(goal_job).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(runner.priority_job_count(), 0);
+
+        // Now a root coordinator / `schedule_wakeup` turn arrives: it acquires the coordinator lane immediately and succeeds!
+        let wakeup = Uuid::new_v4();
+        submit_raw(wakeup, "printf coordinator-woke-up", true, false, false).await;
+        let wakeup_rec = wait_for_terminal(&store, wakeup).await;
+        assert_eq!(wakeup_rec.state, JobState::Succeeded);
+        let tail = read_log_tail(&runner.log_path(wakeup)).await.unwrap();
+        assert_eq!(tail, "coordinator-woke-up");
+
+        // Queued child worker & native /goal remained queued until `main` slots open.
+        assert_eq!(
+            store.get(w3).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+        assert_eq!(
+            store.get(goal_job).await.unwrap().unwrap().state,
+            JobState::Queued
+        );
+
+        assert!(runner.cancel(w1).await.unwrap());
+        assert!(runner.cancel(w2).await.unwrap());
+        assert_eq!(
+            wait_for_terminal(&store, w3).await.state,
+            JobState::Succeeded
+        );
+        assert_eq!(
+            wait_for_terminal(&store, goal_job).await.state,
+            JobState::Succeeded
+        );
     }
 }
 

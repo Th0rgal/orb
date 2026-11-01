@@ -144,6 +144,8 @@ extern uint64_t probe_orb_node_gc_step(uint64_t, uint64_t, uint64_t, uint64_t, u
 extern uint64_t probe_orb_node_disk_admission_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_vm_cap_admit(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern uint64_t probe_orb_slot_bypass_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_node_resize_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern uint64_t probe_orb_node_lane_step(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 uint8_t orb_verify_writer_reuse(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5) { return (uint8_t)probe_orb_verify_writer_reuse((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5); }
 uint8_t orb_verify_lease_mode(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3) { return (uint8_t)probe_orb_verify_lease_mode((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3); }
@@ -275,3 +277,5 @@ uint64_t orb_node_gc_step(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, ui
 uint64_t orb_node_disk_admission_step(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint8_t a5) { return (uint64_t)probe_orb_node_disk_admission_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5); }
 uint32_t orb_vm_cap_admit(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10) { return (uint32_t)probe_orb_vm_cap_admit((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8, (uint64_t)a9, (uint64_t)a10); }
 uint32_t orb_slot_bypass_step(uint8_t a0, uint8_t a1, uint8_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6) { return (uint32_t)probe_orb_slot_bypass_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6); }
+uint64_t orb_node_resize_step(uint8_t a0, uint8_t a1, uint8_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7) { return (uint64_t)probe_orb_node_resize_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7); }
+uint32_t orb_node_lane_step(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10) { return (uint32_t)probe_orb_node_lane_step((uint64_t)a0, (uint64_t)a1, (uint64_t)a2, (uint64_t)a3, (uint64_t)a4, (uint64_t)a5, (uint64_t)a6, (uint64_t)a7, (uint64_t)a8, (uint64_t)a9, (uint64_t)a10); }

@@ -49,11 +49,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "src/api/control/fork.rs",
@@ -61,15 +61,15 @@
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "4f02e0a76a6db040c4fc4946306370e157fa9d49a6d66ae2afb0e4f62c2a1ea2"
+          "sha256": "5086116bed47ae0d4efc307f055316b5ea1a55ad969c5364a5df5dc5df7d0b08"
         },
         {
           "path": "shared/orb-spec/evidence/p0-producer-and-symbol-tests.log",
-          "sha256": "137b29f40f4b57abafb76b2bbdb14a8c25609fb37ea8c90d172061ee99fdfa96"
+          "sha256": "e10335c9ee171a7a65e01a3e712c3e3c79d23f2d30d7c359a8137a0b8b9d5175"
         },
         {
           "path": "src/api/control/dispatch_admission_tests.rs",
-          "sha256": "5b7e8614d49c4886f52637061beaa7001b29c8db4d4ae952d0c9f82f1f100347"
+          "sha256": "ff09c40ce36801273c93773285720b9174a23fd557e501f06b6c77eef8965fa8"
         }
       ],
       "execution": {
@@ -123,15 +123,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "shared/orb-spec/evidence/p0-host-observation-tests.log",
-          "sha256": "5f24dc285ccf267dff01e0e97dd0e498a9314639ed97c9c1c5626d1f32e1cdd8"
+          "sha256": "50652b4e84c478fc1b78239132315792492c02e0d56b8a6e65c993880fe60c54"
         },
         {
           "path": "src/api/control/fork.rs",
@@ -193,15 +193,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -209,7 +209,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "6412f76e6e83a5d95aa1828fc9ae18bc38bb9998d329715a3055d6818c7ba704"
+          "sha256": "0df8ec50d25c5372d051fa54984f44b598842034688901eaa3f3fc02425e2651"
         }
       ],
       "execution": {
@@ -256,15 +256,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -272,7 +272,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "6412f76e6e83a5d95aa1828fc9ae18bc38bb9998d329715a3055d6818c7ba704"
+          "sha256": "0df8ec50d25c5372d051fa54984f44b598842034688901eaa3f3fc02425e2651"
         }
       ],
       "execution": {
@@ -314,15 +314,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -330,7 +330,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "6412f76e6e83a5d95aa1828fc9ae18bc38bb9998d329715a3055d6818c7ba704"
+          "sha256": "0df8ec50d25c5372d051fa54984f44b598842034688901eaa3f3fc02425e2651"
         }
       ],
       "execution": {
@@ -372,15 +372,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -388,7 +388,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-orb-spec-unit-tests.log",
-          "sha256": "6412f76e6e83a5d95aa1828fc9ae18bc38bb9998d329715a3055d6818c7ba704"
+          "sha256": "0df8ec50d25c5372d051fa54984f44b598842034688901eaa3f3fc02425e2651"
         }
       ],
       "execution": {
@@ -435,15 +435,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -455,7 +455,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
+          "sha256": "bfda92f58c14131aeda601b340a5db6ebbc1edbb3d22f739c8d40b5fffb174e3"
         }
       ],
       "execution": {
@@ -502,15 +502,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -518,11 +518,11 @@
         },
         {
           "path": "src/api/control/remote_jobs.rs",
-          "sha256": "4f02e0a76a6db040c4fc4946306370e157fa9d49a6d66ae2afb0e4f62c2a1ea2"
+          "sha256": "5086116bed47ae0d4efc307f055316b5ea1a55ad969c5364a5df5dc5df7d0b08"
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
+          "sha256": "bfda92f58c14131aeda601b340a5db6ebbc1edbb3d22f739c8d40b5fffb174e3"
         }
       ],
       "execution": {
@@ -584,15 +584,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "src/api/mission_access.rs",
@@ -600,7 +600,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
+          "sha256": "bfda92f58c14131aeda601b340a5db6ebbc1edbb3d22f739c8d40b5fffb174e3"
         }
       ],
       "execution": {
@@ -642,15 +642,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "src/api/proxy.rs",
@@ -658,7 +658,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
+          "sha256": "bfda92f58c14131aeda601b340a5db6ebbc1edbb3d22f739c8d40b5fffb174e3"
         }
       ],
       "execution": {
@@ -705,15 +705,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "src/api/proxy.rs",
@@ -721,7 +721,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
+          "sha256": "bfda92f58c14131aeda601b340a5db6ebbc1edbb3d22f739c8d40b5fffb174e3"
         }
       ],
       "execution": {
@@ -778,15 +778,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "src/remote_node/job_ledger.rs",
@@ -794,7 +794,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p0-confinement-proxy-ledger-tests.log",
-          "sha256": "31a1ec74a2b2aa3edc9b6efb80305db6341658a7557b7b0be068b03f8f7d18fb"
+          "sha256": "bfda92f58c14131aeda601b340a5db6ebbc1edbb3d22f739c8d40b5fffb174e3"
         }
       ],
       "execution": {
@@ -846,15 +846,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -866,7 +866,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -918,15 +918,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -938,7 +938,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -995,11 +995,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
@@ -1007,7 +1007,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1015,7 +1015,7 @@
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
-          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          "sha256": "9e56e088f833ad5f2f372ecca97e1e45846f6e54b745226bb25935b11da18b16"
         },
         {
           "path": "src/api/mission_store/mod.rs",
@@ -1023,7 +1023,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -1080,11 +1080,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
@@ -1092,7 +1092,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1100,7 +1100,7 @@
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
-          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          "sha256": "9e56e088f833ad5f2f372ecca97e1e45846f6e54b745226bb25935b11da18b16"
         },
         {
           "path": "src/api/control/remote_grok.rs",
@@ -1108,7 +1108,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -1165,11 +1165,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
@@ -1177,7 +1177,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1185,7 +1185,7 @@
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
-          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          "sha256": "9e56e088f833ad5f2f372ecca97e1e45846f6e54b745226bb25935b11da18b16"
         },
         {
           "path": "src/api/control/control_queue.rs",
@@ -1193,7 +1193,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -1250,11 +1250,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
@@ -1262,7 +1262,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1270,7 +1270,7 @@
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
-          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          "sha256": "9e56e088f833ad5f2f372ecca97e1e45846f6e54b745226bb25935b11da18b16"
         },
         {
           "path": "src/provider_health.rs",
@@ -1278,7 +1278,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -1335,11 +1335,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
@@ -1347,7 +1347,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1355,7 +1355,7 @@
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
-          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          "sha256": "9e56e088f833ad5f2f372ecca97e1e45846f6e54b745226bb25935b11da18b16"
         },
         {
           "path": "src/api/privilege_broker.rs",
@@ -1363,7 +1363,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -1425,11 +1425,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "lean/Orb/MutantSuite.lean",
@@ -1437,7 +1437,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1445,7 +1445,7 @@
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
-          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          "sha256": "9e56e088f833ad5f2f372ecca97e1e45846f6e54b745226bb25935b11da18b16"
         },
         {
           "path": "src/managed/mod.rs",
@@ -1457,7 +1457,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -1519,11 +1519,11 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "lean/Orb/Stream.lean",
@@ -1535,7 +1535,7 @@
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "crates/orb-spec/src/shadow.rs",
@@ -1543,7 +1543,7 @@
         },
         {
           "path": "lean/Orb/StatefulMutantSuite.lean",
-          "sha256": "bd7ffe1b06e813a87628b47866e0c67f8b3983d5a8d3baa6e3d96e9313083fd6"
+          "sha256": "9e56e088f833ad5f2f372ecca97e1e45846f6e54b745226bb25935b11da18b16"
         },
         {
           "path": "src/api/control/streaming.rs",
@@ -1555,7 +1555,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -1592,7 +1592,7 @@
       "sources": [
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "src/orb_spec.rs",
@@ -1600,7 +1600,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-          "sha256": "2b657cb666a310bf1a699dc2f802c22590524af65e278a60ccf4256ad7553d49"
+          "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
         }
       ],
       "execution": {
@@ -1657,15 +1657,15 @@
       "sources": [
         {
           "path": "lean/Orb/Kernel.lean",
-          "sha256": "72b98d3ef9db10a5a07840ac995f5de797a2147edd2f8e41b6aa641cd24b4770"
+          "sha256": "fbaaa55f09cdeeafbf2445978f7338a113a9c2d633dbe236234a76ffa6d8c5f9"
         },
         {
           "path": "lean/Orb/Spec.lean",
-          "sha256": "4f419f0fb2eeb753f0caba8da099764d4bc58fe6ad2e3072b8018fbb5325df23"
+          "sha256": "ae924571590189a40e2267347fc6c135f7b7ef5241b744efd29bdd340623473c"
         },
         {
           "path": "crates/orb-spec/src/lib.rs",
-          "sha256": "0ce12bba90b958a2da41a11a0ded107258416aa5486d21568021417ab7aedec3"
+          "sha256": "b62c901c62fc4d6ea4a683860e0fd1e3df553561adead2530a93814b37f164d2"
         },
         {
           "path": "src/managed/mod.rs",
@@ -1677,7 +1677,7 @@
         },
         {
           "path": "shared/orb-spec/evidence/mission-vm-limits-tests.log",
-          "sha256": "8bfdd982cddb53daf4c5defe2e2f2064fdfbb3c2e21d232585ae9898e8b4c873"
+          "sha256": "00c3e825d9a47ed23cd7c39636a475f471283ad11346d3d6b25111e561a48031"
         }
       ],
       "execution": {
