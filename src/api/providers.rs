@@ -2378,6 +2378,18 @@ pub async fn list_backend_model_options(
     Json(BackendModelOptionsResponse { backends })
 }
 
+/// Configured OpenCode model option values (`provider/model` plus routing chain
+/// ids) for synchronous MCP preflight when no loopback HTTP server is bound.
+pub(crate) async fn opencode_model_values(state: &Arc<AppState>) -> Vec<String> {
+    let Json(resp) =
+        list_backend_model_options(State(state.clone()), Query(BackendModelsQuery::default()))
+            .await;
+    resp.backends
+        .get("opencode")
+        .map(|opts| opts.iter().map(|o| o.value.clone()).collect())
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Copy)]
 struct AntigravityReadiness {
     checked: std::time::Instant,
