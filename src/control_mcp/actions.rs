@@ -48,6 +48,32 @@ fn canonical(value: &Value) -> Value {
         v => v.clone(),
     }
 }
+pub fn existing(conn: &Connection, p: &Principal, call: &Call) -> Result<Option<Value>, String> {
+    let key = call.arguments["idempotency_key"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty() && s.len() <= 200)
+        .ok_or("idempotency_key must contain 1–200 bytes")?;
+    let fingerprint = crate::project_context::digest(
+        canonical(&json!({"tool":call.name,"arguments":call.arguments}))
+            .to_string()
+            .as_bytes(),
+    );
+    let Some((id, old)): Option<(String, String)> = conn
+        .query_row(
+            "SELECT id,fingerprint FROM mcp_actions_v1 WHERE scope=?1 AND retry_key=?2",
+            params![scope(p), key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    if old != fingerprint {
+        return Err("Idempotency key already belongs to different arguments".into());
+    }
+    read(conn, p, &id).map(Some)
+}
 pub fn reserve(conn: &Connection, p: &Principal, call: &Call) -> Result<Value, String> {
     let key = call.arguments["idempotency_key"]
         .as_str()
@@ -1197,5 +1223,38 @@ mod tests {
                 "{id}: {receipt}"
             );
         }
+    }
+
+    #[test]
+    fn existing_recovers_settled_or_queued_receipt_and_rejects_mismatched_arguments() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        let p = principal();
+        let call = Call {
+            name: "consult_model".into(),
+            arguments: json!({
+                "model": "retired-model-v1",
+                "question": "Check the architecture",
+                "idempotency_key": "consult-retry-1"
+            }),
+        };
+        assert!(existing(&conn, &p, &call).unwrap().is_none());
+        let reserved = reserve(&conn, &p, &call).unwrap();
+        let action_id = reserved["action_id"].as_str().unwrap().to_string();
+        let recovered = existing(&conn, &p, &call).unwrap().unwrap();
+        assert_eq!(recovered["action_id"], action_id);
+        assert_eq!(recovered["state"], "queued");
+
+        let mismatched = Call {
+            name: "consult_model".into(),
+            arguments: json!({
+                "model": "other-model",
+                "question": "Check the architecture",
+                "idempotency_key": "consult-retry-1"
+            }),
+        };
+        assert!(existing(&conn, &p, &mismatched)
+            .unwrap_err()
+            .contains("different arguments"));
     }
 }

@@ -1382,6 +1382,17 @@ async fn call_inner(
     .0;
     let api_url = format!("http://127.0.0.1:{}", state.config.port);
     if call.name == "consult_model" {
+        let existing_receipt = {
+            let conn = state
+                .projects
+                .connection
+                .lock()
+                .map_err(|_| ToolError::denied("Action store unavailable"))?;
+            super::actions::existing(&conn, p, call).map_err(|e| ToolError::invalid(&e))?
+        };
+        if let Some(receipt) = existing_receipt {
+            return Ok(receipt);
+        }
         let params = super::assistant::AssistantMcp::parse_consult_params(call.arguments.clone())
             .map_err(|e| ToolError::invalid(&e))?;
         let options =
