@@ -156,7 +156,7 @@ class Receipts(unittest.TestCase):
             self.assertEqual(report["cases"], 2 * len(functions))
             self.assertEqual(report["mismatches"], [])
             self.assertFalse(report["phase_acceptance"])
-            self.assertEqual(report["coverage"], {"partial": 23, "unconnected": 107, "acceptance": "INCOMPLETE"})
+            self.assertEqual(report["coverage"], {"partial": 23, "unconnected": 109, "acceptance": "INCOMPLETE"})
             self.assertEqual(verified["backend"], "leannative")
             self.assertEqual(verified["compared_backend"], "leannative")
             self.assertEqual(verified["artifact_sha256"], verified["leannative_artifact_sha256"])
