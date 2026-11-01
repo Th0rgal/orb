@@ -37,6 +37,7 @@ import {
 } from '@/lib/api';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { toast } from '@/components/toast';
+import { useCopyToClipboard } from '@/components/tool-ui/shared/use-copy-to-clipboard';
 import { getRuntimeApiBase } from '@/lib/settings';
 
 const BUILTIN_VARIABLES = new Set([
@@ -292,7 +293,7 @@ export function MissionAutomationsDialog({
   const [executionsLoading, setExecutionsLoading] = useState(false);
 
   // -- Clipboard --
-  const [copiedWebhookId, setCopiedWebhookId] = useState<string | null>(null);
+  const { copiedId: copiedWebhookId, copy: copyWebhookUrl } = useCopyToClipboard();
 
   // Helper to add auto-populated variables (merges with existing, never overwrites manual)
   const addAutoVariables = useCallback((names: string[]) => {
@@ -775,11 +776,10 @@ export function MissionAutomationsDialog({
     }
   };
 
-  const handleCopyWebhookUrl = (url: string, automationId: string) => {
-    navigator.clipboard.writeText(url).then(() => {
-      setCopiedWebhookId(automationId);
-      setTimeout(() => setCopiedWebhookId(null), 2000);
-    });
+  const handleCopyWebhookUrl = async (url: string, automationId: string) => {
+    if (!(await copyWebhookUrl(url, automationId))) {
+      toast.error('Failed to copy webhook URL. Select and copy the URL manually.');
+    }
   };
 
   const handleAddVariable = () => {
