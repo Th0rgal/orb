@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 function fallbackCopyToClipboard(text: string): boolean {
+  const textArea = document.createElement("textarea");
   try {
-    const textArea = document.createElement("textarea");
     textArea.value = text;
     textArea.setAttribute("readonly", "");
     textArea.style.position = "fixed";
@@ -12,11 +12,11 @@ function fallbackCopyToClipboard(text: string): boolean {
     textArea.style.left = "-9999px";
     document.body.appendChild(textArea);
     textArea.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(textArea);
-    return ok;
+    return document.execCommand("copy");
   } catch {
     return false;
+  } finally {
+    textArea.remove();
   }
 }
 
@@ -27,7 +27,8 @@ export function useCopyToClipboard(options?: {
   copy: (text: string, id?: string) => Promise<boolean>;
 } {
   const resetAfterMs = options?.resetAfterMs ?? 2000;
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copied, setCopied] = useState<{ id: string } | null>(null);
+  const copiedId = copied?.id ?? null;
 
   const copy = useCallback(
     async (text: string, id: string = "default") => {
@@ -44,7 +45,7 @@ export function useCopyToClipboard(options?: {
       }
 
       if (ok) {
-        setCopiedId(id);
+        setCopied({ id });
       }
 
       return ok;
@@ -53,10 +54,10 @@ export function useCopyToClipboard(options?: {
   );
 
   useEffect(() => {
-    if (!copiedId) return;
-    const timeout = setTimeout(() => setCopiedId(null), resetAfterMs);
+    if (!copied) return;
+    const timeout = setTimeout(() => setCopied(null), resetAfterMs);
     return () => clearTimeout(timeout);
-  }, [copiedId, resetAfterMs]);
+  }, [copied, resetAfterMs]);
 
   return { copiedId, copy };
 }
