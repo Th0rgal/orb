@@ -4159,3 +4159,67 @@ async fn newest_ready_worker_snapshot_is_project_and_tenant_scoped_and_light_is_
     assert_eq!(warm.image, s2.name);
     assert_eq!(warm.source_snapshot.as_deref(), Some(s2.name.as_str()));
 }
+
+#[tokio::test]
+async fn bitwarden_discovery_requires_explicit_managed_opt_in() {
+    // Unconfigured companion instance (no env keys, no managed_machines.json,
+    // no managed_providers.json): must NOT auto-discover shared Bitwarden cloud
+    // credentials and reap another instance's `orb-managed-*` VMs.
+    let unconfigured_dir = tempfile::tempdir().unwrap();
+    let mut disabled_settings = settings();
+    disabled_settings.enabled = false;
+    let unconfigured = Arc::new(ManagedManager::new(
+        disabled_settings.clone(),
+        None,
+        unconfigured_dir.path(),
+        3002,
+    ));
+    unconfigured.load().await;
+    assert!(!unconfigured.allows_bitwarden_provider_discovery());
+
+    // Instance with an existing local `managed_machines.json` registry opts in.
+    let registry_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(registry_dir.path().join(".sandboxed-sh")).unwrap();
+    std::fs::write(
+        registry_dir
+            .path()
+            .join(".sandboxed-sh/managed_machines.json"),
+        r#"{"machines":[]}"#,
+    )
+    .unwrap();
+    let with_registry = Arc::new(ManagedManager::new(
+        disabled_settings.clone(),
+        None,
+        registry_dir.path(),
+        3000,
+    ));
+    with_registry.load().await;
+    assert!(with_registry.allows_bitwarden_provider_discovery());
+
+    // Instance with `settings.enabled = true` (e.g. `BOAT_API_KEY` in env) opts in.
+    let env_dir = tempfile::tempdir().unwrap();
+    let with_env = Arc::new(ManagedManager::new(settings(), None, env_dir.path(), 3000));
+    with_env.load().await;
+    assert!(with_env.allows_bitwarden_provider_discovery());
+
+    // Instance with saved encrypted provider credentials in `managed_providers.json` opts in.
+    let stored_dir = tempfile::tempdir().unwrap();
+    let with_stored = Arc::new(ManagedManager::new(
+        disabled_settings,
+        None,
+        stored_dir.path(),
+        3000,
+    ));
+    with_stored.load().await;
+    with_stored
+        .update_provider_config(
+            "hetzner",
+            ProviderUpdateRequest {
+                enabled: Some(true),
+                api_key: Some("hz-key-9999".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(with_stored.allows_bitwarden_provider_discovery());
+}
