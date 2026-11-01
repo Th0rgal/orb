@@ -288,6 +288,7 @@ function AutomationRow({
 }) {
   const [busy, setBusy] = useState<null | 'disable' | 'delete'>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const { showError } = useToast();
 
   const title =
     mission?.title?.trim() ||
@@ -299,6 +300,8 @@ function AutomationRow({
     try {
       await updateAutomation(automation.id, { active: false });
       onMutate();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to disable automation');
     } finally {
       setBusy(null);
     }
@@ -309,9 +312,11 @@ function AutomationRow({
     try {
       await deleteAutomation(automation.id);
       onMutate();
+      setConfirmDelete(false);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to remove automation');
     } finally {
       setBusy(null);
-      setConfirmDelete(false);
     }
   }
 
