@@ -407,3 +407,35 @@ pub async fn cancel_board_task(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(task))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn board_task_with_backend_and_model(backend: &str, model: &str) -> NewBoardTask {
+        NewBoardTask {
+            task_key: "model-check".to_string(),
+            title: "Model check".to_string(),
+            prompt: "Verify board model validation".to_string(),
+            backend: backend.to_string(),
+            model_override: Some(model.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn board_upsert_normalizes_codex_6_1_terra_and_rejects_nonexistent_terra_6() {
+        let mut valid = vec![board_task_with_backend_and_model(
+            "codex",
+            "codex/gpt-6.1-terra",
+        )];
+        validate_and_normalize_board_tasks(&mut valid).unwrap();
+        assert_eq!(valid[0].model_override.as_deref(), Some("gpt-6.1-terra"));
+
+        let mut invalid = vec![board_task_with_backend_and_model("codex", "gpt-6-terra")];
+        let (status, error) = validate_and_normalize_board_tasks(&mut invalid).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("task `model-check`"), "{error}");
+        assert!(error.contains("gpt-6.1-terra"), "{error}");
+    }
+}

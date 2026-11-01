@@ -3222,3 +3222,30 @@ pub(crate) fn managed_auth_precheck(
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_normalization_and_fast_mode_cover_gpt_6_1_family() {
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "gpt-6.1"),
+            Some("gpt-6.1-sol".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "openai/gpt-6.1"),
+            Some("gpt-6.1-sol".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "codex/gpt-6.1-terra"),
+            Some("gpt-6.1-terra".to_string())
+        );
+        assert!(validate_fast_mode("codex", Some("gpt-6.1-terra"), true).is_ok());
+        assert!(validate_fast_mode("codex", Some("gpt-6.1-sol"), true).is_ok());
+        assert_eq!(
+            supported_model_efforts_for_backend(Some("codex")),
+            "low, medium, high, xhigh, max"
+        );
+    }
+}
