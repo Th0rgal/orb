@@ -21,7 +21,7 @@ function getRelativeTime(date: Date, nowMs: number): string {
   if (diffMin < 60) return `${diffMin}m ago`;
   if (diffHour < 24) return `${diffHour}h ago`;
   if (diffDay < 7) return `${diffDay}d ago`;
-  if (diffWeek < 4) return `${diffWeek}w ago`;
+  if (diffDay < 30) return `${diffWeek}w ago`;
   if (diffMonth < 12) return `${diffMonth}mo ago`;
   return date.toLocaleDateString();
 }
