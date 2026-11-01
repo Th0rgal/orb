@@ -396,6 +396,30 @@ fn is_wakeup(name: &str) -> bool {
     matches!(name, "schedule_wakeup" | "schedule_job_wakeup")
 }
 
+fn target_mission_fields(args: &Value) -> Result<Vec<(&'static str, &str)>, ToolError> {
+    let mut out = Vec::new();
+    for field in ["mission_id", "supersedes_mission_id"] {
+        if let Some(raw) = args.get(field).filter(|v| !v.is_null()) {
+            let s = raw
+                .as_str()
+                .ok_or_else(|| ToolError::invalid("A full mission UUID is required"))?;
+            out.push((field, s));
+        }
+    }
+    if let Some(arr) = args.get("mission_ids").filter(|v| !v.is_null()) {
+        let items = arr
+            .as_array()
+            .ok_or_else(|| ToolError::invalid("mission_ids must be an array of UUIDs"))?;
+        for item in items {
+            let s = item
+                .as_str()
+                .ok_or_else(|| ToolError::invalid("A full mission UUID is required"))?;
+            out.push(("mission_id", s));
+        }
+    }
+    Ok(out)
+}
+
 async fn authorize(
     state: &Arc<AppState>,
     p: &Principal,
@@ -412,6 +436,23 @@ async fn authorize(
     }
     if !args.is_object() {
         return Err(ToolError::invalid("Arguments must be an object"));
+    }
+    if tool.definition.name == "get_consult_result" {
+        let has_single = args.get("mission_id").is_some_and(|v| !v.is_null());
+        let has_batch = args.get("mission_ids").is_some_and(|v| !v.is_null());
+        match (has_single, has_batch) {
+            (false, false) => {
+                return Err(ToolError::invalid(
+                    "Pass `mission_id` or `mission_ids` to get_consult_result",
+                ))
+            }
+            (true, true) => {
+                return Err(ToolError::invalid(
+                    "Pass either `mission_id` or `mission_ids`, not both",
+                ))
+            }
+            _ => {}
+        }
     }
     if args.get("parent_mission_id").is_some() || args.get("caller").is_some() {
         return Err(ToolError::invalid("Parent identity is provided by Core"));
@@ -525,54 +566,52 @@ async fn authorize(
         } else {
             None
         };
-        for field in ["mission_id", "supersedes_mission_id"] {
-            if let Some(raw) = args.get(field).and_then(Value::as_str) {
-                let id = Uuid::parse_str(raw)
-                    .map_err(|_| ToolError::invalid("Full mission UUID required"))?;
-                let mission = store
-                    .get_mission(id)
-                    .await
-                    .map_err(|_| ToolError::denied("Mission unavailable"))?
-                    .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
-                if mission.project.project.as_deref() != Some(project) {
-                    let allowed_btw_parent = field == "mission_id"
-                        && btw_parent_tool_allowed(&tool.definition.name)
-                        && match owner_tags.as_deref() {
-                            Some(tags) => btw_associated_with_target(&store, tags, id).await,
-                            None => false,
-                        };
-                    if allowed_btw_parent {
-                        continue;
-                    }
-                    // An approved mission-access grant crosses projects for
-                    // tools covered by its scope (including read grants inherited
-                    // across `fork-of:` versions). Executors are audited below.
-                    let grant = if field == "mission_id" {
-                        let subjects = caller_grant_subjects(&store, p).await;
-                        granted_access_for_subjects(
-                            state,
-                            &p.sub,
-                            p.requester_subject(),
-                            &subjects,
-                            &tool.definition.name,
-                            id,
-                        )
-                        .await
-                    } else {
-                        None
+        for (field, raw) in target_mission_fields(args)? {
+            let id = Uuid::parse_str(raw)
+                .map_err(|_| ToolError::invalid("Full mission UUID required"))?;
+            let mission = store
+                .get_mission(id)
+                .await
+                .map_err(|_| ToolError::denied("Mission unavailable"))?
+                .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
+            if mission.project.project.as_deref() != Some(project) {
+                let allowed_btw_parent = field == "mission_id"
+                    && btw_parent_tool_allowed(&tool.definition.name)
+                    && match owner_tags.as_deref() {
+                        Some(tags) => btw_associated_with_target(&store, tags, id).await,
+                        None => false,
                     };
-                    match grant {
-                        Some(grant) => {
-                            if p.role != Role::Executor {
-                                record_granted_access(state, p, grant, &tool.definition.name).await;
-                            }
+                if allowed_btw_parent {
+                    continue;
+                }
+                // An approved mission-access grant crosses projects for
+                // tools covered by its scope (including read grants inherited
+                // across `fork-of:` versions). Executors are audited below.
+                let grant = if field == "mission_id" {
+                    let subjects = caller_grant_subjects(&store, p).await;
+                    granted_access_for_subjects(
+                        state,
+                        &p.sub,
+                        p.requester_subject(),
+                        &subjects,
+                        &tool.definition.name,
+                        id,
+                    )
+                    .await
+                } else {
+                    None
+                };
+                match grant {
+                    Some(grant) => {
+                        if p.role != Role::Executor {
+                            record_granted_access(state, p, grant, &tool.definition.name).await;
                         }
-                        None => {
-                            return Err(ToolError::denied(&format!(
-                                "Mission is outside this session's project. {}",
-                                crate::api::mission_access::scope_hint(&tool.definition.name, id)
-                            )))
-                        }
+                    }
+                    None => {
+                        return Err(ToolError::denied(&format!(
+                            "Mission is outside this session's project. {}",
+                            crate::api::mission_access::scope_hint(&tool.definition.name, id)
+                        )))
                     }
                 }
             }
@@ -620,32 +659,28 @@ async fn authorize(
             username: p.username.clone(),
         };
         let store = state.control.get_or_spawn(&user).await.mission_store;
-        for field in ["mission_id", "supersedes_mission_id"] {
-            if let Some(raw) = args.get(field).filter(|v| !v.is_null()) {
-                let id = raw
-                    .as_str()
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                    .ok_or_else(|| ToolError::invalid("A full mission UUID is required"))?;
-                store
-                    .get_mission(id)
-                    .await
-                    .map_err(|_| ToolError::denied("Mission unavailable"))?
-                    .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
-                let grant = if field == "mission_id" {
-                    granted_access(state, p, &tool.definition.name, id).await
-                } else {
-                    None
-                };
-                match grant {
-                    Some(grant) => {
-                        record_granted_access(state, p, grant, &tool.definition.name).await;
-                    }
-                    None => {
-                        return Err(ToolError::denied(&crate::api::mission_access::scope_hint(
-                            &tool.definition.name,
-                            id,
-                        )))
-                    }
+        for (field, raw) in target_mission_fields(args)? {
+            let id = Uuid::parse_str(raw)
+                .map_err(|_| ToolError::invalid("A full mission UUID is required"))?;
+            store
+                .get_mission(id)
+                .await
+                .map_err(|_| ToolError::denied("Mission unavailable"))?
+                .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
+            let grant = if field == "mission_id" {
+                granted_access(state, p, &tool.definition.name, id).await
+            } else {
+                None
+            };
+            match grant {
+                Some(grant) => {
+                    record_granted_access(state, p, grant, &tool.definition.name).await;
+                }
+                None => {
+                    return Err(ToolError::denied(&crate::api::mission_access::scope_hint(
+                        &tool.definition.name,
+                        id,
+                    )))
                 }
             }
         }
@@ -662,83 +697,76 @@ async fn authorize(
         .map_err(|_| ToolError::denied("Mission unavailable"))?
         .ok_or_else(|| ToolError::denied("Mission no longer exists"))?;
     let fork_chain = fork_lineage(&store, own).await;
-    for field in ["mission_id", "supersedes_mission_id"] {
-        if let Some(raw) = args.get(field).filter(|v| !v.is_null()) {
-            let id = raw
-                .as_str()
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or_else(|| ToolError::invalid("A full mission UUID is required"))?;
-            let m = store
-                .get_mission(id)
+    for (field, raw) in target_mission_fields(args)? {
+        let id = Uuid::parse_str(raw)
+            .map_err(|_| ToolError::invalid("A full mission UUID is required"))?;
+        let m = store
+            .get_mission(id)
+            .await
+            .map_err(|_| ToolError::denied("Mission unavailable"))?
+            .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
+        // A /btw side agent (`btw-parent:<id>`, minted only by Core) may read and control
+        // its associated parent conversation (including its `fork-of:` lineage chain) by default.
+        let allowed_btw_parent = field == "mission_id"
+            && btw_parent_tool_allowed(&tool.definition.name)
+            && btw_associated_with_target(&store, &owner.project.tags, id).await;
+        // A conversation fork (`fork-of:<id>`, minted only by Core when transferring a
+        // conversation) continues the same coordinator session on a new harness:
+        // read tools may inspect earlier versions in its fork chain, and it retains
+        // child-mission read/control/supersede authority over workers spawned by earlier
+        // versions in `fork_chain`.
+        let fork_child = m
+            .parent_mission_id
+            .is_some_and(|parent| fork_chain.contains(&parent));
+        let reads_fork_lineage = field == "mission_id"
+            && crate::api::mission_access::READ_TOOLS.contains(&tool.definition.name.as_str())
+            && (fork_chain.contains(&id) || fork_child);
+        let controls_fork_child = fork_child
+            && ((field == "mission_id"
+                && crate::api::mission_access::CONTROL_TOOLS
+                    .contains(&tool.definition.name.as_str()))
+                || field == "supersedes_mission_id");
+        if id != own
+            && m.parent_mission_id != Some(own)
+            && !allowed_btw_parent
+            && !reads_fork_lineage
+            && !controls_fork_child
+        {
+            // Device-signed grant approved by Thomas (request_mission_access):
+            // `read` opens READ_TOOLS (including read grants approved on earlier `fork-of:`
+            // versions); `control` opens READ_TOOLS and CONTROL_TOOLS for the exact subject.
+            let grant = if field == "mission_id" {
+                let subjects: Vec<crate::api::approval_flow::RequesterSubject> = fork_chain
+                    .iter()
+                    .copied()
+                    .map(crate::api::approval_flow::RequesterSubject::mission)
+                    .collect();
+                granted_access_for_subjects(
+                    state,
+                    &p.sub,
+                    p.requester_subject(),
+                    &subjects,
+                    &tool.definition.name,
+                    id,
+                )
                 .await
-                .map_err(|_| ToolError::denied("Mission unavailable"))?
-                .ok_or_else(|| ToolError::denied("Mission unavailable"))?;
-            // A /btw side agent (`btw-parent:<id>`, minted only by Core) may read and control
-            // its associated parent conversation (including its `fork-of:` lineage chain) by default.
-            let allowed_btw_parent = field == "mission_id"
-                && btw_parent_tool_allowed(&tool.definition.name)
-                && btw_associated_with_target(&store, &owner.project.tags, id).await;
-            // A conversation fork (`fork-of:<id>`, minted only by Core when transferring a
-            // conversation) continues the same coordinator session on a new harness:
-            // read tools may inspect earlier versions in its fork chain, and it retains
-            // child-mission read/control/supersede authority over workers spawned by earlier
-            // versions in `fork_chain`.
-            let fork_child = m
-                .parent_mission_id
-                .is_some_and(|parent| fork_chain.contains(&parent));
-            let reads_fork_lineage = field == "mission_id"
-                && crate::api::mission_access::READ_TOOLS.contains(&tool.definition.name.as_str())
-                && (fork_chain.contains(&id) || fork_child);
-            let controls_fork_child = fork_child
-                && ((field == "mission_id"
-                    && crate::api::mission_access::CONTROL_TOOLS
-                        .contains(&tool.definition.name.as_str()))
-                    || field == "supersedes_mission_id");
-            if id != own
-                && m.parent_mission_id != Some(own)
-                && !allowed_btw_parent
-                && !reads_fork_lineage
-                && !controls_fork_child
-            {
-                // Device-signed grant approved by Thomas (request_mission_access):
-                // `read` opens READ_TOOLS (including read grants approved on earlier `fork-of:`
-                // versions); `control` opens READ_TOOLS and CONTROL_TOOLS for the exact subject.
-                let grant = if field == "mission_id" {
-                    let subjects: Vec<crate::api::approval_flow::RequesterSubject> = fork_chain
-                        .iter()
-                        .copied()
-                        .map(crate::api::approval_flow::RequesterSubject::mission)
-                        .collect();
-                    granted_access_for_subjects(
-                        state,
-                        &p.sub,
-                        p.requester_subject(),
-                        &subjects,
+            } else {
+                None
+            };
+            match grant {
+                Some(grant) => record_granted_access(state, p, grant, &tool.definition.name).await,
+                None => {
+                    return Err(ToolError::denied(&crate::api::mission_access::scope_hint(
                         &tool.definition.name,
                         id,
-                    )
-                    .await
-                } else {
-                    None
-                };
-                match grant {
-                    Some(grant) => {
-                        record_granted_access(state, p, grant, &tool.definition.name).await
-                    }
-                    None => {
-                        return Err(ToolError::denied(&crate::api::mission_access::scope_hint(
-                            &tool.definition.name,
-                            id,
-                        )))
-                    }
+                    )))
                 }
             }
-            if tool.definition.name == "start_workspace_job" && m.workspace_id != owner.workspace_id
-            {
-                return Err(ToolError::denied(
-                    "Job workspace is outside this session's scope",
-                ));
-            }
+        }
+        if tool.definition.name == "start_workspace_job" && m.workspace_id != owner.workspace_id {
+            return Err(ToolError::denied(
+                "Job workspace is outside this session's scope",
+            ));
         }
     }
     // Managed machines may be targeted by name ("small-a"); resolve to the
@@ -1353,6 +1381,20 @@ async fn call_inner(
     .map_err(|_| ToolError::denied("Authentication unavailable"))?
     .0;
     let api_url = format!("http://127.0.0.1:{}", state.config.port);
+    if call.name == "consult_model" {
+        let params = super::assistant::AssistantMcp::parse_consult_params(call.arguments.clone())
+            .map_err(|e| ToolError::invalid(&e))?;
+        let options =
+            match super::assistant::AssistantMcp::connected(api_url.clone(), token.clone())
+                .opencode_model_options()
+                .await
+            {
+                Ok(opts) if !opts.is_empty() => opts,
+                _ => crate::api::providers::opencode_model_values(&state).await,
+            };
+        super::assistant::validate_consult_params_and_models(&params, &options)
+            .map_err(|e| ToolError::invalid(&e))?;
+    }
     if tool.mutation {
         let mut issuer = p.clone();
         if is_wakeup(&call.name) {

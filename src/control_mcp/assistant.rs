@@ -429,9 +429,14 @@ struct StartMissionParams {
 }
 
 #[derive(Debug, Deserialize)]
-struct ConsultModelParams {
-    /// Full `<provider>/<model>` or a short alias (`gpt-6-astra`, `fable-5.1`).
-    model: String,
+pub(super) struct ConsultModelParams {
+    /// Single-consultant mode: full `<provider>/<model>` or a short alias
+    /// (`gpt-6-astra`, `fable-5.1`, `fable`, `astra`, `gemini-4-carbon`).
+    #[serde(default)]
+    model: Option<String>,
+    /// Quorum mode: dispatch the same question to multiple consultants in one call.
+    #[serde(default)]
+    models: Option<Vec<String>>,
     question: String,
     #[serde(default)]
     files: Vec<String>,
@@ -467,26 +472,142 @@ struct ConsultModelParams {
     managed_ttl_minutes: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GetConsultResultParams {
+    #[serde(default)]
+    mission_id: Option<String>,
+    #[serde(default)]
+    mission_ids: Option<Vec<String>>,
+}
+
+const MAX_CONSULT_QUORUM_MODELS: usize = 6;
+
 fn normalize_model_token(raw: &str) -> String {
     raw.trim().to_ascii_lowercase().replace(['.', '_'], "-")
 }
 
+fn is_first_party_consult_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "anthropic" | "openai" | "google" | "xai" | "kimi" | "minimax" | "zai" | "mistral"
+    )
+}
+
+fn resolve_family_shorthand(wanted: &str, options: &[String]) -> Option<String> {
+    let (provider, prefix, suffix) = match wanted {
+        "fable" | "claude-fable" => ("anthropic", "claude-fable-", None),
+        "opus" | "claude-opus" => ("anthropic", "claude-opus-", None),
+        "sonnet" | "claude-sonnet" => ("anthropic", "claude-sonnet-", None),
+        "haiku" | "claude-haiku" => ("anthropic", "claude-haiku-", None),
+        "astra" | "gpt-astra" => ("openai", "gpt-", Some("-astra")),
+        "sol" | "gpt-sol" => ("openai", "gpt-", Some("-sol")),
+        "terra" | "gpt-terra" => ("openai", "gpt-", Some("-terra")),
+        "luna" | "gpt-luna" => ("openai", "gpt-", Some("-luna")),
+        "grok" => ("xai", "grok-", Some("")),
+        _ => return None,
+    };
+    let candidates: Vec<&str> = options
+        .iter()
+        .filter_map(|opt| {
+            let (p, m) = opt.split_once('/')?;
+            if p != provider {
+                return None;
+            }
+            let norm = normalize_model_token(m);
+            match suffix {
+                None => norm.starts_with(prefix).then_some(opt.as_str()),
+                Some("") => crate::model_selection::is_versioned_text_model(m, "grok")
+                    .then(|| {
+                        (!norm.ends_with("-mini")
+                            && !norm.contains("fast")
+                            && !norm.contains("reasoning")
+                            && !norm.contains("build")
+                            && !norm.contains("multi-agent"))
+                        .then_some(opt.as_str())
+                    })
+                    .flatten(),
+                Some(sfx) => {
+                    (norm.starts_with(prefix) && norm.ends_with(sfx)).then_some(opt.as_str())
+                }
+            }
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let indices = crate::model_selection::preferred_indices(&candidates);
+    indices.first().map(|&idx| candidates[idx].to_string())
+}
+
 /// Resolve `consult_model`'s `model` against the opencode model options
 /// (`provider/model` values plus routing chain ids). A full id must exist; a
-/// short alias must name exactly one model (optionally without its `claude-`
-/// prefix). Unknown and ambiguous inputs list the close valid ids.
-fn resolve_consult_model(input: &str, options: &[String]) -> Result<String, String> {
+/// short alias resolves pool-aware Gemini 4 Carbon/Argon ids, unversioned
+/// flagship family names (`fable`, `astra`, `sol`, `opus`, `sonnet`, `grok`),
+/// or a unique model name (breaking ties in favour of a single native
+/// first-party provider when aggregators/pools mirror the same slug).
+pub(super) fn resolve_consult_model(input: &str, options: &[String]) -> Result<String, String> {
     let wanted = normalize_model_token(input);
     if wanted.is_empty() {
-        return Err("model is required, e.g. openai/gpt-6-astra or fable-5.1".into());
+        return Err(
+            "model is required, e.g. openai/gpt-6-astra, fable, astra, or gemini-4-carbon".into(),
+        );
     }
-    // Gemini 4 Argon is served by Google (one Gemini CLI login) and by the
-    // Antigravity pool (several Ultra logins with their own quotas): the bare
-    // alias goes to the pool first; the proxy fails over between the two.
-    if matches!(wanted.as_str(), "argon" | "gemini-4-argon" | "gemini-argon") {
-        if let Some(preferred) = ["antigravity/gemini-4-argon-medium", "google/gemini-4-argon"]
+    // Gemini 4 Argon and Gemini 4 Carbon are served by Google (single Gemini CLI
+    // login, pinned to native Google when addressed as `google/...`) and by the
+    // Antigravity pool (several Ultra logins with independent quotas). Bare
+    // aliases prefer the Antigravity pool first and fall back to Google.
+    if matches!(
+        wanted.as_str(),
+        "argon" | "gemini-4-argon" | "gemini-4-0-argon" | "gemini-argon" | "agy-demo"
+    ) {
+        if let Some(preferred) = [
+            "antigravity/gemini-4-argon-medium",
+            "antigravity/gemini-4-argon-high",
+            "google/gemini-4-argon",
+        ]
+        .iter()
+        .find_map(|id| options.iter().find(|o| o.as_str() == *id))
+        {
+            return Ok(preferred.clone());
+        }
+    }
+    if matches!(
+        wanted.as_str(),
+        "carbon"
+            | "gemini-4-carbon"
+            | "gemini-4-0-carbon"
+            | "gemini-carbon"
+            | "gemini-4-carbon-eap"
+            | "gemini-4-carbon-high"
+            | "agy-model"
+            | "agy-model-high"
+    ) {
+        if let Some(preferred) = [
+            "antigravity/agy-model-high",
+            "google/gemini-4-carbon-eap",
+            "google/gemini-4-carbon",
+        ]
+        .iter()
+        .find_map(|id| options.iter().find(|o| o.as_str() == *id))
+        {
+            return Ok(preferred.clone());
+        }
+    }
+    if matches!(
+        wanted.as_str(),
+        "gemini-4-carbon-medium" | "agy-model-medium"
+    ) {
+        if let Some(preferred) = options
             .iter()
-            .find_map(|id| options.iter().find(|o| o.as_str() == *id))
+            .find(|o| o.as_str() == "antigravity/agy-model-medium")
+        {
+            return Ok(preferred.clone());
+        }
+    }
+    if matches!(wanted.as_str(), "gemini-4-carbon-low" | "agy-model-low") {
+        if let Some(preferred) = options
+            .iter()
+            .find(|o| o.as_str() == "antigravity/agy-model-low")
         {
             return Ok(preferred.clone());
         }
@@ -494,19 +615,38 @@ fn resolve_consult_model(input: &str, options: &[String]) -> Result<String, Stri
     if let Some(exact) = options.iter().find(|o| normalize_model_token(o) == wanted) {
         return Ok(exact.clone());
     }
+    if !wanted.contains('/') {
+        if let Some(family_match) = resolve_family_shorthand(&wanted, options) {
+            return Ok(family_match);
+        }
+    }
     let mut matches: Vec<&String> = if wanted.contains('/') {
         Vec::new()
     } else {
         options
             .iter()
             .filter(|o| {
-                let model = normalize_model_token(o.split_once('/').map_or(o.as_str(), |(_, m)| m));
+                let model =
+                    normalize_model_token(o.rsplit_once('/').map_or(o.as_str(), |(_, m)| m));
                 model == wanted || model == format!("claude-{wanted}")
             })
             .collect()
     };
     matches.sort();
     matches.dedup();
+    if matches.len() > 1 {
+        let first_party: Vec<&String> = matches
+            .iter()
+            .copied()
+            .filter(|o| {
+                o.split_once('/')
+                    .is_some_and(|(p, _)| is_first_party_consult_provider(p))
+            })
+            .collect();
+        if let [one] = first_party.as_slice() {
+            return Ok((*one).clone());
+        }
+    }
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
         [] => {
@@ -515,7 +655,7 @@ fn resolve_consult_model(input: &str, options: &[String]) -> Result<String, Stri
                 .next()
                 .unwrap_or(&wanted)
                 .split('-')
-                .find(|t| !t.is_empty() && *t != "claude")
+                .find(|t| !t.is_empty() && !matches!(*t, "claude" | "gemini" | "4" | "0"))
                 .unwrap_or("")
                 .to_string();
             let mut close: Vec<&str> = options
@@ -540,6 +680,49 @@ fn resolve_consult_model(input: &str, options: &[String]) -> Result<String, Stri
                 .join(", ")
         )),
     }
+}
+
+pub(super) fn validate_consult_params_and_models(
+    params: &ConsultModelParams,
+    options: &[String],
+) -> Result<(Vec<String>, bool), String> {
+    if params.wait_secs.is_some_and(|w| w > 0) {
+        return Err("consult_model never waits (a blocking wait would hold a shared dispatcher slot): drop wait_secs, then poll get_consult_result(mission_id) until it returns the answer".into());
+    }
+    if params.question.trim().is_empty() {
+        return Err("question is required: write the full question for the consultant".into());
+    }
+    let (raw_models, quorum_mode) = match (&params.model, &params.models) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "Pass either `model` (single consultant) or `models` (quorum array), not both"
+                    .into(),
+            );
+        }
+        (Some(m), None) => (vec![m.clone()], false),
+        (None, Some(ms)) => {
+            if ms.is_empty() {
+                return Err("`models` must contain at least one model id or alias".into());
+            }
+            if ms.len() > MAX_CONSULT_QUORUM_MODELS {
+                return Err(format!(
+                    "`models` accepts at most {MAX_CONSULT_QUORUM_MODELS} consultants per call (got {})",
+                    ms.len()
+                ));
+            }
+            (ms.clone(), true)
+        }
+        (None, None) => {
+            return Err(
+                "Pass `model` (e.g. \"fable\", \"astra\", \"gemini-4-carbon\") or `models` (e.g. [\"fable\", \"astra\", \"gemini-4-carbon\"])".into(),
+            );
+        }
+    };
+    let mut resolved = Vec::with_capacity(raw_models.len());
+    for raw in &raw_models {
+        resolved.push(resolve_consult_model(raw, options)?);
+    }
+    Ok((resolved, quorum_mode))
 }
 
 fn consult_prompt(question: &str, files: &[String], read_only: bool) -> String {
@@ -1834,13 +2017,14 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "consult_model".to_string(),
-                description: "Ask another model a question (review, second opinion, very hard read-only question) without hand-building a mission. Creates a child mission in the caller's project with backend=opencode, model_override=<provider>/<model> and writer=false (pr-readonly) unless read_only=false. Subagents run on Boat (auto-managed, or auto across least-loaded static nodes when Boat is disabled) by default rather than occupying the caller's machine; Boat VMs start clean (seeing committed/PR/snapshot state), so pass remote_node_id=\"same\" only when uncommitted local workspace files must be inspected in place. `model` is a full <provider>/<model> id or a short alias (gpt-6-astra, fable-5.1, opus-5.5); unknown or ambiguous names are rejected with the valid ids. It returns {mission_id} at once and never waits: poll get_consult_result(mission_id) until it returns the answer.".to_string(),
+                description: "Ask one model (`model`) or a quorum of models (`models=[...]`) a read-only question (review, second opinion, hard design/spec check) without hand-building missions. Creates one child mission per model in the caller's project with backend=opencode, model_override=<provider>/<model> and writer=false (pr-readonly) unless read_only=false. Model IDs and aliases are validated synchronously on call — never send a \"Ping\" probe first. Accepted shorthands include `fable` (fable-5.1), `astra` (gpt-6-astra), `gemini-4-carbon` / `carbon`, `argon`, `sol` (gpt-6.1-sol), `opus` (opus-5.5), `sonnet`, `grok`, or any exact `<provider>/<model>` id. Subagents run on Boat (auto-managed, or auto across least-loaded static nodes when Boat is disabled) by default rather than occupying the caller's machine; Boat VMs start clean (seeing committed/PR/snapshot state), so pass remote_node_id=\"same\" only when uncommitted local workspace files must be inspected in place. Returns `{mission_id}` (or `{consultations, mission_ids}` for `models=[...]`) immediately and never waits: poll `get_consult_result(mission_id=...)` or `get_consult_result(mission_ids=[...])` (or arm `schedule_wakeup` when parking a turn) until done.".to_string(),
                 input_schema: json!({
                     "type": "object",
-                    "required": ["model", "question"],
+                    "required": ["question"],
                     "properties": {
-                        "model": {"type": "string", "description": "<provider>/<model> (e.g. openai/gpt-6-astra) or a short alias (gpt-6-astra, fable-5.1, opus-5.5)."},
-                        "question": {"type": "string", "description": "The question, with all context the consultant needs."},
+                        "model": {"type": "string", "description": "Single consultant: <provider>/<model> (e.g. openai/gpt-6-astra) or a short alias (fable, astra, gemini-4-carbon, argon, sol, opus, grok). Pass either `model` or `models`."},
+                        "models": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "string"}, "description": "Quorum mode: dispatch the same question to multiple consultants in one atomic call, e.g. [\"fable\", \"astra\", \"gemini-4-carbon\"]. Validated upfront before any child launches."},
+                        "question": {"type": "string", "description": "The full question, with all context the consultant(s) need. Never send a dummy Ping probe."},
                         "files": {"type": "array", "items": {"type": "string"}, "description": "Paths the consultant must read. Boat VMs (the default placement) start clean and see committed/PR/snapshot state only; pass remote_node_id=\"same\" when inspecting uncommitted local workspace files in place."},
                         "read_only": {"type": "boolean", "description": "Default true (writer=false, pr-readonly). false lets the consultant write."},
                         "remote_node_id": {"type": "string", "description": "Optional placement override: omit for Boat (\"auto-managed\", falling back to \"auto\" if Boat is disabled), pass \"auto-managed:<size>\" or \"auto\" or a registered node id, or pass \"same\" to share/fork the parent's uncommitted local workspace on the same machine."},
@@ -1855,11 +2039,14 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "get_consult_result".to_string(),
-                description: "Read the outcome of a consult_model mission without waiting: {status, done} while it runs, plus the consultant's final answer once it is no longer pending/active. Poll it (e.g. every minute) instead of blocking.".to_string(),
+                description: "Read the outcome of one (`mission_id`) or several (`mission_ids=[...]`) consult_model missions without waiting: `{status, done}` while running, plus each consultant's final `answer` once done (or `{all_done, results}` for a quorum). Poll it (or pair with `schedule_wakeup`) instead of blocking.".to_string(),
                 input_schema: json!({
                     "type": "object",
-                    "required": ["mission_id"],
-                    "properties": {"mission_id": {"type": "string"}}
+                    "required": [],
+                    "properties": {
+                        "mission_id": {"type": "string", "description": "Single consultant mission UUID (or unambiguous prefix for unscoped coordinator calls)."},
+                        "mission_ids": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "string"}, "description": "Batch/quorum mode: check multiple consultant mission UUIDs in one call; returns {all_done, results}."}
+                    }
                 }),
             },
             ToolDefinition {
@@ -2796,7 +2983,7 @@ impl AssistantMcp {
     }
 
     /// Model ids an opencode mission accepts (`provider/model` and chains).
-    async fn opencode_model_options(&self) -> Result<Vec<String>, String> {
+    pub(super) async fn opencode_model_options(&self) -> Result<Vec<String>, String> {
         let response = self.api_get("/api/providers/backend-models").await?;
         let catalog = Self::response_value(response, "List opencode models").await?;
         Ok(catalog["backends"]["opencode"]
@@ -2810,20 +2997,21 @@ impl AssistantMcp {
             .unwrap_or_default())
     }
 
-    /// `consult_model`: a read-only opencode child built on `start_mission`.
+    pub(super) fn parse_consult_params(arguments: Value) -> Result<ConsultModelParams, String> {
+        parse_params(arguments)
+    }
+
+    /// `consult_model`: one or more read-only opencode children built on `start_mission`.
     async fn consult_model(&self, params: ConsultModelParams) -> Result<Value, String> {
-        if params.wait_secs.is_some_and(|w| w > 0) {
-            return Err("consult_model never waits (a blocking wait would hold a shared dispatcher slot): drop wait_secs, then poll get_consult_result(mission_id) until it returns the answer".into());
-        }
-        if params.question.trim().is_empty() {
-            return Err("question is required: write the full question for the consultant".into());
-        }
-        let model = resolve_consult_model(&params.model, &self.opencode_model_options().await?)?;
+        let options = self.opencode_model_options().await?;
+        let (models, quorum_mode) = validate_consult_params_and_models(&params, &options)?;
         let read_only = params.read_only.unwrap_or(true);
-        let title = params
+        let base_title = params
             .title
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| format!("Consult {model}"));
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
         let same_host = params.workspace_id.is_some()
             || params
                 .remote_node_id
@@ -2833,54 +3021,119 @@ impl AssistantMcp {
                     r.eq_ignore_ascii_case(crate::api::control::worker_location::SAME_NODE)
                 });
         let has_files = params.files.iter().any(|f| !f.trim().is_empty());
-        let started = self
-            .start_mission(StartMissionParams {
-                parent_mission_id: params.parent_mission_id,
-                caller: params.caller,
-                cloud: None,
-                title,
-                prompt: consult_prompt(&params.question, &params.files, read_only),
-                workspace_id: params.workspace_id,
-                remote_node_id: params.remote_node_id,
-                managed_ttl_minutes: params.managed_ttl_minutes,
-                managed_from_snapshot: params.managed_from_snapshot,
-                managed_allow_24h_commitment: None,
-                budget_usd: None,
-                backend: Some("opencode".into()),
-                model_override: Some(model.clone()),
-                model_effort: None,
-                fast_mode: None,
-                config_profile: None,
-                agent: None,
-                project: params.project,
-                track: None,
-                idempotency_key: params.idempotency_key,
-                supersedes_mission_id: None,
-                intent: Some("consult_model".into()),
-                github_pr: params.github_pr,
-                writer: Some(!read_only),
-                request_merge_authority: None,
-                tags: Some(vec!["consult-model".into()]),
-                desired_state: None,
-                acceptance_criteria: Vec::new(),
-                next_check_at: None,
-                estimated_disk_gib: None,
-                origin_session_id: params.origin_session_id,
-                attachments: None,
+        let prompt = consult_prompt(&params.question, &params.files, read_only);
+
+        let mut consultations = Vec::with_capacity(models.len());
+        let mut mission_ids = Vec::with_capacity(models.len());
+        for (idx, model) in models.iter().enumerate() {
+            let title = match (&base_title, quorum_mode) {
+                (Some(t), false) => t.clone(),
+                (Some(t), true) => format!("{t} ({model})"),
+                (None, _) => format!("Consult {model}"),
+            };
+            let child_key = params.idempotency_key.as_ref().map(|base| {
+                if !quorum_mode {
+                    base.clone()
+                } else {
+                    format!("{base}:{idx}:{model}")
+                }
+            });
+            let started = self
+                .start_mission(StartMissionParams {
+                    parent_mission_id: params.parent_mission_id,
+                    caller: params.caller.clone(),
+                    cloud: None,
+                    title,
+                    prompt: prompt.clone(),
+                    workspace_id: params.workspace_id.clone(),
+                    remote_node_id: params.remote_node_id.clone(),
+                    managed_ttl_minutes: params.managed_ttl_minutes,
+                    managed_from_snapshot: params.managed_from_snapshot.clone(),
+                    managed_allow_24h_commitment: None,
+                    budget_usd: None,
+                    backend: Some("opencode".into()),
+                    model_override: Some(model.clone()),
+                    model_effort: None,
+                    fast_mode: None,
+                    config_profile: None,
+                    agent: None,
+                    project: params.project.clone(),
+                    track: None,
+                    idempotency_key: child_key,
+                    supersedes_mission_id: None,
+                    intent: Some("consult_model".into()),
+                    github_pr: params.github_pr.clone(),
+                    writer: Some(!read_only),
+                    request_merge_authority: None,
+                    tags: Some(vec!["consult-model".into()]),
+                    desired_state: None,
+                    acceptance_criteria: Vec::new(),
+                    next_check_at: None,
+                    estimated_disk_gib: None,
+                    origin_session_id: params.origin_session_id.clone(),
+                    attachments: None,
+                })
+                .await
+                .map_err(|e| {
+                    if mission_ids.is_empty() {
+                        e
+                    } else {
+                        format!(
+                            "Outcome unconfirmed after starting {}/{} consultants (started mission_ids={}): {e}",
+                            mission_ids.len(),
+                            models.len(),
+                            mission_ids.join(", ")
+                        )
+                    }
+                })?;
+            let mission_id = started["mission"]["id"]
+                .as_str()
+                .ok_or_else(|| {
+                    if mission_ids.is_empty() {
+                        "Created mission response did not include an id".to_string()
+                    } else {
+                        format!(
+                            "Created mission response did not include an id (already started mission_ids={})",
+                            mission_ids.join(", ")
+                        )
+                    }
+                })?
+                .to_string();
+            let status = started["mission"]["status"]
+                .as_str()
+                .unwrap_or("pending")
+                .to_string();
+            mission_ids.push(mission_id.clone());
+            consultations.push(json!({
+                "mission_id": mission_id,
+                "model": model,
+                "status": status,
+            }));
+        }
+
+        let mut out = if !quorum_mode {
+            let first = &consultations[0];
+            let mission_id = first["mission_id"].as_str().unwrap_or_default();
+            json!({
+                "mission_id": mission_id,
+                "model": first["model"],
+                "status": first["status"],
+                "read_only": read_only,
+                "next": format!("Poll get_consult_result(mission_id=\"{mission_id}\") until done=true; it returns the consultant's answer."),
             })
-            .await?;
-        let mission_id = started["mission"]["id"]
-            .as_str()
-            .ok_or("Created mission response did not include an id")?
-            .to_string();
-        let status = started["mission"]["status"].as_str().unwrap_or("pending");
-        let mut out = json!({
-            "mission_id": mission_id,
-            "model": model,
-            "status": status,
-            "read_only": read_only,
-            "next": format!("Poll get_consult_result(mission_id=\"{mission_id}\") until done=true; it returns the consultant's answer."),
-        });
+        } else {
+            let quoted_ids = mission_ids
+                .iter()
+                .map(|id| format!("\"{id}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            json!({
+                "consultations": consultations,
+                "mission_ids": mission_ids,
+                "read_only": read_only,
+                "next": format!("Poll get_consult_result(mission_ids=[{quoted_ids}]) until all_done=true; it returns every consultant's answer."),
+            })
+        };
         if has_files && !same_host {
             out["placement_note"] = json!(
                 "Boat/remote VMs start clean and see committed/PR/snapshot state only. Pass remote_node_id=\"same\" when uncommitted local workspace files must be inspected in place."
@@ -2889,9 +3142,8 @@ impl AssistantMcp {
         Ok(out)
     }
 
-    /// Non-blocking read of a consult_model mission's answer.
-    async fn get_consult_result(&self, params: MissionIdParams) -> Result<Value, String> {
-        let id = self.resolve_mission_id(&params.mission_id).await?;
+    async fn single_consult_result(&self, raw_id: &str) -> Result<Value, String> {
+        let id = self.resolve_mission_id(raw_id).await?;
         let digest = self
             .get_mission_digest(MissionIdParams {
                 mission_id: id.to_string(),
@@ -2900,12 +3152,59 @@ impl AssistantMcp {
         let status = digest["status"].as_str().unwrap_or("pending").to_string();
         let done = !mission_is_running(&status);
         let mut out = json!({"mission_id": id, "status": status, "done": done});
+        if let Some(model) = digest["model_override"].as_str().filter(|s| !s.is_empty()) {
+            out["model"] = json!(model);
+        }
         if done {
             out["answer"] = json!(self.last_assistant_message_bounded(&id, 20_000).await);
         } else {
             out["next"] = json!("Still running: call get_consult_result again later.");
         }
         Ok(out)
+    }
+
+    /// Non-blocking read of one (`mission_id`) or several (`mission_ids`) consult_model missions.
+    async fn get_consult_result(&self, params: GetConsultResultParams) -> Result<Value, String> {
+        match (params.mission_id, params.mission_ids) {
+            (Some(_), Some(_)) => Err(
+                "Pass either `mission_id` (single consultant) or `mission_ids` (quorum batch), not both".into(),
+            ),
+            (Some(mission_id), None) => {
+                if mission_id.trim().is_empty() {
+                    return Err("mission_id must not be empty".into());
+                }
+                self.single_consult_result(&mission_id).await
+            }
+            (None, Some(mission_ids)) => {
+                if mission_ids.is_empty() {
+                    return Err("mission_ids must contain at least one mission id".into());
+                }
+                if mission_ids.len() > 10 {
+                    return Err("mission_ids accepts at most 10 missions per call".into());
+                }
+                let mut results = Vec::with_capacity(mission_ids.len());
+                let mut all_done = true;
+                for raw in &mission_ids {
+                    if raw.trim().is_empty() {
+                        return Err("mission_ids entries must not be empty".into());
+                    }
+                    let entry = self.single_consult_result(raw).await?;
+                    if entry["done"].as_bool() != Some(true) {
+                        all_done = false;
+                    }
+                    results.push(entry);
+                }
+                let mut out = json!({
+                    "all_done": all_done,
+                    "results": results,
+                });
+                if !all_done {
+                    out["next"] = json!("Some consultants are still running: call get_consult_result(mission_ids=[...]) again later.");
+                }
+                Ok(out)
+            }
+            (None, None) => Err("Pass `mission_id` or `mission_ids`".into()),
+        }
     }
 
     /// Run a bash command through `POST /api/workspaces/:id/exec`, which
@@ -4204,7 +4503,7 @@ impl AssistantMcp {
                 self.consult_model(params).await
             }
             "get_consult_result" => {
-                let params: MissionIdParams = parse_params(arguments)?;
+                let params: GetConsultResultParams = parse_params(arguments)?;
                 self.get_consult_result(params).await
             }
             "send_message_to_mission" => {
@@ -5795,6 +6094,8 @@ mod tests {
             "anthropic/claude-fable-5-1",
             "anthropic/claude-opus-5-5",
             "openrouter/claude-opus-5-5",
+            "antigravity/gemini-4-argon-low",
+            "antigravity/gemini-4-argon-high",
             "xai/grok-4.6",
             "grok",
         ]
@@ -5803,19 +6104,31 @@ mod tests {
         .collect();
         let r = |m: &str| resolve_consult_model(m, &options);
         assert_eq!(r("gpt-6-astra").unwrap(), "openai/gpt-6-astra");
+        assert_eq!(r("astra").unwrap(), "openai/gpt-6-astra");
         assert_eq!(r("fable-5.1").unwrap(), "anthropic/claude-fable-5-1");
+        assert_eq!(r("fable").unwrap(), "anthropic/claude-fable-5-1");
         assert_eq!(r("FABLE-5-1").unwrap(), "anthropic/claude-fable-5-1");
         assert_eq!(r("openai/gpt-6-astra").unwrap(), "openai/gpt-6-astra");
         assert_eq!(r("grok-4.6").unwrap(), "xai/grok-4.6");
         assert_eq!(r("grok").unwrap(), "grok");
-        let ambiguous = r("opus-5.5").unwrap_err();
+        // Aggregator mirrors (`openrouter/...`) yield to the single native first-party provider.
+        assert_eq!(r("opus-5.5").unwrap(), "anthropic/claude-opus-5-5");
+        assert_eq!(r("opus").unwrap(), "anthropic/claude-opus-5-5");
+        // Two non-first-party variants with no matching rule remain ambiguous.
+        let non_fp: Vec<String> = [
+            "open-router/meta/llama-4-maverick".to_string(),
+            "cerebras/llama-4-maverick".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let ambiguous = resolve_consult_model("llama-4-maverick", &non_fp).unwrap_err();
         assert!(ambiguous.contains("ambiguous"), "{ambiguous}");
         assert!(
-            ambiguous.contains("anthropic/claude-opus-5-5"),
+            ambiguous.contains("open-router/meta/llama-4-maverick"),
             "{ambiguous}"
         );
         assert!(
-            ambiguous.contains("openrouter/claude-opus-5-5"),
+            ambiguous.contains("cerebras/llama-4-maverick"),
             "{ambiguous}"
         );
         let unknown = r("gpt-6-nova").unwrap_err();
@@ -5823,6 +6136,96 @@ mod tests {
         assert!(!unknown.contains("fable"), "{unknown}");
         assert!(r("openai/gpt-9").unwrap_err().contains("Unknown model"));
         assert!(r(" ").is_err());
+    }
+
+    #[test]
+    fn consult_carbon_and_family_aliases_resolve_against_production_catalog() {
+        let options: Vec<String> = [
+            "builtin/smart",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-6-astra",
+            "openai/gpt-6.1-sol",
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-sonnet-5-5",
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-fable-5-1",
+            "antigravity/claude-sonnet-4-6",
+            "antigravity/agy-model-low",
+            "antigravity/agy-model-medium",
+            "antigravity/agy-model-high",
+            "google/gemini-4-carbon-eap",
+            "open-router/anthropic/claude-opus-5.5",
+            "open-router/google/gemini-4-argon",
+            "xai/grok-4.6",
+            "xai/grok-4.7",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for alias in [
+            "carbon",
+            "gemini-4-carbon",
+            "Gemini-4.0-Carbon",
+            "gemini-carbon",
+            "gemini-4-carbon-eap",
+            "gemini-4-carbon-high",
+            "agy-model",
+        ] {
+            assert_eq!(
+                resolve_consult_model(alias, &options).unwrap(),
+                "antigravity/agy-model-high",
+                "alias={alias}"
+            );
+        }
+        assert_eq!(
+            resolve_consult_model("gemini-4-carbon-medium", &options).unwrap(),
+            "antigravity/agy-model-medium"
+        );
+        assert_eq!(
+            resolve_consult_model("gemini-4-carbon-low", &options).unwrap(),
+            "antigravity/agy-model-low"
+        );
+        // Explicit provider prefix stays untouched.
+        assert_eq!(
+            resolve_consult_model("google/gemini-4-carbon-eap", &options).unwrap(),
+            "google/gemini-4-carbon-eap"
+        );
+        // Without Antigravity, Carbon aliases fall back to Google's EAP id.
+        let google_only = vec!["google/gemini-4-carbon-eap".to_string()];
+        assert_eq!(
+            resolve_consult_model("gemini-4-carbon", &google_only).unwrap(),
+            "google/gemini-4-carbon-eap"
+        );
+        // Bare family shorthands pick the newest first-party release.
+        assert_eq!(
+            resolve_consult_model("fable", &options).unwrap(),
+            "anthropic/claude-fable-5-1"
+        );
+        assert_eq!(
+            resolve_consult_model("astra", &options).unwrap(),
+            "openai/gpt-6-astra"
+        );
+        assert_eq!(
+            resolve_consult_model("sol", &options).unwrap(),
+            "openai/gpt-6.1-sol"
+        );
+        assert_eq!(
+            resolve_consult_model("opus", &options).unwrap(),
+            "anthropic/claude-opus-5-5"
+        );
+        assert_eq!(
+            resolve_consult_model("sonnet", &options).unwrap(),
+            "anthropic/claude-sonnet-5-5"
+        );
+        assert_eq!(
+            resolve_consult_model("grok", &options).unwrap(),
+            "xai/grok-4.7"
+        );
+        // First-party tie-breaker resolves `sonnet-4.6` to `anthropic/...` over `antigravity/...`.
+        assert_eq!(
+            resolve_consult_model("sonnet-4.6", &options).unwrap(),
+            "anthropic/claude-sonnet-4-6"
+        );
     }
 
     #[test]
@@ -5998,6 +6401,108 @@ mod tests {
         assert_eq!(running["done"], false);
         assert!(running.get("answer").is_none());
         assert_eq!(state.requests.lock().unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn consult_model_quorum_validates_all_models_upfront_and_batches_results() {
+        let (assistant, state, task) = mock_assistant(
+            json!({
+                "id": "11111111-1111-1111-1111-111111111111",
+                "status": "active",
+                "backends": {"opencode": [
+                    {"value": "openai/gpt-6-astra"},
+                    {"value": "anthropic/claude-fable-5-1"},
+                    {"value": "antigravity/agy-model-high"},
+                    {"value": "google/gemini-4-carbon-eap"}
+                ]}
+            }),
+            false,
+        )
+        .await;
+
+        // If any model in `models` is unknown, zero child missions are created.
+        let bad_quorum = assistant
+            .handle_call(
+                "consult_model",
+                json!({
+                    "models": ["fable", "astra", "nonexistent-model-xyz"],
+                    "question": "Check the spec",
+                    "idempotency_key": "quorum-bad"
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(bad_quorum.contains("nonexistent-model-xyz"), "{bad_quorum}");
+        assert!(state.requests.lock().unwrap().is_empty());
+
+        // Passing both `model` and `models` or neither is rejected cleanly.
+        assert!(assistant
+            .handle_call(
+                "consult_model",
+                json!({"model": "fable", "models": ["astra"], "question": "q"})
+            )
+            .await
+            .is_err());
+        assert!(assistant
+            .handle_call("consult_model", json!({"question": "q"}))
+            .await
+            .is_err());
+
+        // Valid 3-model quorum dispatches all three with derived idempotency keys.
+        let quorum = assistant
+            .handle_call(
+                "consult_model",
+                json!({
+                    "models": ["fable", "astra", "gemini-4-carbon"],
+                    "question": "Review Lean guarantees",
+                    "title": "Quorum review",
+                    "idempotency_key": "quorum-ok"
+                }),
+            )
+            .await
+            .unwrap();
+        let consultations = quorum["consultations"].as_array().unwrap();
+        assert_eq!(consultations.len(), 3);
+        assert_eq!(consultations[0]["model"], "anthropic/claude-fable-5-1");
+        assert_eq!(consultations[1]["model"], "openai/gpt-6-astra");
+        assert_eq!(consultations[2]["model"], "antigravity/agy-model-high");
+        assert_eq!(quorum["mission_ids"].as_array().unwrap().len(), 3);
+        assert!(quorum["next"].as_str().unwrap().contains("mission_ids="));
+
+        let batch = assistant
+            .handle_call(
+                "get_consult_result",
+                json!({
+                    "mission_ids": [
+                        "11111111-1111-1111-1111-111111111111",
+                        "11111111-1111-1111-1111-111111111111"
+                    ]
+                }),
+            )
+            .await
+            .unwrap();
+        task.abort();
+        assert_eq!(batch["all_done"], false);
+        assert_eq!(batch["results"].as_array().unwrap().len(), 2);
+
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[0].1["idempotency_key"],
+            "quorum-ok:0:anthropic/claude-fable-5-1"
+        );
+        assert_eq!(
+            requests[1].1["idempotency_key"],
+            "quorum-ok:1:openai/gpt-6-astra"
+        );
+        assert_eq!(
+            requests[2].1["idempotency_key"],
+            "quorum-ok:2:antigravity/agy-model-high"
+        );
+        assert_eq!(
+            requests[2].1["title"],
+            "Quorum review (antigravity/agy-model-high)"
+        );
     }
 
     #[tokio::test]
