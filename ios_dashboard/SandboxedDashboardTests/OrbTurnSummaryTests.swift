@@ -141,18 +141,40 @@ final class OrbTurnSummaryTests: XCTestCase {
 
     // MARK: /btw threads (desktop btwAgent.ts after #1190 and #1197)
 
-    private func event(_ seq: Int64, _ type: String, _ content: String, at: String = "2026-10-20T10:00:00Z") -> StoredEvent {
-        StoredEvent(id: seq, missionId: "m", sequence: seq, eventType: type, timestamp: at, eventId: nil, toolCallId: nil, toolName: nil, content: content, metadata: [:])
+    private func event(_ seq: Int64, _ type: String, _ content: String, at: String = "2026-10-20T10:00:00Z", queued: Bool = false) -> StoredEvent {
+        StoredEvent(id: seq, missionId: "m", sequence: seq, eventType: type, timestamp: at, eventId: "e\(seq)", toolCallId: nil, toolName: nil, content: content, metadata: queued ? ["queued": AnyCodable(true)] : [:])
     }
 
     private static let compaction = "## Objective\nFinish the side question.\n\n## Progress\n- read files\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+    private static let checkpointCompaction = "## Objective\nVerify `/btw` turn.\n\n## Work State\n- Checked logs\n\n## Next Move\n- Answer the user\n\n## Relevant Files\n- `src/main.rs`"
 
     func testBtwCompactionBlocksAreStripped() {
         XCTAssertEqual(OrbBtwThreads.stripCompaction(Self.compaction + "\n\nThe **answer**."), "The **answer**.")
         XCTAssertEqual(OrbBtwThreads.stripCompaction("Before.\n" + Self.compaction + "  \nAfter."), "Before.\n\nAfter.")
         XCTAssertEqual(OrbBtwThreads.stripCompaction(Self.compaction), "")
+        XCTAssertEqual(OrbBtwThreads.stripCompaction(Self.checkpointCompaction), "")
         // Text that merely mentions an objective is kept.
         XCTAssertEqual(OrbBtwThreads.stripCompaction("## Objective\nShip it."), "## Objective\nShip it.")
+    }
+
+    func testBtwQueuedFollowUpEventsDoNotAdvanceActiveTurnAndReplacePreservesWrapper() {
+        let events = [
+            event(1, "user_message", "<main_conversation_update>ctx</main_conversation_update>\n\nCurrent request:\nFirst question?", at: "2026-10-20T10:00:00Z"),
+            event(2, "assistant_message_canonical", "Investigating first question…"),
+            event(3, "user_message", "<main_conversation_update>ctx2</main_conversation_update>\n\nCurrent request:\nQueued follow-up", at: "2026-10-20T10:00:10Z", queued: true),
+            event(4, "text_delta", "Almost done"),
+        ]
+        let live = OrbBtwThreads.parse(missionID: "m", events: events, active: true)
+        XCTAssertEqual(live.turns, [])
+        XCTAssertEqual(live.open?.question, "First question?")
+        XCTAssertEqual(live.open?.answer, "Almost done")
+        XCTAssertEqual(live.open?.narration, ["Investigating first question…"])
+
+        let wrapped = "You are the independent /btw agent.\n\n<main_conversation_update>\nUser: hi\n</main_conversation_update>\n\nCurrent request:\nOld question?\nAttachment: /tmp/a.png"
+        let replaced = OrbBtwThreads.replaceQuestion(wrapped, with: "Edited question?")
+        XCTAssertEqual(OrbBtwThreads.question(replaced), "Edited question?")
+        XCTAssertTrue(replaced.contains("<main_conversation_update>\nUser: hi\n</main_conversation_update>"))
+        XCTAssertTrue(replaced.hasSuffix("Attachment: /tmp/a.png"))
     }
 
     func testBtwAnswerIsTheFinalMessageAndNarrationIsFolded() {

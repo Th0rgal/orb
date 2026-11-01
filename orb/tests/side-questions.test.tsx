@@ -9,7 +9,8 @@ const serverReconcile=vi.hoisted(()=>({
  reconnect:async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0}),
 }));
 const watchMock=vi.hoisted(()=>({fn:async(_parent:string,_signal:AbortSignal,_receive:(e:any)=>void)=>{}}));
-vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
+const queueFollowUpMock=vi.hoisted(()=>({enabled:false,fn:vi.fn()}));
+vi.mock('../src/btwAgent',async()=>{const client=await import('../src/sideQuestionClient');return {askBtwAgent:client.askSide,btwSession:()=>undefined,btwActivities:()=>[],btwItems:()=>[],btwThoughts:()=>thoughts.value,stopBtw:async()=>{},watchBtw:(parent:string,signal:AbortSignal,receive:(e:any)=>void)=>watchMock.fn(parent,signal,receive),reconnectBtwSession:(parent:string,sideId:string)=>serverReconcile.reconnect(parent,sideId),reconcileBtwServerHistory:(parent:string,local:any[])=>serverReconcile.fn(parent,local),get queueBtwFollowUp(){return queueFollowUpMock.enabled?queueFollowUpMock.fn:undefined;},isSyntheticRemoteAssistantNote:(text:string)=>/^Remote (?:node '[^']+'|\w+) job [0-9a-f-]{36} /.test(text)};});
 const thoughts=vi.hoisted(()=>({value:[] as {kind:'think';key:string;text:string;done:boolean}[]}));
 const storage=vi.hoisted(()=>new Map<string,unknown>());
 vi.mock('../src/composerDrafts',()=>({
@@ -18,7 +19,7 @@ vi.mock('../src/composerDrafts',()=>({
  readSideThread:async(key:string)=>storage.get('thread:'+key),
  saveSideThread:async(key:string,value:unknown)=>{storage.set('thread:'+key,structuredClone(value));},
 }));
-afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();storage.clear();thoughts.value=[];queueFollowUpMock.enabled=false;queueFollowUpMock.fn.mockReset();watchMock.fn=async()=>{};serverReconcile.fn=async(_parent:string,local:any[])=>({history:local});serverReconcile.reconnect=async(_parent:string,sideId:string)=>({id:sideId,question:'Running side question',harness:'opencode',model:'builtin/smart',local:false,active:false,baseline:0});});
 it('routes /btw away from the working agent while it is busy',async()=>{
  const send=vi.fn(),ask=vi.fn(()=>true),stop=vi.fn();
  render(()=><Composer placeholder="Follow-up" busy onSend={send} onStop={stop} onBtw={ask}/>);
@@ -334,4 +335,61 @@ it('clears a previously persisted Side question interrupted banner when Core rep
  render(()=><SideQuestions mission="stale-error-active" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
  expect(await screen.findByText('Starting side agent…')).toBeTruthy();
  expect(screen.queryByText(/Side question interrupted/)).toBeNull();
+});
+
+it('submits /btw follow-ups into Core RemoteQueue in advance while busy and keeps Working… visible during partial streaming',async()=>{
+ queueFollowUpMock.enabled=true;
+ queueFollowUpMock.fn.mockImplementation(async(_parent:string,question:string,_ctx:string,_history:any[],_attachments:any[],clientId:string)=>({
+  id:clientId,
+  missionId:'side-live-1',
+  prompt:`You are the independent /btw agent sharing the main agent's working folder.\n\n<main_conversation_update>\nctx\n</main_conversation_update>\n\nCurrent request:\n${question}\n`,
+  queued:true,
+  local:false,
+ }));
+ let controller!:ReadableStreamDefaultController<Uint8Array>;
+ vi.stubGlobal('fetch',vi.fn(async(url:string)=>{
+  if(String(url).includes('/api/control/queue'))return Response.json([]);
+  return new Response(new ReadableStream({start(c){controller=c;}}));
+ }));
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="unified-queue-test" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await handle.ask('First running question');
+ controller.enqueue(new TextEncoder().encode('event: btw\ndata: {"type":"delta","text":"Streaming partial narration…"}\n\n'));
+ expect(await screen.findByText('Streaming partial narration…')).toBeTruthy();
+ // Live progress status stays visible even after partial text streams.
+ expect(screen.getByText('Working…')).toBeTruthy();
+ const sideInput=screen.getByPlaceholderText('Queue a side question…');
+ fireEvent.input(sideInput,{target:{value:'Queued in advance'}});
+ fireEvent.keyDown(sideInput,{key:'Enter'});
+ await waitFor(()=>expect(queueFollowUpMock.fn).toHaveBeenCalledTimes(1));
+ const queueRegion=await screen.findByLabelText('Queued messages');
+ expect(queueRegion.textContent).toContain('1 Queued');
+ expect(queueRegion.textContent).toContain('Queued in advance');
+ expect(screen.getByRole('button',{name:'Send now: Queued in advance'})).toBeTruthy();
+});
+
+it('deduplicates already-answered legacy saved.queue items on mount before migrating unsent items',async()=>{
+ queueFollowUpMock.enabled=true;
+ queueFollowUpMock.fn.mockImplementation(async(_parent:string,question:string,_ctx:string,_history:any[],_attachments:any[],clientId:string)=>({
+  id:clientId,missionId:'side-live-2',prompt:`You are the independent /btw agent sharing the main agent's working folder.\n\nCurrent request:\n${question}\n`,queued:true,local:false,
+ }));
+ vi.stubGlobal('fetch',vi.fn(async()=>Response.json([])));
+ const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ await writeSideQuestion(sideQuestionKey('legacy-migrate'),{
+  history:[],draft:'',model:'opencode · builtin/smart',open:true,docked:true,
+  queue:[
+   {id:'9030da6e',question:'Already answered on server'},
+   {id:'unsent-2',question:'Still needs to be sent'},
+  ],
+ });
+ serverReconcile.fn=async()=>({
+  history:[{id:'h1',question:'Already answered on server',answer:'Server Turn 5 reply.'}],
+  activeSession:{id:'side-live-2',question:'Currently running',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0},
+  latest:'side-live-2',
+ });
+ watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(()=>{receive({type:'start',model:'opencode · builtin/smart'});});
+ let handle!:SideQuestionsHandle;
+ render(()=><SideQuestions mission="legacy-migrate" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+ await waitFor(()=>expect(queueFollowUpMock.fn).toHaveBeenCalledTimes(1));
+ expect(queueFollowUpMock.fn.mock.calls[0][1]).toBe('Still needs to be sent');
 });

@@ -65,4 +65,52 @@ class OrbTurnRecapTest {
         assertEquals("7s", OrbSideAgent.elapsedLabel(7_400))
         assertEquals("1:05", OrbSideAgent.elapsedLabel(65_000))
     }
+
+    @Test
+    fun sideAgentStripsLegacyAndCheckpointCompactionWithoutTouchingNormalHeadings() {
+        val legacy = "## Objective\nFinish side question.\n\n## Progress\n- read files\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+        val checkpoint = "## Objective\nVerify `/btw` queue.\n\n## Work State\n- Checked logs\n\n## Next Move\n- Reply\n\n## Relevant Files\n- `src/main.rs`"
+        assertEquals("The **answer**.", OrbSideAgent.stripCompaction("$legacy\n\nThe **answer**."))
+        assertEquals("", OrbSideAgent.stripCompaction(checkpoint))
+        assertEquals("## Objective\nShip it.", OrbSideAgent.stripCompaction("## Objective\nShip it."))
+    }
+
+    @Test
+    fun sideAgentIgnoresQueuedFollowUpUserMessagesAndPreservesWrapperOnEdit() {
+        fun ev(seq: Long, type: String, content: String, queued: Boolean = false, clientId: String? = null): OrbRow {
+            val meta = mutableMapOf<String, Any?>()
+            if (queued) meta["queued"] = true
+            if (clientId != null) meta["client_message_id"] = clientId
+            return OrbRow(
+                "e-$seq",
+                mapOf(
+                    "sequence" to seq,
+                    "event_id" to "e-$seq",
+                    "event_type" to type,
+                    "content" to content,
+                    "timestamp" to "2026-11-01T05:00:0${seq}Z",
+                    "metadata" to meta
+                )
+            )
+        }
+        val events = listOf(
+            ev(1L, "user_message", "<main_conversation_update>ctx</main_conversation_update>\n\nCurrent request:\nFirst question?\nAttachment: /tmp/a.png", clientId = "m1"),
+            ev(2L, "assistant_message_canonical", "Investigating first question…"),
+            ev(3L, "user_message", "<main_conversation_update>ctx2</main_conversation_update>\n\nCurrent request:\nQueued second question?", queued = true, clientId = "q2"),
+            ev(4L, "text_delta", "Almost done")
+        )
+        val parsed = OrbSideAgent.parseTurns("side-1", events, active = true)
+        assertEquals(emptyList<OrbSideAgent.Turn>(), parsed.turns)
+        assertEquals("First question?", parsed.open?.question)
+        assertEquals("Almost done", parsed.open?.answer)
+        assertEquals(listOf("Investigating first question…"), parsed.open?.narration)
+        assertTrue("m1" in parsed.deliveredIds)
+        assertFalse("q2" in parsed.deliveredIds)
+
+        val wrapped = OrbSideAgent.prompt("User: hi", "Original question?") + "\nAttachment: /tmp/a.png"
+        val replaced = OrbSideAgent.replaceQuestion(wrapped, "Edited question?")
+        assertEquals("Edited question?", OrbSideAgent.extractQuestion(replaced))
+        assertTrue(replaced.contains("<main_conversation_update>\nUser: hi\n</main_conversation_update>"))
+        assertTrue(replaced.endsWith("Attachment: /tmp/a.png"))
+    }
 }

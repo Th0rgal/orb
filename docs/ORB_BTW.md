@@ -61,8 +61,12 @@ chain from Core (`btw-parent:<id>`). Reloading or switching conversations reconn
 to an active Core side session without interrupting it, caches finished side threads
 by `(activity, status)`, and retries transient poll errors while watching; see
 [`docs/specs/side-questions.md`](specs/side-questions.md) for the state and
-reconciliation invariants. Closing the panel hides it; Stop cancels only the side
-agent. `.btw-thread` uses the shared `createPinnedScroll` owner
+reconciliation invariants. Closing the panel hides it; Stop cancels only the side agent. Follow-up questions
+submitted while a side turn is running enter the same durable server-backed queue
+(`POST /api/control/message` with `queue_followup: true`, or the local queue
+worker for client-placed local runs) as the main conversation, with `Edit`,
+`Send now` (interrupt and promote), and `Remove` across desktop, iOS, and Android.
+`.btw-thread` uses the shared `createPinnedScroll` owner
 (`overflow-anchor: none` + `scrollKeeper` during panel divider drags) so narrowing
 or resizing the side panel keeps a bottom-pinned side conversation at the bottom and
 preserves the top visible line when scrolled up. Local execution still requires the

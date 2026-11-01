@@ -973,9 +973,11 @@ fun OrbConversationPage(
                         val question = argument.ifEmpty {
                             if (pendingAttachments.isNotEmpty()) "Please look at the attachments." else ""
                         }
-                        if (question.isEmpty()) throw OrbError("Type a question after /btw.")
-                        val child = OrbSideAgent.launch(core, id, question, latestTurns)
-                        sideAgentSession = OrbSideAgentSession(child.id, question)
+                        sideAgentSession = OrbSideAgentSession(
+                            parentId = id,
+                            initialQuestion = question,
+                            contextTurns = latestTurns
+                        )
                         UsageTelemetry.trackAction(UsageTelemetry.Action.Btw, "composer")
                     }
                     OrbMissionCommand.Fork -> {

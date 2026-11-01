@@ -825,3 +825,76 @@ it('memoizes completed /btw threads across polls and discovers newest active thr
  expect(second.history.map(h=>h.question)).toEqual(['Q0','Q1','Q2','Q3','Q4','Q5']);
  expect(second.activeSession).toMatchObject({id:'live-634505a6',active:true});
 });
+
+it('strips newer OpenCode compaction checkpoints without a compaction_continue footer',async()=>{
+ const {sideAnswer,stripCompactionSummary}=await import('../src/btwAgent');
+ const checkpoint='## Objective\nAnswer the side question.\n\n## Important Details\n- Node babylon.\n\n## Work State\n### Completed\n- Checked logs.\n### Active\n- Verifying.\n### Blocked\n- None.\n\n## Next Move\nSummarize findings.\n\n## Relevant Files\n- `src/main.rs`';
+ expect(stripCompactionSummary(checkpoint)).toBe('');
+ expect(sideAnswer([checkpoint,'Final verified answer.'],'Final verified answer.')).toEqual({answer:'Final verified answer.',narration:[]});
+});
+
+it('ignores metadata.queued user_message events in btwTurnEvents and parseBtwThread',async()=>{
+ const {reconcileBtwServerHistory}=await import('../src/btwAgent');
+ const {getMissionEvents}=await import('../src/stream');
+ const rows=[
+  {id:1,sequence:10,event_type:'user_message',content:'Header\n\nCurrent request:\nActive turn question',timestamp:'2026-11-01T00:00:01Z'},
+  {id:2,sequence:11,event_type:'assistant_message_canonical',content:'Working through step 1.',timestamp:'2026-11-01T00:00:02Z'},
+  {id:3,sequence:12,event_type:'user_message',content:'Header\n\nCurrent request:\nPre-submitted follow-up',timestamp:'2026-11-01T00:00:03Z',metadata:{queued:true}},
+  {id:4,sequence:13,event_type:'assistant_message',content:'Active turn final answer.',timestamp:'2026-11-01T00:00:04Z'},
+ ] as any;
+ expect(btwTurnEvents(rows,{baseline:0}).map(e=>e.sequence)).toEqual([11,12,13]);
+ vi.mocked(api).mockImplementation(async(path:string)=>path.startsWith('/api/control/missions?tag=')?[{id:'q-side',status:'active',created_at:'2026-11-01T00:00:00Z',backend:'opencode',model_override:'builtin/smart',tags:['btw-parent:q-parent'],history:[],title:null,updated_at:''}] as any:[] as any);
+ vi.mocked(getMissionEvents).mockResolvedValue(rows);
+ const reconciled=await reconcileBtwServerHistory('q-parent',[]);
+ expect(reconciled.activeSession?.question).toBe('Active turn question');
+ expect(reconciled.history).toEqual([]);
+});
+
+it('queues a /btw follow-up on Core with queue_followup and chains incremental cursors',async()=>{
+ const {prepareBtwContext}=await import('../src/btwContext');
+ const {queueBtwFollowUp,replaceBtwUserQuestion}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('q-parent'),JSON.stringify({id:'q-side',question:'First?',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,conversationCursor:{sequence:5,visibleHash:'h5'}}));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:id==='q-side'?['btw-parent:q-parent']:[],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'delta 5->8',cursor:{sequence:8,visibleHash:'h8'}}).mockResolvedValueOnce({context:'delta 8->12',cursor:{sequence:12,visibleHash:'h12'}});
+ vi.mocked(sendMissionMessage).mockResolvedValue({id:'msg-1',queued:true} as any);
+ const first=await queueBtwFollowUp('q-parent','Follow-up one','ctx',[], [],'msg-1');
+ expect(first).toMatchObject({id:'msg-1',missionId:'q-side',queued:true,local:false});
+ expect(prepareBtwContext).toHaveBeenNthCalledWith(1,expect.anything(),'ctx','core',{sequence:5,visibleHash:'h5'},[],undefined);
+ expect(sendMissionMessage).toHaveBeenCalledWith('q-side',expect.stringContaining('Current request:\nFollow-up one'),undefined,'msg-1');
+ await queueBtwFollowUp('q-parent','Follow-up two','ctx',[], [],'msg-2');
+ expect(prepareBtwContext).toHaveBeenNthCalledWith(2,expect.anything(),'ctx','core',{sequence:8,visibleHash:'h8'},[],undefined);
+ const edited=replaceBtwUserQuestion(first.prompt,'Edited follow-up one');
+ expect(edited).toContain('<main_conversation_update>\ndelta 5->8\n</main_conversation_update>');
+ expect(edited).toContain('Current request:\nEdited follow-up one');
+ expect(edited).not.toContain('Follow-up one');
+});
+
+it('transitions watchBtw from Turn 1 to dequeued Turn 2 and polls incrementally with since',async()=>{
+ vi.useFakeTimers();
+ const {getMissionEvents}=await import('../src/stream');
+ const {watchBtw}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('handoff-parent'),JSON.stringify({id:'handoff-side',question:'First question',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
+ let poll=0;
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:poll<2?'active':'completed',history:[],tags:['btw-parent:handoff-parent'],title:null,created_at:'',updated_at:''} as any));
+ const sinceArgs:(number|undefined)[]=[];
+ vi.mocked(getMissionEvents).mockImplementation(async(_id,opts)=>{
+  sinceArgs.push(opts?.since);
+  const step=poll++;
+  if(step===0)return [{id:1,sequence:1,event_type:'user_message',content:'Header\n\nCurrent request:\nFirst question',timestamp:'2026-11-01T00:00:01Z'}];
+  if(step===1)return [
+   {id:2,sequence:2,event_type:'assistant_message',content:'First answer.',timestamp:'2026-11-01T00:00:02Z'},
+   {id:3,sequence:3,event_type:'user_message',event_id:'msg-2',content:'Header\n\nCurrent request:\nSecond question',timestamp:'2026-11-01T00:00:03Z'},
+  ];
+  return [{id:4,sequence:4,event_type:'assistant_message',content:'Second answer.',timestamp:'2026-11-01T00:00:04Z'}];
+ });
+ const received:any[]=[];
+ const abort=new AbortController();
+ const watching=watchBtw('handoff-parent',abort.signal,e=>received.push(e));
+ try{
+  await vi.advanceTimersByTimeAsync(11000);
+  await watching;
+  expect(sinceArgs).toEqual([undefined,1,3]);
+  expect(received).toContainEqual({type:'turn',question:'Second question',messageId:'msg-2',completed:{question:'First question',answer:'First answer.'}});
+  expect(received.at(-1)).toEqual({type:'done',answer:'Second answer.'});
+ }finally{abort.abort();await watching.catch(()=>{});vi.useRealTimers();}
+});
