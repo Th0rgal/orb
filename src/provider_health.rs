@@ -2289,6 +2289,78 @@ impl ModelChainStore {
             }
         }
 
+        // Google-only Claude Opus / Sonnet chains: route exclusively through
+        // Google Antigravity and Google accounts (never direct `anthropic`
+        // credentials) with clean IDs (`google-opus`, `google-sonnet`) that
+        // work across OpenCode local/remote runners and worker subagent gates.
+        if !chains.iter().any(|c| c.id == "google-opus") {
+            chains.push(ModelChain {
+                id: "google-opus".to_string(),
+                name: "Google Opus 5.5 (Antigravity Only)".to_string(),
+                entries: vec![
+                    ChainEntry {
+                        provider_id: "antigravity".to_string(),
+                        model_id: "claude-opus-5-5-high".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "antigravity".to_string(),
+                        model_id: "claude-opus-5-5-medium".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "antigravity".to_string(),
+                        model_id: "claude-opus-4-6-thinking".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "antigravity".to_string(),
+                        model_id: "agy-model-high".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "google".to_string(),
+                        model_id: "gemini-4-carbon-eap".to_string(),
+                    },
+                ],
+                is_default: false,
+                strip_thinking: false,
+                created_at: now,
+                updated_at: now,
+            });
+            changed = true;
+        }
+
+        if !chains.iter().any(|c| c.id == "google-sonnet") {
+            chains.push(ModelChain {
+                id: "google-sonnet".to_string(),
+                name: "Google Sonnet 5.5 (Antigravity Only)".to_string(),
+                entries: vec![
+                    ChainEntry {
+                        provider_id: "antigravity".to_string(),
+                        model_id: "claude-sonnet-5-5-high".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "antigravity".to_string(),
+                        model_id: "claude-sonnet-5-5-medium".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "antigravity".to_string(),
+                        model_id: "claude-sonnet-4-6".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "antigravity".to_string(),
+                        model_id: "agy-model-high".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "google".to_string(),
+                        model_id: "gemini-4-carbon-eap".to_string(),
+                    },
+                ],
+                is_default: false,
+                strip_thinking: false,
+                created_at: now,
+                updated_at: now,
+            });
+            changed = true;
+        }
+
         // Cerebras retired its hosted Qwen models, and the old `-cs` catalog
         // aliases never matched real API IDs (the live catalog only serves
         // `gpt-oss-120b` and `zai-glm-4.7`). Migrate every chain — builtin or
@@ -3831,6 +3903,44 @@ mod tests {
         assert_eq!(assistant.entries.len(), 3);
         assert_eq!(assistant.entries[0].provider_id, "google");
         assert_eq!(assistant.entries[0].model_id, "gemini-4-carbon-eap");
+    }
+
+    #[tokio::test]
+    async fn ensure_defaults_seeds_google_opus_and_sonnet_without_anthropic_provider() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("chains.json");
+        let store = ModelChainStore::new(path).await;
+        std::mem::forget(tmp);
+
+        let opus = store.get("google-opus").await.expect("google-opus chain");
+        assert!(!opus.is_default);
+        assert!(!opus.strip_thinking);
+        assert!(
+            opus.entries
+                .iter()
+                .all(|e| matches!(e.provider_id.as_str(), "antigravity" | "google")),
+            "google-opus must only route through Google/Antigravity accounts: {:?}",
+            opus.entries
+        );
+        assert_eq!(opus.entries[0].provider_id, "antigravity");
+        assert_eq!(opus.entries[0].model_id, "claude-opus-5-5-high");
+
+        let sonnet = store
+            .get("google-sonnet")
+            .await
+            .expect("google-sonnet chain");
+        assert!(!sonnet.is_default);
+        assert!(!sonnet.strip_thinking);
+        assert!(
+            sonnet
+                .entries
+                .iter()
+                .all(|e| matches!(e.provider_id.as_str(), "antigravity" | "google")),
+            "google-sonnet must only route through Google/Antigravity accounts: {:?}",
+            sonnet.entries
+        );
+        assert_eq!(sonnet.entries[0].provider_id, "antigravity");
+        assert_eq!(sonnet.entries[0].model_id, "claude-sonnet-5-5-high");
     }
 
     fn past_ms(hours: i64) -> i64 {

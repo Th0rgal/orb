@@ -1,3 +1,9 @@
+   Compiling zmij v1.0.21
+   Compiling serde_core v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling memchr v2.8.0
+   Compiling itoa v1.0.18
+   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains/crates/orb-spec)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -7,7 +13,7 @@ warning: function `check_fence_at_line_start` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `orb-spec` (lib test) generated 1 warning
-    Finished `test` profile [unoptimized] target(s) in 0.04s
+    Finished `test` profile [unoptimized] target(s) in 7.17s
      Running unittests src/lib.rs (target/debug/deps/orb_spec-4c486aa5e7ada9e6)
 
 running 2 tests
@@ -16,7 +22,282 @@ test stateful_tests::wave12_orbwire_machine_and_seven_stateful_families_verified
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
 
-   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb)
+   Compiling libc v0.2.184
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling cfg-if v1.0.4
+   Compiling syn v2.0.117
+   Compiling version_check v0.9.5
+   Compiling jobserver v0.1.34
+   Compiling getrandom v0.2.17
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling cc v1.2.59
+   Compiling memchr v2.8.0
+   Compiling pin-project-lite v0.2.17
+   Compiling typenum v1.19.0
+   Compiling generic-array v0.14.7
+   Compiling futures-core v0.3.32
+   Compiling rand_core v0.6.4
+   Compiling once_cell v1.21.4
+   Compiling log v0.4.29
+   Compiling smallvec v1.15.1
+   Compiling bytes v1.11.1
+   Compiling subtle v2.6.1
+   Compiling serde_core v1.0.228
+   Compiling crypto-common v0.1.7
+   Compiling errno v0.3.14
+   Compiling pkg-config v0.3.32
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling futures-sink v0.3.32
+   Compiling serde v1.0.228
+   Compiling bitflags v2.11.0
+   Compiling lock_api v0.4.14
+   Compiling serde_derive v1.0.228
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling http v1.4.0
+   Compiling tokio-macros v2.7.0
+   Compiling zeroize_derive v1.4.3
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling slab v0.4.12
+   Compiling tokio v1.51.1
+   Compiling zeroize v1.8.2
+   Compiling futures-channel v0.3.32
+   Compiling tracing-core v0.1.36
+   Compiling tracing-attributes v0.1.31
+   Compiling futures-macro v0.3.32
+   Compiling core-foundation-sys v0.8.7
+   Compiling futures-io v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling zerocopy v0.8.48
+   Compiling futures-util v0.3.32
+   Compiling tracing v0.1.44
+   Compiling block-buffer v0.10.4
+   Compiling ring v0.17.14
+   Compiling cpufeatures v0.2.17
+   Compiling hashbrown v0.16.1
+   Compiling equivalent v1.0.2
+   Compiling indexmap v2.13.1
+   Compiling digest v0.10.7
+   Compiling httparse v1.10.1
+   Compiling http-body v1.0.1
+   Compiling autocfg v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling rustls-pki-types v1.14.0
+   Compiling percent-encoding v2.3.2
+   Compiling tower-service v0.3.3
+   Compiling base64 v0.22.1
+   Compiling untrusted v0.9.0
+   Compiling unicode-joining-type v1.0.0
+   Compiling thiserror v1.0.69
+   Compiling tinyvec_macros v0.1.1
+   Compiling system-configuration-sys v0.6.0
+   Compiling serde_json v1.0.149
+   Compiling tinyvec v1.11.0
+   Compiling tokio-util v0.7.18
+   Compiling thiserror-impl v1.0.69
+   Compiling try-lock v0.2.5
+   Compiling fnv v1.0.7
+   Compiling rustls v0.23.37
+   Compiling crossbeam-utils v0.8.21
+   Compiling atomic-waker v1.1.2
+   Compiling tower-layer v0.3.3
+   Compiling h2 v0.4.20
+   Compiling want v0.3.1
+   Compiling idna_mapping v1.1.0
+   Compiling unicode-normalization v0.1.25
+   Compiling rustls-webpki v0.103.10
+   Compiling form_urlencoded v1.2.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling core-foundation v0.9.4
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling sync_wrapper v1.0.2
+   Compiling syn v3.0.6
+   Compiling mime v0.3.17
+   Compiling httpdate v1.0.3
+   Compiling semver v1.0.28
+   Compiling unicode-bidi v0.3.18
+   Compiling crc32fast v1.5.0
+   Compiling thiserror v2.0.18
+   Compiling idna_adapter v1.1.0
+   Compiling rustc_version v0.4.1
+   Compiling hyper v1.9.0
+   Compiling system-configuration v0.7.0
+   Compiling rand_chacha v0.3.1
+   Compiling webpki-roots v1.0.6
+   Compiling http-body-util v0.1.3
+   Compiling inout v0.1.4
+   Compiling ahash v0.8.12
+   Compiling thiserror-impl v2.0.18
+   Compiling simd-adler32 v0.3.9
+   Compiling ryu v1.0.23
+   Compiling time-core v0.1.8
+   Compiling num-conv v0.2.1
+   Compiling rustix v1.1.4
+   Compiling utf8_iter v1.0.4
+   Compiling unicase v2.9.0
+   Compiling utf8parse v0.2.2
+   Compiling byteorder v1.5.0
+   Compiling powerfmt v0.2.0
+   Compiling ipnet v2.12.0
+   Compiling hyper-util v0.1.20
+   Compiling deranged v0.5.8
+   Compiling anstyle-parse v1.0.0
+   Compiling mime_guess v2.0.5
+   Compiling idna v1.1.0
+   Compiling time-macros v0.2.27
+   Compiling cipher v0.4.4
+   Compiling crossbeam-epoch v0.9.18
+   Compiling rand v0.8.5
+   Compiling curve25519-dalek v4.1.3
+   Compiling tower v0.5.3
+   Compiling sha1 v0.10.6
+   Compiling lzma-sys v0.1.20
+   Compiling bzip2-sys v0.1.13+1.0.8
+   Compiling aho-corasick v1.1.4
+   Compiling encoding_rs v0.8.35
+   Compiling adler2 v2.0.1
+   Compiling rayon-core v1.13.0
+   Compiling getrandom v0.4.2
+   Compiling vcpkg v0.2.15
+   Compiling zstd-safe v7.2.4
+   Compiling rustversion v1.0.22
+   Compiling anstyle v1.0.14
+   Compiling anyhow v1.0.102
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling regex-syntax v0.8.10
+   Compiling anstyle-query v1.1.5
+   Compiling cfg_aliases v0.1.1
+   Compiling nix v0.28.0
+   Compiling anstream v1.0.0
+   Compiling regex-automata v0.4.14
+   Compiling libsqlite3-sys v0.28.0
+   Compiling miniz_oxide v0.8.9
+   Compiling crossbeam-deque v0.8.6
+   Compiling time v0.3.47
+   Compiling url v2.5.8
+   Compiling serde_urlencoded v0.7.1
+   Compiling tokio-rustls v0.26.4
+   Compiling num-integer v0.1.46
+   Compiling iana-time-zone v0.1.65
+   Compiling universal-hash v0.5.1
+   Compiling multer v3.1.0
+   Compiling utf-8 v0.7.6
+   Compiling crc-catalog v2.4.0
+   Compiling heck v0.5.0
+   Compiling data-encoding v2.10.0
+   Compiling clap_lex v1.1.1
+   Compiling siphasher v1.0.2
+   Compiling strsim v0.11.1
+   Compiling getrandom v0.3.4
+   Compiling opaque-debug v0.3.1
+   Compiling signature v2.2.0
+   Compiling iri-string v0.7.12
+   Compiling minimal-lexical v0.2.1
+   Compiling nom v7.1.3
+   Compiling tower-http v0.6.8
+   Compiling ed25519 v2.2.3
+   Compiling polyval v0.6.2
+   Compiling clap_builder v4.6.7
+   Compiling phf_shared v0.12.1
+   Compiling tungstenite v0.24.0
+   Compiling clap_derive v4.6.7
+   Compiling crc v3.4.0
+   Compiling chrono v0.4.44
+   Compiling num-bigint v0.4.6
+   Compiling hyper-rustls v0.27.7
+   Compiling hashbrown v0.14.5
+   Compiling flate2 v1.1.9
+   Compiling aes v0.8.4
+   Compiling async-trait v0.1.92
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling same-file v1.0.6
+   Compiling either v1.15.0
+   Compiling chrono-tz v0.10.4
+   Compiling zip v2.4.2
+   Compiling lazy_static v1.5.0
+   Compiling winnow v0.7.15
+   Compiling bumpalo v3.20.2
+   Compiling lean-mesh v0.1.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains/crates/lean-mesh)
+   Compiling spin v0.9.8
+   Compiling toml_write v0.1.2
+   Compiling toml_edit v0.22.27
+   Compiling zopfli v0.8.3
+   Compiling sharded-slab v0.1.7
+   Compiling rayon v1.11.0
+   Compiling walkdir v2.5.0
+   Compiling pbkdf2 v0.12.2
+   Compiling ed25519-dalek v2.2.0
+   Compiling axum-core v0.4.5
+   Compiling bzip2 v0.5.2
+   Compiling xz2 v0.1.7
+   Compiling hashlink v0.9.1
+   Compiling reqwest v0.12.28
+   Compiling zstd v0.13.3
+   Compiling simple_asn1 v0.6.4
+   Compiling lzma-rs v0.3.0
+   Compiling clap v4.6.7
+   Compiling tokio-tungstenite v0.24.0
+   Compiling phf v0.12.1
+   Compiling ghash v0.5.1
+   Compiling eventsource-stream v0.2.3
+   Compiling xattr v1.6.1
+   Compiling matchers v0.2.0
+   Compiling ctr v0.9.2
+   Compiling webpki-roots v0.26.11
+   Compiling filedescriptor v0.8.3
+   Compiling pem v3.0.6
+   Compiling futures-executor v0.3.32
+   Compiling tracing-log v0.2.0
+   Compiling tokio-stream v0.1.18
+   Compiling notify-types v2.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling aead v0.5.2
+   Compiling displaydoc v0.2.5
+   Compiling async-stream-impl v0.3.6
+   Compiling serial2 v0.2.35
+   Compiling thread_local v1.1.9
+   Compiling filetime v0.2.29
+   Compiling fsevent-sys v4.1.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling deflate64 v0.1.12
+   Compiling futures-timer v3.0.3
+   Compiling constant_time_eq v0.3.1
+   Compiling fastrand v2.4.1
+   Compiling sha1_smol v1.0.1
+   Compiling shell-words v1.1.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling hex v0.4.3
+   Compiling unsafe-libyaml v0.2.11
+   Compiling matchit v0.7.3
+   Compiling downcast-rs v1.2.1
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains)
+   Compiling portable-pty v0.9.0
+   Compiling axum v0.7.9
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling rusqlite v0.31.0
+   Compiling uuid v1.23.0
+   Compiling tempfile v3.27.0
+   Compiling reqwest-eventsource v0.6.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling notify v8.2.0
+   Compiling tar v0.4.46
+   Compiling async-stream v0.3.6
+   Compiling aes-gcm v0.10.3
+   Compiling tokio-test v0.4.5
+   Compiling futures v0.3.32
+   Compiling jsonwebtoken v9.3.1
+   Compiling ureq v2.12.1
+   Compiling orb-spec v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains/crates/orb-spec)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -26,6 +307,16 @@ warning: function `check_fence_at_line_start` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `orb-spec` (lib) generated 1 warning
+   Compiling sysinfo v0.32.1
+   Compiling toml v0.8.23
+   Compiling croner v2.2.0
+   Compiling regex v1.12.3
+   Compiling tower-http v0.5.2
+   Compiling async-recursion v1.1.1
+   Compiling fs2 v0.4.3
+   Compiling sd-notify v0.4.5
+   Compiling urlencoding v2.1.3
+   Compiling md5 v0.7.0
 warning: unreachable statement
    --> src/api/control/workspace_purge.rs:433:5
     |
@@ -67,14 +358,15 @@ warning: function `scope_oom_killed` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 22.00s
+    Finished `test` profile [unoptimized] target(s) in 11m 35s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test orb_spec::tests::host_orb_wire_machine_patch_and_fd_bounds_gates_verified ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3668 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -125,14 +417,15 @@ warning: function `scope_oom_killed` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.37s
+    Finished `test` profile [unoptimized] target(s) in 35.00s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::mission_store::harness_session_tests::phase4_cursor_pagination_and_sidebar_merge_invariants_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3668 filtered out; finished in 0.06s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -183,14 +476,15 @@ warning: function `scope_oom_killed` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
+    Finished `test` profile [unoptimized] target(s) in 26.33s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::remote_grok::tests::phase3_multi_harness_normalizer_and_transcript_reducer_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3668 filtered out; finished in 0.01s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -241,14 +535,15 @@ warning: function `scope_oom_killed` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.13s
+    Finished `test` profile [unoptimized] target(s) in 49.39s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::control_queue::native_schedule_pool_tests::outbox_crash_reconcile_gate_requeues_unacked_with_single_writer_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3668 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -299,14 +594,15 @@ warning: function `scope_oom_killed` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.13s
+    Finished `test` profile [unoptimized] target(s) in 48.07s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test provider_health::tests::provider_attempt_gate_enforces_pinning_cooldown_first_byte_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3668 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -357,14 +653,15 @@ warning: function `scope_oom_killed` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.13s
+    Finished `test` profile [unoptimized] target(s) in 33.81s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::privilege_broker::tests::auth_toctou_execute_gate_fails_closed_on_swap_revocation_bunker_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3668 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -415,14 +712,15 @@ warning: function `scope_oom_killed` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.14s
+    Finished `test` profile [unoptimized] target(s) in 32.84s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test managed::tests::resource_ledger_gate_conserves_slots_budget_ttl_and_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3668 filtered out; finished in 0.00s
 
+   Compiling sandboxed_sh v1.3.0 (/Users/thomas/work/orb/worktree/feat-google-claude-chains)
 warning: function `check_fence_at_line_start` is never used
     --> crates/orb-spec/src/lib.rs:5070:8
      |
@@ -473,11 +771,11 @@ warning: function `scope_oom_killed` is never used
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `sandboxed_sh` (lib test) generated 4 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 1 suggestion)
-    Finished `test` profile [unoptimized] target(s) in 0.13s
+    Finished `test` profile [unoptimized] target(s) in 32.77s
      Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-1c76eed1b1f60326)
 
 running 1 test
 test api::control::tests::stream_bounded_commit_gate_caps_open_tail_bytes_with_zero_divergences ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3665 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3668 filtered out; finished in 0.00s
 
