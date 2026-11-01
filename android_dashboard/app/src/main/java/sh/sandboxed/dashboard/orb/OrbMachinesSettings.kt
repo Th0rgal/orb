@@ -523,4 +523,12 @@ object OrbComputePlacement {
         val first = sortedComputeNodes(rawNodes).firstOrNull { isAutoSchedulableNode(it, backend) } ?: return null
         return OrbJSON.str(first, "id")?.takeIf { it.isNotEmpty() }
     }
+
+    @JvmName("sortedComputeNodeRows")
+    fun sortedComputeNodes(rows: List<OrbRow>): List<OrbRow> =
+        sortedComputeNodes(rows.map { it.raw }).map { OrbRow(it) }
+
+    @JvmName("firstAvailableNodeIdFromRows")
+    fun firstAvailableNodeId(rows: List<OrbRow>, backend: String? = null): String? =
+        firstAvailableNodeId(rows.map { it.raw }, backend)
 }

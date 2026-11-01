@@ -2581,9 +2581,14 @@ impl NativeGrokObserver {
         } else {
             String::new()
         };
-        let raw_failure = self.stream.error.as_deref().unwrap_or(&startup_evidence);
+        let raw_failure = if !startup_evidence.is_empty() && exited_before_output {
+            startup_evidence.as_str()
+        } else {
+            self.stream.error.as_deref().unwrap_or(&startup_evidence)
+        };
         let failure = super::remote_failure::classify(raw_failure);
-        let location_unsupported = super::remote_failure::is_node_location_unsupported(raw_failure);
+        let location_unsupported = super::remote_failure::is_node_location_unsupported(raw_failure)
+            || super::remote_failure::is_node_location_unsupported(&startup_evidence);
         let success = (succeeded || scheduled_end)
             && self
                 .stream
@@ -4787,6 +4792,61 @@ mod tests {
         let verdict = observer.verdict(&status, "node").await;
         assert!(!verdict.success);
         assert_eq!(verdict.status_reason, "remote_configuration");
+    }
+
+    #[tokio::test]
+    async fn antigravity_stderr_location_rejection_before_json_events_quarantines_node() {
+        use crate::api::mission_store::{MissionStore, SqliteMissionStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn MissionStore> = Arc::new(
+            SqliteMissionStore::new(dir.path().join("missions"), "startup-geo")
+                .await
+                .unwrap(),
+        );
+        let mission = store
+            .create_mission(
+                Some("geo"),
+                None,
+                None,
+                None,
+                None,
+                Some("antigravity"),
+                None,
+            )
+            .await
+            .unwrap();
+        let owner = RemoteMissionOwner {
+            mission_store: store,
+            events_tx: None,
+        };
+        let job = Uuid::new_v4();
+        let mut observer = NativeGrokObserver::attach(&owner, "nimrud", mission.id, job)
+            .await
+            .unwrap();
+        observer
+            .stream
+            .feed("Error: User location is not supported for the API use.\n");
+        let status: NodeJobStatus = serde_json::from_value(serde_json::json!({
+            "job_id": job,
+            "mission_id": mission.id,
+            "state": "failed",
+            "exit_code": 1,
+            "error": "command exited with Some(1)",
+            "created_at": "2026-11-01T00:00:00Z"
+        }))
+        .unwrap();
+        let verdict = observer.verdict(&status, "nimrud").await;
+        assert!(!verdict.success);
+        assert_eq!(verdict.status_reason, "remote_configuration");
+        assert!(
+            verdict
+                .quarantine_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("egress IP")),
+            "expected quarantine reason on stderr location rejection, got {:?}",
+            verdict.quarantine_reason
+        );
+        assert!(verdict.content.contains("egress IP"));
     }
 
     #[test]
