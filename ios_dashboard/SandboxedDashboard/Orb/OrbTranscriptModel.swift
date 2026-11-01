@@ -123,7 +123,7 @@ final class OrbTranscriptModel {
                 ("turn-\(index)-\(row.1)", row.1, row.2)
             }
         }
-        return rows
+        return OrbTranscriptGates.ensureUniqueRows(rows)
     }
 }
 
