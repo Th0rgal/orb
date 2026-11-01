@@ -102,7 +102,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   try{return 'queueBtwFollowUp' in btwMod&&typeof btwMod.queueBtwFollowUp==='function';}catch{return false;}
  };
  const sendNext=()=>{
-  if(busy()||error())return;
+  if(hasQueueFollowUp()||busy()||error())return;
   const next=queue()[0];if(!next)return;
   setQueue(rows=>rows.slice(1));
   void ask(next.question,[],[],next.attachments??[]);
@@ -118,7 +118,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   let stale=false;onCleanup(()=>{stale=true;});
   const missionId=p.mission;
   let resync:(()=>void)|undefined;
-  let legacyQueueMigrated=false;
+  let migratingLegacyQueue=false;
+  let unmigratedLegacyQueue:QueuedSideQuestion[]=[];
   const markDelivered=(id?:string)=>{
    if(!id)return;
    setDeliveredQueuedIds(prev=>prev.includes(id)?prev:[...prev,id]);
@@ -202,7 +203,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
   if(saved?.pending?.turnId)setTurnId(saved.pending.turnId as ReturnType<typeof crypto.randomUUID>);
   setPendingAttachments(saved?.pending?.attachments??[]);setDraft(saved?.draft??'');setModel(saved?.model??'');setStorageError(false);
   const legacySavedQueue=saved?.queue??[];
-  setQueue(hasReconcile&&hasQueueFollowUp()?[]:legacySavedQueue);
+  unmigratedLegacyQueue=hasReconcile&&hasQueueFollowUp()?[...legacySavedQueue]:[];
+  setQueue(legacySavedQueue);
   const agent=refreshSideSession(missionId);
   const lastSaved=saved?.history.at(-1);
   const lastAnswer=lastSaved?.answer;
@@ -261,16 +263,27 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      follow(reconciled.latest);
      const changed=reconciled.history.length!==history().length||reconciled.history.some((row,i)=>row.question!==history()[i]?.question||row.answer!==history()[i]?.answer);
      if(changed)setHistory(reconciled.history);
-     if(!legacyQueueMigrated&&legacySavedQueue.length&&hasQueueFollowUp()){
-      legacyQueueMigrated=true;
+     if(!migratingLegacyQueue&&unmigratedLegacyQueue.length&&hasQueueFollowUp()){
       const answered=new Set(reconciled.history.map(h=>h.question.trim()));
       if(reconciled.activeSession?.question)answered.add(reconciled.activeSession.question.trim());
-      const unsentLegacy=legacySavedQueue.filter(item=>item.question.trim()&&!answered.has(item.question.trim()));
-      if(unsentLegacy.length){
+      unmigratedLegacyQueue=unmigratedLegacyQueue.filter(item=>item.question.trim()&&!answered.has(item.question.trim()));
+      const remainingIds=new Set(unmigratedLegacyQueue.map(item=>item.id));
+      setQueue(rows=>rows.filter(r=>remainingIds.has(r.id)));
+      if(unmigratedLegacyQueue.length){
+       migratingLegacyQueue=true;
+       const batch=[...unmigratedLegacyQueue];
        void (async()=>{
-        for(const item of unsentLegacy){
-         if(stale||key()!==current)break;
-         await ask(item.question,[],[],item.attachments??[]).catch(swallow("sideQuestions.migrateQueue"));
+        try{
+         for(const item of batch){
+          if(stale||key()!==current)break;
+          const ok=await ask(item.question,[],[],item.attachments??[],false,item.id as ReturnType<typeof crypto.randomUUID>).catch(()=>false);
+          if(ok){
+           unmigratedLegacyQueue=unmigratedLegacyQueue.filter(r=>r.id!==item.id);
+           setQueue(rows=>rows.filter(r=>r.id!==item.id));
+          }
+         }
+        }finally{
+         migratingLegacyQueue=false;
         }
        })();
       }
@@ -386,13 +399,14 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
    return false;
   }
  };
- const ask=async(text:string,images:DraftImage[]=[],files:UploadedFile[]=[],retryAttachments?:SideAttachment[],retryTurn=false)=>{
+ const ask=async(text:string,images:DraftImage[]=[],files:UploadedFile[]=[],retryAttachments?:SideAttachment[],retryTurn=false,clientMessageId?:ReturnType<typeof crypto.randomUUID>)=>{
   text=text.trim();if(!text)return false;
   const selected=key();await ready;if(selected!==key())return false;
   if(busy()){
-   return submitQueuedFollowUp(text,images,files,retryAttachments);
+   return submitQueuedFollowUp(text,images,files,retryAttachments,clientMessageId);
   }
-  if(!preparing()&&!retryTurn)setTurnId(crypto.randomUUID());
+  if(clientMessageId)setTurnId(clientMessageId);
+  else if(!preparing()&&!retryTurn)setTurnId(crypto.randomUUID());
   setPreparing(false);
   const current=key(),missionId=p.mission,activeTurnId=turnId(),context=sideContext(p.items,true),controller=new AbortController(),launchController=new AbortController();abort=controller;launchAbort=launchController;
   let attachments:SideAttachment[];
@@ -538,7 +552,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
      <Show when={exchange.error}><ErrorNotice error={exchange.error!} title={notSent()?"Question not sent":"Couldn’t complete side question"}><button type="button" class="error-notice-link" onClick={retry} disabled={busy()}>Retry</button><button type="button" class="error-notice-link" onClick={dismiss} disabled={busy()}>Dismiss</button><Show when={exchange.error?.match(/A side agent is already queued or running for this conversation \(([0-9a-f-]{36})\)/)?.[1]}>{id=><button type="button" class="error-notice-link" onClick={()=>{void Promise.resolve(reconnectSession(id())).catch(e=>setError(String(e)));}}>Open existing side agent</button>}</Show></ErrorNotice></Show>
      <Show when={!exchange.pending&&!exchange.error}><button class="btw-transfer" onClick={()=>p.onTransfer(`About this side question: ${exchange.question}\n\n${content().text||exchange.answer}`)}>Use in agent draft ↗</button></Show>
     </article>;}}</For>
-    <Show when={queue().length}><section class="followup-queue btw-queue" aria-label="Queued side questions" aria-live="polite">
+    <Show when={queue().length&&!hasQueueFollowUp()}><section class="followup-queue btw-queue" aria-label="Queued side questions" aria-live="polite">
      <header><span class="queue-count">{queue().length} Queued</span></header>
      <ol><For each={queue()}>{row=><li class="queue-row"><div class="queue-line"><span class="queue-text" title={row.question}>{row.question}</span><span class="queue-row-actions"><button type="button" title="Remove" aria-label={`Remove queued side question: ${row.question}`} onClick={()=>setQueue(rows=>rows.filter(other=>other.id!==row.id))}><Ic.TrashIcon size={14}/></button></span></div></li>}</For></ol>
     </section></Show>

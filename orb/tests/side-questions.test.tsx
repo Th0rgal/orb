@@ -368,20 +368,28 @@ it('submits /btw follow-ups into Core RemoteQueue in advance while busy and keep
  expect(screen.getByRole('button',{name:'Send now: Queued in advance'})).toBeTruthy();
 });
 
-it('deduplicates already-answered legacy saved.queue items on mount before migrating unsent items',async()=>{
+it('deduplicates already-answered legacy saved.queue items on mount and retains failed migrations until retry succeeds',async()=>{
  queueFollowUpMock.enabled=true;
- queueFollowUpMock.fn.mockImplementation(async(_parent:string,question:string,_ctx:string,_history:any[],_attachments:any[],clientId:string)=>({
-  id:clientId,missionId:'side-live-2',prompt:`You are the independent /btw agent sharing the main agent's working folder.\n\nCurrent request:\n${question}\n`,queued:true,local:false,
- }));
+ let failFirst=true;
+ queueFollowUpMock.fn.mockImplementation(async(_parent:string,question:string,_ctx:string,_history:any[],_attachments:any[],clientId:string)=>{
+  if(failFirst){failFirst=false;throw new Error('Transient network failure');}
+  return {
+   id:clientId,missionId:'side-live-2',prompt:`You are the independent /btw agent sharing the main agent's working folder.\n\nCurrent request:\n${question}\n`,queued:true,local:false,
+  };
+ });
  vi.stubGlobal('fetch',vi.fn(async()=>Response.json([])));
- const {sideQuestionKey,writeSideQuestion}=await import('../src/sideQuestionStorage');
- await writeSideQuestion(sideQuestionKey('legacy-migrate'),{
+ const {sideQuestionKey,readSideQuestion,writeSideQuestion}=await import('../src/sideQuestionStorage');
+ const storageId=sideQuestionKey('legacy-migrate');
+ await writeSideQuestion(storageId,{
   history:[],draft:'',model:'opencode · builtin/smart',open:true,docked:true,
   queue:[
-   {id:'9030da6e',question:'Already answered on server'},
-   {id:'unsent-2',question:'Still needs to be sent'},
+   {id:'9030da6e-f2d9-433a-99c2-e49de1322e23',question:'Already answered on server'},
+   {id:'11111111-2222-4333-8444-555555555555',question:'Still needs to be sent'},
   ],
  });
+ let streamNotify:((event:any)=>void)|undefined;
+ const streamMod=await import('../src/stream');
+ const spy=vi.spyOn(streamMod,'streamMission').mockImplementation((_id,cb)=>{streamNotify=cb as any;return ()=>{};});
  serverReconcile.fn=async()=>({
   history:[{id:'h1',question:'Already answered on server',answer:'Server Turn 5 reply.'}],
   activeSession:{id:'side-live-2',question:'Currently running',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0},
@@ -389,7 +397,21 @@ it('deduplicates already-answered legacy saved.queue items on mount before migra
  });
  watchMock.fn=(_parent,_signal,receive)=>new Promise<void>(()=>{receive({type:'start',model:'opencode · builtin/smart'});});
  let handle!:SideQuestionsHandle;
- render(()=><SideQuestions mission="legacy-migrate" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
- await waitFor(()=>expect(queueFollowUpMock.fn).toHaveBeenCalledTimes(1));
- expect(queueFollowUpMock.fn.mock.calls[0][1]).toBe('Still needs to be sent');
+ try{
+  render(()=><SideQuestions mission="legacy-migrate" items={[]} ref={h=>handle=h} onTransfer={()=>{}}/>);
+  await waitFor(()=>expect(queueFollowUpMock.fn).toHaveBeenCalledTimes(1));
+  expect(queueFollowUpMock.fn.mock.calls[0][1]).toBe('Still needs to be sent');
+  // Failed migration keeps the unsent legacy item persisted (while dropping the answered one).
+  await waitFor(async()=>{
+   const persisted=await readSideQuestion(storageId);
+   expect(persisted?.queue?.map(q=>q.question)).toEqual(['Still needs to be sent']);
+  });
+  // Next reconcile retries the retained legacy item and clears it once acknowledged.
+  streamNotify?.({type:'mission_status_changed'});
+  await waitFor(()=>expect(queueFollowUpMock.fn).toHaveBeenCalledTimes(2));
+  await waitFor(async()=>{
+   const persisted=await readSideQuestion(storageId);
+   expect(persisted?.queue).toEqual([]);
+  });
+ }finally{spy.mockRestore();}
 });

@@ -850,44 +850,44 @@ it('ignores metadata.queued user_message events in btwTurnEvents and parseBtwThr
  expect(reconciled.history).toEqual([]);
 });
 
-it('queues a /btw follow-up on Core with queue_followup, chains cursors, and rolls back deleted queued cursors',async()=>{
+it('bases every queued follow-up on delivered context so deleting or promoting a predecessor keeps remaining prompts complete',async()=>{
  const {prepareBtwContext}=await import('../src/btwContext');
  const {queueBtwFollowUp,dropBtwQueuedCursor,replaceBtwUserQuestion}=await import('../src/btwAgent');
  localStorage.setItem('agent:'+sideQuestionKey('q-parent'),JSON.stringify({id:'q-side',question:'First?',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,conversationCursor:{sequence:5,visibleHash:'h5'}}));
  vi.mocked(getMission).mockImplementation(async id=>({id,status:'active',history:[],tags:id==='q-side'?['btw-parent:q-parent']:[],title:null,created_at:'',updated_at:''} as any));
  vi.mocked(prepareBtwContext)
   .mockResolvedValueOnce({context:'delta 5->8',cursor:{sequence:8,visibleHash:'h8'}})
-  .mockResolvedValueOnce({context:'delta 8->12',cursor:{sequence:12,visibleHash:'h12'}})
-  .mockResolvedValueOnce({context:'delta 5->15',cursor:{sequence:15,visibleHash:'h15'}});
+  .mockResolvedValueOnce({context:'delta 5->12',cursor:{sequence:12,visibleHash:'h12'}});
  vi.mocked(sendMissionMessage)
   .mockResolvedValueOnce({id:'msg-1',queued:true} as any)
-  .mockResolvedValueOnce({id:'msg-2',queued:true} as any)
-  .mockResolvedValueOnce({id:'msg-3',queued:true} as any);
+  .mockResolvedValueOnce({id:'msg-2',queued:true} as any);
  const first=await queueBtwFollowUp('q-parent','Follow-up one','ctx',[], [],'msg-1');
  expect(first).toMatchObject({id:'msg-1',missionId:'q-side',queued:true,local:false});
  expect(prepareBtwContext).toHaveBeenNthCalledWith(1,expect.anything(),'ctx','core',{sequence:5,visibleHash:'h5'},[],undefined);
  expect(sendMissionMessage).toHaveBeenCalledWith('q-side',expect.stringContaining('Current request:\nFollow-up one'),undefined,'msg-1');
- await queueBtwFollowUp('q-parent','Follow-up two','ctx',[], [],'msg-2');
- expect(prepareBtwContext).toHaveBeenNthCalledWith(2,expect.anything(),'ctx','core',{sequence:8,visibleHash:'h8'},[],undefined);
- // Removing msg-1 from the queue invalidates its cursor (and msg-2 chained off it)
- // so the next queued follow-up re-includes parent events since sequence 5.
+ // Second follow-up also starts from delivered cursor {sequence:5}, so removing msg-1
+ // or promoting msg-2 via Send now delivers msg-2 with full 5->12 parent context intact.
+ const second=await queueBtwFollowUp('q-parent','Follow-up two','ctx',[], [],'msg-2');
+ expect(prepareBtwContext).toHaveBeenNthCalledWith(2,expect.anything(),'ctx','core',{sequence:5,visibleHash:'h5'},[],undefined);
+ expect(second.prompt).toContain('<main_conversation_update>\ndelta 5->12\n</main_conversation_update>');
  dropBtwQueuedCursor('q-parent','msg-1');
- const third=await queueBtwFollowUp('q-parent','Follow-up three','ctx',[], [],'msg-3');
- expect(prepareBtwContext).toHaveBeenNthCalledWith(3,expect.anything(),'ctx','core',{sequence:5,visibleHash:'h5'},[],undefined);
- expect(third.prompt).toContain('<main_conversation_update>\ndelta 5->15\n</main_conversation_update>');
+ expect(btwSession('q-parent')?.queuedCursors?.map(c=>c.id)).toEqual(['msg-2']);
  const edited=replaceBtwUserQuestion(first.prompt,'Edited follow-up one');
  expect(edited).toContain('<main_conversation_update>\ndelta 5->8\n</main_conversation_update>');
  expect(edited).toContain('Current request:\nEdited follow-up one');
  expect(edited).not.toContain('Follow-up one');
 });
 
-it('transitions watchBtw from Turn 1 to dequeued Turn 2 and polls incrementally with since',async()=>{
+it('transitions watchBtw from Turn 1 to dequeued Turn 2, merges concurrent queuedCursors, and polls incrementally with since',async()=>{
  vi.useFakeTimers();
+ const {prepareBtwContext}=await import('../src/btwContext');
  const {getMissionEvents}=await import('../src/stream');
- const {watchBtw}=await import('../src/btwAgent');
- localStorage.setItem('agent:'+sideQuestionKey('handoff-parent'),JSON.stringify({id:'handoff-side',question:'First question',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0}));
+ const {watchBtw,queueBtwFollowUp}=await import('../src/btwAgent');
+ localStorage.setItem('agent:'+sideQuestionKey('handoff-parent'),JSON.stringify({id:'handoff-side',question:'First question',harness:'opencode',model:'builtin/smart',local:false,active:true,baseline:0,conversationCursor:{sequence:5,visibleHash:'h5'}}));
  let poll=0;
- vi.mocked(getMission).mockImplementation(async id=>({id,status:poll<2?'active':'completed',history:[],tags:['btw-parent:handoff-parent'],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(getMission).mockImplementation(async id=>({id,status:poll<2?'active':'completed',history:[],tags:id==='handoff-side'?['btw-parent:handoff-parent']:[],title:null,created_at:'',updated_at:''} as any));
+ vi.mocked(prepareBtwContext).mockResolvedValueOnce({context:'delta 5->9',cursor:{sequence:9,visibleHash:'h9'}});
+ vi.mocked(sendMissionMessage).mockResolvedValueOnce({id:'msg-2',queued:true} as any);
  const sinceArgs:(number|undefined)[]=[];
  vi.mocked(getMissionEvents).mockImplementation(async(_id,opts)=>{
   sinceArgs.push(opts?.since);
@@ -903,10 +903,15 @@ it('transitions watchBtw from Turn 1 to dequeued Turn 2 and polls incrementally 
  const abort=new AbortController();
  const watching=watchBtw('handoff-parent',abort.signal,e=>received.push(e));
  try{
+  await vi.advanceTimersByTimeAsync(100);
+  // Queue msg-2 while watchBtw is already running with its initial session object.
+  await queueBtwFollowUp('handoff-parent','Second question','ctx',[],[],'msg-2');
   await vi.advanceTimersByTimeAsync(11000);
   await watching;
   expect(sinceArgs).toEqual([undefined,1,3]);
   expect(received).toContainEqual({type:'turn',question:'Second question',messageId:'msg-2',completed:{question:'First question',answer:'First answer.'}});
   expect(received.at(-1)).toEqual({type:'done',answer:'Second answer.'});
+  expect(btwSession('handoff-parent')?.conversationCursor).toEqual({sequence:9,visibleHash:'h9'});
+  expect(btwSession('handoff-parent')?.queuedCursors).toBeUndefined();
  }finally{abort.abort();await watching.catch(()=>{});vi.useRealTimers();}
 });
