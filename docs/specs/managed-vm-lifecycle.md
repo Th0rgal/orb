@@ -23,7 +23,13 @@ Provider credentials (`BOAT_API_KEY`, `HETZNER_CLOUD_APIKEY`, `VASTAI_API_KEY`,
 operator settings (`.sandboxed-sh/managed_providers.json`, `0600`, AES-256-GCM
 via `env_crypto`), environment variables, or Bitwarden Secrets Manager
 (`bitwarden.rs`) and are classified as `CoreReserved` in `secret_broker.rs`
-(`orb_compute_secret_gate`):
+(`orb_compute_secret_gate`). Startup Bitwarden vault discovery runs only when
+the Core instance has opted into managed compute (`SANDBOXED_MANAGED_ENABLED=true`,
+at least one direct provider env key, a saved `managed_providers.json` key, or an
+existing `.sandboxed-sh/managed_machines.json` registry; `SANDBOXED_MANAGED_ENABLED=false`
+always disables it) so a companion dev/staging Core process sharing the same
+Bitwarden vault cannot silently activate the reconciler and reap production's
+`orb-managed-*` VMs as orphans:
 
 1. Agents cannot read `CoreReserved` cloud provider keys via `secret_get` or
    `secret_request`, and `secret_list` omits them from `accessible`. Agents must

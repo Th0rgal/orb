@@ -1856,6 +1856,35 @@ impl ManagedManager {
             .is_ok_and(|m| m.contains_key(&id))
     }
 
+    /// Whether this Core instance has explicitly opted into managed cloud
+    /// compute via environment (`SANDBOXED_MANAGED_ENABLED=true` or any direct
+    /// provider env key), saved operator provider configuration
+    /// (`managed_providers.json`), or an existing local machine registry
+    /// (`managed_machines.json`).
+    ///
+    /// Shared Bitwarden vault discovery is gated on this so a companion dev or
+    /// staging Core process that shares the operator's Bitwarden vault cannot
+    /// silently activate managed providers and reap production's `orb-managed-*`
+    /// VMs as orphans.
+    pub fn allows_bitwarden_provider_discovery(&self) -> bool {
+        match std::env::var("SANDBOXED_MANAGED_ENABLED").ok().as_deref() {
+            Some("0" | "false" | "no" | "off") => return false,
+            Some("1" | "true" | "yes" | "on") => return true,
+            _ => {}
+        }
+        if self.settings.enabled
+            || self
+                .registry_authoritative
+                .load(std::sync::atomic::Ordering::SeqCst)
+            || self.base_credentials.read().is_ok_and(|m| !m.is_empty())
+        {
+            return true;
+        }
+        self.stored_providers
+            .read()
+            .is_ok_and(|m| m.values().any(|s| s.encrypted_api_key.is_some()))
+    }
+
     /// Register a startup credential (`"environment"` or `"bitwarden"`) and
     /// reconcile it with any operator-saved `"settings"` override.
     pub fn register_base_credential(
