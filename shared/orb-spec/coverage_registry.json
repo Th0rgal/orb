@@ -2200,7 +2200,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -2289,7 +2289,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -2391,7 +2391,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -2489,11 +2489,11 @@
           },
           {
             "path": "src/api/control/remote_grok.rs",
-            "sha256": "b42e9bff4d8a0056500cbabd78ce7b2baadf0e630509e818a9d553c5e53c6dc3"
+            "sha256": "3c7bfeb8838a9318726bc02c30c519636bf105f6397a2d3770dd447630e025cc"
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -2595,7 +2595,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -2697,7 +2697,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -2799,7 +2799,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -2910,7 +2910,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -3025,7 +3025,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {
@@ -3599,7 +3599,7 @@
           },
           {
             "path": "shared/orb-spec/evidence/p4-p6-stateful-host-wiring-tests.log",
-            "sha256": "42e891ef6ec5725aa3ca1dace5fd22545505e200a42c3c99db497a85cffaf291"
+            "sha256": "55c4d81eaaa713e783e32c0b2fc473355fc919ff74be875b7db3aa72884f2f49"
           }
         ],
         "execution": {

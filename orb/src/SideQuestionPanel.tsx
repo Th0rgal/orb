@@ -2,7 +2,7 @@ import { swallow } from "./log";
 import {createStore, reconcile} from "solid-js/store";
 import {NativeInteraction} from "./NativeInteraction";
 import * as btwMod from "./btwAgent";
-import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote} from "./btwAgent";
+import {askBtwAgent,watchBtw,stopBtw,btwSession,btwActivities,btwItems,btwThoughts,isSyntheticRemoteAssistantNote,dropBtwQueuedCursor} from "./btwAgent";
 import {streamMission} from "./stream";
 import {btwConfig} from "./btwSettings";
 import {AgentActivity} from "./AgentActivity";
@@ -558,7 +558,8 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
        mission={sideSessionId()}
        editing={editingQueued()}
        pending={!editingQueued()?pendingQueued().map(item=>({id:item.id,text:item.content})):undefined}
-       onCancelPending={id=>setPendingQueued(rows=>rows.filter(r=>r.id!==id))}
+       onCancel={id=>dropBtwQueuedCursor(p.mission,id)}
+       onCancelPending={id=>{dropBtwQueuedCursor(p.mission,id);setPendingQueued(rows=>rows.filter(r=>r.id!==id));}}
        onEdit={row=>void queuedEdit.start(row)}
       />
      }>
@@ -575,6 +576,7 @@ export function SideQuestions(p:{mission:string;items:StreamItem[];ref:(handle:S
        onSendNowAccepted={(id,live)=>{if(live&&handoffId()===id)setHandoffId(undefined);}}
        onEdited={(id,content)=>setConfirmedQueued(rows=>rows.map(r=>r.id===id?{...r,content}:r))}
        onRows={setRemoteQueuedIds}
+       onRemove={id=>dropBtwQueuedCursor(p.mission,id)}
        onCancel={id=>{
         setConfirmedQueued(rows=>rows.filter(r=>r.id!==id));
         setPendingQueued(rows=>rows.filter(r=>r.id!==id));

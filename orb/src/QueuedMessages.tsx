@@ -4,7 +4,7 @@ import {canDiscardQueuedMessage,queuedLocalMessages,removeQueuedMessage,retryQue
 import * as Ic from './icons';
 /** Follow-ups waiting for the current turn, shown like Cursor's queue: one line per
  * message, hover actions, and the row being edited marked in place. */
-export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:string;text:string}[];onEdit?:(row:{id:string;text:string})=>void;onCancelPending?:(id:string)=>void}){
+export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:string;text:string}[];onEdit?:(row:{id:string;text:string})=>void;onCancel?:(id:string)=>void;onCancelPending?:(id:string)=>void}){
  const storedRows=()=>queuedLocalMessages(p.mission).filter(row=>row.waiting&&row.state!=='accepted'&&row.state!=='dispatching'||!!row.error);
  const pendingRows=()=> {
   const known=new Set<string>(storedRows().map(r=>r.id));
@@ -33,7 +33,7 @@ export function QueuedMessages(p:{mission:string;editing?:string;pending?:{id:st
      <Show when={p.editing===row.id} fallback={<span class="queue-row-actions">
       <Show when={p.onEdit&&row.state==='queued'}><button type="button" class="queue-action-btn" aria-label={`Edit queued message: ${row.text}`} disabled={working()||busyIds().has(row.id)||!!p.editing} onClick={()=>p.onEdit!({id:row.id,text:row.text})}><Ic.PencilIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Edit</span><kbd>→</kbd></span></button></Show>
       <Show when={row.state==='queued'}><button type="button" class="queue-action-btn" aria-label={`Send now: ${row.text}`} disabled={working()||busyIds().has(row.id)||!!p.editing} onClick={()=>void act(()=>sendQueuedNow(p.mission,row.id))}><Ic.ArrowUpIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Send now</span><kbd>↵</kbd></span></button></Show>
-      <button type="button" class="queue-action-btn" aria-label={`Remove queued message: ${row.text}`} disabled={working()||busyIds().has(row.id)||!canDiscardQueuedMessage(row)||p.editing===row.id} onClick={()=>void actRow(row.id,()=>removeQueuedMessage(row.id))}><Ic.TrashIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Delete</span></span></button>
+      <button type="button" class="queue-action-btn" aria-label={`Remove queued message: ${row.text}`} disabled={working()||busyIds().has(row.id)||!canDiscardQueuedMessage(row)||p.editing===row.id} onClick={()=>void actRow(row.id,()=>{const res=removeQueuedMessage(row.id);return p.onCancel?res.then(()=>p.onCancel!(row.id)):res;})}><Ic.TrashIcon size={14}/><span class="queue-tooltip" aria-hidden="true"><span>Delete</span></span></button>
      </span>}><span class="queue-editing">Editing</span></Show>
     </div>
     <Show when={row.state==='dispatching'}><small>{row.error?'Needs review':'Sending…'}</small></Show>

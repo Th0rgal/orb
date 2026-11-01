@@ -47,6 +47,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -257,28 +258,154 @@ object OrbSideAgent {
             }
             .map { it.value }
 
+    fun activityStamp(m: OrbRow): String = "${activity(m)}\u0000${m.str("status").orEmpty()}"
+
+    private fun eventSeq(ev: OrbRow, fallback: Long): Long =
+        (ev.raw["sequence"] as? Number)?.toLong()
+            ?: (ev.raw["seq"] as? Number)?.toLong()
+            ?: ev.int("sequence", "seq")?.toLong()
+            ?: fallback
+
+    /**
+     * Pages backwards through `/api/control/missions/:id/events` using `before_seq`
+     * so `/btw` turns that emit >200 tool/progress events never lose their initiating
+     * `user_message` or earlier turns in the same thread.
+     */
+    suspend fun loadThreadEvents(
+        pageSize: Int = 200,
+        maxPages: Int = 25,
+        fetchPage: suspend (beforeSeq: Long?) -> List<OrbRow>
+    ): List<OrbRow> {
+        val bySeq = linkedMapOf<Long, OrbRow>()
+        val unsequenced = mutableListOf<OrbRow>()
+        var beforeSeq: Long? = null
+        for (pageIndex in 0 until maxPages) {
+            val page = fetchPage(beforeSeq)
+            if (page.isEmpty()) break
+            var minSeq = Long.MAX_VALUE
+            for (ev in page) {
+                val seq = eventSeq(ev, -1L)
+                if (seq >= 0L) {
+                    bySeq[seq] = ev
+                    if (seq < minSeq) minSeq = seq
+                } else {
+                    unsequenced.add(ev)
+                }
+            }
+            if (page.size < pageSize || minSeq == Long.MAX_VALUE || minSeq <= 1L) break
+            if (beforeSeq != null && minSeq >= beforeSeq) break
+            beforeSeq = minSeq
+        }
+        val sorted = bySeq.entries.sortedBy { it.key }.map { it.value }
+        return if (unsequenced.isEmpty()) sorted else sorted + unsequenced
+    }
+
+    suspend fun loadThreadEvents(
+        core: OrbCore,
+        missionId: String,
+        pageSize: Int = 200,
+        maxPages: Int = 25
+    ): List<OrbRow> {
+        val encoded = core.encodeComponent(missionId)
+        return loadThreadEvents(pageSize = pageSize, maxPages = maxPages) { beforeSeq ->
+            val beforeQuery = if (beforeSeq != null) "&before_seq=$beforeSeq" else ""
+            core.fetchRows("/api/control/missions/$encoded/events?limit=$pageSize$beforeQuery", "events")
+        }
+    }
+
+    private fun parseHistoryFallback(
+        missionId: String,
+        history: List<OrbRow>,
+        active: Boolean,
+        deliveredIds: Set<String>
+    ): ParsedThread {
+        val turns = mutableListOf<Turn>()
+        var question = ""
+        var at = ""
+        var index = 0
+        var texts = mutableListOf<String>()
+
+        fun flush(seq: Int) {
+            val q = question.trim()
+            val result = sideAnswer(texts, final = texts.lastOrNull())
+            if (q.isNotEmpty() && result.answer.isNotEmpty() && !isSynthetic(result.answer)) {
+                turns.add(Turn(id = "btw:$missionId:h$seq", question = q, answer = result.answer, narration = result.narration, at = at))
+            }
+            question = ""
+            texts = mutableListOf()
+        }
+
+        for ((rowIdx, row) in history.withIndex()) {
+            val role = (row.str("role", "sender") ?: "").lowercase()
+            val rawContent = (row.raw["content"] as? String) ?: row.str("content", "text", "message").orEmpty()
+            when (role) {
+                "user" -> {
+                    if (question.isNotEmpty()) flush(index)
+                    question = extractQuestion(rawContent)
+                    at = row.str("timestamp", "created_at").orEmpty()
+                    index = rowIdx
+                }
+                "assistant" -> {
+                    val text = rawContent.trim()
+                    if (text.isNotEmpty() && !isSynthetic(text) && texts.lastOrNull() != text) {
+                        texts.add(text)
+                    }
+                }
+            }
+        }
+        if (active && question.isNotEmpty()) {
+            val live = sideAnswer(texts)
+            return ParsedThread(
+                turns = turns,
+                open = OpenTurn(
+                    id = "btw:$missionId:h$index",
+                    question = question,
+                    at = at,
+                    events = emptyList(),
+                    answer = live.answer,
+                    narration = live.narration
+                ),
+                deliveredIds = deliveredIds
+            )
+        }
+        if (question.isNotEmpty()) flush(index)
+        return ParsedThread(turns = turns, open = null, deliveredIds = deliveredIds)
+    }
+
     /**
      * Answered turns of one `/btw` thread and, when it is still working, its open question.
      * Pre-submitted follow-ups (`metadata.queued == true`) are ignored until Core dequeues them.
+     * Falls back to `mission.history` if the event window has no non-queued `user_message` boundary,
+     * and preserves earlier answered turns from `previous` if a partial window starts mid-thread.
      */
-    fun parseTurns(missionId: String, events: List<OrbRow>, active: Boolean): ParsedThread {
+    fun parseTurns(
+        missionId: String,
+        events: List<OrbRow>,
+        active: Boolean,
+        history: List<OrbRow> = emptyList(),
+        previous: ParsedThread? = null
+    ): ParsedThread {
         val ordered = events
-            .mapIndexed { idx, ev ->
-                val seq = (ev.raw["sequence"] as? Number)?.toLong()
-                    ?: (ev.raw["seq"] as? Number)?.toLong()
-                    ?: ev.int("sequence", "seq")?.toLong()
-                    ?: idx.toLong()
-                seq to ev
-            }
+            .mapIndexed { idx, ev -> eventSeq(ev, idx.toLong()) to ev }
             .sortedBy { it.first }
         val turns = mutableListOf<Turn>()
         val deliveredIds = mutableSetOf<String>()
+        if (previous != null) deliveredIds.addAll(previous.deliveredIds)
+        var sawNonQueuedUser = false
         var question = ""
         var at = ""
         var seq = 0L
         var start = 0
         var texts = mutableListOf<String>()
         var final: String? = null
+
+        fun mergeWithPrevious(parsedTurns: List<Turn>): List<Turn> {
+            val prevTurns = previous?.turns.orEmpty()
+            if (prevTurns.isEmpty()) return parsedTurns
+            val seenIds = parsedTurns.mapTo(mutableSetOf()) { it.id }
+            val preserved = prevTurns.filter { it.id !in seenIds }
+            return if (preserved.isEmpty()) parsedTurns else mergeTurns(listOf(preserved, parsedTurns))
+        }
 
         fun flush() {
             val q = question.trim()
@@ -304,6 +431,7 @@ object OrbSideAgent {
                 "user_message" -> {
                     val queued = OrbJSON.bool(meta, "queued") == true || OrbJSON.bool(data, "queued") == true
                     if (queued) continue
+                    sawNonQueuedUser = true
                     for (key in listOf("client_message_id", "message_id", "event_id")) {
                         val cid = OrbJSON.str(meta, key) ?: OrbJSON.str(data, key) ?: ev.str(key)
                         if (!cid.isNullOrEmpty()) deliveredIds.add(cid)
@@ -323,6 +451,33 @@ object OrbSideAgent {
             }
         }
 
+        if (!sawNonQueuedUser) {
+            if (history.isNotEmpty()) {
+                val fromHistory = parseHistoryFallback(missionId, history, active, deliveredIds)
+                if (fromHistory.turns.isNotEmpty() || fromHistory.open != null) {
+                    val tailEvents = ordered.map { it.second }
+                    val openWithEvents = fromHistory.open?.let { open ->
+                        val streamed = OrbTurnText.fromStoredEvents(tailEvents, working = true).trim()
+                        val combined = buildList {
+                            if (open.narration.isNotEmpty()) addAll(open.narration)
+                            if (open.answer.isNotEmpty()) add(open.answer)
+                            if (streamed.isNotEmpty() && !isSynthetic(streamed) && lastOrNull() != streamed) add(streamed)
+                        }
+                        val live = sideAnswer(combined)
+                        open.copy(events = tailEvents, answer = live.answer, narration = live.narration)
+                    }
+                    return ParsedThread(
+                        turns = mergeWithPrevious(fromHistory.turns),
+                        open = openWithEvents,
+                        deliveredIds = deliveredIds
+                    )
+                }
+            }
+            if (previous != null) {
+                return if (active) previous else previous.copy(open = null)
+            }
+        }
+
         if (active && question.isNotEmpty()) {
             val tailEvents = ordered.subList(start, ordered.size).map { it.second }
             val liveTexts = texts.toMutableList()
@@ -334,7 +489,7 @@ object OrbSideAgent {
             }
             val live = sideAnswer(liveTexts)
             return ParsedThread(
-                turns = turns,
+                turns = mergeWithPrevious(turns),
                 open = OpenTurn(
                     id = "btw:$missionId:$seq",
                     question = question,
@@ -347,7 +502,7 @@ object OrbSideAgent {
             )
         }
         if (question.isNotEmpty()) flush()
-        return ParsedThread(turns = turns, open = null, deliveredIds = deliveredIds)
+        return ParsedThread(turns = mergeWithPrevious(turns), open = null, deliveredIds = deliveredIds)
     }
 
     /** Resends an idempotent write after a dropped or timed-out connection (1, 2, 4, 8 s), like desktop `askBtwAgent`. */
@@ -419,6 +574,7 @@ fun OrbSideAgentSheet(
     var queueExpanded by remember(session.parentId) { mutableStateOf(true) }
     var editingQueuedId by remember(session.parentId) { mutableStateOf<String?>(null) }
     val rawQueuedById = remember(session.parentId) { mutableStateMapOf<String, String>() }
+    val cachedThreads = remember(session.parentId) { mutableStateMapOf<String, Pair<String, OrbSideAgent.ParsedThread>>() }
 
     var startedAtMs by remember(session.parentId) { mutableLongStateOf(System.currentTimeMillis()) }
     var nowMs by remember(session.parentId) { mutableLongStateOf(startedAtMs) }
@@ -441,33 +597,42 @@ fun OrbSideAgentSheet(
     }
 
     suspend fun refreshThreads(): OrbRow? {
-        val allRows = runCatching {
-            core.fetchRows("/api/control/missions?limit=200", "missions")
-        }.getOrDefault(emptyList())
+        val allRows = try {
+            val tag = core.encodeComponent("btw-parent:${session.parentId}")
+            core.fetchRows("/api/control/missions?tag=$tag&all=true&limit=50", "missions")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            loading = false
+            return boundMission
+        }
         val matching = OrbSideAgent.threads(allRows, session.parentId).toMutableList()
         val explicitId = boundId ?: session.missionId
         if (!explicitId.isNullOrEmpty() && matching.none { it.id == explicitId }) {
-            runCatching {
-                OrbRow(explicitId, core.fetchDict("/api/control/missions/${core.encodeComponent(explicitId)}"))
-            }.getOrNull()?.let { matching.add(it) }
+            try {
+                matching.add(OrbRow(explicitId, core.fetchDict("/api/control/missions/${core.encodeComponent(explicitId)}")))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                boundMission?.takeIf { it.id == explicitId }?.let { matching.add(it) }
+            }
         }
         if (matching.isEmpty()) {
             loading = false
-            return null
+            return boundMission
         }
         val latest = OrbSideAgent.latestThread(matching) ?: matching.last()
         var target = latest
         val superseded = OrbJSON.strList(target.raw, "tags")
             .firstOrNull { it.startsWith("superseded_by:") }
             ?.removePrefix("superseded_by:")
-        if (!superseded.isNullOrEmpty() && superseded != target.id) {
-            runCatching {
-                OrbRow(superseded, core.fetchDict("/api/control/missions/${core.encodeComponent(superseded)}"))
-            }.getOrNull()?.let { target = it }
-        } else {
-            runCatching {
-                OrbRow(target.id, core.fetchDict("/api/control/missions/${core.encodeComponent(target.id)}"))
-            }.getOrNull()?.let { target = it }
+        try {
+            val detailId = if (!superseded.isNullOrEmpty() && superseded != target.id) superseded else target.id
+            target = OrbRow(detailId, core.fetchDict("/api/control/missions/${core.encodeComponent(detailId)}"))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            boundMission?.takeIf { it.id == target.id }?.let { target = it }
         }
         boundMission = target
         boundId = target.id
@@ -476,23 +641,59 @@ fun OrbSideAgentSheet(
         var latestOpen: OrbSideAgent.OpenTurn? = null
         var latestDelivered = emptySet<String>()
         for (thread in matching) {
-            val tid = if (thread.id == latest.id) target.id else thread.id
-            val tStatus = (if (tid == target.id) target.str("status") else thread.str("status")).orEmpty().lowercase()
+            val row = if (thread.id == latest.id) target else thread
+            val tid = row.id
+            val tStatus = row.str("status").orEmpty().lowercase()
             val isLive = tid == target.id && tStatus in OrbSideAgent.liveStatuses
-            val evs = runCatching {
-                core.fetchRows("/api/control/missions/${core.encodeComponent(tid)}/events?limit=200", "events")
-            }.getOrDefault(emptyList())
-            val parsed = OrbSideAgent.parseTurns(tid, evs, active = isLive)
-            perThread.add(parsed.turns)
-            if (tid == target.id) {
-                latestOpen = parsed.open
-                latestDelivered = parsed.deliveredIds
+            val stamp = OrbSideAgent.activityStamp(row)
+            val cached = cachedThreads[tid]
+            val parsed = if (!isLive && cached != null && cached.first == stamp) {
+                cached.second
+            } else {
+                try {
+                    val evs = OrbSideAgent.loadThreadEvents(core, tid)
+                    val historyRows = row.rows("history").ifEmpty {
+                        if (evs.none { (it.str("event_type", "type", "kind") ?: "").equals("user_message", ignoreCase = true) }) {
+                            runCatching {
+                                OrbRow(tid, core.fetchDict("/api/control/missions/${core.encodeComponent(tid)}")).rows("history")
+                            }.getOrDefault(emptyList())
+                        } else emptyList()
+                    }
+                    val next = OrbSideAgent.parseTurns(
+                        missionId = tid,
+                        events = evs,
+                        active = isLive,
+                        history = historyRows,
+                        previous = cached?.second
+                    )
+                    cachedThreads[tid] = stamp to next
+                    next
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // Preserve already-rendered thread turns and open progress on transient errors.
+                    cached?.second?.let { prev -> if (isLive) prev else prev.copy(open = null) }
+                }
+            }
+            if (parsed != null) {
+                perThread.add(parsed.turns)
+                if (tid == target.id) {
+                    latestOpen = parsed.open
+                    latestDelivered = parsed.deliveredIds
+                }
+            } else {
+                perThread.add(turns.filter { it.id.startsWith("btw:$tid:") })
+                if (tid == target.id) {
+                    latestOpen = if (isLive && openTurn?.id?.startsWith("btw:$tid:") == true) openTurn else null
+                }
             }
         }
         val merged = OrbSideAgent.mergeTurns(perThread)
         turns = merged
         openTurn = latestOpen
-        followUps = followUps.withDelivered(latestDelivered)
+        if (latestDelivered.isNotEmpty()) {
+            followUps = followUps.withDelivered(latestDelivered)
+        }
         val pending = pendingQuestion?.trim()
         if (!pending.isNullOrEmpty() && (latestOpen?.question?.trim() == pending || merged.any { it.question.trim() == pending })) {
             pendingQuestion = null

@@ -35,6 +35,8 @@ export function RemoteQueue(p: {
   onSendImmediate?: (ordered: {id: string; content: string; attached?: boolean}[], liveInjected?: {id: string; content: string; attached?: boolean}[]) => Promise<void>;
   onRows: (ids: string[]) => void;
   onCancel: (id: string) => void;
+  /** Called only when a queued message is explicitly removed (`DELETE`), not when promoted via `Send now`. */
+  onRemove?: (id: string) => void;
   /** Withdraw a message shown optimistically as sent, when it was not delivered live. */
   onRetract?: (id: string) => void;
   /** Core took a Send now: injected into the running turn (`live`), or
@@ -123,12 +125,14 @@ export function RemoteQueue(p: {
       await api(`/api/control/queue/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (destroyed || version !== connectionVersion() || mission !== p.mission) return;
       p.onRows(rows().map(row => row.id));
+      p.onRemove?.(id);
       p.onCancel(id);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/\b404\b/.test(msg)) {
         if (!destroyed && version === connectionVersion() && mission === p.mission) {
           p.onRows(rows().map(row => row.id));
+          p.onRemove?.(id);
           p.onCancel(id);
         }
         return;
@@ -227,7 +231,10 @@ export function RemoteQueue(p: {
       for (const r of tail) deletedIds.add(r.id);
       setRows(previous => previous.filter(row => !tail.some(t => t.id === row.id)));
       p.onRows(rows().map(row => row.id));
-      for (const r of tail) p.onCancel(r.id);
+      for (const r of tail) {
+        p.onRemove?.(r.id);
+        p.onCancel(r.id);
+      }
       const ok = await sendReplaced();
       if (!ok) return false;
       if (after.length && replayAfter) await replayAfter(after.map(r => {

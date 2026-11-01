@@ -10,7 +10,7 @@ import {btwConfig} from './btwSettings';
 import {sideQuestionKey,BTW_HISTORY_LIMIT} from './sideQuestionStorage';
 import {forkSource} from './missionTree';
 import {localBinding,restoreLocalBindings,localAgentForLaunch,rememberBinding,startLocal,followLocal,stopLocal,localActivities,reconcileLocalRun,recoverLocalLaunch} from './localAgents';
-import {enqueueLocalMessage} from './localMessageQueue';
+import {enqueueLocalMessage,queuedLocalMessages} from './localMessageQueue';
 import {extractBtwUserQuestion as extractBtwQuestion,replaceBtwUserQuestion as replaceBtwQuestion} from './messagePresentation';
 import {getMissionEvents,storedToStream,streamMission,type StoredEvent} from './stream';
 import {TranscriptReducer,type StreamItem} from './transcriptModel';
@@ -32,10 +32,40 @@ import {createSignal} from 'solid-js';
 import type {LocalActivity} from './localAgents';
 import {usageTelemetry} from './usageTelemetry';
 const [remoteActivities,setRemoteActivities]=createSignal<Record<string,LocalActivity[]>>({});
-export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;queuedCursor?:ConversationCursor;contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean};
+export type QueuedBtwCursor={id:string;before?:ConversationCursor;after:ConversationCursor};
+export type BtwSession={id:string;question:string;harness:string;model:string;local:boolean;active:boolean;baseline:number;afterSequence?:number;placement?:string;conversationCursor?:ConversationCursor;pendingCursor?:ConversationCursor;queuedCursor?:ConversationCursor;queuedCursors?:QueuedBtwCursor[];contextBytes?:number;contextVersion?:number;launchPending?:boolean;brokenSession?:boolean};
 const storageKey=(parent:string)=>'agent:'+sideQuestionKey(parent);
 export function btwSession(parent:string):BtwSession|undefined{const s=readJson<BtwSession|undefined>(storageKey(parent),undefined,isRecord);return s?{...s}:undefined;}
 function save(parent:string,s:BtwSession){writeJson(storageKey(parent),s);}
+function commitBtwDeliveredCursor(s:BtwSession,messageId?:string){
+ if(s.pendingCursor){s.conversationCursor=s.pendingCursor;delete s.pendingCursor;}
+ if(messageId&&s.queuedCursors?.length){
+  const idx=s.queuedCursors.findIndex(entry=>entry.id===messageId);
+  if(idx>=0){
+   s.pendingCursor=s.queuedCursors[idx].after;
+   s.queuedCursors=s.queuedCursors.slice(idx+1);
+   if(!s.queuedCursors.length)delete s.queuedCursors;
+  }
+ }
+ delete s.queuedCursor;
+}
+/** Remove a cancelled queued follow-up's incremental cursor (and any downstream
+ * cursor chained off its undelivered `<main_conversation_update>` delta) so the
+ * next queued question re-includes parent events that were only in the deleted message. */
+export function dropBtwQueuedCursor(parent:string,messageId:string):void{
+ const s=btwSession(parent);if(!s)return;
+ let changed=false;
+ if(s.queuedCursor){delete s.queuedCursor;changed=true;}
+ if(s.queuedCursors?.length){
+  const idx=s.queuedCursors.findIndex(entry=>entry.id===messageId);
+  if(idx>=0){
+   const remaining=s.queuedCursors.slice(0,idx);
+   if(remaining.length)s.queuedCursors=remaining;else delete s.queuedCursors;
+   changed=true;
+  }
+ }
+ if(changed)save(parent,s);
+}
 const isQueuedUserEvent=(event:StoredEvent)=>event.metadata?.queued===true;
 
 // A turn is delimited by its latest non-queued user event, not an array offset:
@@ -113,7 +143,7 @@ async function currentSide(parent:string,s:BtwSession,signal?:AbortSignal,versio
 }
 const locks=new Map<string,Promise<void>>();
 export function btwLaunchPending(parent:string):Promise<void>|undefined{return locks.get(storageKey(parent));}
-export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.local){await stopLocal(s.id);await flushClientLink(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
+export async function stopBtw(parent:string){const s=btwSession(parent);if(!s)return;if(s.queuedCursor||s.queuedCursors){delete s.queuedCursor;delete s.queuedCursors;save(parent,s);}if(s.local){await stopLocal(s.id);await flushClientLink(s.id);await setClientMissionStatus(s.id,'interrupted');}else{await currentSide(parent,s);await cancelMission(s.id);}}
 export function btwActivities(parent:string){const s=btwSession(parent);return s?.local?localActivities(s.id):s?remoteActivities()[s.id]??[]:[];}
 async function upload(attachments:SideAttachment[],destination:string){
  const paths:string[]=[];
@@ -141,8 +171,15 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   const state=await followLocal(s.id,text=>{if(!signal.aborted&&connectionVersion()===version)receive({type:'snapshot',text});});
   if(signal.aborted||connectionVersion()!==version)return;
   s.active=false;
-  if(state.error||state.exit_code||!state.text.trim()){s.brokenSession=true;delete s.pendingCursor;save(parent,s);throw new Error(state.error||'The side agent stopped without a response.');}
+  if(state.error||state.exit_code||!state.text.trim()){s.brokenSession=true;delete s.pendingCursor;delete s.queuedCursor;delete s.queuedCursors;save(parent,s);throw new Error(state.error||'The side agent stopped without a response.');}
   if(s.pendingCursor){s.conversationCursor=s.pendingCursor;delete s.pendingCursor;}
+  if(s.queuedCursors?.length){
+   const liveLocalIds=new Set<string>(queuedLocalMessages(s.id).filter(row=>row.state!=='error').map(row=>row.id));
+   const remaining=s.queuedCursors.filter(entry=>liveLocalIds.has(entry.id));
+   const delivered=[...s.queuedCursors].reverse().find(entry=>!liveLocalIds.has(entry.id));
+   if(delivered)s.conversationCursor=delivered.after;
+   if(remaining.length)s.queuedCursors=remaining;else delete s.queuedCursors;
+  }
   if(s.queuedCursor){s.conversationCursor=s.queuedCursor;delete s.queuedCursor;}
   delete s.brokenSession;save(parent,s);
   receive({type:'done',answer:state.text});return;
@@ -211,13 +248,17 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   if(latestUser){
    if(activeUserSeq===undefined){
     activeUserSeq=latestUser.sequence;
+    if(latestUser.event_id&&s.queuedCursors?.some(entry=>entry.id===latestUser.event_id)){
+     commitBtwDeliveredCursor(s,latestUser.event_id);
+     save(parent,s);
+    }
    }else if(latestUser.sequence>activeUserSeq){
     const parsed=parseBtwThread({...mission,status:'completed'},events.filter(e=>e.sequence<latestUser.sequence));
     const finished=parsed.turns.at(-1);
     activeUserSeq=latestUser.sequence;
     const nextQuestion=extractBtwUserQuestion(latestUser.content)||s.question;
     s.question=nextQuestion;
-    if(s.pendingCursor){s.conversationCursor=s.pendingCursor;delete s.pendingCursor;}
+    commitBtwDeliveredCursor(s,latestUser.event_id??undefined);
     save(parent,s);
     live=new TranscriptReducer();streamed={answer:'',narration:[]};previous=undefined;
     setLiveThoughts(all=>({...all,[s.id]:[]}));
@@ -243,11 +284,11 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
   if(!active){
    s.active=false;
    if(['failed','interrupted','cancelled'].includes(mission.status)){
-    s.brokenSession=true;delete s.pendingCursor;delete s.queuedCursor;save(parent,s);
+    s.brokenSession=true;delete s.pendingCursor;delete s.queuedCursor;delete s.queuedCursors;save(parent,s);
     throw new Error(mission.remote_job?.error||mission.status_message||`Side agent ${mission.status}.`);
    }
    if(!text.trim()){
-    s.brokenSession=true;delete s.pendingCursor;delete s.queuedCursor;save(parent,s);
+    s.brokenSession=true;delete s.pendingCursor;delete s.queuedCursor;delete s.queuedCursors;save(parent,s);
     const reason=mission.remote_job?.error||mission.status_message;
     const hint=toolItems.length>0
      ?'Check its activity for tool errors, then retry.'
@@ -255,7 +296,7 @@ export async function watchBtw(parent:string,signal:AbortSignal,receive:(e:SideE
     throw new Error(`No response was captured from the side agent (${mission.status}${reason?`: ${reason}`:''}). ${hint}`);
    }
    if(s.pendingCursor){s.conversationCursor=s.pendingCursor;delete s.pendingCursor;}
-   if(s.queuedCursor){s.conversationCursor=s.queuedCursor;delete s.queuedCursor;}
+   delete s.queuedCursor;
    delete s.brokenSession;save(parent,s);
    receive({type:'done',answer:text,...(result.narration.length?{narration:result.narration}:{})});return;
   }
@@ -459,9 +500,26 @@ export async function queueBtwFollowUp(
  const node=machine?.kind==='node'?machine.id:machine?.kind==='core'?undefined:missionAssignedNode(source);
  const destination=local?'local':node??'core';
  const paths=await upload(attachments,destination);
- const baseCursor=s.queuedCursor??s.pendingCursor??s.conversationCursor;
+ let cursorChain=s.queuedCursors?[...s.queuedCursors]:[];
+ if(local&&cursorChain.length){
+  const liveIds=new Set<string>(queuedLocalMessages(s.id).filter(row=>row.waiting&&row.state!=='accepted'&&row.state!=='error').map(row=>row.id));
+  const dropIdx=cursorChain.findIndex(entry=>entry.id===clientMessageId||!liveIds.has(entry.id));
+  if(dropIdx>=0)cursorChain=cursorChain.slice(0,dropIdx);
+ }else if(replace&&cursorChain.length){
+  const dropIdx=cursorChain.findIndex(entry=>entry.id===clientMessageId);
+  if(dropIdx>=0)cursorChain=cursorChain.slice(0,dropIdx);
+ }
+ const baseCursor=cursorChain.at(-1)?.after??s.pendingCursor??s.conversationCursor;
  const snapshot=await prepareBtwContext(source,context,destination,baseCursor,baseCursor?[]:history,local?localBinding(parent)?.cwd:undefined);
  const prompt=makeBtwPrompt(snapshot.context,question,paths);
+ const recordQueuedCursor=(session:BtwSession,id:string):BtwSession=>{
+  const prior=(session.queuedCursors??cursorChain).filter(entry=>entry.id!==id);
+  const nextCursors=snapshot.cursor?[...prior,{id,before:baseCursor,after:snapshot.cursor}]:prior;
+  const next:BtwSession={...session};
+  delete next.queuedCursor;
+  if(nextCursors.length)next.queuedCursors=nextCursors;else delete next.queuedCursors;
+  return next;
+ };
  if(local){
   await restoreLocalBindings();
   const binding=localBinding(parent);
@@ -474,20 +532,27 @@ export async function queueBtwFollowUp(
    question,
    {id:clientMessageId,waiting:true,replace},
   );
-  s={...s,queuedCursor:snapshot.cursor};save(parent,s);
+  s=recordQueuedCursor(s,clientMessageId);save(parent,s);
   return {id:clientMessageId,missionId:s.id,prompt,queued:true,local:true};
  }
  let lastError:unknown;
  for(let attempt=0;;attempt++){
   try{
    const receipt=await sendMissionMessage(current.id,prompt,undefined,clientMessageId);
+   const id=receipt.id||clientMessageId;
    const nextSession=btwSession(parent)??s;
    if(receipt.queued){
-    save(parent,{...nextSession,id:current.id,queuedCursor:snapshot.cursor});
+    save(parent,recordQueuedCursor({...nextSession,id:current.id},id));
    }else{
-    save(parent,{...nextSession,id:current.id,question,active:true,pendingCursor:snapshot.cursor});
+    const cleaned:BtwSession={...nextSession,id:current.id,question,active:true,pendingCursor:snapshot.cursor};
+    delete cleaned.queuedCursor;
+    if(cleaned.queuedCursors){
+     const rest=cleaned.queuedCursors.filter(entry=>entry.id!==id);
+     if(rest.length)cleaned.queuedCursors=rest;else delete cleaned.queuedCursors;
+    }
+    save(parent,cleaned);
    }
-   return {id:receipt.id||clientMessageId,missionId:current.id,prompt,queued:receipt.queued,local:false};
+   return {id,missionId:current.id,prompt,queued:receipt.queued,local:false};
   }catch(error){
    lastError=error;
    if(connectionVersion()!==version||!isTransientNetworkError(error)||attempt>=BTW_SEND_RETRY_MS.length)throw notSent(lastError);

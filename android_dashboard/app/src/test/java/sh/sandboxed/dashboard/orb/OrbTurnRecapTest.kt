@@ -1,5 +1,6 @@
 package sh.sandboxed.dashboard.orb
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -112,5 +113,54 @@ class OrbTurnRecapTest {
         assertEquals("Edited question?", OrbSideAgent.extractQuestion(replaced))
         assertTrue(replaced.contains("<main_conversation_update>\nUser: hi\n</main_conversation_update>"))
         assertTrue(replaced.endsWith("Attachment: /tmp/a.png"))
+    }
+
+    @Test
+    fun sideAgentPagesBackwardBeyond200EventsAndPreservesCachedTurnsWhenWindowIsTruncated() = runBlocking {
+        fun ev(seq: Long, type: String, content: String): OrbRow =
+            OrbRow(
+                "e-$seq",
+                mapOf(
+                    "sequence" to seq,
+                    "event_id" to "e-$seq",
+                    "event_type" to type,
+                    "content" to content,
+                    "timestamp" to "2026-11-01T06:00:${seq.toString().padStart(2, '0')}Z"
+                )
+            )
+
+        val fullLog = buildList {
+            add(ev(1L, "user_message", "<main_conversation_update>ctx</main_conversation_update>\n\nCurrent request:\nLong turn question?"))
+            for (seq in 2L..245L) {
+                add(ev(seq, "tool_call", """{"tool":"read","seq":$seq}"""))
+            }
+            add(ev(246L, "assistant_message", "Long turn final answer."))
+        }
+        val requestedBefore = mutableListOf<Long?>()
+        val paged = OrbSideAgent.loadThreadEvents(pageSize = 200, maxPages = 5) { beforeSeq ->
+            requestedBefore.add(beforeSeq)
+            val eligible = if (beforeSeq == null) fullLog else fullLog.filter { (it.raw["sequence"] as Long) < beforeSeq }
+            eligible.takeLast(200)
+        }
+        assertEquals(listOf(null, 47L), requestedBefore)
+        assertEquals(246, paged.size)
+        val parsed = OrbSideAgent.parseTurns("side-long", paged, active = false)
+        assertEquals(1, parsed.turns.size)
+        assertEquals("Long turn question?", parsed.turns.first().question)
+        assertEquals("Long turn final answer.", parsed.turns.first().answer)
+
+        // Fallback when events are empty/unavailable or capped before the user_message:
+        // history rows + previous cached turns keep the thread intact.
+        val history = listOf(
+            OrbRow("h0", mapOf("role" to "user", "content" to "Header\n\nCurrent request:\nFallback question?", "timestamp" to "2026-11-01T06:10:00Z")),
+            OrbRow("h1", mapOf("role" to "assistant", "content" to "Fallback answer.", "timestamp" to "2026-11-01T06:10:05Z"))
+        )
+        val tailOnly = fullLog.takeLast(20)
+        val recovered = OrbSideAgent.parseTurns("side-long", tailOnly, active = false, history = history, previous = parsed)
+        assertEquals(listOf("Long turn question?", "Fallback question?"), recovered.turns.map { it.question })
+
+        // Transient empty window without history preserves previous cached state instead of wiping it.
+        val preserved = OrbSideAgent.parseTurns("side-long", emptyList(), active = false, previous = parsed)
+        assertEquals(parsed.turns, preserved.turns)
     }
 }
