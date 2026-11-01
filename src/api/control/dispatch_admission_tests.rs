@@ -16659,6 +16659,7 @@ async fn external_mcp_session_gates_missionless_issuance_and_approval_liveness()
         status: RequestStatus::Pending,
         owner: Some(h.user.id.clone()),
         mission_id: None,
+        root_mission_id: None,
         requester: Some(ext_subject.clone()),
         requester_label: ext_subject.external_display_label(),
         mission_title: None,
@@ -18980,4 +18981,334 @@ async fn remote_claude_switches_in_place_to_opencode_and_supersedes_pr_writer_cl
     );
     let absorbed = store.get_mission(prior_writer.id).await.unwrap().unwrap();
     assert_eq!(absorbed.status, MissionStatus::Acknowledged);
+}
+
+#[tokio::test]
+async fn secret_broker_subagent_tree_inherits_grants_and_development_identity_github_token() {
+    use crate::api::secret_broker::{
+        admits_secret_delivery, caller_for, RequestKind, RequestStatus, SecretBroker, SecretRequest,
+    };
+    use crate::control_mcp::{
+        gateway::{session, verify, SessionRequest},
+        Role,
+    };
+
+    let h = Harness::new().await;
+    let store = &h.control.mission_store;
+
+    // 1. Configure `verity-core` with `development-identity` skill (and no Bitwarden default_access).
+    h.state
+        .projects
+        .upsert_project("verity-core", Some("Ethereum"), None, None, None)
+        .unwrap();
+    h.state
+        .projects
+        .set_skills(
+            "verity-core",
+            &[
+                "development-identity".to_string(),
+                "managed-compute".to_string(),
+            ],
+        )
+        .unwrap();
+
+    // Create parent mission + two child subagents + grandchild + fork + `/btw` side mission.
+    let root = store
+        .create_mission(
+            Some("evm.fast coordinator"),
+            None,
+            None,
+            None,
+            None,
+            Some("claude_code"),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            root.id,
+            MissionProjectPatch {
+                project: Some(Some("verity-core".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let sub_a = store
+        .create_mission_with_parent(
+            Some("Subagent Prove GuardedBody Phase1"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(root.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            sub_a.id,
+            MissionProjectPatch {
+                project: Some(Some("verity-core".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let sub_b = store
+        .create_mission_with_parent(
+            Some("Subagent Prove GuardedBody Phase4"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(root.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            sub_b.id,
+            MissionProjectPatch {
+                project: Some(Some("verity-core".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let grandchild = store
+        .create_mission_with_parent(
+            Some("Nested worker"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(sub_b.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            grandchild.id,
+            MissionProjectPatch {
+                project: Some(Some("verity-core".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let forked = store
+        .create_mission_with_parent(
+            Some("evm.fast coordinator · fork"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("claude_code"),
+            None,
+            Some(root.id),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .update_mission_project(
+            forked.id,
+            MissionProjectPatch {
+                project: Some(Some("verity-core".into())),
+                tags: Some(vec![format!("fork-of:{}", root.id)]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let side_mission = store
+        .create_mission_with_parent(
+            Some("btw side question"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("opencode"),
+            None,
+            Some(root.id),
+            None,
+        )
+        .await
+        .unwrap();
+    super::fork::record_side_launch(
+        &h.state.config.working_dir,
+        side_mission.id,
+        "side-key",
+        "fp",
+    )
+    .unwrap();
+
+    let issue_principal = |mid: Uuid, proj: Option<&str>| {
+        let state = h.state.clone();
+        let user = h.user.clone();
+        let proj = proj.map(str::to_string);
+        async move {
+            let Json(issued) = session(
+                State(state.clone()),
+                Extension(user),
+                Json(SessionRequest {
+                    project: proj,
+                    role: Role::Executor,
+                    mission_id: Some(mid),
+                }),
+            )
+            .await
+            .unwrap();
+            verify(&state, issued["token"].as_str().unwrap()).unwrap()
+        }
+    };
+
+    let p_sub_a = issue_principal(sub_a.id, Some("verity-core")).await;
+    let p_sub_b = issue_principal(sub_b.id, Some("verity-core")).await;
+    let p_grand = issue_principal(grandchild.id, Some("verity-core")).await;
+    let p_fork = issue_principal(forked.id, Some("verity-core")).await;
+    let p_side = issue_principal(side_mission.id, None).await;
+
+    let c_sub_a = caller_for(&h.state, &p_sub_a).await.unwrap();
+    let c_sub_b = caller_for(&h.state, &p_sub_b).await.unwrap();
+    let c_grand = caller_for(&h.state, &p_grand).await.unwrap();
+    let c_fork = caller_for(&h.state, &p_fork).await.unwrap();
+    let c_side = caller_for(&h.state, &p_side).await.unwrap();
+
+    assert_eq!(c_sub_a.lineage, vec![sub_a.id, root.id]);
+    assert_eq!(c_sub_b.lineage, vec![sub_b.id, root.id]);
+    assert_eq!(c_grand.lineage, vec![grandchild.id, sub_b.id, root.id]);
+    assert_eq!(
+        c_fork.lineage,
+        vec![forked.id],
+        "fork must not inherit parent lineage"
+    );
+    assert_eq!(
+        c_side.lineage,
+        vec![side_mission.id],
+        "/btw side-launch mission must not inherit parent lineage"
+    );
+
+    let local_broker = SecretBroker::load(
+        h.state
+            .config
+            .working_dir
+            .join(".sandboxed-sh")
+            .join("test_tree_secret_broker.json"),
+    );
+
+    // 2. `development-identity` automatically authorizes `GITHUB_TOKEN` / `GH_TOKEN` (even on Boat
+    //    `managed-*` placement), without authorizing non-GitHub secrets in the same Bitwarden project.
+    let access_a = local_broker.access_for(&h.state, &c_sub_a).await;
+    assert!(access_a.allows("GITHUB_TOKEN", Some("bw-shared-proj")));
+    assert!(access_a.allows("GH_TOKEN", Some("bw-shared-proj")));
+    assert!(admits_secret_delivery("GITHUB_TOKEN", true));
+    assert!(!access_a.allows("SPARK_MEMORY_API_TOKEN", Some("bw-shared-proj")));
+
+    // 3. Concurrent sibling Read requests for a non-default secret deduplicate to 1 pending item,
+    //    and approving it once grants read access to all siblings + grandchildren in the tree,
+    //    while keeping forks and `/btw` side missions isolated.
+    let req_from_a = local_broker
+        .seed_pending_for_test(SecretRequest {
+            id: Uuid::new_v4(),
+            kind: RequestKind::Read,
+            status: RequestStatus::Pending,
+            owner: Some(c_sub_a.owner.clone()),
+            mission_id: Some(sub_a.id),
+            root_mission_id: c_sub_a.root_mission_id(),
+            requester: Some(c_sub_a.subject.clone()),
+            requester_label: None,
+            mission_title: c_sub_a.mission_title.clone(),
+            paloma_project: c_sub_a.paloma_project.clone(),
+            key: Some("CUSTOM_VERIFIER_TOKEN".into()),
+            project_id: Some("bw-shared-proj".into()),
+            all_projects: false,
+            reason: "verify benchmark receipt".into(),
+            note: None,
+            value_sha256: None,
+            encrypted_value: None,
+            target_project_id: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+            error: None,
+        })
+        .await;
+    let req_from_b = local_broker
+        .seed_pending_for_test(SecretRequest {
+            id: Uuid::new_v4(),
+            kind: RequestKind::Read,
+            status: RequestStatus::Pending,
+            owner: Some(c_sub_b.owner.clone()),
+            mission_id: Some(sub_b.id),
+            root_mission_id: c_sub_b.root_mission_id(),
+            requester: Some(c_sub_b.subject.clone()),
+            requester_label: None,
+            mission_title: c_sub_b.mission_title.clone(),
+            paloma_project: c_sub_b.paloma_project.clone(),
+            key: Some("CUSTOM_VERIFIER_TOKEN".into()),
+            project_id: Some("bw-shared-proj".into()),
+            all_projects: false,
+            reason: "verify benchmark receipt".into(),
+            note: None,
+            value_sha256: None,
+            encrypted_value: None,
+            target_project_id: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
+            error: None,
+        })
+        .await;
+    assert_eq!(req_from_a.id, req_from_b.id);
+    assert_eq!(local_broker.pending_count().await, 1);
+
+    let approved = local_broker
+        .approve(&h.state, req_from_a.id, None, Some(24))
+        .await
+        .unwrap();
+    assert_eq!(approved.status, RequestStatus::Approved);
+    assert_eq!(local_broker.pending_count().await, 0);
+
+    assert!(local_broker
+        .access_for(&h.state, &c_sub_b)
+        .await
+        .allows("CUSTOM_VERIFIER_TOKEN", Some("bw-shared-proj")));
+    assert!(local_broker
+        .access_for(&h.state, &c_grand)
+        .await
+        .allows("CUSTOM_VERIFIER_TOKEN", Some("bw-shared-proj")));
+    assert!(
+        !local_broker
+            .access_for(&h.state, &c_fork)
+            .await
+            .allows("CUSTOM_VERIFIER_TOKEN", Some("bw-shared-proj")),
+        "forked mission must not inherit parent secret grant"
+    );
+    assert!(
+        !local_broker
+            .access_for(&h.state, &c_side)
+            .await
+            .allows("CUSTOM_VERIFIER_TOKEN", Some("bw-shared-proj")),
+        "/btw side mission must not inherit parent secret grant"
+    );
 }
