@@ -49,6 +49,10 @@ pub struct Grant {
     pub id: Uuid,
     #[serde(default)]
     pub mission_id: Option<Uuid>,
+    /// Root non-fork ancestor mission when this grant was approved for a mission
+    /// tree, so sibling/child subagents inherit the tree's secret approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_mission_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester: Option<approval_flow::RequesterSubject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +98,10 @@ pub struct SecretRequest {
     pub owner: Option<String>,
     #[serde(default)]
     pub mission_id: Option<Uuid>,
+    /// Root non-fork ancestor mission when this grant was approved for a mission
+    /// tree, so sibling/child subagents inherit the tree's secret approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_mission_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester: Option<approval_flow::RequesterSubject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +152,7 @@ impl SecretRequest {
             o.remove("encrypted_value");
             o.remove("value_sha256");
             o.remove("owner");
+            o.remove("root_mission_id");
         }
         v
     }
@@ -163,7 +172,7 @@ pub struct AuditEntry {
     pub key: String,
     #[serde(default)]
     pub project_id: Option<String>,
-    /// `default`, `grant`, `write`, `delete`, or `move`.
+    /// `default`, `development-identity`, `grant`, `write`, `delete`, or `move`.
     pub via: String,
 }
 
@@ -196,19 +205,25 @@ pub fn broker(state: &AppState) -> Arc<SecretBroker> {
                 .working_dir
                 .join(".sandboxed-sh")
                 .join("secret_broker.json");
-            let data = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or_default();
-            Arc::new(SecretBroker {
-                path,
-                data: Mutex::new(data),
-                list_cache: Mutex::new(None),
-                changed: tokio::sync::Notify::new(),
-                resolving: Mutex::new(()),
-            })
+            SecretBroker::load(path)
         })
         .clone()
+}
+
+impl SecretBroker {
+    pub(crate) fn load(path: PathBuf) -> Arc<Self> {
+        let data = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        Arc::new(Self {
+            path,
+            data: Mutex::new(data),
+            list_cache: Mutex::new(None),
+            changed: tokio::sync::Notify::new(),
+            resolving: Mutex::new(()),
+        })
+    }
 }
 
 /// What a mission may read without asking.
@@ -222,7 +237,7 @@ pub struct Access {
 impl Access {
     pub fn allows(&self, key: &str, project_id: Option<&str>) -> bool {
         self.all
-            || self.keys.iter().any(|k| k == key)
+            || self.keys.iter().any(|k| k.eq_ignore_ascii_case(key.trim()))
             || project_id.is_some_and(|p| self.projects.iter().any(|x| x == p))
     }
 }
@@ -245,20 +260,89 @@ pub fn default_projects(
         .unwrap_or_default()
 }
 
+/// Projects that explicitly attach the `development-identity` skill receive
+/// default read access to worker-safe repository tokens (`GITHUB_TOKEN` /
+/// `GH_TOKEN`) without exposing unrelated secrets in the same Bitwarden project.
+pub fn project_has_development_identity(state: &AppState, slug: Option<&str>) -> bool {
+    let Some(raw) = slug.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let resolved = state.projects.resolve_project_slug(raw);
+    state
+        .projects
+        .get_project(&resolved)
+        .ok()
+        .flatten()
+        .is_some_and(|proj| {
+            proj.skills
+                .iter()
+                .any(|s| s.trim() == "development-identity")
+        })
+}
+
+fn default_identity_keys(has_development_identity: bool) -> Vec<String> {
+    if has_development_identity {
+        vec!["GITHUB_TOKEN".into(), "GH_TOKEN".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn grant_applies_to_caller(
+    grant: &Grant,
+    subject: &approval_flow::RequesterSubject,
+    lineage: &[Uuid],
+) -> bool {
+    if grant.subject().same_actor(subject) {
+        return true;
+    }
+    if subject.is_external() || lineage.is_empty() {
+        return false;
+    }
+    grant
+        .subject()
+        .mission_id()
+        .is_some_and(|gm| lineage.contains(&gm))
+        || grant
+            .root_mission_id
+            .is_some_and(|rm| lineage.contains(&rm))
+}
+
+fn grant_scope_covers_read_request(scope: &GrantScope, req: &SecretRequest) -> bool {
+    if req.kind != RequestKind::Read {
+        return false;
+    }
+    match scope {
+        GrantScope::All => true,
+        GrantScope::Project { project_id } => {
+            !req.all_projects && req.project_id.as_deref() == Some(project_id.as_str())
+        }
+        GrantScope::Secret { key } => {
+            !req.all_projects
+                && req
+                    .key
+                    .as_deref()
+                    .is_some_and(|rk| rk.trim().eq_ignore_ascii_case(key.trim()))
+        }
+    }
+}
+
 fn grant_access(
     defaults: Vec<String>,
+    default_keys: Vec<String>,
     grants: &[Grant],
     subject: &approval_flow::RequesterSubject,
+    lineage: &[Uuid],
     now: DateTime<Utc>,
 ) -> Access {
     let mut access = Access {
         all: false,
         projects: defaults,
-        keys: Vec::new(),
+        keys: default_keys,
     };
     for g in grants
         .iter()
-        .filter(|g| g.subject().same_actor(subject) && g.expires_at > now)
+        .filter(|g| g.expires_at > now && grant_applies_to_caller(g, subject, lineage))
     {
         match &g.scope {
             GrantScope::All => access.all = true,
@@ -276,8 +360,21 @@ pub struct Caller {
     pub subject: approval_flow::RequesterSubject,
     pub mission_title: Option<String>,
     pub paloma_project: Option<String>,
+    /// Non-fork, non-side-question mission ancestor chain `[self, parent, ..., root]`.
+    pub lineage: Vec<Uuid>,
+    /// True when a mission's Paloma project explicitly configures `development-identity`.
+    pub has_development_identity: bool,
     /// True when the calling mission executes on an untrusted `managed-*` VM.
     pub on_managed_node: bool,
+}
+
+impl Caller {
+    pub fn root_mission_id(&self) -> Option<Uuid> {
+        self.lineage
+            .last()
+            .copied()
+            .or_else(|| self.subject.mission_id())
+    }
 }
 
 /// Cloud-compute provider credentials reserved exclusively for Core's native
@@ -378,8 +475,16 @@ impl SecretBroker {
         }
         let bw = state.settings.get_bitwarden().await;
         let defaults = default_projects(&bw, caller.paloma_project.as_deref());
+        let default_keys = default_identity_keys(caller.has_development_identity);
         let data = self.data.lock().await;
-        grant_access(defaults, &data.grants, &caller.subject, Utc::now())
+        grant_access(
+            defaults,
+            default_keys,
+            &data.grants,
+            &caller.subject,
+            &caller.lineage,
+            Utc::now(),
+        )
     }
 
     pub async fn list_all(
@@ -459,9 +564,14 @@ impl SecretBroker {
         }
         if request.kind == RequestKind::Read {
             if let Some(existing) = data.requests.iter().find(|r| {
+                let same_caller_or_tree = r.subject().same_actor(&req_subject)
+                    || (!req_subject.is_external()
+                        && request.root_mission_id.is_some()
+                        && r.root_mission_id == request.root_mission_id
+                        && r.owner == request.owner);
                 r.status == RequestStatus::Pending
                     && r.kind == RequestKind::Read
-                    && r.subject().same_actor(&req_subject)
+                    && same_caller_or_tree
                     && r.key == request.key
                     && r.project_id == request.project_id
                     && r.all_projects == request.all_projects
@@ -693,6 +803,7 @@ impl SecretBroker {
             None => None,
         };
         let mut error = None;
+        let mut approved_read_scope: Option<GrantScope> = None;
         match request.kind {
             RequestKind::Read => {
                 let scope = match scope.unwrap_or("") {
@@ -729,17 +840,24 @@ impl SecretBroker {
                         expires_at = hard;
                     }
                 }
+                let root_mission_id = if request.subject().is_external() {
+                    None
+                } else {
+                    request.root_mission_id.or(request.mission_id)
+                };
                 let grant = Grant {
                     id: Uuid::new_v4(),
                     mission_id: request.mission_id,
+                    root_mission_id,
                     requester: request.requester.clone(),
                     requester_label: request.requester_label.clone(),
                     mission_title: request.mission_title.clone(),
                     paloma_project: request.paloma_project.clone(),
-                    scope,
+                    scope: scope.clone(),
                     created_at: now,
                     expires_at,
                 };
+                approved_read_scope = Some(scope);
                 self.data.lock().await.grants.push(grant);
             }
             RequestKind::Write => {
@@ -817,6 +935,35 @@ impl SecretBroker {
         })?;
         r.error = error.clone();
         let out = r.clone();
+        if let Some(ref scope) = approved_read_scope {
+            let out_subject = out.subject();
+            let out_root = if out_subject.is_external() {
+                None
+            } else {
+                out.root_mission_id.or(out.mission_id)
+            };
+            for other in data.requests.iter_mut() {
+                if other.id == out.id
+                    || other.status != RequestStatus::Pending
+                    || other.kind != RequestKind::Read
+                {
+                    continue;
+                }
+                let same_actor_or_tree = other.subject().same_actor(&out_subject)
+                    || (!out_subject.is_external()
+                        && !other.subject().is_external()
+                        && other.owner == out.owner
+                        && out_root.is_some()
+                        && (other.root_mission_id == out_root || other.mission_id == out_root));
+                if same_actor_or_tree && grant_scope_covers_read_request(scope, other) {
+                    if let Ok(next) = other.status.apply(ApprovalEvent::Approve) {
+                        other.status = next;
+                        other.resolved_at = Some(now);
+                        other.encrypted_value = None;
+                    }
+                }
+            }
+        }
         let via = match out.kind {
             RequestKind::Read => None,
             RequestKind::Write => Some("write"),
@@ -883,6 +1030,7 @@ impl SecretBroker {
         &self,
         owner: &str,
         requester: &approval_flow::RequesterSubject,
+        lineage: &[Uuid],
         id: Uuid,
         wait: Duration,
     ) -> Result<Value, (axum::http::StatusCode, String)> {
@@ -890,7 +1038,13 @@ impl SecretBroker {
             .request(id)
             .await
             .filter(|r| {
-                r.subject().same_actor(requester) && r.owner.as_deref().is_none_or(|o| o == owner)
+                let owner_ok = r.owner.as_deref().is_none_or(|o| o == owner);
+                let subject_ok = r.subject().same_actor(requester)
+                    || (r.kind == RequestKind::Read
+                        && !requester.is_external()
+                        && !r.subject().is_external()
+                        && r.root_mission_id.is_some_and(|rm| lineage.contains(&rm)));
+                owner_ok && subject_ok
             })
             .ok_or_else(|| {
                 (
@@ -975,12 +1129,48 @@ fn delivery(detail: &BitwardenSecretDetail, project: Option<&str>) -> Value {
     })
 }
 
-async fn caller_for(
+/// Walk non-fork, non-side-question mission ancestors `[mission_id, parent, ..., root]`.
+pub async fn mission_secret_lineage(
+    working_dir: &std::path::Path,
+    mission_store: &Arc<dyn crate::api::mission_store::MissionStore>,
+    mission_id: Uuid,
+) -> Vec<Uuid> {
+    let mut lineage = vec![mission_id];
+    let mut cur_id = mission_id;
+    for _ in 0..32 {
+        let Some(m) = mission_store
+            .get_mission_metadata(cur_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            break;
+        };
+        if crate::api::control::fork::side_launch_receipt(working_dir, m.id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            break;
+        }
+        let Some(parent_id) = m.parent_mission_id else {
+            break;
+        };
+        if crate::api::control::is_fork_of_parent(&m, parent_id) || lineage.contains(&parent_id) {
+            break;
+        }
+        lineage.push(parent_id);
+        cur_id = parent_id;
+    }
+    lineage
+}
+
+pub(crate) async fn caller_for(
     state: &Arc<AppState>,
     p: &crate::control_mcp::gateway::Principal,
 ) -> Result<Caller, String> {
     let subject = p.requester_subject();
-    let (mission, on_managed_node) = if let Some(mission_id) = p.mission_id {
+    let (mission, lineage, on_managed_node) = if let Some(mission_id) = p.mission_id {
         let control = state
             .control
             .get_or_spawn(&crate::api::auth::AuthUser {
@@ -994,6 +1184,12 @@ async fn caller_for(
             .await
             .ok()
             .flatten();
+        let lineage = mission_secret_lineage(
+            &state.config.working_dir,
+            &control.mission_store,
+            mission_id,
+        )
+        .await;
         let on_managed_node = crate::api::control::remote_grok::placement(
             &state.config.working_dir,
             &control.mission_store,
@@ -1003,9 +1199,9 @@ async fn caller_for(
         .ok()
         .flatten()
         .is_some_and(|pl| crate::managed::is_managed_node(&pl.node_id));
-        (mission, on_managed_node)
+        (mission, lineage, on_managed_node)
     } else {
-        (None, false)
+        (None, Vec::new(), false)
     };
     // The signed session's project decides default access; the mission record
     // is only a fallback for mission sessions issued without one.
@@ -1014,11 +1210,15 @@ async fn caller_for(
         .clone()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| mission.as_ref().and_then(|m| m.project.project.clone()));
+    let has_development_identity = !subject.is_external()
+        && project_has_development_identity(state, paloma_project.as_deref());
     Ok(Caller {
         owner: p.sub.clone(),
         subject,
         mission_title: mission.and_then(|m| m.title),
         paloma_project,
+        lineage,
+        has_development_identity,
         on_managed_node,
     })
 }
@@ -1146,6 +1346,7 @@ pub async fn handle_tool(
                         status: RequestStatus::Pending,
                         owner: Some(caller.owner.clone()),
                         mission_id: caller.subject.mission_id(),
+                        root_mission_id: caller.root_mission_id(),
                         requester: Some(caller.subject.clone()),
                         requester_label: caller.subject.external_display_label(),
                         mission_title: caller.mission_title.clone(),
@@ -1181,6 +1382,8 @@ pub async fn handle_tool(
             }
             let via = if bitwarden_defaults_cover(state, &caller, project_id.as_deref()).await {
                 "default"
+            } else if caller.has_development_identity && is_allowlisted_managed_secret(&key) {
+                "development-identity"
             } else {
                 "grant"
             };
@@ -1246,6 +1449,7 @@ pub async fn handle_tool(
                     status: RequestStatus::Pending,
                     owner: Some(caller.owner.clone()),
                     mission_id: caller.subject.mission_id(),
+                    root_mission_id: caller.root_mission_id(),
                     requester: Some(caller.subject.clone()),
                     requester_label: caller.subject.external_display_label(),
                     mission_title: caller.mission_title.clone(),
@@ -1328,6 +1532,7 @@ pub async fn handle_tool(
                     status: RequestStatus::Pending,
                     owner: Some(caller.owner.clone()),
                     mission_id: caller.subject.mission_id(),
+                    root_mission_id: caller.root_mission_id(),
                     requester: Some(caller.subject.clone()),
                     requester_label: caller.subject.external_display_label(),
                     mission_title: caller.mission_title.clone(),
@@ -1439,6 +1644,7 @@ pub async fn handle_tool(
                     status: RequestStatus::Pending,
                     owner: Some(caller.owner.clone()),
                     mission_id: caller.subject.mission_id(),
+                    root_mission_id: caller.root_mission_id(),
                     requester: Some(caller.subject.clone()),
                     requester_label: caller.subject.external_display_label(),
                     mission_title: caller.mission_title.clone(),
@@ -1592,9 +1798,10 @@ mod tests {
     fn grants_only_apply_to_their_mission_until_expiry() {
         let now = Utc::now();
         let mission = Uuid::new_v4();
-        let grant = |m, scope, hours| Grant {
+        let grant = |m, root, scope, hours| Grant {
             id: Uuid::new_v4(),
             mission_id: Some(m),
+            root_mission_id: root,
             requester: Some(approval_flow::RequesterSubject::mission(m)),
             requester_label: None,
             mission_title: None,
@@ -1604,20 +1811,28 @@ mod tests {
             expires_at: now + chrono::Duration::hours(hours),
         };
         let grants = vec![
-            grant(mission, GrantScope::Secret { key: "UXON".into() }, 1),
             grant(
                 mission,
+                Some(mission),
+                GrantScope::Secret { key: "UXON".into() },
+                1,
+            ),
+            grant(
+                mission,
+                Some(mission),
                 GrantScope::Project {
                     project_id: "p-infra".into(),
                 },
                 -1,
             ),
-            grant(Uuid::new_v4(), GrantScope::All, 1),
+            grant(Uuid::new_v4(), None, GrantScope::All, 1),
         ];
         let access = grant_access(
             vec!["p-mc".into()],
+            Vec::new(),
             &grants,
             &approval_flow::RequesterSubject::mission(mission),
+            &[mission],
             now,
         );
         assert!(access.allows("UXON", Some("p-core")));
@@ -1633,6 +1848,163 @@ mod tests {
     }
 
     #[test]
+    fn mission_tree_descendants_and_siblings_inherit_grants_without_leaking() {
+        let now = Utc::now();
+        let root = Uuid::new_v4();
+        let sibling_a = Uuid::new_v4();
+        let sibling_b = Uuid::new_v4();
+        let grandchild = Uuid::new_v4();
+        let unrelated = Uuid::new_v4();
+
+        // Approving sibling_a's read request records root_mission_id = Some(root).
+        let grants = vec![Grant {
+            id: Uuid::new_v4(),
+            mission_id: Some(sibling_a),
+            root_mission_id: Some(root),
+            requester: Some(approval_flow::RequesterSubject::mission(sibling_a)),
+            requester_label: None,
+            mission_title: None,
+            paloma_project: Some("verity-core".into()),
+            scope: GrantScope::Secret {
+                key: "GITHUB_TOKEN".into(),
+            },
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(24),
+        }];
+
+        // Sibling B and grandchild both have `root` in their non-fork lineage.
+        let access_b = grant_access(
+            Vec::new(),
+            Vec::new(),
+            &grants,
+            &approval_flow::RequesterSubject::mission(sibling_b),
+            &[sibling_b, root],
+            now,
+        );
+        assert!(access_b.allows("GITHUB_TOKEN", Some("p-dev")));
+
+        let access_gc = grant_access(
+            Vec::new(),
+            Vec::new(),
+            &grants,
+            &approval_flow::RequesterSubject::mission(grandchild),
+            &[grandchild, sibling_b, root],
+            now,
+        );
+        assert!(access_gc.allows("GITHUB_TOKEN", Some("p-dev")));
+
+        // Forked or unrelated missions stop walking lineage before `root`.
+        let access_fork = grant_access(
+            Vec::new(),
+            Vec::new(),
+            &grants,
+            &approval_flow::RequesterSubject::mission(unrelated),
+            &[unrelated],
+            now,
+        );
+        assert!(!access_fork.allows("GITHUB_TOKEN", Some("p-dev")));
+
+        // `development-identity` default keys authorize GITHUB_TOKEN and GH_TOKEN only.
+        let dev_id_access = grant_access(
+            Vec::new(),
+            default_identity_keys(true),
+            &[],
+            &approval_flow::RequesterSubject::mission(unrelated),
+            &[unrelated],
+            now,
+        );
+        assert!(dev_id_access.allows("GITHUB_TOKEN", Some("p-dev")));
+        assert!(dev_id_access.allows("GH_TOKEN", Some("p-dev")));
+        assert!(dev_id_access.allows("gh_token", Some("p-dev")));
+        assert!(
+            !dev_id_access.allows("SPARK_MEMORY_API_TOKEN", Some("p-dev")),
+            "development-identity must not expose non-GitHub secrets in the same Bitwarden project"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_request_deduplicates_sibling_read_requests_in_same_mission_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = SecretBroker {
+            path: dir.path().join("secret_broker.json"),
+            data: Mutex::new(Persisted::default()),
+            list_cache: Mutex::new(None),
+            changed: tokio::sync::Notify::new(),
+            resolving: Mutex::new(()),
+        };
+        let root = Uuid::new_v4();
+        let sub_a = Uuid::new_v4();
+        let sub_b = Uuid::new_v4();
+        let other_root = Uuid::new_v4();
+
+        let make_read = |m: Uuid, r: Uuid, key: &str| SecretRequest {
+            id: Uuid::new_v4(),
+            kind: RequestKind::Read,
+            status: RequestStatus::Pending,
+            owner: Some("thomas".into()),
+            mission_id: Some(m),
+            root_mission_id: Some(r),
+            requester: Some(approval_flow::RequesterSubject::mission(m)),
+            requester_label: None,
+            mission_title: Some("Subagent".into()),
+            paloma_project: Some("verity-core".into()),
+            key: Some(key.into()),
+            project_id: Some("p-dev".into()),
+            all_projects: false,
+            reason: "clone private repo".into(),
+            note: None,
+            value_sha256: None,
+            encrypted_value: None,
+            target_project_id: None,
+            created_at: Utc::now(),
+            resolved_at: None,
+            error: None,
+        };
+
+        let first = broker
+            .open_request(make_read(sub_a, root, "GITHUB_TOKEN"))
+            .await;
+        let second = broker
+            .open_request(make_read(sub_b, root, "GITHUB_TOKEN"))
+            .await;
+        assert_eq!(
+            first.id, second.id,
+            "sibling subagents sharing root_mission_id must share one pending Read request"
+        );
+        assert_eq!(broker.pending_count().await, 1);
+
+        // Sibling mission polling wait_for_requester with timeout=0 can observe the shared request.
+        let waited = broker
+            .wait_for_requester(
+                "thomas",
+                &approval_flow::RequesterSubject::mission(sub_b),
+                &[sub_b, root],
+                first.id,
+                Duration::ZERO,
+            )
+            .await
+            .expect("sibling in mission tree can poll shared Read request");
+        assert_eq!(waited["request_id"], json!(first.id));
+
+        // Unrelated mission tree gets its own distinct pending request and cannot poll `first`.
+        let unrelated = broker
+            .open_request(make_read(other_root, other_root, "GITHUB_TOKEN"))
+            .await;
+        assert_ne!(first.id, unrelated.id);
+        assert_eq!(broker.pending_count().await, 2);
+        assert!(broker
+            .wait_for_requester(
+                "thomas",
+                &approval_flow::RequesterSubject::mission(other_root),
+                &[other_root],
+                first.id,
+                Duration::ZERO,
+            )
+            .await
+            .is_err());
+    }
+
+    #[test]
     fn public_request_view_hides_the_pending_value() {
         let r = SecretRequest {
             id: Uuid::new_v4(),
@@ -1640,6 +2012,7 @@ mod tests {
             status: RequestStatus::Pending,
             owner: Some("thomas".into()),
             mission_id: Some(Uuid::new_v4()),
+            root_mission_id: Some(Uuid::new_v4()),
             requester: None,
             requester_label: None,
             mission_title: None,
@@ -1658,6 +2031,7 @@ mod tests {
         };
         assert!(r.public().get("encrypted_value").is_none());
         assert!(r.public().get("owner").is_none());
+        assert!(r.public().get("root_mission_id").is_none());
     }
 
     #[test]
@@ -1668,6 +2042,7 @@ mod tests {
             status: RequestStatus::Pending,
             owner: None,
             mission_id: Some(Uuid::new_v4()),
+            root_mission_id: None,
             requester: None,
             requester_label: None,
             mission_title: None,

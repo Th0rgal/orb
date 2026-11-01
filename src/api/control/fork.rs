@@ -1796,13 +1796,13 @@ fn side_launch_path(root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub(super) struct SideLaunchReceipt {
+pub(crate) struct SideLaunchReceipt {
     pub(super) key: String,
     pub(super) fingerprint: String,
     pub(super) accepted: bool,
 }
 
-pub(super) fn side_launch_receipt(
+pub(crate) fn side_launch_receipt(
     root: &std::path::Path,
     id: Uuid,
 ) -> Result<Option<SideLaunchReceipt>, String> {
