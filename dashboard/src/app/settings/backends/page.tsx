@@ -33,9 +33,11 @@ export default function BackendsPage() {
   const [savingBackend, setSavingBackend] = useState(false);
   const [savingMissionLimit, setSavingMissionLimit] = useState(false);
   const [savingTaskLimit, setSavingTaskLimit] = useState(false);
+  const [savingGoogleConcurrencyLimit, setSavingGoogleConcurrencyLimit] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [maxParallelMissionsValue, setMaxParallelMissionsValue] = useState('1');
   const [maxConcurrentTasksValue, setMaxConcurrentTasksValue] = useState('5');
+  const [googleMaxConcurrencyValue, setGoogleMaxConcurrencyValue] = useState('10');
 
   // Server connection state
   const [apiUrl, setApiUrl] = useState(() => getRuntimeApiBase());
@@ -160,6 +162,10 @@ export default function BackendsPage() {
     if (typeof taskLimit === 'number' && taskLimit >= 1) {
       setMaxConcurrentTasksValue(String(taskLimit));
     }
+    const googleLimit = serverSettings?.google_max_concurrency;
+    if (typeof googleLimit === 'number' && googleLimit >= 1) {
+      setGoogleMaxConcurrencyValue(String(googleLimit));
+    }
   }, [serverSettings]);
 
   const handleSaveMissionLimit = async () => {
@@ -205,6 +211,29 @@ export default function BackendsPage() {
       );
     } finally {
       setSavingTaskLimit(false);
+    }
+  };
+
+  const handleSaveGoogleConcurrencyLimit = async () => {
+    const parsed = Number.parseInt(googleMaxConcurrencyValue, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 128) {
+      toast.error('Google / Antigravity per-account cap must be between 1 and 128');
+      return;
+    }
+
+    setSavingGoogleConcurrencyLimit(true);
+    try {
+      await updateSettings({ google_max_concurrency: parsed });
+      await mutateSettings();
+      toast.success('Google / Antigravity per-account concurrency updated');
+    } catch (err) {
+      toast.error(
+        `Failed to update Google / Antigravity concurrency: ${
+          err instanceof Error ? err.message : 'Unknown error'
+        }`
+      );
+    } finally {
+      setSavingGoogleConcurrencyLimit(false);
     }
   };
 
@@ -329,7 +358,7 @@ export default function BackendsPage() {
             </div>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
             <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
               <label className="block text-xs text-white/60 mb-1.5">
                 Max Parallel Missions
@@ -389,6 +418,39 @@ export default function BackendsPage() {
               </div>
               <p className="mt-1.5 text-xs text-white/30">
                 Command-mode task concurrency.
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+              <label className="block text-xs text-white/60 mb-1.5">
+                Google / Antigravity Per-Account Cap
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={128}
+                  step={1}
+                  aria-label="Google / Antigravity Per-Account Cap"
+                  value={googleMaxConcurrencyValue}
+                  onChange={(e) => setGoogleMaxConcurrencyValue(e.target.value)}
+                  className="min-w-0 flex-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                />
+                <button
+                  onClick={handleSaveGoogleConcurrencyLimit}
+                  disabled={savingGoogleConcurrencyLimit}
+                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                  title="Save Google / Antigravity per-account cap"
+                >
+                  {savingGoogleConcurrencyLimit ? (
+                    <Loader className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </div>
+              <p className="mt-1.5 text-xs text-white/30">
+                Live OrbRouter in-flight cap per account (no restart).
               </p>
             </div>
           </div>

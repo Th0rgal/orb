@@ -100,6 +100,13 @@ beforeEach(() => {
           { id: "account-one", name: "First account" },
           { id: "account-two", name: "Second account" },
         ]);
+      if (path === "/api/settings") {
+        if (method === "PUT") {
+          if (failSave) return response("Save failed", 503);
+          return response({ google_max_concurrency: body?.google_max_concurrency ?? 10 });
+        }
+        return response({ google_max_concurrency: 10 });
+      }
       if (path === "/api/providers")
         return response({
           providers: [
@@ -294,6 +301,24 @@ describe("Routing settings", () => {
         ),
       ).toBe(true),
     );
+  });
+  it("loads and updates the live Google and Antigravity per-account limit", async () => {
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Provider Health", exact: true }));
+    const input = (await screen.findByLabelText(
+      "Google and Antigravity per-account limit",
+    )) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("10"));
+    fireEvent.input(input, { target: { value: "15" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save limit", exact: true }));
+    await waitFor(() =>
+      expect(writes).toContainEqual({
+        path: "/api/settings",
+        method: "PUT",
+        body: { google_max_concurrency: 15 },
+      }),
+    );
+    await screen.findByText("Saved. Live per-account concurrency updated.");
   });
   it("keeps infra details out of the page (the server URL lives in Account)", async () => {
     await mount();

@@ -1,7 +1,8 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { SWRConfig } from 'swr';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { updateSettings } from '@/lib/api';
 import BackendsPage from './page';
 
 const { refreshBackendConfigs, backendConfigsFixture } = vi.hoisted(() => ({
@@ -42,6 +43,7 @@ vi.mock('@/lib/api', () => ({
   getSettings: vi.fn().mockResolvedValue({
     max_parallel_missions: 1,
     max_concurrent_tasks: 5,
+    google_max_concurrency: 10,
   }),
   updateSettings: vi.fn().mockResolvedValue({}),
 }));
@@ -74,5 +76,17 @@ describe('BackendsPage', () => {
     expect(screen.getByRole('button', { name: 'Claude Code' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Grok Build' })).toBeVisible();
     expect(screen.queryByRole('button', { name: /ChatGPT UI/ })).toBeNull();
+  });
+
+  it('loads and updates the live Google / Antigravity per-account concurrency cap', async () => {
+    renderPage();
+
+    const input = await screen.findByLabelText('Google / Antigravity Per-Account Cap');
+    expect(input).toHaveValue(10);
+
+    fireEvent.change(input, { target: { value: '12' } });
+    fireEvent.click(screen.getByTitle('Save Google / Antigravity per-account cap'));
+
+    expect(updateSettings).toHaveBeenCalledWith({ google_max_concurrency: 12 });
   });
 });
