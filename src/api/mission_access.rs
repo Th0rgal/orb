@@ -59,6 +59,7 @@ pub const READ_TOOLS: &[&str] = &[
     "get_mission_diagnostics",
     "list_mission_shared_files",
     "get_cloud_execution",
+    "get_consult_result",
 ];
 
 /// Direct conversation control tools a `control` grant (or an associated

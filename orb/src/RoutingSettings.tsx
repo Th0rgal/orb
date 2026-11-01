@@ -16,14 +16,17 @@ import {
 } from "solid-js";
 import {
   connectionVersion,
+  getGlobalSettings,
   isConnected,
   listProviders,
+  updateGlobalSettings,
   type AIProvider,
 } from "./api";
 import * as R from "./routingApi";
 import * as Ic from "./icons";
 import { ErrorNotice } from "./ErrorNotice";
 import { ConfirmDialog } from "./Dialog";
+import { SettingsCard, SettingsRow } from "./SettingsCard";
 
 const [dirty, setDirty] = createSignal(false);
 const [leaveRequest, setLeaveRequest] = createSignal<(() => void) | null>(null);
@@ -77,6 +80,37 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
   const [expandedHealth, setExpandedHealth] = createSignal<Set<string>>(
     new Set(),
   );
+  const [googleCapDraft, setGoogleCapDraft] = createSignal("10");
+  const [googleCapDirty, setGoogleCapDirty] = createSignal(false);
+  const [googleCapSaving, setGoogleCapSaving] = createSignal(false);
+  const [googleCapSaved, setGoogleCapSaved] = createSignal(false);
+  let googleCapSavedTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(googleCapSavedTimer));
+  const saveGoogleCap = async () => {
+    if (googleCapSaving()) return;
+    const raw = googleCapDraft().trim();
+    const n = Number(raw);
+    if (!raw || !Number.isInteger(n) || n < 1 || n > 128) {
+      setActionError("Per-account concurrency must be a whole number from 1 to 128.");
+      return;
+    }
+    setGoogleCapSaving(true);
+    setActionError("");
+    setGoogleCapSaved(false);
+    try {
+      const updated = await updateGlobalSettings({ google_max_concurrency: n });
+      const resolved = updated.google_max_concurrency ?? n;
+      setGoogleCapDraft(String(resolved));
+      setGoogleCapDirty(false);
+      setGoogleCapSaved(true);
+      clearTimeout(googleCapSavedTimer);
+      googleCapSavedTimer = setTimeout(() => setGoogleCapSaved(false), 2400);
+    } catch (e) {
+      setActionError(message(e));
+    } finally {
+      setGoogleCapSaving(false);
+    }
+  };
   let generation = 0;
   let fetching = false;
   let queuedFullRefresh = false;
@@ -127,7 +161,14 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
       ...(full ? [read("Fallback Chains", () => R.listChains(force), setChains)] : []),
       ...(tab() === "health" ? [
         read("Provider Health", R.listHealth, setHealth),
-        ...(full ? [read("Accounts", listProviders, setAccounts)] : []),
+        ...(full ? [
+          read("Accounts", listProviders, setAccounts),
+          getGlobalSettings().then((s) => {
+            if (epoch === generation && !googleCapDirty() && s.google_max_concurrency != null) {
+              setGoogleCapDraft(String(s.google_max_concurrency));
+            }
+          }).catch(() => {}),
+        ] : []),
 
       ] : []),
     ]);
@@ -168,6 +209,8 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
     setBusy(false);
     setActionError("");
     setCatalogLoading(false);
+    setGoogleCapDirty(false);
+    setGoogleCapSaved(false);
     if (connected) untrack(() => void refresh(true));
   });
   const stopPoll = pollWhileVisible(() => tab() === "health" ? refresh() : undefined, 10000, "routing.refresh");
@@ -634,7 +677,42 @@ export function RoutingSettings(p: { onOpenClient: () => void; tab?: RoutingTab 
           </section>
           </Show>
           <Show when={tab() === "health"}>
+          <SettingsCard title="Router Concurrency">
+            <SettingsRow
+              title="Google & Antigravity per-account limit"
+              desc="Maximum concurrent in-flight requests per Google or Antigravity account before spilling to the next account or queueing in FIFO order (1–128). Applies immediately without redeploying."
+            >
+              <div class="ps-cap-ctrl">
+                <input
+                  class="s-input ps-cap-input"
+                  inputmode="numeric"
+                  aria-label="Google and Antigravity per-account limit"
+                  value={googleCapDraft()}
+                  disabled={googleCapSaving()}
+                  onInput={(e) => {
+                    setGoogleCapDirty(true);
+                    setGoogleCapSaved(false);
+                    setActionError("");
+                    setGoogleCapDraft(e.currentTarget.value);
+                  }}
+                  onKeyDown={(e) => e.key === "Enter" && void saveGoogleCap()}
+                />
+                <button
+                  type="button"
+                  class="s-btn primary"
+                  disabled={googleCapSaving() || !googleCapDirty()}
+                  onClick={() => void saveGoogleCap()}
+                >
+                  {googleCapSaving() ? "Saving…" : "Save limit"}
+                </button>
+              </div>
+            </SettingsRow>
+            <Show when={googleCapSaved()}>
+              <p class="ps-saved" role="status">Saved. Live per-account concurrency updated.</p>
+            </Show>
+          </SettingsCard>
           <section class="s-sec" id="routing-health">
+            <ErrorToast error={actionError()} onDismiss={() => setActionError("")} />
             <h3>Provider Health</h3>
             <p class="routing-muted">
               Activity observed by this proxy. Token counts are not subscription

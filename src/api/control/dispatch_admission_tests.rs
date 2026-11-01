@@ -17528,15 +17528,65 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
     assert_eq!(spawned_specs.len(), 2);
     assert_eq!(spawned_specs[1].image.as_deref(), Some("lido-warm"));
 
-    // 2. MCP `consult_model` with omitted `remote_node_id` and `files=[...]`:
-    //    succeeds through two-pass authorization, routes to Boat in light mode, and returns `placement_note`.
+    // 2. MCP `consult_model`:
+    //    2a. Unknown model is rejected synchronously BEFORE queueing an `mcp_actions_v1` row.
+    let actions_before: i64 = h
+        .state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM mcp_actions_v1", [], |r| r.get(0))
+        .unwrap();
+    let bad_consult = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "consult_model".into(),
+            arguments: json!({
+                "model": "unknown-model-xyz",
+                "question": "Ping",
+                "idempotency_key": "consult-bad-sync"
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(bad_consult["ok"], false, "{bad_consult}");
+    assert_eq!(
+        bad_consult["error"]["code"], "invalid_arguments",
+        "{bad_consult}"
+    );
+    assert_eq!(bad_consult["error"]["accepted"], "no", "{bad_consult}");
+    assert!(
+        bad_consult["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("openai/gpt-6-astra"),
+        "{bad_consult}"
+    );
+    let actions_after: i64 = h
+        .state
+        .projects
+        .connection
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM mcp_actions_v1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        actions_after, actions_before,
+        "synchronously rejected consult_model must not reserve an action row"
+    );
+
+    //    2b. Valid `consult_model` with omitted `remote_node_id` and `files=[...]`:
+    //        succeeds through two-pass authorization, routes to Boat in light mode, and returns `placement_note`.
     let consult_accepted = gateway::call(
         State(h.state.clone()),
         Extension(principal.clone()),
         Json(gateway::Call {
             name: "consult_model".into(),
             arguments: json!({
-                "model": "gpt-6-astra",
+                "model": "astra",
                 "question": "Check the architecture",
                 "files": ["docs/specs/managed-vm-lifecycle.md"],
                 "idempotency_key": "consult-boat-1"
@@ -17562,6 +17612,69 @@ async fn child_missions_default_to_boat_and_two_pass_mcp_actions_succeed_without
     let spawned_specs = provider.spawned_specs.lock().unwrap().clone();
     assert_eq!(spawned_specs.len(), 3);
     assert_eq!(spawned_specs[2].image.as_deref(), Some("orb-node-base"));
+
+    //    2c. `get_consult_result(mission_ids=[...])` authorizes own children and denies unrelated missions.
+    let consult_child_id = consult_receipt["result"]["mission_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let batch_own = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "get_consult_result".into(),
+            arguments: json!({
+                "mission_ids": [child_id.to_string(), consult_child_id.clone()]
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(batch_own["ok"], true, "{batch_own}");
+    assert_eq!(batch_own["result"]["results"].as_array().unwrap().len(), 2);
+
+    let unrelated = h
+        .control
+        .mission_store
+        .create_mission(
+            Some("unrelated"),
+            Some(parent.workspace_id),
+            None,
+            None,
+            Some("opencode"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    h.control
+        .mission_store
+        .update_mission_project(
+            unrelated.id,
+            crate::api::mission_store::MissionProjectPatch {
+                project: Some(Some("lido".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batch_forbidden = gateway::call(
+        State(h.state.clone()),
+        Extension(principal.clone()),
+        Json(gateway::Call {
+            name: "get_consult_result".into(),
+            arguments: json!({
+                "mission_ids": [consult_child_id, unrelated.id.to_string()]
+            }),
+        }),
+    )
+    .await
+    .0;
+    assert_eq!(batch_forbidden["ok"], false, "{batch_forbidden}");
+    assert_eq!(
+        batch_forbidden["error"]["code"], "forbidden",
+        "{batch_forbidden}"
+    );
 
     // 3. Explicit `remote_node_id: "same"` co-locates on `babylon-parent` and
     //    attaches `fork-workspace:<parent_id>`.

@@ -2382,6 +2382,7 @@ export interface SettingsResponse {
   sandboxed_repo_path: string | null;
   max_parallel_missions: number | null;
   max_concurrent_tasks: number | null;
+  google_max_concurrency?: number | null;
   auto_cleanup_enabled: boolean | null;
   auto_cleanup_days: number | null;
   auto_cleanup_stopped_days: number | null;

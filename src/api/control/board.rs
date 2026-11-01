@@ -79,7 +79,7 @@ fn role_default_model(task: &BoardTask) -> Option<&'static str> {
     Some(match task.role {
         BoardTaskRole::Planner | BoardTaskRole::Reviewer => "gpt-6.1-sol",
         BoardTaskRole::Reconciler if task.risk_class == "high" => "gpt-6.1-sol",
-        BoardTaskRole::Worker | BoardTaskRole::Reconciler => "gpt-5.6-terra",
+        BoardTaskRole::Worker | BoardTaskRole::Reconciler => "gpt-6.1-terra",
     })
 }
 
@@ -4103,5 +4103,66 @@ mod tests {
         }
         assert!(saw_cancel, "live worker should have been cancelled");
         assert!(!saw_wake, "dead boss must not receive a board wake");
+    }
+
+    #[tokio::test]
+    async fn codex_worker_and_reconciler_roles_default_to_gpt_6_1_terra() {
+        let store: Arc<dyn MissionStore> = Arc::new(InMemoryMissionStore::new());
+        let boss_id = Uuid::new_v4();
+        store
+            .upsert_board_tasks(
+                boss_id,
+                vec![
+                    NewBoardTask {
+                        task_key: "worker".into(),
+                        title: "worker".into(),
+                        prompt: "do work".into(),
+                        backend: "codex".into(),
+                        role: BoardTaskRole::Worker,
+                        ..Default::default()
+                    },
+                    NewBoardTask {
+                        task_key: "reconciler-normal".into(),
+                        title: "reconciler-normal".into(),
+                        prompt: "reconcile".into(),
+                        backend: "codex".into(),
+                        role: BoardTaskRole::Reconciler,
+                        risk_class: "normal".into(),
+                        ..Default::default()
+                    },
+                    NewBoardTask {
+                        task_key: "reconciler-high".into(),
+                        title: "reconciler-high".into(),
+                        prompt: "reconcile high risk".into(),
+                        backend: "codex".into(),
+                        role: BoardTaskRole::Reconciler,
+                        risk_class: "high".into(),
+                        ..Default::default()
+                    },
+                    NewBoardTask {
+                        task_key: "reviewer".into(),
+                        title: "reviewer".into(),
+                        prompt: "review".into(),
+                        backend: "codex".into(),
+                        role: BoardTaskRole::Reviewer,
+                        ..Default::default()
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        let tasks = store.list_board_tasks(boss_id).await.unwrap();
+        let by_key: HashMap<&str, &BoardTask> =
+            tasks.iter().map(|t| (t.task_key.as_str(), t)).collect();
+        assert_eq!(role_default_model(by_key["worker"]), Some("gpt-6.1-terra"));
+        assert_eq!(
+            role_default_model(by_key["reconciler-normal"]),
+            Some("gpt-6.1-terra")
+        );
+        assert_eq!(
+            role_default_model(by_key["reconciler-high"]),
+            Some("gpt-6.1-sol")
+        );
+        assert_eq!(role_default_model(by_key["reviewer"]), Some("gpt-6.1-sol"));
     }
 }
