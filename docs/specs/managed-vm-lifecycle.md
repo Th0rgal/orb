@@ -161,7 +161,11 @@ settings…"; agents: `start_mission(budget_usd=…)` for a child, `get_budget`)
 It is a pool shared by the mission's subtree. A descendant given its own
 budget gets a sub-pool carved from the nearest ancestor pool; the grant must
 not exceed that pool's remaining amount (`sub_budget_exceeds_pool`). Without
-any pool in its lineage a mission is limited only by the daily cap.
+any pool in its lineage a mission is limited by the shared global daily cap
+(`daily_cap_usd`). When a mission draws from an active mission budget pool
+(`mode = "own"` or `"pooled"`), that pool **overrides (bypasses) the shared
+global `daily_cap_usd`**, and spend/commitments charged to a mission budget
+pool do not consume `daily_cap_usd` for un-budgeted missions.
 
 Each VM records `budget_pool_id` at create (the pool of its owner, or of the
 child it is claimed for). Per pool, derived from the registry
@@ -173,11 +177,16 @@ child it is claimed for). Per pool, derived from the registry
   once the owner is terminal (unused money returns);
 - `available = budget − spent − reserved − carved`.
 
-Checked under the admission lock at `spawn_managed_machine`, `start_mission`
-auto-managed (before renting), `extend_managed_machine` and auto-extend
-(each needs `min(minutes, 60) × price`), and sub-budget grants. Refusals are
-`402 budget_exceeded` with the remaining amount. The daily cap stays the
-outer bound (`none` = unlimited). Budgets persist in
+Checked under the admission lock at `spawn_managed_machine`, marketplace
+fallback offer re-quotes, `resume`, `start_mission` auto-managed (before
+renting), `extend_managed_machine` and auto-extend (each needs
+`min(minutes, 60) × price`), and sub-budget grants. Refusals are
+`402 budget_exceeded` with the remaining amount. Missions without an active
+pool in their lineage (`mode = "none"`) are bounded by the shared global daily
+cap (`none` = unlimited), counting only un-pooled spend and commitments.
+`list_managed_machines` surfaces `mission_budget` alongside
+`effective_vm_limits` so coordinators see their active mission budget pool even
+when `budget.daily_cap_usd` is lower. Budgets persist in
 `.sandboxed-sh/mission_budgets.json`; ledger events
 (`budget_pool_set`, `auto_extended`, `reused_idle`) go to the managed ledger.
 

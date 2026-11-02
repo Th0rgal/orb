@@ -1820,7 +1820,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "list_managed_machines".to_string(),
-                description: "List live managed VMs across all configured providers (`boat`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, expires_at, reap_at, deletable_at, cost so far, plus configured providers, today's spend, global running count/caps, and your mission's `effective_vm_limits` (which overrides the global concurrency cap when configured in Mission settings). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
+                description: "List live managed VMs across all configured providers (`boat`, `hetzner`, `vastai`, `scaleway`) compactly: name, provider, size, state, project, owner, expires_at, reap_at, deletable_at, cost so far, plus configured providers, today's spend, global running count/caps, `mission_budget` (when your mission or an ancestor has a USD budget pool, which overrides `budget.daily_cap_usd`), and your mission's `effective_vm_limits` (which overrides the global concurrency cap when configured in Mission settings). Pass verbose=true for full rows and the last 24 h of destroyed machines. Check this before spawning to reuse a machine you already own.".to_string(),
                 input_schema: json!({"type": "object", "properties": {"verbose": {"type": "boolean", "description": "Full rows and history (large)."}}}),
             },
             ToolDefinition {
@@ -1855,7 +1855,7 @@ impl AssistantMcp {
             },
             ToolDefinition {
                 name: "get_budget".to_string(),
-                description: "Your mission's managed-VM spending budget and concurrency limits: `mode` (own, pooled from an ancestor, or none = only the daily cap), pool spend/reserved/remaining, `max_grant_usd`, `effective_vm_limits` (`source`: `mission` or `global`, `active`, `max_concurrent`, and per-provider `provider_limits` that bypass the global concurrency cap when set), and each child's usage.".to_string(),
+                description: "Your mission's managed-VM spending budget and concurrency limits: `mode` (`own` or `pooled` from an ancestor — both override the default global `daily_cap_usd` — or `none` = bounded by the global daily cap), pool spend/reserved/remaining, `max_grant_usd`, `effective_vm_limits` (`source`: `mission` or `global`, `active`, `max_concurrent`, and per-provider `provider_limits` that bypass the global concurrency cap when set), and each child's usage.".to_string(),
                 input_schema: json!({"type": "object", "properties": {"mission_id": {"type": "string", "description": "Hermes only; missions always get their own."}}}),
             },
             ToolDefinition {
@@ -4610,7 +4610,7 @@ impl AssistantMcp {
                 let mut list = self
                     .managed_request(reqwest::Method::GET, "/api/managed-machines".into(), None)
                     .await?;
-                let eff = if let Some(mid) = params.mission_id.as_deref() {
+                let mission_budget_resp = if let Some(mid) = params.mission_id.as_deref() {
                     self.managed_request(
                         reqwest::Method::GET,
                         format!("/api/control/missions/{}/budget", urlencoding::encode(mid)),
@@ -4618,13 +4618,17 @@ impl AssistantMcp {
                     )
                     .await
                     .ok()
-                    .and_then(|b| b.get("effective_vm_limits").cloned())
                 } else {
                     None
                 };
-                if let Some(ref limits) = eff {
+                if let Some(ref b) = mission_budget_resp {
                     if let Some(obj) = list.as_object_mut() {
-                        obj.insert("effective_vm_limits".to_string(), limits.clone());
+                        if let Some(limits) = b.get("effective_vm_limits") {
+                            obj.insert("effective_vm_limits".to_string(), limits.clone());
+                        }
+                        if let Some(summary) = summarize_mission_budget(b) {
+                            obj.insert("mission_budget".to_string(), summary);
+                        }
                     }
                 }
                 Ok(if params.verbose == Some(true) {
@@ -8154,6 +8158,28 @@ fn parse_auto_managed_spec(raw: &str) -> Option<(Option<String>, Option<String>)
     crate::api::control::parse_auto_managed_spec(raw)
 }
 
+fn summarize_mission_budget(budget_view: &Value) -> Option<Value> {
+    let mode = budget_view.get("mode")?.as_str()?;
+    let pool = budget_view.get("pool").filter(|p| !p.is_null());
+    if mode != "own" && mode != "pooled" {
+        return None;
+    }
+    let pool = pool?;
+    Some(json!({
+        "source": "mission",
+        "mode": mode,
+        "pool_id": budget_view.get("pool_id").cloned().unwrap_or(Value::Null),
+        "own_budget_usd": budget_view.get("own_budget_usd").cloned().unwrap_or(Value::Null),
+        "budget_usd": pool.get("budget_usd").cloned().unwrap_or(Value::Null),
+        "spent_usd": pool.get("spent_usd").cloned().unwrap_or(Value::Null),
+        "reserved_usd": pool.get("reserved_usd").cloned().unwrap_or(Value::Null),
+        "carved_usd": pool.get("carved_usd").cloned().unwrap_or(Value::Null),
+        "available_usd": pool.get("available_usd").cloned().unwrap_or(Value::Null),
+        "live_machines": pool.get("live_machines").cloned().unwrap_or(Value::Null),
+        "overrides_daily_cap": true,
+    }))
+}
+
 /// `list_managed_machines` summary: live machines with the fields an agent
 /// needs, plus the budget block (the full list was ~60 KB and truncated).
 fn compact_managed_list(list: &Value) -> Value {
@@ -8196,8 +8222,13 @@ fn compact_managed_list(list: &Value) -> Value {
         "machines": machines,
         "budget": list["budget"],
         "spend_today_usd": today,
-        "hint": "verbose=true for full rows and history; get_budget for your mission's budget pool and concurrency overrides",
+        "hint": "verbose=true for full rows and history; when mission_budget is present it overrides budget.daily_cap_usd (use get_budget for sub-budgets and children)",
     });
+    if let Some(mb) = list.get("mission_budget") {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("mission_budget".to_string(), mb.clone());
+        }
+    }
     if let Some(eff) = list.get("effective_vm_limits") {
         if let Some(obj) = out.as_object_mut() {
             obj.insert("effective_vm_limits".to_string(), eff.clone());
@@ -8232,6 +8263,61 @@ mod compact_managed_tests {
         assert_eq!(c["spend_today_usd"], 0.25);
         assert_eq!(c["providers"][0]["provider"], "boat");
         assert!(c.get("sizes").is_none());
+        assert!(c.get("mission_budget").is_none());
+    }
+
+    #[test]
+    fn compact_list_surfaces_overriding_mission_budget_and_vm_limits() {
+        let mission_view = json!({
+            "mission_id": "9409f9a9-d3eb-416a-b5a8-978508bed734",
+            "own_budget_usd": 200.0,
+            "pool_id": "9409f9a9-d3eb-416a-b5a8-978508bed734",
+            "mode": "own",
+            "pool": {
+                "pool_id": "9409f9a9-d3eb-416a-b5a8-978508bed734",
+                "budget_usd": 200.0,
+                "spent_usd": 43.0,
+                "reserved_usd": 0.0,
+                "carved_usd": 0.0,
+                "available_usd": 157.0,
+                "live_machines": 0
+            },
+            "effective_vm_limits": {
+                "source": "mission",
+                "pool_id": "9409f9a9-d3eb-416a-b5a8-978508bed734",
+                "active": 0,
+                "max_concurrent": 50
+            }
+        });
+        let summary = super::summarize_mission_budget(&mission_view).expect("own budget summary");
+        assert_eq!(summary["mode"], "own");
+        assert_eq!(summary["budget_usd"], 200.0);
+        assert_eq!(summary["available_usd"], 157.0);
+        assert_eq!(summary["overrides_daily_cap"], true);
+
+        let none_view = json!({
+            "mission_id": "550e8400-e29b-41d4-a716-446655440000",
+            "own_budget_usd": null,
+            "pool_id": null,
+            "mode": "none",
+            "pool": null
+        });
+        assert!(super::summarize_mission_budget(&none_view).is_none());
+
+        let full = json!({
+            "enabled": true,
+            "providers": [{"provider": "boat", "configured": true}],
+            "machines": [],
+            "budget": {"spent_today_usd": 3.46, "daily_cap_usd": 50.0},
+            "daily_spend": [{"day": "2026-11-02", "usd": 3.46}],
+            "mission_budget": summary,
+            "effective_vm_limits": mission_view["effective_vm_limits"],
+        });
+        let c = super::compact_managed_list(&full);
+        assert_eq!(c["mission_budget"]["budget_usd"], 200.0);
+        assert_eq!(c["mission_budget"]["available_usd"], 157.0);
+        assert_eq!(c["mission_budget"]["overrides_daily_cap"], true);
+        assert_eq!(c["effective_vm_limits"]["max_concurrent"], 50);
     }
 
     #[test]

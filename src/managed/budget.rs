@@ -4,7 +4,8 @@
 //! descendants, until a mission below it gets its own (lower) budget: that
 //! sub-budget is carved out of the parent pool and becomes the pool for its
 //! own subtree. Missions without a budget draw from the nearest ancestor
-//! pool; with no pool anywhere there is no limit beyond the global daily cap.
+//! pool; an active pool overrides (bypasses) the shared global daily cap, while
+//! missions with no pool anywhere are bounded by the shared global daily cap.
 //!
 //! The registry of machines doubles as the ledger: each machine records the
 //! pool it is charged to (`budget_pool_id`). A pool's usage is derived:
