@@ -6425,26 +6425,91 @@ def applyWireEncodeSlice
     (st, outBuf)
 
 /-- Key safety theorem (`encode_failure_no_partial_mutation`):
-    whenever `wireEncodeSliceStep` rejects an encode request (`status != 0` — whether due to
-    schema bounds, record/arena bounds, budget overflow, undersized `outCap`, invalid `is32Bit`,
-    null pointer, `wasm32`/`LP64` span overflow, or input/output slice aliasing), zero bytes of
-    caller `outBuf` are mutated (`∀ i, outBuf' i = outBuf i`), and even on a succeeded encode,
-    every byte beyond `totalLen` (`e.totalLen.toNat ≤ j`) is preserved verbatim. -/
+    1. Whenever `wireEncodeSliceStep` rejects an encode request (`status != 0` — whether due to
+       schema bounds, record/arena bounds, budget overflow, undersized `outCap`, invalid `is32Bit`,
+       null pointer, `wasm32`/`LP64` span overflow, or input/output slice aliasing), zero bytes of
+       caller `outBuf` are mutated (`∀ i, outBuf' i = outBuf i`);
+    2. Whenever `wireEncodeSliceStep` admits (`status == 0`), `totalLen` fits within both
+       `maxBudgetBytes` and `outCap` (`totalLen.toNat ≤ outCap.toNat`), and every byte beyond
+       `totalLen` (`e.totalLen.toNat ≤ j`) is preserved verbatim;
+    3. Address-level half-open disjointness: whenever `wireVerifySliceIo` admits (`status == 0`)
+       with non-empty input and output spans (`0 < inLen.toNat ∧ 0 < outCap.toNat`), no byte
+       address `addr : Nat` lies simultaneously in `[inPtr, inPtr + inLen)` and
+       `[outPtr, outPtr + outCap)`. -/
 theorem encode_failure_no_partial_mutation
     (e : WireEncodeSliceCheck)
     (outBuf frameByte : Nat → UInt8) :
     ((applyWireEncodeSlice e outBuf frameByte).1 ≠ 0 →
       ∀ i, (applyWireEncodeSlice e outBuf frameByte).2 i = outBuf i) ∧
+    ((applyWireEncodeSlice e outBuf frameByte).1 = 0 →
+      e.totalLen.toNat ≤ e.outCap.toNat) ∧
     (∀ j, e.totalLen.toNat ≤ j →
       (applyWireEncodeSlice e outBuf frameByte).2 j = outBuf j) := by
+  have hcons := wireEncodeSliceConservedResource.conserved e
   unfold applyWireEncodeSlice
   dsimp only
   cases hst : (wireEncodeSliceStep e.inArenaPtr e.outPtr e.outCap
       e.schemaId e.recordsCount e.arenaLen e.maxBudgetBytes e.is32Bit == 0)
-  · simp [hst]
-  · refine ⟨fun hne => absurd rfl hne, fun j hj => ?_⟩
-    have hnot : ¬ (j < e.totalLen.toNat) := Nat.not_lt.mpr hj
-    simp [hst, hnot]
+  · refine ⟨fun _ _ => rfl, fun h0 => ?_, fun _ _ => rfl⟩
+    have hbeq : (wireEncodeSliceStep e.inArenaPtr e.outPtr e.outCap
+        e.schemaId e.recordsCount e.arenaLen e.maxBudgetBytes e.is32Bit == 0) = true :=
+      beq_iff_eq.mpr h0
+    rw [hst] at hbeq
+    contradiction
+  · refine ⟨fun hne => absurd rfl hne, fun _ => ?_, fun j hj => ?_⟩
+    · have hbud := hcons hst
+      dsimp [wireEncodeSliceConservedResource] at hbud
+      have hcap := (Bool.and_eq_true_iff.mp hbud).2
+      have hcap' : e.totalLen.toUInt64 ≤ e.outCap := of_decide_eq_true hcap
+      have hle : e.totalLen.toUInt64.toNat ≤ e.outCap.toNat := UInt64.le_iff_toNat_le.mp hcap'
+      simpa [UInt32.toNat_toUInt64] using hle
+    · have hnot : ¬ (j < e.totalLen.toNat) := Nat.not_lt.mpr hj
+      simp [hst, hnot]
+
+/-- Address-level half-open span disjointness proved against exact `Nat` intervals:
+    whenever `wireVerifySliceIo` admits (`== 0`), no `Nat` address belongs simultaneously to
+    `[inPtr.toNat, inPtr.toNat + inLen.toNat)` and `[outPtr.toNat, outPtr.toNat + outCap.toNat)`. -/
+theorem wire_slice_io_half_open_nat_disjoint
+    (inPtr inLen outPtr outCap writtenLen : UInt64) (is32Bit : UInt8)
+    (hok : wireVerifySliceIo inPtr inLen outPtr outCap writtenLen is32Bit = 0)
+    (addr : Nat)
+    (hin : inPtr.toNat ≤ addr ∧ addr < inPtr.toNat + inLen.toNat)
+    (hout : outPtr.toNat ≤ addr ∧ addr < outPtr.toNat + outCap.toNat) : False := by
+  have hadm := wireSliceIoMetaGate.sound
+    ⟨inPtr, inLen, outPtr, outCap, writtenLen, is32Bit⟩ (beq_iff_eq.mpr hok)
+  unfold WireSliceIoCheck.Admissible at hadm
+  rcases Bool.and_eq_true_iff.mp hadm with ⟨h1234, _⟩
+  rcases Bool.and_eq_true_iff.mp h1234 with ⟨_, hdisj⟩
+  have hin0 : inLen ≠ 0 := by
+    intro hz
+    subst hz
+    simp at hin
+    omega
+  have hout0 : outCap ≠ 0 := by
+    intro hz
+    subst hz
+    simp at hout
+    omega
+  have hin0b : (inLen == 0) = false := beq_eq_false_iff_ne.mpr hin0
+  have hout0b : (outCap == 0) = false := beq_eq_false_iff_ne.mpr hout0
+  simp only [hin0b, hout0b, Bool.false_or] at hdisj
+  rcases Bool.or_eq_true_iff.mp hdisj with hleft | hright
+  · rcases Bool.and_eq_true_iff.mp hleft with ⟨h1, h2⟩
+    have h1u : inLen ≤ outPtr := of_decide_eq_true h1
+    have h1' : inLen.toNat ≤ outPtr.toNat := UInt64.le_iff_toNat_le.mp h1u
+    have h2' : inPtr.toNat ≤ (outPtr - inLen).toNat := UInt64.le_iff_toNat_le.mp (of_decide_eq_true h2)
+    have hsub : (outPtr - inLen).toNat = outPtr.toNat - inLen.toNat :=
+      UInt64.toNat_sub_of_le outPtr inLen h1u
+    rw [hsub] at h2'
+    omega
+  · rcases Bool.and_eq_true_iff.mp hright with ⟨h1, h2⟩
+    have h1u : outCap ≤ inPtr := of_decide_eq_true h1
+    have h1' : outCap.toNat ≤ inPtr.toNat := UInt64.le_iff_toNat_le.mp h1u
+    have h2' : outPtr.toNat ≤ (inPtr - outCap).toNat := UInt64.le_iff_toNat_le.mp (of_decide_eq_true h2)
+    have hsub : (inPtr - outCap).toNat = inPtr.toNat - outCap.toNat :=
+      UInt64.toNat_sub_of_le inPtr outCap h1u
+    rw [hsub] at h2'
+    omega
 
 structure WireDecodeSliceCheck where
   inPtr            : UInt64

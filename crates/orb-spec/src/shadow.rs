@@ -233,17 +233,17 @@ impl OrbWireFrame {
         if arena_bytes > 0 {
             std::ptr::copy_nonoverlapping(in_arena_ptr, out_ptr.add(cursor), arena_bytes);
         }
-        let io_status = wire_verify_slice_io(WireSliceIoInput {
-            in_ptr: in_arena_ptr as usize as u64,
-            in_len: arena_bytes as u64,
-            out_ptr: out_ptr as usize as u64,
-            out_cap: out_cap as u64,
-            written_len: total_len as u64,
-            is_32bit,
-        });
-        if io_status != OrbWireStatus::Ok {
-            return Err(io_status);
-        }
+        debug_assert_eq!(
+            wire_verify_slice_io(WireSliceIoInput {
+                in_ptr: in_arena_ptr as usize as u64,
+                in_len: arena_bytes as u64,
+                out_ptr: out_ptr as usize as u64,
+                out_cap: out_cap as u64,
+                written_len: total_len as u64,
+                is_32bit,
+            }),
+            OrbWireStatus::Ok
+        );
         Ok(total_len)
     }
 

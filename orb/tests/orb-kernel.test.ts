@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { kernelAbi } from "../src/orbKernelAbi";
 import {
   leansysGfmPipeRowAdmitted, leansysRichTagAdmitted, leansysVerifyFdBounds,
   orbAuthToctouExecuteStep, orbHierarchyMergeStep, orbOutboxCrashReconcileStep,
@@ -190,7 +191,14 @@ describe("orb kernel gates mirror lean-sys", () => {
     });
   });
 
-  it("encodes and decodes OrbWire slices zero-copy via WASM linear memory and enforces no-partial-mutation", () => {
+  it("encodes and decodes OrbWire slices zero-copy without touching WASM static data and enforces no-partial-mutation", () => {
+    // Regression test (B1): leansys_select_isa / leansys_verify_isa_selection read WASM static rodata at 65536.
+    // Encoding arbitrary caller arenas must never overwrite WASM linear-memory static data.
+    expect(kernelAbi.leansys_select_isa(0xffff_ffffn, 895n, 3, 4)).toBe(3);
+    expect(kernelAbi.leansys_verify_isa_selection(0xffff_ffffn, 895n, 3, 4)).toBe(1);
+    expect(kernelAbi.leansys_select_isa(1n, 1n, 3, 4)).toBe(0);
+    expect(kernelAbi.leansys_verify_isa_selection(1n, 1n, 3, 4)).toBe(0);
+
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
     const arena = encoder.encode("wasm_slice");
@@ -202,6 +210,55 @@ describe("orb kernel gates mirror lean-sys", () => {
     const enc = orbWireEncodeSliceInto({ schemaId: 12, flags: 0x77, records, arena, outBuf });
     expect(enc).toEqual({ status: 0, written: 24 + 16 + 10 });
     expect(Array.from(outBuf.subarray(enc.written))).toEqual(new Array(64 - enc.written).fill(0xee));
+
+    // Adversarial 18-byte arena attempt that previously forged ISA rodata at 65536
+    const adversarialArena = new Uint8Array(18).fill(0x01);
+    const advOut = new Uint8Array(64).fill(0xcc);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records: [{ tag: 1, flags: 0, len16: 18, payload32: 0 }],
+      arena: adversarialArena,
+      outBuf: advOut,
+    })).toEqual({ status: 0, written: 24 + 8 + 18 });
+    expect(kernelAbi.leansys_select_isa(0xffff_ffffn, 895n, 3, 4)).toBe(3);
+    expect(kernelAbi.leansys_verify_isa_selection(0xffff_ffffn, 895n, 3, 4)).toBe(1);
+    expect(kernelAbi.leansys_select_isa(1n, 1n, 3, 4)).toBe(0);
+    expect(kernelAbi.leansys_verify_isa_selection(1n, 1n, 3, 4)).toBe(0);
+
+    // Reserved static-data pointer overrides (< scratchBase 131072) are rejected fail-closed (9)
+    const reservedOut = new Uint8Array(64).fill(0xbb);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena,
+      outBuf: reservedOut,
+      inArenaPtr: 65_536,
+    })).toEqual({ status: 9, written: 0 });
+    expect(Array.from(reservedOut)).toEqual(new Array(64).fill(0xbb));
+
+    // Shared ArrayBuffer aliasing between arena and outBuf is automatically detected and rejected (9)
+    const sharedBacking = new ArrayBuffer(96);
+    const sharedArena = new Uint8Array(sharedBacking, 16, 10);
+    sharedArena.set(arena);
+    const overlappingOut = new Uint8Array(sharedBacking, 8, 64);
+    overlappingOut.fill(0xdd);
+    sharedArena.set(arena);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena: sharedArena,
+      outBuf: overlappingOut,
+    })).toEqual({ status: 9, written: 0 });
+
+    // Record field overflow (len16 > 0xFFFF) rejected fail-closed (3), sentinel untouched
+    const badRecOut = new Uint8Array(64).fill(0x99);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records: [{ tag: 1, flags: 0, len16: 70_000, payload32: 0 }],
+      arena,
+      outBuf: badRecOut,
+    })).toEqual({ status: 3, written: 0 });
+    expect(Array.from(badRecOut)).toEqual(new Array(64).fill(0x99));
 
     const framed = outBuf.subarray(0, enc.written);
     const dec = orbWireDecodeSlice(framed, 12);
@@ -234,8 +291,8 @@ describe("orb kernel gates mirror lean-sys", () => {
       records,
       arena,
       outBuf: aliasOut,
-      inArenaPtr: 4096,
-      outPtr: 4080,
+      inArenaPtr: 131_072,
+      outPtr: 131_064,
     })).toEqual({ status: 9, written: 0 });
     expect(Array.from(aliasOut)).toEqual(new Array(64).fill(0x55));
 
@@ -246,19 +303,19 @@ describe("orb kernel gates mirror lean-sys", () => {
       arena,
       outBuf: aliasOut,
       inArenaPtr: 0,
-      outPtr: 8192,
+      outPtr: 262_144,
     })).toEqual({ status: 7, written: 0 });
     expect(Array.from(aliasOut)).toEqual(new Array(64).fill(0x55));
 
     // 32-bit wasm32 span overflow vs 64-bit LP64 admission
     expect(orbWireVerifySliceIo({
-      inPtr: 0xffff_fff0n, inLen: 32n, outPtr: 0x1000n, outCap: 64n, writtenLen: 32n, is32Bit: true,
+      inPtr: 0xffff_fff0n, inLen: 32n, outPtr: 0x20000n, outCap: 64n, writtenLen: 32n, is32Bit: true,
     })).toBe(8);
     expect(orbWireVerifySliceIo({
-      inPtr: 0xffff_fff0n, inLen: 32n, outPtr: 0x1000n, outCap: 64n, writtenLen: 32n, is32Bit: false,
+      inPtr: 0xffff_fff0n, inLen: 32n, outPtr: 0x20000n, outCap: 64n, writtenLen: 32n, is32Bit: false,
     })).toBe(0);
     expect(orbWireVerifySliceIo({
-      inPtr: 0x1000n, inLen: 16n, outPtr: 0x2000n, outCap: 64n, writtenLen: 16n, is32Bit: 2,
+      inPtr: 0x20000n, inLen: 16n, outPtr: 0x30000n, outCap: 64n, writtenLen: 16n, is32Bit: 2,
     })).toBe(6);
   });
 });

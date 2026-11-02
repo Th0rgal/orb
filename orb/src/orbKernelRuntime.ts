@@ -1,5 +1,6 @@
 // This module owns initialization. No caller can execute a behavioral fallback.
 let instance: WebAssembly.Instance | undefined;
+let scratchBaseOffset = 65_536;
 
 export async function loadKernel(bytes: Uint8Array, sha256: string, arities: Record<string, number>): Promise<void> {
   const buffer = new Uint8Array(bytes).buffer;
@@ -20,6 +21,10 @@ export async function loadKernel(bytes: Uint8Array, sha256: string, arities: Rec
     const fn = candidate.exports[name];
     if (typeof fn !== "function" || fn.length !== arity) throw new Error(`Shared kernel ABI mismatch: ${name}`);
   }
+  const candidateMem = candidate.exports.memory;
+  scratchBaseOffset = candidateMem instanceof WebAssembly.Memory
+    ? Math.max(WASM_PAGE_BYTES, candidateMem.buffer.byteLength)
+    : WASM_PAGE_BYTES;
   instance = candidate;
 }
 
@@ -48,6 +53,12 @@ export function result64(raw: number | bigint): bigint {
 }
 
 const WASM_PAGE_BYTES = 65_536;
+const WASM_MAX_ADDR_LIMIT = 0x1_0000_0000;
+
+export function kernelScratchBaseOffset(): number {
+  if (!instance) throw new Error("Shared kernel is not initialized");
+  return scratchBaseOffset;
+}
 
 export function kernelLinearMemory(minEndOffset = 0): WebAssembly.Memory {
   if (!instance) throw new Error("Shared kernel is not initialized");
@@ -55,7 +66,7 @@ export function kernelLinearMemory(minEndOffset = 0): WebAssembly.Memory {
   if (!(mem instanceof WebAssembly.Memory)) {
     throw new Error("Shared kernel does not export linear memory");
   }
-  if (!Number.isSafeInteger(minEndOffset) || minEndOffset < 0 || minEndOffset > 0xffff_ffff) {
+  if (!Number.isSafeInteger(minEndOffset) || minEndOffset < 0 || minEndOffset > WASM_MAX_ADDR_LIMIT) {
     throw new RangeError("Expected wasm32 linear memory end offset");
   }
   const curBytes = mem.buffer.byteLength;

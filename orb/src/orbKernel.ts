@@ -1,6 +1,6 @@
 // Host input encoding and presentation over generated scalar ABI adapters.
 import { kernelAbi as kernel } from "./orbKernelAbi";
-import { kernelLinearMemory } from "./orbKernelRuntime";
+import { kernelScratchBaseOffset } from "./orbKernelRuntime";
 
 export type WorkfoldVerdict = { foldItem: boolean; foldHasToolNext: boolean };
 export type TranscriptPatchState = { len: number; seq: number };
@@ -306,17 +306,40 @@ export function orbWireEncodeSliceInto(input: {
   inArenaPtr?: number;
   outPtr?: number;
 }): { status: OrbWireStatusCode; written: number } {
+  const scratchBase = kernelScratchBaseOffset();
   const maxBudget = input.maxBudgetBytes ?? ORB_WIRE_DEFAULT_MAX_BUDGET;
-  const inPtr = input.inArenaPtr ?? (input.arena.byteLength === 0 ? 0 : 65_536);
-  const defaultOutPtr = inPtr + Math.max(input.arena.byteLength, 8);
-  const outPtr = input.outPtr ?? (input.outBuf.byteLength === 0 ? 0 : defaultOutPtr);
+  const arenaBytes = input.arena.byteLength;
+  const outCap = input.outBuf.byteLength;
+  const sharesBackingBuffer =
+    arenaBytes > 0 && outCap > 0 && input.arena.buffer === input.outBuf.buffer;
+  const defaultInPtr = sharesBackingBuffer
+    ? scratchBase + input.arena.byteOffset
+    : (arenaBytes === 0 ? 0 : scratchBase);
+  const defaultOutPtr = sharesBackingBuffer
+    ? scratchBase + input.outBuf.byteOffset
+    : (outCap === 0 ? 0 : (defaultInPtr === 0 ? scratchBase : defaultInPtr + Math.max(arenaBytes, 8)));
+  const inPtr = input.inArenaPtr ?? defaultInPtr;
+  const outPtr = input.outPtr ?? defaultOutPtr;
+  if ((arenaBytes > 0 && inPtr > 0 && inPtr < scratchBase) ||
+      (outCap > 0 && outPtr > 0 && outPtr < scratchBase)) {
+    return { status: 9, written: 0 };
+  }
+  for (let i = 0; i < input.records.length; i++) {
+    const rec = input.records[i];
+    if (!Number.isInteger(rec.tag) || rec.tag < 0 || rec.tag > 0xff ||
+        !Number.isInteger(rec.flags) || rec.flags < 0 || rec.flags > 0xff ||
+        !Number.isInteger(rec.len16) || rec.len16 < 0 || rec.len16 > 0xffff ||
+        !Number.isInteger(rec.payload32) || rec.payload32 < 0 || rec.payload32 > 0xffff_ffff) {
+      return { status: 3, written: 0 };
+    }
+  }
   const status = clampWireStatus(kernel.orb_wire_encode_slice_step(
     u64(inPtr),
     u64(outPtr),
-    u64(input.outBuf.byteLength),
+    u64(outCap),
     sat32(input.schemaId),
     sat32(input.records.length),
-    sat32(input.arena.byteLength),
+    sat32(arenaBytes),
     sat32(maxBudget),
     1,
   ));
@@ -324,16 +347,9 @@ export function orbWireEncodeSliceInto(input: {
     return { status, written: 0 };
   }
   const recordsBytes = input.records.length * 8;
-  const arenaBytes = input.arena.byteLength;
   const payloadLen = recordsBytes + arenaBytes;
   const totalLen = ORB_WIRE_HEADER_BYTES + payloadLen;
-  const memEnd = Math.max(inPtr + arenaBytes, outPtr + totalLen);
-  const mem = kernelLinearMemory(memEnd);
-  const wasmBytes = new Uint8Array(mem.buffer);
-  if (arenaBytes > 0) {
-    wasmBytes.set(input.arena, inPtr);
-  }
-  const hdrView = new DataView(mem.buffer, outPtr, ORB_WIRE_HEADER_BYTES);
+  const hdrView = new DataView(input.outBuf.buffer, input.outBuf.byteOffset, ORB_WIRE_HEADER_BYTES);
   hdrView.setUint32(0, ORB_WIRE_MAGIC, true);
   hdrView.setUint16(4, ORB_WIRE_ABI_VERSION, true);
   hdrView.setUint16(6, input.schemaId & 0xffff, true);
@@ -343,29 +359,21 @@ export function orbWireEncodeSliceInto(input: {
   hdrView.setUint16(20, recordsBytes & 0xffff, true);
   hdrView.setUint16(22, arenaBytes & 0xffff, true);
 
-  const recView = new DataView(mem.buffer, outPtr + ORB_WIRE_HEADER_BYTES, recordsBytes);
+  const recView = new DataView(
+    input.outBuf.buffer,
+    input.outBuf.byteOffset + ORB_WIRE_HEADER_BYTES,
+    recordsBytes,
+  );
   for (let i = 0; i < input.records.length; i++) {
     const rec = input.records[i];
     const packed = kernel.orb_wire_pack_record(
-      enum8(rec.tag), enum8(rec.flags), sat32(rec.len16), sat32(rec.payload32),
+      rec.tag, rec.flags, rec.len16, rec.payload32,
     );
     recView.setBigUint64(i * 8, packed, true);
   }
   if (arenaBytes > 0) {
-    wasmBytes.copyWithin(outPtr + ORB_WIRE_HEADER_BYTES + recordsBytes, inPtr, inPtr + arenaBytes);
+    input.outBuf.set(input.arena, ORB_WIRE_HEADER_BYTES + recordsBytes);
   }
-  const ioStatus = orbWireVerifySliceIo({
-    inPtr,
-    inLen: arenaBytes,
-    outPtr,
-    outCap: input.outBuf.byteLength,
-    writtenLen: totalLen,
-    is32Bit: true,
-  });
-  if (ioStatus !== 0) {
-    return { status: ioStatus, written: 0 };
-  }
-  input.outBuf.set(wasmBytes.subarray(outPtr, outPtr + totalLen), 0);
   return { status: 0, written: totalLen };
 }
 
@@ -373,8 +381,13 @@ export function orbWireDecodeSlice(
   bytes: Uint8Array,
   expectedSchemaId: number,
   maxBudgetBytes = ORB_WIRE_DEFAULT_MAX_BUDGET,
-  inPtr = 65_536,
+  inPtr?: number,
 ): { status: OrbWireStatusCode; view: OrbWireSliceView | null } {
+  const scratchBase = kernelScratchBaseOffset();
+  const effectiveInPtr = inPtr ?? scratchBase;
+  if (bytes.byteLength > 0 && effectiveInPtr > 0 && effectiveInPtr < scratchBase) {
+    return { status: 9, view: null };
+  }
   if (bytes.byteLength < ORB_WIRE_HEADER_BYTES) {
     return { status: 3, view: null };
   }
@@ -389,7 +402,7 @@ export function orbWireDecodeSlice(
   const arenaLen = hdr.getUint16(22, true);
 
   const status = clampWireStatus(kernel.orb_wire_decode_slice_step(
-    u64(inPtr),
+    u64(effectiveInPtr),
     u64(bytes.byteLength),
     1,
     magic,
@@ -413,7 +426,6 @@ export function orbWireDecodeSlice(
   const recordsBytes = payload.subarray(0, arenaOff);
   const arenaBytes = payload.subarray(arenaOff, arenaOff + arenaLen);
   const recordCount = recordsBytes.byteLength >>> 3;
-  const recView = new DataView(recordsBytes.buffer, recordsBytes.byteOffset, recordsBytes.byteLength);
 
   return {
     status: 0,
@@ -429,6 +441,8 @@ export function orbWireDecodeSlice(
       recordCount,
       recordAt(index: number): OrbWireRecord | null {
         if (!Number.isInteger(index) || index < 0 || index >= recordCount) return null;
+        if (recordsBytes.buffer.byteLength === 0) return null;
+        const recView = new DataView(recordsBytes.buffer, recordsBytes.byteOffset, recordsBytes.byteLength);
         const word = recView.getBigUint64(index * 8, true);
         return {
           tag: Number(word & 0xffn),
@@ -439,6 +453,7 @@ export function orbWireDecodeSlice(
       },
       arenaSlice(offset: number, len: number): Uint8Array | null {
         if (!coordinates(offset, len) || offset + len > arenaBytes.byteLength) return null;
+        if (arenaBytes.buffer.byteLength === 0) return null;
         return arenaBytes.subarray(offset, offset + len);
       },
     },

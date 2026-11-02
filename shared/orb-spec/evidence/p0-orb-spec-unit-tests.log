@@ -1,5 +1,5 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-fb7283fc71635359)
+    Finished `test` profile [unoptimized] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-8374b4127ccc7fbc)
 
 running 39 tests
 test privilege_bunker_deploy_tests::bunker_step_is_sticky_until_biometric_unbunker ... ok
