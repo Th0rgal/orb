@@ -554,6 +554,44 @@ object OrbKernel {
     @JvmStatic
     external fun leansysVerifyFdBounds(rawWord: Long, fdOut: Int): Int
 
+    @JvmStatic
+    external fun orbWireVerifySliceIo(
+        inPtr: Long,
+        inLen: Long,
+        outPtr: Long,
+        outCap: Long,
+        writtenLen: Long,
+        is32Bit: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbWireEncodeSliceStep(
+        inArenaPtr: Long,
+        outPtr: Long,
+        outCap: Long,
+        schemaId: Int,
+        recordsCount: Int,
+        arenaLen: Int,
+        maxBudgetBytes: Int,
+        is32Bit: Int
+    ): Int
+
+    @JvmStatic
+    external fun orbWireDecodeSliceStep(
+        inPtr: Long,
+        inLen: Long,
+        is32Bit: Int,
+        magic: Int,
+        abiVersion: Int,
+        schemaId: Int,
+        expectedSchemaId: Int,
+        totalLen: Int,
+        payloadLen: Int,
+        arenaOff: Int,
+        arenaLen: Int,
+        maxBudgetBytes: Int
+    ): Int
+
     data class WorkfoldVerdict(val foldItem: Boolean, val foldHasToolNext: Boolean)
 
     private fun bInt(v: Boolean): Int = if (v) 1 else 0
@@ -1000,5 +1038,71 @@ object OrbKernel {
             singleScrollCorrectionOk = ((lo32 ushr 9) and 1) != 0,
             digest32 = hi32
         )
+    }
+
+    fun wireVerifySliceIo(
+        inPtr: Long,
+        inLen: Long,
+        outPtr: Long,
+        outCap: Long,
+        writtenLen: Long,
+        is32Bit: Boolean = false
+    ): Int {
+        requireNative()
+        return orbWireVerifySliceIo(inPtr, inLen, outPtr, outCap, writtenLen, bInt(is32Bit)) and 0xFF
+    }
+
+    fun wireEncodeSliceStep(
+        inArenaPtr: Long,
+        outPtr: Long,
+        outCap: Long,
+        schemaId: Int,
+        recordsCount: Int,
+        arenaLen: Int,
+        maxBudgetBytes: Int,
+        is32Bit: Boolean = false
+    ): Int {
+        requireNative()
+        return orbWireEncodeSliceStep(
+            inArenaPtr,
+            outPtr,
+            outCap,
+            maxOf(0, schemaId),
+            maxOf(0, recordsCount),
+            maxOf(0, arenaLen),
+            maxOf(0, maxBudgetBytes),
+            bInt(is32Bit)
+        ) and 0xFF
+    }
+
+    fun wireDecodeSliceStep(
+        inPtr: Long,
+        inLen: Long,
+        is32Bit: Boolean = false,
+        magic: Int,
+        abiVersion: Int,
+        schemaId: Int,
+        expectedSchemaId: Int,
+        totalLen: Int,
+        payloadLen: Int,
+        arenaOff: Int,
+        arenaLen: Int,
+        maxBudgetBytes: Int
+    ): Int {
+        requireNative()
+        return orbWireDecodeSliceStep(
+            inPtr,
+            inLen,
+            bInt(is32Bit),
+            magic,
+            maxOf(0, abiVersion),
+            maxOf(0, schemaId),
+            maxOf(0, expectedSchemaId),
+            maxOf(0, totalLen),
+            maxOf(0, payloadLen),
+            maxOf(0, arenaOff),
+            maxOf(0, arenaLen),
+            maxOf(0, maxBudgetBytes)
+        ) and 0xFF
     }
 }

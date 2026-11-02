@@ -16,8 +16,8 @@ class CoverageRegistryTests(unittest.TestCase):
     def test_inventory_roundtrip(self):
         registry.validate_registry(self.value)
         self.assertEqual(self.value["acceptance"], "INCOMPLETE")
-        self.assertEqual(self.value["total_exports"], 132)
-        self.assertEqual(self.value["counts_by_status"], {"partial": 46, "unconnected": 86})
+        self.assertEqual(self.value["total_exports"], 135)
+        self.assertEqual(self.value["counts_by_status"], {"partial": 49, "unconnected": 86})
         self.assertTrue(all(e["blockers"] for e in self.value["entries"]))
 
     def test_reject_unsupported_links_and_claims(self):
@@ -106,6 +106,9 @@ class CoverageRegistryTests(unittest.TestCase):
                 "orb_verify_board_slots",
                 "orb_verify_board_retry",
                 "orb_verify_job_transition",
+                "orb_wire_verify_slice_io",
+                "orb_wire_encode_slice_step",
+                "orb_wire_decode_slice_step",
             },
         )
         for entry in partial:
@@ -161,23 +164,23 @@ class CoverageRegistryTests(unittest.TestCase):
         self.assertNotIn("2aedbc0207ccf866c41d0392b82c7187c3941ee6", formal_audit)
         roadmap = (root / "docs/TRUSTWORTHY_SHARED_LEAN_ROADMAP.md").read_text(encoding="utf-8")
         self.assertIn("P0–P7 remain unaccepted.", roadmap)
-        self.assertIn("46 partial / 86 unconnected", roadmap)
+        self.assertIn("49 partial / 86 unconnected", roadmap)
         self.assertIn("BLOCKED_PHYSICAL_DEVICE", roadmap)
         self.assertIn("BLOCKED_HOST_UNREACHABLE", roadmap)
         self.assertIn(pin, roadmap)
         p1_doc = (root / "docs/P1_SHARED_KERNEL_CONFORMANCE.md").read_text(encoding="utf-8")
-        self.assertIn("98 Orb exports and 33 LeanSys exports", p1_doc)
-        self.assertIn("1048 base cases", p1_doc)
-        self.assertIn("1068 cases", p1_doc)
-        self.assertIn("46 partial / 86", p1_doc)
+        self.assertIn("101 Orb exports and 33 LeanSys exports", p1_doc)
+        self.assertIn("1072 base cases", p1_doc)
+        self.assertIn("1092 cases", p1_doc)
+        self.assertIn("49 partial / 86", p1_doc)
         self.assertIn("3c70e5ada278a4e37e0180255f360aa2ff5fe86c", p1_doc)
         p2_doc = (root / "docs/P2_SHARED_WASM_ARTIFACT.md").read_text(encoding="utf-8")
-        self.assertIn("all 132 exported function names", p2_doc)
-        self.assertIn("131 public-prefix exports and one compiler helper", p2_doc)
+        self.assertIn("all 135 exported function names", p2_doc)
+        self.assertIn("134 public-prefix exports and one compiler helper", p2_doc)
         p3_doc = (root / "docs/P3_TARGET_QUALIFICATION_REPORT.md").read_text(encoding="utf-8")
         self.assertIn("QUALIFIED_WITH_HONEST_DEVICE_BLOCKERS", p3_doc)
-        self.assertIn("46 partial / 86 unconnected", p3_doc)
-        self.assertIn("132 manifest entries / 131", p3_doc)
+        self.assertIn("49 partial / 86 unconnected", p3_doc)
+        self.assertIn("135 manifest entries / 134", p3_doc)
 
 
 if __name__ == "__main__":

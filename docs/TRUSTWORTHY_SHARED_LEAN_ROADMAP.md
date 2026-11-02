@@ -12,7 +12,7 @@ open-work statements rather than claiming phase acceptance.
 **P1/P3 local evidence now exists.** turbo-lean Stage 1D #280 merged at
 `e585ba96f58cb06414ce5e3216f3ffc0ce235300` after exact-head green CI and a
 clean Codex review (and `lean/turbo-lean-revision` is currently pinned to
-`c98ac645e3fe9344c92a97d28ed8efaaeb0bf45e`). At
+`72d713b6d8a88038c1b63aedbe6f1f01a18d698e`). At
 the historical execution head Orb `3c70e5ada278a4e37e0180255f360aa2ff5fe86c` /
 Turbo `e585ba96f58cb06414ce5e3216f3ffc0ce235300` / LeanSys
 `c089f3e31dbd36f2bde2219913d5b9c90da670be`, the six-engine kernel conformance
@@ -22,15 +22,16 @@ Node WASM MVP/SIMD128/shipped module, and Linux-loaded Android x86_64 JNI paths
 with zero mismatches (`QUALIFIED_WITH_HONEST_DEVICE_BLOCKERS`):
 [results and receipt hashes](P1_SHARED_KERNEL_CONFORMANCE.md),
 [P3 report](P3_TARGET_QUALIFICATION_REPORT.md). Later `#1488` added
-`orb_slot_bypass_step` and live node capacity / coordinator priority lane added
-`orb_node_resize_step` and `orb_node_lane_step`, expanding the current manifest to **132 entries / 131
-public exports** (98 `orb_*` + 33 `leansys_*` + 1 compiler helper), and `#1490`
-added the repo-owned 264-case (`132 * 2` on current manifest) Ed25519-signed local P3 consistency
+`orb_slot_bypass_step`, live node capacity / coordinator priority lane added
+`orb_node_resize_step` and `orb_node_lane_step`, and Phase R2b added
+`orb_wire_verify_slice_io`, `orb_wire_encode_slice_step`, and `orb_wire_decode_slice_step`, expanding the current manifest to **135 entries / 134
+public exports** (101 `orb_*` + 33 `leansys_*` + 1 compiler helper), and `#1490`
+added the repo-owned 270-case (`135 * 2` on current manifest) Ed25519-signed local P3 consistency
 receipt and `ORB_KERNEL_BACKEND=stock-c` default rollback without retroactively
 relabeling the `3c70e5ada` multi-target run.
 
-That local evidence is not phase acceptance: **46 partial / 86 unconnected**
-coverage entries remain across the current 132-entry manifest (`acceptance:
+That local evidence is not phase acceptance: **49 partial / 86 unconnected**
+coverage entries remain across the current 135-entry manifest (`acceptance:
 INCOMPLETE`; 23 partial / 106 unconnected at `3c70e5ada`); physical iPhone 13
 mini and Pixel 8 stay `BLOCKED_PHYSICAL_DEVICE`, the MacBook Air host is
 `BLOCKED_HOST_UNREACHABLE`, iOS/macOS/Android-ARM64 remain
@@ -57,14 +58,14 @@ those checks.
 
 The coverage registry remains incomplete: 106 entries were unconnected and 23
 had explicit partial evidence in `shared/orb-spec/coverage_evidence.json` at the
-2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, and Phase R1 host-gate evidence, 86 entries are unconnected and 46 partial across 132
-manifest entries: 98 `orb_*` + 33 `leansys_*` + 1 compiler helper).
+2026-10-28 handoff (on current `master`, after `#1488`, live node capacity / coordinator lane exports, Phase R1 host-gate evidence, and Phase R2b `OrbWire` slice I/O evidence, 86 entries are unconnected and 49 partial across 135
+manifest entries: 101 `orb_*` + 33 `leansys_*` + 1 compiler helper).
 Source hashes bind local host-test receipts to the linked theorem declarations
 and observers; these links do not establish authoritative callers or adapter parity.
 At that handoff its 129 manifest entries were 95 `orb_*` exports (`Orb.Kernel.*`), 33 `leansys_*`
 exports (`LeanSys.Spec.*`, verified against pinned `lean-sys` by `gen_orb_kernel_unboxed.py`),
 and the compiler helper `lp_orb_x2dspec_Orb_Kernel_accessStep___redArg` (`model: null`).
-Those 128 public exports covered all public Orb/LeanSys exports at that head (131 on
+Those 128 public exports covered all public Orb/LeanSys exports at that head (134 on
 current `master`); the helper
 remains inventoried separately rather than being counted as an extra public gate.
 Shadow observations now count missing host HOME poststates as unobserved,

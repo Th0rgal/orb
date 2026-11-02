@@ -1,5 +1,6 @@
 // This module owns initialization. No caller can execute a behavioral fallback.
 let instance: WebAssembly.Instance | undefined;
+let scratchBaseOffset = 65_536;
 
 export async function loadKernel(bytes: Uint8Array, sha256: string, arities: Record<string, number>): Promise<void> {
   const buffer = new Uint8Array(bytes).buffer;
@@ -20,6 +21,10 @@ export async function loadKernel(bytes: Uint8Array, sha256: string, arities: Rec
     const fn = candidate.exports[name];
     if (typeof fn !== "function" || fn.length !== arity) throw new Error(`Shared kernel ABI mismatch: ${name}`);
   }
+  const candidateMem = candidate.exports.memory;
+  scratchBaseOffset = candidateMem instanceof WebAssembly.Memory
+    ? Math.max(WASM_PAGE_BYTES, candidateMem.buffer.byteLength)
+    : WASM_PAGE_BYTES;
   instance = candidate;
 }
 
@@ -45,4 +50,11 @@ export function result32(raw: number | bigint): number {
 export function result64(raw: number | bigint): bigint {
   if (typeof raw !== "bigint") throw new TypeError("Expected WASM i64 result");
   return BigInt.asUintN(64, raw);
+}
+
+const WASM_PAGE_BYTES = 65_536;
+
+export function kernelScratchBaseOffset(): number {
+  if (!instance) throw new Error("Shared kernel is not initialized");
+  return scratchBaseOffset;
 }

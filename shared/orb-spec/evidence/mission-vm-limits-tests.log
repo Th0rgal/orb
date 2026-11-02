@@ -1,18 +1,56 @@
-    Finished `test` profile [unoptimized] target(s) in 0.04s
-     Running unittests src/lib.rs (target/debug/deps/orb_spec-e925cae11053abab)
+    Finished `test` profile [unoptimized] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/orb_spec-ec7999243a6baae1)
 
 running 2 tests
 test shadow::tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 test stateful_tests::wave12_orbwire_machine_and_seven_stateful_families_verified ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.00s
 
-    Finished `test` profile [unoptimized] target(s) in 0.10s
-     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-b43eb09b4162af06)
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> src/api/control/actor.rs:7420:50
+     |
+7420 | ...                   .fetch_update(
+     |                        ^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+     |
+7420 -                                                 .fetch_update(
+7420 +                                                 .try_update(
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> src/api/control/actor.rs:7427:78
+     |
+7427 | ...                   let _ = runner.active_tool_calls.fetch_update(
+     |                                                        ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+7427 -                                             let _ = runner.active_tool_calls.fetch_update(
+7427 +                                             let _ = runner.active_tool_calls.try_update(
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
+   --> src/node/runner.rs:988:14
+    |
+988 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+    |              ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+988 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+988 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+    |
+
+warning: `sandboxed_sh` (lib test) generated 3 warnings (run `cargo fix --lib -p sandboxed_sh --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/sandboxed_sh-c29a904789290e9f)
 
 running 2 tests
 test managed::tests::mission_vm_limits_ancestor_ceiling_zero_provider_block_and_independent_usd_budget ... ok
 test managed::tests::mission_vm_limits_bypass_saturated_global_pool_and_enforce_per_provider_caps ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3716 filtered out; finished in 0.01s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3718 filtered out; finished in 0.01s
 

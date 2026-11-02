@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { kernelAbi } from "../src/orbKernelAbi";
 import {
   leansysGfmPipeRowAdmitted, leansysRichTagAdmitted, leansysVerifyFdBounds,
   orbAuthToctouExecuteStep, orbHierarchyMergeStep, orbOutboxCrashReconcileStep,
   orbProviderAttemptStep, orbRelativeTimeString, orbResourceLedgerStep,
   orbStreamBoundedCommitStep, orbTranscriptFoldStep, orbTranscriptPatchStep,
-  orbUsageLimitBadge, orbWireApplyPatchStep, orbWireMachineStep,
+  orbUsageLimitBadge, orbWireApplyPatchStep, orbWireDecodeSlice,
+  orbWireEncodeSliceInto, orbWireMachineStep, orbWireVerifySliceIo,
 } from "../src/orbKernel";
 import { mergeMission, reparentMission, resetMissionHierarchy } from "../src/missionHierarchy";
 import { normalizeLoosePipeTables } from "../src/pipeTables";
@@ -187,5 +189,206 @@ describe("orb kernel gates mirror lean-sys", () => {
       admitted: true,
       checkpointForced: true,
     });
+  });
+
+  it("encodes and decodes OrbWire slices zero-copy without touching WASM static data and enforces no-partial-mutation", () => {
+    // Regression test (B1): leansys_select_isa / leansys_verify_isa_selection read WASM static rodata at 65536.
+    // Encoding arbitrary caller arenas must never overwrite WASM linear-memory static data.
+    expect(kernelAbi.leansys_select_isa(0xffff_ffffn, 895n, 3, 4)).toBe(3);
+    expect(kernelAbi.leansys_verify_isa_selection(0xffff_ffffn, 895n, 3, 4)).toBe(1);
+    expect(kernelAbi.leansys_select_isa(1n, 1n, 3, 4)).toBe(0);
+    expect(kernelAbi.leansys_verify_isa_selection(1n, 1n, 3, 4)).toBe(0);
+
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const arena = encoder.encode("wasm_slice");
+    const records = [
+      { tag: 2, flags: 1, len16: 4, payload32: 0 },
+      { tag: 9, flags: 0, len16: 6, payload32: 4 },
+    ];
+    const outBuf = new Uint8Array(64).fill(0xee);
+    const enc = orbWireEncodeSliceInto({ schemaId: 12, flags: 0x77, records, arena, outBuf });
+    expect(enc).toEqual({ status: 0, written: 24 + 16 + 10 });
+    expect(Array.from(outBuf.subarray(enc.written))).toEqual(new Array(64 - enc.written).fill(0xee));
+
+    // Adversarial 18-byte arena attempt that previously forged ISA rodata at 65536
+    const adversarialArena = new Uint8Array(18).fill(0x01);
+    const advOut = new Uint8Array(64).fill(0xcc);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records: [{ tag: 1, flags: 0, len16: 18, payload32: 0 }],
+      arena: adversarialArena,
+      outBuf: advOut,
+    })).toEqual({ status: 0, written: 24 + 8 + 18 });
+    expect(kernelAbi.leansys_select_isa(0xffff_ffffn, 895n, 3, 4)).toBe(3);
+    expect(kernelAbi.leansys_verify_isa_selection(0xffff_ffffn, 895n, 3, 4)).toBe(1);
+    expect(kernelAbi.leansys_select_isa(1n, 1n, 3, 4)).toBe(0);
+    expect(kernelAbi.leansys_verify_isa_selection(1n, 1n, 3, 4)).toBe(0);
+
+    // Reserved static-data pointer overrides (< scratchBase 131072) are rejected fail-closed (9)
+    const reservedOut = new Uint8Array(64).fill(0xbb);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena,
+      outBuf: reservedOut,
+      inArenaPtr: 65_536,
+    })).toEqual({ status: 9, written: 0 });
+    expect(Array.from(reservedOut)).toEqual(new Array(64).fill(0xbb));
+
+    // Shared ArrayBuffer aliasing between arena and outBuf is automatically detected and rejected (9)
+    const sharedBacking = new ArrayBuffer(96);
+    const sharedArena = new Uint8Array(sharedBacking, 16, 10);
+    sharedArena.set(arena);
+    const overlappingOut = new Uint8Array(sharedBacking, 8, 64);
+    overlappingOut.fill(0xdd);
+    sharedArena.set(arena);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena: sharedArena,
+      outBuf: overlappingOut,
+    })).toEqual({ status: 9, written: 0 });
+
+    // Record field overflow (len16 > 0xFFFF) rejected fail-closed (3), sentinel untouched
+    const badRecOut = new Uint8Array(64).fill(0x99);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records: [{ tag: 1, flags: 0, len16: 70_000, payload32: 0 }],
+      arena,
+      outBuf: badRecOut,
+    })).toEqual({ status: 3, written: 0 });
+    expect(Array.from(badRecOut)).toEqual(new Array(64).fill(0x99));
+
+    const framed = outBuf.subarray(0, enc.written);
+    const dec = orbWireDecodeSlice(framed, 12);
+    expect(dec.status).toBe(0);
+    expect(dec.view).not.toBeNull();
+    const view = dec.view!;
+    expect(view.schemaId).toBe(12);
+    expect(view.flags).toBe(0x77);
+    expect(view.recordCount).toBe(2);
+    expect(view.recordAt(0)).toEqual(records[0]);
+    expect(view.recordAt(1)).toEqual(records[1]);
+    expect(view.recordAt(2)).toBeNull();
+    // Zero-copy subarray shares caller buffer
+    expect(view.arenaBytes.buffer).toBe(outBuf.buffer);
+    expect(decoder.decode(view.arenaSlice(0, 4)!)).toBe("wasm");
+    expect(decoder.decode(view.arenaSlice(4, 6)!)).toBe("_slice");
+
+    // Output too small -> OutputTooSmall (5), sentinel untouched
+    const smallOut = new Uint8Array(16).fill(0xaa);
+    expect(orbWireEncodeSliceInto({ schemaId: 12, records, arena, outBuf: smallOut })).toEqual({
+      status: 5,
+      written: 0,
+    });
+    expect(Array.from(smallOut)).toEqual(new Array(16).fill(0xaa));
+
+    // Overlapping linear-memory spans -> SliceAliasOverlap (9), sentinel untouched
+    const aliasOut = new Uint8Array(64).fill(0x55);
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena,
+      outBuf: aliasOut,
+      inArenaPtr: 131_072,
+      outPtr: 131_064,
+    })).toEqual({ status: 9, written: 0 });
+    expect(Array.from(aliasOut)).toEqual(new Array(64).fill(0x55));
+
+    // Null pointer with non-zero span -> NullSlicePtr (7)
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena,
+      outBuf: aliasOut,
+      inArenaPtr: 0,
+      outPtr: 262_144,
+    })).toEqual({ status: 7, written: 0 });
+    expect(Array.from(aliasOut)).toEqual(new Array(64).fill(0x55));
+
+    // 32-bit wasm32 span overflow vs 64-bit LP64 admission
+    expect(orbWireVerifySliceIo({
+      inPtr: 0xffff_fff0n, inLen: 32n, outPtr: 0x20000n, outCap: 64n, writtenLen: 32n, is32Bit: true,
+    })).toBe(8);
+    expect(orbWireVerifySliceIo({
+      inPtr: 0xffff_fff0n, inLen: 32n, outPtr: 0x20000n, outCap: 64n, writtenLen: 32n, is32Bit: false,
+    })).toBe(0);
+    expect(orbWireVerifySliceIo({
+      inPtr: 0x20000n, inLen: 16n, outPtr: 0x30000n, outCap: 64n, writtenLen: 16n, is32Bit: 2,
+    })).toBe(6);
+
+    // Round 2 strict integer & non-throwing bounds regression checks:
+    // 1. Negative / fractional / NaN / Infinity / >=2^64 pointers never clamp, wrap modulo 2^64, or throw
+    expect(orbWireVerifySliceIo({
+      inPtr: -16, inLen: 0, outPtr: 0x20000, outCap: 64, writtenLen: 16, is32Bit: true,
+    })).toBe(8);
+    expect(orbWireVerifySliceIo({
+      inPtr: 131_072.7, inLen: 8, outPtr: 0x30000, outCap: 64, writtenLen: 16, is32Bit: true,
+    })).toBe(8);
+    expect(orbWireVerifySliceIo({
+      inPtr: Number.NaN, inLen: 0, outPtr: 0x20000, outCap: 64, writtenLen: 0, is32Bit: true,
+    })).toBe(8);
+    expect(orbWireVerifySliceIo({
+      inPtr: 2 ** 53, inLen: 0, outPtr: 0x20000, outCap: 64, writtenLen: 0, is32Bit: true,
+    })).toBe(8);
+    expect(orbWireVerifySliceIo({
+      inPtr: 0x1_0000_0000_0002_0000n, inLen: 16n, outPtr: 0x30000n, outCap: 64n, writtenLen: 16n, is32Bit: true,
+    })).toBe(8);
+    expect(orbWireVerifySliceIo({
+      inPtr: -0xffff_ffff_fffd_0000n, inLen: 16n, outPtr: 0x30000n, outCap: 64n, writtenLen: 16n, is32Bit: true,
+    })).toBe(8);
+
+    // 2. Fractional/out-of-range schemaId, expectedSchemaId, flags, and maxBudgetBytes fail closed with 0 written
+    const guardOut = new Uint8Array(64).fill(0x7a);
+    expect(orbWireEncodeSliceInto({ schemaId: 12.9, records, arena, outBuf: guardOut })).toEqual({
+      status: 2, written: 0,
+    });
+    expect(orbWireEncodeSliceInto({ schemaId: 0x1_0001, records, arena, outBuf: guardOut })).toEqual({
+      status: 2, written: 0,
+    });
+    expect(orbWireEncodeSliceInto({ schemaId: 12, flags: -1, records, arena, outBuf: guardOut })).toEqual({
+      status: 3, written: 0,
+    });
+    expect(orbWireEncodeSliceInto({ schemaId: 12, flags: 2 ** 40, records, arena, outBuf: guardOut })).toEqual({
+      status: 3, written: 0,
+    });
+    expect(orbWireEncodeSliceInto({ schemaId: 12, maxBudgetBytes: -5, records, arena, outBuf: guardOut })).toEqual({
+      status: 4, written: 0,
+    });
+    expect(orbWireEncodeSliceInto({ schemaId: 12, inArenaPtr: -4096, records: [], arena: new Uint8Array(0), outBuf: guardOut })).toEqual({
+      status: 8, written: 0,
+    });
+    expect(orbWireEncodeSliceInto({ schemaId: 12, outPtr: Number.POSITIVE_INFINITY, records, arena, outBuf: guardOut })).toEqual({
+      status: 8, written: 0,
+    });
+    expect(Array.from(guardOut)).toEqual(new Array(64).fill(0x7a));
+
+    // 3. Explicit non-overlapping pointer overrides cannot bypass actual shared-ArrayBuffer overlap
+    expect(orbWireEncodeSliceInto({
+      schemaId: 12,
+      records,
+      arena: sharedArena,
+      outBuf: overlappingOut,
+      inArenaPtr: 131_072,
+      outPtr: 262_144,
+    })).toEqual({ status: 9, written: 0 });
+
+    // 4. Decode rejects fractional/invalid expectedSchemaId, maxBudgetBytes, and pointer overrides
+    expect(orbWireDecodeSlice(framed, 12.9)).toEqual({ status: 2, view: null });
+    expect(orbWireDecodeSlice(framed, 0x1_0001)).toEqual({ status: 2, view: null });
+    expect(orbWireDecodeSlice(framed, 12, -1)).toEqual({ status: 4, view: null });
+    expect(orbWireDecodeSlice(framed, 12, 65_536, -1)).toEqual({ status: 8, view: null });
+    expect(orbWireDecodeSlice(framed, 12, 65_536, 0x1_0000_0000_0002_0000n)).toEqual({ status: 8, view: null });
+
+    // 5. Resizable ArrayBuffer shrink after decode fails closed (null) instead of throwing RangeError
+    const rab = new ArrayBuffer(framed.byteLength, { maxByteLength: 128 });
+    const rabBytes = new Uint8Array(rab);
+    rabBytes.set(framed);
+    const rabDec = orbWireDecodeSlice(rabBytes, 12);
+    expect(rabDec.status).toBe(0);
+    rab.resize(24);
+    expect(rabDec.view!.recordAt(0)).toBeNull();
+    expect(rabDec.view!.arenaSlice(0, 4)).toBeNull();
   });
 });

@@ -132,4 +132,7 @@ pub const EXPORTS: &[&str] = &[
     "orb_slot_bypass_step",
     "orb_node_resize_step",
     "orb_node_lane_step",
+    "orb_wire_verify_slice_io",
+    "orb_wire_encode_slice_step",
+    "orb_wire_decode_slice_step",
 ];

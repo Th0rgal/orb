@@ -6283,4 +6283,308 @@ theorem coordinator_prefers_main_when_uncongested
   unfold nodeLaneStep
   simp [h_main]
 
+-- ===========================================================================
+-- Phase R2b (`G-ORB-1` & `G-ORB-6`): Width-Aware Zero-Copy Slice I/O & `OrbWire` Slice Codec
+-- ===========================================================================
+
+structure WireSliceIoCheck where
+  inPtr      : UInt64
+  inLen      : UInt64
+  outPtr     : UInt64
+  outCap     : UInt64
+  writtenLen : UInt64
+  is32Bit    : UInt8
+  deriving Repr, DecidableEq
+
+def WireSliceIoCheck.Admissible (s : WireSliceIoCheck) : Bool :=
+  decide (s.is32Bit ≤ 1) &&
+  ((s.inLen == 0 || !(s.inPtr == 0)) && (s.outCap == 0 || !(s.outPtr == 0))) &&
+  (wireSliceSpanFits s.inPtr s.inLen s.is32Bit && wireSliceSpanFits s.outPtr s.outCap s.is32Bit) &&
+  (s.inLen == 0 || s.outCap == 0 ||
+    (decide (s.inLen ≤ s.outPtr) && decide (s.inPtr ≤ s.outPtr - s.inLen)) ||
+    (decide (s.outCap ≤ s.inPtr) && decide (s.outPtr ≤ s.inPtr - s.outCap))) &&
+  decide (s.writtenLen ≤ s.outCap)
+
+def wireSliceIoMetaGate : MetaGateSpec WireSliceIoCheck
+    (fun s => s.Admissible = true) where
+  gate s := wireVerifySliceIo s.inPtr s.inLen s.outPtr s.outCap s.writtenLen s.is32Bit == 0
+  sound s h := by
+    unfold WireSliceIoCheck.Admissible
+    unfold wireVerifySliceIo at h
+    cases hw : decide (s.is32Bit ≤ 1) <;>
+      cases hn : ((s.inLen == 0 || !(s.inPtr == 0)) && (s.outCap == 0 || !(s.outPtr == 0))) <;>
+      cases hf : (wireSliceSpanFits s.inPtr s.inLen s.is32Bit && wireSliceSpanFits s.outPtr s.outCap s.is32Bit) <;>
+      cases hd : (s.inLen == 0 || s.outCap == 0 ||
+        (decide (s.inLen ≤ s.outPtr) && decide (s.inPtr ≤ s.outPtr - s.inLen)) ||
+        (decide (s.outCap ≤ s.inPtr) && decide (s.outPtr ≤ s.inPtr - s.outCap))) <;>
+      cases hc : decide (s.writtenLen ≤ s.outCap) <;>
+      (simp only [hw, hn, hf, hd, hc, Bool.not_true, Bool.not_false, Bool.true_and, Bool.false_and, ↓reduceIte] at h ⊢;
+       try (revert h; decide))
+  complete s h := by
+    unfold WireSliceIoCheck.Admissible at h
+    unfold wireVerifySliceIo
+    cases hw : decide (s.is32Bit ≤ 1) <;>
+      cases hn : ((s.inLen == 0 || !(s.inPtr == 0)) && (s.outCap == 0 || !(s.outPtr == 0))) <;>
+      cases hf : (wireSliceSpanFits s.inPtr s.inLen s.is32Bit && wireSliceSpanFits s.outPtr s.outCap s.is32Bit) <;>
+      cases hd : (s.inLen == 0 || s.outCap == 0 ||
+        (decide (s.inLen ≤ s.outPtr) && decide (s.inPtr ≤ s.outPtr - s.inLen)) ||
+        (decide (s.outCap ≤ s.inPtr) && decide (s.outPtr ≤ s.inPtr - s.outCap))) <;>
+      cases hc : decide (s.writtenLen ≤ s.outCap) <;>
+      (simp only [hw, hn, hf, hd, hc, Bool.not_true, Bool.not_false, Bool.true_and, Bool.false_and, ↓reduceIte] at h ⊢;
+       try (revert h; decide))
+  posWitness := ⟨0x1000, 64, 0x2000, 128, 88, 1⟩
+  negWitness := ⟨0x1000, 64, 0x1020, 128, 88, 1⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def wireSliceIoConservedResource : ConservedResource WireSliceIoCheck where
+  admit s := wireSliceIoMetaGate.gate s
+  withinBudget s := decide (s.writtenLen ≤ s.outCap)
+  conserved s h := by
+    have hs := wireSliceIoMetaGate.sound s h
+    unfold WireSliceIoCheck.Admissible at hs
+    revert hs
+    cases (decide (s.writtenLen ≤ s.outCap)) <;> simp
+
+structure WireEncodeSliceCheck where
+  inArenaPtr     : UInt64
+  outPtr         : UInt64
+  outCap         : UInt64
+  schemaId       : UInt32
+  recordsCount   : UInt32
+  arenaLen       : UInt32
+  maxBudgetBytes : UInt32
+  is32Bit        : UInt8
+  deriving Repr, DecidableEq
+
+def WireEncodeSliceCheck.totalLen (e : WireEncodeSliceCheck) : UInt32 :=
+  (24 : UInt32) + ((e.recordsCount <<< 3) + e.arenaLen)
+
+def WireEncodeSliceCheck.Admissible (e : WireEncodeSliceCheck) : Bool :=
+  (decide (1 ≤ e.schemaId) && decide (e.schemaId ≤ 0xFFFF)) &&
+  (decide (e.recordsCount ≤ 8191) && decide (e.arenaLen ≤ 0xFFFF)) &&
+  decide (e.totalLen ≤ e.maxBudgetBytes) &&
+  (WireSliceIoCheck.mk e.inArenaPtr e.arenaLen.toUInt64 e.outPtr e.outCap e.totalLen.toUInt64 e.is32Bit).Admissible
+
+def wireEncodeSliceMetaGate : MetaGateSpec WireEncodeSliceCheck
+    (fun e => e.Admissible = true) where
+  gate e :=
+    wireEncodeSliceStep e.inArenaPtr e.outPtr e.outCap
+      e.schemaId e.recordsCount e.arenaLen e.maxBudgetBytes e.is32Bit == 0
+  sound e h := by
+    unfold WireEncodeSliceCheck.Admissible WireEncodeSliceCheck.totalLen
+    unfold wireEncodeSliceStep at h
+    dsimp only at h
+    cases hs : (decide (1 ≤ e.schemaId) && decide (e.schemaId ≤ 0xFFFF))
+    · simp [hs] at h
+    · cases hr : (decide (e.recordsCount ≤ 8191) && decide (e.arenaLen ≤ 0xFFFF))
+      · simp [hs, hr] at h
+      · cases hb : decide ((24 : UInt32) + ((e.recordsCount <<< 3) + e.arenaLen) ≤ e.maxBudgetBytes)
+        · simp [hs, hr, hb] at h
+        · simp only [hs, hr, hb, Bool.not_true, ↓reduceIte, Bool.true_and] at h ⊢
+          exact wireSliceIoMetaGate.sound _ h
+  complete e h := by
+    unfold WireEncodeSliceCheck.Admissible WireEncodeSliceCheck.totalLen at h
+    unfold wireEncodeSliceStep
+    dsimp only
+    rcases Bool.and_eq_true_iff.mp h with ⟨hpre, hio⟩
+    rcases Bool.and_eq_true_iff.mp hpre with ⟨hpre2, hb⟩
+    rcases Bool.and_eq_true_iff.mp hpre2 with ⟨hs, hr⟩
+    simp only [hs, hr, hb, Bool.not_true, ↓reduceIte]
+    exact wireSliceIoMetaGate.complete _ hio
+  posWitness := ⟨0x1000, 0x2000, 128, 7, 2, 9, 4096, 0⟩
+  negWitness := ⟨0x1000, 0x2000, 32, 7, 2, 9, 4096, 0⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+def wireEncodeSliceConservedResource : ConservedResource WireEncodeSliceCheck where
+  admit e := wireEncodeSliceMetaGate.gate e
+  withinBudget e := decide (e.totalLen ≤ e.maxBudgetBytes) && decide (e.totalLen.toUInt64 ≤ e.outCap)
+  conserved e h := by
+    have hs := wireEncodeSliceMetaGate.sound e h
+    unfold WireEncodeSliceCheck.Admissible at hs
+    rcases Bool.and_eq_true_iff.mp hs with ⟨hpre, hio⟩
+    rcases Bool.and_eq_true_iff.mp hpre with ⟨_, hbud⟩
+    have hcap := wireSliceIoConservedResource.conserved _ (wireSliceIoMetaGate.complete _ hio)
+    dsimp [wireSliceIoConservedResource] at hcap
+    exact Bool.and_eq_true_iff.mpr ⟨hbud, hcap⟩
+
+/-- Executable byte-buffer commit model for zero-copy `OrbWire` slice encoding:
+    `outBuf` is updated on `[0, totalLen)` ONLY when `wireEncodeSliceStep == 0`;
+    on any preflight failure (`status != 0`), `outBuf` is returned verbatim. -/
+def applyWireEncodeSlice
+    (e : WireEncodeSliceCheck)
+    (outBuf : Nat → UInt8)
+    (frameByte : Nat → UInt8) : UInt8 × (Nat → UInt8) :=
+  let st := wireEncodeSliceStep
+    e.inArenaPtr e.outPtr e.outCap
+    e.schemaId e.recordsCount e.arenaLen e.maxBudgetBytes e.is32Bit
+  if st == 0 then
+    (0, fun i => if i < e.totalLen.toNat then frameByte i else outBuf i)
+  else
+    (st, outBuf)
+
+/-- Key safety theorem (`encode_failure_no_partial_mutation`):
+    1. Whenever `wireEncodeSliceStep` rejects an encode request (`status != 0` — whether due to
+       schema bounds, record/arena bounds, budget overflow, undersized `outCap`, invalid `is32Bit`,
+       null pointer, `wasm32`/`LP64` span overflow, or input/output slice aliasing), zero bytes of
+       caller `outBuf` are mutated (`∀ i, outBuf' i = outBuf i`);
+    2. Whenever `wireEncodeSliceStep` admits (`status == 0`), `totalLen` fits within both
+       `maxBudgetBytes` and `outCap` (`totalLen.toNat ≤ outCap.toNat`), and every byte beyond
+       `totalLen` (`e.totalLen.toNat ≤ j`) is preserved verbatim;
+    3. Address-level half-open disjointness: whenever `wireVerifySliceIo` admits (`status == 0`)
+       with non-empty input and output spans (`0 < inLen.toNat ∧ 0 < outCap.toNat`), no byte
+       address `addr : Nat` lies simultaneously in `[inPtr, inPtr + inLen)` and
+       `[outPtr, outPtr + outCap)`. -/
+theorem encode_failure_no_partial_mutation
+    (e : WireEncodeSliceCheck)
+    (outBuf frameByte : Nat → UInt8) :
+    ((applyWireEncodeSlice e outBuf frameByte).1 ≠ 0 →
+      ∀ i, (applyWireEncodeSlice e outBuf frameByte).2 i = outBuf i) ∧
+    ((applyWireEncodeSlice e outBuf frameByte).1 = 0 →
+      e.totalLen.toNat ≤ e.outCap.toNat) ∧
+    (∀ j, e.totalLen.toNat ≤ j →
+      (applyWireEncodeSlice e outBuf frameByte).2 j = outBuf j) := by
+  have hcons := wireEncodeSliceConservedResource.conserved e
+  unfold applyWireEncodeSlice
+  dsimp only
+  cases hst : (wireEncodeSliceStep e.inArenaPtr e.outPtr e.outCap
+      e.schemaId e.recordsCount e.arenaLen e.maxBudgetBytes e.is32Bit == 0)
+  · refine ⟨fun _ _ => rfl, fun h0 => ?_, fun _ _ => rfl⟩
+    have hbeq : (wireEncodeSliceStep e.inArenaPtr e.outPtr e.outCap
+        e.schemaId e.recordsCount e.arenaLen e.maxBudgetBytes e.is32Bit == 0) = true :=
+      beq_iff_eq.mpr h0
+    rw [hst] at hbeq
+    contradiction
+  · refine ⟨fun hne => absurd rfl hne, fun _ => ?_, fun j hj => ?_⟩
+    · have hbud := hcons hst
+      dsimp [wireEncodeSliceConservedResource] at hbud
+      have hcap := (Bool.and_eq_true_iff.mp hbud).2
+      have hcap' : e.totalLen.toUInt64 ≤ e.outCap := of_decide_eq_true hcap
+      have hle : e.totalLen.toUInt64.toNat ≤ e.outCap.toNat := UInt64.le_iff_toNat_le.mp hcap'
+      simpa [UInt32.toNat_toUInt64] using hle
+    · have hnot : ¬ (j < e.totalLen.toNat) := Nat.not_lt.mpr hj
+      simp [hst, hnot]
+
+/-- Address-level half-open span disjointness proved against exact `Nat` intervals:
+    whenever `wireVerifySliceIo` admits (`== 0`), no `Nat` address belongs simultaneously to
+    `[inPtr.toNat, inPtr.toNat + inLen.toNat)` and `[outPtr.toNat, outPtr.toNat + outCap.toNat)`. -/
+theorem wire_slice_io_half_open_nat_disjoint
+    (inPtr inLen outPtr outCap writtenLen : UInt64) (is32Bit : UInt8)
+    (hok : wireVerifySliceIo inPtr inLen outPtr outCap writtenLen is32Bit = 0)
+    (addr : Nat)
+    (hin : inPtr.toNat ≤ addr ∧ addr < inPtr.toNat + inLen.toNat)
+    (hout : outPtr.toNat ≤ addr ∧ addr < outPtr.toNat + outCap.toNat) : False := by
+  have hadm := wireSliceIoMetaGate.sound
+    ⟨inPtr, inLen, outPtr, outCap, writtenLen, is32Bit⟩ (beq_iff_eq.mpr hok)
+  unfold WireSliceIoCheck.Admissible at hadm
+  rcases Bool.and_eq_true_iff.mp hadm with ⟨h1234, _⟩
+  rcases Bool.and_eq_true_iff.mp h1234 with ⟨_, hdisj⟩
+  have hin0 : inLen ≠ 0 := by
+    intro hz
+    subst hz
+    simp at hin
+    omega
+  have hout0 : outCap ≠ 0 := by
+    intro hz
+    subst hz
+    simp at hout
+    omega
+  have hin0b : (inLen == 0) = false := beq_eq_false_iff_ne.mpr hin0
+  have hout0b : (outCap == 0) = false := beq_eq_false_iff_ne.mpr hout0
+  simp only [hin0b, hout0b, Bool.false_or] at hdisj
+  rcases Bool.or_eq_true_iff.mp hdisj with hleft | hright
+  · rcases Bool.and_eq_true_iff.mp hleft with ⟨h1, h2⟩
+    have h1u : inLen ≤ outPtr := of_decide_eq_true h1
+    have h1' : inLen.toNat ≤ outPtr.toNat := UInt64.le_iff_toNat_le.mp h1u
+    have h2' : inPtr.toNat ≤ (outPtr - inLen).toNat := UInt64.le_iff_toNat_le.mp (of_decide_eq_true h2)
+    have hsub : (outPtr - inLen).toNat = outPtr.toNat - inLen.toNat :=
+      UInt64.toNat_sub_of_le outPtr inLen h1u
+    rw [hsub] at h2'
+    omega
+  · rcases Bool.and_eq_true_iff.mp hright with ⟨h1, h2⟩
+    have h1u : outCap ≤ inPtr := of_decide_eq_true h1
+    have h1' : outCap.toNat ≤ inPtr.toNat := UInt64.le_iff_toNat_le.mp h1u
+    have h2' : outPtr.toNat ≤ (inPtr - outCap).toNat := UInt64.le_iff_toNat_le.mp (of_decide_eq_true h2)
+    have hsub : (inPtr - outCap).toNat = inPtr.toNat - outCap.toNat :=
+      UInt64.toNat_sub_of_le inPtr outCap h1u
+    rw [hsub] at h2'
+    omega
+
+structure WireDecodeSliceCheck where
+  inPtr            : UInt64
+  inLen            : UInt64
+  is32Bit          : UInt8
+  magic            : UInt32
+  abiVersion       : UInt32
+  schemaId         : UInt32
+  expectedSchemaId : UInt32
+  totalLen         : UInt32
+  payloadLen       : UInt32
+  arenaOff         : UInt32
+  arenaLen         : UInt32
+  maxBudgetBytes   : UInt32
+  deriving Repr, DecidableEq
+
+def WireDecodeSliceCheck.Admissible (d : WireDecodeSliceCheck) : Bool :=
+  (wireVerifySliceIo d.inPtr d.inLen 0 0 0 d.is32Bit == 0) &&
+  (wireValidateFrame d.magic d.abiVersion d.schemaId d.expectedSchemaId
+    d.totalLen d.payloadLen d.arenaOff d.arenaLen d.maxBudgetBytes 0xFFFFFFFF 0 == 0) &&
+  (d.inLen == d.totalLen.toUInt64 &&
+   (d.arenaOff &&& 7) == 0 &&
+   decide (d.arenaOff ≤ 0xFFFF) &&
+   decide (d.arenaLen ≤ 0xFFFF) &&
+   d.arenaOff + d.arenaLen == d.payloadLen &&
+   (24 : UInt32) + d.payloadLen == d.totalLen)
+
+def wireDecodeSliceMetaGate : MetaGateSpec WireDecodeSliceCheck
+    (fun d => d.Admissible = true) where
+  gate d :=
+    wireDecodeSliceStep d.inPtr d.inLen d.is32Bit
+      d.magic d.abiVersion d.schemaId d.expectedSchemaId
+      d.totalLen d.payloadLen d.arenaOff d.arenaLen d.maxBudgetBytes == 0
+  sound d h := by
+    unfold WireDecodeSliceCheck.Admissible
+    unfold wireDecodeSliceStep at h
+    dsimp only at h
+    cases hs : (wireVerifySliceIo d.inPtr d.inLen 0 0 0 d.is32Bit == 0)
+    · simp [hs] at h
+    · cases hf : (wireValidateFrame d.magic d.abiVersion d.schemaId d.expectedSchemaId
+        d.totalLen d.payloadLen d.arenaOff d.arenaLen d.maxBudgetBytes 0xFFFFFFFF 0 == 0)
+      · simp [hs, hf] at h
+      · cases hc : (d.inLen == d.totalLen.toUInt64 &&
+          (d.arenaOff &&& 7) == 0 &&
+          decide (d.arenaOff ≤ 0xFFFF) &&
+          decide (d.arenaLen ≤ 0xFFFF) &&
+          d.arenaOff + d.arenaLen == d.payloadLen &&
+          (24 : UInt32) + d.payloadLen == d.totalLen)
+        · simp [hs, hf, hc] at h
+        · simp [hs, hf, hc]
+  complete d h := by
+    unfold WireDecodeSliceCheck.Admissible at h
+    unfold wireDecodeSliceStep
+    dsimp only
+    rcases Bool.and_eq_true_iff.mp h with ⟨hsf, hc⟩
+    rcases Bool.and_eq_true_iff.mp hsf with ⟨hs, hf⟩
+    simp [hs, hf, hc]
+  posWitness := ⟨0x2000, 49, 1, 0x4F524257, 1, 7, 7, 49, 25, 16, 9, 4096⟩
+  negWitness := ⟨0x2000, 49, 1, 0x4F524257, 1, 7, 7, 49, 25, 15, 10, 4096⟩
+  nonVacuous := rfl
+  tight      := rfl
+
+/-- Exhaustive rejection witnesses for `orb_wire_verify_slice_io`, `orb_wire_encode_slice_step`,
+    and `orb_wire_decode_slice_step`: distinguishes `wasm32` (`is32Bit = 1`) 4 GiB wraparound
+    rejection (`8`) from LP64 (`is32Bit = 0`) admission (`0`), rejects input/output aliasing (`9`),
+    null non-empty slices (`7`), undersized output buffers (`5`), and unaligned record tables (`3`). -/
+theorem wire_slice_io_wasm32_lp64_and_alias_rejection :
+    wireVerifySliceIo 0x100000000 16 0x200000000 32 16 1 = 8 ∧
+    wireVerifySliceIo 0x100000000 16 0x200000000 32 16 0 = 0 ∧
+    wireVerifySliceIo 0x1000 32 0x1010 32 16 1 = 9 ∧
+    wireVerifySliceIo 0 16 0x2000 32 16 0 = 7 ∧
+    wireEncodeSliceStep 0x1000 0x2000 40 7 2 9 4096 0 = 5 ∧
+    wireEncodeSliceStep 0x1000 0x2000 64 7 2 9 4096 0 = 0 ∧
+    wireDecodeSliceStep 0x2000 49 1 0x4F524257 1 7 7 49 25 16 9 4096 = 0 ∧
+    wireDecodeSliceStep 0x2000 49 1 0x4F524257 1 7 7 49 25 14 11 4096 = 3 := by
+  decide
+
 end Orb.Spec

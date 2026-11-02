@@ -2490,4 +2490,98 @@ def nodeLaneStep
   else
     513
 
+/--
+  Width-aware half-open span bounds helper `[ptr, ptr + len)` for LP64 (`is32Bit == 0`)
+  and `wasm32` (`is32Bit == 1`), using only unboxed `UInt64` and `UInt8` scalar operations.
+-/
+@[inline]
+def wireSliceSpanFits (ptr len : UInt64) (is32Bit : UInt8) : Bool :=
+  if is32Bit == 1 then
+    ptr ≤ 0xFFFFFFFF && len ≤ 0xFFFFFFFF && ptr + len ≤ 0x100000000
+  else
+    ptr == 0 || len == 0 || ptr - 1 ≤ 0xFFFFFFFFFFFFFFFF - len
+
+/--
+  Unboxed C-ABI Width-Aware Zero-Copy Input/Output Slice Gate (`orb_wire_verify_slice_io`):
+  Validates architecture width selector (`is32Bit ≤ 1`: `0 = LP64`, `1 = wasm32`), non-null
+  pointers on non-empty spans, `uintptr_t`/`size_t` and exclusive `addrLimit` no-overflow
+  (`2^32` vs `2^64`), strict input/output non-aliasing (`[inPtr, inPtr + inLen)` disjoint from
+  `[outPtr, outPtr + outCap)` when both spans are non-empty), and bounded output write
+  (`writtenLen ≤ outCap`).
+  Returns status code `UInt8`:
+  - `0`: `OK`
+  - `5`: `OUTPUT_TOO_SMALL` (`writtenLen > outCap`)
+  - `6`: `INVALID_WIDTH` (`is32Bit > 1`)
+  - `7`: `NULL_SLICE_PTR` (`inLen > 0 && inPtr == 0` or `outCap > 0 && outPtr == 0`)
+  - `8`: `SPAN_OVERFLOW` (`[inPtr, inPtr + inLen)` or `[outPtr, outPtr + outCap)` wraps/exceeds address width)
+  - `9`: `SLICE_ALIAS_OVERLAP` (non-empty input and output spans alias)
+-/
+@[inline, export orb_wire_verify_slice_io]
+def wireVerifySliceIo
+    (inPtr inLen outPtr outCap writtenLen : UInt64) (is32Bit : UInt8) : UInt8 :=
+  if !(is32Bit ≤ 1) then 6
+  else if !((inLen == 0 || !(inPtr == 0)) && (outCap == 0 || !(outPtr == 0))) then 7
+  else if !(wireSliceSpanFits inPtr inLen is32Bit && wireSliceSpanFits outPtr outCap is32Bit) then 8
+  else if !(inLen == 0 || outCap == 0 ||
+            (inLen ≤ outPtr && inPtr ≤ outPtr - inLen) ||
+            (outCap ≤ inPtr && outPtr ≤ inPtr - outCap)) then 9
+  else if !(writtenLen ≤ outCap) then 5
+  else 0
+
+/--
+  Unboxed C-ABI Zero-Copy `OrbWire` Slice Encode Preflight Gate (`orb_wire_encode_slice_step`):
+  Atomically validates all `OrbWire` header/record/arena bounds (`1 ≤ schemaId ≤ 0xFFFF`,
+  `recordsCount ≤ 8191`, `arenaLen ≤ 0xFFFF`, `24 + recordsCount * 8 + arenaLen ≤ maxBudgetBytes`)
+  together with width-aware LP64 / `wasm32` zero-copy `(inArenaPtr, arenaLen)` -> `(outPtr, outCap)`
+  pointer non-nullness, address-space fit, non-aliasing, and `totalLen ≤ outCap` BEFORE a single
+  byte of `out_buf` is mutated (`encode_failure_no_partial_mutation`).
+  Returns `OrbWire` status code `UInt8` (`0` = `OK`, `2` = `UNSUPPORTED_SCHEMA`,
+  `3` = `TRUNCATED_OR_OUT_OF_BOUNDS`, `4` = `BUDGET_EXCEEDED`, `5` = `OUTPUT_TOO_SMALL`,
+  `6` = `INVALID_WIDTH`, `7` = `NULL_SLICE_PTR`, `8` = `SPAN_OVERFLOW`, `9` = `SLICE_ALIAS_OVERLAP`).
+-/
+@[inline, export orb_wire_encode_slice_step]
+def wireEncodeSliceStep
+    (inArenaPtr outPtr outCap : UInt64)
+    (schemaId recordsCount arenaLen maxBudgetBytes : UInt32)
+    (is32Bit : UInt8) : UInt8 :=
+  if !(1 ≤ schemaId && schemaId ≤ 0xFFFF) then 2
+  else if !(recordsCount ≤ 8191 && arenaLen ≤ 0xFFFF) then 3
+  else
+    let recordsBytes : UInt32 := recordsCount <<< 3
+    let payloadLen : UInt32 := recordsBytes + arenaLen
+    let totalLen : UInt32 := 24 + payloadLen
+    if !(totalLen ≤ maxBudgetBytes) then 4
+    else
+      wireVerifySliceIo inArenaPtr arenaLen.toUInt64 outPtr outCap totalLen.toUInt64 is32Bit
+
+/--
+  Unboxed C-ABI Zero-Copy `OrbWire` Slice Decode Gate (`orb_wire_decode_slice_step`):
+  Validates width-aware LP64 / `wasm32` input byte-slice safety (`inPtr`, `inLen`, `is32Bit`),
+  exact canonical frame length (`inLen == totalLen.toUInt64`), `OrbWire` header/schema/budget
+  invariants (`wireValidateFrame`), 8-byte record-table alignment (`(arenaOff &&& 7) == 0`),
+  and exact payload partitioning (`arenaOff + arenaLen == payloadLen`, `24 + payloadLen == totalLen`)
+  so callers can borrow `&bytes[24..24+arenaOff]` and `&bytes[24+arenaOff..totalLen]` zero-copy.
+-/
+@[inline, export orb_wire_decode_slice_step]
+def wireDecodeSliceStep
+    (inPtr inLen : UInt64)
+    (is32Bit : UInt8)
+    (magic abiVersion schemaId expectedSchemaId
+     totalLen payloadLen arenaOff arenaLen maxBudgetBytes : UInt32) : UInt8 :=
+  let sliceSt := wireVerifySliceIo inPtr inLen 0 0 0 is32Bit
+  if !(sliceSt == 0) then sliceSt
+  else
+    let frameSt := wireValidateFrame
+      magic abiVersion schemaId expectedSchemaId
+      totalLen payloadLen arenaOff arenaLen
+      maxBudgetBytes 0xFFFFFFFF 0
+    if !(frameSt == 0) then frameSt
+    else if !(inLen == totalLen.toUInt64 &&
+              (arenaOff &&& 7) == 0 &&
+              arenaOff ≤ 0xFFFF &&
+              arenaLen ≤ 0xFFFF &&
+              arenaOff + arenaLen == payloadLen &&
+              24 + payloadLen == totalLen) then 3
+    else 0
+
 end Orb.Kernel

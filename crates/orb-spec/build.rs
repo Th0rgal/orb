@@ -15,21 +15,32 @@ fn verify_lean_sources_if_requested(root: &Path, out_dir: &Path) {
     }
     let lean_dir = root.join("lean");
     if let Ok(turbo) = env::var("TURBO_LEAN_BIN") {
-        let st = Command::new(&turbo)
+        let out = Command::new(&turbo)
             .args(["build", "--project-dir"])
             .arg(&lean_dir)
-            .status()
+            .output()
             .unwrap_or_else(|e| panic!("failed to run {turbo} on {}: {e}", lean_dir.display()));
-        assert!(st.success(), "turbo-lean build failed on lean/");
-        return;
-    }
-    if let Ok(st) = Command::new("turbo-lean")
+        if out.status.success() {
+            return;
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("precompileModules"),
+            "turbo-lean build failed on lean/: {stderr}"
+        );
+    } else if let Ok(out) = Command::new("turbo-lean")
         .args(["build", "--project-dir"])
         .arg(&lean_dir)
-        .status()
+        .output()
     {
-        assert!(st.success(), "turbo-lean build failed on lean/");
-        return;
+        if out.status.success() {
+            return;
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("precompileModules"),
+            "turbo-lean build failed on lean/: {stderr}"
+        );
     }
     let lean_bin = env::var("ORB_LEAN").unwrap_or_else(|_| "lean".to_string());
     let out_orb_dir = out_dir.join("Orb");
